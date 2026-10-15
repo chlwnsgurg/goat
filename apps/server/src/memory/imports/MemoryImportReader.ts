@@ -1,4 +1,4 @@
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- narrow non-inheriting descriptor/Git process boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- narrow non-inheriting Git process boundary.
 import * as NodeChildProcess from "node:child_process";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- snapshot digest, no provider identity derivation.
 import * as NodeCrypto from "node:crypto";
@@ -67,6 +67,8 @@ const identity = (a: Stamp, b: Stamp) => a.dev === b.dev && a.ino === b.ino && a
 const stamp = (a: Stamp, b: Stamp) =>
   identity(a, b) && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
 const fs = NodeFS.promises;
+// oxlint-disable-next-line goat/no-global-process-runtime -- Node FS adapter enforces the actual OS permission model, independent of app platform overrides.
+const posixPermissions = NodeOS.platform() !== "win32";
 const strictText = (bytes: Buffer) => {
   let text: string;
   try {
@@ -77,350 +79,400 @@ const strictText = (bytes: Buffer) => {
   if (text.includes("\0")) throw error("path_rejected");
   return text;
 };
+const snapshotMutations = new Map<string, Promise<void>>();
 const nodeSnapshot = (config: MemoryImportReaderConfig, input: SnapshotOperation) =>
   // An interrupted caller must wait for filesystem work to settle before finalizers remove it.
   Effect.uninterruptible(
     Effect.tryPromise({
       try: async () => {
-        const checks = new Map<string, { before: Stamp; stable: boolean }>();
-        const stat = (path: string) => fs.lstat(path, { bigint: true });
-        const remember = async (
-          path: string,
-          directory: boolean,
-          stable = false,
-          expected?: Stamp,
-        ) => {
-          const before = await stat(path);
-          if (expected && !stamp(expected, before)) throw error("source_changed");
-          if (before.isSymbolicLink() || !(directory ? before.isDirectory() : before.isFile()))
-            throw error("path_rejected");
-          const previous = checks.get(path);
-          if (previous && !(previous.stable ? stamp : identity)(previous.before, before))
-            throw error("source_changed");
-          checks.set(path, {
-            before: previous?.before ?? before,
-            stable: stable || previous?.stable === true,
-          });
-          return before;
-        };
-        const verify = async (target?: string) => {
-          for (const [path, { before, stable }] of checks) {
-            if (
-              target !== undefined &&
-              target !== path &&
-              !target.startsWith(path.endsWith(NodePath.sep) ? path : `${path}${NodePath.sep}`)
-            )
-              continue;
-            let after: Stamp;
+        // Serialize owned directory creation/removal so concurrent slots cannot mistake our
+        // own mutations for source drift. Copy operations retain independent slot ownership.
+        const mutating = input.action !== "copy" && input.action !== "discover";
+        const previous = mutating ? snapshotMutations.get(config.stateDir) : undefined;
+        let release = () => {};
+        const lock = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        if (mutating) snapshotMutations.set(config.stateDir, lock);
+        await previous;
+        try {
+          const checks = new Map<string, { before: Stamp; stable: boolean }>();
+          const stat = async (path: string) => {
             try {
-              after = await stat(path);
-            } catch {
-              throw error("source_changed");
-            }
-            if (!(stable ? stamp : identity)(before, after)) throw error("source_changed");
-          }
-        };
-        const directory = async (path: string) => {
-          absolute(path);
-          const base = NodePath.parse(path).root;
-          await remember(base, true);
-          let current = base;
-          // System ancestors may cross a volume boundary (e.g. macOS /System/Volumes).
-          // Below each explicitly registered root, every descendant must stay on its device.
-          for (const part of path.slice(base.length).split(NodePath.sep)) {
-            current = NodePath.join(current, part);
-            await remember(current, true);
-          }
-          return current;
-        };
-        const child = async (
-          parent: string,
-          name: string,
-          isDirectory: boolean,
-          stable = true,
-          expected?: Stamp,
-        ) => {
-          safe(name);
-          const path = NodePath.join(parent, name);
-          const before = await remember(path, isDirectory, stable, expected);
-          const parentStat = checks.get(parent)!.before;
-          if (before.dev !== parentStat.dev) throw error("path_rejected");
-          return before;
-        };
-        const names = async (path: string, maximum = 4096) => {
-          const before = await remember(path, true);
-          const result: string[] = [];
-          const handle = await fs.opendir(path);
-          try {
-            for (;;) {
-              const entry = await handle.read();
-              if (!entry) break;
-              // Node decodes directory names with replacement; reject ambiguous names conservatively.
-              const name = entry.name;
-              if (name.includes("\uFFFD")) throw error("invalid_utf8");
-              safe(name);
-              result.push(name);
-              if (result.length > maximum) throw error("limit_exceeded");
-            }
-          } finally {
-            await handle.close();
-          }
-          const after = await stat(path);
-          if (!stamp(before, after)) throw error("source_changed");
-          await verify(path);
-          return result.sort();
-        };
-        const read = async (path: string, before: Stamp, maximum: number) => {
-          if (before.size > BigInt(maximum)) throw error("limit_exceeded");
-          let handle: NodeFS.promises.FileHandle;
-          try {
-            handle = await fs.open(
-              path,
-              NodeFS.constants.O_RDONLY |
-                (NodeFS.constants.O_NOFOLLOW ?? 0) |
-                (NodeFS.constants.O_NONBLOCK ?? 0),
-            );
-          } catch {
-            await verify(path);
-            throw error("source_unreadable");
-          }
-          try {
-            if (!stamp(before, await handle.stat({ bigint: true }))) throw error("source_changed");
-            const chunks: Buffer[] = [];
-            let size = 0;
-            for (;;) {
-              const bytes = Buffer.alloc(Math.min(65536, maximum - size + 1));
-              const { bytesRead } = await handle.read(bytes, 0, bytes.length, null);
-              if (!bytesRead) break;
-              chunks.push(bytes.subarray(0, bytesRead));
-              size += bytesRead;
-              if (size > maximum) throw error("limit_exceeded");
-            }
-            config.onSourceRead?.();
-            if (!stamp(before, await handle.stat({ bigint: true })) || BigInt(size) !== before.size)
-              throw error("source_changed");
-            await verify(path);
-            return Buffer.concat(chunks, size);
-          } finally {
-            await handle.close();
-          }
-        };
-        const own = (s: Stamp, mode: number) => {
-          // Windows has no POSIX uid/mode enforcement; the configured private state directory is
-          // the ownership boundary there. POSIX enforces owner and exact private permissions.
-          if (
-            NodeOS.platform() !== "win32" &&
-            (s.uid !== BigInt(process.getuid!()) || Number(s.mode & 0o777n) !== mode)
-          )
-            throw error("path_rejected");
-        };
-        const mkdir = async (parent: string, name: string, existing = false) => {
-          const path = NodePath.join(parent, name);
-          await verify(parent);
-          try {
-            await fs.mkdir(path, { mode: 0o700 });
-          } catch (cause) {
-            if (!existing || !isFsCode(cause, "EEXIST")) throw cause;
-          }
-          own(await child(parent, name, true, false), 0o700);
-          return path;
-        };
-        const write = async (parent: string, name: string, data: Buffer) => {
-          safe(name);
-          await verify(parent);
-          const handle = await fs.open(
-            NodePath.join(parent, name),
-            NodeFS.constants.O_WRONLY |
-              NodeFS.constants.O_CREAT |
-              NodeFS.constants.O_EXCL |
-              (NodeFS.constants.O_NOFOLLOW ?? 0),
-            0o600,
-          );
-          try {
-            await handle.writeFile(data);
-          } finally {
-            await handle.close();
-          }
-        };
-        const result: {
-          files?: { selector: string; utf8Base64: string; byteCount: number }[];
-          selections?: string[];
-        } = {};
-        if (
-          input.action === "init" ||
-          input.action === "allocate" ||
-          input.action === "cleanup" ||
-          input.action === "remove"
-        ) {
-          let state = await directory(config.stateDir);
-          const s = checks.get(state)!.before;
-          if (
-            NodeOS.platform() !== "win32" &&
-            (s.uid !== BigInt(process.getuid!()) || (s.mode & 0o022n) !== 0n)
-          )
-            throw error("path_rejected");
-          for (const name of ["memory-import", "snapshots"]) {
-            if (input.action === "init") state = await mkdir(state, name, true);
-            else {
-              await child(state, name, true, false);
-              state = NodePath.join(state, name);
-              own(checks.get(state)!.before, 0o700);
-            }
-          }
-          if (input.action === "allocate") {
-            const dest = await mkdir(state, input.id);
-            await mkdir(dest, "repo");
-            await mkdir(dest, "cwd");
-          }
-          if (input.action === "cleanup" || input.action === "remove") {
-            const entries = await names(state, 2);
-            const paths: { path: string; directory: boolean }[] = [];
-            for (const name of entries) {
-              if (input.action === "remove" && name !== input.id) continue;
-              if (!/^snapshot-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(name))
-                throw error("path_rejected");
-              let count = 0,
-                total = 0n,
-                objectTotal = 0n,
-                objectCount = 0;
-              const inspect = async (
-                parent: string,
-                name: string,
-                depth: number,
-                rel: string,
-              ): Promise<void> => {
-                const path = NodePath.join(parent, name);
-                const s = await stat(path);
-                const obj = rel === "repo/objects" || rel.startsWith("repo/objects/");
-                if (++count > 4096 || (obj && ++objectCount > 3584) || depth > 9)
-                  throw error("limit_exceeded");
-                if (rel) safe(rel.startsWith("repo/") ? rel.slice(5) : rel);
-                await child(parent, name, s.isDirectory(), false, s);
-                own(s, s.isDirectory() ? 0o700 : 0o600);
-                if (s.isDirectory())
-                  for (const n of await names(path))
-                    await inspect(path, n, depth + 1, rel ? `${rel}/${n}` : n);
-                else {
-                  total += s.size;
-                  if (obj) objectTotal += s.size;
-                  if (total > 67108864n || objectTotal > 62914560n) throw error("limit_exceeded");
-                }
-                paths.push({ path, directory: s.isDirectory() });
-              };
-              await inspect(state, name, 0, "");
-            }
-            await verify();
-            for (const entry of paths) {
-              // Removal changes directory timestamps; identity remains checked before each mutation.
-              await verify(entry.path);
-              if (entry.directory) await fs.rmdir(entry.path);
-              else await fs.unlink(entry.path);
-              checks.delete(entry.path);
-            }
-          }
-        } else if (input.action === "discover") {
-          const root = await directory(input.root);
-          result.selections = [];
-          for (const name of await names(root, 512)) {
-            const s = await stat(NodePath.join(root, name));
-            await child(root, name, s.isDirectory(), false, s);
-            if (s.isDirectory()) result.selections.push(name);
-            if (result.selections.length > 128) throw error("limit_exceeded");
-          }
-        } else {
-          const root = await directory(input.root);
-          let source = root;
-          for (const part of input.relative.split("/")) {
-            await child(source, part, true);
-            source = NodePath.join(source, part);
-          }
-          const dest = await directory(input.snapshot);
-          own(checks.get(dest)!.before, 0o700);
-          let count = input.format === "omo" ? 4 : 0,
-            objectsCount = 0,
-            total = Buffer.byteLength(input.config),
-            objectBytes = 0,
-            sourceBytes = 0;
-          result.files = [];
-          const walk = async (
-            parent: string,
-            out: string,
-            rel: string,
-            depth: number,
-            git: boolean,
-          ): Promise<void> => {
-            for (const name of await names(parent, (git ? 4096 : 512) - count)) {
-              const selector = rel ? `${rel}/${name}` : name;
-              safe(selector);
-              const obj = selector === "objects" || selector.startsWith("objects/");
-              if (++count > (git ? 4096 : 512) || (obj && ++objectsCount > 3584) || depth > 8)
-                throw error("limit_exceeded");
-              const path = NodePath.join(parent, name);
-              const s = await stat(path);
-              await child(parent, name, s.isDirectory(), true, s);
-              if (
-                git &&
-                ["commondir", "objects/info/alternates", "objects/info/http-alternates"].includes(
-                  selector,
+              return await fs.lstat(path, { bigint: true });
+            } catch (cause) {
+              // A vanished entry may be an initially absent source or a changed ancestor.
+              // Recheck observed ancestors before classifying the missing entry.
+              for (const [ancestor, { before }] of checks) {
+                if (
+                  ancestor !== path &&
+                  !path.startsWith(
+                    ancestor.endsWith(NodePath.sep) ? ancestor : `${ancestor}${NodePath.sep}`,
+                  )
                 )
-              )
-                throw error("path_rejected");
-              const selected = git
-                ? selector === "HEAD" ||
-                  selector === "packed-refs" ||
-                  (selector.startsWith("refs/") && !selector.startsWith("refs/replace")) ||
-                  (obj && !selector.startsWith("objects/info"))
-                : input.format === "codex"
-                  ? selector === "MEMORY.md" ||
-                    (selector.startsWith("extensions/ad_hoc/notes/") &&
-                      selector.split("/").length === 4 &&
-                      selector.endsWith(".md"))
-                  : !selector.includes("/") &&
-                    selector.endsWith(".md") &&
-                    !["MEMORY.md", "CLAUDE.md"].includes(selector);
-              if (s.isDirectory()) {
-                const copyDir =
-                  git &&
-                  (["refs", "objects"].includes(selector) ||
-                    (selector.startsWith("refs/") && !selector.startsWith("refs/replace")) ||
-                    (obj && !selector.startsWith("objects/info")));
-                await walk(path, copyDir ? await mkdir(out, name) : out, selector, depth + 1, git);
-              } else if (git && selector === "config") {
-                const text = strictText(await read(path, s, 262144)).toLowerCase();
-                if (/^\s*\[\s*include(?:if)?\b/m.test(text)) throw error("path_rejected");
-                if (/^\s*\[\s*extensions\b/m.test(text)) throw error("unsupported_format");
-              } else if (selected) {
-                if (git) {
-                  total += Number(s.size);
-                  if (obj) objectBytes += Number(s.size);
-                  if (total > 67108864 || objectBytes > 62914560 || total - objectBytes > 4194304)
-                    throw error("limit_exceeded");
-                } else {
-                  sourceBytes += Number(s.size);
-                  if (sourceBytes > 8388608) throw error("limit_exceeded");
-                }
-                const data = await read(path, s, git ? Number(s.size) : 262144);
-                if (git) await write(out, name, data);
-                else {
-                  strictText(data);
-                  result.files!.push({
-                    selector,
-                    utf8Base64: data.toString("base64"),
-                    byteCount: data.length,
-                  });
-                  await write(out, `${result.files!.length}.txt`, data);
+                  continue;
+                try {
+                  if (!identity(before, await fs.lstat(ancestor, { bigint: true })))
+                    throw error("source_changed");
+                } catch {
+                  throw error("source_changed");
                 }
               }
+              throw cause;
             }
           };
-          if (input.format === "omo") {
-            await child(source, ".git", true);
-            await walk(NodePath.join(source, ".git"), dest, "", 1, true);
-            await write(dest, "config", Buffer.from(input.config));
-          } else await walk(source, dest, "", 1, false);
+          const remember = async (
+            path: string,
+            directory: boolean,
+            stable = false,
+            expected?: Stamp,
+          ) => {
+            const before = await stat(path);
+            if (expected && !stamp(expected, before)) throw error("source_changed");
+            const previous = checks.get(path);
+            if (previous && !(previous.stable ? stamp : identity)(previous.before, before))
+              throw error("source_changed");
+            if (before.isSymbolicLink() || !(directory ? before.isDirectory() : before.isFile()))
+              throw error("path_rejected");
+            checks.set(path, {
+              before: previous?.before ?? before,
+              stable: stable || previous?.stable === true,
+            });
+            return before;
+          };
+          const verify = async (target?: string) => {
+            for (const [path, { before, stable }] of checks) {
+              if (
+                target !== undefined &&
+                target !== path &&
+                !target.startsWith(path.endsWith(NodePath.sep) ? path : `${path}${NodePath.sep}`)
+              )
+                continue;
+              let after: Stamp;
+              try {
+                after = await stat(path);
+              } catch {
+                throw error("source_changed");
+              }
+              if (!(stable ? stamp : identity)(before, after)) throw error("source_changed");
+            }
+          };
+          const directory = async (path: string) => {
+            absolute(path);
+            const base = NodePath.parse(path).root;
+            await remember(base, true);
+            let current = base;
+            // System ancestors may cross a volume boundary (e.g. macOS /System/Volumes).
+            // Below each explicitly registered root, every descendant must stay on its device.
+            for (const part of path.slice(base.length).split(NodePath.sep)) {
+              current = NodePath.join(current, part);
+              await remember(current, true);
+            }
+            return current;
+          };
+          const child = async (
+            parent: string,
+            name: string,
+            isDirectory: boolean,
+            stable = true,
+            expected?: Stamp,
+          ) => {
+            safe(name);
+            const path = NodePath.join(parent, name);
+            const before = await remember(path, isDirectory, stable, expected);
+            const parentStat = checks.get(parent)!.before;
+            if (before.dev !== parentStat.dev) throw error("path_rejected");
+            return before;
+          };
+          const names = async (path: string, maximum = 4096) => {
+            const before = await remember(path, true);
+            const result: string[] = [];
+            const handle = await fs.opendir(path);
+            try {
+              for (;;) {
+                const entry = await handle.read();
+                if (!entry) break;
+                // Node decodes directory names with replacement; reject ambiguous names conservatively.
+                const name = entry.name;
+                if (name.includes("\uFFFD")) throw error("invalid_utf8");
+                safe(name);
+                result.push(name);
+                if (result.length > maximum) throw error("limit_exceeded");
+              }
+            } finally {
+              await handle.close();
+            }
+            const after = await stat(path);
+            if (!stamp(before, after)) throw error("source_changed");
+            await verify(path);
+            return result.sort();
+          };
+          const read = async (path: string, before: Stamp, maximum: number) => {
+            if (before.size > BigInt(maximum)) throw error("limit_exceeded");
+            let handle: NodeFS.promises.FileHandle;
+            try {
+              handle = await fs.open(
+                path,
+                NodeFS.constants.O_RDONLY |
+                  (NodeFS.constants.O_NOFOLLOW ?? 0) |
+                  (NodeFS.constants.O_NONBLOCK ?? 0),
+              );
+            } catch {
+              await verify(path);
+              throw error("source_unreadable");
+            }
+            try {
+              if (!stamp(before, await handle.stat({ bigint: true })))
+                throw error("source_changed");
+              const chunks: Buffer[] = [];
+              let size = 0;
+              for (;;) {
+                const bytes = Buffer.alloc(Math.min(65536, maximum - size + 1));
+                const { bytesRead } = await handle.read(bytes, 0, bytes.length, null);
+                if (!bytesRead) break;
+                chunks.push(bytes.subarray(0, bytesRead));
+                size += bytesRead;
+                if (size > maximum) throw error("limit_exceeded");
+              }
+              config.onSourceRead?.();
+              if (
+                !stamp(before, await handle.stat({ bigint: true })) ||
+                BigInt(size) !== before.size
+              )
+                throw error("source_changed");
+              await verify(path);
+              return Buffer.concat(chunks, size);
+            } finally {
+              await handle.close();
+            }
+          };
+          const own = (s: Stamp, mode: number) => {
+            // Windows has no POSIX uid/mode enforcement; the configured private state directory is
+            // the ownership boundary there. POSIX enforces owner and exact private permissions.
+            if (
+              posixPermissions &&
+              (s.uid !== BigInt(process.getuid!()) || Number(s.mode & 0o777n) !== mode)
+            )
+              throw error("path_rejected");
+          };
+          const mkdir = async (parent: string, name: string, existing = false) => {
+            const path = NodePath.join(parent, name);
+            await verify(parent);
+            try {
+              await fs.mkdir(path, { mode: 0o700 });
+            } catch (cause) {
+              if (!existing || !isFsCode(cause, "EEXIST")) throw cause;
+            }
+            own(await child(parent, name, true, false), 0o700);
+            return path;
+          };
+          const write = async (parent: string, name: string, data: Buffer) => {
+            safe(name);
+            await verify(parent);
+            const handle = await fs.open(
+              NodePath.join(parent, name),
+              NodeFS.constants.O_WRONLY |
+                NodeFS.constants.O_CREAT |
+                NodeFS.constants.O_EXCL |
+                (NodeFS.constants.O_NOFOLLOW ?? 0),
+              0o600,
+            );
+            try {
+              await handle.writeFile(data);
+            } finally {
+              await handle.close();
+            }
+          };
+          const result: {
+            files?: { selector: string; utf8Base64: string; byteCount: number }[];
+            selections?: string[];
+          } = {};
+          if (
+            input.action === "init" ||
+            input.action === "allocate" ||
+            input.action === "cleanup" ||
+            input.action === "remove"
+          ) {
+            let state = await directory(config.stateDir);
+            const s = checks.get(state)!.before;
+            if (
+              posixPermissions &&
+              (s.uid !== BigInt(process.getuid!()) || (s.mode & 0o022n) !== 0n)
+            )
+              throw error("path_rejected");
+            for (const name of ["memory-import", "snapshots"]) {
+              if (input.action === "init") state = await mkdir(state, name, true);
+              else {
+                await child(state, name, true, false);
+                state = NodePath.join(state, name);
+                own(checks.get(state)!.before, 0o700);
+              }
+            }
+            if (input.action === "allocate") {
+              const dest = await mkdir(state, input.id);
+              await mkdir(dest, "repo");
+              await mkdir(dest, "cwd");
+            }
+            if (input.action === "cleanup" || input.action === "remove") {
+              const entries = await names(state, 2);
+              const paths: { path: string; directory: boolean }[] = [];
+              for (const name of entries) {
+                if (input.action === "remove" && name !== input.id) continue;
+                if (!/^snapshot-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(name))
+                  throw error("path_rejected");
+                let count = 0,
+                  total = 0n,
+                  objectTotal = 0n,
+                  objectCount = 0;
+                const inspect = async (
+                  parent: string,
+                  name: string,
+                  depth: number,
+                  rel: string,
+                ): Promise<void> => {
+                  const path = NodePath.join(parent, name);
+                  const s = await stat(path);
+                  const obj = rel === "repo/objects" || rel.startsWith("repo/objects/");
+                  if (++count > 4096 || (obj && ++objectCount > 3584) || depth > 9)
+                    throw error("limit_exceeded");
+                  if (rel) safe(rel.startsWith("repo/") ? rel.slice(5) : rel);
+                  await child(parent, name, s.isDirectory(), false, s);
+                  own(s, s.isDirectory() ? 0o700 : 0o600);
+                  if (s.isDirectory())
+                    for (const n of await names(path))
+                      await inspect(path, n, depth + 1, rel ? `${rel}/${n}` : n);
+                  else {
+                    total += s.size;
+                    if (obj) objectTotal += s.size;
+                    if (total > 67108864n || objectTotal > 62914560n) throw error("limit_exceeded");
+                  }
+                  paths.push({ path, directory: s.isDirectory() });
+                };
+                await inspect(state, name, 0, "");
+              }
+              await verify();
+              for (const entry of paths) {
+                // Removal changes directory timestamps; identity remains checked before each mutation.
+                await verify(entry.path);
+                if (entry.directory) await fs.rmdir(entry.path);
+                else await fs.unlink(entry.path);
+                checks.delete(entry.path);
+              }
+            }
+          } else if (input.action === "discover") {
+            const root = await directory(input.root);
+            result.selections = [];
+            for (const name of await names(root, 512)) {
+              const s = await stat(NodePath.join(root, name));
+              await child(root, name, s.isDirectory(), false, s);
+              if (s.isDirectory()) result.selections.push(name);
+              if (result.selections.length > 128) throw error("limit_exceeded");
+            }
+          } else {
+            const root = await directory(input.root);
+            let source = root;
+            for (const part of input.relative.split("/")) {
+              await child(source, part, true);
+              source = NodePath.join(source, part);
+            }
+            const dest = await directory(input.snapshot);
+            own(checks.get(dest)!.before, 0o700);
+            let count = input.format === "omo" ? 4 : 0,
+              objectsCount = 0,
+              total = Buffer.byteLength(input.config),
+              objectBytes = 0,
+              sourceBytes = 0;
+            result.files = [];
+            const walk = async (
+              parent: string,
+              out: string,
+              rel: string,
+              depth: number,
+              git: boolean,
+            ): Promise<void> => {
+              for (const name of await names(parent, (git ? 4096 : 512) - count)) {
+                const selector = rel ? `${rel}/${name}` : name;
+                safe(selector);
+                const obj = selector === "objects" || selector.startsWith("objects/");
+                if (++count > (git ? 4096 : 512) || (obj && ++objectsCount > 3584) || depth > 8)
+                  throw error("limit_exceeded");
+                const path = NodePath.join(parent, name);
+                const s = await stat(path);
+                await child(parent, name, s.isDirectory(), true, s);
+                if (
+                  git &&
+                  ["commondir", "objects/info/alternates", "objects/info/http-alternates"].includes(
+                    selector,
+                  )
+                )
+                  throw error("path_rejected");
+                const selected = git
+                  ? selector === "HEAD" ||
+                    selector === "packed-refs" ||
+                    (selector.startsWith("refs/") && !selector.startsWith("refs/replace")) ||
+                    (obj && !selector.startsWith("objects/info"))
+                  : input.format === "codex"
+                    ? selector === "MEMORY.md" ||
+                      (selector.startsWith("extensions/ad_hoc/notes/") &&
+                        selector.split("/").length === 4 &&
+                        selector.endsWith(".md"))
+                    : !selector.includes("/") &&
+                      selector.endsWith(".md") &&
+                      !["MEMORY.md", "CLAUDE.md"].includes(selector);
+                if (s.isDirectory()) {
+                  const copyDir =
+                    git &&
+                    (["refs", "objects"].includes(selector) ||
+                      (selector.startsWith("refs/") && !selector.startsWith("refs/replace")) ||
+                      (obj && !selector.startsWith("objects/info")));
+                  await walk(
+                    path,
+                    copyDir ? await mkdir(out, name) : out,
+                    selector,
+                    depth + 1,
+                    git,
+                  );
+                } else if (git && selector === "config") {
+                  const text = strictText(await read(path, s, 262144)).toLowerCase();
+                  if (/^\s*\[\s*include(?:if)?\b/m.test(text)) throw error("path_rejected");
+                  if (/^\s*\[\s*extensions\b/m.test(text)) throw error("unsupported_format");
+                } else if (selected) {
+                  if (git) {
+                    total += Number(s.size);
+                    if (obj) objectBytes += Number(s.size);
+                    if (total > 67108864 || objectBytes > 62914560 || total - objectBytes > 4194304)
+                      throw error("limit_exceeded");
+                  } else {
+                    sourceBytes += Number(s.size);
+                    if (sourceBytes > 8388608) throw error("limit_exceeded");
+                  }
+                  const data = await read(path, s, git ? Number(s.size) : 262144);
+                  if (git) await write(out, name, data);
+                  else {
+                    strictText(data);
+                    result.files!.push({
+                      selector,
+                      utf8Base64: data.toString("base64"),
+                      byteCount: data.length,
+                    });
+                    await write(out, `${result.files!.length}.txt`, data);
+                  }
+                }
+              }
+            };
+            if (input.format === "omo") {
+              await child(source, ".git", true);
+              await walk(NodePath.join(source, ".git"), dest, "", 1, true);
+              await write(dest, "config", Buffer.from(input.config));
+            } else await walk(source, dest, "", 1, false);
+          }
+          await verify();
+          return result;
+        } finally {
+          release();
+          if (mutating && snapshotMutations.get(config.stateDir) === lock)
+            snapshotMutations.delete(config.stateDir);
         }
-        await verify();
-        return result;
       },
       catch: (cause) => (isFsCode(cause, "ENOENT") ? error("source_missing") : normalize(cause)),
     }),
@@ -473,18 +525,21 @@ const absolute = (path: string) => {
 };
 
 const validateStateBoundary = (config: MemoryImportReaderConfig) => {
+  const within = (parent: string, path: string) => {
+    const relative = NodePath.relative(parent, path);
+    return (
+      relative === "" ||
+      (!NodePath.isAbsolute(relative) &&
+        relative !== ".." &&
+        !relative.startsWith(`..${NodePath.sep}`))
+    );
+  };
   for (const root of config.roots) {
     absolute(root.path);
-    if (
-      config.stateDir === root.path ||
-      config.stateDir.startsWith(`${root.path}/`) ||
-      root.path.startsWith(`${config.stateDir}/`)
-    )
+    if (within(root.path, config.stateDir) || within(config.stateDir, root.path))
       throw error("path_rejected");
-    for (const executable of [config.gitExecutable]) {
-      if (executable && (executable === root.path || executable.startsWith(`${root.path}/`)))
-        throw error("path_rejected");
-    }
+    if (config.gitExecutable && within(root.path, config.gitExecutable))
+      throw error("path_rejected");
   }
 };
 
