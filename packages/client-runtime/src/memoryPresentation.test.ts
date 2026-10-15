@@ -462,6 +462,50 @@ describe("memory presentation boundaries", () => {
   });
 });
 
+it("presents separate diagnostics only for an advertised capability", () => {
+  const diagnostics: M.MemoryHubDiagnostics = {
+    version: 7,
+    publication: { state: "last_valid", code: "invalid_settings" },
+    readiness: "ready",
+    connection: "unreachable",
+    recoverableHolds: ["protocol"],
+    permanentHolds: [],
+    reconcile: "unavailable",
+  };
+  const status = { state: "offline" as const, memorySpaceId: item.memorySpaceId };
+  const capabilities = {
+    repositoryIdentity: false,
+    memory: { protocolVersion: 1, hubDiagnostics: true },
+  };
+  expect(presentMemorySync(status, { capabilities, diagnostics })).toMatchObject({
+    diagnostics: "last_valid",
+    publicationLabel: "Last valid settings in use",
+    readiness: "ready",
+    connection: "unreachable",
+    canReconcileInSettings: false,
+  });
+  const available = {
+    ...diagnostics,
+    publication: { state: "current" as const },
+    reconcile: "available" as const,
+  };
+  expect(
+    presentMemorySync(status, { capabilities, diagnostics: available }).canReconcileInSettings,
+  ).toBe(true);
+  expect(
+    presentMemorySync(status, {
+      capabilities: { repositoryIdentity: false, memory: { protocolVersion: 1 } },
+      diagnostics: available,
+    }).canReconcileInSettings,
+  ).toBe(false);
+  expect(
+    presentMemorySync(status, {
+      capabilities,
+      diagnostics: { ...diagnostics, permanentHolds: ["identity"], reconcile: "permanent_hold" },
+    }).canReconcileInSettings,
+  ).toBe(false);
+});
+
 describe("shared memory progress presentation", () => {
   it("reads attempts from the report DTO with no caller options", () => {
     expect(presentMemoryReport(report).automaticAttempts).toBeNull();

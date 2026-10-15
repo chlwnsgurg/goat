@@ -15,6 +15,8 @@ import {
   type MemoryRevertResult,
   type MemoryRevisionId,
   type MemorySyncStatus,
+  type MemoryHubDiagnostics,
+  type ExecutionEnvironmentCapabilities,
   type MemoryTaskGrantCeiling,
 } from "@goat/contracts";
 
@@ -249,7 +251,15 @@ export function presentMemoryReport(
 }
 
 /** Online is a connection state, not proof of publication, exposure or policy readiness. */
-export function presentMemorySync(status: Pick<MemorySyncStatus, "state" | "memorySpaceId">) {
+export function presentMemorySync(
+  status: Pick<MemorySyncStatus, "state" | "memorySpaceId">,
+  options?: {
+    readonly capabilities: ExecutionEnvironmentCapabilities;
+    readonly diagnostics?: MemoryHubDiagnostics;
+  },
+) {
+  const diagnostics =
+    options?.capabilities.memory?.hubDiagnostics === true ? options.diagnostics : undefined;
   const labels = {
     disabled: "Memory sharing off",
     bootstrapping: "Receiving initial memories",
@@ -258,12 +268,29 @@ export function presentMemorySync(status: Pick<MemorySyncStatus, "state" | "memo
     error: "Memory sync error",
   } as const;
   return {
-    label:
-      status.state !== "disabled" && status.memorySpaceId === null
+    label: diagnostics
+      ? diagnostics.readiness === "disabled"
+        ? labels.disabled
+        : diagnostics.readiness === "unbound"
+          ? "Connect a memory space"
+          : diagnostics.readiness === "staging"
+            ? labels.bootstrapping
+            : diagnostics.connection === "connected"
+              ? labels.online
+              : diagnostics.connection === "unreachable"
+                ? labels.offline
+                : "Hub connection not confirmed"
+      : status.state !== "disabled" && status.memorySpaceId === null
         ? "Connect a memory space"
         : labels[status.state],
-    diagnostics: "unknown" as const,
-    canReconcileInSettings: false,
+    diagnostics: diagnostics?.publication.state ?? "unknown",
+    readiness: diagnostics?.readiness ?? "unknown",
+    connection: diagnostics?.connection ?? "unknown",
+    publicationLabel:
+      diagnostics?.publication.state === "last_valid" ? "Last valid settings in use" : null,
+    recoverableHolds: diagnostics?.recoverableHolds ?? [],
+    permanentHolds: diagnostics?.permanentHolds ?? [],
+    canReconcileInSettings: diagnostics?.reconcile === "available",
   };
 }
 

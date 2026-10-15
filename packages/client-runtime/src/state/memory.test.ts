@@ -85,7 +85,9 @@ const unrelated = MemoryId.make("00000000-0000-4000-8000-000000000003");
 const target = { environmentId: env, input: { memorySpaceId: space } };
 const readTarget = { environmentId: env, input: { memorySpaceId: space, memoryId: id } };
 const config = {
-  environment: { capabilities: { memory: { protocolVersion: 1, importProvider: true } } },
+  environment: {
+    capabilities: { memory: { protocolVersion: 1, importProvider: true, hubDiagnostics: true } },
+  },
 } as ServerConfig;
 function sessionScopes(scopes: ReadonlyArray<AuthEnvironmentScope>): AuthSessionState {
   return {
@@ -218,7 +220,18 @@ const harness = Effect.fn(function* (
       responded.add(method);
       return Deferred.await(reply).pipe(Effect.as(value));
     });
+  let diagnosticRequests = 0;
   const rpc = {
+    [WS_METHODS.memoryHubDiagnostics]: () =>
+      Effect.sync(() => {
+        diagnosticRequests++;
+        return {};
+      }),
+    [WS_METHODS.memoryHubReconcile]: () =>
+      Effect.sync(() => {
+        diagnosticRequests++;
+        return { version: 1, rearmedClasses: [] };
+      }),
     [WS_METHODS.memoryChanges]: () => {
       subscriptions++;
       return Stream.fromQueue(queue).pipe(
@@ -244,7 +257,10 @@ const harness = Effect.fn(function* (
       Effect.succeed(decodeImport({ action: "discover", sources: [] })),
   };
   const active = yield* SubscriptionRef.make(
-    Option.some({ client: rpc, initialConfig: Effect.succeed(config) } as unknown as RpcSession),
+    Option.some({
+      client: rpc,
+      initialConfig: Effect.sync(() => registry.get(configs(env)) ?? config),
+    } as unknown as RpcSession),
   );
   const supervisor = {
     target: { environmentId: env, label: "Selected tunnel" },
@@ -316,6 +332,7 @@ const harness = Effect.fn(function* (
     Boolean,
   );
   return {
+    diagnosticRequests: () => diagnosticRequests,
     registry,
     entries,
     memory,
@@ -400,6 +417,75 @@ describe("shared memory client", () => {
           );
         }),
       ),
+  );
+
+  it.effect("never dispatches hub diagnostics or reconcile without the advertised capability", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness();
+        h.registry.set(
+          grants(env),
+          AsyncResult.success(sessionScopes(["memory:read", "settings:write"])),
+        );
+        const reconcile = { memorySpaceId: space, environmentId: env, expectedVersion: 1 };
+        for (const memory of [
+          { protocolVersion: 1 },
+          { protocolVersion: 1, hubDiagnostics: false },
+        ]) {
+          h.registry.set(configs(env), {
+            environment: { capabilities: { memory } },
+          } as ServerConfig);
+          expect(h.registry.get(h.memory.hubDiagnostics.permissionAtom(env))).toBe(false);
+          expect(h.registry.get(h.memory.hubReconcile.permissionAtom(env))).toBe(false);
+          expect(
+            (yield* Effect.promise(() =>
+              h.memory.hubDiagnostics.run(h.registry, { environmentId: env, input: {} }),
+            ))._tag,
+          ).toBe("Failure");
+          expect(
+            (yield* Effect.promise(() =>
+              h.memory.hubReconcile.run(h.registry, { environmentId: env, input: reconcile }),
+            ))._tag,
+          ).toBe("Failure");
+        }
+        expect(h.diagnosticRequests()).toBe(0);
+        h.registry.set(configs(env), config);
+        expect(
+          (yield* Effect.promise(() =>
+            h.memory.hubDiagnostics.run(h.registry, { environmentId: env, input: {} }),
+          ))._tag,
+        ).toBe("Success");
+        expect(
+          (yield* Effect.promise(() =>
+            h.memory.hubReconcile.run(h.registry, { environmentId: env, input: reconcile }),
+          ))._tag,
+        ).toBe("Success");
+        expect(h.diagnosticRequests()).toBe(2);
+      }),
+    ),
+  );
+
+  it.effect("hub reconcile follows live Settings permission on the exact destination", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness();
+        const input = { memorySpaceId: space, environmentId: env, expectedVersion: 1 };
+        for (const [scopes, expected] of [
+          [["memory:write"], false],
+          [["settings:write"], true],
+          [[], false],
+        ] as const) {
+          h.registry.set(grants(env), AsyncResult.success(sessionScopes(scopes)));
+          expect(h.registry.get(h.memory.hubReconcile.permissionAtom(env, input))).toBe(expected);
+          expect(h.registry.get(h.memory.hubReconcile.permissionAtom(other, input))).toBe(false);
+        }
+        expect(
+          (yield* Effect.promise(() =>
+            h.memory.hubReconcile.run(h.registry, { environmentId: env, input }),
+          ))._tag,
+        ).toBe("Failure");
+      }),
+    ),
   );
 
   it.effect(
