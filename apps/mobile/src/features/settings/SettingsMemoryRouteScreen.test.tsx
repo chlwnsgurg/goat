@@ -947,3 +947,392 @@ describe("native sharing workflow", () => {
     expect(h.calls).toHaveLength(0);
   });
 });
+
+describe("native WP6 Settings commands", () => {
+  const importCalls = () =>
+    h.calls.filter((call) => call.method === WS_METHODS.memoryImportProvider);
+  const sourceId = "synthetic-profile";
+  function setupImport(count = 1) {
+    h = createNativeMemoryHarness();
+    h.grant(["memory:read", "memory:write", "filesystem:read", "settings:write"]);
+    h.responses.set(WS_METHODS.memoryImportProvider, (value) => {
+      const input = value as {
+        action: string;
+        operationId: string;
+        items: Array<{ sourceItemKey: string }>;
+      };
+      if (input.action === "discover")
+        return {
+          action: "discover",
+          sources: [
+            {
+              sourceId,
+              format: "codex",
+              parserVersion: "1",
+              profile: "private-profile",
+              label: "/private/path",
+            },
+          ],
+        };
+      if (input.action === "preview")
+        return {
+          action: "preview",
+          sourceId,
+          sessionId: "synthetic-session",
+          items: Array.from({ length: count }, (_, index) => ({
+            sourceItemKey: `key-${index}`,
+            sourceFingerprint: "a".repeat(64),
+            byteCount: 10,
+            mappingRequired: true,
+            title: `Import memory ${index + 1}`,
+          })),
+        };
+      return {
+        action: input.action,
+        receipt: {
+          operationId: input.operationId,
+          sourceId,
+          sessionId: "synthetic-session",
+          sessionNewItems: 1,
+          sessionBodyBytes: 10,
+          state: "completed",
+          items:
+            input.items?.map((item) => ({
+              sourceItemKey: item.sourceItemKey,
+              outcome: "accepted",
+              memoryId: null,
+              revisionId: null,
+            })) ?? [],
+          remaining: 0,
+        },
+        syncStatus: nativeSyncStatus,
+      };
+    });
+  }
+  async function show(
+    params: Parameters<typeof SettingsMemoryRouteScreen>[0]["route"]["params"] = {
+      environmentId: nativeEnv,
+      memorySpaceId: nativeSpace,
+    },
+  ) {
+    await h.waitForAtom(h.memory.syncStatus.permissionAtom(nativeEnv), Boolean);
+    view = renderNative(h, <SettingsMemoryRouteScreen route={{ params }} />);
+    await view.render();
+  }
+  async function select(count = 1) {
+    await view.click("Discover Codex profiles");
+    await view.click("Preview Codex profile 1");
+    for (let i = 1; i <= count; i++) await view.click(`Import memory ${i}`);
+    await view.click("Use selected scope and this environment as the import destination");
+    await view.click("Confirm import selection");
+  }
+  it.each(["ios", "android"])(
+    "requires preview and destination confirmation, persists before apply and bounds chunks on %s",
+    async (platform) => {
+      setupImport(33);
+      h.setPlatform(platform);
+      await show();
+      await select(33);
+      expect(importCalls().map((call) => (call.input as { action: string }).action)).toEqual([
+        "discover",
+        "preview",
+      ]);
+      const handler = h.responses.get(WS_METHODS.memoryImportProvider)!;
+      h.responses.set(WS_METHODS.memoryImportProvider, (value) => {
+        if ((value as { action: string }).action === "apply") {
+          expect(h.secureValues.size).toBe(1);
+          const saved = JSON.parse([...h.secureValues.values()][0]!);
+          expect(saved.handle.operationId).toBe((value as { operationId: string }).operationId);
+          expect(Object.keys(saved.handle).sort()).toEqual([
+            "environmentId",
+            "expiresAt",
+            "memorySpaceId",
+            "operationId",
+            "savedAt",
+          ]);
+        }
+        return handler(value);
+      });
+      await view.click("Apply selected memories");
+      const applies = importCalls().filter(
+        (call) => (call.input as { action: string }).action === "apply",
+      );
+      expect(applies.map((call) => (call.input as { items: unknown[] }).items.length)).toEqual([
+        32, 1,
+      ]);
+      expect(view.container.textContent).toContain("Import completed");
+      expect(h.secureValues.size).toBe(0);
+      expect(view.container.textContent).not.toContain("/private/path");
+      expect(view.container.textContent).not.toContain("synthetic-session");
+    },
+  );
+  it("Stop settles the admitted batch and admits no later chunk", async () => {
+    setupImport(33);
+    await show();
+    await select(33);
+    const reply = h.deferred<unknown>();
+    h.responses.set(WS_METHODS.memoryImportProvider, () => reply.response);
+    await view.click("Apply selected memories");
+    const input = importCalls().at(-1)!.input as {
+      operationId: string;
+      items: Array<{ sourceItemKey: string }>;
+    };
+    await view.click("Stop import");
+    await act(async () => {
+      await reply.succeed({
+        action: "apply",
+        receipt: {
+          operationId: input.operationId,
+          sourceId,
+          sessionId: "synthetic-session",
+          sessionNewItems: 32,
+          sessionBodyBytes: 320,
+          state: "completed",
+          items: input.items.map((item) => ({
+            sourceItemKey: item.sourceItemKey,
+            outcome: "accepted",
+            memoryId: null,
+            revisionId: null,
+          })),
+          remaining: 0,
+        },
+        syncStatus: nativeSyncStatus,
+      });
+    });
+    expect(
+      importCalls().filter((call) => (call.input as { action: string }).action === "apply"),
+    ).toHaveLength(1);
+    expect(view.container.textContent).toContain("partial progress");
+    expect(view.container.textContent).toContain("Completed batches: 1");
+  });
+  it("response loss and a fresh mount recover status only, including foreground", async () => {
+    setupImport();
+    await show();
+    await select();
+    h.responses.set(WS_METHODS.memoryImportProvider, () =>
+      Effect.fail(new Error("synthetic response lost")),
+    );
+    await view.click("Apply selected memories");
+    expect(h.secureValues.size).toBe(1);
+    await view.unmount();
+    const operationId = JSON.parse([...h.secureValues.values()][0]!).handle.operationId;
+    h.responses.set(WS_METHODS.memoryImportProvider, (value) => ({
+      action: "status",
+      receipt: {
+        operationId: (value as { operationId: string }).operationId,
+        sourceId,
+        sessionId: "synthetic-session",
+        sessionNewItems: 1,
+        sessionBodyBytes: 10,
+        state: "partial",
+        items: [],
+        remaining: 1,
+      },
+      syncStatus: nativeSyncStatus,
+    }));
+    const before = importCalls().length;
+    await show();
+    expect(
+      importCalls()
+        .slice(before)
+        .map((call) => call.input),
+    ).toEqual([{ action: "status", memorySpaceId: nativeSpace, operationId }]);
+    await act(async () => h.active());
+    expect(
+      importCalls()
+        .slice(before)
+        .every((call) => (call.input as { action: string }).action === "status"),
+    ).toBe(true);
+    expect(h.secureValues.size).toBe(1);
+  });
+  it("partial receipts retain recovery; not_found clears it without claiming nothing was applied", async () => {
+    setupImport();
+    await show();
+    await select();
+    h.responses.set(WS_METHODS.memoryImportProvider, (value) => ({
+      action: "apply",
+      receipt: {
+        operationId: (value as { operationId: string }).operationId,
+        sourceId,
+        sessionId: "synthetic-session",
+        sessionNewItems: 1,
+        sessionBodyBytes: 10,
+        state: "partial",
+        items: [],
+        remaining: 1,
+      },
+      syncStatus: nativeSyncStatus,
+    }));
+    await view.click("Apply selected memories");
+    expect(h.secureValues.size).toBe(1);
+    h.responses.set(WS_METHODS.memoryImportProvider, () => Effect.fail({ code: "not_found" }));
+    await view.click("Check saved import result");
+    expect(h.secureValues.size).toBe(0);
+    expect(view.container.textContent).toContain("Previous items may have been applied");
+  });
+  it("does not import without both grants and fences a late preview after revocation", async () => {
+    setupImport();
+    h.grant(["memory:read", "memory:write"]);
+    await show();
+    await view.click("Discover Codex profiles");
+    expect(importCalls()).toHaveLength(0);
+    await act(async () => h.grant(["memory:read", "memory:write", "filesystem:read"]));
+    await view.click("Discover Codex profiles");
+    const late = h.deferred<unknown>();
+    h.responses.set(WS_METHODS.memoryImportProvider, () => late.response);
+    await view.click("Preview Codex profile 1");
+    await act(async () => h.grant(["memory:read"]));
+    await act(async () => {
+      await late.succeed({
+        action: "preview",
+        sourceId,
+        sessionId: "secret-session",
+        items: [
+          {
+            sourceItemKey: "key",
+            sourceFingerprint: "a".repeat(64),
+            byteCount: 10,
+            mappingRequired: false,
+            title: "Late private preview",
+          },
+        ],
+      });
+    });
+    expect(view.container.textContent).not.toContain("Late private preview");
+    expect(
+      importCalls().filter((call) => (call.input as { action: string }).action === "apply"),
+    ).toHaveLength(0);
+  });
+  it("turns agent access off and on through normal settings, separately from sharing", async () => {
+    setupImport();
+    h.responses.set(WS_METHODS.serverUpdateSettings, (value) => {
+      const enabled = (value as { patch: { enableAgentMemoryAccess: boolean } }).patch
+        .enableAgentMemoryAccess;
+      const config = h.registry.get(h.configs(nativeEnv))!;
+      h.registry.set(h.configs(nativeEnv), {
+        ...config,
+        settings: { ...config.settings, enableAgentMemoryAccess: enabled },
+      });
+      return { ...config.settings, enableAgentMemoryAccess: enabled };
+    });
+    await show();
+    await view.click("Allow agent memory access");
+    await view.click("Allow agent memory access");
+    expect(
+      h.calls
+        .filter((call) => call.method === WS_METHODS.serverUpdateSettings)
+        .map((call) => call.input),
+    ).toEqual([
+      { patch: { enableAgentMemoryAccess: false } },
+      { patch: { enableAgentMemoryAccess: true } },
+    ]);
+    expect(
+      h.calls.filter((call) => call.method === WS_METHODS.memoryHubSettingsUpdate),
+    ).toHaveLength(0);
+  });
+  it("uses project CAS, requires reread after conflict and offers repository reverse", async () => {
+    setupImport();
+    const project = { environmentId: nativeEnv, projectId: "synthetic-project" as never };
+    let version = 2;
+    h.responses.set(WS_METHODS.memoryProjectBindingGet, () => ({
+      memorySpaceId: nativeSpace,
+      project,
+      version,
+      projectKey: { kind: "repository", groupingKey: "repo-key" },
+      repositoryKey: { kind: "repository", groupingKey: "repo-key" },
+    }));
+    h.responses.set(WS_METHODS.memoryProjectBindingUpdate, () =>
+      Effect.fail({ code: "revision_changed" }),
+    );
+    await show({ environmentId: nativeEnv, project });
+    await view.click("Scope: project");
+    await view.click("Create shared project binding");
+    expect(
+      h.calls.findLast((call) => call.method === WS_METHODS.memoryProjectBindingUpdate)?.input,
+    ).toMatchObject({ expectedVersion: 2, action: "setExplicit" });
+    expect(view.container.textContent).toContain("Review the latest binding");
+    version = 3;
+    await view.click("Review latest project binding");
+    h.responses.set(WS_METHODS.memoryProjectBindingUpdate, (value) => ({
+      requestId: (value as { requestId: string }).requestId,
+      binding: {
+        memorySpaceId: nativeSpace,
+        project,
+        version: 4,
+        projectKey: null,
+        repositoryKey: null,
+      },
+    }));
+    await view.click("Use repository binding");
+    expect(
+      h.calls.findLast((call) => call.method === WS_METHODS.memoryProjectBindingUpdate)?.input,
+    ).toMatchObject({ expectedVersion: 3, action: "useRepository" });
+  });
+  it("distinguishes incomplete coverage from an empty complete search", async () => {
+    setupImport();
+    const coverage = {
+      status: "partial",
+      eligibleItems: 2,
+      indexedItems: 0,
+      unindexedItems: 2,
+      projectionWatermark: 1,
+    };
+    h.responses.set(WS_METHODS.memoryList, () => ({
+      items: [],
+      nextCursor: null,
+      projectionWatermark: 1,
+      indexCoverage: coverage,
+    }));
+    await show();
+    expect(view.container.textContent).toContain("Results are incomplete");
+    h.responses.set(WS_METHODS.memoryList, () => ({
+      items: [],
+      nextCursor: null,
+      projectionWatermark: 1,
+      indexCoverage: { ...coverage, status: "available", eligibleItems: 0, unindexedItems: 0 },
+    }));
+    await view.click("Include quarantined");
+    expect(view.container.textContent).toContain("No memories found");
+  });
+  it("selects only exhausted owner reports, preserves Unknown and displays reset counts", async () => {
+    setupImport();
+    const report = {
+      reportId: "a".repeat(64),
+      operationId: "00000000-0000-4000-8000-000000000008",
+      outcome: "failed",
+      state: "failed",
+      failureCode: "generation_failed",
+      resolvingEnvironmentId: nativeEnv,
+      resolutionId: null,
+      reportThread: null,
+      sequence: null,
+      automaticAttempts: 10,
+    };
+    h.responses.set(WS_METHODS.memoryHistory, () => ({
+      ...revertHistory(),
+      reports: [
+        report,
+        { ...report, reportId: "b".repeat(64), automaticAttempts: undefined },
+        { ...report, reportId: "c".repeat(64), resolvingEnvironmentId: nativeDevice },
+      ],
+    }));
+    h.responses.set(WS_METHODS.memoryResetReportAttempts, () => ({
+      resetCount: 0,
+      unchangedCount: 1,
+    }));
+    await show();
+    await view.click("Open memory: Synthetic memory body");
+    expect(view.container.textContent).toContain("Automatic attempts: Unknown");
+    expect(view.container.textContent).not.toContain("Select exhausted report 2");
+    await view.click("Select exhausted report 1");
+    await view.click("Retry selected reports");
+    expect(
+      h.calls.findLast((call) => call.method === WS_METHODS.memoryResetReportAttempts)?.input,
+    ).toEqual({
+      memorySpaceId: nativeSpace,
+      environmentId: nativeEnv,
+      reportIds: [report.reportId],
+    });
+    expect(view.container.textContent).toContain("0 reports ready to retry; 1 unchanged");
+  });
+});
