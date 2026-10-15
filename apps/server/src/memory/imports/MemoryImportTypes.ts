@@ -305,7 +305,12 @@ export type ImportStorePorts = {
   ) => ImportInTx<ImportRegistration>;
   readonly readImportBatchTx: (
     input: ImportBatchAddress,
-  ) => ImportInTx<ImportBatch | ImportRetiredBatchGuard | undefined>;
+  ) => ImportInTx<
+    | ImportBatch
+    | (typeof Store.ImportCompletedNoopCodec.Type & { readonly receipt: M.MemoryImportReceipt })
+    | ImportRetiredBatchGuard
+    | undefined
+  >;
   readonly readImportReceiptTx: (
     input: ImportBatchAddress,
   ) => ImportInTx<M.MemoryImportReceipt | undefined>;

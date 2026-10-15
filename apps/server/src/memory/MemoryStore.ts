@@ -1789,8 +1789,7 @@ const ImportBatchCodec = Schema.Struct({
       ),
   ),
 );
-// Installed by the additive migration; M3e-b will enable reference replay/conversion.
-// Until that implementation is present the detailed/retired reader fails closed.
+// Only fully settled noop results may leave the mutable detailed settlement path.
 export const ImportCompletedNoopCodec = Schema.Struct({
   ...importSourceAddress,
   kind: Schema.Literal("completed-noop-ref"),
@@ -1841,7 +1840,10 @@ const privateImportCodec = <S extends Schema.Constraint>(schema: S) => {
   };
 };
 const importRegistrationCodec = privateImportCodec(ImportRegistrationCodec);
-const importBatchCodec = privateImportCodec(Schema.Union([ImportBatchCodec, ImportRetiredCodec]));
+const importBatchCodec = privateImportCodec(
+  Schema.Union([ImportBatchCodec, ImportCompletedNoopCodec, ImportRetiredCodec]),
+);
+const importNoopResultCodec = privateImportCodec(ImportNoopResultCodec);
 const importItemCodec = privateImportCodec(ImportItemCodec);
 const lineageCodec = codec(M.MemoryImportLineageRecord);
 const stagedCheckpointCodec = codec(
@@ -5907,6 +5909,78 @@ const make = Effect.gen(function* () {
       );
       return next;
     });
+  const noopResultRef = (
+    b: typeof ImportCompletedNoopCodec.Type | typeof ImportBatchCodec.Type,
+    json: string,
+  ) =>
+    hashText(
+      importId([
+        "goat/import-noop-result",
+        "1",
+        b.memorySpaceId,
+        b.environmentId,
+        b.sourceId,
+        json,
+      ]),
+    );
+  // No pointer chains: the immutable object is addressed within its trusted origin.
+  const shareImportNoopTx = Effect.fnUntraced(function* (batch: typeof ImportBatchCodec.Type) {
+    if (
+      batch.receipt.state !== "completed" ||
+      batch.receipt.remaining !== 0 ||
+      new TextEncoder().encode(batch.sessionId).length > 64 ||
+      !batch.selections.every(
+        (s) => s.result?.outcome === "noop" && s.observation !== undefined && s.settled === true,
+      )
+    )
+      return { json: yield* importBatchCodec.encode(batch), resultRef: null };
+    const json = yield* importNoopResultCodec.encode({
+      codecVersion: 1,
+      items: batch.receipt.items,
+    });
+    const resultRef = noopResultRef(batch, json);
+    const rows = yield* stored(
+      "import-noop-existing",
+      sql<{ result_json: string; codec_version: number }>`
+      SELECT result_json,codec_version FROM memory_import_noop_results WHERE space=${batch.memorySpaceId}
+      AND environment_id=${batch.environmentId} AND source_id=${batch.sourceId} AND result_ref=${resultRef}`,
+    );
+    if (rows[0] && (rows[0].result_json !== json || rows[0].codec_version !== 1))
+      return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    if (!rows[0])
+      yield* stored(
+        "import-noop-insert",
+        sql`
+      INSERT INTO memory_import_noop_results(space,environment_id,source_id,result_ref,codec_version,result_json)
+      VALUES (${batch.memorySpaceId},${batch.environmentId},${batch.sourceId},${resultRef},1,${json})`,
+      );
+    return {
+      resultRef,
+      json: yield* importBatchCodec.encode({
+        kind: "completed-noop-ref",
+        codecVersion: 1,
+        memorySpaceId: batch.memorySpaceId,
+        environmentId: batch.environmentId,
+        sourceId: batch.sourceId,
+        operationId: batch.operationId,
+        selectionDigest: batch.selectionDigest,
+        sessionId: batch.sessionId,
+        resultRef,
+        sessionNewItems: batch.receipt.sessionNewItems,
+        sessionBodyBytes: batch.receipt.sessionBodyBytes,
+        createdAtUtc: batch.createdAtUtc,
+      }),
+    };
+  });
+  const gcImportNoopTx = Effect.fnUntraced(function* (b: typeof ImportCompletedNoopCodec.Type) {
+    yield* stored(
+      "import-noop-gc",
+      sql`DELETE FROM memory_import_noop_results
+      WHERE space=${b.memorySpaceId} AND environment_id=${b.environmentId} AND source_id=${b.sourceId} AND result_ref=${b.resultRef}
+      AND NOT EXISTS(SELECT 1 FROM memory_import_receipts r WHERE r.space=${b.memorySpaceId}
+      AND r.environment_id=${b.environmentId} AND r.source_id=${b.sourceId} AND r.result_ref=${b.resultRef})`,
+    );
+  });
   const readImportBatchTx: ImportStorePorts["readImportBatchTx"] = Effect.fnUntraced(
     function* (input) {
       yield* Transaction;
@@ -5921,26 +5995,83 @@ const make = Effect.gen(function* () {
         sql<{
           completed_items_json: string;
           request_digest: string;
-        }>`SELECT completed_items_json,request_digest FROM memory_import_receipts
+          source_id: string;
+          observed_at_utc: string;
+          result_ref: string | null;
+        }>`SELECT completed_items_json,request_digest,source_id,observed_at_utc,result_ref FROM memory_import_receipts
       WHERE space=${input.memorySpaceId} AND environment_id=${input.environmentId} AND record_kind='batch' AND batch_operation_id=${input.operationId}`,
       );
       if (!rows[0]) return undefined;
       const b = yield* importBatchCodec.decode(rows[0].completed_items_json, strict);
       if (
         b.selectionDigest !== rows[0].request_digest ||
-        (b.kind === "detailed" &&
+        (b.kind !== "retired" &&
           (b.memorySpaceId !== input.memorySpaceId ||
             b.environmentId !== input.environmentId ||
-            b.operationId !== input.operationId))
+            b.operationId !== input.operationId ||
+            b.sourceId !== rows[0].source_id ||
+            b.createdAtUtc !== rows[0].observed_at_utc)) ||
+        rows[0].result_ref !== (b.kind === "completed-noop-ref" ? b.resultRef : null)
       )
         return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      if (b.kind === "completed-noop-ref") {
+        const results = yield* stored(
+          "import-noop-read",
+          sql<{ result_json: string; codec_version: number }>`
+          SELECT result_json,codec_version FROM memory_import_noop_results WHERE space=${b.memorySpaceId}
+          AND environment_id=${b.environmentId} AND source_id=${b.sourceId} AND result_ref=${b.resultRef}`,
+        );
+        const row = results[0];
+        if (!row || row.codec_version !== 1 || noopResultRef(b, row.result_json) !== b.resultRef)
+          return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        const result = yield* importNoopResultCodec.decode(row.result_json, strict);
+        return {
+          ...b,
+          receipt: {
+            operationId: b.operationId,
+            sourceId: b.sourceId,
+            sessionId: b.sessionId,
+            state: "completed" as const,
+            remaining: 0,
+            sessionNewItems: b.sessionNewItems,
+            sessionBodyBytes: b.sessionBodyBytes,
+            items: result.items,
+          },
+        };
+      }
+      if (b.kind === "detailed") {
+        const shared = yield* withHubBudget(
+          shareImportNoopTx(b).pipe(
+            Effect.flatMap((shared) =>
+              Effect.gen(function* () {
+                if (shared.resultRef !== null)
+                  yield* stored(
+                    "import-noop-convert",
+                    sql`
+              UPDATE memory_import_receipts SET completed_items_json=${shared.json},result_ref=${shared.resultRef}
+              WHERE space=${b.memorySpaceId} AND environment_id=${b.environmentId} AND batch_operation_id=${b.operationId}`,
+                  );
+                return shared;
+              }),
+            ),
+          ),
+        );
+        if (shared.resultRef !== null)
+          return {
+            ...b,
+            kind: "completed-noop-ref" as const,
+            resultRef: shared.resultRef,
+            sessionNewItems: b.receipt.sessionNewItems,
+            sessionBodyBytes: b.receipt.sessionBodyBytes,
+          };
+      }
       return b;
     },
   );
   const readImportReceiptTx: ImportStorePorts["readImportReceiptTx"] = Effect.fnUntraced(
     function* (input) {
       const b = yield* readImportBatchTx(input);
-      return b?.kind === "detailed" ? b.receipt : undefined;
+      return b && b.kind !== "retired" ? b.receipt : undefined;
     },
   );
   const readImportItemTx: ImportStorePorts["readImportItemTx"] = Effect.fnUntraced(
@@ -5977,6 +6108,13 @@ const make = Effect.gen(function* () {
       if (guard && guard.selectionDigest !== batch.selectionDigest)
         return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
       if (guard?.kind === "retired") return yield* new MemoryStoreConflict({ code: "not_found" });
+      if (guard?.kind === "completed-noop-ref") {
+        const result = guard.receipt.items.find(
+          (s) => s.sourceItemKey === input.next.sourceItemKey,
+        );
+        if (!result) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        return result;
+      }
       const next = yield* importItemCodec.decode(yield* importItemCodec.encode(input.next), strict);
       const selection = batch.selections.find(
         (s) => s.selector.sourceItemKey === next.sourceItemKey,
@@ -6144,11 +6282,12 @@ const make = Effect.gen(function* () {
         next: { ...registration, version: registration.version + 1, session: nextSession },
         expectedVersion: registration.version,
       });
+      const shared = yield* shareImportNoopTx(persisted);
       yield* stored(
         "import-batch-write",
-        sql`INSERT INTO memory_import_receipts(receipt_id,space,environment_id,record_kind,source_id,batch_operation_id,request_digest,completed_items_json,observed_at_utc)
-      VALUES (${importId(["batch", batch.memorySpaceId, batch.environmentId, batch.operationId])},${batch.memorySpaceId},${batch.environmentId},'batch',${batch.sourceId},${batch.operationId},${batch.selectionDigest},${yield* importBatchCodec.encode(persisted)},${batch.createdAtUtc})
-      ON CONFLICT(receipt_id) DO UPDATE SET completed_items_json=excluded.completed_items_json,observed_at_utc=excluded.observed_at_utc`,
+        sql`INSERT INTO memory_import_receipts(receipt_id,space,environment_id,record_kind,source_id,batch_operation_id,request_digest,completed_items_json,observed_at_utc,result_ref)
+      VALUES (${importId(["batch", batch.memorySpaceId, batch.environmentId, batch.operationId])},${batch.memorySpaceId},${batch.environmentId},'batch',${batch.sourceId},${batch.operationId},${batch.selectionDigest},${shared.json},${batch.createdAtUtc},${shared.resultRef})
+      ON CONFLICT(receipt_id) DO UPDATE SET completed_items_json=excluded.completed_items_json,observed_at_utc=excluded.observed_at_utc,result_ref=excluded.result_ref`,
       );
       return selection.result;
     },
@@ -6333,9 +6472,10 @@ const make = Effect.gen(function* () {
         },
       };
       if (NodeUtil.isDeepStrictEqual(batch, next)) continue;
+      const shared = yield* shareImportNoopTx(next);
       yield* stored(
         "import-settlement-batch",
-        sql`UPDATE memory_import_receipts SET completed_items_json=${yield* importBatchCodec.encode(next)} WHERE receipt_id=${row.receipt_id}`,
+        sql`UPDATE memory_import_receipts SET completed_items_json=${shared.json},result_ref=${shared.resultRef} WHERE receipt_id=${row.receipt_id}`,
       );
     }
   });
@@ -6350,7 +6490,7 @@ const make = Effect.gen(function* () {
       "import-batch-expired",
       sql<{ receipt_id: string; completed_items_json: string }>`
       SELECT receipt_id,completed_items_json FROM memory_import_receipts b WHERE space=${space} AND record_kind='batch'
-      AND json_extract(completed_items_json,'$.kind')='detailed'
+      AND json_extract(completed_items_json,'$.kind') IN ('detailed','completed-noop-ref')
       AND (${operationId} IS NULL OR batch_operation_id=${operationId})
       AND observed_at_utc<=${DateTime.formatIso(DateTime.makeUnsafe(now - M.MEMORY_IMPORT_BATCH_RETENTION_MS))}
       AND NOT EXISTS (SELECT 1 FROM json_each(b.completed_items_json,'$.selections') s
@@ -6368,8 +6508,9 @@ const make = Effect.gen(function* () {
       const batch = yield* importBatchCodec.decode(row.completed_items_json, strict);
       yield* stored(
         "import-batch-retire",
-        sql`UPDATE memory_import_receipts SET completed_items_json=${yield* importBatchCodec.encode({ kind: "retired", codecVersion: 1, selectionDigest: batch.selectionDigest })} WHERE receipt_id=${row.receipt_id}`,
+        sql`UPDATE memory_import_receipts SET completed_items_json=${yield* importBatchCodec.encode({ kind: "retired", codecVersion: 1, selectionDigest: batch.selectionDigest })},result_ref=NULL WHERE receipt_id=${row.receipt_id}`,
       );
+      if (batch.kind === "completed-noop-ref") yield* gcImportNoopTx(batch);
     }
     return rows.length;
   });
@@ -9504,7 +9645,7 @@ const make = Effect.gen(function* () {
       sql<{
         id: string;
         bytes: number;
-      }>`SELECT id,length(CAST(metadata_json AS BLOB))+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0) AS bytes FROM memory_outbox o WHERE space=${input.memorySpaceId} AND kind IN ('sync','resolve','revert_intent') AND status IN ('completed','failed','cancelled') AND terminal_at<=${input.now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId')) ORDER BY terminal_at,id LIMIT ${Math.max(0, limit - removedRows)}`,
+      }>`SELECT id,length(CAST(metadata_json AS BLOB))+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0) AS bytes FROM memory_outbox o WHERE space=${input.memorySpaceId} AND kind IN ('sync','resolve','revert_intent','rebuild') AND status IN ('completed','failed','cancelled') AND terminal_at<=${input.now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId')) ORDER BY terminal_at,id LIMIT ${Math.max(0, limit - removedRows)}`,
     );
     for (const work of terminalWork) {
       yield* stored(
@@ -9684,8 +9825,8 @@ const make = Effect.gen(function* () {
       (SELECT coalesce(sum(max(0,reserve_bytes-${M.MEMORY_IDENTITY_CORE_MAX_BYTES})),0) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_bytes,
       (SELECT count(*) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_receipts,
       (SELECT coalesce(sum(reserve_keys),0) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_keys,
-      (SELECT count(*) FROM memory_outbox o WHERE o.space=${space} AND kind IN ('sync','resolve','revert_intent') AND status IN ('completed','failed','cancelled') AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId'))) AS terminal_work_rows,
-      (SELECT coalesce(sum(length(CAST(metadata_json AS BLOB))+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0)),0) FROM memory_outbox o WHERE o.space=${space} AND kind IN ('sync','resolve','revert_intent') AND status IN ('completed','failed','cancelled') AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId'))) AS terminal_work_bytes,
+      (SELECT count(*) FROM memory_outbox o WHERE o.space=${space} AND kind IN ('sync','resolve','revert_intent','rebuild') AND status IN ('completed','failed','cancelled') AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId'))) AS terminal_work_rows,
+      (SELECT coalesce(sum(length(CAST(metadata_json AS BLOB))+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0)),0) FROM memory_outbox o WHERE o.space=${space} AND kind IN ('sync','resolve','revert_intent','rebuild') AND status IN ('completed','failed','cancelled') AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId'))) AS terminal_work_bytes,
 
       (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p JOIN memory_hub_source_reads r ON r.space=p.space AND r.payload_ref=p.payload_ref WHERE r.space=${space} AND r.deadline<=${now}) AS source_bytes,
       (SELECT coalesce(sum(length(CAST(b.metadata_json AS BLOB))),0) FROM memory_inbox_pending b WHERE b.space=${space} AND b.reason='hub_snapshot' AND b.checkpoint_id!=coalesce((SELECT 'hub:'||checkpoint_id FROM memory_hub_retention WHERE space=${space}),'') AND NOT EXISTS(SELECT 1 FROM memory_hub_retention r,json_each(r.handles_json) h WHERE r.space=b.space AND 'hub:'||json_extract(h.value,'$.checkpointId')=b.checkpoint_id AND json_extract(h.value,'$.expiresAt')>${now})) AS snapshot_bytes,

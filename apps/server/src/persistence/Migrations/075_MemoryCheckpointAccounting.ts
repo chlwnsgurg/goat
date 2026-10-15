@@ -16,7 +16,7 @@ export default Effect.gen(function* () {
   yield* sql`CREATE INDEX memory_import_batch_result ON memory_import_receipts(space,environment_id,source_id,result_ref) WHERE result_ref IS NOT NULL`;
   for (const action of ["INSERT", "UPDATE"] as const)
     yield* sql.unsafe(`CREATE TRIGGER memory_import_result_ref_${action.toLowerCase()} BEFORE ${action} ON memory_import_receipts
-      WHEN NEW.result_ref IS NOT NULL AND (NEW.record_kind!='batch' OR json_extract(NEW.completed_items_json,'$.kind') IS NOT 'completed-noop-ref' OR json_extract(NEW.completed_items_json,'$.resultRef') IS NOT NEW.result_ref OR NOT EXISTS(SELECT 1 FROM memory_import_noop_results r WHERE r.space=NEW.space AND r.environment_id=NEW.environment_id AND r.source_id=NEW.source_id AND r.result_ref=NEW.result_ref))
+      WHEN (json_extract(NEW.completed_items_json,'$.kind')='completed-noop-ref' AND NEW.result_ref IS NULL) OR NEW.result_ref IS NOT NULL AND (NEW.record_kind!='batch' OR json_extract(NEW.completed_items_json,'$.kind') IS NOT 'completed-noop-ref' OR json_extract(NEW.completed_items_json,'$.resultRef') IS NOT NEW.result_ref OR NOT EXISTS(SELECT 1 FROM memory_import_noop_results r WHERE r.space=NEW.space AND r.environment_id=NEW.environment_id AND r.source_id=NEW.source_id AND r.result_ref=NEW.result_ref))
       BEGIN SELECT RAISE(ABORT,'invalid import result reference'); END`);
   yield* sql`CREATE TRIGGER memory_import_result_delete BEFORE DELETE ON memory_import_noop_results
     WHEN EXISTS(SELECT 1 FROM memory_import_receipts b WHERE b.space=OLD.space AND b.environment_id=OLD.environment_id AND b.source_id=OLD.source_id AND b.result_ref=OLD.result_ref)
