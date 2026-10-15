@@ -127,7 +127,7 @@ const defaultFiles = (
 const git = (
   fixture: Pick<MemoryImportFixture, "sourceRoot" | "emptyHome">,
   args: readonly string[],
-  input?: string,
+  input?: string | Buffer,
 ) => {
   const result = NodeChildProcess.spawnSync(
     "/usr/bin/git",
@@ -347,7 +347,8 @@ export type MemoryImportFixtureFault =
   | "config-include"
   | "missing-object";
 
-/** Disk-only negative builder; root/slot describe the attempted reader input after mutation. */
+/** Negative builder; byte faults update committed omo blobs, preserving the pre-fault snapshot.
+ * symlink-file is a filesystem-only fault for Codex/Claude; use git-symlink for omo. */
 export const buildMemoryImportFault = (
   fixture: MemoryImportFixture,
   fault: MemoryImportFixtureFault,
@@ -357,6 +358,16 @@ export const buildMemoryImportFault = (
   const first = fixture.snapshot.files[0];
   if (!first) throw new Error("Fault requires a nonempty synthetic fixture");
   const file = NodePath.join(fixture.sourceRoot, first.selector);
+  const corrupt = (data: string | Buffer) => {
+    write(file, data);
+    if (fixture.snapshot.format === "omo") {
+      const oid = git(fixture, ["hash-object", "-w", "--stdin"], data);
+      git(fixture, ["update-index", "--add", "--cacheinfo", `100644,${oid},${first.selector}`]);
+      const tree = git(fixture, ["write-tree"]);
+      const commit = git(fixture, ["commit-tree", tree], "WP5 corrupt bytes fixture\n");
+      git(fixture, ["update-ref", "refs/heads/fixture", commit]);
+    }
+  };
   switch (fault) {
     case "symlink-root":
       root = NodePath.join(fixture.sandbox, "root-link");
@@ -370,6 +381,8 @@ export const buildMemoryImportFault = (
       NodeFS.symlinkSync("trusted-real", NodePath.join(fixture.sandbox, "trusted"));
       break;
     case "symlink-file":
+      if (fixture.snapshot.format === "omo")
+        throw new Error("symlink-file requires Codex/Claude; use git-symlink for omo");
       NodeFS.renameSync(file, `${file}.target`);
       NodeFS.symlinkSync(`${file.split("/").at(-1)}.target`, file);
       break;
@@ -377,16 +390,16 @@ export const buildMemoryImportFault = (
       slot = { ...slot, selection: "../outside" };
       break;
     case "malformed-utf8":
-      write(file, Buffer.from([0xc3, 0x28]));
+      corrupt(Buffer.from([0xc3, 0x28]));
       break;
     case "nul":
-      write(file, "Synthetic\0body\n");
+      corrupt("Synthetic\0body\n");
       break;
     case "oversized-file":
-      write(file, Buffer.alloc(262_145, 0x61));
+      corrupt(Buffer.alloc(262_145, 0x61));
       break;
     case "secret-header":
-      write(file, `---\ndescription: -----BEGIN PRIVATE KEY-----\n---\nSafe synthetic body\n`);
+      corrupt(`---\ndescription: -----BEGIN PRIVATE KEY-----\n---\nSafe synthetic body\n`);
       break;
     default: {
       if (fixture.snapshot.format !== "omo") throw new Error("Git fault requires omo fixture");

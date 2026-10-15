@@ -2,6 +2,10 @@
 import * as NodeChildProcess from "node:child_process";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- snapshot digest, no provider identity derivation.
 import * as NodeCrypto from "node:crypto";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- bounded no-follow snapshot adapter.
+import * as NodeFS from "node:fs";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- filesystem adapter platform permissions.
+import * as NodeOS from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- acquisition validates absolute server configuration only.
 import * as NodePath from "node:path";
 import {
@@ -41,249 +45,402 @@ export type MemoryImportReaderConfig = {
     readonly rootSlot: string;
     readonly path: string;
   }[];
-  readonly gitExecutable: string;
-  /** Python 3 supplies openat/dir_fd absent from Node FS; unavailable platforms refuse. */
-  readonly descriptorExecutable: string;
+  readonly gitExecutable?: string;
+  /** Deterministic fault injection after a source read, before any bytes are accepted. */
+  readonly onSourceRead?: () => void;
   /** Value-free lifecycle observation; no source bytes, paths, arguments or environment. */
   /** Optional acquisition-owned seal barrier, before any Git process; no source values exposed. */
   readonly onSnapshotSealed?: () => Effect.Effect<void, MemoryImportRpcError>;
-  readonly onProcessSpawn?: (event: { readonly operation: string; readonly pid: number }) => void;
+  readonly onProcessSpawn?: (event: {
+    readonly operation: string;
+    readonly pid: number;
+    readonly executable: string;
+  }) => void;
 };
 
-// The broker has no provider write operation. All source opens are parent-descriptor relative.
-// Python is invoked isolated (-I -S), with a complete static env and no shell. It never imports
-// source modules/configuration. Only private snapshot paths can be opened for writes/removal.
-const DESCRIPTORS = String.raw`
-import os, sys, stat, json, errno, re, base64
-class Refusal(Exception):
-    def __init__(self, issue): self.issue = issue
-
-def refuse(issue): raise Refusal(issue)
-def valid(s):
-    if not s or len(s.encode('utf-8', 'strict')) > 512 or '\\' in s or '\x00' in s or any(p in ('', '.', '..') for p in s.split('/')): refuse('path_rejected')
-def identity(s): return (s.st_dev, s.st_ino, s.st_mode)
-def stamp(s): return identity(s) + (s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-held=[]; checks=[]
-def open_child(parent, name, directory=False, stable=True, expected=None):
-    valid(name)
-    try: before=os.stat(name, dir_fd=parent, follow_symlinks=False)
-    except FileNotFoundError:
-        if expected is not None: refuse('source_changed')
-        raise
-    if expected is not None and stamp(before)!=stamp(expected): refuse('source_changed')
-    if stat.S_ISLNK(before.st_mode) or not (stat.S_ISDIR(before.st_mode) if directory else stat.S_ISREG(before.st_mode)): refuse('path_rejected')
-    try: fd=os.open(name, os.O_RDONLY | os.O_NOFOLLOW | (os.O_DIRECTORY if directory else os.O_NONBLOCK), dir_fd=parent)
-    except OSError as e:
-        if e.errno in (errno.ELOOP,errno.ENOTDIR,errno.ENOENT): refuse('source_changed')
-        raise
-    after=os.fstat(fd)
-    if stamp(before)!=stamp(after): os.close(fd); refuse('source_changed')
-    held.append(fd); checks.append((parent, name, fd, after, stable))
-    return fd
-
-def absolute(path, create=False):
-    if not path.startswith('/') or path=='/' or path.endswith('/'): refuse('path_rejected')
-    valid(path[1:]); fd=os.open('/', os.O_RDONLY | os.O_DIRECTORY); held.append(fd)
-    for part in path[1:].split('/'):
-        if create:
-            try: os.mkdir(part, 0o700, dir_fd=fd)
-            except FileExistsError: pass
-        fd=open_child(fd, part, True, False)
-    return fd
-
-def verify():
-    for parent,name,fd,before,stable in checks:
-        try: now=os.stat(name,dir_fd=parent,follow_symlinks=False)
-        except FileNotFoundError: refuse('source_changed')
-        cmp=stamp if stable else identity
-        if cmp(now)!=cmp(before) or cmp(os.fstat(fd))!=cmp(before): refuse('source_changed')
-
-def names(fd,maximum=4096):
-    result=[]
-    with os.scandir(fd) as entries:
-        for entry in entries:
-            name=entry.name
-            try: valid(name)
-            except UnicodeError: refuse('invalid_utf8')
-            result.append(name)
-            if len(result)>maximum: refuse('limit_exceeded')
-    return sorted(result)
-
-def read(fd, maximum):
-    before=os.fstat(fd)
-    if before.st_size>maximum: refuse('limit_exceeded')
-    data=bytearray()
-    while True:
-        chunk=os.read(fd,min(65536,maximum-len(data)+1))
-        if not chunk: break
-        data.extend(chunk)
-        if len(data)>maximum:
-            if stamp(before)!=stamp(os.fstat(fd)): refuse('source_changed')
-            refuse('limit_exceeded')
-    if stamp(before)!=stamp(os.fstat(fd)) or len(data)!=before.st_size: refuse('source_changed')
-    return bytes(data)
-
-def text(data):
-    try: s=data.decode('utf-8','strict')
-    except UnicodeError: refuse('invalid_utf8')
-    if '\x00' in s: refuse('path_rejected')
-    return s
-
-def own(fd):
-    s=os.fstat(fd)
-    if s.st_uid!=os.getuid() or stat.S_IMODE(s.st_mode)!=0o700: refuse('path_rejected')
-
-def destination(parent,name,directory=False):
-    valid(name)
-    if directory:
-        os.mkdir(name,0o700,dir_fd=parent)
-        fd=open_child(parent,name,True,False); own(fd); return fd
-    fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parent)
-    return fd
-
-def write(parent,name,data):
-    fd=destination(parent,name)
-    try:
-        view=memoryview(data)
-        while view:
-            count=os.write(fd,view); view=view[count:]
-    finally: os.close(fd)
-
-c=json.loads(sys.argv[1]); action=c['action']; result={}
-try:
-    if not all(f in os.supports_dir_fd for f in (os.open,os.stat,os.mkdir,os.unlink,os.rmdir)) or os.scandir not in os.supports_fd or not hasattr(os,'O_NOFOLLOW'): refuse('path_rejected')
-    if action in ('init','allocate','remove','cleanup'):
-        state=absolute(c['stateDir'])
-        state_stat=os.fstat(state)
-        if state_stat.st_uid!=os.getuid() or stat.S_IMODE(state_stat.st_mode)&0o022: refuse('path_rejected')
-        if action=='init':
-            for part in ('memory-import','snapshots'):
-                try: os.mkdir(part,0o700,dir_fd=state)
-                except FileExistsError: pass
-                state=open_child(state,part,True,False); own(state)
-        else:
-            state=open_child(state,'memory-import',True,False); own(state)
-            state=open_child(state,'snapshots',True,False); own(state)
-        if action=='allocate':
-            dest=destination(state,c['id'],True)
-            destination(dest,'repo',True); destination(dest,'cwd',True)
-        if action in ('cleanup','remove'):
-            entries=names(state,2)
-            if len(entries)>2: refuse('limit_exceeded')
-            if action=='remove': entries=[c['id']] if c['id'] in entries else []
-            count=0; total=0; object_total=0; object_count=0
-            def inspect(parent,name,depth,rel):
-                global count,total,object_total,object_count
-                count+=1
-                if rel: valid(rel[5:] if rel.startswith('repo/') else rel)
-                obj=rel=='repo/objects' or rel.startswith('repo/objects/')
-                if obj: object_count+=1
-                if count>4096 or object_count>3584 or depth>9: refuse('limit_exceeded')
-                s=os.stat(name,dir_fd=parent,follow_symlinks=False)
-                if s.st_uid!=os.getuid() or stat.S_ISLNK(s.st_mode): refuse('path_rejected')
-                if stat.S_ISDIR(s.st_mode):
-                    fd=open_child(parent,name,True,False); own(fd)
-                    return (name,fd,[inspect(fd,n,depth+1,rel+'/'+n if rel else n) for n in names(fd)])
-                if not stat.S_ISREG(s.st_mode) or stat.S_IMODE(s.st_mode)!=0o600: refuse('path_rejected')
-                total+=s.st_size
-                if obj: object_total+=s.st_size
-                if total>67108864 or object_total>62914560 : refuse('limit_exceeded')
-                return (name,None,[])
-            trees=[]
-            for name in entries:
-                if not re.fullmatch(r'snapshot-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',name): refuse('path_rejected')
-                count=0; total=0; object_total=0; object_count=0
-                trees.append(inspect(state,name,0,''))
-            verify()
-            def remove(parent,tree):
-                name,fd,children=tree
-                if fd is None: os.unlink(name,dir_fd=parent)
-                else:
-                    for child in children: remove(fd,child)
-                    os.rmdir(name,dir_fd=parent)
-            for tree in trees:
-                if action=='cleanup' or tree[0]==c['id']: remove(state,tree)
-    elif action=='discover':
-        root=absolute(c['root']); root_before=os.fstat(root); entries=names(root,512)
-        if len(entries)>512: refuse('limit_exceeded')
-        result={'selections':[]}
-        for name in entries:
-            s=os.stat(name,dir_fd=root,follow_symlinks=False)
-            if stat.S_ISLNK(s.st_mode): refuse('path_rejected')
-            if stat.S_ISDIR(s.st_mode):
-                result['selections'].append(name)
-                if len(result['selections'])>128: refuse('limit_exceeded')
-        if stamp(root_before)!=stamp(os.fstat(root)): refuse('source_changed')
-        verify()
-    elif action=='copy':
-        root=absolute(c['root']); source=root
-        for part in c['relative'].split('/'):
-            source=open_child(source,part,True)
-        dest=absolute(c['snapshot']); own(dest)
-        count=4 if c['format']=='omo' else 0; objects_count=0; total=len(c['config'].encode()); object_bytes=0; source_bytes=0; files=[]
-        def walk(parent,out,rel,depth,git=False):
-            global count,objects_count,total,object_bytes,source_bytes
-            for name in names(parent,(4096 if git else 512)-count):
-                selector=rel+'/'+name if rel else name
-                valid(selector); count+=1
-                obj=selector=='objects' or selector.startswith('objects/')
-                if obj: objects_count+=1
-                if count>(4096 if git else 512) or objects_count>3584 or depth>8: refuse('limit_exceeded')
-                try: s=os.stat(name,dir_fd=parent,follow_symlinks=False)
-                except FileNotFoundError: refuse('source_changed')
-                if stat.S_ISLNK(s.st_mode) or not (stat.S_ISREG(s.st_mode) or stat.S_ISDIR(s.st_mode)): refuse('path_rejected')
-                if git and selector in ('commondir','objects/info/alternates','objects/info/http-alternates'): refuse('path_rejected')
-                selected = (selector in ('HEAD','packed-refs') or selector.startswith('refs/') and not selector.startswith('refs/replace') or obj and not selector.startswith('objects/info')) if git else (selector=='MEMORY.md' or selector.startswith('extensions/ad_hoc/notes/') and selector.count('/')==3 and selector.endswith('.md')) if c['format']=='codex' else ('/' not in selector and selector.endswith('.md') and selector not in ('MEMORY.md','CLAUDE.md'))
-                if stat.S_ISDIR(s.st_mode):
-                    fd=open_child(parent,name,True,True,s)
-                    child=destination(out,name,True) if git and (selector in ('refs','objects') or selector.startswith('refs/') and not selector.startswith('refs/replace') or obj and not selector.startswith('objects/info')) else out
-                    walk(fd,child,selector,depth+1,git)
-                elif git and selector=='config':
-                    fd=open_child(parent,name,False,True,s)
-                    config_text=text(read(fd,262144)).lower()
-                    if re.search(r'^\s*\[\s*include(?:if)?\b',config_text,re.M): refuse('path_rejected')
-                    if re.search(r'^\s*\[\s*extensions\b',config_text,re.M): refuse('unsupported_format')
-                elif selected:
-                    if git:
-                        total+=s.st_size
-                        if obj: object_bytes+=s.st_size
-                        if total>67108864 or object_bytes>62914560 or total-object_bytes>4194304: refuse('limit_exceeded')
-                    else:
-                        source_bytes+=s.st_size
-                        if source_bytes>8388608: refuse('limit_exceeded')
-                    fd=open_child(parent,name,False,True,s)
-                    data=read(fd,s.st_size if git else 262144)
-                    # File descriptors need not stay open; parent-relative restat remains in checks.
-                    checks[-1]=(parent,name,None,s,True); held.remove(fd); os.close(fd)
-                    if git: write(out,name,data)
-                    else:
-                        text(data); files.append({'selector':selector,'utf8Base64':base64.b64encode(data).decode('ascii'),'byteCount':len(data)})
-                        write(out,str(len(files))+'.txt',data)
-        if c['format']=='omo':
-            metadata=open_child(source,'.git',True)
-            walk(metadata,dest,'',1,True)
-            write(dest,'config',c['config'].encode())
-        else: walk(source,dest,'',1)
-        # Revalidate all opened source entries/ancestor chains at the seal point.
-        for parent,name,fd,before,stable in checks:
-            try: now=os.stat(name,dir_fd=parent,follow_symlinks=False)
-            except FileNotFoundError: refuse('source_changed')
-            cmp=stamp if stable else identity
-            if cmp(now)!=cmp(before) or fd is not None and cmp(os.fstat(fd))!=cmp(before): refuse('source_changed')
-        result={'files':files}
-    else: refuse('source_unreadable')
-    print(json.dumps(result,separators=(',',':')))
-except Refusal as e:
-    print(json.dumps({'issue':e.issue})); sys.exit(2)
-except FileNotFoundError:
-    print('{"issue":"source_missing"}'); sys.exit(2)
-except OSError as e:
-    print(json.dumps({'issue':'path_rejected' if e.errno in (errno.ELOOP,errno.ENOTDIR) else 'source_unreadable'})); sys.exit(2)
-except (ValueError,UnicodeError,KeyError):
-    print('{"issue":"path_rejected"}'); sys.exit(2)
-finally:
-    for fd in reversed(held): os.close(fd)
-`;
+// Node lacks openat. Walk every ancestor without following links, compare the opened file,
+// then restat the file and the entire ancestor chain before accepting any bytes. A same-user
+// attacker swapping a component away and back between checks remains an accepted threat-model
+// limitation; a detected change always fails closed. Never realpath a source to bypass this.
+type Stamp = NodeFS.BigIntStats;
+const identity = (a: Stamp, b: Stamp) => a.dev === b.dev && a.ino === b.ino && a.mode === b.mode;
+const stamp = (a: Stamp, b: Stamp) =>
+  identity(a, b) && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+const fs = NodeFS.promises;
+const strictText = (bytes: Buffer) => {
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw error("invalid_utf8");
+  }
+  if (text.includes("\0")) throw error("path_rejected");
+  return text;
+};
+const nodeSnapshot = (config: MemoryImportReaderConfig, input: SnapshotOperation) =>
+  // An interrupted caller must wait for filesystem work to settle before finalizers remove it.
+  Effect.uninterruptible(
+    Effect.tryPromise({
+      try: async () => {
+        const checks = new Map<string, { before: Stamp; stable: boolean }>();
+        const stat = (path: string) => fs.lstat(path, { bigint: true });
+        const remember = async (
+          path: string,
+          directory: boolean,
+          stable = false,
+          expected?: Stamp,
+        ) => {
+          const before = await stat(path);
+          if (expected && !stamp(expected, before)) throw error("source_changed");
+          if (before.isSymbolicLink() || !(directory ? before.isDirectory() : before.isFile()))
+            throw error("path_rejected");
+          const previous = checks.get(path);
+          if (previous && !(previous.stable ? stamp : identity)(previous.before, before))
+            throw error("source_changed");
+          checks.set(path, {
+            before: previous?.before ?? before,
+            stable: stable || previous?.stable === true,
+          });
+          return before;
+        };
+        const verify = async (target?: string) => {
+          for (const [path, { before, stable }] of checks) {
+            if (
+              target !== undefined &&
+              target !== path &&
+              !target.startsWith(path.endsWith(NodePath.sep) ? path : `${path}${NodePath.sep}`)
+            )
+              continue;
+            let after: Stamp;
+            try {
+              after = await stat(path);
+            } catch {
+              throw error("source_changed");
+            }
+            if (!(stable ? stamp : identity)(before, after)) throw error("source_changed");
+          }
+        };
+        const directory = async (path: string) => {
+          absolute(path);
+          const base = NodePath.parse(path).root;
+          await remember(base, true);
+          let current = base;
+          // System ancestors may cross a volume boundary (e.g. macOS /System/Volumes).
+          // Below each explicitly registered root, every descendant must stay on its device.
+          for (const part of path.slice(base.length).split(NodePath.sep)) {
+            current = NodePath.join(current, part);
+            await remember(current, true);
+          }
+          return current;
+        };
+        const child = async (
+          parent: string,
+          name: string,
+          isDirectory: boolean,
+          stable = true,
+          expected?: Stamp,
+        ) => {
+          safe(name);
+          const path = NodePath.join(parent, name);
+          const before = await remember(path, isDirectory, stable, expected);
+          const parentStat = checks.get(parent)!.before;
+          if (before.dev !== parentStat.dev) throw error("path_rejected");
+          return before;
+        };
+        const names = async (path: string, maximum = 4096) => {
+          const before = await remember(path, true);
+          const result: string[] = [];
+          const handle = await fs.opendir(path);
+          try {
+            for (;;) {
+              const entry = await handle.read();
+              if (!entry) break;
+              // Node decodes directory names with replacement; reject ambiguous names conservatively.
+              const name = entry.name;
+              if (name.includes("\uFFFD")) throw error("invalid_utf8");
+              safe(name);
+              result.push(name);
+              if (result.length > maximum) throw error("limit_exceeded");
+            }
+          } finally {
+            await handle.close();
+          }
+          const after = await stat(path);
+          if (!stamp(before, after)) throw error("source_changed");
+          await verify(path);
+          return result.sort();
+        };
+        const read = async (path: string, before: Stamp, maximum: number) => {
+          if (before.size > BigInt(maximum)) throw error("limit_exceeded");
+          let handle: NodeFS.promises.FileHandle;
+          try {
+            handle = await fs.open(
+              path,
+              NodeFS.constants.O_RDONLY |
+                (NodeFS.constants.O_NOFOLLOW ?? 0) |
+                (NodeFS.constants.O_NONBLOCK ?? 0),
+            );
+          } catch {
+            await verify(path);
+            throw error("source_unreadable");
+          }
+          try {
+            if (!stamp(before, await handle.stat({ bigint: true }))) throw error("source_changed");
+            const chunks: Buffer[] = [];
+            let size = 0;
+            for (;;) {
+              const bytes = Buffer.alloc(Math.min(65536, maximum - size + 1));
+              const { bytesRead } = await handle.read(bytes, 0, bytes.length, null);
+              if (!bytesRead) break;
+              chunks.push(bytes.subarray(0, bytesRead));
+              size += bytesRead;
+              if (size > maximum) throw error("limit_exceeded");
+            }
+            config.onSourceRead?.();
+            if (!stamp(before, await handle.stat({ bigint: true })) || BigInt(size) !== before.size)
+              throw error("source_changed");
+            await verify(path);
+            return Buffer.concat(chunks, size);
+          } finally {
+            await handle.close();
+          }
+        };
+        const own = (s: Stamp, mode: number) => {
+          // Windows has no POSIX uid/mode enforcement; the configured private state directory is
+          // the ownership boundary there. POSIX enforces owner and exact private permissions.
+          if (
+            NodeOS.platform() !== "win32" &&
+            (s.uid !== BigInt(process.getuid!()) || Number(s.mode & 0o777n) !== mode)
+          )
+            throw error("path_rejected");
+        };
+        const mkdir = async (parent: string, name: string, existing = false) => {
+          const path = NodePath.join(parent, name);
+          await verify(parent);
+          try {
+            await fs.mkdir(path, { mode: 0o700 });
+          } catch (cause) {
+            if (!existing || !isFsCode(cause, "EEXIST")) throw cause;
+          }
+          own(await child(parent, name, true, false), 0o700);
+          return path;
+        };
+        const write = async (parent: string, name: string, data: Buffer) => {
+          safe(name);
+          await verify(parent);
+          const handle = await fs.open(
+            NodePath.join(parent, name),
+            NodeFS.constants.O_WRONLY |
+              NodeFS.constants.O_CREAT |
+              NodeFS.constants.O_EXCL |
+              (NodeFS.constants.O_NOFOLLOW ?? 0),
+            0o600,
+          );
+          try {
+            await handle.writeFile(data);
+          } finally {
+            await handle.close();
+          }
+        };
+        const result: {
+          files?: { selector: string; utf8Base64: string; byteCount: number }[];
+          selections?: string[];
+        } = {};
+        if (
+          input.action === "init" ||
+          input.action === "allocate" ||
+          input.action === "cleanup" ||
+          input.action === "remove"
+        ) {
+          let state = await directory(config.stateDir);
+          const s = checks.get(state)!.before;
+          if (
+            NodeOS.platform() !== "win32" &&
+            (s.uid !== BigInt(process.getuid!()) || (s.mode & 0o022n) !== 0n)
+          )
+            throw error("path_rejected");
+          for (const name of ["memory-import", "snapshots"]) {
+            if (input.action === "init") state = await mkdir(state, name, true);
+            else {
+              await child(state, name, true, false);
+              state = NodePath.join(state, name);
+              own(checks.get(state)!.before, 0o700);
+            }
+          }
+          if (input.action === "allocate") {
+            const dest = await mkdir(state, input.id);
+            await mkdir(dest, "repo");
+            await mkdir(dest, "cwd");
+          }
+          if (input.action === "cleanup" || input.action === "remove") {
+            const entries = await names(state, 2);
+            const paths: { path: string; directory: boolean }[] = [];
+            for (const name of entries) {
+              if (input.action === "remove" && name !== input.id) continue;
+              if (!/^snapshot-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(name))
+                throw error("path_rejected");
+              let count = 0,
+                total = 0n,
+                objectTotal = 0n,
+                objectCount = 0;
+              const inspect = async (
+                parent: string,
+                name: string,
+                depth: number,
+                rel: string,
+              ): Promise<void> => {
+                const path = NodePath.join(parent, name);
+                const s = await stat(path);
+                const obj = rel === "repo/objects" || rel.startsWith("repo/objects/");
+                if (++count > 4096 || (obj && ++objectCount > 3584) || depth > 9)
+                  throw error("limit_exceeded");
+                if (rel) safe(rel.startsWith("repo/") ? rel.slice(5) : rel);
+                await child(parent, name, s.isDirectory(), false, s);
+                own(s, s.isDirectory() ? 0o700 : 0o600);
+                if (s.isDirectory())
+                  for (const n of await names(path))
+                    await inspect(path, n, depth + 1, rel ? `${rel}/${n}` : n);
+                else {
+                  total += s.size;
+                  if (obj) objectTotal += s.size;
+                  if (total > 67108864n || objectTotal > 62914560n) throw error("limit_exceeded");
+                }
+                paths.push({ path, directory: s.isDirectory() });
+              };
+              await inspect(state, name, 0, "");
+            }
+            await verify();
+            for (const entry of paths) {
+              // Removal changes directory timestamps; identity remains checked before each mutation.
+              await verify(entry.path);
+              if (entry.directory) await fs.rmdir(entry.path);
+              else await fs.unlink(entry.path);
+              checks.delete(entry.path);
+            }
+          }
+        } else if (input.action === "discover") {
+          const root = await directory(input.root);
+          result.selections = [];
+          for (const name of await names(root, 512)) {
+            const s = await stat(NodePath.join(root, name));
+            await child(root, name, s.isDirectory(), false, s);
+            if (s.isDirectory()) result.selections.push(name);
+            if (result.selections.length > 128) throw error("limit_exceeded");
+          }
+        } else {
+          const root = await directory(input.root);
+          let source = root;
+          for (const part of input.relative.split("/")) {
+            await child(source, part, true);
+            source = NodePath.join(source, part);
+          }
+          const dest = await directory(input.snapshot);
+          own(checks.get(dest)!.before, 0o700);
+          let count = input.format === "omo" ? 4 : 0,
+            objectsCount = 0,
+            total = Buffer.byteLength(input.config),
+            objectBytes = 0,
+            sourceBytes = 0;
+          result.files = [];
+          const walk = async (
+            parent: string,
+            out: string,
+            rel: string,
+            depth: number,
+            git: boolean,
+          ): Promise<void> => {
+            for (const name of await names(parent, (git ? 4096 : 512) - count)) {
+              const selector = rel ? `${rel}/${name}` : name;
+              safe(selector);
+              const obj = selector === "objects" || selector.startsWith("objects/");
+              if (++count > (git ? 4096 : 512) || (obj && ++objectsCount > 3584) || depth > 8)
+                throw error("limit_exceeded");
+              const path = NodePath.join(parent, name);
+              const s = await stat(path);
+              await child(parent, name, s.isDirectory(), true, s);
+              if (
+                git &&
+                ["commondir", "objects/info/alternates", "objects/info/http-alternates"].includes(
+                  selector,
+                )
+              )
+                throw error("path_rejected");
+              const selected = git
+                ? selector === "HEAD" ||
+                  selector === "packed-refs" ||
+                  (selector.startsWith("refs/") && !selector.startsWith("refs/replace")) ||
+                  (obj && !selector.startsWith("objects/info"))
+                : input.format === "codex"
+                  ? selector === "MEMORY.md" ||
+                    (selector.startsWith("extensions/ad_hoc/notes/") &&
+                      selector.split("/").length === 4 &&
+                      selector.endsWith(".md"))
+                  : !selector.includes("/") &&
+                    selector.endsWith(".md") &&
+                    !["MEMORY.md", "CLAUDE.md"].includes(selector);
+              if (s.isDirectory()) {
+                const copyDir =
+                  git &&
+                  (["refs", "objects"].includes(selector) ||
+                    (selector.startsWith("refs/") && !selector.startsWith("refs/replace")) ||
+                    (obj && !selector.startsWith("objects/info")));
+                await walk(path, copyDir ? await mkdir(out, name) : out, selector, depth + 1, git);
+              } else if (git && selector === "config") {
+                const text = strictText(await read(path, s, 262144)).toLowerCase();
+                if (/^\s*\[\s*include(?:if)?\b/m.test(text)) throw error("path_rejected");
+                if (/^\s*\[\s*extensions\b/m.test(text)) throw error("unsupported_format");
+              } else if (selected) {
+                if (git) {
+                  total += Number(s.size);
+                  if (obj) objectBytes += Number(s.size);
+                  if (total > 67108864 || objectBytes > 62914560 || total - objectBytes > 4194304)
+                    throw error("limit_exceeded");
+                } else {
+                  sourceBytes += Number(s.size);
+                  if (sourceBytes > 8388608) throw error("limit_exceeded");
+                }
+                const data = await read(path, s, git ? Number(s.size) : 262144);
+                if (git) await write(out, name, data);
+                else {
+                  strictText(data);
+                  result.files!.push({
+                    selector,
+                    utf8Base64: data.toString("base64"),
+                    byteCount: data.length,
+                  });
+                  await write(out, `${result.files!.length}.txt`, data);
+                }
+              }
+            }
+          };
+          if (input.format === "omo") {
+            await child(source, ".git", true);
+            await walk(NodePath.join(source, ".git"), dest, "", 1, true);
+            await write(dest, "config", Buffer.from(input.config));
+          } else await walk(source, dest, "", 1, false);
+        }
+        await verify();
+        return result;
+      },
+      catch: (cause) => (isFsCode(cause, "ENOENT") ? error("source_missing") : normalize(cause)),
+    }),
+  );
+const isFsCode = (cause: unknown, code: string) =>
+  typeof cause === "object" && cause !== null && "code" in cause && cause.code === code;
+type SnapshotOperation =
+  | { action: "init" }
+  | { action: "cleanup" }
+  | { action: "allocate"; id: string }
+  | { action: "remove"; id: string }
+  | { action: "discover"; root: string }
+  | {
+      action: "copy";
+      root: string;
+      relative: string;
+      snapshot: string;
+      format: MemoryImportFormat;
+      config: string;
+    };
 
 type Budget = {
   live: number;
@@ -312,7 +469,7 @@ const safe = (value: string) => {
 const absolute = (path: string) => {
   if (!NodePath.isAbsolute(path) || path === "/" || NodePath.normalize(path) !== path)
     throw error("path_rejected");
-  safe(path.slice(1));
+  safe(path.slice(NodePath.parse(path).root.length).split(NodePath.sep).join("/"));
 };
 
 const validateStateBoundary = (config: MemoryImportReaderConfig) => {
@@ -324,8 +481,8 @@ const validateStateBoundary = (config: MemoryImportReaderConfig) => {
       root.path.startsWith(`${config.stateDir}/`)
     )
       throw error("path_rejected");
-    for (const executable of [config.gitExecutable, config.descriptorExecutable]) {
-      if (executable === root.path || executable.startsWith(`${root.path}/`))
+    for (const executable of [config.gitExecutable]) {
+      if (executable && (executable === root.path || executable.startsWith(`${root.path}/`)))
         throw error("path_rejected");
     }
   }
@@ -420,56 +577,6 @@ const execute = (
     });
   });
 
-const decodeBroker = Schema.decodeUnknownSync(
-  Schema.fromJsonString(
-    Schema.Struct({
-      issue: Schema.optionalKey(
-        Schema.Literals([
-          "source_missing",
-          "source_unreadable",
-          "source_changed",
-          "path_rejected",
-          "limit_exceeded",
-          "invalid_utf8",
-          "unsupported_format",
-        ]),
-      ),
-      files: Schema.optionalKey(
-        Schema.Array(
-          Schema.Struct({
-            selector: Schema.String,
-            utf8Base64: Schema.String,
-            byteCount: Schema.Number,
-          }),
-        ),
-      ),
-      selections: Schema.optionalKey(Schema.Array(Schema.String)),
-    }),
-  ),
-);
-
-const broker = (config: MemoryImportReaderConfig, input: Record<string, unknown>) =>
-  execute(
-    config.descriptorExecutable,
-    ["-I", "-S", "-B", "-c", DESCRIPTORS, encodeJson(input)],
-    config.stateDir,
-    12 * 1024 * 1024,
-    undefined,
-    (pid) => config.onProcessSpawn?.({ operation: String(input.action), pid }),
-  ).pipe(
-    Effect.flatMap((result) =>
-      Effect.try({
-        try: () => {
-          const value = decodeBroker(result.bytes.toString("utf8"));
-          if (value.issue) throw error(value.issue);
-          if (result.code !== 0) throw error("source_unreadable");
-          return value;
-        },
-        catch: normalize,
-      }),
-    ),
-  );
-
 /** L5 must await this before activation. Single server owner per stateDir is a deployment precondition. */
 export const cleanupMemoryImportSnapshots = (config: MemoryImportReaderConfig) =>
   Effect.gen(function* () {
@@ -477,15 +584,14 @@ export const cleanupMemoryImportSnapshots = (config: MemoryImportReaderConfig) =
       try: () => {
         absolute(config.stateDir);
         validateStateBoundary(config);
-        absolute(config.descriptorExecutable);
       },
       catch: normalize,
     });
     const budget = budgets.get(config.stateDir);
     if (budget && (budget.owners > 0 || budget.live > 0 || budget.initializing))
       return yield* Effect.fail(error("source_unreadable"));
-    yield* broker(config, { action: "init", stateDir: config.stateDir });
-    yield* broker(config, { action: "cleanup", stateDir: config.stateDir });
+    yield* nodeSnapshot(config, { action: "init" });
+    yield* nodeSnapshot(config, { action: "cleanup" });
     budgets.delete(config.stateDir);
   });
 
@@ -496,8 +602,7 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
       try: () => {
         absolute(config.stateDir);
         validateStateBoundary(config);
-        absolute(config.gitExecutable);
-        absolute(config.descriptorExecutable);
+        if (config.gitExecutable !== undefined) absolute(config.gitExecutable);
         if (config.roots.length > 128) throw error("limit_exceeded");
         const keys = new Set<string>();
         for (const root of config.roots) {
@@ -526,8 +631,8 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
       return yield* Effect.fail(error("source_unreadable"));
     budgets.set(config.stateDir, budget);
     if (!previous) {
-      yield* broker(config, { action: "init", stateDir: config.stateDir }).pipe(
-        Effect.andThen(broker(config, { action: "cleanup", stateDir: config.stateDir })),
+      yield* nodeSnapshot(config, { action: "init" }).pipe(
+        Effect.andThen(nodeSnapshot(config, { action: "cleanup" })),
         Effect.onExit((exit) =>
           Effect.sync(() => {
             budget.initializing = false;
@@ -589,7 +694,7 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
                 return id;
               }),
               (id) =>
-                broker(config, { action: "remove", stateDir: config.stateDir, id }).pipe(
+                nodeSnapshot(config, { action: "remove", id }).pipe(
                   Effect.tap(() =>
                     Effect.sync(() => {
                       budget.live--;
@@ -604,7 +709,7 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
                   ),
                 ),
             );
-            yield* broker(config, { action: "allocate", stateDir: config.stateDir, id });
+            yield* nodeSnapshot(config, { action: "allocate", id });
             return yield* use(NodePath.join(config.stateDir, "memory-import", "snapshots", id));
           }),
         ).pipe(
@@ -641,7 +746,7 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
         return yield* snapshot((path) =>
           Effect.gen(function* () {
             const repo = NodePath.join(path, "repo");
-            const copied = yield* broker(config, {
+            const copied = yield* nodeSnapshot(config, {
               action: "copy",
               root: root.path,
               relative:
@@ -674,9 +779,11 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
             let commitOid: string | undefined;
             let profile: string;
             if (slot.format === "omo") {
+              if (!config.gitExecutable) return yield* Effect.fail(error("source_unreadable"));
+              const gitExecutable = config.gitExecutable;
               const git = (args: readonly string[], cap = PROCESS_LIMIT) =>
                 execute(
-                  config.gitExecutable,
+                  gitExecutable,
                   [
                     "--no-replace-objects",
                     "-c",
@@ -690,7 +797,8 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
                   NodePath.join(path, "cwd"),
                   cap,
                   repo,
-                  (pid) => config.onProcessSpawn?.({ operation: "git", pid }),
+                  (pid) =>
+                    config.onProcessSpawn?.({ operation: "git", pid, executable: gitExecutable }),
                 ).pipe(
                   Effect.flatMap((result) =>
                     result.code === 0
@@ -797,7 +905,8 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
           const selections =
             format === "codex"
               ? [null]
-              : ((yield* broker(config, { action: "discover", root: root.path })).selections ?? []);
+              : ((yield* nodeSnapshot(config, { action: "discover", root: root.path }))
+                  .selections ?? []);
           for (const selection of selections) {
             if (result.length >= 128) return yield* Effect.fail(error("limit_exceeded"));
             const slot: ImportSlot = { format, rootSlot: root.rootSlot, selection };
