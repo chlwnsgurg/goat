@@ -316,6 +316,7 @@ import { WizardPopup } from "./ui/wizard";
 import { BranchToolbar, type BranchToolbarHandle } from "./BranchToolbar";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import { isEditableFocused } from "../lib/editableFocus";
+import { isPdfFindShortcut } from "./files/pdf/pdfShortcuts";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@goat/shared/keybindings";
 import { resolveChatShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
@@ -8287,6 +8288,7 @@ export default function ChatView(props: ChatViewProps) {
   useEffect(() => {
     if (embedded) return;
     const handler = (event: globalThis.KeyboardEvent) => {
+      if (isPdfFindShortcut(event)) return;
       if (preventRepeatedTerminalCloseShortcut(event, keybindings)) {
         event.stopPropagation();
         return;

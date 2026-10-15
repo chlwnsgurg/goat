@@ -244,6 +244,7 @@ function WorkspaceBrowserPreview(props: {
     [insideWorkspace, props.threadRef, props.draft, props.workspaceRoot, props.absolutePath],
   );
   const assetUrl = useAssetUrlState(props.environmentId, resource);
+  const refreshAssetUrl = useAssetUrlRefresh(props.environmentId, resource);
   const revisionSuffix =
     props.workspaceMutationId === null
       ? ""
@@ -268,6 +269,8 @@ function WorkspaceBrowserPreview(props: {
       src={`${assetUrl.url}${revisionSuffix}`}
       title={props.title}
       pdf={isPdfPreviewFile(props.absolutePath)}
+      onRetry={refreshAssetUrl}
+      threadRef={props.threadRef}
     />
   );
 }
