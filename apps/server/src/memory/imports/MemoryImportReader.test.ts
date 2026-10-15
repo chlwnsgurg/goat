@@ -213,6 +213,59 @@ const readerConfig = (
 const residue = (fixture: MemoryImportFixture) =>
   NodeFS.readdirSync(NodePath.join(fixture.stateDir, "memory-import", "snapshots"));
 
+const makeDescriptorSpy = (fixture: MemoryImportFixture, root = fixture.trustedRoot) => {
+  const wrapper = NodePath.join(fixture.sandbox, "descriptor-spy");
+  const log = NodePath.join(fixture.sandbox, "descriptor-spy.log");
+  NodeFS.writeFileSync(
+    wrapper,
+    `#!/usr/bin/python3 -I
+import os,sys,fcntl,json,traceback
+root=r"${NodeFS.realpathSync(fixture.sourceRoot)}"
+log=r"${log}"
+original_open=os.open; original_write=os.write; original_read=os.read
+writes=0; reads=0
+def path_of(fd):
+    if sys.platform=='darwin': return fcntl.fcntl(fd,50,b'\\0'*1024).split(b'\\0')[0].decode()
+    return os.readlink('/proc/self/fd/'+str(fd))
+def target(path,fd):
+    return os.path.join(path_of(fd),path) if fd is not None else path
+def check(path):
+    global writes
+    if path==root or path.startswith(root+'/'):
+        writes+=1; raise RuntimeError('source write forbidden')
+def opened(path,flags,mode=0o777,*,dir_fd=None):
+    if flags & (os.O_WRONLY|os.O_RDWR|os.O_CREAT|os.O_TRUNC): check(target(path,dir_fd))
+    return original_open(path,flags,mode,dir_fd=dir_fd)
+def written(fd,data):
+    check(path_of(fd)); return original_write(fd,data)
+def read(fd,n):
+    global reads
+    if path_of(fd).startswith(root+'/'): reads+=1
+    return original_read(fd,n)
+def guard(fn):
+    def call(path,*args,**kwargs):
+        check(target(path,kwargs.get('dir_fd'))); return fn(path,*args,**kwargs)
+    return call
+# Preserve Python's advertised dir_fd capability set when wrapping its functions.
+os.supports_dir_fd.add(opened)
+os.open=opened; os.write=written; os.read=read
+for name in ('mkdir','unlink','rmdir'):
+    wrapped=guard(getattr(os,name)); os.supports_dir_fd.add(wrapped); setattr(os,name,wrapped)
+code=sys.argv[-2]; config=sys.argv[-1]; sys.argv=['-c',config]
+try: exec(compile(code,'<descriptor-broker>','exec'),{'__name__':'__main__'})
+finally:
+    fd=original_open(log,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
+    original_write(fd,(json.dumps({'writes':writes,'reads':reads,'error':sys.exc_info()[0].__name__ if sys.exc_info()[0] else None,'line':traceback.extract_tb(sys.exc_info()[2])[-1].lineno if sys.exc_info()[2] else None})+'\\n').encode()); os.close(fd)
+`,
+    { mode: 0o700 },
+  );
+  return { config: { ...readerConfig(fixture, root), descriptorExecutable: wrapper }, log };
+};
+const assertNoSourceWrites = (log: string) => {
+  const records = NodeFS.readFileSync(log, "utf8");
+  assert.equal((records.match(/"writes": 0/g) ?? []).length, records.trim().split("\n").length);
+};
+
 describe("MemoryImportReader", () => {
   it.effect.each(MEMORY_IMPORT_FIXTURE_PROFILES)(
     "reads %s without changing original bytes or Git state",
@@ -278,12 +331,21 @@ describe("MemoryImportReader", () => {
           gitFault ? "omo-memory-core-beta63" : "codex-handbook-v1",
         );
         const input = buildMemoryImportFault(fixture, fault);
-        const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture, input.root));
-        const before = captureMemoryImportInventory(fixture.sandbox);
+        const spy = makeDescriptorSpy(fixture, input.root);
+        const reader = yield* Reader.acquireMemoryImportReader(spy.config);
+        const before = captureMemoryImportInventory(fixture.sandbox).entries.filter(
+          (entry) => entry.path !== "descriptor-spy.log",
+        );
         const failure = yield* Effect.flip(reader.read({ slot: input.slot }));
         assert.equal(failure.issue, issue);
         assert.equal(failure.message.includes(fixture.sandbox), false);
-        assert.deepEqual(captureMemoryImportInventory(fixture.sandbox), before);
+        assert.deepEqual(
+          captureMemoryImportInventory(fixture.sandbox).entries.filter(
+            (entry) => entry.path !== "descriptor-spy.log",
+          ),
+          before,
+        );
+        assertNoSourceWrites(spy.log);
         assert.deepEqual(residue(fixture), []);
       }),
     ),
@@ -388,12 +450,21 @@ describe("MemoryImportReader", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
-        const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+        const spy = makeDescriptorSpy(fixture);
+        const started = yield* Deferred.make<void>();
+        const reader = yield* Reader.acquireMemoryImportReader({
+          ...spy.config,
+          onProcessSpawn: (event) => {
+            if (event.operation === "copy") Deferred.doneUnsafe(started, Effect.void);
+          },
+        });
         const before = captureMemoryImportInventory(fixture.sourceRoot);
         const fiber = yield* Effect.forkChild(reader.read({ slot: fixture.snapshot.slot }));
+        yield* Deferred.await(started);
         yield* Fiber.interrupt(fiber);
         assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
         assert.deepEqual(residue(fixture), []);
+        assertNoSourceWrites(spy.log);
         yield* reader.read({ slot: fixture.snapshot.slot });
       }),
     ),
@@ -685,58 +756,12 @@ exec /usr/bin/git "$@"
       Effect.scoped(
         Effect.gen(function* () {
           const fixture = yield* buildMemoryImportFixture(profile);
-          const wrapper = NodePath.join(fixture.sandbox, "descriptor-spy");
-          const log = NodePath.join(fixture.sandbox, "descriptor-spy.log");
-          NodeFS.writeFileSync(
-            wrapper,
-            `#!/usr/bin/python3 -I
-import os,sys,fcntl,json
-root=r"${fixture.sourceRoot}"
-log=r"${log}"
-original_open=os.open; original_write=os.write; original_read=os.read
-writes=0; reads=0
-def path_of(fd):
-    if sys.platform=='darwin': return fcntl.fcntl(fd,50,b'\\0'*1024).split(b'\\0')[0].decode()
-    return os.readlink('/proc/self/fd/'+str(fd))
-def target(path,fd):
-    return os.path.join(path_of(fd),path) if fd is not None else path
-def check(path):
-    global writes
-    if path==root or path.startswith(root+'/'):
-        writes+=1; raise RuntimeError('source write forbidden')
-def opened(path,flags,mode=0o777,*,dir_fd=None):
-    if flags & (os.O_WRONLY|os.O_RDWR|os.O_CREAT|os.O_TRUNC): check(target(path,dir_fd))
-    return original_open(path,flags,mode,dir_fd=dir_fd)
-def written(fd,data):
-    check(path_of(fd)); return original_write(fd,data)
-def read(fd,n):
-    global reads
-    if path_of(fd).startswith(root+'/'): reads+=1
-    return original_read(fd,n)
-def guard(fn):
-    def call(path,*args,**kwargs):
-        check(target(path,kwargs.get('dir_fd'))); return fn(path,*args,**kwargs)
-    return call
-# Preserve Python's advertised dir_fd capability set when wrapping its functions.
-os.supports_dir_fd.add(opened)
-os.open=opened; os.write=written; os.read=read
-for name in ('mkdir','unlink','rmdir'):
-    wrapped=guard(getattr(os,name)); os.supports_dir_fd.add(wrapped); setattr(os,name,wrapped)
-code=sys.argv[-2]; config=sys.argv[-1]; sys.argv=['-c',config]
-try: exec(compile(code,'<descriptor-broker>','exec'))
-finally:
-    fd=original_open(log,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
-    original_write(fd,(json.dumps({'writes':writes,'reads':reads})+'\\n').encode()); os.close(fd)
-`,
-            { mode: 0o700 },
-          );
-          const reader = yield* Reader.acquireMemoryImportReader({
-            ...readerConfig(fixture),
-            descriptorExecutable: wrapper,
-          });
+          const { config, log } = makeDescriptorSpy(fixture);
+          const reader = yield* Reader.acquireMemoryImportReader(config);
           const before = captureMemoryImportInventory(fixture.sourceRoot);
-          yield* reader.read({ slot: fixture.snapshot.slot });
+          const readExit = yield* Effect.exit(reader.read({ slot: fixture.snapshot.slot }));
           const records = NodeFS.readFileSync(log, "utf8");
+          assert.isTrue(Exit.isSuccess(readExit), records);
           assert.equal(
             (records.match(/"writes": 0/g) ?? []).length,
             records.trim().split("\n").length,
@@ -770,7 +795,7 @@ def read(fd,n):
     return data
 os.read=read
 code=sys.argv[-2]; config=sys.argv[-1]; sys.argv=['-c',config]
-exec(compile(code,'<descriptor-broker>','exec'))
+exec(compile(code,'<descriptor-broker>','exec'),{'__name__':'__main__'})
 `,
           { mode: 0o700 },
         );
@@ -1002,6 +1027,24 @@ exec(compile(code,'<descriptor-broker>','exec'))
         );
         assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
         assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
+  it.effect("stateDir/source overlap is rejected before any snapshot directory write", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
+        const config = { ...readerConfig(fixture), stateDir: fixture.sourceRoot };
+        const before = captureMemoryImportInventory(fixture.sourceRoot);
+        assert.equal(
+          (yield* Effect.flip(Reader.cleanupMemoryImportSnapshots(config))).issue,
+          "path_rejected",
+        );
+        assert.equal(
+          (yield* Effect.flip(Reader.acquireMemoryImportReader(config))).issue,
+          "path_rejected",
+        );
+        assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
       }),
     ),
   );

@@ -309,6 +309,22 @@ const absolute = (path: string) => {
   safe(path.slice(1));
 };
 
+const validateStateBoundary = (config: MemoryImportReaderConfig) => {
+  for (const root of config.roots) {
+    absolute(root.path);
+    if (
+      config.stateDir === root.path ||
+      config.stateDir.startsWith(`${root.path}/`) ||
+      root.path.startsWith(`${config.stateDir}/`)
+    )
+      throw error("path_rejected");
+    for (const executable of [config.gitExecutable, config.descriptorExecutable]) {
+      if (executable === root.path || executable.startsWith(`${root.path}/`))
+        throw error("path_rejected");
+    }
+  }
+};
+
 /** A complete map: Node spawn's env replaces inheritance; host env is never enumerated. */
 const environment = (cwd: string, gitDir?: string) => ({
   PATH: "/usr/bin:/bin",
@@ -454,6 +470,7 @@ export const cleanupMemoryImportSnapshots = (config: MemoryImportReaderConfig) =
     yield* Effect.try({
       try: () => {
         absolute(config.stateDir);
+        validateStateBoundary(config);
         absolute(config.descriptorExecutable);
       },
       catch: normalize,
@@ -472,6 +489,7 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
     yield* Effect.try({
       try: () => {
         absolute(config.stateDir);
+        validateStateBoundary(config);
         absolute(config.gitExecutable);
         absolute(config.descriptorExecutable);
         if (config.roots.length > 128) throw error("limit_exceeded");
