@@ -530,8 +530,8 @@ it.effect("r3 bounds PK pages before foreign filtering and releases the writer b
     const sql = yield* SqlClient.SqlClient;
     // Three spaces, including unprovable foreign rows, local rows and delivered rows.
     yield* sql`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<600)
-      INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,resolving_environment_id,outcome,state,created_at)
-      SELECT printf('%064x',x), CASE WHEN x%3=0 THEN ${id(100)} WHEN x%3=1 THEN ${id(101)} ELSE ${space} END,${memory},${id(11)},${id(7)},CASE WHEN x%3=0 THEN ${owner} ELSE ${other} END,'reverted',CASE WHEN x%5=0 THEN 'delivered' ELSE 'pending' END,0 FROM n`;
+      INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,resolving_environment_id,outcome,state,created_at,delivered_at,report_thread_json,delivered_sequence)
+      SELECT printf('%064x',x), CASE WHEN x%3=0 THEN ${id(100)} WHEN x%3=1 THEN ${id(101)} ELSE ${space} END,${memory},${id(11)},${id(7)},CASE WHEN x%3=0 THEN ${owner} ELSE ${other} END,'reverted',CASE WHEN x%5=0 THEN 'delivered' ELSE 'pending' END,0,CASE WHEN x%5=0 THEN 0 ELSE NULL END,CASE WHEN x%5=0 THEN '{"environmentId":"B","threadId":"report"}' ELSE NULL END,CASE WHEN x%5=0 THEN 1 ELSE NULL END FROM n`;
     const before = yield* sql`SELECT * FROM memory_report_outbox ORDER BY report_id`;
     const usage = yield* counters;
     const entered = yield* Deferred.make<void>();
