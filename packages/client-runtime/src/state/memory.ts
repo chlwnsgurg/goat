@@ -6,7 +6,9 @@ import {
   WS_METHODS,
   supportsMemoryProtocol,
 } from "@goat/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import { createMemoryImportWorkflow } from "../memoryImportWorkflow.ts";
 import * as HashMap from "effect/HashMap";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
@@ -447,6 +449,8 @@ export function createMemoryEnvironmentAtoms<R, E>(
     ).pipe(Atom.withLabel(`memory-draft:${draftId}`), Atom.setIdleTTL(0));
   });
 
+  const importProvider = command(WS_METHODS.memoryImportProvider);
+
   return {
     /** Release body-free metadata when the owning runtime is disposed. */
     dispose: (registry: AtomRegistry.AtomRegistry) => {
@@ -472,7 +476,21 @@ export function createMemoryEnvironmentAtoms<R, E>(
     ownerSourceReadPolicyGet: command(WS_METHODS.memoryOwnerSourceReadPolicyGet),
     ownerSourceReadPolicyUpdate: command(WS_METHODS.memoryOwnerSourceReadPolicyUpdate),
     syncStatus: command(WS_METHODS.memorySyncStatus),
-    importProvider: command(WS_METHODS.memoryImportProvider),
+    importProvider,
+    createImportWorkflow: (
+      registry: AtomRegistry.AtomRegistry,
+      options: Omit<Parameters<typeof createMemoryImportWorkflow>[0], "canImport" | "request">,
+    ) =>
+      createMemoryImportWorkflow({
+        ...options,
+        canImport: ({ environmentId }) =>
+          registry.get(importProvider.permissionAtom(environmentId)),
+        request: async (environmentId, input) => {
+          const result = await importProvider.run(registry, { environmentId, input });
+          if (result._tag === "Failure") throw Cause.squash(result.cause);
+          return result.value;
+        },
+      }),
     draftAtom: (target: MemoryTarget & { readonly draftId: string }) =>
       drafts(JSON.stringify([target.environmentId, target.input, target.draftId])),
   };
