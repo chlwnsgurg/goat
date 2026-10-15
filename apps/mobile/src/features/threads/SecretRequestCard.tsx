@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import {
   SECRET_REQUEST_DEFAULT_PLACEHOLDER,
   SECRET_REQUEST_PRIVACY_NOTE,
@@ -67,6 +68,24 @@ function PendingSecretRequestForm(props: {
   readonly iconColor: ColorValue;
 }) {
   const { item } = props;
+  const canAnswer = useAtomValue(
+    serverEnvironment.answerSecretRequest.permissionAtom(props.environmentId),
+  );
+  const open = useAtomCommand(serverEnvironment.openHandoff, {
+    label: "open secret handoff",
+    reportFailure: false,
+    reportDefect: false,
+  });
+  const opened = useRef(false);
+  const markOpened = () => {
+    if (!opened.current && item.handoff?.state === "pending" && canAnswer) {
+      opened.current = true;
+      void open({
+        environmentId: props.environmentId,
+        input: { threadId: item.threadId, handoffId: item.id },
+      });
+    }
+  };
   const answer = useAtomCommand(serverEnvironment.answerSecretRequest, {
     label: "answer secret request",
     // The failure cause holds the request; keep it out of the console.
@@ -116,7 +135,8 @@ function PendingSecretRequestForm(props: {
         placeholder={item.placeholder ?? SECRET_REQUEST_DEFAULT_PLACEHOLDER}
         value={secret}
         onChangeText={setSecret}
-        editable={!submitting}
+        editable={canAnswer && !submitting}
+        onFocus={markOpened}
         secureTextEntry
         autoCorrect={false}
         autoCapitalize="none"
@@ -138,7 +158,7 @@ function PendingSecretRequestForm(props: {
       ) : null}
       <RequestActionButton
         label="Save securely"
-        disabled={submitting || secret.trim().length === 0}
+        disabled={!canAnswer || submitting || secret.trim().length === 0}
         onPress={() => void send({ type: "save", secret })}
       />
       <View className="flex-row items-center justify-between gap-2">
@@ -157,7 +177,7 @@ function PendingSecretRequestForm(props: {
         <Pressable
           accessibilityRole="button"
           accessibilityState={{ disabled: submitting }}
-          disabled={submitting}
+          disabled={!canAnswer || submitting}
           hitSlop={8}
           className="px-1 py-1 active:opacity-60 disabled:opacity-50"
           onPress={() => void send({ type: "decline" })}

@@ -1,0 +1,475 @@
+import * as SqlClient from "effect/sql/SqlClient";
+import { AuthSessionId, type AuthClientSession } from "@goat/contracts";
+import * as Handoffs from "./Handoffs.ts";
+import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as SecretStore from "../auth/ServerSecretStore.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as Sqlite from "../persistence/Sqlite.ts";
+import * as Option from "effect/Option";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { assert, it } from "@effect/vitest";
+import {
+  CommandId,
+  EnvironmentId,
+  Handoff,
+  MessageId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  TurnItemId,
+} from "@goat/contracts";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as Worker from "../orchestration-v2/EffectWorker.ts";
+import * as Registry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as Harness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
+import { makeFakeCloudAdapter } from "../orchestration-v2/testkit/FakeCloudAdapter.ts";
+import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
+
+const encodeHandoff = Schema.encodeEffect(Schema.toCodecJson(Handoff));
+const threadId = ThreadId.make("thread:handoff-tests");
+const instanceId = ProviderInstanceId.make("codex");
+const withHarness = <A, E, R>(
+  body: (input: {
+    orchestrator: Orchestrator.OrchestratorV2["Service"];
+    worker: Worker.OrchestrationEffectWorkerV2["Service"];
+  }) => Effect.Effect<A, E, R>,
+) =>
+  Effect.gen(function* () {
+    const fake = yield* makeFakeCloudAdapter(true, instanceId);
+    const adapter = {
+      ...fake.adapter,
+      getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+      openSession: (input: Parameters<typeof fake.adapter.openSession>[0]) =>
+        fake.adapter
+          .openSession(input)
+          .pipe(Effect.map((session) => ({ ...session, startTurn: () => Effect.void }))),
+    };
+    const databaseLayer = Sqlite.layerMemory;
+    return yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* Worker.OrchestrationEffectWorkerV2;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-thread"),
+        threadId,
+        projectId: ProjectId.make("project:handoff-tests"),
+        title: "Human handoff",
+        modelSelection: { instanceId, model: "fake" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("start-run"),
+        threadId,
+        messageId: MessageId.make("message:handoff"),
+        text: "Set up the provider",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* worker.drain();
+      return yield* body({ orchestrator, worker });
+    }).pipe(
+      Effect.provide(
+        Harness.layerWithRegistry(
+          { name: "human-handoff" },
+          Registry.layerFromAdapters([adapter]),
+          { runEffectWorker: false, databaseLayer },
+        ).pipe(Layer.provideMerge(databaseLayer)),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
+
+const create = (
+  orchestrator: Orchestrator.OrchestratorV2["Service"],
+  id: string,
+  kind: Handoff["kind"] = "device_code",
+) =>
+  Effect.gen(function* () {
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+    const now = yield* DateTime.now;
+    const handoff: Handoff = {
+      handoffId: TurnItemId.make(id),
+      kind,
+      title: "Sign in to the provider",
+      reason: "The provider requires your consent.",
+      requestedBy: { threadId, providerInstanceId: instanceId, path: "provider.login_start" },
+      target: { environmentId: EnvironmentId.make("test-environment"), path: "provider.verify" },
+      dedupeKey: id,
+      state: "pending",
+      expiresAt: kind === "approval" ? null : DateTime.add(now, { minutes: 15 }),
+      createdAt: now,
+      actor: { type: "agent", threadId },
+    };
+    yield* orchestrator.dispatch({
+      type: "handoff.create",
+      commandId: CommandId.make(`create:${id}`),
+      threadId,
+      runId: run.id,
+      nodeId: run.rootNodeId!,
+      handoff,
+    });
+    return handoff;
+  });
+const transition = (
+  orchestrator: Orchestrator.OrchestratorV2["Service"],
+  id: string,
+  state: Handoff["state"],
+  actor: Handoff["actor"] = { type: "client", label: "Test phone" },
+) =>
+  orchestrator.dispatch({
+    type: "handoff.transition",
+    commandId: CommandId.make(`${id}:${state}`),
+    threadId,
+    handoffId: TurnItemId.make(id),
+    state,
+    actor,
+  });
+const read = (orchestrator: Orchestrator.OrchestratorV2["Service"], id: string) =>
+  orchestrator.getThreadProjection(threadId).pipe(
+    Effect.map((projection) => {
+      const item = projection.turnItems.find((item) => item.id === id);
+      assert.isTrue(item?.type === "human_handoff" || item?.type === "secret_request");
+      return item?.type === "human_handoff" || item?.type === "secret_request"
+        ? item.handoff!
+        : undefined!;
+    }),
+  );
+
+it.effect(
+  "persists actor-labelled transitions, rejects agent completion and terminal rewrites",
+  () =>
+    withHarness(({ orchestrator, worker }) =>
+      Effect.gen(function* () {
+        yield* create(orchestrator, "h:one");
+        yield* transition(orchestrator, "h:one", "opened");
+        yield* worker.drain();
+        assert.equal((yield* read(orchestrator, "h:one")).state, "opened");
+        const denied = yield* orchestrator
+          .dispatch({
+            type: "handoff.transition",
+            commandId: CommandId.make("agent-complete"),
+            threadId,
+            handoffId: TurnItemId.make("h:one"),
+            state: "completed",
+            actor: { type: "agent", threadId },
+          })
+          .pipe(Effect.result);
+        assert.equal(denied._tag, "Failure");
+        const result = yield* transition(orchestrator, "h:one", "completed");
+        yield* worker.drain();
+        assert.equal(result.storedEvents.length, 1);
+        const record = yield* read(orchestrator, "h:one");
+        assert.equal(record.state, "completed");
+        assert.equal(record.resolvedBy, "Test phone");
+        assert.deepEqual(record.actor, { type: "client", label: "Test phone" });
+        assert.equal(
+          (yield* transition(orchestrator, "h:one", "declined").pipe(Effect.result))._tag,
+          "Failure",
+        );
+        assert.equal(
+          (yield* transition(orchestrator, "h:one", "completed")).storedEvents.length,
+          1,
+        ); // receipt replay, not a new event
+      }),
+    ),
+);
+
+it.effect("expiry wins over a late answer even before the scheduler runs", () =>
+  withHarness(({ orchestrator, worker }) =>
+    Effect.gen(function* () {
+      yield* create(orchestrator, "h:expires");
+      yield* transition(orchestrator, "h:expires", "opened");
+      yield* TestClock.adjust("15 minutes");
+      yield* transition(orchestrator, "h:expires", "completed");
+      yield* worker.drain();
+      const record = yield* read(orchestrator, "h:expires");
+      assert.equal(record.state, "expired");
+      assert.deepEqual(record.actor, { type: "server" });
+      assert.isUndefined(record.resolvedBy);
+    }),
+  ),
+);
+
+it.effect("opened requests count toward the three-request cap and cancellation frees a slot", () =>
+  withHarness(({ orchestrator, worker }) =>
+    Effect.gen(function* () {
+      for (const id of ["h:1", "h:2", "h:3"]) {
+        yield* create(orchestrator, id);
+        yield* transition(orchestrator, id, "opened");
+      }
+      assert.equal((yield* create(orchestrator, "h:4").pipe(Effect.result))._tag, "Failure");
+      yield* transition(orchestrator, "h:1", "cancelled");
+      yield* create(orchestrator, "h:5");
+      yield* worker.drain();
+      assert.equal((yield* read(orchestrator, "h:5")).state, "pending");
+    }),
+  ),
+);
+
+it.effect("approval expires at run end and cannot be approved afterwards", () =>
+  withHarness(({ orchestrator, worker }) =>
+    Effect.gen(function* () {
+      yield* create(orchestrator, "h:approval", "approval");
+      yield* orchestrator.dispatch({
+        type: "thread.stop",
+        commandId: CommandId.make("stop"),
+        threadId,
+      });
+      yield* worker.drain();
+      yield* transition(orchestrator, "h:approval", "completed");
+      assert.equal((yield* read(orchestrator, "h:approval")).state, "expired");
+    }),
+  ),
+);
+
+it.effect(
+  "legacy secrets carry handoff metadata and cannot complete through the generic verb",
+  () =>
+    withHarness(({ orchestrator, worker }) =>
+      Effect.gen(function* () {
+        const run = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+        const command = {
+          type: "secret_request.record" as const,
+          commandId: CommandId.make("secret-create"),
+          threadId,
+          runId: run.id,
+          nodeId: run.rootNodeId!,
+          turnItemId: TurnItemId.make("secret:one"),
+          environmentId: EnvironmentId.make("test-environment"),
+          label: "Webhook signing secret",
+          reason: "Sign outgoing requests",
+          secretStatus: "pending" as const,
+        };
+        yield* orchestrator.dispatch(command);
+        yield* worker.drain();
+        const record = yield* read(orchestrator, "secret:one");
+        assert.equal(record.kind, "secret");
+        assert.equal(
+          DateTime.toEpochMillis(record.expiresAt!) - DateTime.toEpochMillis(record.createdAt),
+          3_600_000,
+        );
+        assert.equal(
+          (yield* transition(orchestrator, "secret:one", "completed").pipe(Effect.result))._tag,
+          "Failure",
+        );
+        yield* orchestrator.dispatch({
+          ...command,
+          commandId: CommandId.make("secret-save"),
+          secretStatus: "saved",
+          actor: { type: "client", label: "Test desktop" },
+        });
+        const saved = yield* read(orchestrator, "secret:one");
+        assert.equal(saved.state, "completed");
+        assert.equal(saved.resolvedBy, "Test desktop");
+        const json = yield* encodeHandoff(saved);
+        assert.notProperty(json, "human");
+      }),
+    ),
+);
+
+it.effect(
+  "domain API deduplicates targets, keeps instructions encrypted, authorizes the human and expires opened records",
+  () =>
+    withHarness(({ orchestrator, worker }) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const plan = yield* sql<{
+          detail: string;
+        }>`EXPLAIN QUERY PLAN SELECT thread_id, turn_item_id FROM orchestration_v2_projection_turn_items WHERE type IN ('human_handoff', 'secret_request') AND status = 'waiting'`;
+        assert.isTrue(
+          plan.some((row) =>
+            row.detail.includes("orchestration_v2_projection_turn_items_handoff_idx"),
+          ),
+        );
+        const stored = new Map<string, Uint8Array>();
+        const now = yield* DateTime.now;
+        const sessionId = AuthSessionId.make("client:handoff-test");
+        let sessions: AuthClientSession[] = [
+          {
+            sessionId,
+            subject: "test",
+            method: "browser-session-cookie",
+            scopes: ["orchestration:operate"],
+            permissions: ["orchestration:operate", "providers:manage"],
+            client: { label: "Test tablet", deviceType: "unknown" },
+            issuedAt: now,
+            expiresAt: DateTime.add(now, { days: 1 }),
+            lastConnectedAt: now,
+            connected: true,
+            current: true,
+          },
+        ];
+        const dependencies = Layer.mergeAll(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            dispatch: orchestrator.dispatch,
+            getThreadRecords: orchestrator.getThreadRecords,
+          }),
+          Layer.mock(SessionStore.SessionStore)({
+            cookieName: "test",
+            legacyCookieName: undefined,
+            listActive: () => Effect.sync(() => sessions),
+          }),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.succeed(
+            SecretStore.ServerSecretStore,
+            SecretStore.ServerSecretStore.of({
+              get: (name) => Effect.sync(() => Option.fromNullishOr(stored.get(name))),
+              set: (name, value) =>
+                Effect.sync(() => {
+                  stored.set(name, value);
+                }),
+              create: (name, value) =>
+                Effect.sync(() => {
+                  assert.isFalse(stored.has(name));
+                  stored.set(name, value);
+                }),
+              remove: (name) =>
+                Effect.sync(() => {
+                  stored.delete(name);
+                }),
+              getOrCreateRandom: (name, size) =>
+                Effect.sync(() => {
+                  const bytes = stored.get(name) ?? new Uint8Array(size).fill(5);
+                  stored.set(name, bytes);
+                  return bytes;
+                }),
+            }),
+          ),
+        );
+        const run = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+        const input = {
+          kind: "device_code" as const,
+          title: "Sign in",
+          reason: "Finish provider setup",
+          requestedBy: { threadId, providerInstanceId: instanceId, path: "provider.login_start" },
+          target: { environmentId: EnvironmentId.make("test"), path: "provider.verify" },
+          runId: run.id,
+          nodeId: run.rootNodeId!,
+          args: { instance: "codex", options: { a: 1, b: 2 } },
+          human: {
+            location: "Your browser",
+            url: "https://example.com/device?private=test-code",
+            userCode: "TEST-CODE",
+          },
+        };
+        yield* Effect.gen(function* () {
+          const service = yield* Handoffs.Handoffs;
+          const [first, second] = yield* Effect.all(
+            [
+              service.create(input),
+              service.create({ ...input, args: { options: { b: 2, a: 1 }, instance: "codex" } }),
+            ],
+            { concurrency: "unbounded" },
+          );
+          assert.equal(first.handoffId, second.handoffId);
+          yield* worker.drain();
+          assert.notProperty(first, "human");
+          for (const value of stored.values()) {
+            assert.notInclude(new TextDecoder().decode(value), "TEST-CODE");
+            assert.notInclude(new TextDecoder().decode(value), "example.com");
+          }
+          const address = { threadId, handoffId: first.handoffId };
+          assert.equal(
+            (yield* service.open(address, AuthSessionId.make("thread-token")).pipe(Effect.result))
+              ._tag,
+            "Failure",
+          );
+          const full = sessions;
+          sessions = sessions.map((session) => ({
+            ...session,
+            permissions: ["orchestration:operate"],
+          }));
+          assert.equal(
+            (yield* service.open(address, sessionId).pipe(Effect.result))._tag,
+            "Failure",
+          );
+          sessions = full;
+          const opened = yield* service.open(address, sessionId);
+          assert.equal(opened.human?.userCode, "TEST-CODE");
+          assert.equal(opened.handoff.state, "opened");
+          const transcript = JSON.stringify(yield* orchestrator.getThreadProjection(threadId));
+          assert.notInclude(transcript, "TEST-CODE");
+          assert.notInclude(transcript, "example.com");
+          // Rebuilding the domain service preserves the durable record and decrypts
+          // with the existing key, without copying instructions into the event log.
+          const reopened = yield* Effect.gen(function* () {
+            const restarted = yield* Handoffs.Handoffs;
+            return yield* restarted.open(address, sessionId);
+          }).pipe(Effect.provide(Handoffs.layer.pipe(Layer.provide(dependencies))));
+          assert.equal(reopened.human?.userCode, "TEST-CODE");
+          sessions = [];
+          assert.equal(
+            (yield* service
+              .respond({ ...address, action: "completed" }, sessionId)
+              .pipe(Effect.result))._tag,
+            "Failure",
+          );
+          sessions = full;
+
+          assert.deepEqual(opened.handoff.actor, { type: "client", label: "Test tablet" });
+          yield* TestClock.adjust("15 minutes");
+          const lateOpen = yield* service.open(address, sessionId).pipe(Effect.result);
+          assert.equal(lateOpen._tag, "Failure");
+          if (lateOpen._tag === "Failure")
+            assert.equal(
+              lateOpen.failure._tag === "HandoffError" ? lateOpen.failure.reason : null,
+              "expired",
+            );
+          yield* service.sweep;
+          yield* worker.drain();
+          assert.equal((yield* service.read(address)).state, "expired");
+          assert.isNull((yield* service.open(address, sessionId)).human);
+          assert.equal(stored.size, 1); // only the durable encryption key remains
+          const approval = yield* service.create({
+            ...input,
+            kind: "approval",
+            args: { approval: true },
+          });
+          const approvalAddress = { threadId, handoffId: approval.handoffId };
+          yield* service.open(approvalAddress, sessionId);
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make("end-approval-run"),
+            threadId,
+          });
+          yield* worker.drain();
+          assert.equal(
+            (yield* service.open(approvalAddress, sessionId).pipe(Effect.result))._tag,
+            "Failure",
+          );
+          assert.equal((yield* service.read(approvalAddress)).state, "expired");
+        }).pipe(Effect.provide(Handoffs.layer.pipe(Layer.provide(dependencies))));
+      }),
+    ),
+);
+
+it.effect("declined and failed outcomes are durable and terminal", () =>
+  withHarness(({ orchestrator, worker }) =>
+    Effect.gen(function* () {
+      yield* create(orchestrator, "h:decline", "oauth");
+      yield* transition(orchestrator, "h:decline", "declined");
+      yield* create(orchestrator, "h:failure", "mfa");
+      yield* transition(orchestrator, "h:failure", "failed", { type: "server" });
+      yield* worker.drain();
+      assert.equal((yield* read(orchestrator, "h:decline")).state, "declined");
+      assert.equal((yield* read(orchestrator, "h:failure")).state, "failed");
+      assert.equal(
+        (yield* transition(orchestrator, "h:failure", "completed").pipe(Effect.result))._tag,
+        "Failure",
+      );
+    }),
+  ),
+);

@@ -1,3 +1,5 @@
+import * as Handoffs from "../handoffs/Handoffs.ts";
+import * as HandoffExpiry from "../handoffs/HandoffExpiry.ts";
 import * as AdapterInfrastructure from "../provider/ProviderOrchestrationAdapterInfrastructure.ts";
 import * as RemoteReportInbox from "../remoteReports/RemoteReportInbox.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
@@ -286,6 +288,9 @@ const layerThreadLifecycleProvided = ThreadLifecycleService.layer.pipe(
 const layerSecretRequestsProvided = SecretRequests.layer.pipe(
   Layer.provide(layerThreadManagementProvided),
 );
+const layerHandoffsProvided = Handoffs.layer.pipe(
+  Layer.provide(Layer.mergeAll(layerThreadManagementProvided, layerSecretRequestsProvided)),
+);
 const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -380,6 +385,8 @@ export const layerProduction = Layer.mergeAll(
   layerThreadLifecycleProvided,
   layerScheduledTaskProvided,
   layerSecretRequestsProvided,
+  layerHandoffsProvided,
+  HandoffExpiry.layer.pipe(Layer.provide(layerHandoffsProvided)),
   UsageLimitRecoveryWorker.layer.pipe(
     Layer.provide(Layer.mergeAll(ProjectionStore.layer, layerThreadManagementProvided)),
   ),

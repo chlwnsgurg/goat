@@ -17,6 +17,9 @@ import { SLACK_CHANNEL_WS_METHODS } from "./slackChannel.ts";
 
 /** Incremental client enforcement; the server still authorizes every request. */
 export const CLIENT_GUARDED_RPC_SCOPES = {
+  [WS_METHODS.handoffsOpen]: AuthOrchestrationOperateScope,
+  [WS_METHODS.handoffsRespond]: AuthOrchestrationOperateScope,
+  [WS_METHODS.secretsAnswerRequest]: AuthOrchestrationOperateScope,
   [WS_METHODS.memorySearch]: AuthMemoryReadScope,
   [WS_METHODS.memoryList]: AuthMemoryReadScope,
   [WS_METHODS.memoryRead]: AuthMemoryReadScope,

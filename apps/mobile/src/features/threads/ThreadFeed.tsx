@@ -1,3 +1,4 @@
+import { HumanHandoffCard } from "./HumanHandoffCard";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
 import { ThreadMarkdownVideo, ThreadMediaVisibleContext } from "./ThreadMarkdownVideo";
 import { useMarkdownImageSource } from "../../native/useMarkdownImageSource";
@@ -1158,6 +1159,15 @@ function renderFeedEntry(
   }
 
   if (entry.type === "activity-group" && isSecretRequestActivityGroup(entry)) {
+    const projected = entry.activities[0]!.projectedItem;
+    if (projected.item.type === "human_handoff")
+      return (
+        <HumanHandoffCard
+          environmentId={props.environmentId}
+          handoff={projected.item.handoff}
+          inherited={projected.visibility !== "local"}
+        />
+      );
     return (
       <SecretRequestCard
         environmentId={props.environmentId}

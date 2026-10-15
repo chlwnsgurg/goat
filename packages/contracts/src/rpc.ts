@@ -1,3 +1,10 @@
+import {
+  HandoffReadInput,
+  HandoffRespondInput,
+  HandoffOpenResult,
+  Handoff,
+  HandoffError,
+} from "./handoff.ts";
 import * as Memory from "./memory.ts";
 import {
   OrchestrationV2SearchThreadError,
@@ -591,6 +598,8 @@ export const WS_METHODS = {
   scheduledTasksRunNow: "scheduledTasks.runNow",
   scheduledTasksRotateWebhookToken: "scheduledTasks.rotateWebhookToken",
   secretsAnswerRequest: "secrets.answerRequest",
+  handoffsOpen: "handoffs.open",
+  handoffsRespond: "handoffs.respond",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
 
@@ -1940,9 +1949,20 @@ const WsScheduledTasksRotateWebhookTokenRpc = Rpc.make(
   },
 );
 
+const WsHandoffsOpenRpc = Rpc.make(WS_METHODS.handoffsOpen, {
+  payload: HandoffReadInput,
+  success: HandoffOpenResult,
+  error: Schema.Union([HandoffError, EnvironmentAuthorizationError]),
+});
+const WsHandoffsRespondRpc = Rpc.make(WS_METHODS.handoffsRespond, {
+  payload: HandoffRespondInput,
+  success: Handoff,
+  error: Schema.Union([HandoffError, EnvironmentAuthorizationError]),
+});
+
 const WsSecretsAnswerRequestRpc = Rpc.make(WS_METHODS.secretsAnswerRequest, {
   payload: SecretRequestAnswerInput,
-  error: Schema.Union([SecretRequestError, EnvironmentAuthorizationError]),
+  error: Schema.Union([SecretRequestError, HandoffError, EnvironmentAuthorizationError]),
 });
 
 const WsRemoteLaunchesListRpc = Rpc.make(WS_METHODS.remoteLaunchesList, {
@@ -2143,6 +2163,8 @@ export const WsCoreRpcGroup = RpcGroup.make(
   WsScheduledTasksRunNowRpc,
   WsScheduledTasksRotateWebhookTokenRpc,
   WsSecretsAnswerRequestRpc,
+  WsHandoffsOpenRpc,
+  WsHandoffsRespondRpc,
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsRemoteLaunchesListRpc,

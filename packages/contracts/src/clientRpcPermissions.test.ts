@@ -78,3 +78,13 @@ it("registers every core read and owner policy administration guard", () => {
   ])
     expect(clientRpcRequiredScopes(method, {})).toEqual(["settings:write"]);
 });
+
+it("human handoff and secret answers require orchestration operation permission", () => {
+  for (const method of [
+    WS_METHODS.handoffsOpen,
+    WS_METHODS.handoffsRespond,
+    WS_METHODS.secretsAnswerRequest,
+  ]) {
+    expect(clientRpcRequiredScopes(method, {})).toEqual(["orchestration:operate"]);
+  }
+});
