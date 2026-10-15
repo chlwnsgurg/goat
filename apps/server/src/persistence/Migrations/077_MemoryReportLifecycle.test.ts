@@ -29,6 +29,7 @@ it.effect("077 DDL and accounting rollback together then ledger restart preserve
     assert.deepStrictEqual(yield* runMigrations(), [
       [77, "MemoryReportLifecycle"],
       [78, "MemoryUsageCounters"],
+      [79, "MemoryRevertResults"],
     ]);
     assert.deepStrictEqual(
       yield* sql`SELECT automatic_attempts,report_kind,report_approved FROM memory_report_outbox`,

@@ -41,6 +41,7 @@ import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import usageMigration from "../persistence/Migrations/078_MemoryUsageCounters.ts";
+import revertMigration from "../persistence/Migrations/079_MemoryRevertResults.ts";
 import * as Service from "./MemoryService.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import type { ImportItem, PreparedImportCommit } from "./imports/MemoryImportTypes.ts";
@@ -56,6 +57,7 @@ const growthLayer = (filename: string) => {
       yield* checkpointMigration;
       yield* reportMigration;
       yield* usageMigration;
+      yield* revertMigration;
       const sql = yield* SqlClient.SqlClient;
       yield* sql.unsafe("PRAGMA journal_mode=WAL");
       yield* sql`CREATE TABLE orchestration_events(sequence INTEGER PRIMARY KEY,event_id TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT,occurred_at TEXT,application_event_version INTEGER,aggregate_kind TEXT)`;
