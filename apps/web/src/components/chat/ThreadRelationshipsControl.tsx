@@ -301,7 +301,9 @@ export function ThreadRelationshipsPanel(props: {
   const projection = useThreadProjection(ref)?.projection ?? null;
   const providers = useServerConfigs().get(props.environmentId)?.providers;
   const runtimeSubagents = useMemo(() => {
-    const records = new Map((projection?.subagents ?? []).map((record) => [record.id, record]));
+    const records = new Map(
+      (projection?.subagents ?? []).map((record) => [String(record.id), record]),
+    );
     return projectedSubagentsToRuntime(projection?.subagents ?? []).map((agent) => {
       const record = records.get(agent.id);
       return {
