@@ -331,8 +331,27 @@ export function createMemoryEnvironmentAtoms<R, E>(
           if (
             Option.isSome(result.value.value) &&
             containsForgottenMemory(result.value.value.value, current.forgotten)
-          )
+          ) {
+            const value = result.value.value.value;
+            // A tombstone in a page must not hide unrelated memories. Drop affected
+            // entries, including derived text, while keeping the response epoch fence.
+            if (
+              typeof value === "object" &&
+              value !== null &&
+              "items" in value &&
+              Array.isArray(value.items)
+            ) {
+              return AsyncResult.success(
+                Option.some({
+                  ...value,
+                  items: value.items.filter(
+                    (item) => !containsForgottenMemory(item, current.forgotten),
+                  ),
+                } as EnvironmentRpcSuccess<T>),
+              );
+            }
             return AsyncResult.success(Option.none<EnvironmentRpcSuccess<T>>());
+          }
           return AsyncResult.success(result.value.value);
         },
         (refresh) => refresh(raw),

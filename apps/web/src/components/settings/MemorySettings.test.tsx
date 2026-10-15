@@ -34,6 +34,7 @@ const state = vi.hoisted(() => ({
   responses: new Map<string, unknown>(),
   executors: new Map<string, (input: unknown) => Promise<unknown>>(),
   connection: {} as object | null,
+  deviceConnections: new Map<string, object | null>(),
 }));
 function useFixtureVersion() {
   useSyncExternalStore(
@@ -117,11 +118,14 @@ vi.mock("../../state/environments", () => ({
 }));
 vi.mock("../../state/session", async (original) => ({
   ...(await original<typeof import("../../state/session")>()),
-  usePreparedConnection: () => {
+  usePreparedConnection: (id: string) => {
     useFixtureVersion();
-    return Option.fromNullishOr(state.connection);
+    return Option.fromNullishOr(
+      state.deviceConnections.has(id) ? state.deviceConnections.get(id) : state.connection,
+    );
   },
-  readPreparedConnection: () => state.connection,
+  readPreparedConnection: (id: string) =>
+    state.deviceConnections.has(id) ? state.deviceConnections.get(id) : state.connection,
   readEnvironmentScope: () => state.allowed,
   useEnvironmentScope: () => {
     useFixtureVersion();
@@ -252,6 +256,7 @@ beforeEach(() => {
   state.result = { _tag: "Failure" };
   state.responses.clear();
   state.connection = { httpBaseUrl: "https://hub.example" };
+  state.deviceConnections.clear();
 });
 
 const decodeRevision = Schema.decodeUnknownSync(MemoryRevision);
@@ -522,8 +527,10 @@ it("requires confirmation, retains operation identity after failure, and display
   await click("Confirm forget");
   expect(state.calls.mock.calls[1]![0]).toEqual(first);
   expect(first.environmentId).toBe("remote-owner");
-  expect(container.textContent).toContain("Expansion: pending");
-  expect(container.textContent).toContain("Sharing pending: true");
+  expect(container.textContent).toContain("Forgotten. Other devices remove it when they sync.");
+  expect(container.textContent).not.toContain("Expansion:");
+  expect(container.textContent).not.toContain("Sharing pending:");
+  expect(container.textContent).not.toContain("The provider's original");
   expect(container.textContent).not.toContain("Forget confirmation");
 });
 it("cancels without mutation and removes an open intent when permission is revoked", async () => {
@@ -1139,4 +1146,161 @@ it("reloads persisted members, excludes them from Add, and removes an offline un
     input: { action: "revokeMember", environmentId: "unregistered-private-id", expectedVersion: 4 },
   });
   expect(container.textContent).not.toContain("Waiting for the device to confirm");
+});
+
+it("keeps original labels tied to revision IDs across omitted payloads and reversed resolution inputs", async () => {
+  const history = {
+    ...retained,
+    revisions: [
+      { revision: revision(9), payload: null },
+      { revision: revision(4), payload: { ...payload, text: "Second original body" } },
+      { revision: revision(3), payload: { ...payload, text: "Third original body" } },
+    ],
+  };
+  await renderRevert(history);
+  const choices = [...container.querySelectorAll("label")];
+  const second = choices.find((label) => label.textContent?.includes("Second original body"))!;
+  expect(second.textContent).toContain("Original 2");
+  const third = choices.find((label) => label.textContent?.includes("Third original body"))!;
+  expect(third.textContent).toContain("Original 3");
+  await act(async () => second.querySelector<HTMLInputElement>("input")!.click());
+  await click("Revert resolution");
+  expect(state.calls.mock.calls.at(-1)![0]).toMatchObject({ input: { restoredRevisionId: id(4) } });
+});
+
+it("invalidates a focus read when sharing changes, so its late reply cannot reopen sharing", async () => {
+  const { render } = await supportedScreen(false);
+  const late = await deferredResult();
+  state.executors.set("hubSettingsGet", () => late.promise);
+  await render();
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  state.responses.set(
+    "hubSettingsUpdate",
+    success({
+      view: { version: 3, members: [], settings: { mode: "disabled" } },
+      credential: null,
+    }),
+  );
+  await click("Turn sharing off");
+  await click("Stop sharing");
+  await act(async () => late.resolve(success(hubView(2))));
+  expect(container.textContent).toContain("Make this device the hub");
+  expect(container.textContent).not.toContain("This device is the hub");
+  expect(container.textContent).not.toContain("Conversation access");
+});
+
+it("ends a confirmed sharing conflict, refreshes and requires a new confirmation with fresh version", async () => {
+  const { render } = await supportedScreen(false);
+  const Cause = await import("effect/Cause");
+  state.responses.set("hubSettingsUpdate", {
+    _tag: "Failure",
+    cause: Cause.fail({ code: "revision_changed" }),
+  });
+  await click("Turn sharing off");
+  await click("Stop sharing");
+  const old = state.calls.mock.calls.at(-1)![0];
+  expect(container.textContent).toContain("Review latest settings");
+  state.responses.set("hubSettingsGet", success(hubView(7)));
+  await click("Review latest settings");
+  await render();
+  await click("Turn sharing off");
+  await click("Stop sharing");
+  const fresh = state.calls.mock.calls.at(-1)![0];
+  expect(fresh).toMatchObject({ input: { expectedVersion: 7 } });
+  expect(fresh.input.requestId).not.toBe(old.input.requestId);
+});
+
+async function selectAddDevice() {
+  const picker = container.querySelector<HTMLSelectElement>("select")!;
+  await act(async () => {
+    picker.value = "active-device";
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await click("Add");
+}
+
+it("blocks localhost addresses before provisioning another device", async () => {
+  state.connection = { httpBaseUrl: "http://localhost:3773" };
+  await supportedScreen(false);
+  await selectAddDevice();
+  expect(container.textContent).toContain("Localhost points to the device itself");
+  const confirm = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Confirm",
+  )!;
+  expect(confirm.disabled).toBe(true);
+  expect(state.calls.mock.calls.some(([call]) => call.input.action === "provisionMember")).toBe(
+    false,
+  );
+});
+
+it.each(["reading", "installing"])(
+  "recovers on member-only reconnection while %s without reusing a stale credential",
+  async (stage) => {
+    const { render } = await supportedScreen(false);
+    state.deviceConnections.set("active-device", { httpBaseUrl: "https://member.example" });
+    const deferred = await deferredResult();
+    const mutations: { environmentId: string; input: { action: string } }[] = [];
+    state.executors.set("hubSettingsGet", async (raw) => {
+      const call = raw as { environmentId: string };
+      return stage === "reading" && call.environmentId === "active-device"
+        ? deferred.promise
+        : success(hubView(3));
+    });
+    state.executors.set("hubSettingsUpdate", async (raw) => {
+      const call = raw as (typeof mutations)[number];
+      mutations.push(call);
+      if (call.input.action === "installCredential") return deferred.promise;
+      return success({
+        view: hubView(4),
+        credential: { memorySpaceId: id(1), credential: "synthetic-ephemeral-key" },
+      });
+    });
+    await render();
+    await selectAddDevice();
+    await click("Confirm");
+    state.deviceConnections.set("active-device", { httpBaseUrl: "https://member-new.example" });
+    await render();
+    expect(container.textContent).toContain("Device connection changed");
+    await act(async () => deferred.resolve(success({ view: hubView(5), credential: null })));
+    expect(mutations.some((call) => call.input.action === "acknowledgeCredential")).toBe(false);
+    await click("Review latest settings");
+    expect(container.textContent).not.toContain("Device connection changed");
+    const add = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Add",
+    )!;
+    expect(add.disabled).toBe(false);
+    expect(container.innerHTML).not.toContain("synthetic-ephemeral-key");
+  },
+);
+
+it("offers explicit recovery after a device setup version conflict", async () => {
+  const { render } = await supportedScreen(false);
+  const Cause = await import("effect/Cause");
+  state.deviceConnections.set("active-device", { httpBaseUrl: "https://member.example" });
+  const provisioned = {
+    ...hubView(4),
+    members: [
+      { environmentId: "active-device", credentialVersion: 1, status: "pending_ack", joinedAt: 0 },
+    ],
+  };
+  state.executors.set("hubSettingsUpdate", async (raw) => {
+    const call = raw as { input: { action: string } };
+    if (call.input.action === "installCredential")
+      return { _tag: "Failure", cause: Cause.fail({ code: "revision_changed" }) };
+    return success({
+      view: provisioned,
+      credential: { memorySpaceId: id(1), credential: "ephemeral" },
+    });
+  });
+  await render();
+  await selectAddDevice();
+  await click("Confirm");
+  expect(container.textContent).toContain("Setup may be incomplete");
+  state.responses.set("hubSettingsGet", success(provisioned));
+  await click("Review latest settings");
+  const row = [...container.querySelectorAll("[data-test-row]")].find((row) =>
+    row.textContent?.startsWith("active device"),
+  )!;
+  expect(row.textContent).toContain("Replace key");
+  expect(row.textContent).toContain("Remove");
 });

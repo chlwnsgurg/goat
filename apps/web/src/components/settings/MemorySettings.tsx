@@ -24,7 +24,6 @@ import {
   presentMemoryResolution,
   presentMemoryRevert,
   presentMemoryRevertResult,
-  presentMemoryForget,
   presentMemoryReport,
   presentMemorySync,
 } from "@goat/client-runtime/memory-presentation";
@@ -43,6 +42,9 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { memoryEnvironment } from "../../state/memory";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
+import { Switch } from "../ui/switch";
+import { formatTimestamp } from "../../timestampFormat";
 import { SettingsPageContainer, SettingsSection, SettingsRow } from "./settingsLayout";
 import {
   isMemoryEnvironmentAvailable,
@@ -326,6 +328,7 @@ function MemoryRecords({
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState<string | undefined>();
   const [adding, setAdding] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const canWrite = useAtomValue(memoryEnvironment.upsert.permissionAtom(environmentId));
   const [quarantine, setQuarantine] = useState(false);
   const navigate = useNavigate();
@@ -394,24 +397,27 @@ function MemoryRecords({
             >
               <Input
                 aria-label="Search memories"
+                placeholder="Search memories"
                 value={queryInput}
                 onChange={(event) => setQueryInput(event.currentTarget.value)}
               />
-              <Button type="submit" size="sm">
+              <Button type="submit" size="sm" variant="outline">
                 Search
               </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setQueryInput("");
-                  setQuery("");
-                  setCursor(undefined);
-                }}
-              >
-                Clear search
-              </Button>
+              {queryInput || query ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setQueryInput("");
+                    setQuery("");
+                    setCursor(undefined);
+                  }}
+                >
+                  Clear search
+                </Button>
+              ) : null}
             </form>
           }
         />
@@ -419,17 +425,14 @@ function MemoryRecords({
           title="Quarantined memories"
           description="Review memories that need attention."
           control={
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setQuarantine(!quarantine);
+            <Switch
+              aria-label="Include quarantined memories"
+              checked={quarantine}
+              onCheckedChange={(checked) => {
+                setQuarantine(checked);
                 setCursor(undefined);
               }}
-            >
-              {" "}
-              {quarantine ? "Hide quarantined memories" : "Include quarantined memories"}
-            </Button>
+            />
           }
         />
         {page.error ? (
@@ -443,12 +446,13 @@ function MemoryRecords({
             }
           />
         ) : null}
-        {!value ? (
+        {notice ? <SettingsRow title={<span role="status">{notice}</span>} /> : null}
+        {!value && !page.error ? (
           <SettingsRow
             title="Loading memories"
             description="Reconnect this device if records do not appear."
           />
-        ) : items.length === 0 ? (
+        ) : !value ? null : items.length === 0 ? (
           <SettingsRow
             title="No memories yet"
             description="Memories saved on this device will appear here."
@@ -458,15 +462,23 @@ function MemoryRecords({
             data={items}
             keyExtractor={(item) => item.memoryId}
             estimatedItemSize={72}
-            style={{ height: 320 }}
+            style={{ height: Math.min(320, items.length * 88) }}
             renderItem={({ item }) => (
               <SettingsRow
                 title={
-                  item.status === "active"
-                    ? item.payload.text.slice(0, 120)
-                    : presentMemoryItem(item).label
+                  item.status === "active" ? (
+                    item.payload.text.slice(0, 120)
+                  ) : item.status === "forgotten" ? (
+                    <span className="text-muted-foreground">Forgotten memory</span>
+                  ) : (
+                    presentMemoryItem(item).label
+                  )
                 }
-                description={presentMemoryItem(item).syncLabel}
+                description={
+                  item.status === "forgotten"
+                    ? `Forgotten ${formatTimestamp(item.tombstone.deletedAtUtc, "locale")}. Content has been removed.`
+                    : presentMemoryItem(item).syncLabel
+                }
                 control={
                   <Button size="sm" variant="ghost" onClick={() => select(item)}>
                     Open
@@ -476,34 +488,33 @@ function MemoryRecords({
             )}
           />
         )}
-        <SettingsRow
-          title="Browse memories"
-          control={
-            <div className="flex gap-2">
-              <Button size="sm" variant="ghost" onClick={page.refresh}>
-                Refresh records
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={cursor === undefined}
-                onClick={() => setCursor(undefined)}
-              >
-                First page
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={!value?.nextCursor}
-                onClick={() => {
-                  if (value?.nextCursor) setCursor(value.nextCursor);
-                }}
-              >
-                Next page
-              </Button>
-            </div>
-          }
-        />
+        {cursor || value?.nextCursor ? (
+          <SettingsRow
+            title="Browse memories"
+            control={
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={cursor === undefined}
+                  onClick={() => setCursor(undefined)}
+                >
+                  First page
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!value?.nextCursor}
+                  onClick={() => {
+                    if (value?.nextCursor) setCursor(value.nextCursor);
+                  }}
+                >
+                  Next page
+                </Button>
+              </div>
+            }
+          />
+        ) : null}
       </SettingsSection>
       {target.memoryId ? (
         <MemoryDetails
@@ -511,6 +522,10 @@ function MemoryRecords({
           target={target}
           environmentId={environmentId}
           memorySpaceId={memorySpaceId}
+          onForgotten={(message) => {
+            setNotice(message);
+            page.refresh();
+          }}
         />
       ) : null}
     </>
@@ -521,10 +536,12 @@ function MemoryDetails({
   target,
   environmentId,
   memorySpaceId,
+  onForgotten,
 }: {
   target: MemorySettingsSearch;
   environmentId: EnvironmentId;
   memorySpaceId: MemorySpaceId;
+  onForgotten: (message: string) => void;
 }) {
   const { environments } = useEnvironments();
   const deviceName = (id: EnvironmentId) =>
@@ -546,10 +563,15 @@ function MemoryDetails({
   if ((item === null || !canWrite) && editing) setEditing(false);
   const value = history.data ? Option.getOrNull(history.data) : null;
   const navigate = useNavigate();
+  const detailsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    detailsRef.current?.scrollIntoView?.({ block: "start" });
+    detailsRef.current?.focus({ preventScroll: true });
+  }, []);
   return (
     <SettingsSection title="Memory details" id="memory-details">
-      <SettingsRow title="Selected memory">
-        <div className="space-y-3">
+      <SettingsRow title={item?.status === "forgotten" ? "Forgotten memory" : "Memory"}>
+        <div ref={detailsRef} tabIndex={-1} aria-label="Memory details" className="space-y-3">
           <Button
             size="sm"
             variant="ghost"
@@ -566,7 +588,13 @@ function MemoryDetails({
           {read.error || history.error ? <p role="alert">{read.error ?? history.error}</p> : null}
           {item ? (
             <>
-              <p>{presentMemoryItem(item).label}</p>
+              {item.status !== "active" ? (
+                <p>
+                  {item.status === "forgotten"
+                    ? `Content has been removed. Forgotten ${formatTimestamp(item.tombstone.deletedAtUtc, "locale")}.`
+                    : presentMemoryItem(item).label}
+                </p>
+              ) : null}
               <p>
                 {presentMemoryItem(item).syncLabel} {presentMemoryItem(item).cleanupLabel}
               </p>
@@ -598,7 +626,18 @@ function MemoryDetails({
             <p role="status">This memory is unavailable. Visible details have been cleared.</p>
           )}
           {/* A forget signal hides bodies while the same request may still need its receipt retried. */}
-          <MemoryForgetControl environmentId={environmentId} item={item} />
+          <MemoryForgetControl
+            environmentId={environmentId}
+            item={item}
+            onForgotten={(message) => {
+              onForgotten(message);
+              void navigate({
+                to: "/settings/memory",
+                search: validateMemorySettingsSearch({ environmentId, memorySpaceId }),
+                hash: "",
+              });
+            }}
+          />
           <Button
             size="sm"
             variant="ghost"
@@ -609,9 +648,11 @@ function MemoryDetails({
           >
             Refresh details
           </Button>
-          <h3>Resolution history</h3>
-          {item && value ? (
+          {item && item.status !== "forgotten" && value ? (
             <>
+              {value.resolutions.length > 0 ? (
+                <h3 className="text-sm font-medium">Resolution history</h3>
+              ) : null}
               {value.resolutions.map((entry) => {
                 const display = presentMemoryResolution(entry);
                 return (
@@ -620,11 +661,12 @@ function MemoryDetails({
                     open={target.resolutionId === entry.resolution.resolutionId}
                   >
                     <summary>
-                      {display.label} · {display.providerLabel} · {display.appliedAtUtc}
+                      {display.label} · {display.providerLabel} ·{" "}
+                      {formatTimestamp(display.appliedAtUtc, "locale")}
                     </summary>
                     <p>Effective model: {display.effectiveModel}</p>
                     <p>Resolved on {deviceName(display.resolvingEnvironmentId)}</p>
-                    <p>Revert deadline: {display.revertDeadlineUtc}</p>
+                    <p>Revert deadline: {formatTimestamp(display.revertDeadlineUtc, "locale")}</p>
                     <p>{entry.payload?.judgment ?? "Retained judgment unavailable."}</p>
                     {item ? (
                       <MemoryRevertControl
@@ -641,11 +683,15 @@ function MemoryDetails({
                   </details>
                 );
               })}
-              <h3>Retained originals</h3>
+              {value.revisions.length > 0 ? (
+                <h3 className="text-sm font-medium">
+                  {value.resolutions.length ? "Retained originals" : "History"}
+                </h3>
+              ) : null}
               {value.revisions.map((entry, index) => (
                 <details key={entry.revision.revisionId}>
                   <summary>
-                    Original {index + 1} · {entry.revision.createdAtUtc}
+                    Original {index + 1} · {formatTimestamp(entry.revision.createdAtUtc, "locale")}
                   </summary>
                   <p className="whitespace-pre-wrap break-words">
                     {entry.payload?.text ?? "Original unavailable."}
@@ -674,28 +720,30 @@ function MemoryDetails({
               {value.reports.map((report) => (
                 <MemoryReportControl key={report.reportId} report={report} />
               ))}
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={!cursor}
-                onClick={() => setCursor(undefined)}
-              >
-                First history page
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={!value.nextCursor}
-                onClick={() => {
-                  if (value.nextCursor) setCursor(value.nextCursor);
-                }}
-              >
-                Next history page
-              </Button>
+              {cursor || value.nextCursor ? (
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={!cursor}
+                    onClick={() => setCursor(undefined)}
+                  >
+                    First history page
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!value.nextCursor}
+                    onClick={() => {
+                      if (value.nextCursor) setCursor(value.nextCursor);
+                    }}
+                  >
+                    Next history page
+                  </Button>
+                </div>
+              ) : null}
             </>
-          ) : (
-            <p>History unavailable.</p>
-          )}
+          ) : null}
         </div>
       </SettingsRow>
     </SettingsSection>
@@ -716,6 +764,7 @@ export function MemoryRevertControl({
   history: Pick<MemoryHistoryPage, "revertResults" | "revisions" | "nextCursor">;
   onSettled: () => void;
 }) {
+  const { environments } = useEnvironments();
   const registry = useContext(RegistryContext);
   const canWrite = useAtomValue(memoryEnvironment.revertResolution.permissionAtom(environmentId));
   const connection = Option.getOrNull(usePreparedConnection(environmentId));
@@ -804,19 +853,32 @@ export function MemoryRevertControl({
       {!result && available ? (
         <div role="group" aria-label="Revert confirmation">
           <p>Choose the retained original to restore.</p>
-          {display.restorableRevisionIds.map((revisionId, index) => (
-            <label key={revisionId}>
-              <input
-                type="radio"
-                name={`revert-${entry.resolution.resolutionId}`}
-                value={revisionId}
-                checked={selected === revisionId}
-                disabled={busy || intent !== null}
-                onChange={() => setSelected(revisionId)}
-              />
-              Original {index + 1}
-            </label>
-          ))}
+          {display.restorableRevisionIds.map((revisionId) => {
+            const index = history.revisions.findIndex(
+              (entry) => entry.revision.revisionId === revisionId,
+            );
+            const original = history.revisions[index]!;
+            return (
+              <label key={revisionId} className="block space-x-2">
+                <input
+                  type="radio"
+                  name={`revert-${entry.resolution.resolutionId}`}
+                  value={revisionId}
+                  checked={selected === revisionId}
+                  disabled={busy || intent !== null}
+                  onChange={() => setSelected(revisionId)}
+                />
+                <span>
+                  Original {index + 1} · {formatTimestamp(original.revision.createdAtUtc, "locale")}{" "}
+                  ·{" "}
+                  {environments.find(
+                    (device) => device.environmentId === original.revision.provenance.environmentId,
+                  )?.label ?? "Unknown device"}
+                </span>
+                <p className="whitespace-pre-wrap break-words">{original.payload?.text}</p>
+              </label>
+            );
+          })}
           <Button
             size="sm"
             variant="outline"
@@ -846,9 +908,11 @@ export function MemoryRevertControl({
 export function MemoryForgetControl({
   environmentId,
   item,
+  onForgotten,
 }: {
   environmentId: EnvironmentId;
   item: MemoryItem | null;
+  onForgotten?: ((message: string) => void) | undefined;
 }) {
   const canForget = useAtomValue(memoryEnvironment.forget.permissionAtom(environmentId));
   return (
@@ -857,6 +921,7 @@ export function MemoryForgetControl({
       environmentId={environmentId}
       item={item}
       canForget={canForget}
+      onForgotten={onForgotten}
     />
   );
 }
@@ -865,10 +930,12 @@ function MemoryForgetRequest({
   environmentId,
   item,
   canForget,
+  onForgotten,
 }: {
   environmentId: EnvironmentId;
   item: MemoryItem | null;
   canForget: boolean;
+  onForgotten?: ((message: string) => void) | undefined;
 }) {
   const registry = useContext(RegistryContext);
   const connection = Option.getOrNull(usePreparedConnection(environmentId));
@@ -883,6 +950,9 @@ function MemoryForgetRequest({
       mounted.current = false;
     };
   }, []);
+  const imported = useRef(false);
+  if (item?.status === "active")
+    imported.current = item.payload.evidence.some((e) => e.origin === "import");
   const available = item !== null && presentMemoryItem(item).canForget;
   function liveDestination() {
     return (
@@ -900,10 +970,18 @@ function MemoryForgetRequest({
     if (!liveDestination()) return;
     setBusy(false);
     if (result._tag === "Success") {
-      const display = presentMemoryForget(result.value);
-      setMessage(
-        `${display.label} · Expansion: ${display.expansionStatus} · Sharing pending: ${display.pendingSync} · ${display.failureCode ?? ""} · ${display.notice}`,
-      );
+      if (result.value.outcome === "rejected") {
+        setMessage("Could not forget this memory. Review the record before trying again.");
+        setIntent(null);
+        return;
+      }
+      const notice =
+        "Forgotten. Other devices remove it when they sync." +
+        (imported.current
+          ? " The provider's original conversation stays, but forgotten content is never imported again."
+          : "");
+      setMessage(notice);
+      onForgotten?.(notice);
       setIntent(null);
     } else setMessage("Forget request failed. Retry this request with the same operation ID.");
   }
@@ -914,7 +992,7 @@ function MemoryForgetRequest({
         intent && canForget ? (
           <div role="group" aria-label="Forget confirmation">
             <p>Forget this memory? This cannot be undone.</p>
-            <Button size="sm" disabled={busy} onClick={() => void submit()}>
+            <Button size="sm" variant="destructive" disabled={busy} onClick={() => void submit()}>
               Confirm forget
             </Button>
             <Button
@@ -941,9 +1019,7 @@ function MemoryForgetRequest({
             Forget memory
           </Button>
         )
-      ) : (
-        <p>Forget is unavailable for this record.</p>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -1029,6 +1105,7 @@ function MemoryEditor({
     );
   return (
     <form
+      className="space-y-3"
       onSubmit={async (event) => {
         event.preventDefault();
         if (
@@ -1068,7 +1145,7 @@ function MemoryEditor({
           setError("Memory update failed. Retry the same request or close the editor and reload.");
       }}
     >
-      <Input
+      <Textarea
         aria-label="Memory text"
         value={text ?? ""}
         disabled={busy || operationId !== null}

@@ -175,7 +175,7 @@ function waitFor<A>(
     Stream.runHead,
   );
 }
-const harness = Effect.fn(function* (ledger = createMemoryTombstoneLedger()) {
+const harness = Effect.fn(function* (ledger = createMemoryTombstoneLedger(), pageValue = page) {
   const registry = AtomRegistry.make();
   yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
   const queue = yield* Queue.unbounded<
@@ -217,8 +217,8 @@ const harness = Effect.fn(function* (ledger = createMemoryTombstoneLedger()) {
           Effect.ensuring(Deferred.succeed(finalized, undefined)),
         );
       }),
-    [WS_METHODS.memoryList]: () => respondOnce("list", page),
-    [WS_METHODS.memorySearch]: () => respondOnce("search", page),
+    [WS_METHODS.memoryList]: () => respondOnce("list", pageValue),
+    [WS_METHODS.memorySearch]: () => respondOnce("search", pageValue),
     [WS_METHODS.memoryHistory]: () => respondOnce("history", history),
     [WS_METHODS.memoryReadSource]: () => respondOnce("source", sourcePage),
     [WS_METHODS.memoryImportProvider]: () =>
@@ -1196,3 +1196,59 @@ describe("shared memory client", () => {
       ),
   );
 });
+
+it.effect.each(["list", "search"] as const)(
+  "keeps unrelated %s records after forget without exposing forgotten or derived text",
+  (method) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const derivedId = MemoryId.make("00000000-0000-4000-8000-000000000009");
+        if (unrelatedItem.status !== "active" || item.status !== "active")
+          throw new Error("Active fixture required");
+        const derived = {
+          ...unrelatedItem,
+          memoryId: derivedId,
+          revision: { ...unrelatedItem.revision, memoryId: derivedId },
+          payload: {
+            ...unrelatedItem.payload,
+            text: "Derived forgotten text",
+            derivedFromMemoryRevisions: [{ memoryId: id, revisionId: item.revision.revisionId }],
+          },
+        };
+        const h = yield* harness(createMemoryTombstoneLedger(), {
+          ...page,
+          items: [item, unrelatedItem, derived],
+        });
+        const exposure = h.memory.exposureAtom(target);
+        h.registry.mount(exposure);
+        yield* Queue.offer(h.queue, signal("reset"));
+        yield* waitFor(h.registry, exposure, (state) => state.ready);
+        yield* Queue.offer(h.queue, signal("forget"));
+        yield* waitFor(h.registry, exposure, (state) => state.forgotten.has(id));
+        const query =
+          method === "list"
+            ? h.memory.list({
+                ...target,
+                input: { ...target.input, includeQuarantined: false, limit: 10 },
+              })
+            : h.memory.search({
+                ...target,
+                input: { ...target.input, query: "Synthetic", mode: "fts", limit: 10 },
+              });
+        h.registry.mount(query);
+        yield* Deferred.succeed(h.reply, item);
+        const result = yield* waitFor(
+          h.registry,
+          query,
+          (value) => value._tag === "Success" && Option.isSome(value.value),
+        );
+        expect(Option.isSome(result)).toBe(true);
+        const value = h.registry.get(query);
+        if (value._tag !== "Success" || Option.isNone(value.value))
+          throw new Error("Page required");
+        expect(value.value.value.items.map((entry) => entry.memoryId)).toEqual([unrelated]);
+        expect(JSON.stringify(value.value.value)).not.toContain("Derived forgotten text");
+        expect(h.registry.get(exposure).forgotten.has(id)).toBe(true);
+      }),
+    ),
+);

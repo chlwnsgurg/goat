@@ -17,6 +17,7 @@ import { useEnvironments } from "../../state/environments";
 import { readPreparedConnection, usePreparedConnection } from "../../state/session";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Cause from "effect/Cause";
 import { memoryEnvironment } from "../../state/memory";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { randomUUID } from "../../lib/utils";
@@ -28,6 +29,22 @@ import { isMemoryEnvironmentAvailable, memoryOwnerDesiredIds } from "./MemorySet
 import { memoryDeviceFlow } from "./memoryDeviceFlow";
 
 const decodeHubAddress = Schema.decodeUnknownSync(MemoryHubEndpoint);
+const loopbackAddress = (value: string) => {
+  try {
+    return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+};
+const versionConflict = (cause: Cause.Cause<unknown>) => {
+  const failure = Option.getOrNull(Cause.findErrorOption(cause));
+  return (
+    typeof failure === "object" &&
+    failure !== null &&
+    "code" in failure &&
+    failure.code === "revision_changed"
+  );
+};
 const operationId = () => MemoryOperationId.make(randomUUID());
 
 export function MemoryAdministration({
@@ -73,6 +90,35 @@ export function MemoryAdministration({
   const ownerIntent = useRef<Parameters<typeof updateOwner>[0]["input"] | null>(null);
   const flow = useRef<ReturnType<typeof memoryDeviceFlow> | null>(null);
   const mounted = useRef(true);
+  const loadGeneration = useRef(0);
+  const deviceAttempt = useRef<{
+    connection: object;
+    deviceId: EnvironmentId;
+    generation: number;
+  } | null>(null);
+  const attemptGeneration = useRef(0);
+  const [recovery, setRecovery] = useState(false);
+  function recover(message: string) {
+    attemptGeneration.current += 1;
+    deviceAttempt.current = null;
+    flow.current?.dispose();
+    flow.current = null;
+    intent.current = null;
+    ownerIntent.current = null;
+    setPending(null);
+    setBusy(false);
+    setConfirm(null);
+    setRecovery(true);
+    setError(message);
+  }
+  useEffect(() => {
+    const attempt = deviceAttempt.current;
+    if (attempt && readPreparedConnection(attempt.deviceId) !== attempt.connection) {
+      recover(
+        "Device connection changed. Setup may be incomplete. Review the latest devices, then Replace key to recover or Remove to clean up.",
+      );
+    }
+  });
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -95,15 +141,16 @@ export function MemoryAdministration({
   );
   useEffect(() => {
     let current = true;
-    setError(null);
+    const generation = ++loadGeneration.current;
+    if (!recovery) setError(null);
     void (async () => {
       const result = await getHub({ environmentId, input: {} });
-      if (!current) return;
+      if (!current || generation !== loadGeneration.current) return;
       if (result._tag === "Success") setHub(result.value);
       else setError("Could not load sharing settings.");
       if (registry.get(memoryEnvironment.ownerSourceReadPolicyGet.permissionAtom(environmentId))) {
         const policy = await getOwner({ environmentId, input: {} });
-        if (!current) return;
+        if (!current || generation !== loadGeneration.current) return;
         if (policy._tag === "Success") setOwner(policy.value);
         else setError("Could not load original conversation access.");
       }
@@ -123,6 +170,7 @@ export function MemoryAdministration({
   }, [pending, busy, onSharingRefresh]);
   async function saveHub(input: MemoryHubSettingsUpdateInput) {
     if (busy || !live() || !writable(environmentId)) return;
+    loadGeneration.current += 1;
     intent.current = input;
     setPending("hub");
     setBusy(true);
@@ -131,6 +179,12 @@ export function MemoryAdministration({
     if (!live()) return;
     setBusy(false);
     if (result._tag === "Failure") {
+      if (versionConflict(result.cause)) {
+        recover(
+          "Sharing changed on another device. Review the latest settings before trying again.",
+        );
+        return;
+      }
       setError("Sharing update failed. Retry to continue the same request.");
       return;
     }
@@ -153,6 +207,7 @@ export function MemoryAdministration({
       expectedVersion: owner.version,
       allowedRequesterEnvironmentIds: memoryOwnerDesiredIds(owner, id, allowed),
     };
+    loadGeneration.current += 1;
     ownerIntent.current = input;
     setPending("owner");
     setBusy(true);
@@ -165,10 +220,23 @@ export function MemoryAdministration({
       ownerIntent.current = null;
       setPending(null);
       setRequester(null);
+    } else if (versionConflict(result.cause)) {
+      recover(
+        "Conversation access changed on another device. Review the latest settings before trying again.",
+      );
     } else setError("Could not update access. Retry to continue the same request.");
   }
   async function addDevice(action: "provisionMember" | "rotateMemberCredential") {
-    if (!hub || !device || busy || !live() || !writable(environmentId) || !writable(device)) return;
+    if (
+      !hub ||
+      !device ||
+      busy ||
+      recovery ||
+      !live() ||
+      !writable(environmentId) ||
+      !writable(device)
+    )
+      return;
     if (!readPreparedConnection(device)) {
       setError("Connect the device in Settings → Connections first.");
       return;
@@ -179,13 +247,28 @@ export function MemoryAdministration({
       setError("Enter a valid Hub address using HTTPS, or HTTP for localhost.");
       return;
     }
+    if (loopbackAddress(endpoint)) {
+      setError(
+        "Localhost points to the device itself. Enter a hub address reachable from the other device.",
+      );
+      return;
+    }
+    loadGeneration.current += 1;
     setBusy(true);
     setError(null);
+    const generation = attemptGeneration.current;
     try {
       if (!flow.current) {
-        const deviceConnection = readPreparedConnection(device);
+        const deviceConnection = readPreparedConnection(device)!;
+        deviceAttempt.current = { connection: deviceConnection, deviceId: device, generation };
         const target = await getHub({ environmentId: device, input: {} });
-        if (!live() || readPreparedConnection(device) !== deviceConnection) return;
+        if (!live() || generation !== attemptGeneration.current) return;
+        if (readPreparedConnection(device) !== deviceConnection) {
+          recover(
+            "Device connection changed. Review the latest devices before setting it up again.",
+          );
+          return;
+        }
         if (target._tag === "Failure") throw new Error();
         const selected = device;
         setPending("device");
@@ -205,13 +288,17 @@ export function MemoryAdministration({
           update: async (id, input) => {
             if (!live() || !writable(id) || !readPreparedConnection(id)) throw new Error();
             const result = await updateHub({ environmentId: id, input });
-            if (result._tag === "Failure") throw new Error();
+            if (result._tag === "Failure") {
+              if (versionConflict(result.cause)) throw new Error("revision_changed");
+              throw new Error("Request failed");
+            }
             return result.value;
           },
         });
       }
       const view = await flow.current.run();
-      if (!live()) return;
+      if (!live() || generation !== attemptGeneration.current) return;
+      deviceAttempt.current = null;
       setHub(view);
       flow.current.dispose();
       flow.current = null;
@@ -219,13 +306,27 @@ export function MemoryAdministration({
       setConfirm(null);
       setDevice(null);
       onSharingRefresh?.();
-    } catch {
+    } catch (failure) {
+      if (generation !== attemptGeneration.current) return;
+      const attempt = deviceAttempt.current;
+      if (attempt && readPreparedConnection(attempt.deviceId) !== attempt.connection) {
+        recover(
+          "Device connection changed. Setup may be incomplete. Review the latest devices, then Replace key to recover or Remove to clean up.",
+        );
+        return;
+      }
+      if (failure instanceof Error && failure.message === "revision_changed") {
+        recover(
+          "Device settings changed during setup. Setup may be incomplete. Review the latest devices, then Replace key to recover or Remove to clean up.",
+        );
+        return;
+      }
       if (live())
         setError(
           "Device setup did not finish. Retry to continue. If you reload, use Replace key on the device row to recover, or Remove to clean up.",
         );
     } finally {
-      if (live()) setBusy(false);
+      if (live() && generation === attemptGeneration.current) setBusy(false);
     }
   }
   const policy = owner ? presentMemoryOwnerPolicy(owner) : null;
@@ -250,7 +351,7 @@ export function MemoryAdministration({
       </Select>
     );
   }
-  const blocked = busy || !canHub || pending !== null;
+  const blocked = busy || !canHub || pending !== null || recovery;
   return (
     <>
       <SettingsSection title="Sharing" id="memory-sharing">
@@ -346,25 +447,46 @@ export function MemoryAdministration({
             title="Could not complete request"
             description={<span role="alert">{error}</span>}
             control={
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy}
-                onClick={() => {
-                  if (flow.current)
-                    void addDevice(
-                      confirm === "rotate" ? "rotateMemberCredential" : "provisionMember",
-                    );
-                  else if (intent.current) void saveHub(intent.current);
-                  else if (ownerIntent.current) void saveOwner(environmentId, true);
-                  else {
-                    setReload((n) => n + 1);
-                    onSharingRefresh?.();
-                  }
-                }}
-              >
-                Retry
-              </Button>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => {
+                    if (recovery) {
+                      setRecovery(false);
+                      setError(null);
+                      setReload((n) => n + 1);
+                      onSharingRefresh?.();
+                    } else if (flow.current)
+                      void addDevice(
+                        confirm === "rotate" ? "rotateMemberCredential" : "provisionMember",
+                      );
+                    else if (intent.current) void saveHub(intent.current);
+                    else if (ownerIntent.current) void saveOwner(environmentId, true);
+                    else {
+                      setReload((n) => n + 1);
+                      onSharingRefresh?.();
+                    }
+                  }}
+                >
+                  {recovery ? "Review latest settings" : "Retry"}
+                </Button>
+                {pending !== null ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() =>
+                      recover(
+                        "Setup may be incomplete. Review the latest settings. For a device, use Replace key to recover or Remove to clean up.",
+                      )
+                    }
+                  >
+                    Stop retrying
+                  </Button>
+                ) : null}
+              </div>
             }
           />
         ) : null}
@@ -450,7 +572,11 @@ export function MemoryAdministration({
               title={
                 confirm === "add" ? `Add ${name(device)}?` : `Replace key for ${name(device)}?`
               }
-              description="Address the device uses to reach this hub."
+              description={
+                loopbackAddress(endpoint)
+                  ? "Localhost points to the device itself. Enter an address reachable from the other device."
+                  : "Address the device uses to reach this hub. Check that the device can reach it; saving an address does not verify connectivity."
+              }
               control={
                 <div className="flex flex-wrap items-center gap-2">
                   <label htmlFor="memory-hub-address">Hub address</label>
@@ -462,7 +588,7 @@ export function MemoryAdministration({
                   />
                   <Button
                     size="sm"
-                    disabled={blocked || !writable(device)}
+                    disabled={blocked || !writable(device) || loopbackAddress(endpoint)}
                     onClick={() =>
                       void addDevice(
                         confirm === "rotate" ? "rotateMemberCredential" : "provisionMember",
@@ -517,65 +643,69 @@ export function MemoryAdministration({
           ) : null}
         </SettingsSection>
       ) : null}
-      <SettingsSection title="Original conversations" id="memory-owner-policy">
-        <SettingsRow
-          title="Conversation access"
-          description="When a memory points to a conversation on this device, these devices can open the original. Removing a device applies to later requests and to results still on the hub."
-        />
-        {policy?.desiredRequesterEnvironmentIds.map((id) => (
+      {hub && hub.settings.mode !== "disabled" ? (
+        <SettingsSection title="Original conversations" id="memory-owner-policy">
           <SettingsRow
-            key={id}
-            title={name(id)}
-            status={policy.pendingEnrollments.find((e) => e.requesterEnvironmentId === id)?.label}
-            control={
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy || !canOwner || pending !== null}
-                onClick={() => void saveOwner(id, false)}
-              >
-                Remove
-              </Button>
-            }
+            title="Conversation access"
+            description="When a memory points to a conversation on this device, these devices can open the original. Removing a device applies to later requests and to results still on the hub."
           />
-        ))}
-        {owner?.policy.removals
-          .filter(
-            (r) =>
-              r.state === "pending" &&
-              !policy?.desiredRequesterEnvironmentIds.includes(r.requesterEnvironmentId),
-          )
-          .map((r) => (
+          {policy?.desiredRequesterEnvironmentIds.map((id) => (
             <SettingsRow
-              key={r.requesterEnvironmentId}
-              title={name(r.requesterEnvironmentId)}
-              status="Removal pending"
+              key={id}
+              title={name(id)}
+              status={policy.pendingEnrollments.find((e) => e.requesterEnvironmentId === id)?.label}
+              control={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy || recovery || !canOwner || pending !== null}
+                  onClick={() => void saveOwner(id, false)}
+                >
+                  Remove
+                </Button>
+              }
             />
           ))}
-        <SettingsRow
-          title="Allow device"
-          description={!canOwner ? "Settings write permission is required." : undefined}
-          control={
-            <div className="flex gap-2">
-              {picker(
-                requester,
-                setRequester,
-                candidates.filter(
-                  (e) => !policy?.desiredRequesterEnvironmentIds.includes(e.environmentId),
-                ),
-                "Conversation access device",
-              )}
-              <Button
-                size="sm"
-                disabled={busy || !canOwner || !owner || !requester || pending !== null}
-                onClick={() => requester && void saveOwner(requester, true)}
-              >
-                Allow
-              </Button>
-            </div>
-          }
-        />
-      </SettingsSection>
+          {owner?.policy.removals
+            .filter(
+              (r) =>
+                r.state === "pending" &&
+                !policy?.desiredRequesterEnvironmentIds.includes(r.requesterEnvironmentId),
+            )
+            .map((r) => (
+              <SettingsRow
+                key={r.requesterEnvironmentId}
+                title={name(r.requesterEnvironmentId)}
+                status="Removal pending"
+              />
+            ))}
+          <SettingsRow
+            title="Allow device"
+            description={!canOwner ? "Settings write permission is required." : undefined}
+            control={
+              <div className="flex gap-2">
+                {picker(
+                  requester,
+                  setRequester,
+                  candidates.filter(
+                    (e) => !policy?.desiredRequesterEnvironmentIds.includes(e.environmentId),
+                  ),
+                  "Conversation access device",
+                )}
+                <Button
+                  size="sm"
+                  disabled={
+                    busy || recovery || !canOwner || !owner || !requester || pending !== null
+                  }
+                  onClick={() => requester && void saveOwner(requester, true)}
+                >
+                  Allow
+                </Button>
+              </div>
+            }
+          />
+        </SettingsSection>
+      ) : null}
     </>
   );
 }
