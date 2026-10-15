@@ -31,6 +31,8 @@ import * as MemoryMaintenance from "./memory/MemoryFtsMaintenance.ts";
 import * as MemorySync from "./memory/MemorySyncService.ts";
 import * as MemoryOwnerSourceReadPolicyBinding from "./memory/MemoryOwnerSourceReadPolicyBinding.ts";
 import * as MemorySyncRuntimeLive from "./memory/MemorySyncRuntimeLive.ts";
+import * as MemoryReportWorker from "./memory/MemoryReportWorker.ts";
+import * as MemoryReportAdapter from "./memory/MemoryReportAdapter.ts";
 import * as MemoryWorker from "./memory/MemoryWorker.ts";
 import * as MemoryHub from "./memory/MemoryHubService.ts";
 import * as MemoryCompactor from "./memory/MemoryCompactor.ts";
@@ -580,7 +582,11 @@ const layerMemoryService = layerMemorySourceReadService.pipe(
   Layer.provide(layerRepositoryIdentityResolver),
   Layer.provide(layerPersistence),
 );
-const layerMemoryWorker = MemoryWorker.layer.pipe(
+const layerMemoryWorker = Layer.mergeAll(
+  MemoryWorker.layer,
+  MemoryReportWorker.layer.pipe(Layer.provide(MemoryReportAdapter.layer)),
+).pipe(
+  Layer.provide(ServerEnvironment.layerIdentity),
   Layer.provideMerge(layerMemoryService),
   Layer.provide(MemoryMaintenance.layer.pipe(Layer.provide(layerMemoryQuota))),
   Layer.provide(RuntimeLayer.layerEventSink),
@@ -591,6 +597,8 @@ const layerMemoryStarted = Layer.effectDiscard(
   Effect.gen(function* () {
     const worker = yield* MemoryWorker.MemoryWorker;
     yield* worker.start();
+    const reports = yield* MemoryReportWorker.MemoryReportWorker;
+    yield* reports.start();
   }),
 ).pipe(Layer.provideMerge(layerMemoryWorker));
 
