@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { afterEach, describe, expect, it } from "vite-plus/test";
-import { WS_METHODS, type MemoryUpsertInput } from "@goat/contracts";
+import {
+  WS_METHODS,
+  type MemoryOwnerSourceReadPolicyUpdateInput,
+  type MemoryUpsertInput,
+} from "@goat/contracts";
 import {
   createNativeMemoryHarness,
   renderNative,
@@ -163,15 +167,45 @@ describe("native Memory with shared factory", () => {
       version: 1,
     }));
     h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyGet, () => policy);
-    h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyUpdate, () => ({
-      ...policy,
-      version: 4,
-      policy: {
-        ...policy.policy,
-        allowedRequesterEnvironmentIds: [],
-        enrollments: policy.policy.enrollments.filter((entry) => entry.state === "pending"),
-      },
-    }));
+    h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyUpdate, (input) => {
+      const adding = (
+        input as MemoryOwnerSourceReadPolicyUpdateInput
+      ).allowedRequesterEnvironmentIds.includes("active-requester" as never);
+      return {
+        ...policy,
+        version: adding ? 5 : 4,
+        policy: {
+          ...policy.policy,
+          ownerPolicyEpoch: adding ? 5 : 4,
+          allowedRequesterEnvironmentIds: [],
+          removals: [
+            ...policy.policy.removals,
+            {
+              memorySpaceId: nativeSpace,
+              ownerEnvironmentId: nativeEnv,
+              requesterEnvironmentId: "active-requester",
+              removalEpoch: 4,
+              state: "pending",
+            },
+          ],
+          enrollments: [
+            ...policy.policy.enrollments.filter((entry) => entry.state === "pending"),
+            ...(adding
+              ? [
+                  {
+                    memorySpaceId: nativeSpace,
+                    ownerEnvironmentId: nativeEnv,
+                    requesterEnvironmentId: "active-requester",
+                    removalEpoch: 4,
+                    ownerPolicyEpoch: 5,
+                    state: "pending",
+                  },
+                ]
+              : []),
+          ],
+        },
+      };
+    });
     await view.click("Load sharing and original access settings");
     await view.click("Remove active-requester");
     expect(
@@ -181,6 +215,16 @@ describe("native Memory with shared factory", () => {
       input: { expectedVersion: 3, allowedRequesterEnvironmentIds: ["pending-requester"] },
     });
     expect(view.container.textContent).toContain("pending-requester");
+    await view.click("Allow active-requester");
+    const updates = h.calls.filter(
+      (call) => call.method === WS_METHODS.memoryOwnerSourceReadPolicyUpdate,
+    );
+    expect(updates).toHaveLength(2);
+    expect(updates[1]!.input).toMatchObject({
+      expectedVersion: 4,
+      allowedRequesterEnvironmentIds: ["pending-requester", "active-requester"],
+    });
+    expect(view.container.textContent).toContain("Remove active-requester");
   });
   it("pins the first selected space across later environment binding changes", async () => {
     h = createNativeMemoryHarness();

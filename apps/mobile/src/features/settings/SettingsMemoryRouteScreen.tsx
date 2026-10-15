@@ -1269,6 +1269,7 @@ function MemoryAdministration({
               ...new Set([
                 ...Object.keys(savedConnectionsById),
                 ...ownerView.desiredRequesterEnvironmentIds,
+                ...(owner?.policy.removals.map((removal) => removal.requesterEnvironmentId) ?? []),
               ]),
             ].map((value) => {
               const id = value as EnvironmentId;
