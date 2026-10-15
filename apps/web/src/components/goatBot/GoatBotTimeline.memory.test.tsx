@@ -17,7 +17,10 @@ vi.mock("../../state/environments", () => ({
     },
   }),
 }));
-vi.mock("../../state/session", () => ({ useEnvironmentScope: () => state.allowed }));
+vi.mock("../../state/session", async (original) => ({
+  ...(await original<typeof import("../../state/session")>()),
+  useEnvironmentScope: () => state.allowed,
+}));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => async (input: { search: Record<string, unknown> }) => {
     state.destination = input.search;

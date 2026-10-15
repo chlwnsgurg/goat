@@ -11,7 +11,8 @@ vi.mock("../../state/environments", () => ({
     },
   }),
 }));
-vi.mock("../../state/session", () => ({
+vi.mock("../../state/session", async (original) => ({
+  ...(await original<typeof import("../../state/session")>()),
   useEnvironmentScope: () => state.allowed,
   readEnvironmentScope: () => state.allowed,
 }));

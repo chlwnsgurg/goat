@@ -53,7 +53,8 @@ vi.mock("../../state/environments", () => ({
   useEnvironment: () => state.environment,
   useEnvironments: () => ({ environments: [] }),
 }));
-vi.mock("../../state/session", () => ({
+vi.mock("../../state/session", async (original) => ({
+  ...(await original<typeof import("../../state/session")>()),
   usePreparedConnection: () => Option.fromNullishOr(state.connection),
   readPreparedConnection: () => state.connection,
   useEnvironmentScope: () => state.allowed,
@@ -123,7 +124,10 @@ const payload = {
   derivedFromMemoryRevisions: [],
 };
 const activeItem = Schema.decodeUnknownSync(MemoryItem)({
-  ...item,
+  memorySpaceId: item.memorySpaceId,
+  memoryId: item.memoryId,
+  scope: { kind: "user" },
+  pendingSync: false,
   status: "active",
   revision: revision(5),
   payload,
