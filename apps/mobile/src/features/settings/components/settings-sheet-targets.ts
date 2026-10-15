@@ -1,4 +1,5 @@
 export type SettingsSheetTarget =
+  | "SettingsMemory"
   | "SettingsGoatBot"
   | "SettingsEnvironments"
   | "SettingsNotifications"

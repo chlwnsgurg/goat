@@ -1,3 +1,4 @@
+import { presentMemoryRunAccess } from "@goat/client-runtime/memory-presentation";
 import { scopeProjectRef, scopeThreadRef } from "@goat/client-runtime/environment";
 import { resolveProviderInstanceDisplayName } from "@goat/client-runtime/state/provider-instance-display";
 import { resolveSubagentMetadata } from "@goat/client-runtime/state/subagent-display";
@@ -16,6 +17,7 @@ import { resolveSubagentRowPresentation } from "./threadAgentsPresentation";
 
 type SubagentRowSubagent = Pick<
   OrchestrationV2Subagent,
+  | "memoryGrantCeiling"
   | "threadId"
   | "childThreadId"
   | "model"
@@ -76,6 +78,7 @@ export function SubagentRow(props: {
           ) : null}
         </View>
         <SubagentMetadata environmentId={props.environmentId} subagent={props.subagent} />
+        <SubagentMemoryAccess subagent={props.subagent} />
         {detail ? (
           <Text
             numberOfLines={3}
@@ -151,5 +154,18 @@ function SubagentMetadata(props: {
         </View>
       ))}
     </View>
+  );
+}
+
+export function SubagentMemoryAccess({
+  subagent,
+}: {
+  readonly subagent: Pick<OrchestrationV2Subagent, "memoryGrantCeiling">;
+}) {
+  const view = presentMemoryRunAccess(subagent);
+  return (
+    <Text className="text-xs text-foreground-muted">
+      Saved memory access: {view.savedCeiling} · Effective access: {view.effectiveAccess}
+    </Text>
   );
 }

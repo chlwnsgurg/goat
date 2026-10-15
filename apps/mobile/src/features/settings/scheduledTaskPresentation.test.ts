@@ -75,3 +75,11 @@ describe("formatNextScheduledTaskRun", () => {
     expect(formatNextScheduledTaskRun("invalid", now)).toBe("Next run unavailable");
   });
 });
+
+import { scheduledMemoryAccess } from "./scheduledTaskPresentation";
+it("keeps the saved ceiling separate from unknown current access", () => {
+  expect(scheduledMemoryAccess({})).toBe("Saved memory access: none · Effective access: unknown");
+  expect(scheduledMemoryAccess({ memoryGrantCeiling: "read_write" })).toBe(
+    "Saved memory access: read_write · Effective access: unknown",
+  );
+});
