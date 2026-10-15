@@ -3,7 +3,8 @@ import type {
   RuntimeSubagent,
 } from "@goat/client-runtime/state/subagentRuntime";
 import type { ProviderDriverKind, ProviderInstanceId, ServerProvider } from "@goat/contracts";
-import { ChevronDownIcon, LoaderCircleIcon, SquareIcon } from "~/components/solar";
+import { ChevronDownIcon, SquareIcon } from "~/components/solar";
+import { Spinner } from "~/components/ui/spinner";
 import { useState, type ReactNode } from "react";
 
 import { AgentElapsed } from "./AgentElapsed";
@@ -168,7 +169,7 @@ export function ThreadLineageWorkflowRow({
                 }
               >
                 {stopping ? (
-                  <LoaderCircleIcon aria-hidden className="size-3 animate-spin" />
+                  <Spinner size="xs" aria-hidden />
                 ) : (
                   <SquareIcon aria-hidden className="size-3 fill-current" />
                 )}
