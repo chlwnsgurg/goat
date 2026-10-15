@@ -60,14 +60,15 @@ const live = (
   onInput?: (input: M.GenerateMemorySummaryInput) => void,
   local = false,
   elapsedPerCallMs = 0,
+  unconfigured = false,
 ) =>
   Worker.layer.pipe(
     Layer.provideMerge(service),
     Layer.provideMerge(maintenance),
     Layer.provide(NodeServices.layer),
-    Layer.provide(
+    Layer.provideMerge(
       Settings.layerTest({
-        defaultModelSelection: selection,
+        defaultModelSelection: unconfigured ? null : selection,
         memoryHub: local ? { mode: "disabled" } : { mode: "hub", memorySpaceId: space },
       }),
     ),
@@ -274,6 +275,26 @@ describe("MemoryWorker", () => {
         "attempt_expired",
       );
     }).pipe(Effect.provide(live())),
+  );
+  it.effect("resumes skipped summaries after configuring a model without a new event", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const worker = yield* Worker.MemoryWorker;
+      const store = yield* Store.MemoryStore;
+      yield* worker.sweepDue();
+      assert.strictEqual(yield* store.readThreadHookWatermark(), 2);
+      assert.strictEqual((yield* store.dueWork(0, 100)).length, 0);
+      const settings = yield* Settings.ServerSettingsService;
+      yield* settings.updateSettings({ defaultModelSelection: selection });
+      yield* worker.sweepDue();
+      const page = yield* store.list({
+        memorySpaceId: space,
+        scope: { kind: "thread", thread: { environmentId, threadId } },
+        limit: 20,
+      });
+      assert.strictEqual(page.length, 1);
+      assert.strictEqual(page[0]!.status, "active");
+    }).pipe(Effect.provide(live(false, undefined, false, 0, true))),
   );
   it.effect("catches up committed termination and emits one stable summary", () =>
     Effect.gen(function* () {
