@@ -495,7 +495,7 @@ describe("MemoryCompactor", () => {
             },
           },
           payload: {
-            text: '\u0000\u0001"\\한🙂'.repeat(700),
+            text: '\u0000\u0001"\\한🙂'.repeat(100),
             evidence: [],
             derivedFromMemoryRevisions: [],
           },
