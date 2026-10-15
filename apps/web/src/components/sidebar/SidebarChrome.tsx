@@ -36,7 +36,11 @@ import { observeResize } from "~/lib/observeResize";
 import { useGoatBotPreferred } from "../goatBot/GoatBotModeButton";
 import { useGoatBotWaitingCount } from "../goatBot/useGoatBotWaitingCount";
 import { useDestinationRailVisible } from "./DestinationRail";
-import { SidebarViewToggles } from "./SidebarViewToggles";
+import {
+  SidebarPriorityCountBadge,
+  SidebarViewToggles,
+  useSidebarPriorityCount,
+} from "./SidebarViewToggles";
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron,
@@ -100,6 +104,7 @@ export function SidebarBrandWidthProbe({
 }: {
   onWidthChange: (width: number) => void;
 }) {
+  const priorityCount = useSidebarPriorityCount();
   const observeWidth = useCallback(
     (probe: HTMLDivElement) => {
       return observeResize(probe, ([entry]) => {
@@ -120,6 +125,7 @@ export function SidebarBrandWidthProbe({
       </div>
       <span className="flex items-center gap-1">
         <span className="size-8 sm:size-7" />
+        <SidebarPriorityCountBadge priorityCount={priorityCount} />
         <span className="size-8 sm:size-7" />
       </span>
     </div>

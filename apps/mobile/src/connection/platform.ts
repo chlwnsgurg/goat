@@ -20,6 +20,7 @@ import Constants from "expo-constants";
 import * as Network from "expo-network";
 import { AppState } from "react-native";
 
+import { isForegroundHandoffActive } from "../lib/foreground-handoff";
 import { authClientMetadata } from "../lib/authClientMetadata";
 import * as Runtime from "../lib/runtime";
 import * as MobileStorage from "../persistence/mobile-storage";
@@ -128,17 +129,24 @@ const layerWakeups = Wakeups.layer({
         Effect.acquireRelease(
           Effect.sync(() => {
             let backgroundedAtMs = AppState.currentState === "background" ? Date.now() : null;
+            let foregroundHandoff = isForegroundHandoffActive();
             return AppState.addEventListener("change", (state) => {
               if (state === "background") {
                 backgroundedAtMs = Date.now();
+                foregroundHandoff = isForegroundHandoffActive();
                 return;
               }
               if (state === "active") {
                 Queue.offerUnsafe(
                   queue,
-                  mobileApplicationActiveWakeup(backgroundedAtMs, Date.now()),
+                  mobileApplicationActiveWakeup(
+                    backgroundedAtMs,
+                    Date.now(),
+                    foregroundHandoff || isForegroundHandoffActive(),
+                  ),
                 );
                 backgroundedAtMs = null;
+                foregroundHandoff = false;
               }
             });
           }),

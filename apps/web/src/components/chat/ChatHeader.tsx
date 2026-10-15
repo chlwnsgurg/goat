@@ -385,7 +385,7 @@ export const ChatHeader = memo(function ChatHeader({
                   }
                 >
                   <ProjectFavicon project={activeProject} className="size-3.5" />
-                  <WorkspaceBreadcrumbText className="max-w-40">
+                  <WorkspaceBreadcrumbText className="max-w-24 sm:max-w-40">
                     {activeProjectName}
                   </WorkspaceBreadcrumbText>
                 </TooltipTrigger>

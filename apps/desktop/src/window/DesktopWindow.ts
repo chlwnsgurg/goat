@@ -35,6 +35,8 @@ import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts"
 import { makeQuitShortcutHandler } from "./QuitHold.ts";
 import { copyContextMenuImage } from "./ContextMenuImage.ts";
 
+const MIN_MAIN_WINDOW_WIDTH = 840;
+const MIN_MAIN_WINDOW_HEIGHT = 620;
 const TITLEBAR_HEIGHT = 40;
 // Matches --workspace-topbar-height in apps/web/src/index.css. Native macOS
 // buttons are 14 points tall and do not scale with the renderer's zoom.
@@ -170,16 +172,174 @@ function getInitialWindowBackgroundColor(shouldUseDarkColors: boolean): string {
 
 type DisplayBounds = Pick<Electron.Rectangle, "x" | "y" | "width" | "height">;
 
-function windowFitsWithinDisplay(
+interface RectEdges {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+}
+
+function toRectEdges(bounds: DisplayBounds): RectEdges {
+  return {
+    left: bounds.x,
+    top: bounds.y,
+    right: bounds.x + bounds.width,
+    bottom: bounds.y + bounds.height,
+  };
+}
+
+function subtractRect(rect: RectEdges, cover: RectEdges): readonly RectEdges[] {
+  const overlapLeft = Math.max(rect.left, cover.left);
+  const overlapTop = Math.max(rect.top, cover.top);
+  const overlapRight = Math.min(rect.right, cover.right);
+  const overlapBottom = Math.min(rect.bottom, cover.bottom);
+
+  if (overlapLeft >= overlapRight || overlapTop >= overlapBottom) {
+    return [rect];
+  }
+
+  const remainder: RectEdges[] = [];
+  if (rect.left < overlapLeft) {
+    remainder.push({
+      left: rect.left,
+      top: rect.top,
+      right: overlapLeft,
+      bottom: rect.bottom,
+    });
+  }
+  if (overlapRight < rect.right) {
+    remainder.push({
+      left: overlapRight,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+    });
+  }
+  if (rect.top < overlapTop) {
+    remainder.push({
+      left: overlapLeft,
+      top: rect.top,
+      right: overlapRight,
+      bottom: overlapTop,
+    });
+  }
+  if (overlapBottom < rect.bottom) {
+    remainder.push({
+      left: overlapLeft,
+      top: overlapBottom,
+      right: overlapRight,
+      bottom: rect.bottom,
+    });
+  }
+  return remainder;
+}
+
+function windowFitsWithinDisplays(
+  windowBounds: DesktopAppSettings.DesktopWindowBounds,
+  displays: readonly DisplayBounds[],
+): boolean {
+  if (windowBounds.width <= 0 || windowBounds.height <= 0 || displays.length === 0) {
+    return false;
+  }
+
+  let uncovered: readonly RectEdges[] = [toRectEdges(windowBounds)];
+  for (const display of displays) {
+    if (display.width <= 0 || display.height <= 0) {
+      continue;
+    }
+    const cover = toRectEdges(display);
+    uncovered = uncovered.flatMap((rect) => subtractRect(rect, cover));
+    if (uncovered.length === 0) {
+      return true;
+    }
+  }
+  return uncovered.length === 0;
+}
+
+function getOverlapArea(left: DisplayBounds, right: DisplayBounds): number {
+  const overlapWidth = Math.max(
+    0,
+    Math.min(left.x + left.width, right.x + right.width) - Math.max(left.x, right.x),
+  );
+  const overlapHeight = Math.max(
+    0,
+    Math.min(left.y + left.height, right.y + right.height) - Math.max(left.y, right.y),
+  );
+  return overlapWidth * overlapHeight;
+}
+
+function getAxisGap(
+  firstStart: number,
+  firstSize: number,
+  secondStart: number,
+  secondSize: number,
+): number {
+  if (firstStart + firstSize < secondStart) {
+    return secondStart - (firstStart + firstSize);
+  }
+  if (secondStart + secondSize < firstStart) {
+    return firstStart - (secondStart + secondSize);
+  }
+  return 0;
+}
+
+function getDisplayDistanceSquared(
   windowBounds: DesktopAppSettings.DesktopWindowBounds,
   displayBounds: DisplayBounds,
-): boolean {
-  return (
-    windowBounds.x >= displayBounds.x &&
-    windowBounds.y >= displayBounds.y &&
-    windowBounds.x + windowBounds.width <= displayBounds.x + displayBounds.width &&
-    windowBounds.y + windowBounds.height <= displayBounds.y + displayBounds.height
-  );
+): number {
+  const dx = getAxisGap(windowBounds.x, windowBounds.width, displayBounds.x, displayBounds.width);
+  const dy = getAxisGap(windowBounds.y, windowBounds.height, displayBounds.y, displayBounds.height);
+  return dx * dx + dy * dy;
+}
+
+function selectRecoveryDisplay(
+  windowBounds: DesktopAppSettings.DesktopWindowBounds,
+  displays: readonly DisplayBounds[],
+): DisplayBounds {
+  let selected = displays[0]!;
+  let bestOverlapArea = getOverlapArea(windowBounds, selected);
+  let bestDistanceSquared = getDisplayDistanceSquared(windowBounds, selected);
+
+  for (let index = 1; index < displays.length; index += 1) {
+    const candidate = displays[index]!;
+    const overlapArea = getOverlapArea(windowBounds, candidate);
+    const distanceSquared = getDisplayDistanceSquared(windowBounds, candidate);
+    if (
+      overlapArea > bestOverlapArea ||
+      (overlapArea === bestOverlapArea && distanceSquared < bestDistanceSquared)
+    ) {
+      selected = candidate;
+      bestOverlapArea = overlapArea;
+      bestDistanceSquared = distanceSquared;
+    }
+  }
+
+  return selected;
+}
+
+function clampDimension(value: number, minimum: number, available: number): number {
+  const maximum = Math.max(minimum, Math.floor(available));
+  return Math.min(Math.max(Math.round(value), minimum), maximum);
+}
+
+function clampCoordinate(value: number, start: number, available: number, size: number): number {
+  const minimum = Math.round(start);
+  const maximum = Math.max(minimum, Math.round(start + available) - size);
+  return Math.min(Math.max(Math.round(value), minimum), maximum);
+}
+
+function clampWindowBoundsToDisplay(
+  windowBounds: DesktopAppSettings.DesktopWindowBounds,
+  displayBounds: DisplayBounds,
+): DesktopAppSettings.DesktopWindowBounds {
+  const width = clampDimension(windowBounds.width, MIN_MAIN_WINDOW_WIDTH, displayBounds.width);
+  const height = clampDimension(windowBounds.height, MIN_MAIN_WINDOW_HEIGHT, displayBounds.height);
+  return {
+    x: clampCoordinate(windowBounds.x, displayBounds.x, displayBounds.width, width),
+    y: clampCoordinate(windowBounds.y, displayBounds.y, displayBounds.height, height),
+    width,
+    height,
+  };
 }
 
 function windowBoundsEqual(
@@ -198,13 +358,17 @@ export function resolveInitialMainWindowBounds(
   persistedBounds: DesktopAppSettings.DesktopWindowBounds | null,
   displays: readonly DisplayBounds[],
 ): DesktopAppSettings.DesktopWindowBounds | typeof DesktopAppSettings.DEFAULT_MAIN_WINDOW_SIZE {
-  if (
-    persistedBounds !== null &&
-    displays.some((display) => windowFitsWithinDisplay(persistedBounds, display))
-  ) {
+  const validDisplays = displays.filter((display) => display.width > 0 && display.height > 0);
+  if (persistedBounds === null || validDisplays.length === 0) {
+    return DesktopAppSettings.DEFAULT_MAIN_WINDOW_SIZE;
+  }
+  if (windowFitsWithinDisplays(persistedBounds, validDisplays)) {
     return persistedBounds;
   }
-  return DesktopAppSettings.DEFAULT_MAIN_WINDOW_SIZE;
+  return clampWindowBoundsToDisplay(
+    persistedBounds,
+    selectRecoveryDisplay(persistedBounds, validDisplays),
+  );
 }
 
 // A self-contained "Connecting to WSL" splash, shown immediately in wsl-only
@@ -408,8 +572,8 @@ export const make = Effect.gen(function* () {
     }
     const window = yield* electronWindow.create({
       ...initialBounds,
-      minWidth: 840,
-      minHeight: 620,
+      minWidth: MIN_MAIN_WINDOW_WIDTH,
+      minHeight: MIN_MAIN_WINDOW_HEIGHT,
       show: false,
       autoHideMenuBar: true,
       ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),

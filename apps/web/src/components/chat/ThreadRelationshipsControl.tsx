@@ -44,13 +44,13 @@ import {
   BotIcon,
   CornerLeftUpIcon,
   GitForkIcon,
-  LoaderCircleIcon,
   EllipsisIcon as MoreHorizontalIcon,
   PlusIcon,
   RocketIcon,
   SquareIcon,
   UnplugIcon,
 } from "~/components/solar";
+import { Spinner } from "~/components/ui/spinner";
 import { useMemo, useState, type ReactNode } from "react";
 
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
@@ -819,7 +819,7 @@ export function ThreadRelationshipsPanel(props: {
                               onClick={() => void merge()}
                             >
                               {busyAction === "merge" ? (
-                                <LoaderCircleIcon className="size-3 animate-spin" />
+                                <Spinner size="xs" />
                               ) : (
                                 <PullRequestGlyph.merged className="size-3" />
                               )}
@@ -867,7 +867,7 @@ export function ThreadRelationshipsPanel(props: {
                           }
                         >
                           {stoppingId === threadId ? (
-                            <LoaderCircleIcon aria-hidden className="size-3 animate-spin" />
+                            <Spinner size="xs" aria-hidden />
                           ) : (
                             <SquareIcon aria-hidden className="size-3 fill-current" />
                           )}

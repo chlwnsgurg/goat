@@ -32,8 +32,7 @@ export function useSidebarActivityToggle() {
   return { activityActive: projectsSidebar === false, toggleActivity };
 }
 
-export function SidebarViewToggles({ onBackdrop }: { onBackdrop: boolean }) {
-  const { activityActive, toggleActivity } = useSidebarActivityToggle();
+export function useSidebarPriorityCount() {
   const publishedPriorityCount = useSyncExternalStore(
     subscribeSidebarPriorityCount,
     getPublishedSidebarPriorityCount,
@@ -47,8 +46,7 @@ export function SidebarViewToggles({ onBackdrop }: { onBackdrop: boolean }) {
   const localLastVisitedAtByKey = useUiStateStore((state) => state.threadLastVisitedAtById);
   const globalAgentRef = useGlobalAgentStore((state) => state.ref);
   const botRef = useGlobalAgentStore((state) => state.botRef);
-  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const priorityCount = useMemo(() => {
+  return useMemo(() => {
     if (publishedPriorityCount !== null) return publishedPriorityCount;
     const index = buildSidebarSubagentIndex(threads);
     const visible = excludeGlobalAgentThreads(
@@ -75,6 +73,21 @@ export function SidebarViewToggles({ onBackdrop }: { onBackdrop: boolean }) {
     serverConfigs,
     threads,
   ]);
+}
+
+/** The header and its width probe subscribe to the same count and measure the same badge. */
+export function SidebarPriorityCountBadge({ priorityCount }: { priorityCount: number }) {
+  return priorityCount > 0 ? (
+    <span className="min-w-4 text-center text-xs text-secondary-label tabular-nums">
+      {priorityCount}
+    </span>
+  ) : null;
+}
+
+export function SidebarViewToggles({ onBackdrop }: { onBackdrop: boolean }) {
+  const { activityActive, toggleActivity } = useSidebarActivityToggle();
+  const priorityCount = useSidebarPriorityCount();
+  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const activityLabel = activityActive ? "Turn off activity view" : "View activity";
   const activityName =
     priorityCount > 0 ? `${activityLabel}, ${priorityCount} in Priority` : activityLabel;
@@ -107,11 +120,7 @@ export function SidebarViewToggles({ onBackdrop }: { onBackdrop: boolean }) {
           {shortcutLabel ? ` (${shortcutLabel})` : ""}
         </TooltipPopup>
       </Tooltip>
-      {priorityCount > 0 ? (
-        <span className="min-w-4 text-center text-xs text-secondary-label tabular-nums">
-          {priorityCount}
-        </span>
-      ) : null}
+      <SidebarPriorityCountBadge priorityCount={priorityCount} />
       <Tooltip>
         <TooltipTrigger
           render={

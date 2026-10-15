@@ -259,28 +259,48 @@ export function persistClientSettingsPatch(
   // Patches queued before hydration must publish before newer optimistic patches.
   const deferPatch =
     clientSettingsHydrationStatus !== "ready" || deferredClientSettingsPatchCount > 0;
+  let previous: ClientSettings | undefined;
+  const publish = () => {
+    previous = getClientSettingsSnapshot();
+    replaceClientSettingsSnapshot({ ...previous, ...patch });
+  };
   if (deferPatch) {
     deferredClientSettingsPatchCount += 1;
   } else {
-    replaceClientSettingsSnapshot({ ...getClientSettingsSnapshot(), ...patch });
+    publish();
   }
   return enqueueClientSettingsPersistence(async () => {
-    if (deferPatch) {
-      try {
-        if (clientSettingsHydrationStatus !== "ready") {
-          await hydrateClientSettings();
+    try {
+      if (deferPatch) {
+        try {
+          if (clientSettingsHydrationStatus !== "ready") {
+            await hydrateClientSettings();
+          }
+          publish();
+        } finally {
+          deferredClientSettingsPatchCount -= 1;
         }
-        replaceClientSettingsSnapshot({ ...getClientSettingsSnapshot(), ...patch });
-      } finally {
-        deferredClientSettingsPatchCount -= 1;
       }
+      await persist(getClientSettingsSnapshot());
+    } catch (error) {
+      if (previous) {
+        const current = getClientSettingsSnapshot();
+        const rollback = Object.fromEntries(
+          Object.entries(patch)
+            .filter(([key, value]) => Object.is(current[key as keyof ClientSettings], value))
+            .map(([key]) => [key, previous?.[key as keyof ClientSettings]]),
+        );
+        // Roll back before the next queued write captures its snapshot.
+        if (Object.keys(rollback).length > 0) {
+          replaceClientSettingsSnapshot({ ...current, ...rollback });
+        }
+      }
+      console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} persist failed`, {
+        operation: "persist",
+        ...safeErrorLogAttributes(error),
+      });
+      throw error;
     }
-    await persist(getClientSettingsSnapshot());
-  }).catch((error) => {
-    console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} persist failed`, {
-      operation: "persist",
-      ...safeErrorLogAttributes(error),
-    });
   });
 }
 
@@ -838,7 +858,7 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
         }
       }
       if (Object.keys(clientPatch).length > 0) {
-        void persistClientSettingsPatch(clientPatch);
+        void persistClientSettingsPatch(clientPatch).catch(reportClientSettingsFailure);
       }
     },
     [environmentId, environments, persist, persistServerSettings, sharedSettingsSyncTargetIds],
@@ -855,9 +875,23 @@ export function useUpdatePrimarySettings() {
   return useUpdateSettingsTarget(usePrimaryEnvironment()?.environmentId ?? null);
 }
 
+function reportClientSettingsFailure(): void {
+  toastManager.add({
+    type: "error",
+    title: "Setting not saved",
+    description: "Could not save settings on this device. Try again.",
+  });
+}
+
 export function useUpdateClientSettings() {
   return useCallback((patch: ClientSettingsPatch) => {
-    return persistClientSettingsPatch(patch);
+    return persistClientSettingsPatch(patch).then(
+      () => true,
+      () => {
+        reportClientSettingsFailure();
+        return false;
+      },
+    );
   }, []);
 }
 
