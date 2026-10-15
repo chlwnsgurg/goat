@@ -162,6 +162,7 @@ export const parseClaudeMemory: MemoryImportParser = (input) =>
         candidate: {
           sourceItemKey,
           sourceFingerprint: hash(
+            // @effect-diagnostics-next-line preferSchemaOverJson:off -- deterministic tuple framing for hashing, not a JSON wire codec.
             JSON.stringify([
               input.parserVersion,
               parsed.name,

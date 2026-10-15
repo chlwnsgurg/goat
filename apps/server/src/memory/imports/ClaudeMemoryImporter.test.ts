@@ -44,11 +44,13 @@ const fixtureTest = (
     ),
   );
 const expectIssue = (snapshot: ImportSnapshot, issue: M.MemoryImportIssue) =>
-  Effect.gen(function* () {
-    const error = yield* Effect.flip(parseClaudeMemory(snapshot));
-    assert.instanceOf(error, M.MemoryImportRpcError);
-    assert.equal(error.issue, issue);
-    assert.deepEqual(JSON.parse(JSON.stringify(error)), { _tag: "MemoryImportRpcError", issue });
+  Effect.match(parseClaudeMemory(snapshot), {
+    onSuccess: () => assert.fail("Expected a typed import refusal"),
+    onFailure: (error) => {
+      assert.instanceOf(error, M.MemoryImportRpcError);
+      assert.equal(error.issue, issue);
+      assert.deepEqual(JSON.parse(JSON.stringify(error)), { _tag: "MemoryImportRpcError", issue });
+    },
   });
 
 describe("ClaudeMemoryImporter", () => {
