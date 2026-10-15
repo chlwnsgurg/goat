@@ -31,7 +31,7 @@ export default Effect.gen(function* () {
   for (const trigger of definitions) {
     if (
       /^memory_.*_hub_snapshot_(bytes|rows)_(insert|update|delete)$/.test(trigger.name) ||
-      /^memory_tombstones_snapshot_forget_/.test(trigger.name)
+      trigger.name.startsWith("memory_tombstones_snapshot_forget_")
     ) {
       yield* sql.unsafe(`DROP TRIGGER ${trigger.name}`);
     } else if (/^memory_import_lineage_(insert|update|delete)$/.test(trigger.name)) {
@@ -45,7 +45,9 @@ export default Effect.gen(function* () {
     }
   }
   const counter = (space: string, dimension: string, value: string) =>
-    `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${space},'${dimension}','',${value}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;
+    value.startsWith("-")
+      ? `UPDATE memory_quota_counters SET value=value+(${value}) WHERE space=${space} AND dimension='${dimension}' AND scope_key='';`
+      : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${space},'${dimension}','',${value}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;
   // Replace origin triggers as one unit, retaining every private admission dimension.
   const columns =
     "receipt_id,space,environment_id,record_kind,source_id,format,source_locator,source_item_key,parser_version,scope_json,accepted_source_fingerprint,accepted_content_fingerprints_json,observed_rejected_fingerprint,memory_id,accepted_revision_id,batch_operation_id,request_digest,completed_items_json,outcome,issue,observed_at_utc,source_aliases_json,registration_json,result_ref".split(

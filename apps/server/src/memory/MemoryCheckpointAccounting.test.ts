@@ -17,7 +17,6 @@ import {
   emptyCheckpointInventory,
   encodeCheckpointPage,
   encodeCheckpointRecord,
-  checkpointKeys,
 } from "./MemoryCheckpointInventory.ts";
 import {
   checkpointBound,
@@ -150,7 +149,7 @@ it.effect(
       };
       yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},${id(40)},${memoryId},${JSON.stringify(payload)},'[]')`;
       for (const n of [40, 41])
-        yield* sql`INSERT INTO memory_revisions VALUES (${space},${id(n)},${memoryId},${id(n + 100)},'[]','{"kind":"user"}','inference',${JSON.stringify({ environmentId })},${id(40)},0)`;
+        yield* sql`INSERT INTO memory_revisions VALUES (${space},${id(n)},${memoryId},${id(n + 100)},${JSON.stringify(n === 40 ? [] : [id(40)])},'{"kind":"user"}','inference',${JSON.stringify({ environmentId, importSource: { sourceId: id(80), format: "codex", parserVersion: "v1", sourceLocator: "synthetic.md", sourceItemKey: `key-${n}`, sourceFingerprint: "a".repeat(64), contentFingerprint: "b".repeat(64), sourceAliases: [], acceptedContentFingerprints: [] } })},${id(40)},0)`;
       const item = {
         memorySpaceId: space,
         memoryId,

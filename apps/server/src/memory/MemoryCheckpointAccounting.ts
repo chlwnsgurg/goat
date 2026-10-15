@@ -10,6 +10,9 @@ import {
 } from "./MemoryCheckpointInventory.ts";
 import { futureForgetReserve } from "./MemoryCheckpointBound.ts";
 
+const decodeSpace = Schema.decodeUnknownEffect(M.MemorySpaceId);
+const decodeMemory = Schema.decodeUnknownEffect(M.MemoryId);
+
 export class CheckpointAccountingError extends Schema.TaggedError<CheckpointAccountingError>()(
   "CheckpointAccountingError",
   { stage: Schema.String },
@@ -27,11 +30,11 @@ export const refreshCheckpointAccounting = Effect.fnUntraced(function* () {
     scope_key: string;
   }>`SELECT dimension,scope_key FROM memory_quota_counters WHERE space='_checkpoint_dirty'`;
   for (const key of dirty) {
-    const space = yield* Schema.decodeUnknownEffect(M.MemorySpaceId)(key.dimension);
+    const space = yield* decodeSpace(key.dimension);
     const memory = key.scope_key.startsWith("m:");
     const id = key.scope_key.slice(2);
     const inventory = memory
-      ? yield* selectCheckpointMemory(space, yield* Schema.decodeUnknownEffect(M.MemoryId)(id), now)
+      ? yield* selectCheckpointMemory(space, yield* decodeMemory(id), now)
       : yield* selectCheckpointReceipt(space, id);
     const size = checkpointInventorySize(inventory);
     if (memory) {
@@ -53,7 +56,13 @@ export const refreshCheckpointAccounting = Effect.fnUntraced(function* () {
         value: number;
       }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension=${dimension} AND scope_key=${key.scope_key}`;
       const delta = value - (previous[0]?.value ?? 0);
-      yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${space},${dimension},'',${delta}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`;
+      if (delta < 0) {
+        const updated =
+          yield* sql`UPDATE memory_quota_counters SET value=value+${delta} WHERE space=${space} AND dimension=${dimension} AND scope_key='' RETURNING value`;
+        if (!updated.length)
+          return yield* new CheckpointAccountingError({ stage: "missing-total" });
+      } else
+        yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${space},${dimension},'',${delta}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`;
       yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${space},${dimension},${key.scope_key},${value}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=excluded.value`;
     }
     yield* sql`DELETE FROM memory_quota_counters WHERE space='_checkpoint_dirty' AND dimension=${space} AND scope_key=${key.scope_key}`;

@@ -32,10 +32,31 @@ export const emptyCheckpointInventory = (): CheckpointInventory => ({
   importLineage: [],
 });
 const strict = { onExcessProperty: "error" } as const;
-const decode = <S extends Schema.Constraint>(schema: S, json: string) =>
-  Schema.decodeUnknownEffect(Schema.fromJsonString(schema))(json, strict);
-const decodeValue = <S extends Schema.Constraint>(schema: S, value: unknown) =>
-  Schema.decodeUnknownEffect(schema)(value, strict);
+const jsonDecoder = <S extends Schema.Constraint>(schema: S) => {
+  const decode = Schema.decodeUnknownEffect(Schema.fromJsonString(schema));
+  return (json: string) => decode(json, strict);
+};
+const valueDecoder = <S extends Schema.Constraint>(schema: S) => {
+  const decode = Schema.decodeUnknownEffect(schema);
+  return (value: unknown) => decode(value, strict);
+};
+const decodeIdentity = jsonDecoder(M.MemoryIdentityRecord);
+const decodeFence = jsonDecoder(M.MemoryFenceRecord);
+const decodeLineage = jsonDecoder(M.MemoryImportLineageRecord);
+const decodeProjection = jsonDecoder(Schema.Record(Schema.String, Schema.Unknown));
+const decodePayload = jsonDecoder(M.MemoryPayload);
+const decodeHeads = jsonDecoder(Schema.Array(M.MemoryRevisionId));
+const decodeSuppression = jsonDecoder(M.MemorySuppressionRecord);
+const decodeResolution = jsonDecoder(M.MemoryResolution);
+const decodeJudgment = jsonDecoder(M.MemoryResolutionPayload);
+const decodeScope = jsonDecoder(M.MemoryScope);
+const decodeProvenance = jsonDecoder(M.MemoryProvenance);
+const decodeCompact = jsonDecoder(M.MemoryCompactReceipt);
+const decodeItem = valueDecoder(M.MemoryItem);
+const decodeTombstone = valueDecoder(M.MemoryTombstone);
+const decodeRevision = valueDecoder(M.MemoryRevision);
+const decodeConflict = valueDecoder(M.MemoryConflict);
+const validatePage = Schema.decodeUnknownEffect(M.MemoryHubCheckpointPage);
 const timestamp = (n: number) => DateTime.formatIso(DateTime.makeUnsafe(n));
 
 /** These are JSON objects in the page, never JSON strings containing encoded JSON. */
@@ -66,13 +87,12 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
     fence_json: string;
   }>`SELECT identity_json,fence_json FROM memory_identity_ledger WHERE space=${space} AND memory_id=${id}`;
   if (!ledgers[0]) return all;
-  all.identities.push(yield* decode(M.MemoryIdentityRecord, ledgers[0].identity_json));
-  all.fences.push(yield* decode(M.MemoryFenceRecord, ledgers[0].fence_json));
+  all.identities.push(yield* decodeIdentity(ledgers[0].identity_json));
+  all.fences.push(yield* decodeFence(ledgers[0].fence_json));
   const lineage = yield* sql<{
     record_json: string;
   }>`SELECT record_json FROM memory_import_lineage WHERE space=${space} AND memory_id=${id} ORDER BY kind,key`;
-  for (const row of lineage)
-    all.importLineage.push(yield* decode(M.MemoryImportLineageRecord, row.record_json));
+  for (const row of lineage) all.importLineage.push(yield* decodeLineage(row.record_json));
   const items = yield* sql<{
     item_json: string;
     heads_json: string;
@@ -81,16 +101,15 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
   const row = items[0];
   let heads: readonly M.MemoryRevisionId[] = [];
   if (row) {
-    const projection = yield* decode(Schema.Record(Schema.String, Schema.Unknown), row.item_json);
+    const projection = yield* decodeProjection(row.item_json);
     const unsent =
       yield* sql`SELECT 1 FROM memory_outbox WHERE space=${space} AND memory_id=${id} AND kind IN ('sync','revert_intent') AND status IN ('pending','retry','running') LIMIT 1`;
-    const item = yield* decodeValue(
-      M.MemoryItem,
+    const item = yield* decodeItem(
       projection.status === "active"
         ? row.body_json
           ? {
               ...projection,
-              payload: yield* decode(M.MemoryPayload, row.body_json),
+              payload: yield* decodePayload(row.body_json),
               pendingSync: unsent.length > 0,
             }
           : {
@@ -122,7 +141,7 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
           }
         : item,
     );
-    heads = yield* decode(Schema.Array(M.MemoryRevisionId), row.heads_json);
+    heads = yield* decodeHeads(row.heads_json);
   }
   const tombstones = yield* sql<{
     delete_operation_id: string;
@@ -132,7 +151,7 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
   const t = tombstones[0];
   if (t) {
     all.tombstones.push(
-      yield* decodeValue(M.MemoryTombstone, {
+      yield* decodeTombstone({
         memorySpaceId: space,
         memoryId: id,
         deleteOperationId: t.delete_operation_id,
@@ -146,8 +165,7 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
     const suppressions = yield* sql<{
       record_json: string;
     }>`SELECT record_json FROM memory_import_keys WHERE space=${space} AND memory_id=${id} AND key_kind IN ('sourceKey','content','sourceExclusion') ORDER BY key_kind,key`;
-    for (const r of suppressions)
-      all.suppressions.push(yield* decode(M.MemorySuppressionRecord, r.record_json));
+    for (const r of suppressions) all.suppressions.push(yield* decodeSuppression(r.record_json));
     return all;
   }
   const resolutions = yield* sql<{
@@ -156,8 +174,8 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
   }>`SELECT r.resolution_json,p.body_json FROM memory_resolutions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.judgment_payload_ref WHERE r.space=${space} AND r.memory_id=${id} AND r.revert_deadline>${now} ORDER BY r.resolution_id`;
   for (const r of resolutions)
     all.resolutions.push({
-      resolution: yield* decode(M.MemoryResolution, r.resolution_json),
-      payload: r.body_json ? yield* decode(M.MemoryResolutionPayload, r.body_json) : null,
+      resolution: yield* decodeResolution(r.resolution_json),
+      payload: r.body_json ? yield* decodeJudgment(r.body_json) : null,
     });
   const needed = new Set([
     ...heads,
@@ -179,19 +197,19 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
     : [];
   for (const r of revisions)
     all.revisions.push({
-      revision: yield* decodeValue(M.MemoryRevision, {
+      revision: yield* decodeRevision({
         memorySpaceId: space,
         memoryId: id,
         revisionId: r.revision_id,
         operationId: r.operation_id,
-        parents: yield* decode(Schema.Array(M.MemoryRevisionId), r.parents_json),
-        scope: yield* decode(M.MemoryScope, r.scope_json),
+        parents: yield* decodeHeads(r.parents_json),
+        scope: yield* decodeScope(r.scope_json),
         assertionKind: r.assertion_kind,
-        provenance: yield* decode(M.MemoryProvenance, r.provenance_json),
+        provenance: yield* decodeProvenance(r.provenance_json),
         payloadRef: r.payload_ref ?? r.revision_id,
         createdAtUtc: timestamp(r.created_at),
       }),
-      payload: r.body_json ? yield* decode(M.MemoryPayload, r.body_json) : null,
+      payload: r.body_json ? yield* decodePayload(r.body_json) : null,
     });
   const conflicts = yield* sql<{
     conflict_id: string;
@@ -201,11 +219,11 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
   }>`SELECT * FROM memory_conflicts WHERE space=${space} AND memory_id=${id} AND status!='resolved' ORDER BY conflict_id`;
   for (const c of conflicts)
     all.conflicts.push(
-      yield* decodeValue(M.MemoryConflict, {
+      yield* decodeConflict({
         conflictId: c.conflict_id,
         memorySpaceId: space,
         memoryId: id,
-        heads: yield* decode(Schema.Array(M.MemoryRevisionId), c.heads_json),
+        heads: yield* decodeHeads(c.heads_json),
         status: c.status,
         ...(c.failure_code ? { failureCode: c.failure_code } : {}),
       }),
@@ -222,14 +240,13 @@ export const selectCheckpointReceipt = Effect.fnUntraced(function* (
     compact_json: string;
   }>`SELECT compact_json FROM memory_compact_receipts WHERE space=${space} AND operation_id=${operationId}`;
   const all = emptyCheckpointInventory();
-  if (rows[0])
-    all.compactReceipts.push(yield* decode(M.MemoryCompactReceipt, rows[0].compact_json));
+  if (rows[0]) all.compactReceipts.push(yield* decodeCompact(rows[0].compact_json));
   return all;
 });
 
 /** Validation and literal object insertion keep escaping identical to record accounting. */
 export const encodeCheckpointPage = (page: M.MemoryHubCheckpointPage) =>
-  Schema.decodeUnknownEffect(M.MemoryHubCheckpointPage)(page, strict).pipe(
+  validatePage(page, strict).pipe(
     Effect.map(
       () =>
         `{${Object.entries(page)
