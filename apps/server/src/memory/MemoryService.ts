@@ -1164,6 +1164,12 @@ const make = Effect.fnUntraced(function* (
           return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
         if (encodeHeads(current.heads) !== encodeHeads(input.expectedHeads))
           return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+        const lineage = yield* store.readThreadLineage(
+          meta.sourceThread,
+          M.MemorySpaceId.make(work.space),
+        );
+        if (lineage.state !== "tracked")
+          return yield* new Store.MemoryStoreConflict({ code: "source_invalidated" });
         // The final input also carries lineage across in-memory generation chunks. Rebuilds
         // without the old summary must not inherit dependencies from the discarded head.
         const payload = yield* decode(
@@ -1172,7 +1178,10 @@ const make = Effect.fnUntraced(function* (
               text: generated.result.text,
               evidence: generated.result.evidence,
               derivedFromMemoryRevisions: [
-                ...new Set(input.input.previousSummary?.derivedFromMemoryRevisions ?? []),
+                ...new Set([
+                  ...lineage.revisions,
+                  ...(input.input.previousSummary?.derivedFromMemoryRevisions ?? []),
+                ]),
               ],
             },
             strict,
