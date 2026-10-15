@@ -1,3 +1,5 @@
+import * as Config from "effect/Config";
+import * as DateTime from "effect/DateTime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Console from "effect/Console";
 import * as FileSystem from "effect/FileSystem";
@@ -2073,6 +2075,116 @@ describe("MemoryImport M3d", () => {
   );
 });
 
+describe("MemoryImport dependent purge accounting", () => {
+  it.effect("returns dependent head bytes on forget, rollback, replay and quota reuse", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const a = M.MemoryId.make(uuid(970));
+      yield* service.upsert(
+        {
+          memorySpaceId: space,
+          memoryId: a,
+          operationId: M.MemoryOperationId.make(uuid(971)),
+          baseBoundary: null,
+          expectedHeads: [],
+          scope: { kind: "user" },
+          assertionKind: "inference",
+          payload: { text: "synthetic dependency", evidence: [], derivedFromMemoryRevisions: [] },
+        },
+        Effect.void,
+      );
+      const source = yield* store.loadAggregate(space, a);
+      const first = prepared();
+      yield* service.importPorts.commit(first, Effect.void);
+      yield* service.upsert(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(uuid(972)),
+          baseBoundary: null,
+          expectedHeads: (yield* store.loadAggregate(space, memoryId)).heads,
+          scope: { kind: "user" },
+          assertionKind: "inference",
+          payload: {
+            text: "dependent head bytes",
+            evidence: [],
+            derivedFromMemoryRevisions: source.heads,
+          },
+        },
+        Effect.void,
+      );
+      const bytes = Effect.gen(function* () {
+        return (yield* sql<{ value: number }>`SELECT value FROM memory_quota_counters
+          WHERE space='_hub_global' AND dimension='import_live_bytes'`)[0]!.value;
+      });
+      assert.strictEqual(yield* bytes, 20);
+      const forget = {
+        memorySpaceId: space,
+        memoryId: a,
+        operationId: M.MemoryOperationId.make(uuid(973)),
+        expectedHeads: source.heads,
+      };
+      const before = yield* allMemoryInventory;
+      yield* store
+        .transact(
+          Effect.gen(function* () {
+            yield* service.forget(forget, Effect.void);
+            assert.strictEqual(yield* bytes, 0);
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.deepStrictEqual(yield* allMemoryInventory, before);
+      yield* service.forget(forget, Effect.void);
+      assert.strictEqual((yield* store.loadAggregate(space, memoryId)).item?.status, "blocked");
+      assert.strictEqual(
+        (yield* sql`SELECT * FROM memory_payloads WHERE memory_id=${memoryId}`).length,
+        0,
+      );
+      assert.strictEqual(yield* bytes, 0);
+      yield* service.forget(forget, Effect.void);
+      assert.strictEqual(yield* bytes, 0);
+      yield* service.forget(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(uuid(974)),
+          expectedHeads: (yield* store.loadAggregate(space, memoryId)).heads,
+        },
+        Effect.void,
+      );
+      assert.strictEqual(yield* bytes, 0);
+      const reg = (yield* service.importPorts.readRegistration(
+        { ...address, sourceId, by: "source" },
+        Effect.void,
+      ))!;
+      const next = prepared(reg, 980);
+      const freshId = M.MemoryId.make(uuid(990));
+      const selection = {
+        ...next.selection,
+        memoryId: freshId,
+        selector: { ...next.selection.selector, sourceItemKey: "quota-reuse" },
+      };
+      yield* sql`UPDATE memory_quota_counters SET value=${M.MEMORY_IMPORT_MAX_LIVE_BODY_BYTES - 16}
+        WHERE space='_hub_global' AND dimension='import_live_bytes'`;
+      yield* service.importPorts.commit(
+        {
+          ...next,
+          selection,
+          batch: { ...next.batch, selections: [selection] },
+          candidate: { ...next.candidate, sourceItemKey: "quota-reuse" },
+          next: { ...next.next, memoryId: freshId, sourceItemKey: "quota-reuse" },
+        },
+        Effect.void,
+      );
+      assert.strictEqual(yield* bytes, M.MEMORY_IMPORT_MAX_LIVE_BODY_BYTES);
+    }).pipe(Effect.provide(importLive)),
+  );
+});
+
 describe("MemoryImport M3d alias ownership", () => {
   it.effect("rejects forged shared payloads atomically at the canonical Store boundary", () =>
     Effect.gen(function* () {
@@ -2161,7 +2273,13 @@ describe("MemoryImport physical-growth source harness", () => {
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
           // Preserve synthetic DB and metrics until the remote evidence collector retrieves them.
-          const directory = yield* fs.makeTempDirectory({ prefix: "wp5-growth-" });
+          const directory = yield* fs.makeTempDirectory({
+            directory: yield* Config.String("WP5_GROWTH_ROOT").pipe(
+              Config.orElse(() => Config.String("TMPDIR")),
+            ),
+            prefix: "wp5-growth-",
+          });
+          yield* Effect.logInfo(`WP5_GROWTH_ARTIFACTS ${directory}`);
           const filename = `${directory}/synthetic.sqlite`;
           yield* Effect.gen(function* () {
             yield* TestClock.setTime(Date.parse(stamp));
@@ -2173,6 +2291,7 @@ describe("MemoryImport physical-growth source harness", () => {
             const worker = yield* Worker.MemoryWorker;
             const compactor = yield* Compactor.MemoryCompactor;
             const quota = yield* Quota.MemoryQuotaService;
+            const hub = yield* Hub.MemoryHubService;
             const sql = yield* SqlClient.SqlClient;
             const items = Array.from({ length: 64 }, (_, i) => ({
               sourceItemKey: `growth-${i}`,
@@ -2207,6 +2326,105 @@ describe("MemoryImport physical-growth source harness", () => {
               current: number | undefined;
               limit: number;
             }[] = [];
+            // Replace only model output; use the same lease and canonical Service commit
+            // as MemorySyncService.runResolution, without a provider or background timers.
+            const resolveChanged = (round: number) =>
+              Effect.gen(function* () {
+                for (let index = 0; index < 16; index++) {
+                  const id = M.MemoryId.make(uuid(10000 + index));
+                  const aggregate = yield* store.loadAggregate(space, id);
+                  if (aggregate.heads.length <= 1) continue;
+                  const conflict = aggregate.conflicts.find((c) => c.status === "quarantined")!;
+                  assert.isDefined(conflict);
+                  allocation += 4;
+                  const operationId = M.MemoryOperationId.make(uuid(allocation));
+                  const revisionId = M.MemoryRevisionId.make(uuid(allocation + 1));
+                  const resolutionId = M.MemoryResolutionId.make(uuid(allocation + 2));
+                  const lease = yield* hub.claim(
+                    {
+                      protocolVersion: 1,
+                      memorySpaceId: space,
+                      memoryId: id,
+                      holderEnvironmentId: environmentId,
+                      conflictId: conflict.conflictId,
+                      conflictHeadSet: aggregate.heads,
+                      attemptId: M.MemoryOperationId.make(uuid(allocation + 3)),
+                      frozenDefaultModelSelection: {
+                        instanceId: M.ProviderInstanceId.make("synthetic-growth"),
+                        model: "synthetic-model",
+                      },
+                    },
+                    authority.principal,
+                  );
+                  const head = aggregate.revisions.find(
+                    (r) => r.revision.revisionId === aggregate.heads[0],
+                  )!;
+                  const op: Extract<M.MemoryOperation, { kind: "resolve" }> = {
+                    protocolVersion: 1,
+                    kind: "resolve",
+                    memorySpaceId: space,
+                    memoryId: id,
+                    originEnvironmentId: environmentId,
+                    operationId,
+                    expectedHeads: aggregate.heads,
+                    conflictId: conflict.conflictId,
+                    fencingToken: lease.fencingToken,
+                    revision: {
+                      ...head.revision,
+                      operationId,
+                      revisionId,
+                      payloadRef: revisionId,
+                      parents: aggregate.heads,
+                      createdAtUtc: stamp,
+                    },
+                    payload: {
+                      text: text(index, round),
+                      evidence: head.payload!.evidence,
+                      derivedFromMemoryRevisions: aggregate.heads,
+                    },
+                    resolution: {
+                      resolutionId,
+                      memorySpaceId: space,
+                      memoryId: id,
+                      inputRevisionIds: aggregate.heads,
+                      inputPayloadRefs: aggregate.heads.map(
+                        (h) =>
+                          aggregate.revisions.find((r) => r.revision.revisionId === h)!.revision
+                            .payloadRef,
+                      ),
+                      judgmentRef: resolutionId,
+                      requestedModelSelection: lease.frozenDefaultModelSelection,
+                      effectiveProvider: M.ProviderDriverKind.make("codex"),
+                      effectiveModel: "synthetic-model",
+                      resolvingEnvironmentId: environmentId,
+                      fencingToken: lease.fencingToken,
+                      resultRevisionId: revisionId,
+                      appliedAtUtc: stamp,
+                      revertDeadlineUtc: M.MemoryUtcTimestamp.make(
+                        DateTime.formatIso(
+                          DateTime.makeUnsafe(Date.parse(stamp) + M.MEMORY_REVERT_WINDOW_MS),
+                        ),
+                      ),
+                    },
+                    resolutionPayload: {
+                      resolutionId,
+                      judgment: "Synthetic: keep the current source round.",
+                    },
+                  };
+                  const receipt = yield* hub.applyResolution(
+                    {
+                      protocolVersion: 1,
+                      memorySpaceId: space,
+                      holderEnvironmentId: environmentId,
+                      attemptId: lease.attemptId,
+                      operation: op,
+                    },
+                    authority.principal,
+                  );
+                  assert.strictEqual(receipt.outcome, "accepted");
+                  assert.strictEqual((yield* store.loadAggregate(space, id)).heads.length, 1);
+                }
+              });
             const runRound = (phase: "seed" | "noop" | "change", round: number) =>
               Effect.gen(function* () {
                 if (phase === "change") {
@@ -2417,6 +2635,7 @@ describe("MemoryImport physical-growth source harness", () => {
                     if (preflight.kind === "partial") batch = preflight.batch;
                   }
                 }
+                if (phase === "change") yield* resolveChanged(round);
                 yield* worker.drain;
               }).pipe(
                 Effect.tapError((error) =>

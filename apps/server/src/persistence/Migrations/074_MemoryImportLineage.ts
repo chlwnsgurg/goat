@@ -173,6 +173,12 @@ export default Effect.gen(function* () {
       `CREATE TRIGGER memory_items_import_${action.toLowerCase()} AFTER ${action} ON memory_items WHEN ${owned(p + ".space", p + ".memory_id")} BEGIN ${body} END`,
     );
   }
+  // Purge deletes dependent bodies before publishing their blocked projection.
+  // Release the still-live head charge while OLD body bytes remain available;
+  // the later item update sees no payload and therefore cannot release it twice.
+  yield* sql.unsafe(`CREATE TRIGGER memory_payloads_import_live_delete BEFORE DELETE ON memory_payloads
+    WHEN ${owned("OLD.space", "OLD.memory_id")}
+    BEGIN ${counter("'_hub_global'", "import_live_bytes", `-length(CAST(json_extract(OLD.body_json,'$.text') AS BLOB)) * (SELECT count(*) FROM memory_items i WHERE i.space=OLD.space AND i.memory_id=OLD.memory_id AND i.status!='forgotten' AND EXISTS(SELECT 1 FROM json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE v.payload_ref=OLD.payload_ref))`)} END`);
   const mappedDelta = (p: string, sign: number) =>
     liveDelta(
       `(SELECT coalesce(sum(${liveCount("i")}),0) FROM memory_items i WHERE i.space=${p}.space AND i.memory_id=${p}.memory_id)`,
