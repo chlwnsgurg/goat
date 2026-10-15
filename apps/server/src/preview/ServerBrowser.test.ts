@@ -278,6 +278,93 @@ beforeEach(() => {
   desktopConnections.length = 0;
 });
 
+it.live.each([
+  { desktop: false, outcome: "success" },
+  { desktop: false, outcome: "failure" },
+  { desktop: false, outcome: "cancelled" },
+  { desktop: true, outcome: "success" },
+  { desktop: true, outcome: "failure" },
+  { desktop: true, outcome: "cancelled" },
+])(
+  "full-page capture pauses viewers until CDP drains ($outcome, desktop=$desktop)",
+  ({ desktop, outcome }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = desktop;
+        const { browser, broker, tabId } = yield* ready;
+        yield* browser.attachViewer(viewerInput(tabId, false));
+        const context = desktop ? desktopConnections[0]!.context : contexts[0]!;
+        const cdp = context.sessions[0]!;
+        const viewerCdp = context.sessions[1]!;
+        const original = cdp.send.getMockImplementation()!;
+        const started = Promise.withResolvers<void>();
+        const captured = Promise.withResolvers<Record<string, unknown>>();
+        yield* Effect.addFinalizer(() => Effect.sync(() => captured.resolve({ data: "" })));
+        const png = Buffer.alloc(24);
+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png);
+        png.write("IHDR", 12, "ascii");
+        png.writeUInt32BE(1280, 16);
+        png.writeUInt32BE(4000, 20);
+        cdp.send.mockImplementation(async (method, input) => {
+          if (method === "Page.getLayoutMetrics")
+            return { cssContentSize: { width: 1280, height: 4000 } };
+          if (method === "Page.captureScreenshot") {
+            started.resolve();
+            return captured.promise;
+          }
+          return original(method, input);
+        });
+        viewerCdp.send.mockClear();
+        context.page.setViewportSize.mockClear();
+        const capture = yield* broker
+          .invoke<PreviewAutomationSnapshot>({
+            scope,
+            tabId,
+            operation: "snapshot",
+            input: { fullPage: true },
+          })
+          .pipe(Effect.exit, Effect.forkScoped);
+        yield* Effect.promise(() => started.promise);
+        expect(viewerCdp.send.mock.calls.map(([method]) => method)).toEqual([
+          "Page.stopScreencast",
+        ]);
+        if (outcome === "cancelled") {
+          yield* Fiber.interrupt(capture);
+          expect(viewerCdp.send.mock.calls.map(([method]) => method)).toEqual([
+            "Page.stopScreencast",
+          ]);
+        }
+        if (outcome === "failure") captured.reject(new Error("capture failed"));
+        else captured.resolve({ data: png.toString("base64") });
+        if (outcome !== "cancelled") {
+          const result = yield* Fiber.join(capture);
+          expect(result._tag).toBe(outcome === "success" ? "Success" : "Failure");
+          if (result._tag === "Success") {
+            expect(result.value.screenshot).toMatchObject({
+              width: 1280,
+              height: 4000,
+              fullPage: true,
+              clipped: false,
+              byteLength: 24,
+            });
+          }
+        }
+        // This second capture queues behind the first even if its requesting fiber was cancelled.
+        cdp.send.mockImplementation(original);
+        yield* broker.invoke({ scope, tabId, operation: "snapshot", input: {} });
+        expect(viewerCdp.send.mock.calls.map(([method]) => method)).toEqual([
+          "Page.stopScreencast",
+          "Page.stopScreencast",
+          "Page.startScreencast",
+          "Page.stopScreencast",
+          "Page.stopScreencast",
+          "Page.startScreencast",
+        ]);
+        expect(context.page.setViewportSize).not.toHaveBeenCalled();
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live("readiness none responds immediately but takeover input waits for navigation commit", () =>
   Effect.scoped(
     Effect.gen(function* () {

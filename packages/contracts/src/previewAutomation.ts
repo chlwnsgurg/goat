@@ -75,6 +75,17 @@ const PreviewAutomationTabTargetFields = {
 export const PreviewAutomationTabTargetInput = Schema.Struct(PreviewAutomationTabTargetFields);
 export type PreviewAutomationTabTargetInput = typeof PreviewAutomationTabTargetInput.Type;
 
+export const PreviewAutomationSnapshotInput = Schema.Struct({
+  ...PreviewAutomationTabTargetFields,
+  fullPage: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Capture the document from its top-left instead of the viewport. Defaults to false. Full-page captures are clipped to 3840 × 16384 CSS pixels and scaled to at most 3840 × 16384 image pixels and 8 MiB; screenshot.clipped reports omitted document content.",
+    }),
+  ),
+});
+export type PreviewAutomationSnapshotInput = typeof PreviewAutomationSnapshotInput.Type;
+
 /** `human`: a person controls the tab now; `agent`: an agent session opened it; `unclaimed`: neither. */
 export const PreviewAutomationTabOwner = Schema.Literals(["agent", "human", "unclaimed"]);
 
@@ -738,6 +749,9 @@ export const PreviewAutomationSnapshot = Schema.Struct({
     data: Schema.String,
     width: Schema.Int,
     height: Schema.Int,
+    fullPage: Schema.optional(Schema.Boolean),
+    clipped: Schema.optional(Schema.Boolean),
+    byteLength: Schema.optional(Schema.Int),
   }),
 });
 export type PreviewAutomationSnapshot = typeof PreviewAutomationSnapshot.Type;
