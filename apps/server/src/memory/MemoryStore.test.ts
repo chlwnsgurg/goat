@@ -8752,7 +8752,7 @@ it.effect.each([false, true])(
         assert.isNull(history.nextCursor);
         assert.deepStrictEqual(history.revertResults, source);
       });
-      yield* replica.pipe(checkUsage, Effect.provide(live));
+      yield* replica.pipe(checkUsage, Effect.provide(Layer.fresh(live)));
     }).pipe(checkUsage, Effect.provide(live)),
 );
 
@@ -8811,7 +8811,8 @@ it.effect(
         derivedFromMemoryRevisions: [],
       };
       yield* sql`UPDATE memory_payloads SET body_json=${JSON.stringify(body)}`;
-      yield* sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at) SELECT space,${id(71001)},memory_id,${id(71002)},parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at FROM memory_revisions LIMIT 1`;
+      yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) SELECT space,${id(71001)},memory_id,body_json,dependencies_json FROM memory_payloads LIMIT 1`;
+      yield* sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at) SELECT space,${id(71001)},memory_id,${id(71002)},parents_json,scope_json,assertion_kind,provenance_json,${id(71001)},created_at FROM memory_revisions LIMIT 1`;
       const first = (yield* store.historyPage(
         { memorySpaceId: space, memoryId: memory, limit: 100 },
         item,
