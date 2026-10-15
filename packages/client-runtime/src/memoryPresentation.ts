@@ -266,10 +266,11 @@ export function presentMemorySync(status: Pick<MemorySyncStatus, "state" | "memo
 /** Saved ceiling has a legacy default; current effective access needs independent producer evidence. */
 export function presentMemoryRunAccess(input: {
   readonly memoryGrantCeiling?: MemoryTaskGrantCeiling;
+  readonly currentMemoryAccess?: import("@goat/contracts").MemoryCurrentAccess;
 }) {
   return {
     savedCeiling: input.memoryGrantCeiling ?? "none",
-    effectiveAccess: "unknown" as const,
-    effectiveReason: null,
+    effectiveAccess: input.currentMemoryAccess?.access ?? ("unknown" as const),
+    effectiveReason: input.currentMemoryAccess?.reason ?? null,
   };
 }

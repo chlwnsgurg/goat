@@ -47,6 +47,8 @@ import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import { currentMemoryAccess } from "../memory/MemoryAccess.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
 import {
   redactHeaders,
@@ -412,6 +414,24 @@ export const layer = Layer.effect(
     const secretRequests = yield* SecretRequests.SecretRequests;
     const scheduler = yield* Scheduler.Scheduler;
     const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
+    const memoryPolicy = yield* Effect.serviceOption(ServerSettings.MemoryProviderCommittedPolicy);
+    const readMemoryPolicy = Option.isSome(memoryPolicy)
+      ? memoryPolicy.value.read
+      : Effect.succeed({ policyReady: false, enableAgentMemoryAccess: false, epoch: 0 });
+    const projectTaskResult = (result: ScheduledTaskMutationResult) =>
+      readMemoryPolicy.pipe(
+        Effect.map((policy) => ({
+          ...result,
+          task: {
+            ...result.task,
+            currentMemoryAccess: currentMemoryAccess({
+              ...policy,
+              readOnly: false,
+              memoryGrantCeiling: result.task.memoryGrantCeiling,
+            }),
+          },
+        })),
+      );
     // Webhook deliveries for one task dispatch in arrival order rather than
     // being dropped while an earlier delivery is still dispatching.
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
@@ -1003,7 +1023,20 @@ export const layer = Layer.effect(
 
     const list: ScheduledTaskService["Service"]["list"] = () =>
       listRows().pipe(
-        Effect.map((tasks) => ({ tasks })),
+        Effect.flatMap((tasks) =>
+          readMemoryPolicy.pipe(
+            Effect.map((policy) => ({
+              tasks: tasks.map((task) => ({
+                ...task,
+                currentMemoryAccess: currentMemoryAccess({
+                  ...policy,
+                  readOnly: false,
+                  memoryGrantCeiling: task.memoryGrantCeiling,
+                }),
+              })),
+            })),
+          ),
+        ),
         Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })),
       );
 
@@ -1013,9 +1046,18 @@ export const layer = Layer.effect(
           // Subscribe before taking the snapshot so a change landing between
           // the two is buffered by the subscription rather than dropped.
           const subscription = yield* PubSub.subscribe(changesPubSub);
+          const changes = Option.isSome(memoryPolicy)
+            ? Stream.merge(
+                Stream.fromSubscription(subscription),
+                (yield* memoryPolicy.value.subscribeRotations).pipe(
+                  Stream.drop(1),
+                  Stream.map(() => undefined),
+                ),
+              )
+            : Stream.fromSubscription(subscription);
           return Stream.concat(
             Stream.fromEffect(list()),
-            Stream.fromSubscription(subscription).pipe(Stream.mapEffect(() => list())),
+            changes.pipe(Stream.mapEffect(() => list())),
           );
         }),
       );
@@ -1706,11 +1748,13 @@ export const layer = Layer.effect(
     return ScheduledTaskService.of({
       list,
       subscribeList,
-      upsert,
-      setEnabled,
+      upsert: (input, captured) => upsert(input, captured).pipe(Effect.flatMap(projectTaskResult)),
+      setEnabled: (input, captured) =>
+        setEnabled(input, captured).pipe(Effect.flatMap(projectTaskResult)),
       delete: deleteTask,
-      runNow,
-      rotateWebhookToken,
+      runNow: (input) => runNow(input).pipe(Effect.flatMap(projectTaskResult)),
+      rotateWebhookToken: (input) =>
+        rotateWebhookToken(input).pipe(Effect.flatMap(projectTaskResult)),
       listWebhookDeliveries,
       getWebhookDelivery,
       triggerWebhook,

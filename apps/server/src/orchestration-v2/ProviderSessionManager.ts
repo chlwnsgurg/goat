@@ -7,6 +7,8 @@ import {
   ModelSelection,
   type AuthEnvironmentScope,
   type MemoryTaskGrantCeiling,
+  type RunId,
+  type NodeId,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
@@ -156,6 +158,8 @@ export const ProviderSessionManagerV2Error = Schema.Union([
 export type ProviderSessionManagerV2Error = typeof ProviderSessionManagerV2Error.Type;
 
 export interface ProviderMemoryPrepareInput {
+  readonly runId?: RunId;
+  readonly delegatedTaskId?: NodeId;
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
   /** Explicit null is ordinary; missing legacy task authority is none. */
@@ -173,6 +177,11 @@ export interface McpCredentialRotation {
 }
 
 export interface ProviderSessionManagerV2Shape {
+  /** SQL-free destination constraints; absence cannot establish a positive current permission. */
+  readonly memoryAccessInputs?: (
+    threadId: ThreadId,
+    providerInstanceId: ProviderInstanceId,
+  ) => Effect.Effect<ProviderMemoryPrepareInput | undefined>;
   readonly currentMemoryPolicy?: (threadId: ThreadId) => Effect.Effect<MemorySnapshotPolicy>;
   readonly prepareMcpSession?: (input: ProviderMemoryPrepareInput) => Effect.Effect<void>;
   readonly mcpCredentialRotations?: Stream.Stream<McpCredentialRotation>;
@@ -183,6 +192,8 @@ export interface ProviderSessionManagerV2Shape {
     readonly providerSessionId: ProviderSessionId;
     readonly modelSelection: ModelSelection;
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+    readonly runId?: RunId;
+    readonly delegatedTaskId?: NodeId;
     readonly memoryGrantCeiling?: MemoryTaskGrantCeiling | null;
     readonly readOnly?: boolean;
     readonly dispatchScopes?: ReadonlyArray<AuthEnvironmentScope>;
@@ -577,10 +588,19 @@ export const layerWithOptions = (
                 const previousInput = memoryPrepareInputs.get(input.threadId);
                 const admitted =
                   typeof reusePreparedInput === "object" ? reusePreparedInput : previousInput;
+                const {
+                  runId: _previousRun,
+                  delegatedTaskId: _previousTask,
+                  ...admittedAuthority
+                } = admitted ?? input;
                 const preparedInput =
                   reusePreparedInput && admitted?.providerInstanceId === input.providerInstanceId
                     ? {
-                        ...admitted,
+                        ...admittedAuthority,
+                        ...(input.runId === undefined ? {} : { runId: input.runId }),
+                        ...(input.delegatedTaskId === undefined
+                          ? {}
+                          : { delegatedTaskId: input.delegatedTaskId }),
                         readOnly: admitted.readOnly === true || input.readOnly === true,
                       }
                     : { ...input, readOnly: input.readOnly === true };
@@ -2430,6 +2450,11 @@ export const layerWithOptions = (
 
       return ProviderSessionManagerV2.of({
         currentMemoryPolicy,
+        memoryAccessInputs: (threadId, providerInstanceId) =>
+          Effect.sync(() => {
+            const prepared = memoryPrepareInputs.get(threadId);
+            return prepared?.providerInstanceId === providerInstanceId ? prepared : undefined;
+          }),
         mcpCredentialRotations: Option.isSome(admission)
           ? admission.value.rotations
           : Stream.fromPubSub(credentialRotations),
@@ -2480,6 +2505,10 @@ export const layerWithOptions = (
                     {
                       threadId: input.threadId,
                       providerInstanceId: existing.runtime.instanceId,
+                      ...(input.runId === undefined ? {} : { runId: input.runId }),
+                      ...(input.delegatedTaskId === undefined
+                        ? {}
+                        : { delegatedTaskId: input.delegatedTaskId }),
                       ...(input.memoryGrantCeiling === undefined
                         ? {}
                         : { memoryGrantCeiling: input.memoryGrantCeiling }),
@@ -2521,6 +2550,10 @@ export const layerWithOptions = (
                   {
                     threadId: input.threadId,
                     providerInstanceId: input.modelSelection.instanceId,
+                    ...(input.runId === undefined ? {} : { runId: input.runId }),
+                    ...(input.delegatedTaskId === undefined
+                      ? {}
+                      : { delegatedTaskId: input.delegatedTaskId }),
                     ...(input.memoryGrantCeiling === undefined
                       ? {}
                       : { memoryGrantCeiling: input.memoryGrantCeiling }),

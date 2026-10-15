@@ -1404,6 +1404,23 @@ const paging = { limit, cursor: Schema.optionalKey(canonical) };
 /** Server-owned task metadata. Missing legacy values never acquire managed defaults. */
 export const MemoryTaskGrantCeiling = Schema.Literals(["none", "read", "read_write"]);
 export type MemoryTaskGrantCeiling = typeof MemoryTaskGrantCeiling.Type;
+/**
+ * Response-time destination assessment, never evidence of a past issued grant.
+ * Consumers refresh after policy changes; absent destination inputs leave this omitted.
+ */
+export const MemoryCurrentAccess = Schema.Struct({
+  access: MemoryTaskGrantCeiling,
+  reason: Schema.Literals([
+    "policy_unready",
+    "environment_off",
+    "legacy_none",
+    "ceiling",
+    "read_only_destination",
+    "dispatch_scope",
+  ]),
+});
+export type MemoryCurrentAccess = typeof MemoryCurrentAccess.Type;
+
 export const MemoryTaskGrantCeilingField = MemoryTaskGrantCeiling.pipe(
   Schema.withDecodingDefault(Effect.succeed("none")),
   // Keep older in-process producers assignable; missing and none are omitted on encode and decode to none.

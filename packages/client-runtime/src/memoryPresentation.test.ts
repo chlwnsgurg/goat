@@ -448,3 +448,23 @@ describe("memory presentation boundaries", () => {
     });
   });
 });
+
+it("uses only the optional server assessment for current permission and reason", () => {
+  for (const [access, reason] of [
+    ["none", "environment_off"],
+    ["read", "read_only_destination"],
+    ["read_write", "ceiling"],
+  ] as const) {
+    expect(
+      presentMemoryRunAccess({
+        memoryGrantCeiling: "read_write",
+        currentMemoryAccess: { access, reason },
+      }),
+    ).toEqual({
+      savedCeiling: "read_write",
+      effectiveAccess: access,
+      effectiveReason: reason,
+    });
+  }
+  expect(presentMemoryRunAccess({ memoryGrantCeiling: "none" }).effectiveAccess).toBe("unknown");
+});

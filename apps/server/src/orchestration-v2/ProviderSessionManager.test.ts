@@ -6384,6 +6384,16 @@ it.effect.each(turnStartMemoryCases)(
           // Allowed refreshes check initial authority and the snapshot's live checkpoint.
           assert.deepEqual(refreshReads, [expectedReads, expectedReads]);
           assert.equal(selections, testCase.expected === "none" ? 0 : 2);
+          const constraints = yield* manager.memoryAccessInputs!(
+            threadId,
+            modelSelection.instanceId,
+          );
+          assert.isDefined(constraints);
+          assert.equal(constraints!.runId, startRunId);
+          assert.equal(constraints!.readOnly, "readOnly" in testCase);
+          assert.isUndefined(
+            yield* manager.memoryAccessInputs!(threadId, ProviderInstanceId.make("other-provider")),
+          );
           const config = yield* configs.read(threadId);
           assert.isDefined(config);
           const expectedScopes =
