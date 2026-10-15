@@ -20,6 +20,7 @@ import {
   type PreviewAutomationDragInput,
   type PreviewAutomationEvaluateInput,
   type PreviewAutomationHoverInput,
+  PreviewAutomationLogsInput,
   type PreviewAutomationNavigateInput,
   type PreviewAutomationNetworkEntry,
   type PreviewAutomationOpenInput,
@@ -77,12 +78,14 @@ import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
 import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
 import * as PreviewManager from "./Manager.ts";
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
+import { ServerBrowserDiagnostics } from "./ServerBrowserDiagnostics.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
 
 const SERVER_HOST_CLIENT_ID = SERVER_BROWSER_AUTOMATION_CLIENT_ID;
+const decodeLogsInput = Schema.decodeUnknownSync(PreviewAutomationLogsInput);
 const RENDER_SCALE = 2;
 // Chromium allows three unacked frames, so 100 ms pacing caps viewers near 30 fps.
 const SCREENCAST_ACK_PACE_MS = 100;
@@ -296,6 +299,7 @@ interface ServerTab {
   readonly viewers: Set<ViewerState>;
   readonly consoleEntries: Array<PreviewAutomationConsoleEntry>;
   readonly networkEntries: Array<PreviewAutomationNetworkEntry>;
+  readonly diagnostics: ServerBrowserDiagnostics;
   readonly actionTimeline: Array<PreviewAutomationActionEvent>;
   readonly control: SessionControl;
   /** The tab's own storage context, closed with it. Popups share their opener's. */
@@ -365,6 +369,7 @@ interface ServerDownload {
 const READ_OPERATIONS: ReadonlySet<PreviewAutomationRequest["operation"]> = new Set([
   "status",
   "snapshot",
+  "logs",
   "waitFor",
 ]);
 
@@ -688,6 +693,7 @@ const make = Effect.gen(function* () {
     if (tabs.get(key) !== tab) return;
     tabs.delete(key);
     tab.closing = true;
+    tab.diagnostics.dispose();
     clearAbortedNavigation(tab);
     // A desktop page outlives the connection unless its session closed with it.
     const end = tab.desktop && !closeSession && sessionOpen(tab) ? "reconnect" : "gone";
@@ -775,6 +781,7 @@ const make = Effect.gen(function* () {
     const control = new SessionControl(snapshot.automationOwner ?? null, () =>
       ServerBrowserPage.invalidateRefs(page),
     );
+    const diagnostics = new ServerBrowserDiagnostics(page);
     const tab: ServerTab = {
       threadId: ThreadId.make(snapshot.threadId),
       tabId: snapshot.tabId,
@@ -783,8 +790,9 @@ const make = Effect.gen(function* () {
       createdAt: Date.now(),
       usedAt: Date.now(),
       viewers: new Set(),
-      consoleEntries: [],
-      networkEntries: [],
+      consoleEntries: diagnostics.consoleEntries,
+      networkEntries: diagnostics.networkEntries,
+      diagnostics,
       actionTimeline: [],
       control,
       isolatedContext,
@@ -831,14 +839,6 @@ const make = Effect.gen(function* () {
     });
     page.on("requestfailed", (request) => {
       const errorText = request.failure()?.errorText ?? "";
-      pushBounded(tab.networkEntries, {
-        url: request.url(),
-        method: request.method(),
-        status: null,
-        failed: true,
-        errorText,
-        timestamp: new Date().toISOString(),
-      });
       if (!isMainNavigation(request)) return;
       // A navigation a newer one replaced leaves the status to the newer one. A
       // popup's first request can predate the listener, so it is untracked and
@@ -871,22 +871,6 @@ const make = Effect.gen(function* () {
         description,
       });
     });
-    page.on("response", (response) => {
-      pushBounded(tab.networkEntries, {
-        url: response.url(),
-        method: response.request().method(),
-        status: response.status(),
-        failed: false,
-        timestamp: new Date().toISOString(),
-      });
-    });
-    page.on("console", (message) => {
-      pushBounded(tab.consoleEntries, {
-        level: message.type(),
-        text: message.text().slice(0, 2_000),
-        timestamp: new Date().toISOString(),
-      });
-    });
     page.on("dialog", (dialog) => {
       tab.dialog = dialog;
       broadcastControl(tab);
@@ -898,6 +882,7 @@ const make = Effect.gen(function* () {
     // Playwright cannot reload a crashed page, so it must leave the tab list.
     const key = tabKey(tab.threadId, tab.tabId);
     if (closedPendingTabs.delete(key)) {
+      diagnostics.dispose();
       await control.close().catch(constVoid);
       if (desktop) await desktop.close().catch(constVoid);
       else await page.close().catch(constVoid);
@@ -1921,6 +1906,8 @@ const make = Effect.gen(function* () {
           ServerBrowserPage.snapshot({ ...tab, renderScale: RENDER_SCALE }),
         );
       }
+      case "logs":
+        return tab.diagnostics.read(decodeLogsInput(input));
       case "click": {
         const clickInput = input as PreviewAutomationClickInput;
         await recordAction(tab, "click", () =>
