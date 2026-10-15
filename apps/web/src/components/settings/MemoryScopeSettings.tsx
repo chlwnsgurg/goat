@@ -11,6 +11,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { useProjects, useThreadShells } from "../../state/entities";
 import { memoryEnvironment } from "../../state/memory";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { removeMemoryImportDestination } from "../../lib/memoryImportRecoveryStorage";
 import { randomUUID } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Select, SelectTrigger, SelectValue, SelectPopup, SelectItem } from "../ui/select";
@@ -103,6 +104,22 @@ export function MemoryScopeSettings({
       requestId: MemoryOperationId.make(randomUUID()),
       expectedVersion: binding.version,
     };
+    try {
+      await removeMemoryImportDestination({ environmentId, memorySpaceId });
+    } catch {
+      if (token === generation.current) {
+        setBusy(false);
+        setMessage("Could not clear import recovery. Binding was not changed.");
+      }
+      return;
+    }
+    if (
+      token !== generation.current ||
+      !registry.get(memoryEnvironment.projectBindingUpdate.permissionAtom(environmentId))
+    ) {
+      setBusy(false);
+      return;
+    }
     const result = await update({
       environmentId,
       input:

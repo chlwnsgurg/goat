@@ -12,7 +12,7 @@ import { memoryReportRetryIntent } from "./MemorySettings.logic";
 import { Button } from "../ui/button";
 
 /** The server decides ownership, active claims and final reset eligibility. */
-export function MemoryReportRetrySettings({
+function MemoryReportRetryRequest({
   environmentId,
   memorySpaceId,
   reports,
@@ -117,4 +117,12 @@ export function MemoryReportRetrySettings({
       {message ? <p role="status">{message}</p> : null}
     </div>
   );
+}
+
+/** Regrant starts a new selection; an old settlement cannot update it. */
+export function MemoryReportRetrySettings(props: Parameters<typeof MemoryReportRetryRequest>[0]) {
+  const allowed = useAtomValue(
+    memoryEnvironment.resetReportAttempts.permissionAtom(props.environmentId),
+  );
+  return <MemoryReportRetryRequest key={String(allowed)} {...props} />;
 }

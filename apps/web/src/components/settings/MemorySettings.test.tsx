@@ -1583,7 +1583,10 @@ import {
   type MemoryImportProviderInput,
   type MemoryReportDelivery,
 } from "@goat/contracts";
-import { memoryImportRecoveryStorage } from "../../lib/memoryImportRecoveryStorage";
+import {
+  registerMemoryImportDestination,
+  memoryImportRecoveryStorage,
+} from "../../lib/memoryImportRecoveryStorage";
 const spaceId = MemorySpaceId.make(id(1));
 it("toggles environment agent access off and on through updateSettings independently of sharing", async () => {
   state.executors.set("updateSettings", async (input) => {
@@ -1862,4 +1865,114 @@ it("preserves the recovery handle while disconnected and checks it on reconnect"
       (call) => (call[0] as { input: MemoryImportProviderInput }).input.action,
     ),
   ).toEqual(["status", "status"]);
+});
+it("waits for initial grants without deleting saved recovery and then issues status only", async () => {
+  const operationId = (await import("@goat/contracts")).MemoryOperationId.make(id(79));
+  const store = memoryImportRecoveryStorage();
+  await store.save({ environmentId: envId, memorySpaceId: spaceId }, operationId);
+  state.allowed = false;
+  const view = await renderControl(
+    <MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />,
+  );
+  expect((await store.load({ environmentId: envId, memorySpaceId: spaceId }))?.operationId).toBe(
+    operationId,
+  );
+  expect(state.calls).not.toHaveBeenCalled();
+  state.executors.set("importProvider", async (request) => {
+    state.calls(request);
+    throw new Error("offline");
+  });
+  state.allowed = true;
+  await view.render();
+  expect(
+    state.calls.mock.calls.map(
+      (call) => (call[0] as { input: MemoryImportProviderInput }).input.action,
+    ),
+  ).toEqual(["status"]);
+});
+it("drops an old reset response after revoke/regrant and accepts a fresh selection", async () => {
+  const first = await deferredResult();
+  state.executors.set("resetReportAttempts", async (request) => {
+    state.calls(request);
+    return first.promise;
+  });
+  const reports = [
+    {
+      reportId: "a".repeat(64),
+      state: "failed",
+      automaticAttempts: 10,
+      resolvingEnvironmentId: envId,
+    },
+  ] as MemoryReportDelivery[];
+  const view = await renderControl(
+    <MemoryReportRetrySettings
+      environmentId={envId}
+      memorySpaceId={spaceId}
+      reports={reports}
+      onSettled={() => undefined}
+    />,
+  );
+  await act(async () => container.querySelector<HTMLInputElement>("input")!.click());
+  await click("Retry selected reports");
+  state.allowed = false;
+  await view.render();
+  state.allowed = true;
+  await view.render();
+  await act(async () => first.resolve(success({ resetCount: 1, unchangedCount: 0 })));
+  expect(container.textContent).not.toContain("1 reports ready to retry");
+  expect(container.querySelector<HTMLInputElement>("input")!.disabled).toBe(false);
+  expect(container.querySelector<HTMLInputElement>("input")!.checked).toBe(false);
+});
+it("awaits importer removal before submitting a binding CAS change", async () => {
+  state.projects = [{ id: "project-a", environmentId: envId, title: "Project A" }];
+  const binding = {
+    memorySpaceId: spaceId,
+    project: { environmentId: envId, projectId: "project-a" },
+    version: 4,
+    projectKey: { kind: "repository", groupingKey: "repository" },
+    repositoryKey: { kind: "repository", groupingKey: "repository" },
+  };
+  state.responses.set("projectBindingGet", success(binding));
+  state.responses.set(
+    "projectBindingUpdate",
+    success({
+      binding: {
+        ...binding,
+        version: 5,
+        projectKey: { kind: "explicit", sharedProjectId: "shared" },
+      },
+    }),
+  );
+  const removed = await deferredResult();
+  let started = false;
+  const unregister = registerMemoryImportDestination(
+    { environmentId: envId, memorySpaceId: spaceId },
+    async () => {
+      started = true;
+      await removed.promise;
+    },
+  );
+  try {
+    await renderControl(
+      <MemoryScopeSettings
+        environmentId={envId}
+        memorySpaceId={spaceId}
+        onChange={() => undefined}
+      />,
+    );
+    await chooseControl("project");
+    await chooseControl("project-a", 1);
+    await click("Create dedicated shared project");
+    await click("Confirm binding change");
+    expect(started).toBe(true);
+    expect(
+      state.calls.mock.calls.filter(([request]) => request.input.action === "setExplicit"),
+    ).toEqual([]);
+    await act(async () => removed.resolve(undefined));
+    expect(state.calls.mock.calls.at(-1)![0]).toMatchObject({
+      input: { action: "setExplicit", expectedVersion: 4 },
+    });
+  } finally {
+    unregister();
+  }
 });

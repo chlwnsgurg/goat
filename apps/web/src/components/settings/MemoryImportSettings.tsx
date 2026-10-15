@@ -12,7 +12,10 @@ import {
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { readEnvironmentScope, readPreparedConnection } from "../../state/session";
 import { memoryEnvironment } from "../../state/memory";
-import { memoryImportRecoveryStorage } from "../../lib/memoryImportRecoveryStorage";
+import {
+  registerMemoryImportDestination,
+  memoryImportRecoveryStorage,
+} from "../../lib/memoryImportRecoveryStorage";
 import { randomUUID } from "../../lib/utils";
 import { MemoryScopeSettings, type MemoryScopeSelection } from "./MemoryScopeSettings";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
@@ -49,6 +52,7 @@ export function MemoryImportSettings({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(false);
+  const authorized = useRef(canImport);
   const generation = useRef(0);
   const previousScope = useRef<MemoryScopeSelection | null>(null);
   const run = useCallback(
@@ -71,11 +75,13 @@ export function MemoryImportSettings({
   );
   useEffect(() => {
     mounted.current = true;
+    if (canImport) authorized.current = true;
     // Recover synchronizes the saved handle with the server, never admitting a write.
     // eslint-disable-next-line react/set-state-in-effect
     if (canImport && workflow) void run(() => workflow.recover());
     if (
       !canImport &&
+      authorized.current &&
       workflow &&
       readPreparedConnection(environmentId) !== null &&
       (!readEnvironmentScope(environmentId, AuthMemoryWriteScope) ||
@@ -103,6 +109,7 @@ export function MemoryImportSettings({
       generation.current++;
       if (
         workflow &&
+        authorized.current &&
         readPreparedConnection(environmentId) !== null &&
         (!readEnvironmentScope(environmentId, AuthMemoryWriteScope) ||
           !readEnvironmentScope(environmentId, AuthFilesystemReadScope))
@@ -110,7 +117,7 @@ export function MemoryImportSettings({
         void workflow.removeDestination().catch(() => undefined);
       else workflow?.invalidate({ environmentId, memorySpaceId, session: randomUUID() });
     };
-  }, [canImport, workflow, run, environmentId, memorySpaceId, registry]);
+  }, [canImport, workflow, run, environmentId, memorySpaceId]);
   const changeScope = useCallback(
     (next: MemoryScopeSelection | null) => {
       const previous = previousScope.current;
@@ -147,6 +154,24 @@ export function MemoryImportSettings({
     },
     [workflow, environmentId, memorySpaceId],
   );
+  useEffect(() => {
+    if (!workflow) return;
+    return registerMemoryImportDestination({ environmentId, memorySpaceId }, async () => {
+      generation.current++;
+      setScope(null);
+      previousScope.current = null;
+      setError("Destination changed. Choose a scope and preview again.");
+      setBusy(true);
+      setItems([]);
+      setSelected([]);
+      setSources([]);
+      await workflow.removeDestination();
+      if (mounted.current) {
+        setProgress(workflow.getState());
+        setBusy(false);
+      }
+    });
+  }, [environmentId, memorySpaceId, workflow]);
   const locked = busy || progress?.phase === "previewed";
   return (
     <SettingsSection title="Import memories">

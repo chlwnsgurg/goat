@@ -34,3 +34,28 @@ export function memoryImportRecoveryStorage(
   }
   return store;
 }
+
+const activeDestinations = new Set<{
+  destination: MemoryImportDestination;
+  remove: () => Promise<void>;
+}>();
+/** A binding editor must stop any open importer before changing that destination. */
+export function registerMemoryImportDestination(
+  destination: MemoryImportDestination,
+  remove: () => Promise<void>,
+) {
+  const entry = { destination, remove };
+  activeDestinations.add(entry);
+  return () => {
+    activeDestinations.delete(entry);
+  };
+}
+export async function removeMemoryImportDestination(destination: MemoryImportDestination) {
+  const matching = [...activeDestinations].filter(
+    (entry) =>
+      entry.destination.environmentId === destination.environmentId &&
+      entry.destination.memorySpaceId === destination.memorySpaceId,
+  );
+  await Promise.all(matching.map((entry) => entry.remove()));
+  await memoryImportRecoveryStorage().clear(destination);
+}
