@@ -128,6 +128,7 @@ const escapedOperation = () => {
       scope: { kind: "thread" as const, thread: sourceThread },
       provenance: {
         environmentId: hubEnv,
+        upsertRequestDigest: "d".repeat(64),
         sourceThread,
         sourceWatermark: {
           fromEventId: M.EventId.make('"'.repeat(1024)),
@@ -524,6 +525,12 @@ describe("MemoryCompactor", () => {
         assert.isAbove(rows.length, 1);
         const pages = rows.map((r) => JSON.parse(r.metadata_json) as M.MemoryHubCheckpointPage);
         assert.isTrue(M.validateMemoryCheckpointRecords(pages));
+        assert.strictEqual(
+          pages
+            .flatMap((p) => p.compactReceipts)
+            .find((r) => r.receipt.operationId === op.operationId)!.upsertRequestDigest,
+          "d".repeat(64),
+        );
         assert.strictEqual(
           pages.flatMap((p) => p.items).find((i) => i.status === "active")!.payload.text,
           op.payload.text,
