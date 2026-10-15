@@ -2140,3 +2140,35 @@ it("shows refused history without consuming the one-time revert slot", async () 
   expect(container.querySelector('[aria-label="Revert confirmation"]')).not.toBeNull();
   expect(state.calls).not.toHaveBeenCalled();
 });
+
+it("allows a fresh explicit attempt after a refused response", async () => {
+  await renderRevert();
+  await chooseOriginal();
+  state.result = success(
+    decodeRevert({
+      operationId: id(9),
+      memoryId: id(2),
+      resolutionId: id(6),
+      revertDeadlineUtc: resolution.revertDeadlineUtc,
+      status: "refused",
+      failureCode: "source_invalidated",
+    }),
+  );
+  await click("Revert resolution");
+  const first = state.calls.mock.calls[0]![0] as { input: { operationId: string } };
+  expect(container.textContent).toContain("Revert attempt refused");
+  await chooseOriginal();
+  state.result = success(
+    decodeRevert({
+      operationId: id(10),
+      memoryId: id(2),
+      resolutionId: id(6),
+      revertDeadlineUtc: resolution.revertDeadlineUtc,
+      status: "pending",
+    }),
+  );
+  await click("Revert resolution");
+  const second = state.calls.mock.calls[1]![0] as { input: { operationId: string } };
+  expect(second.input.operationId).not.toBe(first.input.operationId);
+  expect(container.textContent).toContain("Waiting for revert approval");
+});

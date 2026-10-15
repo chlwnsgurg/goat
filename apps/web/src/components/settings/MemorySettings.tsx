@@ -924,7 +924,14 @@ export function MemoryRevertControl({
     );
   }
   async function submit() {
-    if (!selected || busy || result || !liveDestination() || item.status !== "active") return;
+    if (
+      !selected ||
+      busy ||
+      (result && result.status !== "refused") ||
+      !liveDestination() ||
+      item.status !== "active"
+    )
+      return;
     const eligibility = presentMemoryRevert({
       item,
       entry,
@@ -966,7 +973,7 @@ export function MemoryRevertControl({
       {!canWrite ? <p>Memory write permission is required to revert.</p> : null}
       {result ? <p role="status">{presentMemoryRevertResult(result).label}</p> : null}
       {error ? <p role="alert">{error}</p> : null}
-      {!result && available ? (
+      {(!result || result.status === "refused") && available ? (
         <div role="group" aria-label="Revert confirmation">
           <p>Choose the retained original to restore.</p>
           {display.restorableRevisionIds.map((revisionId) => {
