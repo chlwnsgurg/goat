@@ -16,6 +16,7 @@ import * as Quota from "./MemoryQuotaService.ts";
 import * as Service from "./MemoryService.ts";
 import * as Maintenance from "./MemoryFtsMaintenance.ts";
 import * as Snapshot from "./MemorySnapshot.ts";
+import { scanMemoryValue, MEMORY_SCANNER_POLICY_VERSION } from "./MemorySecretScanner.ts";
 import * as Sync from "./MemorySyncService.ts";
 import * as Projection from "../orchestration-v2/ProjectionStore.ts";
 
@@ -168,6 +169,23 @@ describe("r4 authoritative lineage", () => {
               receipt,
               reauthorize: Effect.void,
             });
+            // Settle the actual scanner work created by replica admission before indexing.
+            yield* e.store.recoverDeferred(MEMORY_SCANNER_POLICY_VERSION, at);
+            for (const target of yield* e.store.readDeferred(at, 100)) {
+              if (target.kind !== "scanner" || target.memoryId !== op.memoryId) continue;
+              assert.isTrue(
+                yield* e.store.claimDeferred(target, "synthetic-scanner", at, at + 600000),
+              );
+              const chunk = yield* e.store.readScannerChunk(target);
+              assert.strictEqual(scanMemoryValue({ payloads: chunk.payloads }).kind, "allowed");
+              assert.isNull(chunk.nextCursor);
+              assert.isTrue(
+                yield* e.store.finishOwnedDeferred(target, "synthetic-scanner", at + 600000, {
+                  now: at,
+                  scannerPolicyVersion: MEMORY_SCANNER_POLICY_VERSION,
+                }),
+              );
+            }
             const current = yield* e.store.loadAggregate(space, op.memoryId);
             assert.isTrue(
               yield* e.maintenance.repair({
