@@ -81,6 +81,7 @@ import { BrowserDocumentFrame, isPdfPreviewFile } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
 import FileBrowserPanel from "./FileBrowserPanel";
 import { FileBreadcrumbs } from "./FileBreadcrumbs";
+import { FilePathCopyMenu } from "./FilePathCopyMenu";
 import { FileMarkdownPreview } from "./FileMarkdownPreview";
 import {
   type FileCommentAnnotationEntry,
@@ -1272,6 +1273,7 @@ export default function FilePreviewPanel({
               />
             </div>
           </ScrollArea>
+          <FilePathCopyMenu filePath={relativePath} workspaceRoot={cwd} />
           {absolutePath &&
           (environmentId === primaryEnvironmentId || remoteOpenState.mode !== "local-exec") ? (
             <OpenInPicker
