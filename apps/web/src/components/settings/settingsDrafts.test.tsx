@@ -9,12 +9,21 @@ const state = vi.hoisted(() => ({
   mixed: false,
   environmentId: "first",
   save: vi.fn(),
+  listeners: new Set<() => void>(),
 }));
-vi.mock("./useScopedSettings", () => ({
-  useScopedSettings: () => state.settings,
-  useScopedSettingsMixed: () => state.mixed,
-  useUpdateScopedSettings: () => state.save,
-}));
+// Subscribe like the real hook does, so a pushed value re-renders the field itself.
+vi.mock("./useScopedSettings", async () => {
+  const { useSyncExternalStore } = await import("react");
+  const subscribe = (listener: () => void) => {
+    state.listeners.add(listener);
+    return () => state.listeners.delete(listener);
+  };
+  return {
+    useScopedSettings: () => useSyncExternalStore(subscribe, () => state.settings),
+    useScopedSettingsMixed: () => state.mixed,
+    useUpdateScopedSettings: () => state.save,
+  };
+});
 vi.mock("./SettingsScopeContext", () => ({
   useSettingsScope: () => ({ targets: [{ environmentId: state.environmentId, projectId: null }] }),
 }));
@@ -31,6 +40,12 @@ vi.mock("./settingsSearch", () => ({ searchableSetting: () => ({}) }));
 
 import { StandingInstructionsSettings } from "./StandingInstructionsSettings";
 import { BranchNamingSettings } from "./BranchNamingSettings";
+
+// The real hook returns a new object on every change; components may memoize on it.
+const setSetting = (key: string, value: unknown) => {
+  state.settings = { ...state.settings, [key]: value };
+  for (const listener of state.listeners) listener();
+};
 
 let root: Root;
 let container: HTMLDivElement;
@@ -63,7 +78,7 @@ afterEach(async () => {
 
 describe.each(fields)("$label", (field) => {
   const render = async () => {
-    state.settings.branchNamingMode = field.mode;
+    setSetting("branchNamingMode", field.mode);
     await act(() =>
       root.render(
         field.standing ? (
@@ -89,12 +104,12 @@ describe.each(fields)("$label", (field) => {
   };
 
   it("keeps the node, focus, selection and draft across a server push, then commits the draft", async () => {
-    state.settings[field.key] = "initial";
+    setSetting(field.key, "initial");
     const input = await render();
     await act(() => input.focus());
     await edit(input, " local draft ");
     input.setSelectionRange(2, 6);
-    state.settings[field.key] = "other device";
+    setSetting(field.key, "other device");
     const updated = await render();
     expect(updated).toBe(input);
     expect(document.activeElement).toBe(input);
@@ -106,11 +121,11 @@ describe.each(fields)("$label", (field) => {
 
   it("reflects external changes while idle and does not overwrite them after focus without edits", async () => {
     const input = await render();
-    state.settings[field.key] = "idle update";
+    setSetting(field.key, "idle update");
     await render();
     expect(input.value).toBe("idle update");
     await act(() => input.focus());
-    state.settings[field.key] = "newer update";
+    setSetting(field.key, "newer update");
     await render();
     await act(() => input.blur());
     expect(input.value).toBe("newer update");
@@ -122,7 +137,7 @@ describe.each(fields)("$label", (field) => {
     await act(() => input.focus());
     await edit(input, "old target draft");
     state.environmentId = "second";
-    state.settings[field.key] = "second target";
+    setSetting(field.key, "second target");
     const replacement = await render();
     expect(replacement).not.toBe(input);
     expect(replacement.value).toBe("second target");
@@ -136,7 +151,7 @@ describe.each(fields)("$label", (field) => {
       await act(() => input.focus());
       await edit(input, "draft");
       state.mixed = false;
-      state.settings[field.key] = "remote";
+      setSetting(field.key, "remote");
       expect(await render()).toBe(input);
       expect(input.value).toBe("draft");
       state.mixed = true;
