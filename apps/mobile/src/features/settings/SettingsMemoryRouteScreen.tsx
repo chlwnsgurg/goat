@@ -1,6 +1,7 @@
 import { RegistryContext, useAtomValue, useAtomSet } from "@effect/atom-react";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import {
+  AuthOrchestrationReadScope,
   EnvironmentId as EnvironmentIdSchema,
   MemorySpaceId as MemorySpaceIdSchema,
   MemoryId,
@@ -40,7 +41,7 @@ import { ScreenScrollView } from "../../components/ScreenScrollView";
 import { memoryEnvironment as memory } from "../../state/memory";
 import { useThreadShell } from "../../state/entities";
 import { serverEnvironment } from "../../state/server";
-import { environmentSession } from "../../state/session";
+import { environmentSession, useEnvironmentScope, readEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { useHomeThreadSelection } from "../home/home-thread-navigation";
@@ -110,25 +111,17 @@ export function useMemoryNavigation(
     (thread && environmentId ? { environmentId, projectId: thread.projectId } : undefined);
   const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const visible = config !== null && supportsMemoryProtocol(config.environment.capabilities);
+  const destination = useMemo(
+    () => ({ environmentId, ...extra, ...(project ? { project } : {}) }),
+    [environmentId, extra, project],
+  );
   const open = useCallback(() => {
     if (environmentId === null) return;
     navigation.navigate("SettingsSheet", {
       screen: "SettingsContent",
-      params: {
-        screen: "SettingsMemory",
-        params: { environmentId, ...extra, ...(project ? { project } : {}) },
-      },
+      params: { screen: "SettingsMemory", params: destination as MemoryScreenParams },
     });
-  }, [
-    navigation,
-    environmentId,
-    project?.projectId,
-    extra.project,
-    extra.thread,
-    extra.memorySpaceId,
-    extra.memoryId,
-    extra.resolutionId,
-  ]);
+  }, [navigation, environmentId, destination]);
   return { visible, open };
 }
 
@@ -204,12 +197,9 @@ function MemoryEnvironment({
   const { environmentId } = params;
   const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const session = useAtomValue(environmentSession.preparedConnectionValueAtom(environmentId));
-  const connectionVersion = useRef({ connection: session, version: 0 });
-  if (connectionVersion.current.connection !== session)
-    connectionVersion.current = {
-      connection: session,
-      version: connectionVersion.current.version + 1,
-    };
+  const [connectionVersion, setConnectionVersion] = useState({ connection: session, version: 0 });
+  if (connectionVersion.connection !== session)
+    setConnectionVersion({ connection: session, version: connectionVersion.version + 1 });
   const readAllowed = useAtomValue(memory.syncStatus.permissionAtom(environmentId));
   const adminAllowed = useAtomValue(memory.hubSettingsGet.permissionAtom(environmentId));
   const writeAllowed = useAtomValue(memory.upsert.permissionAtom(environmentId));
@@ -221,38 +211,33 @@ function MemoryEnvironment({
     return <Copy>This connection does not have permission to manage memory.</Copy>;
   return (
     <MemoryConnected
-      key={`${connectionVersion.current.version}:${readAllowed}:${adminAllowed}:${writeAllowed}`}
+      key={`${connectionVersion.version}:${readAllowed}:${adminAllowed}:${writeAllowed}`}
       params={params}
-      connection={session.value}
       readAllowed={readAllowed}
-      adminAllowed={adminAllowed}
     />
   );
 }
 
 function MemoryConnected({
   params,
-  connection,
   readAllowed,
-  adminAllowed,
 }: {
   readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
-  readonly connection: object;
   readonly readAllowed: boolean;
-  readonly adminAllowed: boolean;
 }) {
   const registry = useContext(RegistryContext);
   const { environmentId } = params;
   const sync = useAtomCommand(memory.syncStatus);
   const [status, setStatus] = useState<MemorySyncStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState(false);
   const generation = useRef(0);
   useEffect(() => {
     generation.current++;
     return () => {
       generation.current++;
     };
-  }, [connection]);
+  }, []);
   const load = useCallback(async () => {
     if (!registry.get(memory.syncStatus.permissionAtom(environmentId))) return;
     const before = generation.current;
@@ -268,6 +253,8 @@ function MemoryConnected({
     } else if (AsyncResult.isFailure(result)) setError(failureMessage(result));
   }, [registry, environmentId, sync]);
   useEffect(() => {
+    // The command synchronizes the selected environment, not derived render state.
+    // oxlint-disable-next-line react/set-state-in-effect
     if (readAllowed) void load();
   }, [load, readAllowed]);
   const space = params.memorySpaceId ?? status?.memorySpaceId;
@@ -282,6 +269,45 @@ function MemoryConnected({
         <>
           <Copy>{status ? presentMemorySync(status).label : "Checking memory sharing…"}</Copy>
           <Action label="Refresh sharing status" onPress={() => void load()} />
+        </>
+      ) : null}
+      {status ? (
+        <>
+          <Action
+            label={diagnostics ? "Hide sharing details" : "Show sharing details"}
+            onPress={() => setDiagnostics((value) => !value)}
+          />
+          {diagnostics ? (
+            <>
+              <Copy>
+                Pending sync: {status.pendingSync} · Quarantined: {status.quarantined} · Parked:{" "}
+                {status.parked}
+              </Copy>
+              <Copy>
+                Last successful sync: {status.lastSuccessfulSyncAtUtc ?? "Unknown"}
+                {status.failureCode ? ` · ${status.failureCode}` : ""}
+              </Copy>
+              <Copy>
+                Detailed publication readiness: Unknown. Hub connection does not confirm publication
+                readiness.
+              </Copy>
+              <Copy>
+                Database: {status.storage.dbFileBytes ?? "Unknown"} bytes · WAL:{" "}
+                {status.storage.walBytes ?? "Unknown"} bytes · Free pages:{" "}
+                {status.storage.freelistBytes ?? "Unknown"} bytes. Physical files do not shrink
+                automatically.
+              </Copy>
+              {status.storage.growth.deltas.map((delta) => (
+                <Copy key={`${delta.days}:${delta.metric}`}>
+                  {delta.days} days · {delta.metric}:{" "}
+                  {delta.deltaBytes === null ? "Unavailable" : `${delta.deltaBytes} bytes`}
+                </Copy>
+              ))}
+              {status.storage.warnings.map((warning) => (
+                <Copy key={warning}>{warning}</Copy>
+              ))}
+            </>
+          ) : null}
         </>
       ) : null}
       {params.memorySpaceId &&
@@ -536,6 +562,7 @@ function MemoryDetails({
   const [source, setSource] = useState<MemoryReadSourceInput | null>(null);
   const canWrite = useAtomValue(memory.upsert.permissionAtom(params.environmentId));
   const canForget = useAtomValue(memory.forget.permissionAtom(params.environmentId));
+  const canReadOriginal = useEnvironmentScope(params.environmentId, AuthOrchestrationReadScope);
   const forget = useAtomCommand(memory.forget);
   const intent = useRef<{
     operationId: MemoryOperationId;
@@ -544,6 +571,7 @@ function MemoryDetails({
   const busy = useRef(false);
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [retry, setRetry] = useState(false);
   const mounted = useRef(true);
   useEffect(
     () => () => {
@@ -572,10 +600,13 @@ function MemoryDetails({
           `${view.label} · Expansion: ${view.expansionStatus}${view.pendingSync ? " · Propagation pending" : ""}${view.failureCode ? ` · ${view.failureCode}` : ""}`,
         );
         intent.current = null;
+        setRetry(false);
         registry.refresh(readAtom);
         registry.refresh(historyAtom);
-      } else if (AsyncResult.isFailure(result))
+      } else if (AsyncResult.isFailure(result)) {
+        setRetry(true);
         setNotice(`${failureMessage(result)} Retry uses the same request.`);
+      }
     } finally {
       busy.current = false;
       if (mounted.current) setPending(false);
@@ -620,11 +651,12 @@ function MemoryDetails({
                 disabled={!canWrite || pending}
                 onPress={() => setEditing(true)}
               />
-              {item.payload.evidence.map((evidence, index) =>
+              {item.payload.evidence.map((evidence) =>
                 evidence.sourceThread && evidence.messageIds.length > 0 ? (
                   <Action
-                    key={index}
+                    key={JSON.stringify(evidence)}
                     label={`Read original on ${evidence.sourceThread.environmentId}`}
+                    disabled={!canReadOriginal}
                     onPress={() =>
                       setSource({
                         memorySpaceId,
@@ -640,7 +672,7 @@ function MemoryDetails({
             </>
           ) : null}
           <Action
-            label={intent.current ? "Retry forget request" : "Forget memory"}
+            label={retry ? "Retry forget request" : "Forget memory"}
             disabled={!canForget || !presentMemoryItem(item).canForget || pending}
             onPress={() =>
               Alert.alert("Forget this memory?", MEMORY_FORGET_NOTICE, [
@@ -765,7 +797,7 @@ function MemoryReport({ report }: { readonly report: Parameters<typeof presentMe
   const onSelectThread = useHomeThreadSelection();
   const target = view.reportTarget;
   const config = useAtomValue(serverEnvironment.configValueAtom(target?.environmentId ?? null));
-  const allowed = useAtomValue(memory.syncStatus.permissionAtom(target?.environmentId ?? null));
+  const allowed = useEnvironmentScope(target?.environmentId ?? null, AuthOrchestrationReadScope);
   return (
     <View>
       <Copy>
@@ -776,9 +808,10 @@ function MemoryReport({ report }: { readonly report: Parameters<typeof presentMe
         <Action
           label="Open report"
           disabled={!config || !allowed}
-          onPress={() =>
-            onSelectThread({ environmentId: target.environmentId, id: target.threadId })
-          }
+          onPress={() => {
+            if (readEnvironmentScope(target.environmentId, AuthOrchestrationReadScope))
+              onSelectThread({ environmentId: target.environmentId, id: target.threadId });
+          }}
         />
       ) : null}
       <Copy>Manual delivery retry is unavailable on this server.</Copy>
@@ -817,6 +850,7 @@ function MemoryEditor({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const intent = useRef<MemoryOperationId | null>(null);
+  const [retry, setRetry] = useState(false);
   const busy = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -825,7 +859,7 @@ function MemoryEditor({
       mounted.current = false;
       registry.set(draftAtom, null);
     };
-  }, [registry, draftAtom]);
+  }, [registry, draftAtom, item, id]);
   async function save() {
     const current = registry.get(draftAtom);
     if (
@@ -868,8 +902,10 @@ function MemoryEditor({
         );
         intent.current = null;
         if (result.value.outcome === "accepted" || result.value.outcome === "noop") onClose();
-      } else if (AsyncResult.isFailure(result))
+      } else if (AsyncResult.isFailure(result)) {
+        setRetry(true);
         setError(`${failureMessage(result)} Retry uses the same request.`);
+      }
     } finally {
       busy.current = false;
       if (mounted.current) setPending(false);
@@ -886,11 +922,11 @@ function MemoryEditor({
             label="Memory text"
             value={text}
             onChange={(value) => setDraft({ text: value, memoryIds: item ? [id] : [] })}
-            disabled={pending || intent.current !== null || !allowed}
+            disabled={pending || retry || !allowed}
             multiline
           />
           <Action
-            label={intent.current ? "Retry save request" : "Save memory"}
+            label={retry ? "Retry save request" : "Save memory"}
             onPress={() => void save()}
             disabled={!allowed || pending || !text.trim()}
           />
@@ -935,7 +971,14 @@ function MemoryAdministration({
   const [endpoint, setEndpoint] = useState("");
   const [secretName, setSecretName] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
+  const [running, setPending] = useState(false);
+  const [retryAction, setRetryAction] = useState<(() => Promise<void>) | null>(null);
+  const pending = running || retryAction !== null;
+  const request = useRef<MemoryOperationId | null>(null);
+  function administrationRequestId() {
+    request.current ??= operationId();
+    return request.current;
+  }
   const busy = useRef(false);
   const mounted = useRef(true);
   useEffect(
@@ -954,9 +997,13 @@ function MemoryAdministration({
     setNotice(null);
     try {
       await action();
+      request.current = null;
+      if (mounted.current) setRetryAction(null);
     } catch (error) {
-      if (mounted.current)
+      if (mounted.current) {
+        setRetryAction(() => action);
         setNotice(error instanceof Error ? error.message : "The action could not be completed.");
+      }
     } finally {
       busy.current = false;
       if (mounted.current) setPending(false);
@@ -997,7 +1044,7 @@ function MemoryAdministration({
     const result = await updateHub({
       environmentId,
       input: {
-        requestId: operationId(),
+        requestId: administrationRequestId(),
         expectedVersion: hub.version,
         action: "configure",
         settings,
@@ -1155,7 +1202,7 @@ function MemoryAdministration({
                       const result = await updateOwner({
                         environmentId,
                         input: {
-                          requestId: operationId(),
+                          requestId: administrationRequestId(),
                           expectedVersion: owner.version,
                           allowedRequesterEnvironmentIds: toggleMemoryRequester(owner, id),
                         },
@@ -1187,7 +1234,9 @@ function MemoryAdministration({
             <>
               <Copy>
                 {binding.projectKey
-                  ? JSON.stringify(binding.projectKey)
+                  ? binding.projectKey.kind === "explicit"
+                    ? binding.projectKey.sharedProjectId
+                    : binding.projectKey.groupingKey
                   : "No shared project binding"}
               </Copy>
               <Field
@@ -1214,7 +1263,7 @@ function MemoryAdministration({
                         input: {
                           memorySpaceId,
                           project: params.project,
-                          requestId: operationId(),
+                          requestId: administrationRequestId(),
                           expectedVersion: binding.version,
                           ...(action === "setExplicit"
                             ? { action, sharedProjectId: sharedProjectId.trim() }
@@ -1243,6 +1292,24 @@ function MemoryAdministration({
         <Copy>Provider memory import and recovery are unavailable on this server.</Copy>
       </SettingsSection>
       {notice ? <Copy>{notice}</Copy> : null}
+      {retryAction ? (
+        <>
+          <Action
+            label="Retry administrative request"
+            disabled={running}
+            onPress={() => void run(retryAction)}
+          />
+          <Action
+            label="Discard retry and reload settings"
+            disabled={running}
+            onPress={() => {
+              request.current = null;
+              setRetryAction(null);
+              void run(loadAdministration);
+            }}
+          />
+        </>
+      ) : null}
     </View>
   );
 }

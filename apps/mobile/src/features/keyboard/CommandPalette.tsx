@@ -266,11 +266,12 @@ export function CommandPalette(props: {
           }),
       },
     ];
+    const activeMemoryConfig = activeThreadRef
+      ? memoryConfigs.get(activeThreadRef.environmentId)
+      : undefined;
     if (
       activeThreadRef
-        ? supportsMemoryProtocol(
-            memoryConfigs.get(activeThreadRef.environmentId)?.environment.capabilities ?? {},
-          )
+        ? activeMemoryConfig && supportsMemoryProtocol(activeMemoryConfig.environment.capabilities)
         : [...memoryConfigs.values()].some((config) =>
             supportsMemoryProtocol(config.environment.capabilities),
           )

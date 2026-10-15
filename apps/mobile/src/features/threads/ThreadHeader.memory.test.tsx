@@ -1,3 +1,4 @@
+import { act } from "react";
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import {
@@ -94,7 +95,7 @@ it("opens memory from both platform header actions without substituting the envi
         },
       },
     ]);
-  h.registry.set(h.configs(nativeEnv), null);
+  await act(async () => h.registry.set(h.configs(nativeEnv), null));
   await view.rerender(<ThreadHeader {...props} />);
   expect(view.container.textContent).not.toContain("memory");
 });

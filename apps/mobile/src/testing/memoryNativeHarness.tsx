@@ -1,13 +1,16 @@
 import React, { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { RegistryContext } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { vi } from "vite-plus/test";
 import {
   EnvironmentId,
   MemoryId,
   MemorySpaceId,
   MemoryItem,
+  MemorySyncStatus,
+  MemoryOwnerSourceReadPolicyView,
   WS_METHODS,
+  sessionGrantsScope,
   type AuthSessionState,
   type AuthEnvironmentScope,
   type ServerConfig,
@@ -134,6 +137,15 @@ vi.mock("../state/server", () => ({
   },
 }));
 vi.mock("../state/session", () => ({
+  useEnvironmentScope: (id: EnvironmentId, scope: AuthEnvironmentScope) => {
+    const result = useAtomValue((bridge.current as NativeMemoryHarness).grants(id));
+    return AsyncResult.isSuccess(result) && sessionGrantsScope(result.value, scope);
+  },
+  readEnvironmentScope: (id: EnvironmentId, scope: AuthEnvironmentScope) => {
+    const h = bridge.current as NativeMemoryHarness;
+    const result = h.registry.get(h.grants(id));
+    return AsyncResult.isSuccess(result) && sessionGrantsScope(result.value, scope);
+  },
   environmentSession: {
     preparedConnectionValueAtom: (id: EnvironmentId) =>
       (bridge.current as NativeMemoryHarness).prepared(id),
@@ -215,6 +227,118 @@ export const nativeItem = Schema.decodeUnknownSync(MemoryItem)({
     derivedFromMemoryRevisions: [],
   },
 });
+export const nativeOwnerPolicy = Schema.decodeUnknownSync(MemoryOwnerSourceReadPolicyView)({
+  version: 3,
+  revocationPropagation: "pending",
+  policy: {
+    ownerPolicyEpoch: 3,
+    allowedRequesterEnvironmentIds: ["active-requester"],
+    removals: [
+      {
+        memorySpaceId: nativeSpace,
+        ownerEnvironmentId: nativeEnv,
+        requesterEnvironmentId: "pending-requester",
+        removalEpoch: 2,
+        state: "pending",
+      },
+    ],
+    enrollments: [
+      {
+        memorySpaceId: nativeSpace,
+        ownerEnvironmentId: nativeEnv,
+        requesterEnvironmentId: "active-requester",
+        ownerPolicyEpoch: 1,
+        state: "active",
+      },
+      {
+        memorySpaceId: nativeSpace,
+        ownerEnvironmentId: nativeEnv,
+        requesterEnvironmentId: "pending-requester",
+        ownerPolicyEpoch: 3,
+        removalEpoch: 2,
+        state: "pending",
+      },
+    ],
+  },
+});
+export const nativeSyncStatus = Schema.decodeUnknownSync(MemorySyncStatus)({
+  memorySpaceId: nativeSpace,
+  state: "online",
+  pendingSync: 0,
+  quarantined: 0,
+  parked: 0,
+  lastSuccessfulSyncAtUtc: null,
+  lastHubSequence: 0,
+  processing: {
+    lastReceivedHubSequence: 0,
+    receiveLag: null,
+    deferred: 0,
+    oldestDeferredAtUtc: null,
+    unindexedItems: 0,
+    scannerHeldItems: 0,
+    scannerPendingItems: 0,
+    missingParentItems: 0,
+    pendingCleanupItems: 0,
+    reportBacklog: 0,
+    reportFailed: 0,
+    hubAdmissionFailures: 0,
+    indexCoverage: {
+      status: "available",
+      eligibleItems: 0,
+      indexedItems: 0,
+      unindexedItems: 0,
+      projectionWatermark: 0,
+    },
+  },
+  storage: {
+    quotas: [],
+    tables: [],
+    measuredAtUtc: null,
+    dbFileBytes: null,
+    walBytes: null,
+    freelistBytes: null,
+    freelistRatio: null,
+    retentionFloor: 0,
+    checkpointSequence: 0,
+    compaction: {
+      lastRunAtUtc: null,
+      removedRows: 0,
+      reclaimedLogicalBytes: 0,
+      reclaimableLogicalBytes: 0,
+      blockedReasons: [],
+    },
+    ftsAdmission: {
+      state: "open",
+      changedAtUtc: null,
+      lastMeasuredAtUtc: null,
+      allocatedBytes: null,
+      measurementStatus: "unavailable",
+    },
+    growth: {
+      current: null,
+      deltas: [1, 7, 30].flatMap((days) =>
+        [
+          "memoryLogicalBytes",
+          "memoryAllocatedBytes",
+          "ftsAllocatedBytes",
+          "dbFileBytes",
+          "walBytes",
+          "freelistBytes",
+        ].map((metric) => ({
+          days,
+          metric,
+          status: "unavailable",
+          baselineAtUtc: null,
+          currentAtUtc: null,
+          elapsedMs: null,
+          deltaBytes: null,
+          reason: "missing_baseline",
+        })),
+      ),
+    },
+    warnings: [],
+  },
+});
 const scopes = (values: readonly AuthEnvironmentScope[]): AuthSessionState => ({
   authenticated: true,
   scopes: values,
@@ -245,6 +369,7 @@ export function createNativeMemoryHarness() {
     settings: { enableAgentMemoryAccess: true },
   } as ServerConfig;
   const responses = new Map<string, (input: unknown) => unknown>([
+    [WS_METHODS.memorySyncStatus, () => nativeSyncStatus],
     [
       WS_METHODS.memoryList,
       () => ({ items: [nativeItem], nextCursor: null, projectionWatermark: 1 }),
@@ -355,6 +480,8 @@ export function createNativeMemoryHarness() {
         );
       }),
     signal: (signal: MemoryChangeSignal) => Effect.runPromise(Queue.offer(queue, signal)),
+    grant: (values: readonly AuthEnvironmentScope[]) =>
+      registry.set(grants(nativeEnv), AsyncResult.success(scopes(values))),
     revoke: () => registry.set(grants(nativeEnv), AsyncResult.success(scopes([]))),
     dispose: () => {
       memory.dispose(registry);

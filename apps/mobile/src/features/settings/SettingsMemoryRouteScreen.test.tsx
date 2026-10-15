@@ -8,6 +8,7 @@ import {
   nativeEnv,
   nativeSpace,
   nativeId,
+  nativeOwnerPolicy,
   type NativeMemoryHarness,
 } from "../../testing/memoryNativeHarness";
 import { SettingsMemoryRouteScreen } from "./SettingsMemoryRouteScreen";
@@ -18,9 +19,10 @@ afterEach(async () => {
   await view?.unmount();
   h?.dispose();
 });
-async function mount() {
+async function mount(scopes?: Parameters<NativeMemoryHarness["grant"]>[0]) {
   h = createNativeMemoryHarness();
-  await h.waitForAtom(h.memory.upsert.permissionAtom(nativeEnv), Boolean);
+  if (scopes) h.grant(scopes);
+  await h.waitForAtom(h.memory.syncStatus.permissionAtom(nativeEnv), Boolean);
   view = renderNative(
     h,
     <SettingsMemoryRouteScreen
@@ -114,5 +116,69 @@ describe("native Memory with shared factory", () => {
     await view.render();
     expect(view.container.textContent).toContain("Update this environment");
     expect(h.calls).toEqual([]);
+  });
+  it("preserves one save intent after a lost response and explicitly retries the same payload", async () => {
+    await mount();
+    h.responses.set(WS_METHODS.memoryUpsert, () => {
+      throw new Error("Synthetic lost response");
+    });
+    await view.click("Remember something");
+    await view.type("Memory text", "Synthetic retry fact");
+    await view.click("Save memory");
+    expect(view.container.textContent).toContain("Retry uses the same request");
+    h.responses.set(WS_METHODS.memoryUpsert, () => ({ outcome: "accepted", pendingSync: true }));
+    await view.click("Retry save request");
+    const writes = h.calls.filter((call) => call.method === WS_METHODS.memoryUpsert);
+    expect(writes).toHaveLength(2);
+    expect(writes[0]!.input).toEqual(writes[1]!.input);
+  });
+  it("keeps reading available on a read-only connection without allowing a write", async () => {
+    await mount(["memory:read"]);
+    expect(view.container.textContent).toContain("Synthetic memory body");
+    await view.click("Remember something");
+    expect(view.container.querySelector('input[aria-label="Memory text"]')).toBeNull();
+    expect(h.calls.some((call) => call.method === WS_METHODS.memoryUpsert)).toBe(false);
+  });
+  it("allows explicit-space creation with write-only access without subscribing to bodies", async () => {
+    h = createNativeMemoryHarness();
+    h.grant(["memory:write"]);
+    await h.waitForAtom(h.memory.upsert.permissionAtom(nativeEnv), Boolean);
+    view = renderNative(
+      h,
+      <SettingsMemoryRouteScreen
+        route={{ params: { environmentId: nativeEnv, memorySpaceId: nativeSpace } }}
+      />,
+    );
+    await view.render();
+    await view.click("Remember in selected space");
+    expect(view.container.querySelector('input[aria-label="Memory text"]')).not.toBeNull();
+    expect(h.calls).toEqual([]);
+  });
+  it("changes an owner requester without cancelling an unrelated pending enrollment", async () => {
+    await mount(["memory:read", "memory:write", "settings:write"]);
+    const policy = nativeOwnerPolicy;
+    h.responses.set(WS_METHODS.memoryHubSettingsGet, () => ({
+      settings: { mode: "disabled" },
+      version: 1,
+    }));
+    h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyGet, () => policy);
+    h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyUpdate, () => ({
+      ...policy,
+      version: 4,
+      policy: {
+        ...policy.policy,
+        allowedRequesterEnvironmentIds: [],
+        enrollments: policy.policy.enrollments.filter((entry) => entry.state === "pending"),
+      },
+    }));
+    await view.click("Load sharing and original access settings");
+    await view.click("Remove active-requester");
+    expect(
+      h.calls.find((call) => call.method === WS_METHODS.memoryOwnerSourceReadPolicyUpdate),
+    ).toMatchObject({
+      environmentId: nativeEnv,
+      input: { expectedVersion: 3, allowedRequesterEnvironmentIds: ["pending-requester"] },
+    });
+    expect(view.container.textContent).toContain("pending-requester");
   });
 });
