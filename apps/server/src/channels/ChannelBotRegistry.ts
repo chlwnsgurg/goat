@@ -16,6 +16,7 @@ import {
   ChannelGatewayError,
   type ChannelGetBotStatusResult,
   type ThreadId,
+  type EnvironmentId,
 } from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -30,6 +31,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import type { ChannelConnectionOwner } from "./ChannelIngressContext.ts";
 import * as ChannelBotHome from "./ChannelBotHome.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
+import { channelOwnerIdFor } from "./channelOwner.ts";
 import { botLaunchIdsFor } from "./channelIds.ts";
 
 const GOAT_BOT_TITLE = "GOAT bot";
@@ -42,6 +44,10 @@ export class ChannelBotRegistry extends Context.Service<
     readonly ensure: (
       input: ChannelEnsureBotInput,
       owner: ChannelConnectionOwner,
+    ) => Effect.Effect<ChannelBotRef, ChannelGatewayError>;
+    /** Internal memory delivery: canonical local bot without changing the cluster home. */
+    readonly ensureForReport: (
+      owner: EnvironmentId,
     ) => Effect.Effect<ChannelBotRef, ChannelGatewayError>;
     /**
      * The stored bot and its waiting count, read without creating anything, so a client that
@@ -90,7 +96,7 @@ const make = Effect.gen(function* () {
     );
 
   /** Starts a bot thread in the bot's project. Ids are fixed per owner and replaced thread. */
-  const launchBot = (owner: ChannelConnectionOwner, replacing?: ThreadId) =>
+  const launchBot = (ownerId: string, replacing?: ThreadId) =>
     Effect.gen(function* () {
       const environmentId = yield* environment.getEnvironmentId;
       const project = yield* folders.ensureBotProject.pipe(
@@ -98,7 +104,7 @@ const make = Effect.gen(function* () {
         Effect.mapError(persistence),
       );
       const settings = yield* serverSettings.getSettings.pipe(Effect.mapError(persistence));
-      const ids = botLaunchIdsFor(owner.ownerId, replacing);
+      const ids = botLaunchIdsFor(ownerId, replacing);
       // No initial message: the bot thread exists only to hold the conversation and chips.
       const launched = yield* launches
         .launch({
@@ -120,17 +126,16 @@ const make = Effect.gen(function* () {
       return { environmentId, projectId: project.projectId, threadId: launched.threadId };
     });
 
-  const ensure: ChannelBotRegistry["Service"]["ensure"] = (input, owner) =>
+  const ensureCanonical = (input: ChannelEnsureBotInput, ownerId: string) =>
     Effect.gen(function* () {
-      yield* home.requireHome;
-      const existing = yield* ledger.getBot(owner.ownerId).pipe(Effect.mapError(persistence));
+      const existing = yield* ledger.getBot(ownerId).pipe(Effect.mapError(persistence));
       const now = DateTime.formatIso(yield* DateTime.now);
       if (existing !== undefined) {
         const previousThreadId = existing.bot.threadId;
         if (!(yield* wasDeleted(previousThreadId))) return existing.bot;
-        const bot = yield* launchBot(owner, previousThreadId);
+        const bot = yield* launchBot(ownerId, previousThreadId);
         return yield* ledger
-          .replaceBot({ ownerId: owner.ownerId, previousThreadId, bot, now })
+          .replaceBot({ ownerId, previousThreadId, bot, now })
           .pipe(Effect.mapError(persistence));
       }
       const environmentId = yield* environment.getEnvironmentId;
@@ -144,7 +149,7 @@ const make = Effect.gen(function* () {
       if (candidate.type === "adopt" && input.candidateThreadId !== undefined) {
         return yield* ledger
           .setBotIfAbsent({
-            ownerId: owner.ownerId,
+            ownerId,
             bot: {
               environmentId,
               projectId: candidate.projectId,
@@ -154,10 +159,10 @@ const make = Effect.gen(function* () {
           })
           .pipe(Effect.mapError(persistence));
       }
-      const bot = yield* launchBot(owner);
+      const bot = yield* launchBot(ownerId);
       return yield* ledger
         .setBotIfAbsent({
-          ownerId: owner.ownerId,
+          ownerId,
           bot,
           ...(candidate.type === "legacy" && input.candidateThreadId !== undefined
             ? { legacyThreadId: input.candidateThreadId }
@@ -167,13 +172,24 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError(persistence));
     });
 
+  const ensure: ChannelBotRegistry["Service"]["ensure"] = (input, owner) =>
+    home.requireHome.pipe(Effect.andThen(ensureCanonical(input, owner.ownerId)));
+
+  const ensureForReport: ChannelBotRegistry["Service"]["ensureForReport"] = (owner) =>
+    Effect.gen(function* () {
+      if (owner !== (yield* environment.getEnvironmentId))
+        return yield* new ChannelGatewayError({ reason: "invalid_input" });
+      // No candidate means a report can never adopt a user's active agent thread.
+      return yield* ensureCanonical({}, channelOwnerIdFor(owner));
+    });
+
   const status: ChannelBotRegistry["Service"]["status"] = (owner) =>
     Effect.all({
       bot: ledger.getBot(owner.ownerId).pipe(Effect.map((stored) => stored?.bot ?? null)),
       waitingCount: ledger.countWaitingGoatTasks(owner.ownerId),
     }).pipe(Effect.mapError(persistence));
 
-  return ChannelBotRegistry.of({ ensure, status });
+  return ChannelBotRegistry.of({ ensure, ensureForReport, status });
 });
 
 export const layer = Layer.effect(ChannelBotRegistry, make);
