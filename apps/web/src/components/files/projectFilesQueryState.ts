@@ -18,6 +18,8 @@ import { projectEnvironment } from "~/state/projects";
 import { useProjectPathSearch } from "~/state/queries";
 import { executeAtomQuery } from "@goat/client-runtime/state/runtime";
 
+import { FileSaveSession } from "./fileSaveCoordinator";
+
 const EMPTY_PROJECT_FILE_PATH = "";
 const EMPTY_PROJECT_ENTRIES_QUERY_ATOM = Atom.make(
   AsyncResult.initial<ProjectListEntriesResult, never>(false),
@@ -32,6 +34,22 @@ export function optimisticFileAtom(
   relativePath: string,
 ) {
   return projectEnvironment.optimisticFile({ environmentId, cwd, relativePath });
+}
+
+const fileSaveSessions = new WeakMap<ReturnType<typeof optimisticFileAtom>, FileSaveSession>();
+
+export function getProjectFileSaveSession(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string,
+): FileSaveSession {
+  const atom = optimisticFileAtom(environmentId, cwd, relativePath);
+  let session = fileSaveSessions.get(atom);
+  if (!session) {
+    session = new FileSaveSession();
+    fileSaveSessions.set(atom, session);
+  }
+  return session;
 }
 
 // Dirty contents must survive a closed preview, including failed or unauthorized saves.
@@ -136,7 +154,10 @@ export async function reloadProjectFileData(
     reportDefect: false,
     reportFailure: false,
   });
-  if (result._tag === "Success") clearProjectFileQueryData(environmentId, cwd, relativePath);
+  if (result._tag === "Success") {
+    clearProjectFileQueryData(environmentId, cwd, relativePath);
+    getProjectFileSaveSession(environmentId, cwd, relativePath).discard();
+  }
   return result;
 }
 

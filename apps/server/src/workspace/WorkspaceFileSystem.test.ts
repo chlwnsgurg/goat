@@ -521,6 +521,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           for (const contents of ["created\n", "replaced\n"]) {
             expect(yield* service.writeFile({ cwd, relativePath, contents })).toEqual({
               relativePath,
+              version: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
             });
             expect(yield* fs.readFileString(target)).toBe(contents);
             expect(yield* fs.readDirectory(cwd)).toEqual([relativePath]);

@@ -1,7 +1,13 @@
 import type { ProjectReadFileResult } from "@goat/contracts";
 import { EnvironmentId } from "@goat/contracts";
 import { AsyncResult } from "effect/reactivity";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+const executeQuery = vi.hoisted(() => vi.fn());
+vi.mock("@goat/client-runtime/state/runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/client-runtime/state/runtime")>()),
+  executeAtomQuery: executeQuery,
+}));
 
 const registryTasks = vi.hoisted(() => new Set<() => void>());
 
@@ -27,6 +33,8 @@ import {
   confirmProjectFileQueryData,
   getOptimisticProjectFileQueryData,
   getUnsavedProjectFileQueryData,
+  getProjectFileSaveSession,
+  reloadProjectFileData,
   resolveProjectFileQueryData,
   setProjectFileQueryData,
 } from "./projectFilesQueryState";
@@ -47,9 +55,13 @@ function drainRegistryTasks(): void {
 }
 
 describe("project files queries", () => {
+  beforeEach(() => {
+    executeQuery.mockResolvedValue(AsyncResult.success(undefined));
+  });
   afterEach(() => {
     clearProjectFileQueryData(environmentId, "/repo", "convex.json");
     drainRegistryTasks();
+    executeQuery.mockReset();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -134,6 +146,37 @@ describe("project files queries", () => {
     reopened.dispose();
     drainRegistryTasks();
     expect(appAtomRegistry.getNodes().has(optimisticFile)).toBe(false);
+  });
+
+  it("discards a replacement view's recovered draft when delayed disk reload completes", async () => {
+    vi.useFakeTimers();
+    const session = getProjectFileSaveSession(environmentId, "/repo", "convex.json");
+    const persist = vi.fn().mockResolvedValue(AsyncResult.success(undefined));
+    const replacement = new FileSaveCoordinator({
+      debounceMs: 500,
+      persist,
+      onPendingChange: vi.fn(),
+      onConfirmed: vi.fn(),
+    });
+    let finishRead!: (result: ReturnType<typeof AsyncResult.success>) => void;
+    executeQuery.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishRead = resolve;
+      }),
+    );
+    setProjectFileQueryData(environmentId, "/repo", "convex.json", "stale draft");
+    const reloading = reloadProjectFileData(environmentId, "/repo", "convex.json");
+    session.coordinators.add(replacement);
+    replacement.change(
+      getUnsavedProjectFileQueryData(environmentId, "/repo", "convex.json")!.contents,
+    );
+    finishRead(AsyncResult.success({ contents: "external edit", version: "external" }));
+    await reloading;
+    await vi.runAllTimersAsync();
+    replacement.dispose();
+    session.coordinators.delete(replacement);
+    expect(persist).not.toHaveBeenCalled();
+    expect(getUnsavedProjectFileQueryData(environmentId, "/repo", "convex.json")).toBeNull();
   });
 
   it("releases a retained unsaved draft when explicitly cleared", () => {

@@ -3,7 +3,7 @@ import type { AtomCommandResult } from "@goat/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 
-import { FileSaveCoordinator } from "./fileSaveCoordinator";
+import { FileSaveCoordinator, FileSaveSession } from "./fileSaveCoordinator";
 
 function deferred() {
   let resolve!: (result: AtomCommandResult<void, never>) => void;
@@ -143,6 +143,31 @@ describe("FileSaveCoordinator", () => {
     expect(persist).toHaveBeenLastCalledWith("latest");
   });
 
+  it("does not flush newer retired contents after a queued save is cancelled", async () => {
+    vi.useFakeTimers();
+    let cancelWrite!: () => void;
+    const cancelled = new Promise<null>((resolve) => {
+      cancelWrite = () => resolve(null);
+    });
+    const persist = vi
+      .fn()
+      .mockReturnValueOnce(cancelled)
+      .mockResolvedValue(AsyncResult.success(undefined));
+    const coordinator = new FileSaveCoordinator({
+      debounceMs: 500,
+      persist,
+      onPendingChange: vi.fn(),
+      onConfirmed: vi.fn(),
+    });
+    coordinator.change("queued draft");
+    await vi.advanceTimersByTimeAsync(500);
+    coordinator.change("newer retired draft");
+    coordinator.dispose();
+    cancelWrite();
+    await vi.runAllTimersAsync();
+    expect(persist).toHaveBeenCalledExactlyOnceWith("queued draft");
+  });
+
   it("does not rewrite a write that lands while the editor closes", async () => {
     vi.useFakeTimers();
     const inFlight = deferred();
@@ -252,5 +277,58 @@ describe("FileSaveCoordinator", () => {
     await vi.runAllTimersAsync();
 
     expect(persist).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("FileSaveSession", () => {
+  it("discards recovered drafts in every view before closing", async () => {
+    vi.useFakeTimers();
+    const session = new FileSaveSession();
+    const persist = vi.fn().mockResolvedValue(AsyncResult.success(undefined));
+    const makeCoordinator = () => {
+      const coordinator = new FileSaveCoordinator({
+        debounceMs: 500,
+        persist,
+        onPendingChange: vi.fn(),
+        onConfirmed: vi.fn(),
+      });
+      session.coordinators.add(coordinator);
+      return coordinator;
+    };
+    const source = makeCoordinator();
+    const markdown = makeCoordinator();
+    source.change("stale source draft");
+    markdown.change("recovered stale draft");
+    session.discard();
+    await vi.runAllTimersAsync();
+    source.dispose();
+    markdown.dispose();
+    expect(persist).not.toHaveBeenCalled();
+    markdown.change("retired contents");
+    expect(session.status).toBe("saved");
+    vi.useRealTimers();
+  });
+
+  it("serializes version lookup and confirmation across coordinators", async () => {
+    const session = new FileSaveSession();
+    let version = "loaded";
+    let finishFirst!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    const versions: string[] = [];
+    const first = session.enqueue(async () => {
+      versions.push(version);
+      await pending;
+      version = "first-written";
+    });
+    const second = session.enqueue(async () => {
+      versions.push(version);
+    });
+    await Promise.resolve();
+    expect(versions).toEqual(["loaded"]);
+    finishFirst();
+    await Promise.all([first, second]);
+    expect(versions).toEqual(["loaded", "first-written"]);
   });
 });
