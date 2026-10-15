@@ -547,6 +547,20 @@ it.effect(
           ).code,
           "operation_id_reused",
         );
+        const otherCaller = {
+          ...invocation,
+          client: undefined,
+          thread: {
+            threadId: M.ThreadId.make("changed-caller"),
+            providerSessionId: "synthetic",
+            providerInstanceId: M.ProviderInstanceId.make("codex"),
+          },
+        };
+        assert.strictEqual(
+          ((yield* McpFixture.call("memory_upsert", input, otherCaller)).body as { code: string })
+            .code,
+          "operation_id_reused",
+        );
         assert.deepStrictEqual(yield* counts, before);
       });
       yield* TestClock.adjust(M.MEMORY_LOG_RETENTION_MS);

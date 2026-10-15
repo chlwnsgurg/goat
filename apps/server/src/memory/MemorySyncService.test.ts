@@ -6166,6 +6166,13 @@ it.effect.each(["accepted", "rejected"] as const)(
             Effect.void,
           );
           yield* sql`INSERT INTO orchestration_events(application_event_version,aggregate_kind,stream_id,event_type,payload_json) VALUES(2,'thread','r6-caller','context-transfer.created','{"targetThreadId":"r6-caller","sourceThreadId":"other"}')`;
+          assert.strictEqual(
+            (yield* store.readThreadLineage(
+              { environmentId: local, threadId: invocation.thread.threadId },
+              space,
+            )).state,
+            "unknown",
+          );
           yield* replay;
           assert.lengthOf(
             yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${input.memoryId}`,

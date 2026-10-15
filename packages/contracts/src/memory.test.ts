@@ -483,6 +483,12 @@ describe("memory sync and views", () => {
     const replay = { ...compact, upsertRequestDigest: "a".repeat(64) };
     expect(round(M.MemoryCompactReceipt, replay).upsertRequestDigest).toBe("a".repeat(64));
     rejects(M.MemoryCompactReceipt, { ...replay, upsertRequestDigest: "body" });
+    rejects(M.MemoryCompactReceipt, {
+      ...replay,
+      operationKind: "forget",
+      revisionId: null,
+      receipt: { ...receipt, outcome: "deleted" },
+    });
 
     rejects(M.MemoryCompactReceipt, {
       ...compact,
