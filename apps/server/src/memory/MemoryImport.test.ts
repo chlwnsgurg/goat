@@ -265,8 +265,8 @@ const durableInventory = Effect.gen(function* () {
 const encodeUnknown = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const retired = Effect.fnUntraced(function* (p: PreparedImportCommit) {
   const sql = yield* SqlClient.SqlClient;
-  yield* sql`INSERT INTO memory_import_receipts(receipt_id,space,environment_id,record_kind,batch_operation_id,request_digest,completed_items_json,observed_at_utc)
-    VALUES ('synthetic-retired',${space},${environmentId},'batch',${p.batch.operationId},${p.batch.selectionDigest},${encodeUnknown({ kind: "retired", codecVersion: 1, selectionDigest: p.batch.selectionDigest })},${stamp})`;
+  yield* sql`UPDATE memory_import_receipts SET completed_items_json=${encodeUnknown({ kind: "retired", codecVersion: 1, selectionDigest: p.batch.selectionDigest })}
+    WHERE space=${space} AND environment_id=${environmentId} AND record_kind='batch' AND batch_operation_id=${p.batch.operationId}`;
 });
 describe("MemoryImport durable ports", () => {
   it.effect(
@@ -411,14 +411,50 @@ describe("MemoryImport durable ports", () => {
       Effect.gen(function* () {
         yield* setupImport;
         const service = yield* Service.MemoryService;
-        const p = prepared();
-        assert.strictEqual(
-          (yield* service.importPorts.preflightBatch(
-            { ...p.batch, selectionDigest: p.batch.selectionDigest },
-            Effect.void,
-          )).kind,
-          "new",
+        const first = prepared();
+        const unfinished = {
+          ...first.selection,
+          selector: { ...first.selection.selector, sourceItemKey: "synthetic-second" },
+          memoryId: M.MemoryId.make(uuid(70)),
+          operationId: M.MemoryOperationId.make(uuid(71)),
+          revisionId: M.MemoryRevisionId.make(uuid(72)),
+          result: null,
+        };
+        const batch = {
+          ...first.batch,
+          selections: [first.selection, unfinished],
+          receipt: { ...first.batch.receipt, state: "partial" as const, remaining: 1 },
+        };
+        yield* service.importPorts.commit({ ...first, batch }, Effect.void);
+        const preflight = yield* service.importPorts.preflightBatch(
+          { ...batch, selectionDigest: batch.selectionDigest },
+          Effect.void,
         );
+        assert.strictEqual(preflight.kind, "partial");
+        if (preflight.kind !== "partial") return assert.fail("expected durable partial batch");
+        assert.strictEqual(preflight.batch.selections[1]!.operationId, unfinished.operationId);
+        const reg = yield* service.importPorts.readRegistration(
+          { ...address, sourceId, by: "source" },
+          Effect.void,
+        );
+        const p: PreparedImportCommit = {
+          ...first,
+          registration: reg!,
+          registrationVersion: reg!.version,
+          selection: unfinished,
+          batch: preflight.batch,
+          candidate: { ...first.candidate, sourceItemKey: unfinished.selector.sourceItemKey },
+          next: {
+            ...first.next,
+            sourceItemKey: unfinished.selector.sourceItemKey,
+            memoryId: unfinished.memoryId,
+            pending: {
+              ...first.next.pending!,
+              operationId: unfinished.operationId,
+              revisionId: unfinished.revisionId,
+            },
+          },
+        };
         yield* retired(p);
         const before = yield* durableInventory;
         const same = yield* service.importPorts.commit(p, Effect.void).pipe(Effect.flip);
