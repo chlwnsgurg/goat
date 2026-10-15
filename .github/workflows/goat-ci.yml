@@ -112,6 +112,12 @@ jobs:
           vp run --filter @goat/ssh test
           vp run --filter @goat/web test
 
+      - name: Test provider core
+        if: matrix.task == 'test'
+        run: |
+          vp run --filter @goat/provider-core test
+          vp test run --config vite.config.ts packages/provider-opencode/src/server/textGeneration.test.ts
+
       - name: Test desktop
         if: matrix.task == 'test-desktop'
         run: vp run --filter @goat/desktop test

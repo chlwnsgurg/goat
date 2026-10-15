@@ -1,3 +1,4 @@
+import { MemoryReportReference } from "./memory.ts";
 import * as Schema from "effect/Schema";
 
 import { AuthEnvironmentScopes } from "./auth.ts";
@@ -100,6 +101,7 @@ export type ChannelMessageKind = typeof ChannelMessageKind.Type;
  * reading the input as context, not when a person viewed it.
  */
 export const ChannelMessageMeta = Schema.Struct({
+  memory: Schema.optionalKey(MemoryReportReference),
   conversationId: ChannelConversationId,
   originKind: ChannelKind,
   kind: ChannelMessageKind,

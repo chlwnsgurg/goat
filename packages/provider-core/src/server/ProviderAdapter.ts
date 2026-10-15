@@ -1,4 +1,4 @@
-import type { OrchestrationV2HistoricalMessage } from "@goat/contracts";
+import type { MemoryContextSnapshot, OrchestrationV2HistoricalMessage } from "@goat/contracts";
 import {
   OrchestrationV2CloudTask,
   OrchestrationV2CloudSourceRestriction,
@@ -416,6 +416,7 @@ export type ProviderAdapterV2CloudTaskMetadata = Pick<
 >;
 
 export interface ProviderAdapterV2TurnInput {
+  readonly memoryContext?: MemoryContextSnapshot;
   /** Initial launch only. Follow-up and attach must not require this checkout. */
   readonly cloudLaunchSource?: ProviderAdapterV2CloudLaunchSource;
   readonly cloudSource?: OrchestrationV2CloudTask["source"];

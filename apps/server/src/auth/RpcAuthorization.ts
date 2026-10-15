@@ -47,7 +47,13 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  * runtime failure.
  */
 export const RPC_REQUIRED_SCOPES = {
-  ...CLIENT_GUARDED_RPC_SCOPES,
+  // Staged client guards must not activate server scopes before their RPC group is installed.
+  ...(Object.fromEntries(
+    Object.entries(CLIENT_GUARDED_RPC_SCOPES).filter(([tag]) => WsRpcGroup.requests.has(tag)),
+  ) as Pick<
+    typeof CLIENT_GUARDED_RPC_SCOPES,
+    Extract<keyof typeof CLIENT_GUARDED_RPC_SCOPES, WsRpcMethod>
+  >),
   [WS_METHODS.connectionCatalogServe]: AuthSettingsWriteScope,
   [WS_METHODS.connectionCatalogRespond]: AuthSettingsWriteScope,
   [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: AuthOrchestrationOperateScope,

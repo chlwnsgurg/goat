@@ -1,6 +1,10 @@
 import * as Schema from "effect/Schema";
 import { GitPreparePullRequestThreadInput } from "./git.ts";
 import {
+  AuthMemoryReadScope,
+  AuthMemoryWriteScope,
+  AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
@@ -13,6 +17,16 @@ import { SLACK_CHANNEL_WS_METHODS } from "./slackChannel.ts";
 
 /** Incremental client enforcement; the server still authorizes every request. */
 export const CLIENT_GUARDED_RPC_SCOPES = {
+  [WS_METHODS.memoryUpsert]: AuthMemoryWriteScope,
+  [WS_METHODS.memoryForget]: AuthMemoryWriteScope,
+  [WS_METHODS.memoryRevertResolution]: AuthMemoryWriteScope,
+  [WS_METHODS.memoryImportProvider]: AuthMemoryWriteScope,
+  [WS_METHODS.memoryProjectBindingGet]: AuthMemoryWriteScope,
+  [WS_METHODS.memoryProjectBindingUpdate]: AuthMemoryWriteScope,
+  [WS_METHODS.memoryHubSettingsGet]: AuthSettingsWriteScope,
+  [WS_METHODS.memoryHubSettingsUpdate]: AuthSettingsWriteScope,
+  [WS_METHODS.memoryReadSource]: AuthMemoryReadScope,
+
   [WS_METHODS.serverRunStorageCleanup]: AuthSettingsWriteScope,
   // Endpoint checks exist to configure exports, so they need the same grant as saving them.
   [WS_METHODS.serverCheckOtlpEndpoint]: AuthSettingsWriteScope,
@@ -67,6 +81,10 @@ export function clientRpcRequiredScopes(
   method: string,
   input: unknown,
 ): readonly AuthEnvironmentScope[] {
+  if (method === WS_METHODS.memoryImportProvider)
+    return [AuthMemoryWriteScope, AuthFilesystemReadScope];
+  if (method === WS_METHODS.memoryReadSource)
+    return [AuthMemoryReadScope, AuthOrchestrationReadScope];
   if (method === WS_METHODS.sshWorkspaceLaunch)
     return [AuthSourceControlWriteScope, AuthOrchestrationOperateScope];
   if (method === WS_METHODS.gitPreparePullRequestThread && input !== undefined) {

@@ -1,3 +1,5 @@
+import { MemoryHubSettings } from "./memory.ts";
+import * as Predicate from "effect/Predicate";
 import { SshDeviceHostConfigs } from "./device.ts";
 import {
   AuthOrchestrationOperateScope,
@@ -1241,6 +1243,10 @@ export function goatBotHomeClaimSupersedes(
 }
 
 export const ServerSettings = Schema.Struct({
+  memoryHubVersion: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  memoryHub: MemoryHubSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed({ mode: "disabled" as const })),
+  ),
   // Null means no client has migrated this preference yet; an empty value is
   // authoritative so another device cannot resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1638,7 +1644,7 @@ const ModelSelectionPatch = Schema.Struct({
   options: Schema.optionalKey(ProviderOptionSelections),
 });
 
-export const ServerSettingsPatch = Schema.Struct({
+const ServerSettingsPatchFields = Schema.Struct({
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),
   ),
@@ -1821,6 +1827,17 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   /** Kept only when it supersedes the stored claim (`goatBotHomeClaimSupersedes`). */
   goatBotHome: Schema.optionalKey(GoatBotHomeClaim),
+});
+// Test reserved keys on the raw object before the ordinary patch decoder strips unknown fields.
+const ServerSettingsPatchCodec = Schema.Unknown.check(
+  Schema.makeFilter(
+    (raw) =>
+      !Predicate.isObject(raw) ||
+      (!Object.hasOwn(raw, "memoryHub") && !Object.hasOwn(raw, "memoryHubVersion")),
+  ),
+).pipe(Schema.decodeTo(ServerSettingsPatchFields));
+export const ServerSettingsPatch = Object.assign(ServerSettingsPatchCodec, {
+  fields: ServerSettingsPatchFields.fields,
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 

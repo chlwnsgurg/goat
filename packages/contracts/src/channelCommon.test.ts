@@ -40,3 +40,26 @@ describe("channel addresses", () => {
     ).toThrow();
   });
 });
+
+describe("memory report metadata", () => {
+  it("round-trips report reference", () => {
+    const memory = {
+      memorySpaceId: "00000000-0000-4000-8000-000000000001",
+      environmentId: "env",
+      memoryId: "00000000-0000-4000-8000-000000000002",
+    };
+    expect(
+      decodeMeta({ conversationId: "conv", originKind: "goat", kind: "receipt", memory }).memory,
+    ).toEqual(memory);
+  });
+  it("keeps old report metadata unchanged and rejects invalid ids", () => {
+    const old = { conversationId: "conv", originKind: "goat", kind: "receipt" };
+    expect(decodeMeta(old).memory).toBeUndefined();
+    expect(() =>
+      decodeMeta({
+        ...old,
+        memory: { memorySpaceId: "invalid", environmentId: "env", memoryId: "invalid" },
+      }),
+    ).toThrow();
+  });
+});
