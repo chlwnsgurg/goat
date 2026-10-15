@@ -1132,7 +1132,7 @@ describe("ProviderMemoryImport actual Service/Store ports", () => {
                 commits++;
                 if (
                   capacityFailure &&
-                  a.candidate.sourceItemKey.endsWith("/z.md#body") &&
+                  a.candidate.sourceItemKey.endsWith("/a.md#body") &&
                   !a.rejectOnly
                 )
                   return Effect.fail(
@@ -1203,6 +1203,7 @@ describe("ProviderMemoryImport actual Service/Store ports", () => {
               Effect.void,
             );
           if (partial) {
+            commits = 0;
             failSecond = true;
             const e = yield* runtime.run(input, Effect.void).pipe(Effect.flip);
             assert.equal(e._tag, "MemoryStoreConflict");
@@ -1251,16 +1252,34 @@ describe("ProviderMemoryImport actual Service/Store ports", () => {
           const zResult = result.receipt.items.find(
             (r) => r.sourceItemKey === zSelector.sourceItemKey,
           )!;
-          assert.equal(zResult.outcome, refusal === "frontier" ? "noop" : "rejected");
-          if (refusal === "scope") assert.equal(zResult.issue, "mapping_changed");
-          if (refusal === "capacity")
-            assert.deepEqual(zResult.capacity, {
+          if (refusal === "capacity") {
+            const aResult = result.receipt.items.find((r) =>
+              r.sourceItemKey.endsWith("/a.md#body"),
+            )!;
+            assert.equal(aResult.outcome, "rejected");
+            assert.deepEqual(aResult.capacity, {
               code: "capacity_exceeded",
               dimension: "import_source_items",
               current: 10,
               limit: 10,
               reclaimable: 2,
             });
+            assert.equal(zResult.outcome, "created");
+            assert.isUndefined(
+              yield* service.importPorts.readItem(
+                {
+                  memorySpaceId: space,
+                  environmentId,
+                  sourceId,
+                  sourceItemKey: aResult.sourceItemKey,
+                },
+                Effect.void,
+              ),
+            );
+            return;
+          }
+          assert.equal(zResult.outcome, refusal === "frontier" ? "noop" : "rejected");
+          if (refusal === "scope") assert.equal(zResult.issue, "mapping_changed");
           assert.deepEqual(
             yield* service.importPorts.readItem(
               {
