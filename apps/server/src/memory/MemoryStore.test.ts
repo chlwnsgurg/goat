@@ -9,6 +9,7 @@ import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 import * as Clock from "effect/Clock";
 import * as Schema from "effect/Schema";
+import * as Statement from "effect/sql/Statement";
 import * as SqlClient from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
@@ -5503,18 +5504,17 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
     let bytesRead = 0;
     const observed = new Proxy(sql, {
       apply(target, _this, args) {
-        const statement: Effect.Effect<readonly object[], SqlError> = Reflect.apply(
-          target,
-          target,
-          args,
-        );
-        return Effect.tap(statement, (rows) =>
-          Effect.sync(() => {
-            if (measuring) {
-              rowsRead += rows.length;
-              bytesRead += new TextEncoder().encode(JSON.stringify(rows)).length;
-            }
-          }),
+        const statement: Statement.Statement<object> = Reflect.apply(target, target, args);
+        return Object.assign(
+          Effect.tap(statement, (rows) =>
+            Effect.sync(() => {
+              if (measuring) {
+                rowsRead += rows.length;
+                bytesRead += new TextEncoder().encode(JSON.stringify(rows)).length;
+              }
+            }),
+          ),
+          Statement.fragment(statement.segments),
         );
       },
     });

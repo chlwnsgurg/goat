@@ -1281,7 +1281,10 @@ describe("ProviderMemoryImport read-only binding preparation", () => {
               Effect.void,
             );
             assert.isDefined(z);
-            yield* sql`UPDATE memory_identity_ledger SET identity_json=json_set(identity_json,'$.scope',json(${JSON.stringify({ kind: "thread", thread: { environmentId, threadId: "synthetic-other" } })})) WHERE space=${space} AND memory_id=${z!.memoryId}`;
+            const store = yield* Store.MemoryStore;
+            yield* store.transact(
+              sql`UPDATE memory_identity_ledger SET identity_json=json_set(identity_json,'$.scope',json(${JSON.stringify({ kind: "thread", thread: { environmentId, threadId: "synthetic-other" } })})) WHERE space=${space} AND memory_id=${z!.memoryId}`,
+            );
           }
           assert.equal((yield* sql`SELECT * FROM memory_project_bindings`).length, 0);
           const before = yield* inventory;
