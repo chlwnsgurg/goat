@@ -37,6 +37,7 @@ const payload = M.MemoryPayload.make({
   evidence: [{ origin: "user", messageIds: [] }],
   derivedFromMemoryRevisions: [],
 });
+const decodeRevertResult = Schema.decodeUnknownSync(M.MemoryRevertResult);
 const decodeRevision = Schema.decodeUnknownSync(M.MemoryRevision);
 const decodeOwnerView = Schema.decodeUnknownSync(M.MemoryOwnerSourceReadPolicyView);
 const revision = (n: number) =>
@@ -462,6 +463,105 @@ describe("memory presentation boundaries", () => {
   });
 });
 
+it("uses only the optional server assessment for current permission and reason", () => {
+  for (const [access, reason] of [
+    ["none", "environment_off"],
+    ["read", "read_only_destination"],
+    ["read_write", "ceiling"],
+  ] as const) {
+    expect(
+      presentMemoryRunAccess({
+        memoryGrantCeiling: "read_write",
+        currentMemoryAccess: { access, reason },
+      }),
+    ).toEqual({
+      savedCeiling: "read_write",
+      effectiveAccess: access,
+      effectiveReason: reason,
+    });
+  }
+  expect(presentMemoryRunAccess({ memoryGrantCeiling: "none" }).effectiveAccess).toBe("unknown");
+});
+
+it("refused is settled while retry still checks head, history and originals", () => {
+  const result = decodeRevertResult({
+    operationId: id(60),
+    memoryId: item.memoryId,
+    resolutionId: resolution.resolutionId,
+    revertDeadlineUtc: deadline,
+    status: "refused",
+    failureCode: "source_unavailable",
+  });
+  expect(presentMemoryRevertResult(result)).toMatchObject({
+    label: "Revert attempt refused",
+    settled: true,
+  });
+  const input = {
+    item,
+    entry,
+    history: { ...history, revertResults: [result] },
+    now: Date.parse(applied),
+  };
+  expect(presentMemoryRevert(input)).toMatchObject({
+    canRevert: true,
+    reason: null,
+    notice: "Last revert attempt was refused: source unavailable",
+  });
+  expect(
+    presentMemoryRevert({ ...input, history: { ...input.history, nextCursor: "more" } }).canRevert,
+  ).toBe(false);
+  expect(
+    presentMemoryRevert({ ...input, history: { ...input.history, revisions: [] } }).canRevert,
+  ).toBe(false);
+  expect(
+    presentMemoryRevert({ ...input, item: { ...item, revision: revision(7) } }).canRevert,
+  ).toBe(false);
+});
+
+it("presents separate diagnostics only for an advertised capability", () => {
+  const diagnostics: M.MemoryHubDiagnostics = {
+    version: 7,
+    publication: { state: "last_valid", code: "invalid_settings" },
+    readiness: "ready",
+    connection: "unreachable",
+    recoverableHolds: ["protocol"],
+    permanentHolds: [],
+    reconcile: "unavailable",
+  };
+  const status = { state: "offline" as const, memorySpaceId: item.memorySpaceId };
+  const capabilities = {
+    repositoryIdentity: false,
+    memory: { protocolVersion: 1, hubDiagnostics: true },
+  };
+  expect(presentMemorySync(status, { capabilities, diagnostics })).toMatchObject({
+    diagnostics: "last_valid",
+    publicationLabel: "Last valid settings in use",
+    readiness: "ready",
+    connection: "unreachable",
+    canReconcileInSettings: false,
+  });
+  const available = {
+    ...diagnostics,
+    publication: { state: "current" as const },
+    reconcile: "available" as const,
+  };
+  expect(
+    presentMemorySync(status, { capabilities, diagnostics: available }).canReconcileInSettings,
+  ).toBe(true);
+  expect(
+    presentMemorySync(status, {
+      capabilities: { repositoryIdentity: false, memory: { protocolVersion: 1 } },
+      diagnostics: available,
+    }).canReconcileInSettings,
+  ).toBe(false);
+  expect(
+    presentMemorySync(status, {
+      capabilities,
+      diagnostics: { ...diagnostics, permanentHolds: ["identity"], reconcile: "permanent_hold" },
+    }).canReconcileInSettings,
+  ).toBe(false);
+});
+
 describe("shared memory progress presentation", () => {
   it("reads attempts from the report DTO with no caller options", () => {
     expect(presentMemoryReport(report).automaticAttempts).toBeNull();
@@ -567,6 +667,23 @@ describe("shared memory progress presentation", () => {
         projectionWatermark: 4,
       },
     });
+    for (const work of [
+      { scannerPendingItems: 1, unindexedItems: 0, pendingCleanupItems: 0 },
+      { scannerPendingItems: 0, unindexedItems: 1, pendingCleanupItems: 0 },
+      { scannerPendingItems: 0, unindexedItems: 0, pendingCleanupItems: 1 },
+    ]) {
+      const shown = presentMemoryProcessing({
+        ...processing,
+        ...work,
+        missingParentItems: 0,
+        reportBacklog: 0,
+        reportFailed: 0,
+      });
+      expect(shown.waitingLabel).toBe(
+        work.scannerPendingItems > 0 ? null : "Memory processing pending",
+      );
+      expect(shown.checkingLabel).toBe(work.scannerPendingItems > 0 ? "Checking content" : null);
+    }
     expect(presentMemoryProcessing(processing)).toMatchObject({
       checkingLabel: "Checking content",
       heldLabel: "Sensitive content on hold; forgetting is available",

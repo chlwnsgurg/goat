@@ -15,6 +15,8 @@ import {
   type MemoryRevertResult,
   type MemoryRevisionId,
   type MemorySyncStatus,
+  type MemoryHubDiagnostics,
+  type ExecutionEnvironmentCapabilities,
   type MemoryTaskGrantCeiling,
 } from "@goat/contracts";
 
@@ -67,6 +69,7 @@ export function presentMemoryItem(item: MemoryItem) {
 }
 
 const REVERT_LABELS = {
+  refused: "Revert attempt refused",
   pending: "Waiting for revert approval",
   accepted: "Revert approved",
   revision_changed: "Memory changed; cannot revert",
@@ -139,7 +142,7 @@ export function presentMemoryRevert(input: {
       ? "Memory does not match"
       : item.status === "forgotten"
         ? "Forgotten memory cannot be reverted"
-        : result !== undefined
+        : result !== undefined && result.status !== "refused"
           ? REVERT_LABELS[result.status]
           : resolution.revertsResolutionId !== undefined
             ? "A revert cannot be reverted"
@@ -156,6 +159,10 @@ export function presentMemoryRevert(input: {
                     : null;
   return {
     canRevert: reason === null,
+    notice:
+      result?.status === "refused"
+        ? `Last revert attempt was refused: ${result.failureCode.replaceAll("_", " ")}`
+        : null,
     reason,
     windowLabel: "Revert once within 30 days of resolution",
     revertDeadlineUtc: resolution.revertDeadlineUtc,
@@ -249,7 +256,15 @@ export function presentMemoryReport(
 }
 
 /** Online is a connection state, not proof of publication, exposure or policy readiness. */
-export function presentMemorySync(status: Pick<MemorySyncStatus, "state" | "memorySpaceId">) {
+export function presentMemorySync(
+  status: Pick<MemorySyncStatus, "state" | "memorySpaceId">,
+  options?: {
+    readonly capabilities: ExecutionEnvironmentCapabilities;
+    readonly diagnostics?: MemoryHubDiagnostics;
+  },
+) {
+  const diagnostics =
+    options?.capabilities.memory?.hubDiagnostics === true ? options.diagnostics : undefined;
   const labels = {
     disabled: "Memory sharing off",
     bootstrapping: "Receiving initial memories",
@@ -258,23 +273,41 @@ export function presentMemorySync(status: Pick<MemorySyncStatus, "state" | "memo
     error: "Memory sync error",
   } as const;
   return {
-    label:
-      status.state !== "disabled" && status.memorySpaceId === null
+    label: diagnostics
+      ? diagnostics.readiness === "disabled"
+        ? labels.disabled
+        : diagnostics.readiness === "unbound"
+          ? "Connect a memory space"
+          : diagnostics.readiness === "staging"
+            ? labels.bootstrapping
+            : diagnostics.connection === "connected"
+              ? labels.online
+              : diagnostics.connection === "unreachable"
+                ? labels.offline
+                : "Hub connection not confirmed"
+      : status.state !== "disabled" && status.memorySpaceId === null
         ? "Connect a memory space"
         : labels[status.state],
-    diagnostics: "unknown" as const,
-    canReconcileInSettings: false,
+    diagnostics: diagnostics?.publication.state ?? "unknown",
+    readiness: diagnostics?.readiness ?? "unknown",
+    connection: diagnostics?.connection ?? "unknown",
+    publicationLabel:
+      diagnostics?.publication.state === "last_valid" ? "Last valid settings in use" : null,
+    recoverableHolds: diagnostics?.recoverableHolds ?? [],
+    permanentHolds: diagnostics?.permanentHolds ?? [],
+    canReconcileInSettings: diagnostics?.reconcile === "available",
   };
 }
 
 /** Saved ceiling has a legacy default; current effective access needs independent producer evidence. */
 export function presentMemoryRunAccess(input: {
   readonly memoryGrantCeiling?: MemoryTaskGrantCeiling;
+  readonly currentMemoryAccess?: import("@goat/contracts").MemoryCurrentAccess;
 }) {
   return {
     savedCeiling: input.memoryGrantCeiling ?? "none",
-    effectiveAccess: "unknown" as const,
-    effectiveReason: null,
+    effectiveAccess: input.currentMemoryAccess?.access ?? ("unknown" as const),
+    effectiveReason: input.currentMemoryAccess?.reason ?? null,
   };
 }
 
@@ -379,9 +412,16 @@ export function presentMemoryProcessing(processing: MemoryProcessingStatus) {
     heldLabel:
       processing.scannerHeldItems > 0 ? "Sensitive content on hold; forgetting is available" : null,
     waitingLabel:
-      processing.deferred > 0 || processing.missingParentItems > 0
+      processing.missingParentItems > 0
         ? "Waiting for earlier memories"
-        : null,
+        : processing.deferred > 0 &&
+            (processing.scannerPendingItems === 0 ||
+              processing.unindexedItems > 0 ||
+              processing.pendingCleanupItems > 0 ||
+              processing.reportBacklog > 0 ||
+              processing.reportFailed > 0)
+          ? "Memory processing pending"
+          : null,
     cleanupLabel: processing.pendingCleanupItems > 0 ? "Cleaning up remaining content" : null,
     receiveLabel:
       processing.receiveLag === null

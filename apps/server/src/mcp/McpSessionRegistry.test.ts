@@ -227,6 +227,42 @@ it.effect(
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("credential ID lookup follows refresh, thread revocation and revokeAll", () =>
+  Effect.gen(function* () {
+    let timestamp = 1_000;
+    const registry = yield* makeRegistry(() => timestamp);
+    const policy = { grant: "read_write" as const, policyEpoch: 1 };
+    const threadId = ThreadId.make("indexed-memory-credential");
+    const issue = () =>
+      registry.issue({
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        memoryPolicy: policy,
+        readCurrentPolicy: () => Effect.succeed(policy),
+        isLiveCaller: Effect.succeed(true),
+      });
+    const first = yield* issue();
+    const token = first.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    timestamp += 100;
+    expect(yield* registry.resolve(token)).toBeDefined();
+    timestamp += 100;
+    expect(yield* registry.currentMemoryPolicy!(first.config.providerSessionId)).toEqual(policy);
+    yield* registry.touch(threadId);
+    timestamp += 100;
+    expect(yield* registry.currentMemoryPolicy!(first.config.providerSessionId)).toEqual(policy);
+    yield* registry.revokeThread(threadId);
+    expect(yield* registry.currentMemoryPolicy!(first.config.providerSessionId)).toBeUndefined();
+    expect(yield* registry.resolve(token)).toBeUndefined();
+    const second = yield* issue();
+    expect(yield* registry.currentMemoryPolicy!(second.config.providerSessionId)).toEqual(policy);
+    yield* registry.revokeAll;
+    expect(yield* registry.currentMemoryPolicy!(second.config.providerSessionId)).toBeUndefined();
+    expect(
+      yield* registry.resolve(second.config.authorizationHeader.replace(/^Bearer\s+/, "")),
+    ).toBeUndefined();
+  }),
+);
+
 it.effect.each([
   "memoryPolicy",
   "readCurrentPolicy",

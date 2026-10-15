@@ -1,6 +1,6 @@
 import * as M from "@goat/contracts";
 import * as Schema from "effect/Schema";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import {
   MEMORY_IMPORT_RECOVERY_TTL_MS as TTL,
   MemoryImportRecoveryHandle,
@@ -165,18 +165,21 @@ function workflowFixture(count = 65) {
     };
   }
   let respond = async (input: M.MemoryImportProviderInput) => result(input);
-  const workflow = createMemoryImportWorkflow({
-    fence,
-    recovery: fixture.store,
-    canImport: () => permitted,
-    operationId: () => M.MemoryOperationId.make(uuid(nextId++)),
-    request: async (_, input) => {
-      calls.push(input);
-      return respond(input);
-    },
-  });
+  const createWorkflow = () =>
+    createMemoryImportWorkflow({
+      fence,
+      recovery: fixture.store,
+      canImport: () => permitted,
+      operationId: () => M.MemoryOperationId.make(uuid(nextId++)),
+      request: async (_, input) => {
+        calls.push(input);
+        return respond(input);
+      },
+    });
+  const workflow = createWorkflow();
   return {
     ...fixture,
+    createWorkflow,
     workflow,
     calls,
     items,
@@ -302,7 +305,11 @@ describe("import workflow admission and fences", () => {
     await saved.promise;
     expect(f.calls.some((input) => input.action === "apply")).toBe(false);
     gate.reject(new Error("storage unavailable"));
-    await expect(applying).rejects.toThrow("storage unavailable");
+    await applying;
+    expect(f.workflow.getSnapshot()).toMatchObject({
+      phase: "save_failed",
+      message: expect.stringContaining("Nothing was imported from this batch"),
+    });
     expect(f.calls.some((input) => input.action === "apply")).toBe(false);
   });
   it("stops future chunks while settling the admitted chunk as partial", async () => {
@@ -336,8 +343,8 @@ describe("import workflow admission and fences", () => {
     const handle = await f.store.load(destination);
     expect(handle).not.toBeNull();
     const before = f.calls.length;
-    f.workflow.invalidate({ ...fence, session: "reconnected" });
-    await f.workflow.recover();
+    const restarted = f.createWorkflow();
+    await restarted.recover();
     expect(f.calls.slice(before)).toEqual([
       {
         action: "status",
@@ -346,11 +353,11 @@ describe("import workflow admission and fences", () => {
       },
     ]);
     expect(await f.store.load(destination)).toEqual(handle);
-    await expect(f.workflow.apply()).rejects.toThrow("Preview");
+    await expect(restarted.apply()).rejects.toThrow("Preview");
     f.setRespond(async (input) => f.result(input));
-    await f.workflow.recover();
+    await restarted.recover();
     expect(await f.store.load(destination)).toBeNull();
-    expect(f.workflow.getState().phase).toBe("repreview");
+    expect(restarted.getState().phase).toBe("repreview");
   });
   it("not_found removes the handle without claiming zero applied", async () => {
     const f = workflowFixture(1);
@@ -444,7 +451,10 @@ describe("import workflow admission and fences", () => {
     const f = workflowFixture(1);
     await f.store.save(destination, operationId);
     await f.ready();
-    await expect(f.workflow.apply()).rejects.toThrow("previous import");
+    await f.workflow.apply();
+    expect(f.workflow.getSnapshot().phase).toBe("recovery");
+    expect((await f.store.load(destination))?.operationId).toBe(operationId);
+    await expect(f.workflow.retry()).rejects.toThrow("Preview");
     expect(f.calls.some((input) => input.action === "apply")).toBe(false);
   });
   it("bounds selection and disallows duplicate keys", () => {
@@ -572,5 +582,299 @@ describe("scope snapshots", () => {
       scope: { thread: { threadId: "original" }, projectKey: { sharedProjectId: "original" } },
       project: { projectId: "original" },
     });
+  });
+});
+
+describe("observable import progress and retry", () => {
+  it("publishes immutable intermediate snapshots and stops notifying after unsubscribe", async () => {
+    const f = workflowFixture(33);
+    await f.ready();
+    const gate = deferred<M.MemoryImportProviderResult>();
+    const second = deferred<M.MemoryImportProviderInput>();
+    let count = 0;
+    f.setRespond(async (input) => {
+      if (input.action === "apply" && ++count === 2) {
+        second.resolve(input);
+        return gate.promise;
+      }
+      return f.result(input);
+    });
+    const snapshots: ReturnType<typeof f.workflow.getSnapshot>[] = [];
+    const unsubscribe = f.workflow.subscribe(() => snapshots.push(f.workflow.getSnapshot()));
+    const before = f.workflow.getSnapshot();
+    expect(f.workflow.getSnapshot()).toBe(before);
+    const applying = f.workflow.apply();
+    const input = await second.promise;
+    expect(snapshots.some((s) => s.phase === "applying" && s.settledChunks === 1)).toBe(true);
+    expect(before.phase).toBe("previewed");
+    expect(Object.isFrozen(f.workflow.getSnapshot().chunkSummaries[0]?.outcomes)).toBe(true);
+    expect(Object.isFrozen(f.workflow.getSnapshot().receipt?.items)).toBe(true);
+    unsubscribe();
+    const notifications = snapshots.length;
+    gate.resolve(f.result(input));
+    await applying;
+    expect(snapshots).toHaveLength(notifications);
+    const final = f.workflow.getSnapshot();
+    f.workflow.stop();
+    const stopped = f.workflow.getSnapshot();
+    f.workflow.stop();
+    expect(f.workflow.getSnapshot()).toBe(stopped);
+    expect(final.settledChunks).toBe(2);
+  });
+
+  it.each([1, 2])(
+    "explicitly retries failed save %i with identical ID and selectors",
+    async (failAt) => {
+      const f = workflowFixture(33);
+      const write = f.storage.setItem;
+      const attempted: string[] = [];
+      let failed = true;
+      f.storage.setItem = (key, value) => {
+        attempted.push(value);
+        if (attempted.length === failAt && failed) throw new Error("unavailable");
+        write(key, value);
+      };
+      await f.ready();
+      await f.workflow.apply();
+      expect(f.workflow.getSnapshot()).toMatchObject({
+        phase: "save_failed",
+        settledChunks: failAt - 1,
+      });
+      expect(f.calls.filter((i) => i.action === "apply")).toHaveLength(failAt - 1);
+      await expect(f.workflow.apply()).rejects.toThrow("Preview");
+      failed = false;
+      await f.workflow.retry();
+      const handles = attempted.map((value) => decodeMemoryImportRecovery(value, 1000)!);
+      expect(handles[failAt]!.operationId).toBe(handles[failAt - 1]!.operationId);
+      const applies = f.calls.filter((i) => i.action === "apply");
+      expect(applies.map((i) => i.items)).toEqual([f.items.slice(0, 32), f.items.slice(32)]);
+      expect(new Set(applies.map((i) => i.operationId)).size).toBe(2);
+      expect(f.workflow.getSnapshot()).toMatchObject({ phase: "completed", settledChunks: 2 });
+    },
+  );
+
+  it("a write followed by rejection requires status, never retry apply", async () => {
+    const f = workflowFixture(1);
+    const write = f.storage.setItem;
+    f.storage.setItem = (key, value) => {
+      write(key, value);
+      throw new Error("lost acknowledgement");
+    };
+    await f.ready();
+    await f.workflow.apply();
+    const handle = await f.store.load(destination);
+    expect(f.workflow.getSnapshot().phase).toBe("recovery");
+    await expect(f.workflow.retry()).rejects.toThrow("Preview");
+    await f.workflow.recover();
+    expect(f.calls.filter((i) => i.action === "apply")).toEqual([]);
+    expect(f.calls.filter((i) => i.action === "status")).toEqual([
+      {
+        action: "status",
+        memorySpaceId: destination.memorySpaceId,
+        operationId: handle!.operationId,
+      },
+    ]);
+  });
+
+  it.each(["completed", "partial", "stop"] as const)(
+    "preserves capacity and later outcomes with %s",
+    async (ending) => {
+      const f = workflowFixture(33);
+      await f.ready();
+      let count = 0;
+      let last: M.MemoryImportReceipt | null = null;
+      f.setRespond(async (input) => {
+        if (input.action === "status" && last !== null)
+          return { action: "status", receipt: last, syncStatus };
+        const response = f.result(input);
+        if (input.action !== "apply" || response.action !== "apply") return response;
+        const first = ++count === 1;
+        if (!first && ending === "stop") f.workflow.stop();
+        last = {
+          ...response.receipt,
+          state: !first && ending === "partial" ? "partial" : "completed",
+          remaining: !first && ending === "partial" ? 1 : 0,
+          items: [
+            {
+              sourceItemKey: "private-key",
+              memoryId: null,
+              revisionId: null,
+              ...(first
+                ? {
+                    outcome: "rejected" as const,
+                    issue: "capacity_exceeded" as const,
+                    capacity: {
+                      code: "capacity_exceeded" as const,
+                      dimension: "body" as const,
+                      current: 128,
+                      limit: 128,
+                      reclaimable: 0,
+                    },
+                  }
+                : { outcome: "noop" as const }),
+            },
+          ],
+        };
+        return { ...response, receipt: last };
+      });
+      await f.workflow.apply();
+      const snapshot = f.workflow.getSnapshot();
+      expect(snapshot.totals).toEqual({
+        outcomes: { rejected: 1, noop: 1 },
+        issues: { capacity_exceeded: 1 },
+        capacity: { body: 1 },
+      });
+      expect(snapshot.chunkSummaries).toHaveLength(2);
+      expect(JSON.stringify(snapshot.chunkSummaries)).not.toContain("private-key");
+      expect(snapshot.phase).toBe(
+        ending === "partial" ? "recovery" : ending === "stop" ? "partial" : "completed",
+      );
+      if (ending === "partial") {
+        await f.workflow.recover();
+        await f.workflow.recover();
+        expect(f.workflow.getSnapshot().totals).toEqual(snapshot.totals);
+        expect(f.workflow.getSnapshot().chunkSummaries).toHaveLength(2);
+      }
+    },
+  );
+});
+
+describe("import subscription isolation and admission", () => {
+  it.each([
+    {
+      kind: "Error",
+      error: Object.assign(
+        new Error("synthetic-id private-body-marker", {
+          cause: { id: "synthetic-id", body: "private-body-marker" },
+        }),
+        { id: "synthetic-id", body: "private-body-marker" },
+      ),
+    },
+    {
+      kind: "object",
+      error: { id: "synthetic-id", body: "private-body-marker" },
+    },
+  ])("isolates a throwing $kind listener and reports only safe text", async ({ error }) => {
+    const f = workflowFixture(33);
+    await f.ready();
+    await Promise.resolve();
+    const report = vi.spyOn(console, "error").mockImplementation(() => {});
+    const snapshots: ReturnType<typeof f.workflow.getSnapshot>[] = [];
+    const unsubscribe = f.workflow.subscribe(() => {
+      throw error;
+    });
+    f.workflow.subscribe(() => snapshots.push(f.workflow.getSnapshot()));
+    try {
+      await f.workflow.apply();
+      expect(f.calls.filter((input) => input.action === "apply")).toHaveLength(2);
+      expect(f.workflow.getSnapshot()).toMatchObject({ phase: "completed", settledChunks: 2 });
+      expect(snapshots.at(-1)).toBe(f.workflow.getSnapshot());
+      expect(report).toHaveBeenCalled();
+      for (const args of report.mock.calls) {
+        expect(args).toEqual(["Memory import listener failed"]);
+      }
+    } finally {
+      unsubscribe();
+      report.mockRestore();
+    }
+  });
+
+  it.each(
+    (["invalidate", "destination", "stop", "revoke"] as const).flatMap((action) =>
+      [0, 1].map((admittedChunks) => ({ action, admittedChunks })),
+    ),
+  )(
+    "does not admit an apply after $action in applying notification with $admittedChunks chunks already sent",
+    async ({ action, admittedChunks }) => {
+      const f = workflowFixture(33);
+      await f.ready();
+      let observed = false;
+      f.workflow.subscribe(() => {
+        const snapshot = f.workflow.getSnapshot();
+        if (observed || snapshot.phase !== "applying" || snapshot.settledChunks !== admittedChunks)
+          return;
+        observed = true;
+        if (action === "invalidate") f.workflow.invalidate();
+        if (action === "destination")
+          f.workflow.invalidate({
+            environmentId: M.EnvironmentId.make("other-device"),
+            memorySpaceId: M.MemorySpaceId.make(uuid(900)),
+            session: "other-session",
+          });
+        if (action === "stop") f.workflow.stop();
+        if (action === "revoke") f.setPermitted(false);
+      });
+      await f.workflow.apply();
+      expect(observed).toBe(true);
+      expect(f.calls.filter((input) => input.action === "apply")).toHaveLength(admittedChunks);
+      expect(await f.store.load(destination)).toBeNull();
+      expect(f.workflow.getSnapshot().phase).toBe(
+        action === "invalidate" || action === "destination" ? "idle" : "partial",
+      );
+    },
+  );
+
+  it.each(["invalidate", "destination", "stop", "revoke"] as const)(
+    "keeps a recovery handle without sending status after %s in checking notification",
+    async (action) => {
+      const f = workflowFixture(1);
+      await f.store.save(destination, operationId);
+      f.workflow.subscribe(() => {
+        if (f.workflow.getSnapshot().phase !== "checking") return;
+        if (action === "invalidate") f.workflow.invalidate();
+        if (action === "destination")
+          f.workflow.invalidate({ ...fence, environmentId: M.EnvironmentId.make("other-device") });
+        if (action === "stop") f.workflow.stop();
+        if (action === "revoke") f.setPermitted(false);
+      });
+      await f.workflow.recover();
+      expect(f.calls).toHaveLength(0);
+      expect((await f.store.load(destination))?.operationId).toBe(operationId);
+      expect(f.workflow.getSnapshot().phase).toBe(
+        action === "invalidate" || action === "destination" ? "idle" : "recovery",
+      );
+    },
+  );
+
+  it("preserves the new idle generation when receipt notification invalidates recovery", async () => {
+    const f = workflowFixture(1);
+    await f.store.save(destination, operationId);
+    let observed = false;
+    f.workflow.subscribe(() => {
+      if (f.workflow.getSnapshot().receipt === null) return;
+      observed = true;
+      f.workflow.invalidate();
+    });
+    await f.workflow.recover();
+    await Promise.resolve();
+    expect(observed).toBe(true);
+    expect(f.workflow.getSnapshot()).toEqual(initialMemoryImportWorkflowState);
+    expect(f.calls.map((input) => input.action)).toEqual(["status"]);
+  });
+
+  it("coalesces synchronous changes into the final snapshot and excludes removed listeners", async () => {
+    const f = workflowFixture(1);
+    const snapshots: ReturnType<typeof f.workflow.getSnapshot>[] = [];
+    const removed = vi.fn();
+    let unsubscribeRemoved = () => {};
+    f.workflow.subscribe(() => {
+      snapshots.push(f.workflow.getSnapshot());
+      unsubscribeRemoved();
+    });
+    unsubscribeRemoved = f.workflow.subscribe(removed);
+    f.workflow.stop();
+    f.workflow.invalidate();
+    expect(snapshots).toHaveLength(0);
+    await Promise.resolve();
+    expect(snapshots).toEqual([f.workflow.getSnapshot()]);
+    expect(snapshots[0]).toEqual(initialMemoryImportWorkflowState);
+    expect(removed).not.toHaveBeenCalled();
+    const removedBeforeFlush = vi.fn();
+    const unsubscribe = f.workflow.subscribe(removedBeforeFlush);
+    f.workflow.stop();
+    unsubscribe();
+    await Promise.resolve();
+    expect(removedBeforeFlush).not.toHaveBeenCalled();
+    expect(snapshots.at(-1)).toBe(f.workflow.getSnapshot());
   });
 });
