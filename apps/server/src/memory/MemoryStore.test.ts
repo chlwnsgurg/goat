@@ -11,7 +11,6 @@ import * as Clock from "effect/Clock";
 import * as Schema from "effect/Schema";
 import * as Statement from "effect/sql/Statement";
 import * as SqlClient from "effect/sql/SqlClient";
-import type { SqlError } from "effect/sql/SqlError";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
@@ -5527,7 +5526,7 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
     measuring = false;
     const before = { rows: rowsRead, bytes: bytesRead };
     for (let n = 0; n < 100; n++) {
-      yield* sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at) SELECT space,${id(20000 + n)},memory_id,${id(21000 + n)},parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at FROM memory_revisions WHERE space=${space} AND revision_id=${claim.conflictHeadSet[0]}`;
+      yield* sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at) SELECT space,${id(20000 + n)},memory_id,${id(21000 + n)},parents_json,scope_json,assertion_kind,provenance_json,NULL,created_at FROM memory_revisions WHERE space=${space} AND revision_id=${claim.conflictHeadSet[0]}`;
       yield* sql`INSERT INTO memory_conflicts(space,conflict_id,memory_id,heads_json,status,failure_code) SELECT space,${id(22000 + n)},memory_id,heads_json,status,failure_code FROM memory_conflicts WHERE space=${space} LIMIT 1`;
     }
     rowsRead = 0;
