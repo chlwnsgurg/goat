@@ -885,7 +885,7 @@ export class MemoryStore extends Context.Service<
   {
     readonly transact: <A, E, R>(
       effect: Effect.Effect<A, E, R>,
-      options?: { requireOuter: boolean },
+      options?: { requireOuter?: boolean; finalGuard?: Effect.Effect<void, E> },
     ) => Effect.Effect<A, E | MemoryStorageError, Exclude<R, Transaction>>;
     readonly readThreadLineage: (
       thread: M.ScopedThreadRef,
@@ -2069,12 +2069,12 @@ const make = Effect.gen(function* () {
   const wake = PubSub.publish(wakes, undefined).pipe(Effect.asVoid);
   const transact = <A, E, R>(
     effect: Effect.Effect<A, E, R>,
-    options?: { requireOuter: boolean },
+    options?: { requireOuter?: boolean; finalGuard?: Effect.Effect<void, E> },
   ): Effect.Effect<A, E | MemoryStorageError, Exclude<R, Transaction>> =>
     Effect.gen(function* () {
       const existing = yield* Effect.serviceOption(Transaction);
       if (Option.isSome(existing)) {
-        if (options?.requireOuter)
+        if (options?.requireOuter || options?.finalGuard)
           return yield* new MemoryStorageError({ stage: "nested-admission", cause: undefined });
         return yield* Effect.provideService(effect, Transaction, existing.value);
       }
@@ -2096,6 +2096,8 @@ const make = Effect.gen(function* () {
                       Effect.provideService(SqlClient.SqlClient, sql),
                     ),
                   );
+                  // SQL-free authority check after every accounting statement, before COMMIT.
+                  if (options?.finalGuard) yield* options.finalGuard;
                   return result;
                 }),
               )
@@ -7583,33 +7585,31 @@ const make = Effect.gen(function* () {
       ? yield* pullRetryCodec.decode(rows[0].pull_retry_json, strict)
       : emptyPullRetry;
   });
-  // Discovery is a snapshot of presence, not rearm authority. Outbox work belongs to
+  // Discovery observes presence, not rearm authority. Outbox work belongs to
   // the space; only pull retry is scoped to the current hub binding.
   const readPersistedHoldClasses: MemoryStore["Service"]["readPersistedHoldClasses"] = Effect.fn(
     "MemoryStore.readPersistedHoldClasses",
   )(function* (input) {
-    return yield* transact(
-      Effect.gen(function* () {
-        const pull = yield* readPullRetry(input);
-        const classes: MemoryHoldClass[] = [];
-        for (const holdClass of HoldClass.literals) {
-          const held = yield* stored(
-            "persisted-hold-discovery",
-            sql`SELECT 1 FROM memory_outbox INDEXED BY memory_outbox_held_class
+    // Observational probes need no write transaction or checkpoint accounting.
+    // Rearm authority and mutations are checked separately inside transact.
+    const pull = yield* readPullRetry(input);
+    const classes: MemoryHoldClass[] = [];
+    for (const holdClass of HoldClass.literals) {
+      const held = yield* stored(
+        "persisted-hold-discovery",
+        sql`SELECT 1 FROM memory_outbox INDEXED BY memory_outbox_held_class
               WHERE space=${input.memorySpaceId} AND hold_class=${holdClass}
                 AND hold_class IS NOT NULL AND next_attempt_at=9007199254740991
                 AND kind IN ('sync','revert_intent','claim','resolve')
                 AND status IN ('pending','retry','running') LIMIT 1`,
-          );
-          if (
-            held.length ||
-            (pull.nextAttemptAt === Number.MAX_SAFE_INTEGER && pull.holdClass === holdClass)
-          )
-            classes.push(holdClass);
-        }
-        return classes;
-      }),
-    );
+      );
+      if (
+        held.length ||
+        (pull.nextAttemptAt === Number.MAX_SAFE_INTEGER && pull.holdClass === holdClass)
+      )
+        classes.push(holdClass);
+    }
+    return classes;
   });
   const writePullRetryTx: MemoryStore["Service"]["writePullRetryTx"] = Effect.fn(
     "MemoryStore.writePullRetryTx",

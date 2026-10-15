@@ -222,6 +222,8 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
     );
     if (
       !supportsMemoryProtocol(config.environment.capabilities) ||
+      ((tag === WS_METHODS.memoryHubDiagnostics || tag === WS_METHODS.memoryHubReconcile) &&
+        config.environment.capabilities.memory?.hubDiagnostics !== true) ||
       (tag === WS_METHODS.memoryImportProvider &&
         config.environment.capabilities.memory?.importProvider !== true) ||
       typeof (session.client as Partial<EnvironmentProtocolClient>)[tag] !== "function"
