@@ -951,8 +951,6 @@ function MemoryForgetRequest({
     };
   }, []);
   const imported = useRef(false);
-  if (item?.status === "active")
-    imported.current = item.payload.evidence.some((e) => e.origin === "import");
   const available = item !== null && presentMemoryItem(item).canForget;
   function liveDestination() {
     return (
@@ -1013,7 +1011,12 @@ function MemoryForgetRequest({
             variant="outline"
             disabled={!canForget}
             onClick={() => {
-              if (item && liveDestination()) setIntent(memoryForgetIntent(item));
+              if (item && liveDestination()) {
+                imported.current =
+                  item.status === "active" &&
+                  item.payload.evidence.some((e) => e.origin === "import");
+                setIntent(memoryForgetIntent(item));
+              }
             }}
           >
             Forget memory

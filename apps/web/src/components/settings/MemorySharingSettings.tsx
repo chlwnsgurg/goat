@@ -81,6 +81,7 @@ export function MemoryAdministration({
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<"hub" | "owner" | "device" | null>(null);
   const [device, setDevice] = useState<EnvironmentId | null>(null);
+  const selectedConnection = Option.getOrNull(usePreparedConnection(device));
   const [requester, setRequester] = useState<EnvironmentId | null>(null);
   const [endpoint, setEndpoint] = useState(connection?.httpBaseUrl ?? "");
   const [confirm, setConfirm] = useState<"disable" | "add" | "rotate" | EnvironmentId | null>(null);
@@ -100,6 +101,7 @@ export function MemoryAdministration({
   const [recovery, setRecovery] = useState(false);
   function recover(message: string) {
     attemptGeneration.current += 1;
+    loadGeneration.current += 1;
     deviceAttempt.current = null;
     flow.current?.dispose();
     flow.current = null;
@@ -113,7 +115,11 @@ export function MemoryAdministration({
   }
   useEffect(() => {
     const attempt = deviceAttempt.current;
-    if (attempt && readPreparedConnection(attempt.deviceId) !== attempt.connection) {
+    if (
+      attempt &&
+      (selectedConnection !== attempt.connection ||
+        readPreparedConnection(attempt.deviceId) !== attempt.connection)
+    ) {
       recover(
         "Device connection changed. Setup may be incomplete. Review the latest devices, then Replace key to recover or Remove to clean up.",
       );
@@ -142,7 +148,7 @@ export function MemoryAdministration({
   useEffect(() => {
     let current = true;
     const generation = ++loadGeneration.current;
-    if (!recovery) setError(null);
+    setError(null);
     void (async () => {
       const result = await getHub({ environmentId, input: {} });
       if (!current || generation !== loadGeneration.current) return;
@@ -455,6 +461,8 @@ export function MemoryAdministration({
                   onClick={() => {
                     if (recovery) {
                       setRecovery(false);
+                      setHub(null);
+                      setOwner(null);
                       setError(null);
                       setReload((n) => n + 1);
                       onSharingRefresh?.();

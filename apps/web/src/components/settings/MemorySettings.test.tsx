@@ -1304,3 +1304,27 @@ it("offers explicit recovery after a device setup version conflict", async () =>
   expect(row.textContent).toContain("Replace key");
   expect(row.textContent).toContain("Remove");
 });
+
+it("refreshes a confirmed owner policy conflict and asks for a new access change", async () => {
+  await supportedScreen(false);
+  const Cause = await import("effect/Cause");
+  state.responses.set("ownerSourceReadPolicyUpdate", {
+    _tag: "Failure",
+    cause: Cause.fail({ code: "revision_changed" }),
+  });
+  const removeAccess = async () => {
+    const row = [...container.querySelectorAll("[data-test-row]")].find((row) =>
+      row.textContent?.startsWith("device-a"),
+    )!;
+    await act(async () => row.querySelector<HTMLButtonElement>("button")!.click());
+  };
+  await removeAccess();
+  const first = state.calls.mock.calls.at(-1)![0];
+  expect(container.textContent).toContain("Conversation access changed");
+  state.responses.set("ownerSourceReadPolicyGet", success(ownerView(8, "device-a")));
+  await click("Review latest settings");
+  await removeAccess();
+  const next = state.calls.mock.calls.at(-1)![0];
+  expect(next.input.expectedVersion).toBe(8);
+  expect(next.input.requestId).not.toBe(first.input.requestId);
+});
