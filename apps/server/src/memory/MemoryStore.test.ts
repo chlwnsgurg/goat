@@ -8431,8 +8431,11 @@ it.effect(
         ))
           .map((r) => r.detail)
           .join("\n");
-        yield* Console.log("A2 QUERY PLAN", table, details);
+        // Keep the actual SQLite plan in the focused-run evidence artifact.
+        console.info("A2 QUERY PLAN", table, details);
         assert.match(details, /SEARCH/);
+        assert.match(details, /\(space=\? AND memory_id=\?/);
+        if (table === "memory_report_outbox") assert.include(details, "memory_report_memory_idx");
         assert.notMatch(details, /SCAN|TEMP B-TREE/);
       }
     }).pipe(checkUsage, Effect.provide(live)),
