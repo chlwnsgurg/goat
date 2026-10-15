@@ -122,6 +122,7 @@ describe("native Memory with shared factory", () => {
   });
   it("keeps the bootstrap subscription stable until a new reset makes it ready", async () => {
     h = createNativeMemoryHarness();
+    h.grant(["memory:read", "memory:write", "settings:write"]);
     const initial = h.deferred<unknown>();
     const refresh = h.deferred<unknown>();
     let calls = 0;
@@ -273,7 +274,11 @@ describe("native Memory with shared factory", () => {
           })),
           resolutions: history.resolutions.map((entry) => ({
             ...entry,
-            resolution: { ...entry.resolution, inputRevisionIds: [ids[2], ids[1], ids[0]] },
+            resolution: {
+              ...entry.resolution,
+              inputRevisionIds: [ids[2], ids[1], ids[0]],
+              inputPayloadRefs: [ids[2], ids[1], ids[0]],
+            },
           })),
         }),
       );
