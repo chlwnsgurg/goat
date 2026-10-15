@@ -2359,22 +2359,45 @@ describe("MemoryImport physical-growth source harness", () => {
                   const operationId = M.MemoryOperationId.make(uuid(allocation));
                   const revisionId = M.MemoryRevisionId.make(uuid(allocation + 1));
                   const resolutionId = M.MemoryResolutionId.make(uuid(allocation + 2));
-                  const lease = yield* hub.claim(
-                    {
-                      protocolVersion: 1,
-                      memorySpaceId: space,
-                      memoryId: id,
-                      holderEnvironmentId: environmentId,
-                      conflictId: conflict.conflictId,
-                      conflictHeadSet: aggregate.heads,
-                      attemptId: M.MemoryOperationId.make(uuid(allocation + 3)),
-                      frozenDefaultModelSelection: {
-                        instanceId: M.ProviderInstanceId.make("synthetic-growth"),
-                        model: "synthetic-model",
+                  const beforeClaim = yield* footprint;
+                  const lease = yield* hub
+                    .claim(
+                      {
+                        protocolVersion: 1,
+                        memorySpaceId: space,
+                        memoryId: id,
+                        holderEnvironmentId: environmentId,
+                        conflictId: conflict.conflictId,
+                        conflictHeadSet: aggregate.heads,
+                        attemptId: M.MemoryOperationId.make(uuid(allocation + 3)),
+                        frozenDefaultModelSelection: {
+                          instanceId: M.ProviderInstanceId.make("synthetic-growth"),
+                          model: "synthetic-model",
+                        },
                       },
-                    },
-                    authority.principal,
-                  );
+                      authority.principal,
+                    )
+                    .pipe(
+                      Effect.catchTags({
+                        MemoryCapacityError: (error) =>
+                          Effect.gen(function* () {
+                            refusals.push({
+                              phase: "resolve-claim",
+                              round,
+                              dimension: error.dimension,
+                              current: error.current,
+                              limit: error.limit,
+                            });
+                            assert.deepStrictEqual(yield* footprint, beforeClaim);
+                            yield* fs.writeFileString(
+                              `${directory}/claim-refusals.json`,
+                              encodeUnknown(refusals),
+                            );
+                            return null;
+                          }),
+                      }),
+                    );
+                  if (lease === null) continue;
                   const head = aggregate.revisions.find(
                     (r) => r.revision.revisionId === aggregate.heads[0],
                   )!;
