@@ -2851,7 +2851,9 @@ it.effect.each(["resolve", "unrelated issue"] as const)(
       const settingsLayer = Layer.effect(
         ServerSettings.MemoryProviderCommittedPolicy,
         Effect.gen(function* () {
-          const policy = yield* ServerSettings.MemoryProviderCommittedPolicy;
+          const policy = Option.getOrThrow(
+            yield* Effect.serviceOption(ServerSettings.MemoryProviderCommittedPolicy),
+          );
           return {
             ...policy,
             subscribeRotations: policy.subscribeRotations.pipe(
