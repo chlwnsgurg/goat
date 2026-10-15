@@ -1669,6 +1669,7 @@ it.effect(
           .pipe(Effect.flip))._tag,
         "MemoryHubUnauthorizedError",
       );
+      yield* update("revokeMember", M.EnvironmentId.make("offline-replacement"));
       const readded = yield* update("provisionMember", c.a.identity);
       const newPrincipal: M.MemoryHubPrincipal = {
         memorySpaceId: c.space,
@@ -1691,13 +1692,15 @@ it.effect(
               credentialVersion: owner!.credentialVersion,
             })).accepted,
           );
-          assert.strictEqual(
-            (yield* hub.resultSourceRead(
+          const staleResult = yield* hub
+            .resultSourceRead(
               { protocolVersion: 1, memorySpaceId: c.space, requestId: submission.requestId },
               newPrincipal,
-            )).state,
-            "expired",
-          );
+            )
+            .pipe(Effect.flip);
+          assert.strictEqual(staleResult._tag, "MemoryHubError");
+          if (staleResult._tag === "MemoryHubError")
+            assert.strictEqual(staleResult.code, "identity_mismatch");
           const next = yield* hub.requestSourceRead(
             { ...submission, requestId: M.MemorySourceReadRequestId.make(id(52001)) },
             newPrincipal,
