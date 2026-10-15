@@ -78,20 +78,23 @@ const setup = Layer.effectDiscard(
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storage = Store.layer.pipe(Layer.provideMerge(setup));
 const quota = Quota.layer.pipe(Layer.provideMerge(storage));
-const core = Service.layer.pipe(
-  Layer.provideMerge(quota),
-  Layer.provide(identity),
-  Layer.provide(
-    Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
-      resolve: () => Effect.succeed(null),
-    }),
-  ),
-);
-const hub = Hub.layer.pipe(
-  Layer.provideMerge(core),
-  Layer.provide(Hub.activityLayer),
-  Layer.provide(Layer.succeed(Hub.MemoryHubConfiguration, { read: Effect.succeed(null) })),
-);
+const coreFor = (environmentIdentity = identity) =>
+  Service.layer.pipe(
+    Layer.provideMerge(quota),
+    Layer.provide(environmentIdentity),
+    Layer.provide(
+      Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+        resolve: () => Effect.succeed(null),
+      }),
+    ),
+  );
+const core = coreFor();
+const hubFor = (serviceCore = core) =>
+  Hub.layer.pipe(
+    Layer.provideMerge(serviceCore),
+    Layer.provide(Hub.activityLayer),
+    Layer.provide(Layer.succeed(Hub.MemoryHubConfiguration, { read: Effect.succeed(null) })),
+  );
 // Real Store ports; the fixture Settings authority below is a SQL-free Ref.
 const runtimeBase = Layer.effect(
   Sync.MemorySyncRuntime,
@@ -143,7 +146,7 @@ const runtimeBase = Layer.effect(
     });
   }),
 );
-const runtime = runtimeBase.pipe(Layer.provide(core));
+
 const peer = (overrides: Partial<Client.MemoryHubClient["Service"]> = {}) => {
   const issued = new Map<string, M.MemoryResolutionLease>();
   const defaultClaim: Client.MemoryHubClient["Service"]["claim"] = (
@@ -276,7 +279,15 @@ const fixture = (
   generation = realGeneration({ resolveMemoryConflict: () => Effect.never }),
   disabled = false,
   changing = false,
+  environmentId = local,
 ) => {
+  const environmentIdentity =
+    environmentId === local
+      ? identity
+      : Layer.succeed(Environment.ServerEnvironmentIdentity, {
+          getEnvironmentId: Effect.succeed(environmentId),
+        });
+  const serviceCore = environmentId === local ? core : coreFor(environmentIdentity);
   const sharedSettings = changing
     ? changingSettings(disabled)
     : Settings.layerTest({
@@ -289,9 +300,12 @@ const fixture = (
     Settings.MemoryHubCommittedSettings,
     Effect.serviceOption(Settings.MemoryHubCommittedSettings).pipe(Effect.map(Option.getOrThrow)),
   ).pipe(Layer.provide(sharedSettings));
-  const shared = Layer.mergeAll(hub, runtime, identity, generation).pipe(
-    Layer.provideMerge(Layer.merge(sharedSettings, committed)),
-  );
+  const shared = Layer.mergeAll(
+    hubFor(serviceCore),
+    runtimeBase.pipe(Layer.provide(serviceCore)),
+    environmentIdentity,
+    generation,
+  ).pipe(Layer.provideMerge(Layer.merge(sharedSettings, committed)));
   return Sync.layer.pipe(Layer.provideMerge(client.pipe(Layer.provideMerge(shared))));
 };
 const ready = Effect.gen(function* () {
@@ -6198,6 +6212,191 @@ it.effect.each(["accepted", "rejected"] as const)(
           );
           assert.deepStrictEqual(yield* counts, before);
         }).pipe(Effect.provide(integrated));
+      }),
+    ),
+);
+
+it.effect.each(["tail", "bootstrap"] as const)(
+  "M-R6-1 caller-free replay fences foreign environment after %s",
+  (phase) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* Layer.build(Layer.fresh(core));
+        const hService = Context.get(h, Service.MemoryService);
+        const hStore = Context.get(h, Store.MemoryStore);
+        const hSql = Context.get(h, SqlClient.SqlClient);
+        const bEnvironment = M.EnvironmentId.make("fixture-member-b");
+        for (const environment of [local, remote, bEnvironment])
+          yield* hSql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${environment},${"a".repeat(64)},1,'active',0)`;
+        const authority = (environmentId: M.EnvironmentId): Store.HubAuthority => ({
+          principal: {
+            memorySpaceId: space,
+            environmentId,
+            credentialVersion: 1,
+            scopes: ["memory:sync"],
+          },
+          now: Clock.currentTimeMillis,
+          reauthorize: Effect.void,
+        });
+        const aClient = peer({
+          push: (_c, input) =>
+            Effect.gen(function* () {
+              const receipt = yield* hService.admitHubOperation({
+                operation: input.operations[0]!,
+                authority: authority(local),
+              });
+              return { receipts: [receipt] };
+            }).pipe(Effect.mapError(() => new M.MemoryHubError({ code: "unavailable" }))),
+        });
+        const a = yield* Layer.build(Layer.fresh(fixture(aClient)));
+        const aService = Context.get(a, Service.MemoryService);
+        const aStore = Context.get(a, Store.MemoryStore);
+        const aSql = Context.get(a, SqlClient.SqlClient);
+        yield* ready.pipe(Effect.provide(a));
+        const input = { ...McpFixture.upsert(97501), memorySpaceId: space };
+        const caller = { environmentId: local, threadId: M.ThreadId.make("r7-caller") };
+        const threaded = {
+          ...McpFixture.upsert(97502),
+          memorySpaceId: space,
+          memoryId: M.MemoryId.make(id(97503)),
+        };
+        yield* aService.upsert(input, Effect.void);
+        yield* Context.get(a, Sync.MemorySyncService).syncOnce;
+        yield* aService.upsert(threaded, Effect.void, caller);
+        yield* Context.get(a, Sync.MemorySyncService).syncOnce;
+        assert.property((yield* aStore.receipt(space, input.operationId))!.receipt, "hubSequence");
+        let snapshotToken: string | undefined;
+        if (phase === "bootstrap") {
+          yield* TestClock.adjust(M.MEMORY_LOG_RETENTION_MS);
+          yield* hStore.transact(
+            Effect.gen(function* () {
+              const previous = yield* hStore.readHubRetentionTx(space);
+              const handle = yield* hStore.prepareHubProducerCheckpointTx({
+                authority: authority(remote),
+                checkpointId: "r7-checkpoint",
+                hubEnvironmentId: remote,
+              });
+              yield* hStore.publishCheckpointAndFloorTx({
+                memorySpaceId: space,
+                checkpointId: handle.checkpointId,
+                expectedFloor: previous.retentionFloor,
+                nextFloor: handle.checkpointSequence,
+                now: yield* Clock.currentTimeMillis,
+              });
+              yield* hStore.compactEligibleHistoryTx({
+                memorySpaceId: space,
+                expectedFloor: handle.checkpointSequence,
+                now: yield* Clock.currentTimeMillis,
+                limit: 100,
+              });
+              assert.lengthOf(yield* hSql`SELECT 1 FROM memory_events`, 0);
+              const snapshot = yield* hStore.prepareHubCheckpointTx({
+                authority: authority(bEnvironment),
+                checkpointId: handle.checkpointId,
+                snapshotToken: "r7-snapshot",
+                hubEnvironmentId: remote,
+              });
+              snapshotToken = snapshot.snapshotToken;
+            }),
+          );
+        }
+        const bClient = peer({
+          join: () =>
+            hStore
+              .transact(
+                Effect.gen(function* () {
+                  const retention = yield* hStore.readHubRetentionTx(space);
+                  return {
+                    protocolVersion: 1 as const,
+                    memorySpaceId: space,
+                    hubEnvironmentId: remote,
+                    checkpointSequence: retention.retentionFloor,
+                    snapshotToken: snapshotToken!,
+                    causalBoundary: retention.causalBoundary!,
+                    retentionFloor: retention.retentionFloor,
+                  };
+                }),
+              )
+              .pipe(Effect.mapError(() => new M.MemoryHubError({ code: "unavailable" }))),
+          pull: (_c, request) =>
+            hStore
+              .transact(
+                Effect.gen(function* () {
+                  if (request.snapshotToken) {
+                    const page = yield* hStore.readHubCheckpointPageTx({
+                      authority: authority(bEnvironment),
+                      snapshotToken: request.snapshotToken,
+                      cursor: request.cursor ?? null,
+                    });
+                    return {
+                      highWatermark: page.checkpointSequence,
+                      throughSequence: page.checkpointSequence,
+                      hasMore: !page.bootstrapComplete,
+                      entries: [],
+                      checkpoint: page,
+                    };
+                  }
+                  return yield* hStore.readHubTailTx({
+                    memorySpaceId: space,
+                    afterSequence: request.afterSequence,
+                    highWatermark: request.highWatermark ?? null,
+                    limit: request.limit,
+                    maxBytes: M.MEMORY_PAGE_MAX_UTF8_BYTES,
+                  });
+                }),
+              )
+              .pipe(Effect.mapError(() => new M.MemoryHubError({ code: "unavailable" }))),
+        });
+        const b = yield* Layer.build(
+          Layer.fresh(fixture(bClient, undefined, false, false, bEnvironment)),
+        );
+        const bService = Context.get(b, Service.MemoryService);
+        const bStore = Context.get(b, Store.MemoryStore);
+        const bSql = Context.get(b, SqlClient.SqlClient);
+        if (phase === "tail") yield* ready.pipe(Effect.provide(b));
+        yield* Context.get(b, Sync.MemorySyncService).syncOnce;
+        assert.isDefined(yield* bStore.receipt(space, input.operationId));
+        assert.lengthOf(
+          yield* bSql`SELECT 1 FROM memory_events WHERE operation_id=${input.operationId}`,
+          phase === "tail" ? 1 : 0,
+        );
+        const counts = (sql: SqlClient.SqlClient) =>
+          sql`SELECT (SELECT count(*) FROM memory_events) AS events,(SELECT count(*) FROM memory_payloads) AS payloads,(SELECT count(*) FROM memory_outbox) AS outbox`;
+        const aBefore = yield* counts(aSql);
+        const bBefore = yield* counts(bSql);
+        const aCanonical = yield* aStore.receipt(space, input.operationId);
+        const bCanonical = yield* bStore.receipt(space, input.operationId);
+        const reject = <A, E, R>(effect: Effect.Effect<A, E, R>, code: string) =>
+          effect.pipe(
+            Effect.flip,
+            Effect.tap((error) => Effect.sync(() => assert.propertyVal(error, "code", code))),
+          );
+        yield* reject(bService.upsert(input, Effect.void), "operation_id_reused");
+        yield* aService.upsert(input, Effect.void);
+        yield* aService.upsert(threaded, Effect.void, caller);
+        yield* reject(
+          aService.upsert(
+            { ...input, payload: { ...input.payload, text: "changed" } },
+            Effect.void,
+          ),
+          "operation_id_reused",
+        );
+        yield* reject(bService.upsert(threaded, Effect.void, caller), "identity_mismatch");
+        yield* reject(
+          bService.upsert(threaded, Effect.void, { ...caller, environmentId: bEnvironment }),
+          "operation_id_reused",
+        );
+        yield* reject(
+          aService.upsert(threaded, Effect.void, {
+            ...caller,
+            threadId: M.ThreadId.make("other-thread"),
+          }),
+          "operation_id_reused",
+        );
+        assert.deepStrictEqual(yield* counts(aSql), aBefore);
+        assert.deepStrictEqual(yield* counts(bSql), bBefore);
+        assert.deepStrictEqual(yield* aStore.receipt(space, input.operationId), aCanonical);
+        assert.deepStrictEqual(yield* bStore.receipt(space, input.operationId), bCanonical);
       }),
     ),
 );
