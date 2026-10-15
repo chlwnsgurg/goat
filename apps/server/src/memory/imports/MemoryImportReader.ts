@@ -45,6 +45,8 @@ export type MemoryImportReaderConfig = {
   /** Python 3 supplies openat/dir_fd absent from Node FS; unavailable platforms refuse. */
   readonly descriptorExecutable: string;
   /** Value-free lifecycle observation; no source bytes, paths, arguments or environment. */
+  /** Optional acquisition-owned seal barrier, before any Git process; no source values exposed. */
+  readonly onSnapshotSealed?: () => Effect.Effect<void, MemoryImportRpcError>;
   readonly onProcessSpawn?: (event: { readonly operation: string; readonly pid: number }) => void;
 };
 
@@ -70,7 +72,10 @@ def open_child(parent, name, directory=False, stable=True, expected=None):
         raise
     if expected is not None and stamp(before)!=stamp(expected): refuse('source_changed')
     if stat.S_ISLNK(before.st_mode) or not (stat.S_ISDIR(before.st_mode) if directory else stat.S_ISREG(before.st_mode)): refuse('path_rejected')
-    fd=os.open(name, os.O_RDONLY | os.O_NOFOLLOW | (os.O_DIRECTORY if directory else os.O_NONBLOCK), dir_fd=parent)
+    try: fd=os.open(name, os.O_RDONLY | os.O_NOFOLLOW | (os.O_DIRECTORY if directory else os.O_NONBLOCK), dir_fd=parent)
+    except OSError as e:
+        if e.errno in (errno.ELOOP,errno.ENOTDIR,errno.ENOENT): refuse('source_changed')
+        raise
     after=os.fstat(fd)
     if stamp(before)!=stamp(after): os.close(fd); refuse('source_changed')
     held.append(fd); checks.append((parent, name, fd, after, stable))
@@ -186,7 +191,7 @@ try:
                 return (name,None,[])
             trees=[]
             for name in entries:
-                if not name.startswith('snapshot-') or len(name)!=45: refuse('path_rejected')
+                if not re.fullmatch(r'snapshot-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',name): refuse('path_rejected')
                 count=0; total=0; object_total=0; object_count=0
                 trees.append(inspect(state,name,0,''))
             verify()
@@ -199,7 +204,7 @@ try:
             for tree in trees:
                 if action=='cleanup' or tree[0]==c['id']: remove(state,tree)
     elif action=='discover':
-        root=absolute(c['root']); entries=names(root,512)
+        root=absolute(c['root']); root_before=os.fstat(root); entries=names(root,512)
         if len(entries)>512: refuse('limit_exceeded')
         result={'selections':[]}
         for name in entries:
@@ -208,6 +213,7 @@ try:
             if stat.S_ISDIR(s.st_mode):
                 result['selections'].append(name)
                 if len(result['selections'])>128: refuse('limit_exceeded')
+        if stamp(root_before)!=stamp(os.fstat(root)): refuse('source_changed')
         verify()
     elif action=='copy':
         root=absolute(c['root']); source=root
@@ -445,7 +451,7 @@ const decodeBroker = Schema.decodeUnknownSync(
 const broker = (config: MemoryImportReaderConfig, input: Record<string, unknown>) =>
   execute(
     config.descriptorExecutable,
-    ["-I", "-S", "-c", DESCRIPTORS, encodeJson(input)],
+    ["-I", "-S", "-B", "-c", DESCRIPTORS, encodeJson(input)],
     config.stateDir,
     12 * 1024 * 1024,
     undefined,
@@ -644,6 +650,7 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
               format: slot.format,
               config: slot.format === "omo" ? CONFIG : "",
             });
+            if (config.onSnapshotSealed) yield* Effect.suspend(config.onSnapshotSealed);
             let files = [...(copied.files ?? [])];
             let commitOid: string | undefined;
             let profile: string;
@@ -729,7 +736,9 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
                 ? PROFILES[0]
                 : PROFILES[1];
             } else
-              profile = files.some((file) => /^metadata:\s*$/m.test(file.text))
+              profile = files.some((file) =>
+                /^---\r?\n(?:(?!---)[^])*?^metadata:[^]*?^---\s*$/m.test(file.text),
+              )
                 ? PROFILES[3]
                 : PROFILES[2];
             yield* Effect.try({

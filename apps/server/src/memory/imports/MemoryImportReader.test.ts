@@ -1048,4 +1048,90 @@ exec(compile(code,'<descriptor-broker>','exec'),{'__name__':'__main__'})
       }),
     ),
   );
+  it.effect.each(["config", "objects", "ancestor", "combined"] as const)(
+    "seal barrier isolates original %s replacement",
+    (variant) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* buildMemoryImportFixture("omo-memory-core-beta63");
+          const sealed = yield* Deferred.make<void>();
+          const proceed = yield* Deferred.make<void>();
+          const reader = yield* Reader.acquireMemoryImportReader({
+            ...readerConfig(fixture),
+            onSnapshotSealed: () =>
+              Deferred.succeed(sealed, undefined).pipe(Effect.andThen(Deferred.await(proceed))),
+          });
+          const metadata = NodePath.join(fixture.sourceRoot, ".git");
+          const config = NodePath.join(metadata, "config");
+          const originalConfig = NodeFS.readFileSync(config);
+          const objects = NodePath.join(metadata, "objects");
+          const savedObjects = NodePath.join(fixture.sandbox, "saved-objects");
+          const savedMetadata = NodePath.join(fixture.sandbox, "saved-metadata");
+          const external = NodePath.join(fixture.sandbox, "external-metadata");
+          NodeFS.mkdirSync(NodePath.join(external, "info"), { recursive: true });
+          NodeFS.writeFileSync(
+            NodePath.join(external, "info", "alternates"),
+            "../../not-a-provider-root\n",
+          );
+          const before = captureMemoryImportInventory(fixture.sourceRoot);
+          const fiber = yield* Effect.forkChild(reader.read({ slot: fixture.snapshot.slot }));
+          yield* Deferred.await(sealed);
+          if (variant === "config" || variant === "combined")
+            NodeFS.writeFileSync(config, "[include]\n path = ../../external-config\n");
+          if (variant === "objects" || variant === "combined") {
+            NodeFS.renameSync(objects, savedObjects);
+            NodeFS.symlinkSync(external, objects);
+          }
+          if (variant === "ancestor" || variant === "combined") {
+            NodeFS.renameSync(metadata, savedMetadata);
+            NodeFS.symlinkSync(external, metadata);
+          }
+          const value = yield* Deferred.succeed(proceed, undefined).pipe(
+            Effect.andThen(Fiber.join(fiber)),
+            Effect.ensuring(
+              Effect.sync(() => {
+                if (variant === "ancestor" || variant === "combined") {
+                  NodeFS.unlinkSync(metadata);
+                  NodeFS.renameSync(savedMetadata, metadata);
+                }
+                if (variant === "objects" || variant === "combined") {
+                  NodeFS.unlinkSync(objects);
+                  NodeFS.renameSync(savedObjects, objects);
+                }
+                if (variant === "config" || variant === "combined")
+                  NodeFS.writeFileSync(config, originalConfig);
+              }),
+            ),
+          );
+          assert.equal(value.commitOid, fixture.snapshot.commitOid);
+          assert.deepEqual(value.files, fixture.snapshot.files);
+          assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+          assert.deepEqual(residue(fixture), []);
+        }),
+      ),
+  );
+
+  it.effect("loose and packed replace refs cannot redirect commit bytes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("omo-memory-core-beta63");
+        const metadata = NodePath.join(fixture.sourceRoot, ".git");
+        NodeFS.mkdirSync(NodePath.join(metadata, "refs", "replace"), { recursive: true });
+        NodeFS.writeFileSync(
+          NodePath.join(metadata, "refs", "replace", fixture.snapshot.commitOid!),
+          fixture.snapshot.commitOid + "\n",
+        );
+        NodeFS.writeFileSync(
+          NodePath.join(metadata, "packed-refs"),
+          fixture.snapshot.commitOid + " refs/replace/" + fixture.snapshot.commitOid + "\n",
+        );
+        const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+        const before = captureMemoryImportInventory(fixture.sourceRoot);
+        const value = yield* reader.read({ slot: fixture.snapshot.slot });
+        assert.deepEqual(value.files, fixture.snapshot.files);
+        assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
 });
