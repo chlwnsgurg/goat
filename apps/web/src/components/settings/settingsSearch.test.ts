@@ -599,3 +599,10 @@ describe("sidebar view search", () => {
     },
   );
 });
+
+it.each(["memory", "sharing", "forget", "conflict", "revert", "source access"])(
+  "keeps Memory reachable through settings search: %s",
+  (query) => {
+    expect(searchSettings(query).some((item) => item.to === "/settings/memory")).toBe(true);
+  },
+);

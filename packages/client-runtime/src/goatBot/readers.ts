@@ -86,6 +86,9 @@ export const goatBotItemReaders: GoatBotItemReaders = {
     if (meta === undefined) return null;
     return {
       tone: MESSAGE_TONE[meta.kind],
+      ...(item.type !== "assistant_message" || meta.memory === undefined
+        ? {}
+        : { memory: meta.memory }),
       readAt: meta.readAt ?? null,
       requestKey: meta.inputId ?? null,
       replyToKey: meta.inReplyToInputId ?? null,

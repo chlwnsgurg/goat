@@ -127,6 +127,7 @@ import { UsageRouteScreen } from "./features/usage/UsageRouteScreen";
 import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
 import { SettingsNotificationsRouteScreen } from "./features/settings/SettingsNotificationsRouteScreen";
 import { MobileGoatBotHomeWorker } from "./features/goat-bot/MobileGoatBotHomeWorker";
+import { SettingsMemoryRouteScreen } from "./features/settings/SettingsMemoryRouteScreen";
 import { SettingsGoatBotRouteScreen } from "./features/settings/SettingsGoatBotRouteScreen";
 import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
 import { SettingsThreadsRouteScreen } from "./features/settings/SettingsThreadsRouteScreen";
@@ -232,6 +233,11 @@ const SettingsContentStack = createV5SheetStackNavigator({
       options: {
         title: "Settings",
       },
+    }),
+    SettingsMemory: createNativeStackScreen({
+      screen: SettingsMemoryRouteScreen,
+      linking: "memory",
+      options: { title: "Memory" },
     }),
     SettingsGoatBot: createNativeStackScreen({
       screen: SettingsGoatBotRouteScreen,

@@ -39,6 +39,8 @@ GOAT Bot screen shows only a chip for the work and its final report.
   `goat-bot/memory.md` in GOAT's data folder on that machine; edit the file
   to change them. Put written procedures in `goat-bot/skills/` as Markdown
   files, and the bot points its coding agents to the one that fits.
+- For memories used in coding conversations and shared between devices, see
+  [Memory](./memory.md).
 - Work you start from Slack is capped at the access level chosen when you
   created the link code.
 - When you connect to several machines, Slack runs only on the machine GOAT

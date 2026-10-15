@@ -14,6 +14,7 @@ import { usePrimarySettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 import { formatShortTimestamp } from "~/timestampFormat";
 
+import { MemorySettingsEntry } from "../settings/MemorySettings";
 import { Button } from "../ui/button";
 import { GoatBotAvatar } from "./GoatBotAvatar";
 import { GoatBotTaskChip } from "./GoatBotTaskChip";
@@ -118,6 +119,13 @@ export function GoatBotTimeline({
                           </blockquote>
                         ) : null}
                         {row.text}
+                        {row.memory ? (
+                          <MemorySettingsEntry
+                            environmentId={row.memory.environmentId}
+                            reference={row.memory}
+                            label="View memory details"
+                          />
+                        ) : null}
                       </div>
                     </div>
                     <span className="shrink-0 pb-0.5 text-xs text-muted-foreground">

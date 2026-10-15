@@ -12,6 +12,9 @@ const harness = vi.hoisted(() => ({
   navigatedRoutes: [] as string[],
 }));
 
+vi.mock("../settings/SettingsMemoryRouteScreen", () => ({
+  useMemoryNavigation: () => ({ visible: false, open: () => {} }),
+}));
 vi.mock("@react-navigation/native", () => {
   const navigation = {
     canGoBack: () => true,

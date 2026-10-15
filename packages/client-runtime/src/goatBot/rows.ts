@@ -1,5 +1,6 @@
 import type {
   EnvironmentId,
+  MemoryReportReference,
   OrchestrationV2ProjectedTurnItem,
   OrchestrationV2TurnItem,
   ThreadId,
@@ -58,6 +59,7 @@ export interface GoatBotMessagePresentation {
   readonly clientKey?: string | null;
   /** Answers a bot question offers. */
   readonly options?: ReadonlyArray<string>;
+  readonly memory?: MemoryReportReference;
 }
 
 type MessageItem = Extract<OrchestrationV2TurnItem, { type: "user_message" | "assistant_message" }>;
@@ -105,6 +107,7 @@ export type GoatBotRow =
       readonly replyTo: string | null;
       /** Answers to pick, only while nothing has been sent since the question. */
       readonly options: ReadonlyArray<string>;
+      readonly memory?: MemoryReportReference;
       readonly firstInGroup: boolean;
     }
   | {
@@ -213,6 +216,7 @@ export function buildGoatBotTimeline(input: {
             ? (inputTexts.get(presentation.replyToKey)?.slice(0, 160) ?? null)
             : null,
         options: presentation?.options ?? NO_OPTIONS,
+        ...(presentation?.memory === undefined ? {} : { memory: presentation.memory }),
       });
       previousInputKey = null;
       continue;
