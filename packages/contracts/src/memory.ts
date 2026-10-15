@@ -1316,6 +1316,7 @@ export const MemoryReportDelivery = struct({
   resolutionId: Schema.NullOr(MemoryResolutionId),
   state: Schema.Literals(["pending", "delivered", "failed"]),
   failureCode: Schema.optionalKey(MemoryFailureCode),
+  automaticAttempts: Schema.optionalKey(NonNegativeInt.check(Schema.isLessThanOrEqualTo(10))),
   reportThread: Schema.NullOr(ScopedThreadRef),
   sequence: Schema.NullOr(NonNegativeInt),
 }).check(
@@ -1516,6 +1517,18 @@ export type MemoryListInput = typeof MemoryListInput.Type;
 
 export const MemoryReadInput = struct({ ...space, memoryId: MemoryId });
 export type MemoryReadInput = typeof MemoryReadInput.Type;
+
+export const MemoryResetReportAttemptsInput = struct({
+  ...space,
+  environmentId: EnvironmentId,
+  reportIds: distinct(digest, 32, 1),
+});
+export type MemoryResetReportAttemptsInput = typeof MemoryResetReportAttemptsInput.Type;
+export const MemoryResetReportAttemptsResult = struct({
+  resetCount: NonNegativeInt.check(Schema.isLessThanOrEqualTo(32)),
+  unchangedCount: NonNegativeInt.check(Schema.isLessThanOrEqualTo(32)),
+}).check(Schema.makeFilter((v) => v.resetCount + v.unchangedCount <= 32));
+export type MemoryResetReportAttemptsResult = typeof MemoryResetReportAttemptsResult.Type;
 
 export const MemoryHistoryInput = struct({ ...space, ...paging, memoryId: MemoryId });
 export type MemoryHistoryInput = typeof MemoryHistoryInput.Type;

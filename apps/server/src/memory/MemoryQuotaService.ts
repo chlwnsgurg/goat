@@ -684,6 +684,8 @@ const make = Effect.gen(function* () {
             import_lineage_bytes: M.MEMORY_IMPORT_LINEAGE_MAX_BYTES,
             log_tail_rows: M.MEMORY_LOG_MAX_TAIL_ROWS,
             log_tail_bytes: M.MEMORY_LOG_MAX_TAIL_BYTES,
+            report_items: M.MEMORY_REPORT_MAX_PENDING_ITEMS,
+            report_bytes: M.MEMORY_REPORT_MAX_PENDING_BYTES,
             work_items: M.MEMORY_WORK_MAX_PENDING_ITEMS,
             work_bytes: M.MEMORY_WORK_MAX_PAYLOAD_BYTES,
             checkpoint_staging: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,

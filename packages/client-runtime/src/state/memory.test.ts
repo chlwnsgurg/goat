@@ -400,6 +400,30 @@ describe("shared memory client", () => {
       ),
   );
 
+  it.effect("report retry reset permission follows settings write on the exact environment", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness();
+        const request = { memorySpaceId: space, environmentId: env, reportIds: ["a".repeat(64)] };
+        h.registry.set(grants(env), AsyncResult.success(sessionScopes(["memory:write"])));
+        expect(h.registry.get(h.memory.resetReportAttempts.permissionAtom(env, request))).toBe(
+          false,
+        );
+        h.registry.set(grants(env), AsyncResult.success(sessionScopes(["settings:write"])));
+        expect(h.registry.get(h.memory.resetReportAttempts.permissionAtom(env, request))).toBe(
+          true,
+        );
+        expect(h.registry.get(h.memory.resetReportAttempts.permissionAtom(other, request))).toBe(
+          false,
+        );
+        h.registry.set(grants(env), AsyncResult.success(sessionScopes([])));
+        expect(h.registry.get(h.memory.resetReportAttempts.permissionAtom(env, request))).toBe(
+          false,
+        );
+      }),
+    ),
+  );
+
   it.effect("allows core commands but rejects import on a core-only environment", () =>
     Effect.scoped(
       Effect.gen(function* () {

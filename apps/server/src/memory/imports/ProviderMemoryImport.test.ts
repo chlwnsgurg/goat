@@ -1,3 +1,4 @@
+import * as Settings from "../../serverSettings.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
@@ -10,6 +11,7 @@ import migration from "../../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../../persistence/Migrations/072_MemoryHubSync.ts";
 import searchMigration from "../../persistence/Migrations/073_MemorySearchCounters.ts";
 import checkpointMigration from "../../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
+import reportMigration from "../../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import lineageMigration from "../../persistence/Migrations/075_MemoryImportLineage.ts";
 import * as Service from "../MemoryService.ts";
 import * as Store from "../MemoryStore.ts";
@@ -1098,12 +1100,21 @@ const database = Layer.effectDiscard(
     Effect.andThen(searchMigration),
     Effect.andThen(lineageMigration),
     Effect.andThen(checkpointMigration),
+    Effect.andThen(reportMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const serviceLive = (
   resolve: RepositoryResolver.RepositoryIdentityResolver["Service"]["resolve"],
 ) =>
   Service.layer.pipe(
+    Layer.provide(
+      Layer.succeed(Settings.MemoryHubCommittedSettings, {
+        read: Effect.succeed({
+          settings: { mode: "hub" as const, memorySpaceId: space },
+          version: 1,
+        }),
+      }),
+    ),
     Layer.provide(
       Layer.succeed(Environment.ServerEnvironmentIdentity, {
         getEnvironmentId: Effect.succeed(environmentId),

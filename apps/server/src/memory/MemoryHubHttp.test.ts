@@ -1,5 +1,6 @@
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
+import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import { expect, it } from "vite-plus/test";
 import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -27,6 +28,7 @@ const setup = Layer.effectDiscard(
     yield* hubMigration;
     yield* lineageMigration;
     yield* checkpointMigration;
+    yield* reportMigration;
     const sql = yield* SqlClient.SqlClient;
     const crypto = yield* Crypto.Crypto;
     const digest = Hex.encode(
@@ -84,9 +86,12 @@ const app = (failure?: Hub.HubFailure, disabled = false) =>
   Hub.layer.pipe(
     Layer.provideMerge(boundary(failure)),
     Layer.provideMerge(
-      Settings.layerTest({
-        memoryHub: disabled ? { mode: "disabled" } : { mode: "hub", memorySpaceId: space },
-      }),
+      Settings.layerTest(
+        {
+          memoryHub: disabled ? { mode: "disabled" } : { mode: "hub", memorySpaceId: space },
+        },
+        "memoryHub",
+      ),
     ),
   );
 const request = (

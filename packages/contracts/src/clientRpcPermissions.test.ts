@@ -78,3 +78,8 @@ it("registers every core read and owner policy administration guard", () => {
   ])
     expect(clientRpcRequiredScopes(method, {})).toEqual(["settings:write"]);
 });
+
+it("report retry reset is Settings-only", () =>
+  expect(clientRpcRequiredScopes(WS_METHODS.memoryResetReportAttempts, {})).toEqual([
+    "settings:write",
+  ]));

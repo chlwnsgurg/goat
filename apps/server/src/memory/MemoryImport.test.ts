@@ -15,6 +15,7 @@ import {
   encodeUnknown,
 } from "./MemoryImport.testkit.ts";
 import { checkpointLedgerFixture } from "./MemoryCheckpoint.testkit.ts";
+import * as Settings from "../serverSettings.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
@@ -30,6 +31,7 @@ import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
+import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import * as Service from "./MemoryService.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
@@ -43,6 +45,7 @@ const database = Layer.effectDiscard(
     Effect.andThen(searchMigration),
     Effect.andThen(lineageMigration),
     Effect.andThen(checkpointMigration),
+    Effect.andThen(reportMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const live = Store.layer.pipe(Layer.provideMerge(database));
@@ -136,7 +139,18 @@ describe("MemoryImport lifetime lineage", () => {
   );
 });
 
-const serviceLayer = Service.layer.pipe(Layer.provide(identity), Layer.provide(resolver));
+const serviceLayer = Service.layer.pipe(
+  Layer.provide(
+    Layer.succeed(Settings.MemoryHubCommittedSettings, {
+      read: Effect.succeed({
+        settings: { mode: "hub" as const, memorySpaceId: space },
+        version: 1,
+      }),
+    }),
+  ),
+  Layer.provide(identity),
+  Layer.provide(resolver),
+);
 const importLive = serviceLayer.pipe(
   Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(live))),
 );
@@ -1754,6 +1768,14 @@ const repository = {
   },
 };
 const repositoryImportLive = Service.layer.pipe(
+  Layer.provide(
+    Layer.succeed(Settings.MemoryHubCommittedSettings, {
+      read: Effect.succeed({
+        settings: { mode: "hub" as const, memorySpaceId: space },
+        version: 1,
+      }),
+    }),
+  ),
   Layer.provide(identity),
   Layer.provide(
     Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({

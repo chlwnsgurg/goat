@@ -14,6 +14,7 @@ import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Store from "./MemoryStore.ts";
+import * as Settings from "../serverSettings.ts";
 import { ProviderMemoryImportRuntime } from "./imports/MemoryImportTypes.ts";
 import type {
   ImportProviderFacade,
@@ -229,6 +230,27 @@ export class MemoryService extends Context.Service<
     readonly reconnectParked: (
       operation: M.MemoryOperation,
     ) => Effect.Effect<boolean, MemoryServiceError>;
+    readonly resetReportAttempts: (
+      input: M.MemoryResetReportAttemptsInput,
+      permit: Permit,
+    ) => Effect.Effect<M.MemoryResetReportAttemptsResult, MemoryServiceError>;
+    readonly readReportTarget: Store.MemoryStore["Service"]["readReportTarget"];
+    readonly nextReportWakeAt: (
+      now: number,
+    ) => Effect.Effect<number | null, Store.MemoryStorageError>;
+    readonly acquireReports: Store.MemoryStore["Service"]["acquireReports"];
+    readonly acknowledgeClaimedReport: Store.MemoryStore["Service"]["acknowledgeClaimedReport"];
+    readonly deferClaimedReport: Store.MemoryStore["Service"]["deferClaimedReport"];
+    readonly normalizeExpiredReports: Store.MemoryStore["Service"]["normalizeExpiredReports"];
+    readonly purgeDeliveredReportDetails: (input: {
+      memorySpaceId?: M.MemorySpaceId;
+      now: number;
+      limit: number;
+    }) => Effect.Effect<
+      { removedRows: number; reclaimedLogicalBytes: number },
+      Store.MemoryStorageError | Store.MemoryStoreConflict
+    >;
+    readonly nextReportMaintenanceAt: Effect.Effect<number | null, Store.MemoryStorageError>;
     readonly pendingReports: Store.MemoryStore["Service"]["pendingReports"];
     readonly claimReport: Store.MemoryStore["Service"]["claimReport"];
     readonly acknowledgeReport: Store.MemoryStore["Service"]["acknowledgeReport"];
@@ -367,6 +389,7 @@ const make = Effect.fnUntraced(function* (
 ) {
   const repositoryResolver = yield* RepositoryResolver.RepositoryIdentityResolver;
   const store = yield* Store.MemoryStore;
+  const committedSettings = yield* Settings.MemoryHubCommittedSettings;
   const quota = yield* Quota.MemoryQuotaService;
   const identity = yield* Environment.ServerEnvironmentIdentity;
   const environmentId = yield* identity.getEnvironmentId;
@@ -375,6 +398,29 @@ const make = Effect.fnUntraced(function* (
     effect.pipe(
       Effect.mapError((cause) => new Store.MemoryStorageError({ stage: "service-read", cause })),
     );
+  const requireSharing = Effect.fnUntraced(function* (space: M.MemorySpaceId) {
+    const binding = yield* committedSettings.read;
+    if (binding.settings.mode === "disabled" || binding.settings.memorySpaceId !== space)
+      return yield* new MemoryAccessError({ code: "bootstrap_required" });
+  });
+  const resetReportAttempts: MemoryService["Service"]["resetReportAttempts"] = Effect.fn(
+    "MemoryService.resetReportAttempts",
+  )(function* (input, permit) {
+    const value = yield* decode(
+      Schema.decodeUnknownEffect(M.MemoryResetReportAttemptsInput)(input, strict),
+    );
+    return yield* store.transact(
+      Effect.gen(function* () {
+        yield* permit;
+        if (value.environmentId !== environmentId)
+          return yield* new MemoryAccessError({ code: "identity_mismatch" });
+        yield* requireSharing(value.memorySpaceId);
+        const result = yield* store.resetReportAttemptsTx(value, yield* Clock.currentTimeMillis);
+        yield* permit;
+        return result;
+      }),
+    );
+  });
   const projectRoot = Effect.fn("MemoryService.projectRoot")(function* (
     project: M.ScopedProjectRef,
   ) {
@@ -605,7 +651,17 @@ const make = Effect.fnUntraced(function* (
         if (admission.kind !== "approvedReplica") yield* requireImportNotSuppressed(op);
         const decision = yield* decide(current, op, admission, approval, ancestry);
         return yield* quota.commit(decision, environmentId, permit);
-      }),
+      }).pipe(
+        Effect.tap(() =>
+          admission.kind === "approvedReplica" && approval
+            ? store.reconcileOperationReportTx({
+                operation: op,
+                receipt: approval,
+                localEnvironmentId: environmentId,
+              })
+            : Effect.void,
+        ),
+      ),
     );
   });
   const requireImportAddress = (address: ImportAddress) =>
@@ -1118,6 +1174,7 @@ const make = Effect.fnUntraced(function* (
     return yield* store.transact(
       Effect.gen(function* () {
         yield* permit;
+        yield* requireSharing(value.memorySpaceId);
         yield* requireCaller(sourceThread);
         const requestDigest = hash(
           yield* decode(
@@ -1234,6 +1291,7 @@ const make = Effect.fnUntraced(function* (
       .transact(
         Effect.gen(function* () {
           yield* permit;
+          yield* requireSharing(value.memorySpaceId);
           const current = yield* store.loadAggregate(value.memorySpaceId, value.memoryId);
           if (current.identity) yield* requireScope(current.identity.scope);
           const old = yield* store.readOperation(value.memorySpaceId, value.operationId);
@@ -1445,6 +1503,7 @@ const make = Effect.fnUntraced(function* (
     return yield* store.transact(
       Effect.gen(function* () {
         yield* permit;
+        yield* requireSharing(value.memorySpaceId);
         yield* requireCaller(sourceThread);
         const current = yield* store.loadAggregate(value.memorySpaceId, value.memoryId);
         if (current.identity) yield* requireScope(current.identity.scope);
@@ -1768,9 +1827,13 @@ const make = Effect.fnUntraced(function* (
             };
           }),
         );
+        yield* store.normalizeExpiredReports(yield* Clock.currentTimeMillis, environmentId);
         const reportRows = yield* query(
           sql<{
             report_id: string;
+            automatic_attempts: number;
+            report_kind: string;
+            attempts_known: number;
             operation_id: string;
             outcome: string;
             resolving_environment_id: string;
@@ -1787,6 +1850,9 @@ const make = Effect.fnUntraced(function* (
               decodeReport(
                 {
                   reportId: row.report_id,
+                  ...(row.attempts_known === 1
+                    ? { automaticAttempts: row.automatic_attempts }
+                    : {}),
                   operationId: row.operation_id,
                   outcome: row.outcome,
                   resolvingEnvironmentId: row.resolving_environment_id,
@@ -2724,6 +2790,19 @@ const make = Effect.fnUntraced(function* (
       apply(op, Store.approvedReplica, Effect.void, receipt),
     queueResolution: store.persistResolutionTicket,
     recoverWork: store.dueWork,
+    resetReportAttempts,
+    readReportTarget: store.readReportTarget,
+    nextReportWakeAt: (now) => store.nextReportWakeAt(now, environmentId),
+    acquireReports: (input) =>
+      input.owner === environmentId ? store.acquireReports(input) : Effect.succeed([]),
+    acknowledgeClaimedReport: (input) =>
+      input.owner === environmentId ? store.acknowledgeClaimedReport(input) : Effect.succeed(false),
+    deferClaimedReport: (input) =>
+      input.owner === environmentId ? store.deferClaimedReport(input) : Effect.succeed(false),
+    normalizeExpiredReports: (now) => store.normalizeExpiredReports(now, environmentId),
+    purgeDeliveredReportDetails: (input) =>
+      store.transact(store.purgeDeliveredReportDetailsTx({ ...input, environmentId })),
+    nextReportMaintenanceAt: store.nextReportMaintenanceAt(environmentId),
     pendingReports: store.pendingReports,
     claimReport: store.claimReport,
     acknowledgeReport: store.acknowledgeReport,

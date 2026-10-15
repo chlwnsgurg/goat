@@ -574,6 +574,7 @@ export const layerMemorySourceReadService = Layer.unwrap(
   }),
 ).pipe(Layer.provide(layerMemorySourceReadBinding));
 const layerMemoryService = layerMemorySourceReadService.pipe(
+  Layer.provide(layerServerSettings),
   Layer.provideMerge(layerMemoryQuota),
   Layer.provide(ServerEnvironment.layerIdentity),
   Layer.provide(layerRepositoryIdentityResolver),

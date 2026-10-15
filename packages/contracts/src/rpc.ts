@@ -426,6 +426,7 @@ export const WS_METHODS = {
   memoryList: "memory.list",
   memoryRead: "memory.read",
   memoryHistory: "memory.history",
+  memoryResetReportAttempts: "memory.resetReportAttempts",
   memorySyncStatus: "memory.syncStatus",
   memoryOwnerSourceReadPolicyGet: "memory.ownerSourceReadPolicy.get",
   memoryOwnerSourceReadPolicyUpdate: "memory.ownerSourceReadPolicy.update",
@@ -2399,7 +2400,13 @@ export const WsMemoryOwnerSourceReadPolicyUpdateRpc = Rpc.make(
     error: MemoryRpcErrors,
   },
 );
+export const WsMemoryResetReportAttemptsRpc = Rpc.make(WS_METHODS.memoryResetReportAttempts, {
+  payload: Memory.MemoryResetReportAttemptsInput,
+  success: Memory.MemoryResetReportAttemptsResult,
+  error: MemoryRpcErrors,
+});
 export const WsMemoryAdministrationRpcGroup = RpcGroup.make(
+  WsMemoryResetReportAttemptsRpc,
   WsMemoryOwnerSourceReadPolicyGetRpc,
   WsMemoryOwnerSourceReadPolicyUpdateRpc,
 ).middleware(RpcScopeAuthorization);

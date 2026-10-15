@@ -21,6 +21,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.memoryList]: AuthMemoryReadScope,
   [WS_METHODS.memoryRead]: AuthMemoryReadScope,
   [WS_METHODS.memoryHistory]: AuthMemoryReadScope,
+  [WS_METHODS.memoryResetReportAttempts]: AuthSettingsWriteScope,
   [WS_METHODS.memoryChanges]: AuthMemoryReadScope,
   [WS_METHODS.memorySyncStatus]: AuthMemoryReadScope,
   [WS_METHODS.memoryOwnerSourceReadPolicyGet]: AuthSettingsWriteScope,

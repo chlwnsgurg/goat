@@ -39,6 +39,7 @@ import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
+import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Service from "./MemoryService.ts";
 import * as Quota from "./MemoryQuotaService.ts";
@@ -75,6 +76,7 @@ const setup = Layer.effectDiscard(
     yield* hubMigration;
     yield* lineageMigration;
     yield* checkpointMigration;
+    yield* reportMigration;
     const sql = yield* SqlClient.SqlClient;
     yield* sql`CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY,event_id TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT,occurred_at TEXT,application_event_version INTEGER,aggregate_kind TEXT)`;
     yield* sql`CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT PRIMARY KEY,deleted_at TEXT)`;
@@ -84,6 +86,14 @@ const storage = Store.layer.pipe(Layer.provideMerge(setup));
 const quota = Quota.layer.pipe(Layer.provideMerge(storage));
 const coreFor = (environmentIdentity = identity) =>
   Service.layer.pipe(
+    Layer.provide(
+      Layer.succeed(Settings.MemoryHubCommittedSettings, {
+        read: Effect.succeed({
+          settings: { mode: "hub" as const, memorySpaceId: space },
+          version: 1,
+        }),
+      }),
+    ),
     Layer.provideMerge(quota),
     Layer.provide(environmentIdentity),
     Layer.provide(
@@ -270,11 +280,14 @@ const changingSettings = (disabled: boolean) =>
       );
     }).pipe(
       Effect.provide(
-        Settings.layerTest({
-          memoryHub: disabled ? { mode: "disabled" } : member,
-          memoryHubVersion: 1,
-          defaultModelSelection: selection,
-        }),
+        Settings.layerTest(
+          {
+            memoryHub: disabled ? { mode: "disabled" } : member,
+            memoryHubVersion: 1,
+            defaultModelSelection: selection,
+          },
+          "memoryHub",
+        ),
       ),
     ),
   );
@@ -294,11 +307,14 @@ const fixture = (
   const serviceCore = environmentId === local ? core : coreFor(environmentIdentity);
   const sharedSettings = changing
     ? changingSettings(disabled)
-    : Settings.layerTest({
-        memoryHub: disabled ? { mode: "disabled" } : member,
-        memoryHubVersion: 1,
-        defaultModelSelection: selection,
-      });
+    : Settings.layerTest(
+        {
+          memoryHub: disabled ? { mode: "disabled" } : member,
+          memoryHubVersion: 1,
+          defaultModelSelection: selection,
+        },
+        "memoryHub",
+      );
   // layerTest supplies this tag at runtime but its declared output still hides it (L5 handoff).
   const committed = Layer.effect(
     Settings.MemoryHubCommittedSettings,
@@ -4068,7 +4084,7 @@ it.effect.each(["pull", "ack"] as const)(
         const configLayer = ServerConfig.layerTest(process.cwd(), baseDir);
         const config = yield* ServerConfig.ServerConfig.pipe(Effect.provide(configLayer));
         const defaults = yield* Settings.ServerSettingsService.use((s) => s.getSettings).pipe(
-          Effect.provide(Settings.layerTest()),
+          Effect.provide(Settings.layerTest({}, "memoryHub")),
         );
         const encodeSettings = Schema.encodeEffect(Schema.fromJsonString(M.ServerSettings));
         yield* fs.writeFileString(
@@ -4106,6 +4122,14 @@ it.effect.each(["pull", "ack"] as const)(
           Layer.provideMerge(configLayer),
         );
         const realCore = Service.layer.pipe(
+          Layer.provide(
+            Layer.succeed(Settings.MemoryHubCommittedSettings, {
+              read: Effect.succeed({
+                settings: { mode: "hub" as const, memorySpaceId: space },
+                version: 1,
+              }),
+            }),
+          ),
           Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(Store.layer))),
           Layer.provide(identity),
           Layer.provide(
@@ -4963,11 +4987,14 @@ it.effect.each(["bootstrap", "exchange"] as const)(
             credentialVersion: 1,
             scopes: ["memory:sync"],
           };
-          const aSettings = Settings.layerTest({
-            memoryHub: { ...member, memorySpaceId: allocated, hubEnvironmentId: local },
-            memoryHubVersion: 1,
-            defaultModelSelection: selection,
-          });
+          const aSettings = Settings.layerTest(
+            {
+              memoryHub: { ...member, memorySpaceId: allocated, hubEnvironmentId: local },
+              memoryHubVersion: 1,
+              defaultModelSelection: selection,
+            },
+            "memoryHub",
+          );
           const aCommitted = Layer.effect(
             Settings.MemoryHubCommittedSettings,
             Effect.serviceOption(Settings.MemoryHubCommittedSettings).pipe(
@@ -4975,6 +5002,14 @@ it.effect.each(["bootstrap", "exchange"] as const)(
             ),
           ).pipe(Layer.provide(aSettings));
           const aCore = Service.layer.pipe(
+            Layer.provide(
+              Layer.succeed(Settings.MemoryHubCommittedSettings, {
+                read: Effect.succeed({
+                  settings: { mode: "hub" as const, memorySpaceId: space },
+                  version: 1,
+                }),
+              }),
+            ),
             Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(Layer.fresh(storage)))),
             Layer.provideMerge(Layer.merge(aSettings, aCommitted)),
             Layer.provideMerge(
