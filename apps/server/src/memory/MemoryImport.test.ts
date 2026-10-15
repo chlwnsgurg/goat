@@ -2120,6 +2120,9 @@ describe("MemoryImport dependent purge accounting", () => {
         return (yield* sql<{ value: number }>`SELECT value FROM memory_quota_counters
           WHERE space='_hub_global' AND dimension='import_live_bytes'`)[0]!.value;
       });
+      // Resolution judgments share this table but carry no text/live-head charge.
+      yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json)
+        VALUES (${space},${uuid(995)},${memoryId},${encodeUnknown({ resolutionId: uuid(995), judgment: "synthetic judgment" })},'[]')`;
       assert.strictEqual(yield* bytes, 20);
       const forget = {
         memorySpaceId: space,
