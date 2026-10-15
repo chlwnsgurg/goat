@@ -1686,7 +1686,10 @@ export class MemoryStore extends Context.Service<
       failureCode: M.MemoryFailureCode;
       nextAttemptAt: number;
     }) => Effect.Effect<boolean, MemoryStorageError>;
-    readonly normalizeExpiredReports: (now: number) => Effect.Effect<void, MemoryStorageError>;
+    readonly normalizeExpiredReports: (
+      now: number,
+      owner?: M.EnvironmentId,
+    ) => Effect.Effect<void, MemoryStorageError>;
     readonly resetReportAttemptsTx: (
       input: M.MemoryResetReportAttemptsInput,
       now: number,
@@ -3317,7 +3320,7 @@ const make = Effect.gen(function* () {
           const reportId = resolutionReportId(op.memorySpaceId, op.operationId, resolutionId);
           yield* stored(
             "report-intent",
-            sql`INSERT INTO memory_report_outbox (report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,created_at,report_kind) VALUES (${reportId},${op.memorySpaceId},${op.memoryId},${op.operationId},${resolutionId},${op.kind === "resolve" ? op.operationId : null},${op.originEnvironmentId},${op.kind === "resolve" ? "resolved" : "reverted"},'pending',${Date.parse(op.revision.createdAtUtc)},${op.kind === "resolve" ? "resolve" : "revert"}) ON CONFLICT(report_id) DO NOTHING`,
+            sql`INSERT INTO memory_report_outbox (report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,created_at,report_kind,attempts_known) VALUES (${reportId},${op.memorySpaceId},${op.memoryId},${op.operationId},${resolutionId},${op.kind === "resolve" ? op.operationId : null},${op.originEnvironmentId},${op.kind === "resolve" ? "resolved" : "reverted"},'pending',${Date.parse(op.revision.createdAtUtc)},${op.kind === "resolve" ? "resolve" : "revert"},1) ON CONFLICT(report_id) DO NOTHING`,
           );
         }
         if (decision.pending && accepted && op.kind !== "forget" && !tombstones.length)
@@ -5174,11 +5177,12 @@ const make = Effect.gen(function* () {
   });
   const normalizeExpiredReports = Effect.fn("MemoryStore.normalizeExpiredReports")(function* (
     now: number,
+    owner?: M.EnvironmentId,
   ) {
     yield* stored(
       "report-exhausted",
       sql`UPDATE memory_report_outbox SET state='failed',failure_code=coalesce(failure_code,'unavailable'),claimed_by=NULL,claimed_until=NULL
-      WHERE state!='delivered' AND automatic_attempts=10 AND (claimed_until IS NULL OR claimed_until<=${now})`,
+      WHERE state!='delivered' AND automatic_attempts=10 AND (state!='failed' OR claimed_by IS NOT NULL OR claimed_until IS NOT NULL) AND (claimed_until IS NULL OR claimed_until<=${now}) AND (${owner ?? null} IS NULL OR resolving_environment_id=${owner ?? null})`,
     );
   });
   const readReportTarget = Effect.fn("MemoryStore.readReportTarget")(function* (reportId: string) {
@@ -5213,7 +5217,7 @@ const make = Effect.gen(function* () {
       sql<{
         wake: number | null;
       }>`SELECT min(max(${now},next_attempt_at,coalesce(claimed_until,0))) AS wake FROM memory_report_outbox r
-      WHERE resolving_environment_id=${owner} AND state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure') AND automatic_attempts<10
+      WHERE resolving_environment_id=${owner} AND state!='delivered' AND report_approved=1 AND ((report_kind='resolve' AND outcome='resolved') OR (report_kind='revert' AND outcome='reverted') OR (report_kind='conflict_failure' AND outcome='failed')) AND automatic_attempts<10
       AND NOT EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=r.space AND g.key_kind='report_delivered' AND g.key=r.report_id)`,
     );
     return rows[0]?.wake ?? null;
@@ -5221,21 +5225,22 @@ const make = Effect.gen(function* () {
   const acquireReports: MemoryStore["Service"]["acquireReports"] = Effect.fn(
     "MemoryStore.acquireReports",
   )(function* (input) {
-    if (input.until <= input.now || input.owner.length > 128) return [];
+    if (input.until <= input.now) return [];
     return yield* transact(
       Effect.gen(function* () {
-        yield* normalizeExpiredReports(input.now);
+        yield* normalizeExpiredReports(input.now, input.owner);
         const rows = yield* stored(
           "report-acquire",
           sql<{
             report_id: string;
-          }>`UPDATE memory_report_outbox SET claimed_by=${input.owner},claimed_until=${input.until},automatic_attempts=automatic_attempts+1
+          }>`UPDATE memory_report_outbox SET claimed_by=${input.owner},claimed_until=${input.until},automatic_attempts=automatic_attempts+1,attempts_known=1
         WHERE report_id IN (SELECT report_id FROM memory_report_outbox r WHERE resolving_environment_id=${input.owner}
-          AND state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure') AND automatic_attempts<10
+          AND state!='delivered' AND report_approved=1 AND ((report_kind='resolve' AND outcome='resolved') OR (report_kind='revert' AND outcome='reverted') OR (report_kind='conflict_failure' AND outcome='failed')) AND automatic_attempts<10
           AND next_attempt_at<=${input.now} AND (claimed_until IS NULL OR claimed_until<=${input.now})
           AND NOT EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=r.space AND g.key_kind='report_delivered' AND g.key=r.report_id)
           ORDER BY next_attempt_at,created_at,report_id LIMIT ${Math.max(0, Math.min(32, Math.floor(input.limit)))}) RETURNING report_id`,
         );
+        if (rows.length) yield* markRunnable;
         const claimed = new Set(rows.map((r) => r.report_id));
         // Read only the claimed rows, never materialize the backlog before applying LIMIT.
         return yield* Effect.forEach([...claimed], (reportId) => readReportDelivery(reportId));
@@ -5296,10 +5301,11 @@ const make = Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
         const rows = yield* stored(
           "report-ack-cas",
-          sql`SELECT 1 FROM memory_report_outbox WHERE report_id=${d.reportId} AND claimed_by=${input.owner} AND claimed_until=${input.claimUntil} AND claimed_until>${now} AND resolving_environment_id=${input.owner} AND state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure')`,
+          sql`SELECT 1 FROM memory_report_outbox WHERE report_id=${d.reportId} AND claimed_by=${input.owner} AND claimed_until=${input.claimUntil} AND claimed_until>${now} AND resolving_environment_id=${input.owner} AND state!='delivered' AND report_approved=1 AND ((report_kind='resolve' AND outcome='resolved') OR (report_kind='revert' AND outcome='reverted') OR (report_kind='conflict_failure' AND outcome='failed'))`,
         );
         if (!rows.length) return false;
         yield* acknowledgeReport(d);
+        yield* markRunnable;
         return true;
       }),
     );
@@ -5320,6 +5326,7 @@ const make = Effect.gen(function* () {
         WHERE report_id=${input.reportId} AND resolving_environment_id=${input.owner} AND claimed_by=${input.owner} AND claimed_until=${input.claimUntil} AND claimed_until>${now} AND state!='delivered'
         AND NOT EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=memory_report_outbox.space AND g.key_kind='report_delivered' AND g.key=memory_report_outbox.report_id) RETURNING report_id`,
         );
+        if (rows.length) yield* markRunnable;
         return rows.length === 1;
       }),
     );
@@ -5328,16 +5335,17 @@ const make = Effect.gen(function* () {
     "MemoryStore.resetReportAttemptsTx",
   )(function* (input, now) {
     yield* Transaction;
-    yield* normalizeExpiredReports(now);
+    yield* normalizeExpiredReports(now, input.environmentId);
     let resetCount = 0;
     for (const reportId of input.reportIds) {
       const rows = yield* stored(
         "report-reset",
-        sql`UPDATE memory_report_outbox SET automatic_attempts=0 WHERE report_id=${reportId} AND space=${input.memorySpaceId} AND resolving_environment_id=${input.environmentId} AND state='failed' AND automatic_attempts=10 AND claimed_by IS NULL AND claimed_until IS NULL AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure')
+        sql`UPDATE memory_report_outbox SET automatic_attempts=0 WHERE report_id=${reportId} AND space=${input.memorySpaceId} AND resolving_environment_id=${input.environmentId} AND state='failed' AND automatic_attempts=10 AND claimed_by IS NULL AND claimed_until IS NULL AND report_approved=1 AND ((report_kind='resolve' AND outcome='resolved') OR (report_kind='revert' AND outcome='reverted') OR (report_kind='conflict_failure' AND outcome='failed'))
         AND NOT EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=memory_report_outbox.space AND g.key_kind='report_delivered' AND g.key=memory_report_outbox.report_id) RETURNING report_id`,
       );
       resetCount += rows.length;
     }
+    if (resetCount) yield* markRunnable;
     return { resetCount, unchangedCount: input.reportIds.length - resetCount };
   });
   const purgeDeliveredReportDetailsTx: MemoryStore["Service"]["purgeDeliveredReportDetailsTx"] =
@@ -5496,8 +5504,8 @@ const make = Effect.gen(function* () {
         yield* stored(
           "generation-failure-intent",
           sql`INSERT INTO memory_report_outbox
-        (report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,failure_code,created_at,report_kind,report_approved)
-        VALUES (${reportId},${current.space},${current.memoryId},${metadata.operationId},NULL,${metadata.operationId},${environment},'failed','pending',${code},${input.now},${current.kind},1)
+        (report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,failure_code,created_at,report_kind,report_approved,attempts_known)
+        VALUES (${reportId},${current.space},${current.memoryId},${metadata.operationId},NULL,${metadata.operationId},${environment},'failed','pending',${code},${input.now},${current.kind},1,1)
         ON CONFLICT(report_id) DO NOTHING`,
         );
         if (input.retryAt !== null) yield* retryWork(current, input.retryAt);
@@ -8194,8 +8202,8 @@ const make = Effect.gen(function* () {
       );
       yield* stored(
         "conflict-failure-report",
-        sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,failure_code,created_at,report_kind,report_approved)
-        SELECT ${reportId},${row.ticket.memorySpaceId},${row.ticket.memoryId},${row.ticket.attemptId},NULL,${row.ticket.attemptId},${row.ticket.holderEnvironmentId},'failed','pending',${input.failureCode},${input.now},'conflict_failure',1
+        sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,failure_code,created_at,report_kind,report_approved,attempts_known)
+        SELECT ${reportId},${row.ticket.memorySpaceId},${row.ticket.memoryId},${row.ticket.attemptId},NULL,${row.ticket.attemptId},${row.ticket.holderEnvironmentId},'failed','pending',${input.failureCode},${input.now},'conflict_failure',1,1
         WHERE NOT EXISTS (SELECT 1 FROM memory_import_keys WHERE space=${row.ticket.memorySpaceId} AND key_kind='report_delivered' AND key=${reportId}) ON CONFLICT(report_id) DO NOTHING`,
       );
     }
@@ -11057,12 +11065,13 @@ const make = Effect.gen(function* () {
       if (delivered.length) return { reportId, deliverable: false };
       yield* stored(
         "report-reconcile",
-        sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,created_at,report_kind,report_approved) VALUES (${reportId},${record.memorySpaceId},${record.receipt.memoryId},${record.receipt.operationId},${guard.resolutionId},${record.attemptId},${guard.resolvingEnvironmentId},${guard.outcome},'pending',${record.receipt.resolutionApproval ? Date.parse(record.receipt.resolutionApproval.appliedAtUtc) : 0},${record.operationKind === "resolve" ? "resolve" : "revert"},1) ON CONFLICT(report_id) DO UPDATE SET report_approved=1,report_kind=excluded.report_kind WHERE memory_report_outbox.space=excluded.space AND memory_report_outbox.memory_id=excluded.memory_id AND memory_report_outbox.operation_id=excluded.operation_id AND memory_report_outbox.resolving_environment_id=excluded.resolving_environment_id AND memory_report_outbox.resolution_id=excluded.resolution_id AND memory_report_outbox.outcome=excluded.outcome`,
+        sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,created_at,report_kind,report_approved,attempts_known) VALUES (${reportId},${record.memorySpaceId},${record.receipt.memoryId},${record.receipt.operationId},${guard.resolutionId},${record.attemptId},${guard.resolvingEnvironmentId},${guard.outcome},'pending',${record.receipt.resolutionApproval ? Date.parse(record.receipt.resolutionApproval.appliedAtUtc) : 0},${record.operationKind === "resolve" ? "resolve" : "revert"},1,1) ON CONFLICT(report_id) DO UPDATE SET report_approved=1,report_kind=excluded.report_kind WHERE memory_report_outbox.space=excluded.space AND memory_report_outbox.memory_id=excluded.memory_id AND memory_report_outbox.operation_id=excluded.operation_id AND memory_report_outbox.resolving_environment_id=excluded.resolving_environment_id AND memory_report_outbox.resolution_id=excluded.resolution_id AND memory_report_outbox.outcome=excluded.outcome`,
       );
       const retained = yield* stored(
         "report-admission",
         sql`SELECT 1 FROM memory_report_outbox WHERE report_id=${reportId} AND report_approved=1`,
       );
+      if (retained.length) yield* markRunnable;
       return { reportId, deliverable: retained.length === 1 };
     });
   return MemoryStore.of({

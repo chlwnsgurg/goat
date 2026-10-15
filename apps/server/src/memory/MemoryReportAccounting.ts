@@ -12,4 +12,4 @@ export const reportMetadataBytes = (prefix = "") =>
     "report_thread_json",
   ]
     .map((column) => `coalesce(length(CAST(${prefix}${column} AS BLOB)),0)`)
-    .join("+") + "+288";
+    .join("+") + `+coalesce(length(CAST(${prefix}resolving_environment_id AS BLOB)),0)+288`;

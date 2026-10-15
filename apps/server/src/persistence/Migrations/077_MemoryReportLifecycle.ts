@@ -9,6 +9,7 @@ export default Effect.gen(function* () {
   yield* sql`ALTER TABLE memory_report_outbox ADD COLUMN report_kind TEXT NOT NULL DEFAULT 'unknown' CHECK(report_kind IN ('resolve','revert','conflict_failure','summary','consolidate','unknown'))`;
   yield* sql`ALTER TABLE memory_report_outbox ADD COLUMN report_approved INTEGER NOT NULL DEFAULT 0 CHECK(report_approved IN (0,1))`;
   yield* sql`ALTER TABLE memory_report_outbox ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0`;
+  yield* sql`ALTER TABLE memory_report_outbox ADD COLUMN attempts_known INTEGER NOT NULL DEFAULT 0 CHECK(attempts_known IN (0,1))`;
   // Only matching canonical, accepted receipts prove kind and approval. No body inspection
   // or guesses from outcome/nullable resolution IDs; pre-feature attempts remain unknown.
   yield* sql`UPDATE memory_report_outbox AS r SET
@@ -33,7 +34,9 @@ export default Effect.gen(function* () {
       [d],
     );
   const counter = (space: string, d: string, expression: string) =>
-    `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${space},'${d}','',${expression}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;
+    expression.startsWith("-")
+      ? `UPDATE memory_quota_counters SET value=value+(${expression}) WHERE space=${space} AND dimension='${d}' AND scope_key='';`
+      : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${space},'${d}','',${expression}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;
   for (const [d, expression] of [
     ["report_items", "1"],
     ["report_bytes", reportMetadataBytes()],

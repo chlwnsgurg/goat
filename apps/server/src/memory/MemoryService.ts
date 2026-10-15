@@ -1816,12 +1816,13 @@ const make = Effect.fnUntraced(function* (
             };
           }),
         );
-        yield* store.normalizeExpiredReports(yield* Clock.currentTimeMillis);
+        yield* store.normalizeExpiredReports(yield* Clock.currentTimeMillis, environmentId);
         const reportRows = yield* query(
           sql<{
             report_id: string;
             automatic_attempts: number;
             report_kind: string;
+            attempts_known: number;
             operation_id: string;
             outcome: string;
             resolving_environment_id: string;
@@ -1838,7 +1839,7 @@ const make = Effect.fnUntraced(function* (
               decodeReport(
                 {
                   reportId: row.report_id,
-                  ...(row.report_kind !== "unknown"
+                  ...(row.attempts_known === 1
                     ? { automaticAttempts: row.automatic_attempts }
                     : {}),
                   operationId: row.operation_id,
@@ -2787,7 +2788,7 @@ const make = Effect.fnUntraced(function* (
       input.owner === environmentId ? store.acknowledgeClaimedReport(input) : Effect.succeed(false),
     deferClaimedReport: (input) =>
       input.owner === environmentId ? store.deferClaimedReport(input) : Effect.succeed(false),
-    normalizeExpiredReports: store.normalizeExpiredReports,
+    normalizeExpiredReports: (now) => store.normalizeExpiredReports(now, environmentId),
     purgeDeliveredReportDetails: (input) =>
       store.transact(store.purgeDeliveredReportDetailsTx({ ...input, environmentId })),
     nextReportMaintenanceAt: store.nextReportMaintenanceAt(environmentId),

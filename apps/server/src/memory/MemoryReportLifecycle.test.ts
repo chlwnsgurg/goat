@@ -44,6 +44,8 @@ describe("MemoryReportLifecycle", () => {
     Effect.gen(function* () {
       const store = yield* Store.MemoryStore;
       const sql = yield* SqlClient.SqlClient;
+      yield* insert(0);
+      yield* sql`UPDATE memory_report_outbox SET outcome='reverted' WHERE report_id=${reportId(0)}`;
       yield* insert(1, "summary");
       yield* insert(2, "unknown");
       yield* insert(3, "resolve", other);
@@ -328,6 +330,15 @@ describe("MemoryReportLifecycle", () => {
             operationDigest: "a".repeat(64),
             outcome: "accepted",
             hubSequence: n,
+            ...(kind === "resolve"
+              ? {
+                  resolutionApproval: {
+                    resolutionId,
+                    appliedAtUtc: M.MemoryUtcTimestamp.make("2026-10-15T00:00:00.000Z"),
+                    revertDeadlineUtc: M.MemoryUtcTimestamp.make("2026-11-14T00:00:00.000Z"),
+                  },
+                }
+              : {}),
           },
           revisionId: M.MemoryRevisionId.make(id(n + 30)),
           resolutionId,
