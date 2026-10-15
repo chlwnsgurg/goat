@@ -138,7 +138,16 @@ const item = Schema.decodeUnknownSync(MemoryItem)({
 const unrelatedItem = Schema.decodeUnknownSync(MemoryItem)({
   ...item,
   memoryId: unrelated,
-  ...(item.status === "active" ? { revision: { ...item.revision, memoryId: unrelated } } : {}),
+  ...(item.status === "active"
+    ? {
+        revision: {
+          ...item.revision,
+          memoryId: unrelated,
+          revisionId: "00000000-0000-4000-8000-000000000008",
+          payloadRef: "00000000-0000-4000-8000-000000000008",
+        },
+      }
+    : {}),
 });
 const page = Schema.decodeUnknownSync(MemoryPage)({
   items: [item],
@@ -473,7 +482,7 @@ describe("shared memory client", () => {
           yield* waitFor(h.registry, exposure, (state) => state !== before);
           expect(h.registry.get(edit)).toBeNull();
           expect(h.registry.get(fresh)).toBe("New draft");
-          expect(h.registry.get(otherEdit)).toBe(kind === "reset" ? null : "Unrelated edit");
+          expect(h.registry.get(otherEdit)).toBe(kind === "invalidate" ? "Unrelated edit" : null);
           yield* Deferred.succeed(h.reply, item);
           yield* TestClock.adjust(0);
           expect(Option.isNone(h.registry.get(read))).toBe(true);
