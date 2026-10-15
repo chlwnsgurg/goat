@@ -154,7 +154,7 @@ beforeEach(() => {
   state.choose.mockReset().mockResolvedValue(null);
   state.openFile.mockReset();
   state.openExternal.mockReset().mockResolvedValue(undefined);
-  state.copy.mockReset().mockResolvedValue(undefined);
+  state.copy.mockReset().mockResolvedValue(true);
   state.toast.mockReset();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("window", {});
@@ -200,11 +200,28 @@ it("removes host actions after revocation while keeping file preview and copying
   state.choose.mockResolvedValue("copy-full");
   await openContextMenu();
   expect(offeredActions()).toEqual(["copy-relative", "copy-full"]);
-  expect(state.copy).toHaveBeenCalledWith("/work/docs/readme.md");
+  expect(state.copy).toHaveBeenCalledWith("/work/docs/readme.md", "full path");
   await act(async () => anchor().props.onClick(menuEvent()));
   expect(state.openFile).toHaveBeenCalledWith(threadRef, "docs/readme.md", undefined);
   expect(state.openEditor).not.toHaveBeenCalled();
 });
+
+it.each([
+  ["copy-relative", "docs/copy path.md", "relative path"],
+  ["copy-full", "/work/docs/copy path.md", "full path"],
+])(
+  "routes %s through the shared clipboard helper without position suffixes",
+  async (action, path, target) => {
+    vi.stubGlobal("navigator", {});
+    state.choose.mockResolvedValue(action);
+    await renderMarkdown("[Readme](<docs/copy path.md:12:3>)");
+    await openContextMenu();
+    expect(state.copy).toHaveBeenCalledWith(path, target);
+    expect(state.toast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "success", description: path }),
+    );
+  },
+);
 
 it("does not launch an editor after revocation during a native context menu", async () => {
   let choose: (action: string) => void = () => {

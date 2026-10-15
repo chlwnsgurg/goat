@@ -283,7 +283,7 @@ const PreviewEvaluateTool = browserTool(
 const PreviewWaitForTool = readonlyBrowserTool(
   Tool.make("preview_wait_for", {
     description:
-      "Wait in the tab selected by tabId, or this agent session's current tab when omitted, until all supplied locator, selector, text, and URL conditions match.",
+      "Wait in the tab selected by tabId, or this agent session's current tab when omitted, until every supplied condition holds together. Locator/selector state defaults to attached; use visible, hidden (also matches absence), or detached for transitions. Add loadState=load or domContentLoaded for document readiness; networkIdle is opt-in and can time out on busy pages. Text is a case-sensitive visible-text substring; urlIncludes also handles same-document navigation. All conditions share one timeoutMs (default 15000, maximum 60000). Human takeover interrupts waits on your own tab; observing a human-driven tab remains allowed. A completed wait proves the conditions, not application success.",
     parameters: PreviewAutomationWaitForInput,
     success: PreviewActionResult,
     failure: PreviewToolFailure,

@@ -85,7 +85,17 @@ interface CredentialRecord {
 
 interface RegistryState {
   readonly records: ReadonlyMap<string, CredentialRecord>;
+  readonly recordsById: ReadonlyMap<string, CredentialRecord>;
 }
+
+// Both keys reference the same records and are published together, including
+// after refresh, prune and revoke. No independent liveness state is retained.
+const registryState = (records: ReadonlyMap<string, CredentialRecord>): RegistryState => ({
+  records,
+  recordsById: new Map(
+    Array.from(records.values(), (record) => [record.scope.thread.providerSessionId, record]),
+  ),
+});
 
 export interface McpSessionRegistryOptions {
   readonly livenessWindowMs?: number;
@@ -127,7 +137,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const environmentId = yield* environment.getEnvironmentId;
   const httpServer = yield* HttpServer.HttpServer;
-  const state = yield* SynchronizedRef.make<RegistryState>({ records: new Map() });
+  const state = yield* SynchronizedRef.make(registryState(new Map()));
   const currentTimeMillis = options.now ? Effect.sync(options.now) : Clock.currentTimeMillis;
   const livenessWindowMs = options.livenessWindowMs ?? DEFAULT_LIVENESS_WINDOW_MS;
   const endpoint = NetAddress.isInetAddress(httpServer.address)
@@ -211,7 +221,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           readCurrentPolicy: request.readCurrentPolicy,
           isLiveCaller: request.isLiveCaller,
         });
-        return { records: next };
+        return registryState(next);
       });
       return {
         config: {
@@ -246,10 +256,10 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     return yield* SynchronizedRef.modify(state, ({ records }) => {
       const current = pruneDead(records, timestamp);
       const record = current.get(tokenHash);
-      if (!record) return [undefined, { records: current }] as const;
+      if (!record) return [undefined, registryState(current)] as const;
       const next = new Map(current);
       next.set(tokenHash, { ...record, lastAliveAt: timestamp });
-      return [record.scope, { records: next }] as const;
+      return [record.scope, registryState(next)] as const;
     });
   });
 
@@ -269,25 +279,22 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
             next.set(tokenHash, { ...record, lastAliveAt: timestamp });
           }
         }
-        return { records: next };
+        return registryState(next);
       });
     },
   );
 
   const revokeWhere = (predicate: (record: CredentialRecord) => boolean) =>
-    SynchronizedRef.update(state, ({ records }) => ({
-      records: new Map(Array.from(records).filter(([, record]) => !predicate(record))),
-    }));
+    SynchronizedRef.update(state, ({ records }) =>
+      registryState(new Map(Array.from(records).filter(([, record]) => !predicate(record)))),
+    );
 
   return McpSessionRegistry.of({
     issue,
     resolve,
     currentMemoryPolicy: (providerSessionId) =>
       Effect.gen(function* () {
-        const records = (yield* SynchronizedRef.get(state)).records;
-        const record = Array.from(records.values()).find(
-          (record) => record.scope.thread.providerSessionId === providerSessionId,
-        );
+        const record = (yield* SynchronizedRef.get(state)).recordsById.get(providerSessionId);
         if (!record?.readCurrentPolicy || !record.memoryPolicy || !record.isLiveCaller)
           return undefined;
         if ((yield* currentTimeMillis) - record.lastAliveAt > livenessWindowMs) return undefined;
@@ -308,7 +315,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     revokeThread: Effect.fn("McpSessionRegistry.revokeThread")(function* (threadId) {
       yield* revokeWhere((record) => record.scope.thread.threadId === threadId);
     }),
-    revokeAll: SynchronizedRef.set(state, { records: new Map() }),
+    revokeAll: SynchronizedRef.set(state, registryState(new Map())),
   });
 });
 

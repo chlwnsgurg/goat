@@ -71,6 +71,8 @@ import { assetEnvironment } from "~/state/assets";
 import { usePreviewAvailable } from "~/browser/previewRuntime";
 import { useEnvironmentHttpBaseUrl, usePrimaryEnvironmentId } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
+import { projectEnvironment } from "~/state/projects";
+import { useEnvironmentQuery } from "~/state/query";
 import { useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
@@ -81,6 +83,7 @@ import { BrowserDocumentFrame, isPdfPreviewFile } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
 import FileBrowserPanel from "./FileBrowserPanel";
 import { FileBreadcrumbs } from "./FileBreadcrumbs";
+import { FilePathCopyMenu } from "./FilePathCopyMenu";
 import { FileMarkdownPreview } from "./FileMarkdownPreview";
 import {
   type FileCommentAnnotationEntry,
@@ -107,6 +110,7 @@ import { projectFileCacheKey } from "./fileContentRevision";
 import {
   filePreviewReadErrorMessage,
   isMarkdownPreviewFile,
+  resolveFileExplorerTarget,
   resolveFilePreviewPath,
   setMarkdownTaskChecked,
   shouldShowFileExplorer,
@@ -968,16 +972,12 @@ function RenderedMarkdownSurface({
   relativePath,
   contents,
   threadRef,
+  composerDraftTarget,
   readOnly,
   onPendingChange,
 }: Omit<
   EditableFileSurfaceProps,
-  | "resolvedTheme"
-  | "composerDraftTarget"
-  | "revealLine"
-  | "revealRequestId"
-  | "wordWrap"
-  | "onPostRender"
+  "resolvedTheme" | "revealLine" | "revealRequestId" | "wordWrap" | "onPostRender"
 > & {
   threadRef: ScopedThreadRef;
   readOnly: boolean;
@@ -996,6 +996,7 @@ function RenderedMarkdownSurface({
         cwd={cwd}
         relativePath={relativePath}
         threadRef={threadRef}
+        composerDraftTarget={composerDraftTarget}
         onTaskListChange={
           readOnly
             ? undefined
@@ -1087,12 +1088,21 @@ export default function FilePreviewPanel({
     attachment === undefined && relativePath !== null,
   );
   const attemptedPath = file.readError?.resolvedPath ?? file.readError?.operationPath;
-  // A chat link cannot tell a folder from a file, so a folder arrives here as
-  // a file surface and the read fails. Keep the breadcrumbs, drop the preview
-  // pane, and let the tree fill the surface with the folder revealed. Mutation
-  // refresh stays on so the surface notices if the path becomes a file. A host
-  // path cannot be revealed in the workspace tree, so it keeps the read error.
-  const isDirectory = file.isNotFile && !isHostFile;
+  const hostMetadata = useEnvironmentQuery(
+    canReadFiles &&
+      isHostFile &&
+      attachment === undefined &&
+      relativePath !== null &&
+      file.readError !== null
+      ? projectEnvironment.fileMetadata({ environmentId, input: { path: relativePath } })
+      : null,
+  );
+  // Folder links use file surfaces too. Reveal workspace folders in the project
+  // tree; outside folders get a tree rooted at that folder, with absolute opens.
+  const isDirectory =
+    (file.isNotFile && !isHostFile) ||
+    (hostMetadata.error === null && hostMetadata.data?.kind === "directory");
+  const explorerTarget = resolveFileExplorerTarget(cwd, relativePath, isDirectory);
   // Everything preview-related keys off previewPath; a folder has no preview.
   const previewPath = isDirectory ? null : relativePath;
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
@@ -1275,6 +1285,7 @@ export default function FilePreviewPanel({
               />
             </div>
           </ScrollArea>
+          <FilePathCopyMenu filePath={relativePath} workspaceRoot={cwd} />
           {absolutePath &&
           (environmentId === primaryEnvironmentId || remoteOpenState.mode !== "local-exec") ? (
             <OpenInPicker
@@ -1445,6 +1456,7 @@ export default function FilePreviewPanel({
                 cwd={cwd}
                 relativePath={relativePath}
                 threadRef={threadRef}
+                composerDraftTarget={composerDraftTarget}
                 contents={file.data.contents}
                 readOnly={isHostFile || !canWriteFiles}
                 onPendingChange={onPendingChange}
@@ -1492,11 +1504,12 @@ export default function FilePreviewPanel({
             )}
           >
             <FileBrowserPanel
-              key={`${environmentId}:${cwd}`}
+              key={`${environmentId}:${explorerTarget.cwd}`}
               environmentId={environmentId}
-              cwd={cwd}
+              cwd={explorerTarget.cwd}
+              workspaceRoot={cwd}
               projectName={projectName}
-              selectedPath={relativePath}
+              selectedPath={explorerTarget.selectedPath}
               selectedPathRevealId={revealRequestId}
               onOpenFile={onOpenFile}
               workspaceMutationId={workspaceMutationId}

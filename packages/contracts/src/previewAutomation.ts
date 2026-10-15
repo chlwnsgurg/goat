@@ -660,6 +660,16 @@ export const PreviewAutomationWaitForInput = Schema.Struct({
     description:
       "Playwright selector that must match an element, for example role=button[name='Send'].",
   }),
+  state: Schema.optional(Schema.Literals(["attached", "visible", "hidden", "detached"])).annotate({
+    description:
+      "Locator state to wait for. Requires locator or selector. Defaults to attached (presence, even when hidden). Hidden also matches a detached element.",
+  }),
+  loadState: Schema.optional(Schema.Literals(["load", "domContentLoaded", "networkIdle"])).annotate(
+    {
+      description:
+        "Optional load milestone for the current document. networkIdle explicitly waits for 500ms without network connections and may time out on busy pages. All conditions share timeoutMs; no load wait by default.",
+    },
+  ),
   text: Schema.optional(
     TrimmedNonEmptyString.annotate({
       description: "Case-sensitive substring that must appear in visible document text.",
@@ -679,11 +689,19 @@ export const PreviewAutomationWaitForInput = Schema.Struct({
       if (input.selector !== undefined && input.locator !== undefined) {
         return "Provide at most one of selector or locator.";
       }
+      if (
+        input.state !== undefined &&
+        input.selector === undefined &&
+        input.locator === undefined
+      ) {
+        return "Provide locator or selector when specifying state.";
+      }
       return (
         input.selector !== undefined ||
         input.locator !== undefined ||
         input.text !== undefined ||
         input.urlIncludes !== undefined ||
+        input.loadState !== undefined ||
         "Provide at least one wait condition."
       );
     }),

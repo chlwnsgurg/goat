@@ -146,12 +146,18 @@ const stopEarlierBackgroundWork = ({
         const sink = yield* EventSink.EventSinkV2;
         const threadId = ThreadId.make("thread:background-work-stop");
         const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
-          orchestrator.streamDomainEvents.pipe(
-            Stream.filter(predicate),
-            Stream.take(1),
-            Stream.runDrain,
-            Effect.forkScoped,
-          );
+          Effect.gen(function* () {
+            // Capture the cursor before the action, even if the child starts after
+            // its event commits. The live-only stream chooses its cursor too late.
+            const afterSequence = yield* sink.latestSequence();
+            return yield* sink.stream({ afterSequence }).pipe(
+              Stream.map((stored) => stored.event),
+              Stream.filter(predicate),
+              Stream.take(1),
+              Stream.runDrain,
+              Effect.forkScoped,
+            );
+          });
         yield* orchestrator.dispatch({
           type: "thread.create",
           commandId: CommandId.make("create"),

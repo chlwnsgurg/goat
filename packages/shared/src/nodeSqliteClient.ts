@@ -20,6 +20,7 @@ import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Context from "effect/Context";
@@ -162,6 +163,30 @@ const classifyError = (cause: unknown, message: string, operation: string) => {
   }
   return classifySqliteError(cause, { message, operation });
 };
+
+// WAL recovery may return SQLITE_BUSY_RECOVERY without invoking SQLite's
+// busy handler, even with busy_timeout set. It fails before the statement can
+// change data, so retry only this code, never BUSY_SNAPSHOT or a whole transaction.
+// Yield between attempts so recovery on another connection can finish without
+// blocking the main thread. Cap the wait at 500 delays of 10 ms.
+const isWalRecovery = (error: SqlError) => {
+  const cause = error.reason.cause;
+  return Predicate.hasProperty(cause, "errcode") && cause.errcode === 261;
+};
+
+const waitForWalRecovery = <A, R>(effect: Effect.Effect<A, SqlError, R>) =>
+  Effect.catchIf(effect, isWalRecovery, () =>
+    // Keep retry machinery off the successful first attempt. The first failure
+    // already consumed one attempt, leaving 500 delayed attempts in total.
+    Effect.delay(
+      Effect.retry(effect, {
+        times: 499,
+        schedule: Schedule.spaced("10 millis"),
+        while: isWalRecovery,
+      }),
+      "10 millis",
+    ),
+  );
 
 /**
  * SQLite keeps its copy of a statement's text and blob parameters until the
@@ -703,7 +728,7 @@ const make = Effect.fn("makeWithDatabase")(function* (
           new SqlError({
             reason: classifyError(cause, "Failed to prepare statement", "prepare"),
           }),
-      });
+      }).pipe(waitForWalRecovery);
 
     const prepareCache = yield* Cache.makeWith(prepare, {
       capacity: options.prepareCacheSize ?? 200,
@@ -738,7 +763,7 @@ const make = Effect.fn("makeWithDatabase")(function* (
             }),
           );
         }
-      });
+      }).pipe(waitForWalRecovery);
 
     const run = (sql: string, params: ReadonlyArray<unknown>, raw = false) =>
       Effect.flatMap(statementFor(sql, params), (s) => runStatement(s, params, raw));
@@ -772,7 +797,7 @@ const make = Effect.fn("makeWithDatabase")(function* (
               new SqlError({
                 reason: classifyError(cause, "Failed to execute statement", "execute"),
               }),
-          }),
+          }).pipe(waitForWalRecovery),
         (statement) =>
           Effect.try({
             try: () => {
@@ -853,6 +878,22 @@ const make = Effect.fn("makeWithDatabase")(function* (
 
   const acquirer = Effect.flatMap(route, (target) =>
     Effect.withFiber((fiber) => {
+      const acquire =
+        target.name === "reader"
+          ? target.lock.withPermits(1)(Effect.succeed(target.connection))
+          : Effect.uninterruptibleMask((restore) =>
+              Effect.flatMap(Effect.scope, (scope) =>
+                // Only the writer retries asynchronously. Keep its permit through
+                // execution and result-mode cleanup, including reader fallback.
+                Effect.as(
+                  Effect.andThen(
+                    restore(target.lock.take(1)),
+                    Scope.addFinalizer(scope, target.lock.release(1)),
+                  ),
+                  target.connection,
+                ),
+              ),
+            );
       // The statement's span is current here only when it propagates, which
       // Statement skips while tracing is off. Otherwise the current span is
       // the caller's, so leave it alone.
@@ -860,16 +901,14 @@ const make = Effect.fn("makeWithDatabase")(function* (
         !fiber.getRef(References.TracerEnabled) ||
         !fiber.getRef(Statement.SpanPropagationEnabled)
       ) {
-        return target.lock.withPermits(1)(Effect.succeed(target.connection));
+        return acquire;
       }
       const clock = fiber.getRef(Clock.Clock);
       const start = clock.monotonicTimeNanosUnsafe();
-      return target.lock.withPermits(1)(
-        Effect.sync(() => {
-          annotateAcquired(fiber, acquired(target, clock, start));
-          return target.connection;
-        }),
-      );
+      return Effect.map(acquire, (connection) => {
+        annotateAcquired(fiber, acquired(target, clock, start));
+        return connection;
+      });
     }),
   );
   const transactionAcquirer = Effect.flatMap(route, (target) =>

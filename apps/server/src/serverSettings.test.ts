@@ -458,6 +458,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         yield* awaitWatch(path.dirname(config.settingsPath), 2);
         if (damage === "missing symlink target") yield* awaitWatch(path.dirname(target));
         assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 7 });
+        assert.deepStrictEqual(yield* snapshot.readPublication!, { state: "current" });
         const changes = yield* service.subscribeChanges;
         if (damage === "deleted file" || damage === "missing symlink target") {
           yield* fs.remove(filePath);
@@ -484,6 +485,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         assert.deepStrictEqual(Option.getOrThrow(rejected).memoryHub, hub);
         assert.strictEqual(Option.getOrThrow(rejected).memoryHubVersion, 7);
         assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 7 });
+        assert.strictEqual((yield* snapshot.readPublication!).state, "last_valid");
         // Rejected input must remain for repair; migrations cannot rewrite it.
         if (damage === "deleted file" || damage === "missing symlink target") {
           assert.strictEqual(yield* fs.exists(filePath), false);
@@ -498,6 +500,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const repaired = yield* repairedChanges.pipe(Stream.runHead);
         assert.deepStrictEqual(Option.getOrThrow(repaired).memoryHub, { mode: "disabled" });
         assert.strictEqual(Option.getOrThrow(repaired).memoryHubVersion, 8);
+        assert.deepStrictEqual(yield* snapshot.readPublication!, { state: "current" });
         assert.deepStrictEqual(yield* snapshot.read, {
           settings: { mode: "disabled" },
           version: 8,
