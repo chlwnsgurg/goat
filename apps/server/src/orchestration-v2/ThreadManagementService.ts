@@ -755,12 +755,17 @@ const make = Effect.gen(function* () {
             ? saved
             : {
                 ...saved,
-                currentMemoryAccess: currentMemoryAccess({
-                  ...policy,
-                  ...inputs,
-                  readOnly: inputs.readOnly === true,
-                  memoryGrantCeiling: record.memoryGrantCeiling,
-                }),
+                currentMemoryAccess: {
+                  // Inputs explain the restriction; execution's current policy
+                  // is the authority for the access level itself.
+                  ...currentMemoryAccess({
+                    ...policy,
+                    ...inputs,
+                    readOnly: inputs.readOnly === true,
+                    memoryGrantCeiling: record.memoryGrantCeiling,
+                  }),
+                  access: inputs.currentMemoryGrant,
+                },
               };
         });
       return {

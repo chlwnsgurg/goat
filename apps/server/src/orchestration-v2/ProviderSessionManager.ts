@@ -177,11 +177,16 @@ export interface McpCredentialRotation {
 }
 
 export interface ProviderSessionManagerV2Shape {
-  /** SQL-free prepare constraints; callers must also validate the current destination projection. */
+  /** Positive execution authority with prepare identity; callers also match the run/task projection. */
   readonly memoryAccessInputs?: (
     threadId: ThreadId,
     providerInstanceId: ProviderInstanceId,
-  ) => Effect.Effect<ProviderMemoryPrepareInput | undefined>;
+  ) => Effect.Effect<
+    | (ProviderMemoryPrepareInput & {
+        readonly currentMemoryGrant: Exclude<MemoryTaskGrantCeiling, "none">;
+      })
+    | undefined
+  >;
   readonly currentMemoryPolicy?: (threadId: ThreadId) => Effect.Effect<MemorySnapshotPolicy>;
   readonly prepareMcpSession?: (input: ProviderMemoryPrepareInput) => Effect.Effect<void>;
   readonly mcpCredentialRotations?: Stream.Stream<McpCredentialRotation>;
@@ -409,12 +414,6 @@ export const layerWithOptions = (
         ThreadId,
         ProviderMemoryPrepareInput & {
           readonly destinationUsable: boolean;
-          readonly installedCredential?:
-            | {
-                readonly id: string;
-                readonly policy: McpSessionRegistry.McpMemoryPolicy;
-              }
-            | undefined;
           readonly providerSessionId?: ProviderSessionId | undefined;
         }
       >();
@@ -632,8 +631,6 @@ export const layerWithOptions = (
                     previousInput?.providerInstanceId === providerInstanceId
                       ? previousInput.providerSessionId
                       : undefined,
-                  // Preparing inputs is not evidence that a credential was installed.
-                  installedCredential: undefined,
                 });
                 const readOnly = preparedInput.readOnly === true;
                 const threadReadAllowed = usableThread;
@@ -649,14 +646,6 @@ export const layerWithOptions = (
                     : { dispatchScopes: preparedInput.dispatchScopes }),
                 });
                 const issuedPolicy = { grant, policyEpoch: committed.epoch };
-                const publishInstalledCredential = (id: string) => {
-                  const prepared = memoryPrepareInputs.get(threadId);
-                  if (prepared)
-                    memoryPrepareInputs.set(threadId, {
-                      ...prepared,
-                      installedCredential: { id, policy: issuedPolicy },
-                    });
-                };
                 const grantedScopes: ReadonlyArray<AuthEnvironmentScope> = [
                   ...(grant === "none" ? [] : ["memory:read" as const]),
                   ...(grant === "read_write" ? ["memory:write" as const] : []),
@@ -738,7 +727,6 @@ export const layerWithOptions = (
                     resolved.memoryPolicy?.grant === grant &&
                     resolved.memoryPolicy.policyEpoch === committed.epoch
                   ) {
-                    publishInstalledCredential(existing.providerSessionId);
                     return { mcpCredentialId: existing.providerSessionId, issued: false };
                   }
                   dropMcpCredentialReservation(threadId, existing.providerSessionId);
@@ -784,7 +772,6 @@ export const layerWithOptions = (
                 };
                 if (Option.isSome(admission)) yield* admission.value.rotated(rotation);
                 else yield* PubSub.publish(credentialRotations, rotation);
-                publishInstalledCredential(credential.config.providerSessionId);
                 reserveMcpCredential(threadId, credential.config.providerSessionId);
                 return { mcpCredentialId: credential.config.providerSessionId, issued: true };
               }),
@@ -2500,30 +2487,12 @@ export const layerWithOptions = (
               !entry.attachedThreadIds.has(threadId)
             )
               return undefined;
-            const config = yield* mcpSessions.read(threadId);
-            const committed = Option.isSome(memoryPolicy)
-              ? yield* memoryPolicy.value.read
-              : undefined;
-            const installed = prepared.installedCredential;
-            if (
-              !config ||
-              !committed ||
-              !installed ||
-              installed.policy.grant === "none" ||
-              memoryPrepareInputs.get(threadId) !== prepared ||
-              installed.id !== config.providerSessionId ||
-              entry.mcpCredentialIdByThread.get(threadId) !== installed.id ||
-              installed.policy.policyEpoch !== committed.epoch ||
-              installed.policy.grant !==
-                MemoryAccess.effectiveMemoryGrant({
-                  ...committed,
-                  ...prepared,
-                  readOnly: prepared.readOnly === true,
-                  memoryGrantCeiling: prepared.memoryGrantCeiling,
-                })
-            )
+            // Use execution's current authority, including registry expiry and
+            // revocation, rather than reconstructing it from prepare metadata.
+            const policy = yield* currentMemoryPolicy(threadId);
+            if (policy.grant === "none" || memoryPrepareInputs.get(threadId) !== prepared)
               return undefined;
-            return prepared;
+            return { ...prepared, currentMemoryGrant: policy.grant };
           }),
         mcpCredentialRotations: Option.isSome(admission)
           ? admission.value.rotations

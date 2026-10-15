@@ -530,6 +530,7 @@ function layerTest(input: {
     readonly armed: Ref.Ref<boolean>;
     readonly paused: Deferred.Deferred<void>;
   };
+  readonly registryOptions?: McpSessionRegistry.McpSessionRegistryOptions;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
   readonly backgroundTasksEndWithProcess?: boolean;
@@ -610,7 +611,9 @@ function layerTest(input: {
   );
   const layerConfiguredMcpRegistry =
     input.pauseResolve === undefined
-      ? layerTestMcpRegistry
+      ? input.registryOptions === undefined
+        ? layerTestMcpRegistry
+        : layerTestMcpRegistryWithOptions(input.registryOptions)
       : layerPausingMcpRegistry(input.pauseResolve);
   const layerProviderEventIngestorTest = ProviderEventIngestor.layer.pipe(
     Layer.provide(
@@ -666,14 +669,17 @@ const fakeEnvironment = ServerEnvironment.ServerEnvironment.of({
   getDescriptor: Effect.die("unused"),
 });
 
-const layerTestMcpRegistry = Layer.effect(
-  McpSessionRegistry.McpSessionRegistry,
-  McpSessionRegistry.__testing.make(),
-).pipe(
-  Layer.provide(Layer.succeed(HttpServer.HttpServer, fakeHttpServer)),
-  Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, fakeEnvironment)),
-  Layer.provide(NodeServices.layer),
-);
+const layerTestMcpRegistryWithOptions = (options: McpSessionRegistry.McpSessionRegistryOptions) =>
+  Layer.effect(
+    McpSessionRegistry.McpSessionRegistry,
+    McpSessionRegistry.__testing.make(options),
+  ).pipe(
+    Layer.provide(Layer.succeed(HttpServer.HttpServer, fakeHttpServer)),
+    Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, fakeEnvironment)),
+    Layer.provide(NodeServices.layer),
+  );
+
+const layerTestMcpRegistry = layerTestMcpRegistryWithOptions({});
 
 const layerPausingMcpRegistry = (pause: {
   readonly armed: Ref.Ref<boolean>;
@@ -2833,6 +2839,91 @@ it.effect("current memory DTO withholds access until the committed on epoch is i
       ),
     );
   }),
+);
+
+it.effect.each(["resolve", "unrelated issue"] as const)(
+  "current memory DTO denies expired live attachments before and after prune by %s",
+  (pruneBy) =>
+    Effect.gen(function* () {
+      let timestamp = 1_000;
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const threadId = ThreadId.make(`memory-expired-${pruneBy}`);
+        const runId = RunId.make("expired-run");
+        const taskId = NodeId.make("expired-task");
+        const now = yield* DateTime.now;
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* sink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+        });
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+          runId,
+          delegatedTaskId: taskId,
+          memoryGrantCeiling: "read_write",
+        });
+        const config = (yield* configs.read(threadId))!;
+        const token = config.authorizationHeader.replace(/^Bearer\s+/, "");
+        assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "read_write");
+        assert.equal(
+          (yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess?.access,
+          "read_write",
+        );
+        // The exact boundary remains live. Snapshot reads must not extend it.
+        timestamp += 100;
+        assert.isDefined(yield* registry.currentMemoryPolicy!(config.providerSessionId));
+        assert.isDefined((yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess);
+        timestamp += 1;
+        assert.isUndefined(yield* registry.currentMemoryPolicy!(config.providerSessionId));
+        assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "none");
+        assert.isUndefined(
+          (yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess,
+        );
+        if (pruneBy === "unrelated issue")
+          yield* registry.issue({
+            threadId: ThreadId.make("unrelated-live-credential"),
+            providerInstanceId: modelSelection.instanceId,
+          });
+        assert.isUndefined(yield* registry.resolve(token));
+        assert.isUndefined(yield* registry.currentMemoryPolicy!(config.providerSessionId));
+        assert.isUndefined(
+          (yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess,
+        );
+        // Rewinding only the test hook proves prune removed both lookup keys,
+        // rather than merely hiding a stale ID record behind its expiry check.
+        timestamp = 1_000;
+        assert.isUndefined(yield* registry.currentMemoryPolicy!(config.providerSessionId));
+        assert.isUndefined(yield* registry.resolve(token));
+        assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "none");
+        assert.isUndefined(
+          (yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess,
+        );
+        assert.equal((yield* configs.read(threadId))?.providerSessionId, config.providerSessionId);
+        assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
+        assert.isUndefined(yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId));
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            serverSettingsLayer: settingsLayer,
+            registryOptions: { now: () => timestamp, livenessWindowMs: 100 },
+          }).pipe(Layer.provideMerge(settingsLayer)),
+        ),
+      );
+    }),
 );
 
 it.effect("current memory DTO denies an archived destination before a deferred detach", () =>

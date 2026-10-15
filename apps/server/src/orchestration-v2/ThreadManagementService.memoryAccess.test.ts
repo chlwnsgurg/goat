@@ -90,6 +90,7 @@ it.effect(
         memoryGrantCeiling: "read_write" as const,
       };
       let inputs: Sessions.ProviderMemoryPrepareInput | undefined = { ...prepared, readOnly: true };
+      let currentMemoryGrant = "read" as "read" | "read_write";
       const settingsLayer = Settings.layerTest();
       const layer = Threads.layer.pipe(
         Layer.provideMerge(
@@ -98,7 +99,11 @@ it.effect(
             Receipts.layer.pipe(Layer.provide(Persistence.layerMemory)),
             Layer.mock(Sessions.ProviderSessionManagerV2)({
               memoryAccessInputs: (_thread, provider) =>
-                Effect.sync(() => (provider === shell.providerInstanceId ? inputs : undefined)),
+                Effect.sync(() =>
+                  provider === shell.providerInstanceId && inputs
+                    ? { ...inputs, currentMemoryGrant }
+                    : undefined,
+                ),
             }),
             Layer.mock(Orchestrator.OrchestratorV2)({
               getThreadProjection: () => Effect.succeed(source),
@@ -165,6 +170,12 @@ it.effect(
         );
         yield* settings.updateSettings({ enableAgentMemoryAccess: true });
         inputs = { ...prepared, readOnly: false };
+        // Positive DTOs use execution's grant even if prepare metadata alone
+        // would infer write access.
+        expect((yield* threads.getThreadProjection(shell.id)).runs[0]?.currentMemoryAccess).toEqual(
+          { access: "read", reason: "ceiling" },
+        );
+        currentMemoryGrant = "read_write";
         expect((yield* threads.getThreadProjection(shell.id)).runs[0]?.currentMemoryAccess).toEqual(
           { access: "read_write", reason: "ceiling" },
         );
