@@ -11,7 +11,10 @@
 import * as Migrator from "effect/sql/Migrator";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
-import { reconcileGoatMigrationIds } from "./reconcileGoatMigrationIds.ts";
+import {
+  assertMemoryMigrationsCompatible,
+  reconcileGoatMigrationIds,
+} from "./reconcileGoatMigrationIds.ts";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
 
 // Import all migrations statically
@@ -253,6 +256,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
 }: RunMigrationsOptions = {}) {
   const includesV2 =
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
+  yield* assertMemoryMigrationsCompatible(migrationEntries);
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
   // GOAT ledgers move before the V2 check, which would otherwise read GOAT's
   // old ids as upstream migrations the migrator skips.
