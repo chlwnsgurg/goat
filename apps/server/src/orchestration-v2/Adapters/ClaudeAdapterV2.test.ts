@@ -6485,6 +6485,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             messageCreationSource: "provider",
           }),
         );
+        yield* harness.awaitEventsRecorded;
         assert.lengthOf(harness.terminalEvents(), 1);
 
         yield* harness.offerAndWait(wakeAssistant);
@@ -8352,6 +8353,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           .pipe(Effect.forkScoped);
         yield* TestClock.adjust("10 seconds");
         yield* Fiber.join(stop);
+        yield* harness.awaitEventsRecorded;
         assert.deepEqual(bashStatuses(), [
           "command_execution:running",
           "command_execution:interrupted",
@@ -9293,6 +9295,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* Deferred.await(requested);
         yield* TestClock.adjust("2 seconds");
         const result = yield* Fiber.join(stopping);
+        yield* fixture.awaitEventsRecorded;
         assert.isTrue(Exit.isFailure(result));
         assert.equal(
           fixture.events.findLast((event) => event.type === "subagent.updated")?.subagent.status,
@@ -9415,6 +9418,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.equal(stops, 0);
           const stopping = yield* fixture.stop().pipe(Effect.exit, Effect.forkScoped);
           yield* Queue.take(fixture.requests);
+          yield* fixture.awaitEventsRecorded;
           const beforeReplay = fixture.events.length;
           yield* fixture.replay();
           const reopened = yield* Queue.take(fixture.subagentReceipts);
@@ -12085,6 +12089,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         assert.deepEqual(stoppedTasks, []);
         yield* stopTask({ providerThread: harness.providerThread, taskId: WORKFLOW_TASK_ID });
+        yield* harness.awaitEventsRecorded;
         assert.deepEqual(stoppedTasks, [WORKFLOW_TASK_ID]);
         assert.isFalse(interrupted);
         assert.isFalse(closed);
@@ -13289,6 +13294,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           });
           yield* Deferred.succeed(releaseDigest, undefined);
           yield* Fiber.join(replay);
+          yield* harness.awaitEventsRecorded;
           const second = harness.events
             .flatMap((event) =>
               event.type === "subagent.updated" &&
@@ -13413,6 +13419,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             }).pipe(Effect.exit, Effect.forkScoped);
             yield* TestClock.adjust("2 seconds");
             assert.isTrue(Exit.isFailure(yield* Fiber.join(retry)));
+            yield* harness.awaitEventsRecorded;
           }
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
           assert.equal(workflowCoordinatorEvents(harness.events).at(-1)?.subagent.status, settled);
@@ -13665,6 +13672,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 messageCreationSource: "provider",
               }),
             );
+            yield* harness.awaitEventsRecorded;
             assert.equal(
               workflowCoordinatorEvents(harness.events).at(-1)?.subagent.status,
               expected,
