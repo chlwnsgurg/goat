@@ -1244,7 +1244,11 @@ export interface DesktopBridge {
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
   getConnectionCatalog?: () => Promise<string | null>;
-  setConnectionCatalog?: (catalog: string) => Promise<boolean>;
+  /** Compare against the document read by this renderer; conflict requires reload and reapply. */
+  setConnectionCatalog?: (
+    catalog: string,
+    expectedCatalog: string | null,
+  ) => Promise<boolean | "conflict">;
   /** Null while the catalog is missing or readable. */
   getConnectionCatalogUnreadable?: () => Promise<DesktopConnectionCatalogUnreadable | null>;
   /** Removes the saved catalog. One this app cannot open is copied first, or kept. */

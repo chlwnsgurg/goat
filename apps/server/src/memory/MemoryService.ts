@@ -1,4 +1,5 @@
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- deterministic server-owned revision identifiers.
+import * as NodeUtil from "node:util";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- stable server-owned hashes.
 import * as NodeCrypto from "node:crypto";
 import * as M from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
@@ -13,6 +14,13 @@ import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Store from "./MemoryStore.ts";
+import { ProviderMemoryImportRuntime } from "./imports/MemoryImportTypes.ts";
+import type {
+  ImportProviderFacade,
+  ImportPorts,
+  ImportAddress,
+  PreparedImportCommit,
+} from "./imports/MemoryImportTypes.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
@@ -71,6 +79,9 @@ export type MemoryOwnerCommittedReader = {
 export class MemoryService extends Context.Service<
   MemoryService,
   {
+    readonly importProvider: ImportProviderFacade;
+    /** L5 adds readiness/requireBootstrap/syncStatus from its existing Sync instance. */
+    readonly importPorts: Omit<ImportPorts, "readiness" | "requireBootstrap" | "syncStatus">;
     readonly commitLocalIntent: (
       input: IntentCommitInput,
     ) => Effect.Effect<
@@ -292,6 +303,7 @@ const normalizeMemoryDependencies = Effect.fn("MemoryService.normalizeMemoryDepe
     payload: M.MemoryPayload,
     allowPruned = false,
     resolutionHeads: ReadonlyArray<M.MemoryRevisionId> = [],
+    resolvingMemoryId?: M.MemoryId,
   ) {
     const sql = yield* SqlClient.SqlClient;
     const revisions = [...new Set(payload.derivedFromMemoryRevisions)];
@@ -299,6 +311,8 @@ const normalizeMemoryDependencies = Effect.fn("MemoryService.normalizeMemoryDepe
       if (revisions.length > 100)
         return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
       const revision = revisions[index]!;
+      // Only authoritative resolution inputs may use this memory's own history
+      // while its current frontier is quarantined. Foreign owners still need visibility.
       const rows = yield* sql<{ dependencies_json: string | null }>`
         SELECT p.dependencies_json FROM memory_revisions r
         JOIN memory_items i ON i.space=r.space AND i.memory_id=r.memory_id
@@ -306,7 +320,7 @@ const normalizeMemoryDependencies = Effect.fn("MemoryService.normalizeMemoryDepe
         WHERE r.space=${space} AND r.revision_id=${revision}
         AND NOT EXISTS (SELECT 1 FROM memory_inbox_pending q WHERE q.space=r.space AND q.operation_id=r.operation_id AND q.record_kind='operation')
         AND (i.status='active' AND json_extract(i.availability_json,'$.exposure')='visible'
-          OR r.revision_id IN (SELECT value FROM json_each(${encodeHeads(resolutionHeads)})))
+          OR r.memory_id=${resolvingMemoryId ?? null} AND r.revision_id IN (SELECT value FROM json_each(${encodeHeads(resolutionHeads)})))
         AND i.status NOT IN ('forgotten','blocked')
         AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=r.space AND f.memory_id=r.memory_id)
       `.pipe(
@@ -326,8 +340,21 @@ const normalizeMemoryDependencies = Effect.fn("MemoryService.normalizeMemoryDepe
 );
 /** Consumers of a previously admitted closed set verify every still-available edge. */
 export const validateSummaryDependencies = Effect.fn("MemoryService.validateSummaryDependencies")(
-  function* (space: M.MemorySpaceId, payload: M.MemoryPayload) {
-    const normalized = yield* normalizeMemoryDependencies(space, payload, true);
+  function* (
+    space: M.MemorySpaceId,
+    payload: M.MemoryPayload,
+    resolution?: {
+      readonly memoryId: M.MemoryId;
+      readonly revisions: ReadonlyArray<M.MemoryRevisionId>;
+    },
+  ) {
+    const normalized = yield* normalizeMemoryDependencies(
+      space,
+      payload,
+      true,
+      resolution?.revisions ?? [],
+      resolution?.memoryId,
+    );
     if (
       normalized.derivedFromMemoryRevisions.length !==
       new Set(payload.derivedFromMemoryRevisions).size
@@ -361,36 +388,49 @@ const make = Effect.fnUntraced(function* (
     if (!rows[0]) return yield* new Store.MemoryStoreConflict({ code: "not_found" });
     return rows[0].workspace_root;
   });
-  const getProjectBinding = Effect.fn("MemoryService.getProjectBinding")(function* (
+  // Preparation observes repository-derived bindings without publishing them.
+  const readProjectBinding = Effect.fn("MemoryService.readProjectBinding")(function* (
     input: M.MemoryProjectBindingGetInput,
     permit: Permit,
   ) {
     const value = yield* decode(decodeBindingGet(input, strict));
     yield* permit;
     const root = yield* projectRoot(value.project);
+    const old = yield* store.getProjectBinding(value.memorySpaceId, value.project);
+    if (old?.repositoryKey) return old;
     const observed = yield* repositoryResolver.resolve(root);
+    yield* permit;
+    if (!observed) return old ?? { ...value, projectKey: null, repositoryKey: null, version: 0 };
+    const repositoryKey = {
+      kind: "repository" as const,
+      groupingKey: M.repositoryGroupingKeyOf(observed),
+    };
+    return {
+      ...value,
+      repositoryKey,
+      projectKey: old?.projectKey?.kind === "explicit" ? old.projectKey : repositoryKey,
+      version: old?.version ?? 0,
+    };
+  });
+  const getProjectBinding = Effect.fn("MemoryService.getProjectBinding")(function* (
+    input: M.MemoryProjectBindingGetInput,
+    permit: Permit,
+  ) {
     return yield* store.transact(
       Effect.gen(function* () {
-        yield* permit;
-        yield* projectRoot(value.project);
-        const old = yield* store.getProjectBinding(value.memorySpaceId, value.project);
-        if (old?.repositoryKey || !observed)
-          return old ?? { ...value, projectKey: null, repositoryKey: null, version: 0 };
-        const repositoryKey = {
-          kind: "repository" as const,
-          groupingKey: M.repositoryGroupingKeyOf(observed),
-        };
-        const binding = {
-          ...value,
-          repositoryKey,
-          projectKey: old?.projectKey?.kind === "explicit" ? old.projectKey : repositoryKey,
-          version: old?.version ?? 0,
-        };
-        yield* store.putProjectBinding(
-          binding,
-          old?.version ?? null,
-          yield* Clock.currentTimeMillis,
-        );
+        const binding = yield* readProjectBinding(input, permit);
+        const old = yield* store.getProjectBinding(binding.memorySpaceId, binding.project);
+        if (
+          !NodeUtil.isDeepStrictEqual(
+            old ?? { ...input, projectKey: null, repositoryKey: null, version: 0 },
+            binding,
+          )
+        )
+          yield* store.putProjectBinding(
+            binding,
+            old?.version ?? null,
+            yield* Clock.currentTimeMillis,
+          );
         return binding;
       }),
     );
@@ -491,6 +531,35 @@ const make = Effect.fnUntraced(function* (
         ),
       catch: (cause) => (isConflict(cause) ? cause : invalid()),
     });
+  const requireImportNotSuppressed = Effect.fnUntraced(function* (op: M.MemoryOperation) {
+    if (op.kind === "forget" || !op.revision.provenance.importSource) return;
+    const source = op.revision.provenance.importSource;
+    const keys = [
+      {
+        environmentId: op.revision.provenance.environmentId,
+        sourceId: source.sourceId,
+        sourceItemKey: source.sourceItemKey,
+      },
+      ...source.sourceAliases,
+    ];
+    const fingerprints = [source.contentFingerprint, ...source.acceptedContentFingerprints];
+    for (let index = 0; index < Math.max(keys.length, fingerprints.length); index++) {
+      const match = yield* store.findImportMatchTx({
+        memorySpaceId: op.memorySpaceId,
+        environmentId,
+        source: keys[index % keys.length]!,
+        content: {
+          scope: op.revision.scope,
+          assertionKind: op.revision.assertionKind,
+          contentFingerprint: fingerprints[index % fingerprints.length]!,
+        },
+      });
+      if (match.kind === "pending_forget")
+        return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
+      if (match.kind === "source_suppressed" || match.kind === "content_suppressed")
+        return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
+    }
+  });
   const apply = Effect.fn("MemoryService.apply")(function* (
     op: M.MemoryOperation,
     admission: Store.MemoryAdmissionContext,
@@ -533,11 +602,440 @@ const make = Effect.fnUntraced(function* (
           )
             return yield* new Store.MemoryStoreConflict({ code: "base_compacted" });
         }
+        if (admission.kind !== "approvedReplica") yield* requireImportNotSuppressed(op);
         const decision = yield* decide(current, op, admission, approval, ancestry);
         return yield* quota.commit(decision, environmentId, permit);
       }),
     );
   });
+  const requireImportAddress = (address: ImportAddress) =>
+    address.environmentId === environmentId
+      ? Effect.void
+      : Effect.fail(new Store.MemoryStoreConflict({ code: "not_found" }));
+  const importTransaction = <A, E, R>(
+    address: ImportAddress,
+    permit: Permit,
+    effect: Effect.Effect<A, E, R>,
+  ) =>
+    store.transact(
+      Effect.gen(function* () {
+        yield* permit;
+        yield* requireImportAddress(address);
+        yield* store.requireImportLineageCompleteTx(address.memorySpaceId);
+        return yield* effect;
+      }),
+      { requireOuter: true },
+    );
+  const commitImport = Effect.fn("MemoryService.commitImport")(function* (
+    input: PreparedImportCommit,
+    permit: Permit,
+  ) {
+    return yield* importTransaction(
+      input.batch,
+      permit,
+      Effect.gen(function* () {
+        const { candidate, next, previous, registration } = input;
+        // L4 may pass an unfinished frozen selection. Results are materialized here, IDs never regenerated.
+        const itemResult: M.MemoryImportItemResult = input.rejectOnly
+          ? {
+              sourceItemKey: next.sourceItemKey,
+              outcome: "rejected",
+              memoryId: null,
+              revisionId: null,
+              ...input.rejectOnly,
+            }
+          : (input.selection.result ?? {
+              sourceItemKey: next.sourceItemKey,
+              outcome: next.outcome,
+              memoryId:
+                next.outcome === "suppressed" || next.outcome === "rejected" ? null : next.memoryId,
+              revisionId:
+                next.outcome === "suppressed" || next.outcome === "rejected"
+                  ? null
+                  : next.outcome === "noop"
+                    ? ((next.pending ?? next.accepted)?.revisionId ?? null)
+                    : input.selection.revisionId,
+              ...(next.outcome === "rejected" && next.rejected
+                ? { issue: next.rejected.issue }
+                : {}),
+            });
+        const selection = { ...input.selection, result: itemResult };
+        const selections = input.batch.selections.map((s) =>
+          s.selector.sourceItemKey === next.sourceItemKey ? selection : s,
+        );
+        const remaining = selections.filter((s) => s.result === null).length;
+        const batch = {
+          ...input.batch,
+          selections,
+          receipt: {
+            ...input.batch.receipt,
+            state: remaining === 0 ? ("completed" as const) : ("partial" as const),
+            remaining,
+            items: selections.flatMap((s) => (s.result ? [s.result] : [])),
+          },
+        };
+        if (
+          registration.environmentId !== environmentId ||
+          next.environmentId !== environmentId ||
+          registration.memorySpaceId !== batch.memorySpaceId ||
+          registration.sourceId !== batch.sourceId ||
+          next.sourceId !== batch.sourceId ||
+          next.memorySpaceId !== batch.memorySpaceId ||
+          selection.memoryId !== next.memoryId ||
+          selection.selector.sourceItemKey !== next.sourceItemKey ||
+          candidate.sourceItemKey !== next.sourceItemKey ||
+          candidate.sourceFingerprint !== selection.selector.sourceFingerprint ||
+          !NodeUtil.isDeepStrictEqual(
+            input.selection,
+            input.batch.selections.find((s) => s.selector.sourceItemKey === next.sourceItemKey),
+          ) ||
+          (!input.rejectOnly && !NodeUtil.isDeepStrictEqual(next.scope, selection.selector.scope))
+        )
+          return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+        yield* requireScope(selection.selector.scope);
+        if (
+          input.rejectOnly &&
+          (previous
+            ? !NodeUtil.isDeepStrictEqual(next, previous)
+            : next.outcome !== "rejected" ||
+              next.accepted !== null ||
+              next.pending !== null ||
+              !NodeUtil.isDeepStrictEqual(next.scope, selection.selector.scope))
+        )
+          return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+        // Sync readiness is observed outside SQL; published local state is authoritative after lock.
+        const ready = yield* query(
+          sql`SELECT 1 FROM memory_compaction_state WHERE space=${batch.memorySpaceId} AND published=1`,
+        );
+        if (!ready.length)
+          return yield* new Store.MemoryStoreConflict({ code: "bootstrap_required" });
+        const commitIntent = Effect.gen(function* () {
+          yield* permit;
+          const savedRegistration = yield* store.readImportRegistrationTx({
+            ...batch,
+            by: "source",
+          });
+          if (
+            !NodeUtil.isDeepStrictEqual(savedRegistration, registration) ||
+            registration.version !== input.registrationVersion ||
+            !NodeUtil.isDeepStrictEqual(next.accepted, previous?.accepted ?? null) ||
+            (!input.rejectOnly && next.outcome !== selection.result?.outcome)
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          if (selection.selector.project) {
+            const project = selection.selector.project;
+            yield* projectRoot(project);
+            const binding = yield* readProjectBinding(
+              { memorySpaceId: batch.memorySpaceId, project },
+              permit,
+            );
+            if (
+              !input.projectBinding ||
+              !NodeUtil.isDeepStrictEqual(binding, input.projectBinding) ||
+              selection.selector.scope.kind !== "project" ||
+              !NodeUtil.isDeepStrictEqual(binding.projectKey, selection.selector.scope.projectKey)
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            const storedBinding = yield* store.getProjectBinding(batch.memorySpaceId, project);
+            if (
+              !NodeUtil.isDeepStrictEqual(
+                storedBinding ?? {
+                  memorySpaceId: batch.memorySpaceId,
+                  project,
+                  projectKey: null,
+                  repositoryKey: null,
+                  version: 0,
+                },
+                binding,
+              )
+            )
+              yield* store.putProjectBinding(
+                binding,
+                storedBinding?.version ?? null,
+                yield* Clock.currentTimeMillis,
+              );
+          } else if (selection.selector.scope.kind === "project" || input.projectBinding !== null) {
+            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+          }
+          if (previous && !NodeUtil.isDeepStrictEqual(previous.scope, next.scope))
+            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+          if (input.rejectOnly) return;
+          const match = yield* store.findImportMatchTx({
+            ...batch,
+            source: {
+              environmentId,
+              sourceId: batch.sourceId,
+              sourceItemKey: candidate.sourceItemKey,
+            },
+            content: {
+              scope: next.scope,
+              assertionKind: "inference",
+              contentFingerprint: candidate.contentFingerprint,
+            },
+          });
+          if (next.outcome === "suppressed") {
+            if (
+              match.kind !== "source_suppressed" &&
+              match.kind !== "content_suppressed" &&
+              match.kind !== "pending_forget"
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            return;
+          }
+          if (next.outcome === "rejected") {
+            if (
+              !next.rejected ||
+              next.rejected.sourceFingerprint !== candidate.sourceFingerprint ||
+              itemResult.issue !== next.rejected.issue
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
+            return;
+          }
+          const current = yield* store.loadAggregate(batch.memorySpaceId, next.memoryId);
+          if (current.identity && !NodeUtil.isDeepStrictEqual(current.identity.scope, next.scope))
+            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+          if (current.tombstone) return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
+          if (current.pendingForget)
+            return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
+          if (
+            current.heads.length !== input.expectedHeads.length ||
+            !current.heads.every((h) => input.expectedHeads.includes(h))
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          if (next.outcome === "noop") {
+            const observation = previous?.pending ?? previous?.accepted;
+            const payload = current.revisions.find(
+              (r) => r.revision.revisionId === observation?.revisionId,
+            )?.payload;
+            if (
+              !observation ||
+              observation.sourceFingerprint !== candidate.sourceFingerprint ||
+              observation.contentFingerprint !== candidate.contentFingerprint ||
+              payload?.text !== candidate.payload.text ||
+              !NodeUtil.isDeepStrictEqual(next.pending, previous?.pending ?? null)
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            return;
+          }
+          // Updated imports branch only from their last accepted observation, never a pending proposal.
+          let parents = previous?.accepted ? [previous.accepted.revisionId] : [];
+          let alias: { revision: M.MemoryRevision; payload: M.MemoryPayload } | undefined;
+          if (
+            next.outcome === "aliased" &&
+            !previous?.accepted &&
+            !previous?.pending &&
+            input.parents.length === 1
+          ) {
+            const parent = current.revisions.find(
+              (r) => r.revision.revisionId === input.parents[0],
+            );
+            const accepted = parent
+              ? yield* store.receipt(batch.memorySpaceId, parent.revision.operationId)
+              : undefined;
+            if (
+              !parent ||
+              current.item?.status !== "active" ||
+              current.heads.length !== 1 ||
+              current.heads[0] !== parent.revision.revisionId ||
+              parent.payload?.text !== candidate.payload.text ||
+              !accepted ||
+              !("hubSequence" in accepted.receipt) ||
+              accepted.receipt.hubSequence === null ||
+              accepted.receipt.outcome === "rejected"
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            parents = [parent.revision.revisionId];
+            alias = { revision: parent.revision, payload: parent.payload! };
+          }
+          if (
+            parents.length !== input.parents.length ||
+            !parents.every((h) => input.parents.includes(h)) ||
+            (current.identity &&
+              next.outcome !== "aliased" &&
+              (!previous || previous.memoryId !== next.memoryId))
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          const observation = next.pending;
+          if (
+            !observation ||
+            observation.operationId !== selection.operationId ||
+            observation.revisionId !== selection.revisionId ||
+            observation.sourceFingerprint !== candidate.sourceFingerprint ||
+            observation.contentFingerprint !== candidate.contentFingerprint
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+          const operation = yield* decode(
+            decodeOperation(
+              {
+                protocolVersion: 1,
+                kind: "upsert",
+                memorySpaceId: batch.memorySpaceId,
+                memoryId: next.memoryId,
+                operationId: selection.operationId,
+                originEnvironmentId: environmentId,
+                expectedHeads: input.parents,
+                revision: {
+                  memorySpaceId: batch.memorySpaceId,
+                  memoryId: next.memoryId,
+                  operationId: selection.operationId,
+                  revisionId: selection.revisionId,
+                  payloadRef: alias?.revision.payloadRef ?? selection.revisionId,
+                  parents: input.parents,
+                  scope: next.scope,
+                  assertionKind: "inference",
+                  createdAtUtc: batch.createdAtUtc,
+                  provenance: {
+                    environmentId,
+                    importSource: {
+                      sourceId: registration.sourceId,
+                      format: registration.source.format,
+                      parserVersion: registration.source.parserVersion,
+                      sourceLocator: registration.sourceLocator,
+                      sourceItemKey: candidate.sourceItemKey,
+                      sourceFingerprint: candidate.sourceFingerprint,
+                      contentFingerprint: candidate.contentFingerprint,
+                      sourceAliases: [],
+                      acceptedContentFingerprints: [],
+                    },
+                  },
+                },
+                payload: alias?.payload ?? candidate.payload,
+              },
+              strict,
+            ),
+          );
+          if (operation.kind !== "upsert")
+            return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
+          const receipt = yield* apply(
+            operation,
+            { ...Store.localIntent, localExpectedHeads: input.expectedHeads },
+            permit,
+          );
+          if ((receipt.receipt.outcome === "conflicted") !== (next.outcome === "conflicted"))
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          if (receipt.receipt.outcome === "rejected")
+            return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
+          // Parent-aware intent records the frozen operation, unlike the initial-only local draft materializer.
+          yield* store.enqueueWork({
+            id: `import:${environmentId}:${batch.operationId}:${selection.operationId}`,
+            space: batch.memorySpaceId,
+            memoryId: next.memoryId,
+            kind: "admin",
+            status: "completed",
+            metadata: {
+              protocolVersion: 1,
+              kind: "upsert",
+              operationId: selection.operationId,
+              memorySpaceId: batch.memorySpaceId,
+              memoryId: next.memoryId,
+              originEnvironmentId: environmentId,
+              expectedHeads: input.parents,
+              revision: operation.revision,
+            },
+            payloadRef: operation.revision.payloadRef,
+            attempt: 0,
+            nextAttemptAt: 0,
+            claimedBy: null,
+            claimedUntil: null,
+          });
+          yield* permit;
+        });
+        const result = yield* store.commitImportItemTx({
+          registrationVersion: input.registrationVersion,
+          batch,
+          previous,
+          next,
+          commitIntent,
+          preserveItem: input.rejectOnly !== undefined,
+          contentFingerprint: candidate.contentFingerprint,
+        });
+        yield* permit;
+        return result;
+      }),
+    );
+  });
+  const importPorts: MemoryService["Service"]["importPorts"] = {
+    readRegistration: (input, permit) =>
+      importTransaction(input, permit, store.readImportRegistrationTx(input)),
+    saveRegistration: (input, permit) =>
+      importTransaction(input, permit, store.writeImportRegistrationTx(input)),
+    preflightBatch: (input, permit) =>
+      importTransaction(
+        input,
+        permit,
+        Effect.gen(function* () {
+          const batch = yield* store.readImportBatchTx(input);
+          if (!batch) return { kind: "new" as const };
+          if (batch.selectionDigest !== input.selectionDigest)
+            return yield* new M.MemoryImportRpcError({
+              issue: "operation_id_reused",
+              operationId: input.operationId,
+            });
+          if (batch.kind === "retired") return { kind: "retired" as const };
+          return batch.kind === "completed-noop-ref" || batch.receipt.state === "completed"
+            ? { kind: "completed" as const, receipt: batch.receipt }
+            : { kind: "partial" as const, batch, receipt: batch.receipt };
+        }),
+      ),
+    readReceipt: (input, permit) =>
+      importTransaction(input, permit, store.readImportReceiptTx(input)).pipe(
+        Effect.flatMap((receipt) =>
+          receipt
+            ? Effect.succeed(receipt)
+            : Effect.fail(new M.MemoryRpcError({ code: "not_found" })),
+        ),
+      ),
+    readItem: (input, permit) => importTransaction(input, permit, store.readImportItemTx(input)),
+    findMatch: (input, permit) => importTransaction(input, permit, store.findImportMatchTx(input)),
+    prepareTarget: (input, permit) =>
+      importTransaction(
+        input,
+        permit,
+        Effect.gen(function* () {
+          yield* requireScope(input.scope);
+          const current = yield* store.loadAggregate(input.memorySpaceId, input.memoryId);
+          if (current.identity && !NodeUtil.isDeepStrictEqual(current.identity.scope, input.scope))
+            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+          const acceptedParent =
+            input.acceptedRevisionId === null
+              ? null
+              : (yield* store.readAncestry(input.memorySpaceId, input.memoryId, [
+                  input.acceptedRevisionId,
+                ])).parents[0]!;
+          const head =
+            current.item?.status === "active" &&
+            current.heads.length === 1 &&
+            !current.pendingForget &&
+            !current.tombstone
+              ? current.revisions.find((r) => r.revision.revisionId === current.heads[0])
+              : undefined;
+          const approval = head
+            ? yield* store.receipt(input.memorySpaceId, head.revision.operationId)
+            : undefined;
+          return {
+            identity: current.identity ?? null,
+            heads: current.heads,
+            forgotten: current.tombstone !== undefined,
+            pendingForget: current.pendingForget !== undefined,
+            acceptedParent,
+            alias:
+              head?.payload &&
+              approval &&
+              "hubSequence" in approval.receipt &&
+              approval.receipt.hubSequence !== null &&
+              approval.receipt.outcome !== "rejected"
+                ? { revision: head.revision, payload: head.payload }
+                : null,
+          };
+        }),
+      ),
+    binding: readProjectBinding,
+    resolveProjectKey: (space, project) =>
+      readProjectBinding({ memorySpaceId: space, project }, Effect.void).pipe(
+        Effect.map((binding) => binding.projectKey),
+      ),
+    commit: commitImport,
+  };
   const commitLocalIntent: MemoryService["Service"]["commitLocalIntent"] = Effect.fn(
     "MemoryService.commitLocalIntent",
   )(function* (input) {
@@ -757,7 +1255,14 @@ const make = Effect.fnUntraced(function* (
                 pendingSync: false,
               },
             };
-          const suppressedSourceKeys: M.MemorySourceKey[] = [];
+          // Lifetime evidence survives compaction and is captured before base deletion purges payloads.
+          const lineage = yield* store.readImportLineage(value.memorySpaceId, value.memoryId);
+          const suppressedSourceKeys = lineage.flatMap((r) =>
+            r.kind === "sourceKey" ? [r.sourceKey] : [],
+          );
+          const suppressedContent = lineage.flatMap((r) =>
+            r.kind === "content" ? [r.content] : [],
+          );
           const sourceExclusions: M.MemorySourceExclusion[] = [];
           for (const { revision, payload } of current.revisions) {
             const p = revision.provenance;
@@ -790,11 +1295,73 @@ const make = Effect.fnUntraced(function* (
                 DateTime.formatIso(DateTime.makeUnsafe(yield* Clock.currentTimeMillis)),
               ),
               suppressedSourceKeys,
-              suppressedContent: [],
+              suppressedContent,
               sourceExclusions,
             },
           };
-          return yield* apply(op, Store.localIntent, permit);
+          if (old) return yield* apply(old, Store.localIntent, permit);
+          // Every operation stays within the v1 tombstone bound. IDs and digests are immutable;
+          // the base receipt and each expansion retain their own local/remote outcome.
+          const records = [
+            ...suppressedSourceKeys.map((sourceKey) => ({ kind: "sourceKey" as const, sourceKey })),
+            ...suppressedContent.map((content) => ({ kind: "content" as const, content })),
+            ...sourceExclusions.map((exclusion) => ({ kind: "exclusion" as const, exclusion })),
+          ];
+          const operations: Extract<M.MemoryOperation, { kind: "forget" }>[] = [];
+          for (let offset = 0; offset < Math.max(1, records.length); offset += 100) {
+            const fragment = records.slice(offset, offset + 100);
+            const operationId =
+              offset === 0
+                ? value.operationId
+                : M.MemoryOperationId.make(
+                    memoryStableUuid(`${value.operationId}:lineage-fragment:${offset / 100}`),
+                  );
+            operations.push({
+              ...op,
+              operationId,
+              expectedHeads: offset === 0 ? value.expectedHeads : [],
+              tombstone: {
+                ...op.tombstone,
+                deleteOperationId: operationId,
+                suppressedSourceKeys: fragment.flatMap((r) =>
+                  r.kind === "sourceKey" ? [r.sourceKey] : [],
+                ),
+                suppressedContent: fragment.flatMap((r) =>
+                  r.kind === "content" ? [r.content] : [],
+                ),
+                sourceExclusions: fragment.flatMap((r) =>
+                  r.kind === "exclusion" ? [r.exclusion] : [],
+                ),
+              },
+            });
+          }
+          let base: Store.StoredReceipt | undefined;
+          let previous: Store.StoredReceipt | undefined;
+          for (const operation of operations) {
+            const result = yield* apply(operation, Store.localIntent, permit);
+            if (previous) {
+              const linked = yield* store.settleForgetExpansion(value.memorySpaceId, {
+                ...previous,
+                receipt: {
+                  ...previous.receipt,
+                  forgetExpansion: {
+                    requestDigest: previous.operationDigest,
+                    operationId: operation.operationId,
+                    operationDigest: result.operationDigest,
+                    status:
+                      result.receipt.outcome === "rejected"
+                        ? "rejected"
+                        : "pendingSync" in result.receipt && result.receipt.pendingSync
+                          ? "pending"
+                          : "accepted",
+                  },
+                },
+              });
+              if (previous.receipt.operationId === base?.receipt.operationId) base = linked;
+            } else base = result;
+            previous = result;
+          }
+          return base!;
         }),
       )
       .pipe(
@@ -1662,6 +2229,7 @@ const make = Effect.fnUntraced(function* (
     const current = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);
     // Only the read-only semantic decision is caught; every subsequent write can fail the outer transaction.
     const prepared = yield* Effect.gen(function* () {
+      yield* requireImportNotSuppressed(op);
       if (op.kind !== "forget" && current.pendingForget)
         return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
       let approval: M.MemoryResolutionApproval | undefined;
@@ -1712,10 +2280,14 @@ const make = Effect.fnUntraced(function* (
           encodeHeads([...dependencies].sort())
         )
           return yield* invalid();
-        yield* validateSummaryDependencies(op.memorySpaceId, {
-          ...payload,
-          derivedFromMemoryRevisions: inherited.filter((id) => !op.expectedHeads.includes(id)),
-        }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+        yield* validateSummaryDependencies(
+          op.memorySpaceId,
+          {
+            ...payload,
+            derivedFromMemoryRevisions: inherited.filter((id) => !op.expectedHeads.includes(id)),
+          },
+          { memoryId: op.memoryId, revisions: dependencies },
+        ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
         const iso = (value: number) =>
           M.MemoryUtcTimestamp.make(DateTime.formatIso(DateTime.makeUnsafe(value)));
         approval = {
@@ -1729,8 +2301,9 @@ const make = Effect.fnUntraced(function* (
         const normalized = yield* normalizeMemoryDependencies(
           op.memorySpaceId,
           op.payload,
-          false,
-          op.kind === "resolve" ? op.expectedHeads : [],
+          op.kind === "resolve",
+          op.kind === "resolve" ? op.payload.derivedFromMemoryRevisions : [],
+          op.kind === "resolve" ? op.memoryId : undefined,
         ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
         // The member signs the operation digest. Never rewrite its payload under that ID.
         if (
@@ -2115,6 +2688,12 @@ const make = Effect.fnUntraced(function* (
     );
   });
   return MemoryService.of({
+    importPorts,
+    importProvider: (input, permit) =>
+      Effect.gen(function* () {
+        yield* permit;
+        return yield* (yield* ProviderMemoryImportRuntime).run(input, permit);
+      }),
     commitLocalIntent,
     readSource,
     prepareSourceRead,

@@ -35,6 +35,7 @@ import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { observeResize } from "~/lib/observeResize";
 import { useGoatBotPreferred } from "../goatBot/GoatBotModeButton";
 import { useGoatBotWaitingCount } from "../goatBot/useGoatBotWaitingCount";
+import { useDestinationRailVisible } from "./DestinationRail";
 import {
   SidebarPriorityCountBadge,
   SidebarViewToggles,
@@ -285,6 +286,8 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     select: (location) => isSidebarUtilityPage(location.pathname),
   });
   const pullRequestsSupported = usePullRequestsSupported();
+  // The destination rail already carries Settings, Pull requests and Usage.
+  const railVisible = useDestinationRailVisible();
   const closeMobileSidebar = useCallback(() => {
     if (isMobile) {
       setOpenMobile(false);
@@ -323,7 +326,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             <span>Back</span>
           </SidebarMenuButton>
         </SidebarMenuItem>
-      ) : (
+      ) : railVisible ? null : (
         <>
           <SidebarUtilityItem
             icon={<SettingsIcon />}

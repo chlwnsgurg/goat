@@ -1,6 +1,20 @@
+import { resolveCommandPath } from "@goat/shared/shell";
+import * as HostProcess from "@goat/shared/HostProcess";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- the closed import factory requires a synchronous UUID callback.
+import * as NodeCrypto from "node:crypto";
+import { ProviderMemoryImportRuntime } from "./memory/imports/MemoryImportTypes.ts";
+import {
+  acquireMemoryImportReader,
+  preflightMemoryImportStateDirectory,
+  type MemoryImportReaderConfig,
+} from "./memory/imports/MemoryImportReader.ts";
+import { makeProviderMemoryImport } from "./memory/imports/ProviderMemoryImport.ts";
+import { parseCodexMemory } from "./memory/imports/CodexMemoryImporter.ts";
+import { parseClaudeMemory } from "./memory/imports/ClaudeMemoryImporter.ts";
+import { parseOmoMemory } from "./memory/imports/OmoMemoryImporter.ts";
 import type * as Crypto from "effect/Crypto";
 import type * as FileSystem from "effect/FileSystem";
-import type * as Path from "effect/Path";
+import * as Path from "effect/Path";
 import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Schema from "effect/Schema";
 import * as McpToolAccess from "./mcp/McpToolAccess.ts";
@@ -95,6 +109,7 @@ import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSess
 import * as OpenCodeRuntime from "@goat/provider-opencode/server/OpenCodeRuntime";
 import * as OpenCodeServerLedger from "@goat/provider-opencode/server/OpenCodeServerLedger";
 import * as ProviderHostLive from "./provider/ProviderHostLive.ts";
+import * as ProviderDiagnosisService from "./provider/ProviderDiagnosisService.ts";
 import * as AcpRegistrySupport from "@goat/provider-acp-registry/server/AcpRegistrySupport";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
@@ -501,6 +516,10 @@ export class MemorySourceReadBinding extends Context.Service<
   MemorySourceReadBinding,
   {
     readonly readSource: MemoryService.MemorySourceReadAuthority["readSource"];
+    readonly importSync: Pick<
+      MemorySync.MemorySyncService["Service"],
+      "readLocalReadiness" | "requireBootstrap" | "syncStatus"
+    >;
     readonly bind: (sync: MemorySync.MemorySyncService["Service"]) => Effect.Effect<void>;
   }
 >()("goat/server/MemorySourceReadBinding") {}
@@ -517,6 +536,32 @@ export const layerMemorySourceReadBinding = Layer.effect(
               : sync.readSource(input, permit),
           ),
         ),
+      importSync: {
+        readLocalReadiness: () =>
+          Ref.get(current).pipe(
+            Effect.flatMap((sync) =>
+              sync === null
+                ? Effect.fail(new MemoryHubError({ code: "route_unavailable" }))
+                : sync.readLocalReadiness(),
+            ),
+          ),
+        requireBootstrap: (space) =>
+          Ref.get(current).pipe(
+            Effect.flatMap((sync) =>
+              sync === null
+                ? Effect.fail(new MemoryHubError({ code: "route_unavailable" }))
+                : sync.requireBootstrap(space),
+            ),
+          ),
+        syncStatus: (input, permit) =>
+          Ref.get(current).pipe(
+            Effect.flatMap((sync) =>
+              sync === null
+                ? Effect.fail(new MemoryHubError({ code: "route_unavailable" }))
+                : sync.syncStatus(input, permit),
+            ),
+          ),
+      },
       bind: (sync) => Ref.set(current, sync),
     });
   }),
@@ -686,6 +731,75 @@ const layerMemorySync = layerMemorySyncStarted.pipe(
   Layer.provide(ServerEnvironment.layerIdentity),
 );
 
+/** Acquisition is isolated from the core graph; only a fully acquired reader publishes the tag. */
+export const layerMemoryImport = (config?: MemoryImportReaderConfig) =>
+  Layer.unwrap(
+    Effect.gen(function* () {
+      const service = yield* MemoryService.MemoryService;
+      const { importSync: sync } = yield* MemorySourceReadBinding;
+      const identity = yield* ServerEnvironment.ServerEnvironmentIdentity;
+      const environmentId = yield* identity.getEnvironmentId;
+      const server = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const home = yield* HostProcess.HomeDirectory;
+      const gitExecutable =
+        config === undefined ? yield* resolveCommandPath("git") : config.gitExecutable;
+      const readerConfig = config ?? {
+        stateDir: server.stateDir,
+        ...(gitExecutable ? { gitExecutable } : {}),
+        roots: [
+          { format: "codex", rootSlot: "default", path: path.join(home, ".codex") },
+          { format: "claude", rootSlot: "default", path: path.join(home, ".claude", "projects") },
+          {
+            format: "omo",
+            rootSlot: "default",
+            path: path.join(home, ".omo", "memory", "agents"),
+          },
+        ],
+      };
+      const reader = yield* preflightMemoryImportStateDirectory(readerConfig.stateDir).pipe(
+        Effect.andThen(acquireMemoryImportReader(readerConfig)),
+        Effect.result,
+      );
+      if (reader._tag === "Failure") {
+        yield* Effect.logWarning("Provider memory import unavailable", {
+          issue: reader.failure.issue,
+          ...(reader.failure.issue === "path_rejected"
+            ? {
+                stateDir: readerConfig.stateDir,
+                recovery:
+                  "Match the stateDir owner to the server execution UID. If shared writes are not needed, remove group/other write permission and restart. If shared writes are needed, use a dedicated stateDir.",
+              }
+            : {}),
+        });
+        return Layer.empty;
+      }
+      return Layer.succeed(
+        ProviderMemoryImportRuntime,
+        makeProviderMemoryImport(
+          {
+            ...service.importPorts,
+            readiness: sync.readLocalReadiness,
+            requireBootstrap: sync.requireBootstrap,
+            syncStatus: sync.syncStatus,
+          },
+          reader.success,
+          { codex: parseCodexMemory, claude: parseClaudeMemory, omo: parseOmoMemory },
+          {
+            uuid: () => NodeCrypto.randomUUID(),
+            now: () => Clock.currentTimeMillis,
+            environmentId,
+          },
+        ),
+      );
+    }),
+  );
+const layerProviderMemoryImport = layerMemoryImport().pipe(
+  Layer.provide(layerMemoryService),
+  Layer.provide(layerMemorySourceReadBinding),
+  Layer.provide(ServerEnvironment.layerIdentity),
+);
+
 export const layerMemorySnapshot = MemorySnapshot.layer;
 export const provideMemorySnapshot = MemorySnapshotBinding.provide;
 const layerMemorySnapshotWithDependencies = layerMemorySnapshot.pipe(
@@ -751,6 +865,7 @@ export const layerMemoryToolkits = Layer.mergeAll(
 );
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(
+  Layer.provide(layerProviderMemoryImport),
   Layer.provide(layerRegisteredMemoryHub),
   Layer.provide(layerServerSettings),
   Layer.provide(ServerSecretStore.layer),
@@ -872,6 +987,7 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   layerMemoryStarted,
   layerMemorySync,
+  layerProviderMemoryImport,
   AgentAwarenessRelay.layer,
   // Asks T3 Connect to deliver webhooks it held while this environment was offline.
   HeldHooksWaker.layer,
@@ -1080,7 +1196,13 @@ const layerMakeRoutes = Layer.mergeAll(
   // delegation targets through the same live adapter facade the V2
   // orchestrator uses, so MCP capability reporting can never drift from
   // what dispatch can actually serve.
-  Layer.mergeAll(McpHttpServer.layer, layerMemoryToolkits).pipe(
+  Layer.mergeAll(
+    McpHttpServer.layer,
+    layerMemoryToolkits,
+    McpHttpServer.layerProviderToolkit.pipe(
+      Layer.provide(ProviderDiagnosisService.layer.pipe(Layer.provide(ProviderHostLive.layer))),
+    ),
+  ).pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),

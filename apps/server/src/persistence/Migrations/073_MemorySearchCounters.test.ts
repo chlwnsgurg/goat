@@ -1,3 +1,5 @@
+import lineageMigration from "./075_MemoryImportLineage.ts";
+import checkpointMigration from "./076_MemoryCheckpointAccounting.ts";
 import { assert, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
@@ -29,6 +31,8 @@ it.effect(
       const indexesBefore =
         yield* sql`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='memory_items' ORDER BY name`;
       yield* migration;
+      yield* lineageMigration;
+      yield* checkpointMigration;
       assert.deepStrictEqual(yield* sql`SELECT * FROM memory_search_counters`, []);
       assert.deepStrictEqual(
         yield* sql`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='memory_items' ORDER BY name`,

@@ -113,6 +113,24 @@ export const LAUNCH_LINEAGE_PROBE_TIMEOUT = "5 seconds";
 /** How a remote that predates goat_thread_status refuses it; callers fall back to goat_thread_read. */
 export const REMOTE_THREAD_STATUS_UNSUPPORTED = "does not have goat_thread_status";
 
+/** Whether a JSON-RPC refusal says the remote has no such tool, as an older GOAT answers. */
+const isUnknownToolRefusal = (error: AcpMcpBridgeError, tool: string) =>
+  error.kind === "rpc" &&
+  (error.message.includes(`Tool '${tool}' not found`) ||
+    error.message.includes(`Unknown tool: ${tool}`));
+
+/**
+ * Names the build each side runs and the fix. Starts with "GOAT on <host> does
+ * not have <tool>", which callers match to fall back for older remotes.
+ */
+export function missingRemoteToolMessage(
+  host: string,
+  tool: string,
+  remoteVersion: string | undefined,
+): string {
+  return `GOAT on ${host} does not have ${tool}; it runs ${remoteVersion ?? "an older build"} and this machine runs ${packageJson.version}. Update GOAT on ${host}; a runtime this machine installed there is refreshed once that host is idle.`;
+}
+
 type SshDispatchDestination =
   | { readonly host: string; readonly target?: undefined }
   | { readonly target: DesktopSshEnvironmentTarget; readonly host?: undefined };
@@ -282,6 +300,11 @@ const PROBE_TIMEOUT_MS = 8_000;
 const DEFAULT_BROWSE_LIMIT = 200;
 const MAX_BROWSE_LIMIT = 1000;
 const MAX_PROJECT_PAGES = 20;
+/**
+ * Agents connect on every tool call. A host whose runtime refresh was deferred
+ * keeps serving on its current runtime until the manager's background retry.
+ */
+const AGENT_CONNECTION = { reuseWhileRefreshPending: true } as const;
 
 /** An alias the SSH config or known_hosts names, with nothing ssh could read as an option. */
 const SAFE_HOST_ALIAS = /^[A-Za-z0-9_][A-Za-z0-9_.@:%+\-[\]]*$/u;
@@ -982,9 +1005,9 @@ const make = Effect.gen(function* () {
     readonly runtimeMode: RuntimeMode;
     readonly modelSelection: ModelSelection;
   }) {
-    const bootstrap = yield* withRuntime(manager.ensureEnvironment(input.target)).pipe(
-      sshFailed(input.target.alias),
-    );
+    const bootstrap = yield* withRuntime(
+      manager.ensureEnvironment(input.target, AGENT_CONNECTION),
+    ).pipe(sshFailed(input.target.alias));
     if ("type" in bootstrap)
       return yield* failure(
         "host_unavailable",
@@ -1066,7 +1089,7 @@ const make = Effect.gen(function* () {
         if (folder.gitRoot === null) {
           return yield* failure(
             "invalid_request",
-            `${folder.path} on ${target.alias} is not inside a Git repository, so it cannot get a worktree.`,
+            `${folder.path} on ${target.alias} is not inside a Git repository, so it cannot get a worktree. Omit workspace to run in the folder itself, or pick a folder goat_ssh_browse marks isGitRepository.`,
           );
         }
         const baseRef = input.workspace.baseRef?.trim() || folder.branch;
@@ -1093,7 +1116,7 @@ const make = Effect.gen(function* () {
         break;
     }
 
-    const bootstrap = yield* withRuntime(manager.ensureEnvironment(target)).pipe(
+    const bootstrap = yield* withRuntime(manager.ensureEnvironment(target, AGENT_CONNECTION)).pipe(
       sshFailed(target.alias),
     );
     if ("type" in bootstrap)
@@ -1330,7 +1353,7 @@ const make = Effect.gen(function* () {
   ) {
     const target = yield* resolveHost(call.host);
     const ceiling = yield* authorize;
-    const bootstrap = yield* withRuntime(manager.ensureEnvironment(target)).pipe(
+    const bootstrap = yield* withRuntime(manager.ensureEnvironment(target, AGENT_CONNECTION)).pipe(
       unavailable(target.alias),
     );
     if ("type" in bootstrap)
@@ -1400,6 +1423,14 @@ const make = Effect.gen(function* () {
                   ),
                 )
               : attempt(true);
+          }
+          if (isUnknownToolRefusal(error, call.tool)) {
+            return Effect.fail(
+              failure(
+                "remote_refused",
+                missingRemoteToolMessage(target.alias, call.tool, bootstrap.remoteServerVersion),
+              ),
+            );
           }
           return Effect.fail(
             error.kind === "transport" || error.kind === "http"

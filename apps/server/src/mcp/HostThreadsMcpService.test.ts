@@ -13,6 +13,9 @@ import {
   RuntimeRequestId,
   ThreadId,
 } from "@goat/contracts";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -213,6 +216,110 @@ const unknownHost = new SshRemoteDispatch.SshRemoteDispatchError({
 });
 
 describe("HostThreadsMcpService", () => {
+  it.effect("lets a direct host query wait beyond the fan-out deadline", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const returned = yield* Deferred.make<void>();
+      const fiber = yield* runService(
+        {
+          interactionMode: "default",
+          hostCall: () =>
+            Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.as({
+                projectId: null,
+                currentThreadId: null,
+                threads: [],
+                nextCursor: null,
+                total: 2,
+              }),
+            ),
+        },
+        (service) => service.listThreads(scope, { host: "slow" }),
+      ).pipe(
+        Effect.tap(() => Deferred.succeed(returned, undefined)),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(30_000);
+      expect(yield* Deferred.isDone(returned)).toBe(false);
+      yield* Deferred.succeed(release, undefined);
+      const { result, calls } = yield* Fiber.join(fiber);
+      expect(result._tag).toBe("Success");
+      if (result._tag !== "Success") return;
+      expect(result.success.total).toBe(2);
+      expect(result.success.unavailableHosts).toBeUndefined();
+      expect(calls[0]?.timeoutMs).toBe(120_000);
+    }),
+  );
+
+  it.effect("returns fast hosts at the fan-out deadline without interrupting a slow launch", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const finished = yield* Deferred.make<void>();
+      const interrupted = yield* Deferred.make<void>();
+      const returned = yield* Deferred.make<void>();
+      const slow = Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(Deferred.await(release)),
+        Effect.andThen(Deferred.succeed(finished, undefined)),
+        Effect.as({
+          projectId: null,
+          currentThreadId: null,
+          threads: [],
+          nextCursor: null,
+          total: 99,
+        }),
+        Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+      );
+      const fiber = yield* runService(
+        {
+          interactionMode: "default",
+          hosts: ["fast", "slow"],
+          hostCall: (call) =>
+            call.host === "slow"
+              ? slow
+              : Effect.succeed({
+                  projectId: null,
+                  currentThreadId: null,
+                  threads: [],
+                  nextCursor: null,
+                  total: 2,
+                }),
+        },
+        (service) => service.listThreads(scope, { allHosts: true }),
+      ).pipe(
+        Effect.tap(() => Deferred.succeed(returned, undefined)),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(14_999);
+      expect(yield* Deferred.isDone(returned)).toBe(false);
+      yield* TestClock.adjust(1);
+      const returnedOnTime = yield* Deferred.isDone(returned);
+      const wasInterrupted = yield* Deferred.isDone(interrupted);
+      // Release even on the old implementation so a failing regression cannot hang.
+      yield* Deferred.succeed(release, undefined);
+      const { result } = yield* Fiber.join(fiber);
+      if (!wasInterrupted) yield* Deferred.await(finished);
+      expect(returnedOnTime).toBe(true);
+      expect(wasInterrupted).toBe(false);
+      expect(result._tag).toBe("Success");
+      if (result._tag !== "Success") return;
+      expect(result.success.threads.map((thread) => thread.threadId)).toEqual(["local-1"]);
+      expect(result.success.total).toBe(3);
+      expect(result.success.unavailableHosts).toEqual([
+        {
+          host: "slow",
+          code: "host_unavailable",
+          message: expect.stringContaining("host:slow"),
+        },
+      ]);
+      expect(result.success.unavailableHosts?.[0]?.message).toContain("waits longer");
+    }),
+  );
+
   it.effect("re-arms only the outside caller's own launcherless watch after its send", () =>
     Effect.gen(function* () {
       const outside: McpInvocationScope = {

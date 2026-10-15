@@ -11,6 +11,8 @@ import * as Layer from "effect/Layer";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
+import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
+import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
@@ -23,7 +25,12 @@ const space = M.MemorySpaceId.make(id(1));
 const memoryId = M.MemoryId.make(id(2));
 const environmentId = M.EnvironmentId.make("fixture");
 const database = Layer.effectDiscard(
-  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
+  migration.pipe(
+    Effect.andThen(hubMigration),
+    Effect.andThen(lineageMigration),
+    Effect.andThen(checkpointMigration),
+    Effect.andThen(searchMigration),
+  ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const store = Store.layer.pipe(Layer.provideMerge(database));
 const serviceLive = (serviceLayer = Service.layer) =>
@@ -1485,7 +1492,10 @@ it.effect.each(["status", "kind", "memory_id"] as const)(
         );
         const after = yield* store.readHubUsageTx(space);
         assert.strictEqual(after.checkpointReservationConsumedBytes, 0);
-        assert.strictEqual(after.requiredCheckpointBoundBytes, before.requiredCheckpointBoundBytes);
+        assert.strictEqual(
+          after.requiredCheckpointBoundBytes,
+          before.requiredCheckpointBoundBytes + 1,
+        );
         assert.isAtMost(after.stagingBytes, M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES);
       });
       assert.strictEqual(

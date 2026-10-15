@@ -165,7 +165,7 @@ const PendingRequestReadTool = Tool.make("goat_pending_request_read", {
 const PendingRequestRespondTool = Tool.make("goat_pending_request_respond", {
   ...pendingTool,
   description:
-    "Answer a pending user-input question with answers and a required reason (1–2000 characters, including non-whitespace text). Pass host and threadId for another machine; remote writes need default interaction mode. Approvals are human-only, except for an MCP client token with orchestration:approve, which answers one with decision ('accept' or 'decline') instead of answers. Forward humanRequired questions to the user. respondedBy is reserved for outside host transport; thread callers must omit it.",
+    "Answer a pending user-input question with answers keyed by question id from goat_pending_request_read: a string for single select/free text, or a string array for multiSelect. Include a required reason shown to the user (1–2000 characters, including non-whitespace text). Pass host and threadId for another machine; remote writes need default interaction mode. Approvals are human-only, except for an MCP client token with orchestration:approve, which answers one with decision ('accept' or 'decline') instead of answers. Forward humanRequired questions to the user. respondedBy is reserved for outside host transport; thread callers must omit it.",
   parameters: OrchestratorMcpPendingRequestRespondInput,
   success: OrchestratorMcpPendingRequestRespondResult,
 })

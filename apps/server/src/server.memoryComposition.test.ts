@@ -14,6 +14,8 @@ import * as Identity from "./environment/ServerEnvironment.ts";
 import * as Settings from "./serverSettings.ts";
 import {
   layerMemoryToolkits,
+  MemorySourceReadBinding,
+  layerMemorySourceReadBinding,
   layerMemoryHubAdministration,
   layerMemorySnapshot,
 } from "./server.ts";
@@ -150,5 +152,33 @@ it.effect("two consumers of the application Snapshot layer observe the same inst
       ),
     );
     expect(instances.size).toBe(1);
+  }),
+);
+
+it.effect("import and source relay share the application late-bound Sync instance", () =>
+  Effect.gen(function* () {
+    yield* Effect.gen(function* () {
+      const binding = yield* MemorySourceReadBinding;
+      expect((yield* binding.importSync.readLocalReadiness().pipe(Effect.flip))._tag).toBe(
+        "MemoryHubError",
+      );
+      const sync = yield* Sync.MemorySyncService;
+      yield* binding.bind(sync);
+      expect(yield* binding.importSync.readLocalReadiness()).toEqual({
+        memorySpaceId: null,
+        bootstrap: "unbound",
+      });
+      yield* binding.importSync.requireBootstrap(M.MemorySpaceId.make(Fixture.id(50)));
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          layerMemorySourceReadBinding,
+          Layer.mock(Sync.MemorySyncService)({
+            readLocalReadiness: () => Effect.succeed({ memorySpaceId: null, bootstrap: "unbound" }),
+            requireBootstrap: () => Effect.void,
+          }),
+        ),
+      ),
+    );
   }),
 );

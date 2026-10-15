@@ -1,10 +1,13 @@
-// A page may hold just one record. Include that worst-case envelope for every input row.
-// Six bytes cover JSON escaping of any one UTF-8 byte (including control characters).
-// Binary compact receipts decode to bounded JSON; their record overhead covers the expansion.
-export const CHECKPOINT_BYTE_EXPANSION = 6;
-export const CHECKPOINT_RECORD_OVERHEAD = 8192;
+// Producer framing: 36-byte UUID, 64-byte hash cursors/boundary, six safe integers,
+// ten array names/brackets and booleans use < 1024 bytes. 4096 additionally covers
+// the pull envelope and every separating comma, even at one record per page.
 export const CHECKPOINT_PAGE_OVERHEAD = 4096;
 export const checkpointBound = (bytes: number, rows: number) =>
-  CHECKPOINT_PAGE_OVERHEAD +
-  bytes * CHECKPOINT_BYTE_EXPANSION +
-  rows * (CHECKPOINT_RECORD_OVERHEAD + CHECKPOINT_PAGE_OVERHEAD);
+  bytes + Math.max(1, rows) * CHECKPOINT_PAGE_OVERHEAD;
+
+// Only fields not yet materialized retain the legacy worst-case escape/core reserve.
+// Current encoded records are literal objects and must NEVER be multiplied by six.
+export const futureForgetReserve = (bytes: number, keys: number) => ({
+  bytes: bytes * 6 + 8 * 8192,
+  rows: keys + 8,
+});

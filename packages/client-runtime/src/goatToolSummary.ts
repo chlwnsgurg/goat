@@ -361,6 +361,9 @@ export function summarizeGoatToolCalls(
     case "host-status":
       label = phrase("Read", "read", `host status ${times}`);
       break;
+    case "provider-diagnose":
+      label = phrase("Diagnosed", "diagnose", `providers ${times}`);
+      break;
     case "ssh-host-list":
       label = phrase("Listed", "list", `SSH hosts ${times}`);
       break;
