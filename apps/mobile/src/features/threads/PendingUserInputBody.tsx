@@ -1,21 +1,49 @@
+import type { RuntimeRequestId } from "@goat/contracts";
+import type { ThreadUserInputQuestion } from "@goat/client-runtime/state/thread-requests";
 import type { ReactNode } from "react";
 import { Pressable, View } from "react-native";
 import { AppText as Text } from "../../components/AppText";
 import { cn } from "../../lib/cn";
-import { isPendingUserInputOptionSelected } from "../../lib/threadActivity";
-import type { PendingUserInputCardProps } from "./PendingUserInputCard";
+import {
+  isPendingUserInputOptionSelected,
+  type PendingUserInput,
+  type PendingUserInputDraftAnswer,
+} from "../../lib/threadActivity";
+import { SelectableMarkdownText } from "../../native/SelectableMarkdownText";
+import { useOpenPullRequest } from "../../native/useOpenPullRequest";
+import { useMarkdownPreviewStyles } from "../files/FileMarkdownPreview";
 
-type BodyProps = Pick<
-  PendingUserInputCardProps,
-  "pendingUserInput" | "drafts" | "respondingUserInputId" | "onSelectOption"
-> & {
+// Kept apart from PendingUserInputCardProps so the card can import this body
+// without an import cycle.
+type BodyProps = {
+  readonly pendingUserInput: PendingUserInput;
+  readonly drafts: Record<string, PendingUserInputDraftAnswer>;
+  readonly respondingUserInputId: RuntimeRequestId | null;
+  readonly onSelectOption: (
+    requestId: RuntimeRequestId,
+    question: ThreadUserInputQuestion,
+    value: string,
+  ) => void;
   readonly disabled?: boolean;
   readonly renderCustomAnswer: (
-    question: PendingUserInputCardProps["pendingUserInput"]["questions"][number],
-    draft: PendingUserInputCardProps["drafts"][string] | undefined,
+    question: PendingUserInput["questions"][number],
+    draft: PendingUserInputDraftAnswer | undefined,
     disabled: boolean,
   ) => ReactNode;
 };
+
+/** Renders question text as markdown so agent-provided links open on tap. */
+function QuestionText(props: { readonly markdown: string }) {
+  const styles = useMarkdownPreviewStyles();
+  const openLink = useOpenPullRequest();
+  return (
+    <SelectableMarkdownText
+      markdown={props.markdown}
+      textStyle={styles.nativeTextStyle}
+      onLinkPress={(href) => void openLink(href)}
+    />
+  );
+}
 
 export function PendingUserInputBody(props: BodyProps) {
   const canRespond = props.pendingUserInput.responseCapability !== "not_resumable";
@@ -38,9 +66,7 @@ export function PendingUserInputBody(props: BodyProps) {
             <Text className="font-goat-bold text-xs uppercase tracking-[1px] text-foreground-muted">
               {question.header}
             </Text>
-            <Text className="font-sans text-base leading-snug text-foreground">
-              {question.question}
-            </Text>
+            <QuestionText markdown={question.question} />
             <View className="gap-2">
               {question.options.map((option) => {
                 const optionValue = option.value ?? option.label.trim();

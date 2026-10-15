@@ -21,6 +21,15 @@ export const GOAT_MIGRATION_NAMES: ReadonlySet<string> = new Set([
   "MemoryTaskGrantCeiling",
 ]);
 
+// These ids identify the first releasable memory schema. Older sandbox schemas are not migrated.
+const RELEASED_MEMORY_MIGRATION_IDS = new Map([
+  ["Memory", 71],
+  ["MemoryHubSync", 72],
+  ["MemorySearchCounters", 73],
+  ["MemoryTaskGrantCeiling", 74],
+  ["MemoryImportLineage", 75],
+]);
+
 type MigrationEntry<E> = readonly [
   id: number,
   name: string,
@@ -40,13 +49,33 @@ export const reconcileGoatMigrationIds = Effect.fn("reconcileGoatMigrationIds")(
   const sql = yield* SqlClient.SqlClient;
   return yield* sql.withTransaction(
     Effect.gen(function* () {
-      const tables = yield* sql`
-        SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
+      const tables = yield* sql<{ readonly name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND (name = 'effect_sql_migrations' OR name GLOB 'memory_*')
       `;
-      if (tables.length === 0) return [];
-      const history = yield* sql<{ readonly migration_id: number; readonly name: string }>`
-        SELECT migration_id, name FROM effect_sql_migrations
-      `;
+      const hasLedger = tables.some((table) => table.name === "effect_sql_migrations");
+      const history = hasLedger
+        ? yield* sql<{ readonly migration_id: number; readonly name: string }>`
+            SELECT migration_id, name FROM effect_sql_migrations
+          `
+        : [];
+      const incompatibleLedger = history.some((row) => {
+        const releasedId = RELEASED_MEMORY_MIGRATION_IDS.get(row.name);
+        return releasedId !== undefined && row.migration_id !== releasedId;
+      });
+      const unrecordedMemory =
+        tables.some((table) => table.name.startsWith("memory_")) &&
+        !history.some((row) => row.name === "Memory" && row.migration_id === 71);
+      // Check before both the unchanged-id return and any ledger write: renumbering would hide
+      // the only reliable evidence that a sandbox used an unreleased memory schema.
+      if (incompatibleLedger || unrecordedMemory) {
+        return yield* new Migrator.MigrationError({
+          kind: "BadState",
+          message:
+            "Unreleased memory DB is incompatible; reset this sandbox's memory development state and restart.",
+        });
+      }
+      if (!hasLedger) return [];
       const currentIds = new Map(entries.map(([id, name]) => [name, id]));
       const goatRows = history.filter((row) => GOAT_MIGRATION_NAMES.has(row.name));
       if (goatRows.every((row) => currentIds.get(row.name) === row.migration_id)) return [];
