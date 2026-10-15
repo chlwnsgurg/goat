@@ -344,6 +344,41 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
   });
 
   describe("writeFile", () => {
+    it.effect.each(["a".repeat(240), "界".repeat(80)])(
+      "creates and replaces a file with a 240-byte basename: %s",
+      (relativePath, context) =>
+        Effect.gen(function* () {
+          const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          const target = path.join(cwd, relativePath);
+          expect(Buffer.byteLength(relativePath, "utf8")).toBe(240);
+          // Probe the destination itself so only a smaller filesystem name limit skips.
+          const supported = yield* Effect.promise(async () => {
+            try {
+              await NodeFS.promises.writeFile(target, "", { flag: "wx" });
+              await NodeFS.promises.unlink(target);
+              return true;
+            } catch (cause) {
+              if (cause instanceof Error && "code" in cause && cause.code === "ENAMETOOLONG") {
+                return false;
+              }
+              throw cause;
+            }
+          });
+          if (!supported) context.skip("Filesystem does not support a 240-byte basename");
+
+          for (const contents of ["created\n", "replaced\n"]) {
+            expect(yield* service.writeFile({ cwd, relativePath, contents })).toEqual({
+              relativePath,
+            });
+            expect(yield* fs.readFileString(target)).toBe(contents);
+            expect(yield* fs.readDirectory(cwd)).toEqual([relativePath]);
+          }
+        }),
+    );
+
     it.effect("replaces an existing file while open readers retain the original bytes", () =>
       Effect.gen(function* () {
         const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
