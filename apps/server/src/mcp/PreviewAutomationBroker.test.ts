@@ -929,7 +929,7 @@ it.effect("prefers a focused host over unrelated extra capabilities for a new se
   ),
 );
 
-it.effect.each(["resize", "logs"] as const)(
+it.effect.each(["resize", "back", "forward", "reload", "logs"] as const)(
   "does not route %s to legacy hosts that did not advertise support",
   (operation) =>
     Effect.scoped(
@@ -986,7 +986,7 @@ it.effect.each(["resize", "logs"] as const)(
     ),
 );
 
-it.effect.each(["resize", "logs"] as const)(
+it.effect.each(["resize", "back", "forward", "reload", "logs"] as const)(
   "does not move a live legacy assignment to another runtime for %s",
   (operation) =>
     Effect.scoped(
