@@ -85,7 +85,7 @@ import Migration0067 from "./Migrations/067_RemoteDispatchQuestions.ts";
 import Migration0068 from "./Migrations/068_ThreadRunResults.ts";
 import Migration0069 from "./Migrations/069_RemoteReportRelay.ts";
 import Migration0070 from "./Migrations/070_ProjectionTurnItemRequestIndex.ts";
-import MigrationMemory from "./Migrations/070_Memory.ts";
+import Migration0071 from "./Migrations/071_Memory.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -172,7 +172,7 @@ export const migrationEntries = [
   [68, "ThreadRunResults", Migration0068],
   [69, "RemoteReportRelay", Migration0069],
   [70, "ProjectionTurnItemRequestIndex", Migration0070],
-  [70, "Memory", MigrationMemory],
+  [71, "Memory", Migration0071],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
