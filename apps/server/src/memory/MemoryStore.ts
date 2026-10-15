@@ -5976,25 +5976,36 @@ const make = Effect.gen(function* () {
       const op = yield* readOperation(batch.memorySpaceId, selection.operationId);
       const bodyBytes =
         charged && op?.kind === "upsert" ? new TextEncoder().encode(op.payload.text).length : 0;
-      const applied = session.applied.some(
+      const observed = session.applied.some(
         (a) =>
           a.sourceItemKey === next.sourceItemKey &&
           a.sourceFingerprint === selection.selector.sourceFingerprint,
       );
+      // A rejected/suppressed observation allocates metadata, not an accepted body charge.
+      // Keep its immutable zero-byte observation while a later successful retry adds its charge.
+      const previouslyCharged = session.applied.some(
+        (a) =>
+          a.sourceItemKey === next.sourceItemKey &&
+          a.sourceFingerprint === selection.selector.sourceFingerprint &&
+          a.bodyBytes > 0,
+      );
+      const chargeNow = charged && !previouslyCharged;
       const nextSession = {
         ...session,
-        newItems: session.newItems + Number(!applied && selection.result.outcome === "created"),
-        bodyBytes: session.bodyBytes + (applied ? 0 : bodyBytes),
-        applied: applied
-          ? session.applied
-          : [
-              ...session.applied,
-              {
-                sourceItemKey: next.sourceItemKey,
-                sourceFingerprint: selection.selector.sourceFingerprint,
-                bodyBytes,
-              },
-            ],
+        newItems:
+          session.newItems + Number(!previouslyCharged && selection.result.outcome === "created"),
+        bodyBytes: session.bodyBytes + (chargeNow ? bodyBytes : 0),
+        applied:
+          observed && !chargeNow
+            ? session.applied
+            : [
+                ...session.applied,
+                {
+                  sourceItemKey: next.sourceItemKey,
+                  sourceFingerprint: selection.selector.sourceFingerprint,
+                  bodyBytes,
+                },
+              ],
       };
       for (const [dimension, current, limit] of [
         ["import_session_items", nextSession.newItems, M.MEMORY_IMPORT_SESSION_MAX_NEW_ITEMS],

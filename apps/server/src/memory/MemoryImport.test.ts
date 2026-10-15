@@ -1429,6 +1429,70 @@ describe("MemoryImport refused forget expansion", () => {
 });
 
 describe("MemoryImport origin admission", () => {
+  it.effect("a rejected zero-byte observation cannot waive a later accepted session charge", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const initial = registration();
+      const reg = {
+        ...initial,
+        version: 1,
+        session: { ...initial.session!, newItems: M.MEMORY_IMPORT_SESSION_MAX_NEW_ITEMS },
+      };
+      yield* service.importPorts.saveRegistration(
+        { ...address, next: reg, expectedVersion: 0 },
+        Effect.void,
+      );
+      const first = prepared(reg);
+      const selection = { ...first.selection, result: null };
+      const rejected = {
+        ...first.next,
+        outcome: "rejected" as const,
+        pending: null,
+        rejected: {
+          sourceFingerprint: first.candidate.sourceFingerprint,
+          issue: "source_changed" as const,
+        },
+      };
+      yield* service.importPorts.commit(
+        { ...first, selection, batch: { ...first.batch, selections: [selection] }, next: rejected },
+        Effect.void,
+      );
+      const updated = (yield* service.importPorts.readRegistration(
+        { ...address, sourceId, by: "source" },
+        Effect.void,
+      ))!;
+      assert.strictEqual(updated.session!.applied[0]!.bodyBytes, 0);
+      const attempt = prepared(updated, 30, rejected);
+      const retrySelection = {
+        ...attempt.selection,
+        selector: first.selection.selector,
+        result: null,
+      };
+      const retry = {
+        ...attempt,
+        selection: retrySelection,
+        batch: { ...attempt.batch, selections: [retrySelection] },
+        candidate: first.candidate,
+        next: {
+          ...attempt.next,
+          outcome: "created" as const,
+          pending: {
+            ...attempt.next.pending!,
+            sourceFingerprint: first.candidate.sourceFingerprint,
+            contentFingerprint: first.candidate.contentFingerprint,
+          },
+        },
+      };
+      const before = yield* durableInventory;
+      const failure = yield* service.importPorts.commit(retry, Effect.void).pipe(Effect.flip);
+      if (failure._tag !== "MemoryCapacityError")
+        return assert.fail("expected accepted charge admission");
+      assert.strictEqual(failure.dimension, "import_session_items");
+      assert.deepStrictEqual(yield* durableInventory, before);
+    }).pipe(Effect.provide(importLive)),
+  );
+
   it.effect.each([
     ["import_source_items", M.MEMORY_IMPORT_MAX_SOURCE_ITEMS, 1],
     ["import_aliases", M.MEMORY_IMPORT_MAX_ALIASES, 1],
@@ -1526,47 +1590,45 @@ describe("MemoryImport origin admission", () => {
         assert.deepStrictEqual(yield* durableInventory, before);
       }).pipe(Effect.provide(importLive)),
   );
-  it.effect(
-    "rejected and suppressed observations allocate source/alias/digest metadata without a body",
-    () =>
-      Effect.gen(function* () {
-        yield* setupImport;
-        const service = yield* Service.MemoryService;
-        const sql = yield* SqlClient.SqlClient;
-        const first = prepared();
-        const selection = { ...first.selection, result: null };
-        const rejected = {
-          ...first.next,
-          outcome: "rejected" as const,
-          pending: null,
-          rejected: {
-            sourceFingerprint: first.candidate.sourceFingerprint,
-            issue: "source_changed" as const,
-          },
-        };
-        yield* service.importPorts.commit(
-          {
-            ...first,
-            selection,
-            batch: { ...first.batch, selections: [selection] },
-            next: rejected,
-          },
-          Effect.void,
-        );
-        const counters = yield* sql<{
-          dimension: string;
-          value: number;
-        }>`SELECT dimension,value FROM memory_quota_counters WHERE space='_hub_global' AND dimension LIKE 'import_%'`;
-        const values = new Map(counters.map((r) => [r.dimension, r.value]));
-        assert.strictEqual(values.get("import_source_items"), 1);
-        assert.strictEqual(values.get("import_aliases"), 1);
-        assert.strictEqual(values.get("import_digests"), 1);
-        assert.strictEqual(values.get("import_live_items"), 0);
-        assert.isAbove(values.get("import_metadata")!, 0);
-        assert.isAbove(values.get("import_staging")!, 0);
-        assert.strictEqual((yield* durableInventory).payloads.length, 0);
-        const receipt = yield* service.importPorts.readReceipt(first.batch, Effect.void);
-        assert.strictEqual(receipt.sessionBodyBytes, 0);
-      }).pipe(Effect.provide(importLive)),
+  it.effect("rejected observations allocate source/alias/digest metadata without a body", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const sql = yield* SqlClient.SqlClient;
+      const first = prepared();
+      const selection = { ...first.selection, result: null };
+      const rejected = {
+        ...first.next,
+        outcome: "rejected" as const,
+        pending: null,
+        rejected: {
+          sourceFingerprint: first.candidate.sourceFingerprint,
+          issue: "source_changed" as const,
+        },
+      };
+      yield* service.importPorts.commit(
+        {
+          ...first,
+          selection,
+          batch: { ...first.batch, selections: [selection] },
+          next: rejected,
+        },
+        Effect.void,
+      );
+      const counters = yield* sql<{
+        dimension: string;
+        value: number;
+      }>`SELECT dimension,value FROM memory_quota_counters WHERE space='_hub_global' AND dimension LIKE 'import_%'`;
+      const values = new Map(counters.map((r) => [r.dimension, r.value]));
+      assert.strictEqual(values.get("import_source_items"), 1);
+      assert.strictEqual(values.get("import_aliases"), 1);
+      assert.strictEqual(values.get("import_digests"), 1);
+      assert.strictEqual(values.get("import_live_items"), 0);
+      assert.isAbove(values.get("import_metadata")!, 0);
+      assert.isAbove(values.get("import_staging")!, 0);
+      assert.strictEqual((yield* durableInventory).payloads.length, 0);
+      const receipt = yield* service.importPorts.readReceipt(first.batch, Effect.void);
+      assert.strictEqual(receipt.sessionBodyBytes, 0);
+    }).pipe(Effect.provide(importLive)),
   );
 });
