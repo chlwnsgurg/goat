@@ -17,6 +17,7 @@ import type {
   ImportRegistration,
   MakeProviderMemoryImport,
   Permit,
+  PreparedImportCommit,
   SyncError,
 } from "./MemoryImportTypes.ts";
 
@@ -432,6 +433,12 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
             },
           };
         }
+        // Prepare every unfinished selection before any durable write. L1 target-frontier
+        // preparation and scope-preserving rejection ports belong in this phase.
+        const prepared: Omit<
+          PreparedImportCommit,
+          "registrationVersion" | "registration" | "batch"
+        >[] = [];
         for (const frozen of batch.selections) {
           if (frozen.result) continue;
           const selector = frozen.selector;
@@ -559,25 +566,28 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
               : (previous?.rejected ?? null),
             outcome,
           };
+          prepared.push({
+            selection: frozen,
+            candidate: c,
+            previous,
+            next,
+            expectedHeads,
+            parents,
+            projectBinding,
+          });
+        }
+        // Independent commits retain final Service CAS/permit checks and partial-resume semantics.
+        for (const preparation of prepared) {
           const item = yield* ports.commit(
-            {
-              registrationVersion: r.version,
-              registration: r,
-              batch,
-              selection: frozen,
-              candidate: c,
-              previous,
-              next,
-              expectedHeads,
-              parents,
-              projectBinding,
-            },
+            { ...preparation, registrationVersion: r.version, registration: r, batch },
             permit,
           );
           batch = {
             ...batch,
             selections: batch.selections.map((s) =>
-              s.selector.sourceItemKey === selector.sourceItemKey ? { ...s, result: item } : s,
+              s.selector.sourceItemKey === preparation.selection.selector.sourceItemKey
+                ? { ...s, result: item }
+                : s,
             ),
           };
           r = yield* registration(input.memorySpaceId, input.sourceId, permit);

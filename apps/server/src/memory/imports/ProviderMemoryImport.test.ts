@@ -866,6 +866,65 @@ describe("ProviderMemoryImport closed coordinator", () => {
   );
 });
 
+describe("ProviderMemoryImport Hub error boundaries", () => {
+  it.effect.each(["readiness", "requireBootstrap", "syncStatus"] as const)(
+    "maps directly injected Hub failures at %s",
+    (boundary) =>
+      fixtureTest((h) =>
+        Effect.gen(function* () {
+          const { input } = yield* prepare(h);
+          yield* h.make().run(input, Effect.void);
+          for (const error of [
+            new M.MemoryHubUnauthorizedError({}),
+            new M.MemoryHubForbiddenError({}),
+            new M.MemoryHubError({ code: "bootstrap_required" }),
+            new M.MemoryHubError({ code: "storage_failed" }),
+          ]) {
+            const failure = () => Effect.fail(error);
+            const runtime = h.make({ [boundary]: failure });
+            const e = yield* runtime
+              .run(
+                boundary === "syncStatus"
+                  ? { action: "status", memorySpaceId: space, operationId: input.operationId }
+                  : { ...input, operationId: M.MemoryOperationId.make(uuid(80)) },
+                Effect.void,
+              )
+              .pipe(Effect.flip);
+            if (error._tag === "MemoryHubError") issue(e, error.code);
+            else {
+              assert.instanceOf(e, Service.MemoryAccessError);
+              if (e._tag === "MemoryAccessError") assert.equal(e.code, "unavailable");
+            }
+          }
+          assert.equal(h.commits.length, 1);
+        }),
+      ),
+  );
+});
+
+const batchSnapshot = (s: ImportSnapshot) =>
+  snapshotMemoryImportFiles(
+    s,
+    ["a", "b", "z"].map((key) => ({
+      ...s.files[0]!,
+      selector: `extensions/ad_hoc/notes/${key}.md`,
+      text: `${key} guidance`,
+      byteCount: 10,
+    })),
+  );
+
+// Capture all synthetic memory tables, including receipt/item/session/intent/outbox/quota rows.
+const inventory = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql<{ name: string }>`SELECT name FROM sqlite_master
+    WHERE type='table' AND name LIKE 'memory_%' ORDER BY name`;
+  return yield* Effect.forEach(tables, ({ name }) =>
+    sql
+      .unsafe(`SELECT * FROM "${name}" ORDER BY rowid`)
+      .pipe(Effect.map((rows) => ({ name, rows }))),
+  );
+});
+
 const database = Layer.effectDiscard(
   migration.pipe(
     Effect.andThen(hubMigration),
@@ -889,6 +948,111 @@ const live = Service.layer.pipe(
   ),
 );
 describe("ProviderMemoryImport actual Service/Store ports", () => {
+  it.effect.each([
+    { refusal: "scope", partial: false },
+    { refusal: "frontier", partial: false },
+    { refusal: "scope", partial: true },
+    { refusal: "frontier", partial: true },
+  ] as const)(
+    "pre-admission refuses $refusal partial=$partial without any additional writes",
+    ({ refusal, partial }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* buildMemoryImportFixture("codex-ad-hoc-v1");
+          const h = harness(batchSnapshot(fixture.snapshot));
+          const service = yield* Service.MemoryService;
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`INSERT INTO memory_compaction_state(space,published) VALUES (${space},1)`;
+          let commits = 0;
+          let failSecond = false;
+          const runtime = makeProviderMemoryImport(
+            {
+              ...h.ports,
+              ...service.importPorts,
+              commit: (a, permit) => {
+                commits++;
+                return failSecond && commits === 2
+                  ? Effect.fail(new Store.MemoryStoreConflict({ code: "revision_changed" }))
+                  : service.importPorts.commit(a, permit);
+              },
+            },
+            h.reader,
+            parsers,
+            {
+              ...h.primitives,
+              now: () => Effect.succeed(Date.parse(stamp) + 12 * 60 * 60 * 1000),
+            },
+          );
+          const d = yield* runtime.run(
+            { action: "discover", memorySpaceId: space, format: "codex" },
+            Effect.void,
+          );
+          assert.equal(d.action, "discover");
+          if (d.action !== "discover") return;
+          const sourceId = d.sources[0]!.sourceId;
+          const p = yield* runtime.run(
+            { action: "preview", memorySpaceId: space, sourceId },
+            Effect.void,
+          );
+          assert.equal(p.action, "preview");
+          if (p.action !== "preview") return;
+          const input: Extract<M.MemoryImportProviderInput, { action: "apply" }> = {
+            action: "apply",
+            memorySpaceId: space,
+            sourceId,
+            sessionId: p.sessionId,
+            operationId: M.MemoryOperationId.make(uuid(70)),
+            items: p.items
+              .filter((r) => partial || !r.sourceItemKey.endsWith("/b.md"))
+              .map((r) => ({
+                sourceItemKey: r.sourceItemKey,
+                sourceFingerprint: r.sourceFingerprint!,
+                scope:
+                  refusal === "scope" && r.sourceItemKey.endsWith("/z.md")
+                    ? {
+                        kind: "thread",
+                        thread: { environmentId, threadId: M.ThreadId.make("synthetic-thread") },
+                      }
+                    : { kind: "user" },
+              })),
+          };
+          if (partial) {
+            failSecond = true;
+            const e = yield* runtime.run(input, Effect.void).pipe(Effect.flip);
+            assert.equal(e._tag, "MemoryStoreConflict");
+            const receipt = yield* service.importPorts.readReceipt(
+              { memorySpaceId: space, environmentId, operationId: input.operationId },
+              Effect.void,
+            );
+            assert.equal(receipt.items.length, 1);
+            assert.equal(receipt.state, "partial");
+            failSecond = false;
+          }
+          // z becomes an existing pending item after any prior independent a commit.
+          yield* runtime.run(
+            {
+              ...input,
+              operationId: M.MemoryOperationId.make(uuid(71)),
+              items: input.items
+                .filter((r) => r.sourceItemKey.endsWith("/z.md"))
+                .map((r) => ({ ...r, scope: { kind: "user" } })),
+            },
+            Effect.void,
+          );
+          const before = yield* inventory;
+          commits = 0;
+          const e = yield* runtime.run(input, Effect.void).pipe(Effect.flip);
+          if (refusal === "scope") issue(e, "mapping_changed");
+          else {
+            assert.equal(e._tag, "MemoryStoreConflict");
+            if (e._tag === "MemoryStoreConflict") assert.equal(e.code, "revision_changed");
+          }
+          assert.equal(commits, 0);
+          assert.deepEqual(yield* inventory, before);
+        }),
+      ).pipe(Effect.provide(live)),
+  );
+
   it.effect.each([false, true])(
     "actual ports rollback after-write denial=%s or replay committed receipt",
     (deny) =>
@@ -932,11 +1096,13 @@ describe("ProviderMemoryImport actual Service/Store ports", () => {
             sourceId,
             sessionId: p.sessionId,
             operationId: M.MemoryOperationId.make(uuid(60)),
-            items: p.items.map((r) => ({
-              sourceItemKey: r.sourceItemKey,
-              sourceFingerprint: r.sourceFingerprint!,
-              scope: { kind: "user" },
-            })),
+            items: p.items
+              .filter((r) => partial || !r.sourceItemKey.endsWith("/b.md"))
+              .map((r) => ({
+                sourceItemKey: r.sourceItemKey,
+                sourceFingerprint: r.sourceFingerprint!,
+                scope: { kind: "user" },
+              })),
           };
           if (deny) {
             const before = yield* sql`SELECT * FROM memory_import_receipts ORDER BY receipt_id`;
