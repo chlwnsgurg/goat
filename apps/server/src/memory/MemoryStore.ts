@@ -6967,12 +6967,16 @@ const make = Effect.gen(function* () {
             AND json_extract(admin_json,'$.result.view.settings.memorySpaceId')=${input.memorySpaceId}`,
       );
       // Revoked authority cannot authenticate. Keep any row that still anchors live
-      // work; terminal receipts/token guards remain independently fenced and bounded.
+      // work. A ready outgoing receipt below the revoked version is already
+      // superseded: replay cannot activate or disclose it. Its guard stays bounded.
       yield* stored(
         "hub-member-reclaim",
         sql`DELETE FROM memory_hub_members AS m WHERE m.space=${input.memorySpaceId} AND m.status='revoked'
           AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.kind='admin' AND o.status!='completed'
-            AND (json_extract(o.admin_json,'$.action.environmentId')=m.environment
+            AND ((json_extract(o.admin_json,'$.action.environmentId')=m.environment
+              AND NOT (json_extract(o.admin_json,'$.stage')='ready'
+                AND json_extract(o.admin_json,'$.action.action') IN ('provisionMember','rotateMemberCredential')
+                AND coalesce(json_extract(o.admin_json,'$.memberVersion'),m.credential_version)<m.credential_version))
               OR (json_extract(o.admin_json,'$.action.action')='configure'
                 AND json_extract(o.admin_json,'$.stage') IN ('prepared','activated'))))
           AND NOT EXISTS (SELECT 1 FROM memory_hub_leases l WHERE l.space=m.space

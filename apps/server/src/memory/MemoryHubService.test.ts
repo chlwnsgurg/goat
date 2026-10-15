@@ -699,10 +699,7 @@ describe("MemoryHubAdministrator", () => {
         environmentId: provision.environmentId,
       });
       const oldCredential = first.credential!;
-      yield* update({
-        action: "acknowledgeCredential",
-        credentialRequestId: oldCredential.requestId,
-      });
+      // Leave this install unacknowledged; revoke must supersede its ready receipt.
       const oldPrincipal = {
         ...principal(provision.environmentId),
         credentialVersion: oldCredential.credentialVersion,
@@ -742,11 +739,28 @@ describe("MemoryHubAdministrator", () => {
         (yield* store.readHubMembers(space)).map((m) => m.environmentId),
         [hubEnv],
       );
+      // Model r1's successful revoke receipt, which stopped at ready.
+      yield* sql`UPDATE memory_outbox SET status='pending',terminal_at=NULL,
+        admin_json=json_set(admin_json,'$.stage','ready')
+        WHERE kind='admin' AND json_extract(admin_json,'$.action.action')='revokeMember'
+          AND json_extract(admin_json,'$.action.environmentId')=${provision.environmentId}`;
       const added = yield* update({
         action: "provisionMember",
         environmentId: M.EnvironmentId.make("after-removals"),
       });
       assert.isNotNull(added.credential);
+      assert.strictEqual(
+        (yield* sql<{ status: string }>`SELECT status FROM memory_outbox
+        WHERE kind='admin' AND json_extract(admin_json,'$.action.action')='revokeMember'
+          AND json_extract(admin_json,'$.action.environmentId')=${provision.environmentId}`)[0]!
+          .status,
+        "completed",
+      );
+      assert.strictEqual(
+        (yield* sql<{ count: number }>`SELECT count(*) AS count FROM memory_quota_counters
+        WHERE space=${space} AND dimension='hub_member_version'`)[0]!.count,
+        1,
+      );
       assert.isUndefined(yield* store.readHubMember(space, provision.environmentId));
       assert.strictEqual(
         (yield* sql<{
@@ -827,12 +841,11 @@ describe("MemoryHubAdministrator", () => {
           .pipe(Effect.flip))._tag,
         "MemoryStoreConflict",
       );
-      // An acknowledged receipt can replay its safe result, never its old key or activation.
-      const replay = yield* admin.update(
-        { ...provision, requestId: oldCredential.requestId },
-        Effect.void,
-      );
-      assert.isNull(replay.credential);
+      const replay = yield* admin
+        .update({ ...provision, requestId: oldCredential.requestId }, Effect.void)
+        .pipe(Effect.flip);
+      assert.strictEqual(replay._tag, "MemoryHubError");
+      if (replay._tag === "MemoryHubError") assert.strictEqual(replay.code, "identity_mismatch");
       assert.strictEqual(
         (yield* store.readHubMember(space, provision.environmentId))!.credentialVersion,
         currentPrincipal.credentialVersion,
@@ -1342,7 +1355,7 @@ describe("MemoryHubAdministrator", () => {
       const store = yield* Store.MemoryStore;
       assert.strictEqual(
         (yield* store.readHubMember(space, issued.credential!.environmentId))!.credentialVersion,
-        1,
+        2,
       );
     }).pipe(Effect.provide(adminDependencies)),
   );
