@@ -5,6 +5,8 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 import * as TestClock from "effect/testing/TestClock";
@@ -2906,4 +2908,49 @@ it.effect("report reset denies live permission loss and wrong selected environme
       unchangedCount: 0,
     });
   }).pipe(Effect.provide(live)),
+);
+
+it.effect("Settings retry reset reauthorizes after waiting for the SQL writer", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const storage = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const rid = "b".repeat(64);
+      yield* sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolving_environment_id,outcome,state,failure_code,created_at,report_kind,report_approved,automatic_attempts) VALUES (${rid},${space},${memoryId},${id(3)},${environmentId},'resolved','failed','unavailable',0,'resolve',1,10)`;
+      const locked = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const started = yield* Deferred.make<void>();
+      const holder = yield* storage
+        .transact(Deferred.succeed(locked, undefined).pipe(Effect.andThen(Deferred.await(release))))
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(locked);
+      let allowed = true;
+      let permitCalls = 0;
+      const permit = Effect.suspend(() => {
+        permitCalls++;
+        return allowed ? Effect.void : denied;
+      });
+      const reset = yield* Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(
+          service.resetReportAttempts(
+            { memorySpaceId: space, environmentId, reportIds: [rid] },
+            permit,
+          ),
+        ),
+        Effect.exit,
+        Effect.forkChild,
+      );
+      yield* Deferred.await(started);
+      assert.strictEqual(permitCalls, 0);
+      allowed = false;
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(holder);
+      assert.strictEqual((yield* Fiber.join(reset))._tag, "Failure");
+      assert.deepStrictEqual(
+        yield* sql`SELECT automatic_attempts FROM memory_report_outbox WHERE report_id=${rid}`,
+        [{ automatic_attempts: 10 }],
+      );
+    }),
+  ).pipe(Effect.provide(live)),
 );

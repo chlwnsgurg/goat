@@ -243,7 +243,7 @@ export class MemoryService extends Context.Service<
     readonly deferClaimedReport: Store.MemoryStore["Service"]["deferClaimedReport"];
     readonly normalizeExpiredReports: Store.MemoryStore["Service"]["normalizeExpiredReports"];
     readonly purgeDeliveredReportDetails: (input: {
-      memorySpaceId: M.MemorySpaceId;
+      memorySpaceId?: M.MemorySpaceId;
       now: number;
       limit: number;
     }) => Effect.Effect<

@@ -91,6 +91,7 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 74, name: "MemoryTaskGrantCeiling" },
         { migration_id: 75, name: "MemoryImportLineage" },
         { migration_id: 76, name: "MemoryCheckpointAccounting" },
+        { migration_id: 77, name: "MemoryReportLifecycle" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`

@@ -24,7 +24,7 @@ export default Effect.gen(function* () {
       AND json_extract(c.compact_json,'$.reportGuard.outcome')=r.outcome
       AND json_extract(c.compact_json,'$.reportGuard.resolutionId')=r.resolution_id
       AND json_extract(c.compact_json,'$.receipt.memoryId')=r.memory_id
-      AND ((r.outcome='resolved' AND json_extract(c.compact_json,'$.operationKind')='resolve')
+      AND ((r.outcome='resolved' AND json_extract(c.compact_json,'$.operationKind')='resolve' AND json_extract(c.compact_json,'$.receipt.resolutionApproval.resolutionId')=r.resolution_id)
         OR (r.outcome='reverted' AND json_extract(c.compact_json,'$.operationKind')='revert')))`;
   const oldBytes = (p = "") =>
     `length(CAST(${p}report_id AS BLOB))+length(CAST(${p}operation_id AS BLOB))+length(CAST(${p}resolving_environment_id AS BLOB))+coalesce(length(CAST(${p}resolution_id AS BLOB)),0)+coalesce(length(CAST(${p}report_thread_json AS BLOB)),0)+32`;
@@ -83,5 +83,6 @@ export default Effect.gen(function* () {
         OR coalesce((SELECT value FROM memory_quota_counters WHERE space=NEW.space AND dimension='report_bytes' AND scope_key=''),0)+(${reportMetadataBytes("NEW.")})>${M.MEMORY_REPORT_MAX_PENDING_BYTES})
     BEGIN ${counter("NEW.space", "processing_admission_failures", "1")} SELECT RAISE(IGNORE); END`);
   yield* sql`CREATE INDEX memory_report_delivery_due ON memory_report_outbox(resolving_environment_id,next_attempt_at,claimed_until,created_at,report_id) WHERE state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure') AND automatic_attempts<10`;
-  yield* sql`CREATE INDEX memory_report_retention ON memory_report_outbox(space,resolving_environment_id,delivered_at,report_id) WHERE state='delivered'`;
+  yield* sql`CREATE INDEX memory_report_local_retention ON memory_report_outbox(resolving_environment_id,delivered_at,report_id) WHERE state='delivered'`;
+  yield* sql`CREATE INDEX memory_report_retention ON memory_report_outbox(space,delivered_at,report_id) WHERE state='delivered'`;
 });

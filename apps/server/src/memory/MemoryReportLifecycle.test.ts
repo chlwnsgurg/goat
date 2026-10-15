@@ -371,3 +371,45 @@ describe("MemoryReportLifecycle", () => {
     }).pipe(Effect.provide(live)),
   );
 });
+
+it.effect(
+  "local maintenance purges delivered details from a former space and keeps failed rows",
+  () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(0);
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* insert(1);
+      yield* insert(2);
+      const r = (yield* acquire(store, 0))[0]!;
+      yield* store.acknowledgeClaimedReport({ delivery: delivered(r), owner, claimUntil: 1000 });
+      const result = yield* store.transact(
+        store.purgeDeliveredReportDetailsTx({
+          environmentId: owner,
+          now: M.MEMORY_REPORT_DETAIL_RETENTION_MS,
+          limit: 1,
+        }),
+      );
+      assert.strictEqual(result.removedRows, 1);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_report_outbox WHERE report_id=${reportId(2)}`).length,
+        1,
+      );
+      assert.isNull(yield* store.nextReportMaintenanceAt(owner));
+    }).pipe(Effect.provide(live)),
+);
+it.effect("active tenth claim can acknowledge and target contradictions stay unavailable", () =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(0);
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* insert();
+    yield* sql`UPDATE memory_report_outbox SET automatic_attempts=9`;
+    const r = (yield* acquire(store, 0))[0]!;
+    assert.isTrue(
+      yield* store.acknowledgeClaimedReport({ delivery: delivered(r), owner, claimUntil: 1000 }),
+    );
+    yield* sql`UPDATE memory_import_keys SET record_json='{"operationId":"00000000-0000-4000-8000-000000000011","outcome":"resolved","resolvingEnvironmentId":"B"}' WHERE key_kind='report_delivered'`;
+    assert.isNull(yield* store.readReportTarget(r.reportId));
+  }).pipe(Effect.provide(live)),
+);
