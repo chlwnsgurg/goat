@@ -1003,12 +1003,12 @@ describe("ProviderMemoryImport actual Service/Store ports", () => {
             sessionId: p.sessionId,
             operationId: M.MemoryOperationId.make(uuid(70)),
             items: p.items
-              .filter((r) => partial || !r.sourceItemKey.endsWith("/b.md"))
+              .filter((r) => partial || !r.sourceItemKey.endsWith("/b.md#body"))
               .map((r) => ({
                 sourceItemKey: r.sourceItemKey,
                 sourceFingerprint: r.sourceFingerprint!,
                 scope:
-                  refusal === "scope" && r.sourceItemKey.endsWith("/z.md")
+                  refusal === "scope" && r.sourceItemKey.endsWith("/z.md#body")
                     ? {
                         kind: "thread",
                         thread: { environmentId, threadId: M.ThreadId.make("synthetic-thread") },
@@ -1016,6 +1016,8 @@ describe("ProviderMemoryImport actual Service/Store ports", () => {
                     : { kind: "user" },
               })),
           };
+          assert.equal(input.items.length, partial ? 3 : 2);
+          assert.equal(input.items.filter((r) => r.sourceItemKey.endsWith("/z.md#body")).length, 1);
           if (partial) {
             failSecond = true;
             const e = yield* runtime.run(input, Effect.void).pipe(Effect.flip);
@@ -1034,7 +1036,7 @@ describe("ProviderMemoryImport actual Service/Store ports", () => {
               ...input,
               operationId: M.MemoryOperationId.make(uuid(71)),
               items: input.items
-                .filter((r) => r.sourceItemKey.endsWith("/z.md"))
+                .filter((r) => r.sourceItemKey.endsWith("/z.md#body"))
                 .map((r) => ({ ...r, scope: { kind: "user" } })),
             },
             Effect.void,
