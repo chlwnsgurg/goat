@@ -6,7 +6,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import memory from "./071_Memory.ts";
 import hub from "./072_MemoryHubSync.ts";
 
-it.effect("upgrades 070 without rewriting legacy resolution data or sync payloads", () =>
+it.effect("upgrades 071 without rewriting legacy resolution data or sync payloads", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* memory;
