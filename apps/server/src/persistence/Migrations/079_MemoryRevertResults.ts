@@ -17,8 +17,24 @@ export default Effect.gen(function* () {
   // existing-table history index, not a corpus/search index. rowid supplies the cursor.
   yield* sql`CREATE INDEX memory_report_memory_idx ON memory_report_outbox(space,memory_id)`;
 
-  // No resolution metadata is part of 078 usage/quota. Keep the same accounting
-  // boundary: no extra rows, at most 2048 bytes per existing resolution.
+  // 078 usage_* excludes resolution metadata, but 076's local input meter
+  // retains 072's serialized resolution charge. Extend that meter, including the
+  // previously unused operation-id column. Slot data is not a checkpoint record.
+  yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
+    SELECT space,'memory_input_bytes','',coalesce(sum(length(CAST(revert_operation_id AS BLOB))),0)
+    FROM memory_resolutions GROUP BY space
+    ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`;
+  const bytes = (p: string) =>
+    `coalesce(length(CAST(${p}.revert_result_json AS BLOB)),0)+coalesce(length(CAST(${p}.revert_operation_id AS BLOB)),0)`;
+  const delta = (p: string, sign: number) =>
+    sign < 0
+      ? `UPDATE memory_quota_counters SET value=value-(${bytes(p)}) WHERE space=${p}.space AND dimension='memory_input_bytes' AND scope_key='';`
+      : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${p}.space,'memory_input_bytes','',${bytes(p)}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;
+  for (const action of ["INSERT", "UPDATE", "DELETE"] as const)
+    yield* sql.unsafe(
+      `CREATE TRIGGER memory_revert_result_input_${action.toLowerCase()} AFTER ${action} ON memory_resolutions BEGIN ${action !== "INSERT" ? delta("OLD", -1) : ""}${action !== "DELETE" ? delta("NEW", 1) : ""} END`,
+    );
+
   // Backfill only unambiguous correlation. Conflicting attempts without comparable
   // creation evidence stay unknown; an authoritative acceptance takes precedence.
   const candidates = yield* sql<{

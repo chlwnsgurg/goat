@@ -1,4 +1,8 @@
-import { checkUsage } from "./MemoryUsageScan.testkit.ts";
+import {
+  checkUsage,
+  scanRevertResultBytes,
+  assertUsageCounters,
+} from "./MemoryUsageScan.testkit.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
@@ -16,6 +20,7 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
 import migration from "../persistence/Migrations/071_Memory.ts";
+import { runMigrations } from "../persistence/Migrations.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
@@ -8426,6 +8431,7 @@ it.effect(
         ))
           .map((r) => r.detail)
           .join("\n");
+        yield* Console.log("A2 QUERY PLAN", table, details);
         assert.match(details, /SEARCH/);
         assert.notMatch(details, /SCAN|TEMP B-TREE/);
       }
@@ -8440,6 +8446,20 @@ it.effect(
       const sql = yield* SqlClient.SqlClient;
       const resolutionId = M.MemoryResolutionId.make(id(90000));
       yield* sql`INSERT INTO memory_resolutions(space,resolution_id,memory_id,input_revision_ids_json,input_payload_refs_json,judgment_payload_ref,requested_model_selection_json,effective_provider_model_json,resolving_environment_id,fencing_token,result_revision_id,applied_at,revert_deadline,resolution_json) VALUES (${space},${resolutionId},${memory},'[]','[]','judgment','{}','{}',${env},1,${id(90001)},0,0,'{}')`;
+      const baseline = (yield* sql<{
+        value: number;
+      }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='memory_input_bytes' AND scope_key=''`)[0]!
+        .value;
+      const checkInput = Effect.gen(function* () {
+        const raw = (yield* sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='memory_input_bytes' AND scope_key=''`)[0]!
+          .value;
+        assert.strictEqual(
+          raw - baseline,
+          (yield* scanRevertResultBytes).find((r) => r.space === space)?.bytes ?? 0,
+        );
+      });
       const write = (
         n: number,
         slot: Parameters<Store.MemoryStore["Service"]["recordRevertResultTx"]>[0]["slot"],
@@ -8454,7 +8474,9 @@ it.effect(
           settlement,
         });
       yield* store.transact(write(90002, { status: "pending" }));
+      yield* checkInput;
       yield* store.transact(write(90003, { status: "revision_changed" }));
+      yield* checkInput;
       yield* store.transact(write(90002, { status: "revert_expired" }, true));
       assert.deepStrictEqual(yield* sql`SELECT revert_operation_id FROM memory_resolutions`, [
         { revert_operation_id: id(90003) },
@@ -8480,5 +8502,71 @@ it.effect(
           },
         ],
       );
+      yield* checkInput;
+      yield* sql`DELETE FROM memory_resolutions WHERE space=${space} AND resolution_id=${resolutionId}`;
+      assert.strictEqual(
+        (yield* sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='memory_input_bytes' AND scope_key=''`)[0]!
+          .value,
+        0,
+      );
     }).pipe(checkUsage, Effect.provide(live)),
+);
+
+it.effect.each(["pending", "revision_changed", "revert_expired", "forgotten", "accepted"] as const)(
+  "A2 reopens file SQLite with durable %s result and no body fields",
+  (status) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "a2-slot-restart-" });
+      const filename = `${dir}/memory.sqlite`;
+      const first = Store.layer.pipe(
+        Layer.provideMerge(
+          Layer.effectDiscard(runMigrations()).pipe(
+            Layer.provideMerge(NodeSqliteClient.layer({ filename })),
+          ),
+        ),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const store = yield* Store.MemoryStore;
+          yield* sql`INSERT INTO memory_resolutions(space,resolution_id,memory_id,input_revision_ids_json,input_payload_refs_json,judgment_payload_ref,requested_model_selection_json,effective_provider_model_json,resolving_environment_id,fencing_token,result_revision_id,applied_at,revert_deadline,resolution_json) VALUES (${space},${id(95000)},${memory},'[]','[]','judgment','{}','{}',${env},1,${id(95001)},0,0,'{}')`;
+          yield* store.transact(
+            store.recordRevertResultTx({
+              space,
+              memoryId: memory,
+              resolutionId: M.MemoryResolutionId.make(id(95000)),
+              operationId: M.MemoryOperationId.make(id(95002)),
+              slot:
+                status === "accepted"
+                  ? { status, revisionId: M.MemoryRevisionId.make(id(95003)) }
+                  : { status },
+            }),
+          );
+        }).pipe(Effect.provide(first)),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          assert.deepStrictEqual(
+            yield* sql`SELECT revert_operation_id,json_extract(revert_result_json,'$.status') AS status,json_extract(revert_result_json,'$.revisionId') AS revision_id FROM memory_resolutions`,
+            [
+              {
+                revert_operation_id: id(95002),
+                status,
+                revision_id: status === "accepted" ? id(95003) : null,
+              },
+            ],
+          );
+          assert.isEmpty(yield* sql`SELECT 1 FROM memory_payloads`);
+          yield* assertUsageCounters;
+        }).pipe(
+          Effect.provide(
+            Store.layer.pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename }))),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
 );

@@ -8,7 +8,10 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { runMigrations } from "../Migrations.ts";
 import migration from "./079_MemoryRevertResults.ts";
 import * as Store from "../../memory/MemoryStore.ts";
-import { assertUsageCounters } from "../../memory/MemoryUsageScan.testkit.ts";
+import {
+  assertUsageCounters,
+  scanRevertResultBytes,
+} from "../../memory/MemoryUsageScan.testkit.ts";
 import * as Layer from "effect/Layer";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -66,6 +69,10 @@ it.effect(
         .withTransaction(migration.pipe(Effect.andThen(Effect.fail("rollback"))))
         .pipe(Effect.exit);
       assert.deepStrictEqual(rollback, Exit.fail("rollback"));
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`,
+        before,
+      );
       assert.isFalse(
         (yield* sql<{ name: string }>`PRAGMA table_info(memory_resolutions)`).some(
           (r) => r.name === "revert_result_json",
@@ -85,10 +92,27 @@ it.effect(
           { resolution_id: id(14), revert_operation_id: null, status: null },
         ],
       );
+      const after = yield* sql<{
+        space: string;
+        dimension: string;
+        scope_key: string;
+        value: number;
+      }>`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`;
       assert.deepStrictEqual(
-        yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`,
-        before,
+        after.filter((r) => r.dimension !== "memory_input_bytes"),
+        before.filter((r) => r.dimension !== "memory_input_bytes"),
       );
+      const slotBytes = yield* scanRevertResultBytes;
+      for (const row of slotBytes)
+        assert.strictEqual(
+          after.find((r) => r.space === row.space && r.dimension === "memory_input_bytes")!.value -
+            (Number(
+              before.find((r) => r.space === row.space && r.dimension === "memory_input_bytes")
+                ?.value,
+            ) || 0),
+          row.bytes,
+        );
+
       yield* assertUsageCounters;
       assert.deepStrictEqual(yield* runMigrations(), []);
       const tooBig =

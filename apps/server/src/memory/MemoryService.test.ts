@@ -1,3 +1,4 @@
+import { refreshCheckpointAccounting } from "./MemoryCheckpointAccounting.ts";
 import { checkUsage } from "./MemoryUsageScan.testkit.ts";
 import * as Settings from "../serverSettings.ts";
 import { assert, describe, it } from "@effect/vitest";
@@ -3345,6 +3346,34 @@ it.effect.each(["accepted", "rejected"] as const)(
       const service = yield* Service.MemoryService;
       const store = yield* Store.MemoryStore;
       const sql = yield* SqlClient.SqlClient;
+      // Publish the genuine empty starting checkpoint before creating local work.
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active',0)`;
+      const checkpointAt = yield* Clock.currentTimeMillis;
+      const checkpoint = yield* store.transact(
+        store.prepareHubProducerCheckpointTx({
+          authority: {
+            principal: {
+              memorySpaceId: space,
+              environmentId,
+              credentialVersion: 1,
+              scopes: ["memory:sync"],
+            },
+            now: Effect.succeed(checkpointAt),
+            reauthorize: Effect.void,
+          },
+          checkpointId: "a2-result-retention",
+          hubEnvironmentId: environmentId,
+        }),
+      );
+      yield* store.transact(
+        store.publishCheckpointAndFloorTx({
+          memorySpaceId: space,
+          checkpointId: checkpoint.checkpointId,
+          expectedFloor: 0,
+          nextFloor: checkpoint.checkpointSequence,
+          now: checkpointAt,
+        }),
+      );
       const { op, workId, request } = yield* stageReportRevert;
       const history = () =>
         service.history({ memorySpaceId: space, memoryId, limit: 100 }, Effect.void);
@@ -3391,34 +3420,7 @@ it.effect.each(["accepted", "rejected"] as const)(
         )).page.revertResults[0]?.status,
         expected,
       );
-      // Publish a real checkpoint, then run the actual 30-day terminal-work compactor.
-      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active',0)`;
       const at = (yield* Clock.currentTimeMillis) + M.MEMORY_LOG_RETENTION_MS + 1;
-      const checkpoint = yield* store.transact(
-        store.prepareHubProducerCheckpointTx({
-          authority: {
-            principal: {
-              memorySpaceId: space,
-              environmentId,
-              credentialVersion: 1,
-              scopes: ["memory:sync"],
-            },
-            now: Effect.succeed(at),
-            reauthorize: Effect.void,
-          },
-          checkpointId: "a2-result-retention",
-          hubEnvironmentId: environmentId,
-        }),
-      );
-      yield* store.transact(
-        store.publishCheckpointAndFloorTx({
-          memorySpaceId: space,
-          checkpointId: checkpoint.checkpointId,
-          expectedFloor: 0,
-          nextFloor: checkpoint.checkpointSequence,
-          now: at,
-        }),
-      );
       yield* store.transact(
         store.compactEligibleHistoryTx({
           memorySpaceId: space,
@@ -3460,49 +3462,60 @@ it.effect.each(["accepted", "rejected"] as const)(
     }).pipe(checkUsage, Effect.provide(live)),
 );
 
-it.effect("A2 forget settles pending and records immediate refusal without a new row", () =>
-  Effect.gen(function* () {
-    const service = yield* Service.MemoryService;
-    const store = yield* Store.MemoryStore;
-    const sql = yield* SqlClient.SqlClient;
-    const { request } = yield* stageReportRevert;
-    const wrong = {
-      ...request,
-      operationId: M.MemoryOperationId.make(id(80003)),
-      expectedHeads: [M.MemoryRevisionId.make(id(80004))],
-    };
-    assert.strictEqual(
-      (yield* service.revertResolution(wrong, Effect.void)).status,
-      "revision_changed",
-    );
-    let page = yield* service.history({ memorySpaceId: space, memoryId, limit: 100 }, Effect.void);
-    assert.strictEqual(page.revertResults[0]?.operationId, wrong.operationId);
-    assert.strictEqual(page.revertResults[0]?.status, "revision_changed");
-    // Restore the pending slot with a real staged replay, then forget.
-    yield* store.transact(
-      store.recordRevertResultTx({
-        space,
-        memoryId,
-        resolutionId: request.resolutionId,
-        operationId: request.operationId,
-        slot: { status: "pending" },
-      }),
-    );
-    yield* service.forget(
-      {
-        memorySpaceId: space,
-        memoryId,
-        operationId: M.MemoryOperationId.make(id(80005)),
-        expectedHeads: [...(yield* store.loadAggregate(space, memoryId)).heads],
-      },
-      Effect.void,
-    );
-    page = yield* service.history({ memorySpaceId: space, memoryId, limit: 100 }, Effect.void);
-    assert.strictEqual(page.revertResults[0]?.status, "forgotten");
-    assert.strictEqual(page.revertResults[0]?.operationId, request.operationId);
-    assert.lengthOf(yield* sql`SELECT 1 FROM memory_resolutions`, 1);
-    assert.isEmpty(yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${memoryId}`);
-  }).pipe(checkUsage, Effect.provide(live)),
+it.effect.each(["pending", "immediate"] as const)(
+  "A2 forget and immediate refusal preserve the latest %s attempt without a new row",
+  (mode) =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const { request } = yield* stageReportRevert;
+      const wrong = {
+        ...request,
+        operationId: M.MemoryOperationId.make(id(80003)),
+        expectedHeads: [M.MemoryRevisionId.make(id(80004))],
+      };
+      if (mode === "immediate") {
+        assert.strictEqual(
+          (yield* service.revertResolution(wrong, Effect.void)).status,
+          "revision_changed",
+        );
+        const page = yield* service.history(
+          { memorySpaceId: space, memoryId, limit: 100 },
+          Effect.void,
+        );
+        assert.strictEqual(page.revertResults[0]?.operationId, wrong.operationId);
+        assert.strictEqual(page.revertResults[0]?.status, "revision_changed");
+      }
+      yield* service.forget(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(id(80005)),
+          expectedHeads: [...(yield* store.loadAggregate(space, memoryId)).heads],
+        },
+        Effect.void,
+      );
+      let page = yield* service.history(
+        { memorySpaceId: space, memoryId, limit: 100 },
+        Effect.void,
+      );
+      assert.strictEqual(
+        page.revertResults[0]?.status,
+        mode === "pending" ? "forgotten" : "revision_changed",
+      );
+      assert.strictEqual(
+        page.revertResults[0]?.operationId,
+        mode === "pending" ? request.operationId : wrong.operationId,
+      );
+      const next = { ...request, operationId: M.MemoryOperationId.make(id(80006)) };
+      assert.strictEqual((yield* service.revertResolution(next, Effect.void)).status, "forgotten");
+      page = yield* service.history({ memorySpaceId: space, memoryId, limit: 100 }, Effect.void);
+      assert.strictEqual(page.revertResults[0]?.status, "forgotten");
+      assert.strictEqual(page.revertResults[0]?.operationId, next.operationId);
+      assert.lengthOf(yield* sql`SELECT 1 FROM memory_resolutions`, 1);
+      assert.isEmpty(yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${memoryId}`);
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -3541,7 +3554,8 @@ it.effect(
       assert.strictEqual(pages.flatMap((p) => p.revertResults).length, 1);
       const ids = Array.from({ length: 2000 }, (_, n) => id(200000 + n));
       yield* sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at)
-    SELECT ${space},value,${memoryId},value,'invalid','invalid','inference','invalid',NULL,0 FROM json_each(${JSON.stringify(ids)})`;
+    SELECT ${space},value,${memoryId},value,'[]','{"kind":"user"}','inference','{"environmentId":"fixture"}',NULL,0 FROM json_each(${JSON.stringify(ids)})`;
+      yield* refreshCheckpointAccounting();
       let permitCalls = 0;
       const permit = Effect.sync(() => {
         permitCalls++;

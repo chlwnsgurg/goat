@@ -2048,7 +2048,6 @@ const decodeTombstone = Schema.decodeUnknownEffect(M.MemoryTombstone);
 const decodeConflict = Schema.decodeUnknownEffect(M.MemoryConflict);
 const decodeRevision = Schema.decodeUnknownEffect(M.MemoryRevision);
 const isSqlError = Schema.is(SqlError);
-const isStorageError = Schema.is(MemoryStorageError);
 const decodeMemoryId = Schema.decodeUnknownEffect(M.MemoryId);
 const decodeMemorySpaceId = Schema.decodeUnknownEffect(M.MemorySpaceId);
 const decodeAssertionKind = Schema.decodeUnknownEffect(M.MemoryAssertionKind);

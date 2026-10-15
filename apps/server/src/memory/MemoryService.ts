@@ -1536,6 +1536,13 @@ const make = Effect.fnUntraced(function* (
             operation.revertsResolutionId !== value.resolutionId
           )
             return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
+          yield* store.recordRevertResultTx({
+            space: value.memorySpaceId,
+            memoryId: value.memoryId,
+            resolutionId: value.resolutionId,
+            operationId: value.operationId,
+            slot: { status: "accepted", revisionId: operation.revision.revisionId },
+          });
           return {
             ...result,
             status: "accepted" as const,
