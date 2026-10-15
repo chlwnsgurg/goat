@@ -1545,6 +1545,253 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
   });
 
   describe("review diff previews", () => {
+    it.effect("separates staged and later unstaged edits without changing the real index", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* writeTextFile(cwd, "README.md", "staged content\n");
+        yield* git(cwd, ["add", "README.md"]);
+        yield* writeTextFile(cwd, "README.md", "disk content\n");
+        yield* writeTextFile(cwd, "untracked.txt", "untracked content\n");
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const indexPath = path.resolve(cwd, yield* git(cwd, ["rev-parse", "--git-path", "index"]));
+        const before = yield* fs.readFile(indexPath);
+        for (const [scope, oldContents, newContents] of [
+          ["staged", "# test\n", "staged content\n"],
+          ["unstaged", "staged content\n", "disk content\n"],
+          ["working-tree", "# test\n", "disk content\n"],
+        ] as const) {
+          const preview = yield* driver.getReviewDiffPreview({ cwd, scope });
+          assert.deepStrictEqual(
+            preview.sources.map((source) => source.kind),
+            [scope],
+          );
+          const source = preview.sources[0]!;
+          assert.include(source.diff, `-${oldContents.trim()}`);
+          assert.include(source.diff, `+${newContents.trim()}`);
+          assert.deepStrictEqual(
+            yield* driver.getReviewDiffFileContents(
+              makeReviewDiffFileContentsInput(cwd, {
+                sourceKind: scope,
+              }),
+            ),
+            { oldContents, newContents },
+          );
+          assert.equal(
+            source.files!.some((file) => file.path === "untracked.txt"),
+            scope !== "staged",
+          );
+          const file = yield* driver.getReviewDiffPreview({
+            cwd,
+            file: { path: "README.md", previousPath: null, sourceKind: scope },
+          });
+          assert.deepStrictEqual(file.sources[0]!.files, [
+            { path: "README.md", previousPath: null, additions: 1, deletions: 1 },
+          ]);
+        }
+        assert.deepStrictEqual(yield* fs.readFile(indexPath), before);
+      }),
+    );
+
+    it.effect("separates index and disk before the first commit", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* driver.initRepo({ cwd });
+        yield* writeTextFile(cwd, "new.txt", "index\n");
+        yield* git(cwd, ["add", "new.txt"]);
+        yield* writeTextFile(cwd, "new.txt", "disk\n");
+        yield* writeTextFile(cwd, "untracked.txt", "extra\n");
+        const staged = (yield* driver.getReviewDiffPreview({ cwd, scope: "staged" })).sources[0]!;
+        assert.deepStrictEqual(staged.files, [
+          { path: "new.txt", previousPath: null, additions: 1, deletions: 0 },
+        ]);
+        assert.include(staged.diff, "+index");
+        const unstaged = (yield* driver.getReviewDiffPreview({ cwd, scope: "unstaged" }))
+          .sources[0]!;
+        assert.include(unstaged.diff, "-index");
+        assert.include(unstaged.diff, "+disk");
+        assert.include(unstaged.diff, "+extra");
+        for (const [sourceKind, changeType, oldContents, newContents] of [
+          ["staged", "new", "", "index\n"],
+          ["unstaged", "change", "index\n", "disk\n"],
+        ] as const) {
+          assert.deepStrictEqual(
+            yield* driver.getReviewDiffFileContents(
+              makeReviewDiffFileContentsInput(cwd, {
+                sourceKind,
+                changeType,
+                oldPath: "new.txt",
+                newPath: "new.txt",
+              }),
+            ),
+            { oldContents, newContents },
+          );
+        }
+      }),
+    );
+
+    it.effect(
+      "reviews an untracked file without creating a real index in an unborn repository",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const fs = yield* FileSystem.FileSystem;
+          yield* driver.initRepo({ cwd });
+          yield* writeTextFile(cwd, "untracked.txt", "new file\n");
+          const staged = (yield* driver.getReviewDiffPreview({ cwd, scope: "staged" })).sources[0]!;
+          assert.isEmpty(staged.diff);
+          assert.deepStrictEqual(staged.files, []);
+          const unstaged = (yield* driver.getReviewDiffPreview({ cwd, scope: "unstaged" }))
+            .sources[0]!;
+          assert.deepStrictEqual(unstaged.files, [
+            { path: "untracked.txt", previousPath: null, additions: 1, deletions: 0 },
+          ]);
+          assert.deepStrictEqual(
+            yield* driver.getReviewDiffFileContents(
+              makeReviewDiffFileContentsInput(cwd, {
+                sourceKind: "unstaged",
+                changeType: "new",
+                oldPath: "untracked.txt",
+                newPath: "untracked.txt",
+              }),
+            ),
+            { oldContents: "", newContents: "new file\n" },
+          );
+          assert.isFalse(yield* fs.exists(`${cwd}/.git/index`));
+        }),
+    );
+
+    it.effect("detects an unstaged rename and reads its old contents from the index", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.rename(`${cwd}/README.md`, `${cwd}/renamed.md`);
+        const source = (yield* driver.getReviewDiffPreview({ cwd, scope: "unstaged" })).sources[0]!;
+        assert.deepStrictEqual(source.files, [
+          { path: "renamed.md", previousPath: "README.md", additions: 0, deletions: 0 },
+        ]);
+        const single = (yield* driver.getReviewDiffPreview({
+          cwd,
+          file: { path: "renamed.md", previousPath: "README.md", sourceKind: "unstaged" },
+        })).sources[0]!;
+        assert.deepStrictEqual(single.files, source.files);
+        assert.include(single.diff, "rename from README.md");
+        assert.deepStrictEqual(
+          yield* driver.getReviewDiffFileContents(
+            makeReviewDiffFileContentsInput(cwd, {
+              sourceKind: "unstaged",
+              changeType: "rename-pure",
+              newPath: "renamed.md",
+            }),
+          ),
+          { oldContents: "# test\n", newContents: "# test\n" },
+        );
+      }),
+    );
+
+    it.effect("reads staged rename contents from the index and unstaged deletion from disk", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* git(cwd, ["mv", "README.md", "renamed.md"]);
+        yield* writeTextFile(cwd, "renamed.md", "later edit\n");
+        const staged = (yield* driver.getReviewDiffPreview({ cwd, scope: "staged" })).sources[0]!;
+        assert.deepStrictEqual(staged.files, [
+          { path: "renamed.md", previousPath: "README.md", additions: 0, deletions: 0 },
+        ]);
+        assert.deepStrictEqual(
+          yield* driver.getReviewDiffFileContents(
+            makeReviewDiffFileContentsInput(cwd, {
+              sourceKind: "staged",
+              changeType: "rename-pure",
+              newPath: "renamed.md",
+            }),
+          ),
+          { oldContents: "# test\n", newContents: "# test\n" },
+        );
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.remove(`${cwd}/renamed.md`);
+        const unstaged = (yield* driver.getReviewDiffPreview({ cwd, scope: "unstaged" }))
+          .sources[0]!;
+        assert.deepStrictEqual(unstaged.files, [
+          { path: "renamed.md", previousPath: null, additions: 0, deletions: 1 },
+        ]);
+        assert.deepStrictEqual(
+          yield* driver.getReviewDiffFileContents(
+            makeReviewDiffFileContentsInput(cwd, {
+              sourceKind: "unstaged",
+              changeType: "deleted",
+              oldPath: "renamed.md",
+              newPath: "renamed.md",
+            }),
+          ),
+          { oldContents: "# test\n", newContents: "" },
+        );
+      }),
+    );
+
+    it.effect("keeps a staged deletion separate from its untracked replacement", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* git(cwd, ["rm", "README.md"]);
+        yield* writeTextFile(cwd, "README.md", "replacement\n");
+        const staged = (yield* driver.getReviewDiffPreview({ cwd, scope: "staged" })).sources[0]!;
+        assert.deepStrictEqual(staged.files, [
+          { path: "README.md", previousPath: null, additions: 0, deletions: 1 },
+        ]);
+        assert.deepStrictEqual(
+          yield* driver.getReviewDiffFileContents(
+            makeReviewDiffFileContentsInput(cwd, { sourceKind: "staged", changeType: "deleted" }),
+          ),
+          { oldContents: "# test\n", newContents: "" },
+        );
+        const unstaged = (yield* driver.getReviewDiffPreview({ cwd, scope: "unstaged" }))
+          .sources[0]!;
+        assert.deepStrictEqual(unstaged.files, [
+          { path: "README.md", previousPath: null, additions: 1, deletions: 0 },
+        ]);
+        assert.deepStrictEqual(
+          yield* driver.getReviewDiffFileContents(
+            makeReviewDiffFileContentsInput(cwd, { sourceKind: "unstaged", changeType: "new" }),
+          ),
+          { oldContents: "", newContents: "replacement\n" },
+        );
+        assert.equal(yield* git(cwd, ["ls-files", "--stage"]), "");
+      }),
+    );
+
+    it.effect("keeps staged and unstaged statistics complete when patches are truncated", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* writeTextFile(cwd, "large.txt", "index content with a long line\n".repeat(10000));
+        yield* git(cwd, ["add", "large.txt"]);
+        yield* writeTextFile(cwd, "large.txt", "worktree content with a long line\n".repeat(10000));
+        for (const scope of ["staged", "unstaged"] as const) {
+          const source = (yield* driver.getReviewDiffPreview({ cwd, scope })).sources[0]!;
+          assert.isTrue(source.truncated);
+          assert.deepStrictEqual(source.files, [
+            {
+              path: "large.txt",
+              previousPath: null,
+              additions: 10000,
+              deletions: scope === "staged" ? 0 : 10000,
+            },
+          ]);
+        }
+      }),
+    );
+
     it.effect("loads repository-relative files from a nested project directory", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
@@ -2051,6 +2298,11 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         }
         yield* git(cwd, ["add", "."]);
         yield* git(cwd, ["update-index", "--chmod=+x", "mode-only.sh"]);
+        if ((yield* HostProcess.Platform) !== "win32") {
+          const fs = yield* FileSystem.FileSystem;
+          // Changes reads disk, so the fixture must make the file executable there too.
+          yield* fs.chmod(`${cwd}/mode-only.sh`, 0o755);
+        }
         yield* git(cwd, ["commit", "-m", "rename and add files"]);
         const preview = yield* driver.getReviewDiffPreview({
           cwd,
