@@ -49,6 +49,7 @@ vi.mock("./sdk.ts", () => ({
     messages: { list: async () => [] },
   },
   createAgentPlatform: async () => ({ prewarmLocalWorkspace: async () => async () => {} }),
+  SqliteLocalAgentStore: { open: vi.fn() },
 }));
 const decodeCursorSettings = Schema.decodeEffect(CursorSettings);
 
