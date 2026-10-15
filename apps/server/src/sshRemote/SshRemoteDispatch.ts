@@ -1066,7 +1066,7 @@ const make = Effect.gen(function* () {
         if (folder.gitRoot === null) {
           return yield* failure(
             "invalid_request",
-            `${folder.path} on ${target.alias} is not inside a Git repository, so it cannot get a worktree.`,
+            `${folder.path} on ${target.alias} is not inside a Git repository, so it cannot get a worktree. Omit workspace to run in the folder itself, or pick a folder goat_ssh_browse marks isGitRepository.`,
           );
         }
         const baseRef = input.workspace.baseRef?.trim() || folder.branch;
