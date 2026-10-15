@@ -13,9 +13,9 @@ import * as RpcTest from "effect/rpc/RpcTest";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpRouter from "effect/http/HttpRouter";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- independent synthetic source hash/mtime oracle.
-import * as FS from "node:fs";
+import * as NodeFS from "node:fs";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- independent synthetic source hash oracle.
-import * as Crypto from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 import * as Config from "./config.ts";
 import * as Settings from "./serverSettings.ts";
 import * as Secrets from "./auth/ServerSecretStore.ts";
@@ -52,7 +52,7 @@ import {
 } from "./server.ts";
 
 const grants = ["memory:write", "filesystem:read"] as const;
-const id = () => M.MemoryOperationId.make(Crypto.randomUUID());
+const id = () => M.MemoryOperationId.make(NodeCrypto.randomUUID());
 // This constructs the application's layers, including durable SQL, settings, identity,
 // real Sync/Hub and the same scoped reader/factory used by server.ts. Only unused
 // provider generation/registry boundaries are doubles; import has no mocked ports.
@@ -123,6 +123,7 @@ const graph = (
     assert.equal(configured.view.settings.mode, "hub");
     if (configured.view.settings.mode !== "hub") return yield* Effect.die("hub required");
     const space = configured.view.settings.memorySpaceId!;
+    yield* memorySync.syncOnce;
     const routes = layerMemoryHubRoutes.pipe(
       HttpRouter.provideRequest(Layer.succeedContext(context)),
       Layer.provide(Layer.succeedContext(context)),
@@ -165,13 +166,13 @@ const graph = (
 const stamp = (root: string) => {
   const result: Record<string, { hash: string; mtime: string }> = {};
   const walk = (dir: string) => {
-    for (const name of FS.readdirSync(dir).sort()) {
+    for (const name of NodeFS.readdirSync(dir).sort()) {
       const path = `${dir}/${name}`;
-      const stat = FS.lstatSync(path, { bigint: true });
+      const stat = NodeFS.lstatSync(path, { bigint: true });
       if (stat.isDirectory()) walk(path);
       else if (stat.isFile())
         result[path.slice(root.length + 1)] = {
-          hash: Crypto.createHash("sha256").update(FS.readFileSync(path)).digest("hex"),
+          hash: NodeCrypto.createHash("sha256").update(NodeFS.readFileSync(path)).digest("hex"),
           mtime: String(stat.mtimeNs),
         };
     }
@@ -304,7 +305,7 @@ it.effect.each(["codex-handbook-v1", "claude-topic-v1", "omo-memory-core-beta63"
       };
       // Persist synthetic evidence outside the checkout when the remote runner requests it.
       if (process.env.WP5_IMPORT_EVIDENCE_DIR)
-        FS.writeFileSync(
+        NodeFS.writeFileSync(
           `${process.env.WP5_IMPORT_EVIDENCE_DIR}/${fixture.snapshot.format}.json`,
           JSON.stringify(evidence, null, 2),
         );

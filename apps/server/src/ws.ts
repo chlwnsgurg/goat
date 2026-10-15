@@ -114,6 +114,7 @@ import {
   WsChannelRpcGroup,
   WsCoreRpcGroup,
   MemoryMutationReceipt,
+  MemoryImportRpcError,
   WsMemoryCoreRpcGroup,
   WsMemoryAdministrationRpcGroup,
   WsMemoryImportRpcGroup,
@@ -586,6 +587,8 @@ export const memorySessionPermit = <E>(
     Effect.mapError(() => new MemoryService.MemoryAccessError({ code: "unavailable" })),
   );
 
+const isMemoryImportRpcError = Schema.is(MemoryImportRpcError);
+
 /** Shared by the installed websocket route and the transport integration harness. */
 export const makeMemoryImportHandlers = <E>(
   liveScopes: Effect.Effect<ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>, E>,
@@ -605,7 +608,9 @@ export const makeMemoryImportHandlers = <E>(
               .importProvider(input, permit)
               .pipe(Effect.provideService(ProviderMemoryImportRuntime, runtime.value))
           : Effect.fail(new MemoryService.MemoryAccessError({ code: "unavailable" }))
-        ).pipe(Effect.mapError(memoryError)),
+        ).pipe(
+          Effect.mapError((error) => (isMemoryImportRpcError(error) ? error : memoryError(error))),
+        ),
     });
   });
 
