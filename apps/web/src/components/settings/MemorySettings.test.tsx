@@ -1123,8 +1123,13 @@ it("reloads persisted members, excludes them from Add, and removes an offline un
       credential: null,
     }),
   );
+  state.responses.set("hubSettingsGet", success({ ...hubView(5), members: [members[0]] }));
   await click("Remove device");
-  expect(state.calls.mock.calls.at(-1)![0]).toMatchObject({
+  expect(
+    state.calls.mock.calls
+      .map(([call]) => call)
+      .findLast((call) => call.input.action === "revokeMember"),
+  ).toMatchObject({
     environmentId: "remote-owner",
     input: { action: "revokeMember", environmentId: "unregistered-private-id", expectedVersion: 4 },
   });

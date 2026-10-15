@@ -711,7 +711,12 @@ export const layerMemoryHubAdministration = Layer.effect(
               permit,
             ),
           ),
-          Effect.flatMap((result) => decodeMemoryHubDisabled(result.view)),
+          Effect.flatMap((result) =>
+            decodeMemoryHubDisabled({
+              settings: result.view.settings,
+              version: result.view.version,
+            }),
+          ),
           Effect.mapError(memoryError),
         ),
     });
