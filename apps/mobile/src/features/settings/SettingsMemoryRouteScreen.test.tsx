@@ -1069,6 +1069,33 @@ describe("native WP6 Settings commands", () => {
       expect(view.container.textContent).not.toContain("synthetic-session");
     },
   );
+  it("renders settled chunk totals while the next command is still pending", async () => {
+    setupImport(33);
+    await show();
+    await select(33);
+    const handler = h.responses.get(WS_METHODS.memoryImportProvider)!;
+    const second = h.deferred<unknown>();
+    let finalResult: unknown;
+    let applies = 0;
+    h.responses.set(WS_METHODS.memoryImportProvider, (input) => {
+      const result = handler(input);
+      if (++applies === 2) {
+        finalResult = result;
+        return second.response;
+      }
+      return result;
+    });
+    await view.click("Apply selected memories");
+    await h.waitForCall(WS_METHODS.memoryImportProvider, 4);
+    expect(view.container.textContent).toContain("Added: 32");
+    expect(view.container.textContent).toContain("Completed batches: 1");
+    expect(view.container.textContent).not.toContain("Import completed");
+    await act(async () => {
+      await second.succeed(finalResult);
+    });
+    expect(view.container.textContent).toContain("Added: 33");
+    expect(view.container.textContent).toContain("Import completed");
+  });
   it("Stop settles the admitted batch and admits no later chunk", async () => {
     setupImport(33);
     await show();
