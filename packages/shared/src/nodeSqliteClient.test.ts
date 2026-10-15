@@ -638,6 +638,9 @@ it.effect("pipelines reader requests before replies without leaking values mode"
         const objects = yield* Effect.forkChild(select.pipe(SqliteClient.readOnly), {
           startImmediately: true,
         });
+        // Routing awaits the already-resolved startup Promise even for a warm
+        // reader. Let its microtasks run before checking outstanding requests.
+        yield* Effect.yieldNow;
         // Neither request has reached the real worker, so no reply can release
         // a statement lease. Both must already have crossed the permit boundary.
         assert.lengthOf(requests, 2);
