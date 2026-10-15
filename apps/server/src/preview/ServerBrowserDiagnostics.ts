@@ -69,17 +69,17 @@ const redactUrl = (raw: string) => {
   }
 };
 
-// Error stacks and console messages can embed source URLs as well as prose.
-// This only redacts URLs, not arbitrary secrets printed by the page.
+// URL credentials and URL query values are redacted, and fragments are dropped.
+// Within the output limits, other free-form console/error text is returned as the
+// page produced it and is not scrubbed for secrets. Quotes and closing brackets
+// delimit URL tokens; quoted query values are only parsed in structured URL fields.
 const redactText = (text: string, limit: number) => {
   const bounded = text.slice(0, INPUT_LIMIT);
   return bounded
-    .replace(
-      /\b(?:[a-z][a-z0-9+.-]*:\/\/|(?:data|blob|about):)(?:(?<==)"(?:\\.|[^"\\<>])*(?:"|$)|(?<==)'(?:\\.|[^'\\<>])*(?:'|$)|[^\s<>])+/gi,
-      (raw, offset: number) =>
-        text.length > INPUT_LIMIT && offset + raw.length === bounded.length
-          ? "url:[redacted]"
-          : redactUrl(raw),
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>\])}]+/gi, (raw, offset: number) =>
+      text.length > INPUT_LIMIT && offset + raw.length === bounded.length
+        ? "url:[redacted]"
+        : redactUrl(raw),
     )
     .slice(0, limit);
 };

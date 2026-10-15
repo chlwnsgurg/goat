@@ -119,7 +119,7 @@ describe("ServerBrowserDiagnostics", () => {
       expect(all).not.toContain(secret);
     consoleMessage("file:///private/source.js data:text/plain,private blob:https://private/");
     expect(diagnostics.read({}).console.entries[0]?.text).toBe(
-      "file:[redacted] data:[redacted] blob:[redacted]",
+      "file:[redacted] data:text/plain,private blob:https://private/",
     );
   });
 
@@ -130,41 +130,75 @@ describe("ServerBrowserDiagnostics", () => {
     '"TOP SECRET"',
     '"TOP_SECRET\\"suffix"',
     'prefix"TOP_SECRET"',
-  ])("redacts quoted query values %s across diagnostics", (value) => {
-    const { page, diagnostics, consoleMessage } = fixture();
+    `'{"html":"<div> TOP_SECRET"}'`,
+    'prefix"TOP SECRET"',
+  ])("redacts complete quoted query values in structured URLs: %s", (value) => {
+    const { page, diagnostics } = fixture();
     const url = `https://USER_SECRET:PASS_SECRET@example.test/api?token=${value}&other=OTHER_SECRET#FRAGMENT_SECRET`;
-    consoleMessage(`See ${url}`);
-    const error = new Error(`Failed ${url}`);
-    error.stack = `Error: Failed\n at ${url}`;
-    page.emit("pageerror", error);
-    page.emit("requestfailed", {
+    page.emit("requestfinished", {
       url: () => url,
       method: () => "GET",
-      failure: () => ({ errorText: `Failed ${url}` }),
     });
-    const result = diagnostics.read({});
-    const texts = [
-      result.console.entries[0]?.text,
-      result.errors.entries[0]?.message,
-      result.errors.entries[0]?.stack,
-      result.network.entries[0]?.url,
-      result.network.entries[0]?.errorText,
-    ];
-    for (const text of texts) {
-      expect(text).toContain("https://example.test/api?token=%5BREDACTED%5D&other=%5BREDACTED%5D");
-      expect(text).not.toMatch(/SECRET|TOP SECRET/);
-    }
+    expect(diagnostics.read({}).network.entries[0]?.url).toBe(
+      "https://example.test/api?token=%5BREDACTED%5D&other=%5BREDACTED%5D",
+    );
   });
 
-  it("redacts quoted credentials and URLs embedded in JSON strings", () => {
+  it.each([
+    '"TOP SECRET"',
+    "'TOP SECRET'",
+    "`TOP SECRET`",
+    "<div> TOP SECRET",
+    "> TOP SECRET",
+    "] TOP SECRET",
+    ") TOP SECRET",
+    "} TOP SECRET",
+    " TOP SECRET",
+    "\nTOP SECRET",
+    "\tTOP SECRET",
+  ])("preserves text after a URL token delimiter across diagnostics: %s", (suffix) => {
+    const { page, diagnostics, consoleMessage } = fixture();
+    const text = `See https://user:password@example.test/api?token=prefix${suffix}`;
+    const expected = `See https://example.test/api?token=%5BREDACTED%5D${suffix}`;
+    consoleMessage(text);
+    const error = new Error(text);
+    error.stack = `Error: Failed\n at ${text}`;
+    page.emit("pageerror", error);
+    page.emit("requestfailed", {
+      url: () => "https://example.test/",
+      method: () => "GET",
+      failure: () => ({ errorText: text }),
+    });
+    const result = diagnostics.read({});
+    expect(result.console.entries[0]?.text).toBe(expected);
+    expect(result.errors.entries[0]?.message).toBe(expected);
+    expect(result.errors.entries[0]?.stack).toBe(`Error: Failed\n at ${expected}`);
+    expect(result.network.entries[0]?.errorText).toBe(expected);
+  });
+
+  it("redacts multiple URL tokens without rewriting the text between them", () => {
     const { diagnostics, consoleMessage } = fixture();
     consoleMessage(
-      `{"url":"https://USER_SECRET:'PASS_SECRET'@example.test/api?token='TOP_SECRET'"}`,
+      'URLs (https://user:password@example.test/a?token=secret#fragment), "keep this" [wss://user:password@example.test/b?session=secret#fragment]',
     );
-    expect(diagnostics.read({}).console.entries[0]?.text).toContain(
-      "https://example.test/api?token=%5BREDACTED%5D",
+    expect(diagnostics.read({}).console.entries[0]?.text).toBe(
+      'URLs (https://example.test/a?token=%5BREDACTED%5D), "keep this" [wss://example.test/b?session=%5BREDACTED%5D]',
     );
-    expect(diagnostics.read({}).console.entries[0]?.text).not.toContain("SECRET");
+  });
+
+  it.each([
+    [
+      '{"url":"https://example.test/a","other":"keep"}',
+      '{"url":"https://example.test/a","other":"keep"}',
+    ],
+    [
+      '{"url":"https://example.test/a?token=secret","other":"keep"}',
+      '{"url":"https://example.test/a?token=%5BREDACTED%5D","other":"keep"}',
+    ],
+  ])("preserves surrounding JSON when redacting URL tokens: %s", (text, expected) => {
+    const { diagnostics, consoleMessage } = fixture();
+    consoleMessage(text);
+    expect(diagnostics.read({}).console.entries[0]?.text).toBe(expected);
   });
 
   it.each([200, 10_000])("bounds query processing for %i parameters", (count) => {
@@ -184,19 +218,23 @@ describe("ServerBrowserDiagnostics", () => {
     }
   });
 
-  it("does not expose credentials or quoted values cut by the input limit", () => {
-    const { page, diagnostics, consoleMessage } = fixture();
+  it("rejects oversized structured URLs before parsing credentials or quoted values", () => {
+    const { page, diagnostics } = fixture();
     const urls = [
       `https://USER_SECRET:${"PASSWORD_SECRET".repeat(1_000)}@example.test/`,
       `https://example.test/api?token="${"TOP SECRET ".repeat(1_000)}"`,
     ];
     for (const url of urls) {
-      consoleMessage(url);
       page.emit("requestfinished", { url: () => url, method: () => "GET" });
       const result = diagnostics.read({ limit: 1 });
-      expect(result.console.entries[0]?.text).toBe("url:[redacted]");
       expect(result.network.entries[0]?.url).toBe("url:[redacted]");
     }
+  });
+
+  it("does not expose credentials in a URL token cut by the input limit", () => {
+    const { diagnostics, consoleMessage } = fixture();
+    consoleMessage(`https://USER_SECRET:${"PASSWORD_SECRET".repeat(1_000)}@example.test/`);
+    expect(diagnostics.read({}).console.entries[0]?.text).toBe("url:[redacted]");
   });
 
   it("bounds UTF-8 output and reports entries omitted by the shared byte budget", () => {
