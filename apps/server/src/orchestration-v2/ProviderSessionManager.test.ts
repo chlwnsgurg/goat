@@ -2717,6 +2717,116 @@ it.effect(
     }),
 );
 
+it.effect("current memory DTO withholds access until the committed on epoch is installed", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const blocked = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const completed = yield* Deferred.make<void>();
+    const baseSettings = ServerSettings.layerTest({ enableAgentMemoryAccess: false });
+    // Hold the real rotation subscriber before prepare starts, after the settings
+    // service has committed/published on. The old installed credential stays live.
+    const settingsLayer = Layer.effect(
+      ServerSettings.MemoryProviderCommittedPolicy,
+      Effect.gen(function* () {
+        const policy = Option.getOrThrow(
+          yield* Effect.serviceOption(ServerSettings.MemoryProviderCommittedPolicy),
+        );
+        return {
+          ...policy,
+          subscribeRotations: policy.subscribeRotations.pipe(
+            Effect.map((stream) =>
+              stream.pipe(
+                Stream.flatMap((event) =>
+                  event.enableAgentMemoryAccess
+                    ? Stream.fromEffect(
+                        Deferred.succeed(blocked, undefined).pipe(
+                          Effect.andThen(Deferred.await(release)),
+                          Effect.as(event),
+                        ),
+                      ).pipe(
+                        Stream.concat(
+                          Stream.fromEffect(Deferred.succeed(completed, undefined)).pipe(
+                            Stream.drain,
+                          ),
+                        ),
+                      )
+                    : Stream.make(event),
+                ),
+              ),
+            ),
+          ),
+        };
+      }),
+    ).pipe(Layer.provideMerge(baseSettings));
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const policy = Option.getOrThrow(
+        yield* Effect.serviceOption(ServerSettings.MemoryProviderCommittedPolicy),
+      );
+      const registry = yield* McpSessionRegistry.McpSessionRegistry;
+      const configs = yield* McpProviderSessions.McpProviderSessions;
+      const threadId = ThreadId.make("memory-on-before-rotation");
+      const runId = RunId.make("on-run");
+      const taskId = NodeId.make("on-task");
+      const now = yield* DateTime.now;
+      const providerSessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+        runId,
+        delegatedTaskId: taskId,
+        memoryGrantCeiling: "read_write",
+      });
+      const old = (yield* configs.read(threadId))!;
+      const oldToken = old.authorizationHeader.replace(/^Bearer\s+/, "");
+      assert.equal((yield* registry.resolve(oldToken))?.memoryPolicy?.grant, "none");
+      yield* settings.updateSettings({ enableAgentMemoryAccess: true });
+      yield* Deferred.await(blocked);
+      assert.isTrue((yield* policy.read).enableAgentMemoryAccess);
+      assert.equal((yield* configs.read(threadId))?.providerSessionId, old.providerSessionId);
+      assert.isUndefined(yield* registry.currentMemoryPolicy!(old.providerSessionId));
+      assert.isUndefined(yield* registry.resolve(oldToken));
+      assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "none");
+      assert.isUndefined((yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess);
+      yield* Deferred.succeed(release, undefined);
+      yield* Deferred.await(completed);
+      const installed = (yield* configs.read(threadId))!;
+      assert.notEqual(installed.providerSessionId, old.providerSessionId);
+      const scope = yield* registry.resolve(
+        installed.authorizationHeader.replace(/^Bearer\s+/, ""),
+      );
+      assert.equal(scope?.memoryPolicy?.grant, "read_write");
+      assert.deepEqual(
+        yield* registry.currentMemoryPolicy!(installed.providerSessionId),
+        scope?.memoryPolicy,
+      );
+      assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "read_write");
+      assert.equal(
+        (yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess?.access,
+        "read_write",
+      );
+    }).pipe(
+      Effect.provide(
+        layerTest({ state, idleTimeoutMs: 60_000, serverSettingsLayer: settingsLayer }).pipe(
+          Layer.provideMerge(settingsLayer),
+        ),
+      ),
+    );
+  }),
+);
+
 it.effect("current memory DTO denies an archived destination before a deferred detach", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);

@@ -409,7 +409,13 @@ export const layerWithOptions = (
         ThreadId,
         ProviderMemoryPrepareInput & {
           readonly destinationUsable: boolean;
-          readonly providerSessionId?: ProviderSessionId;
+          readonly installedCredential?:
+            | {
+                readonly id: string;
+                readonly policy: McpSessionRegistry.McpMemoryPolicy;
+              }
+            | undefined;
+          readonly providerSessionId?: ProviderSessionId | undefined;
         }
       >();
       // Only an explicit admission may seed the following open. Rotation/reuse
@@ -622,6 +628,12 @@ export const layerWithOptions = (
                 memoryPrepareInputs.set(threadId, {
                   ...preparedInput,
                   destinationUsable: usableThread,
+                  providerSessionId:
+                    previousInput?.providerInstanceId === providerInstanceId
+                      ? previousInput.providerSessionId
+                      : undefined,
+                  // Preparing inputs is not evidence that a credential was installed.
+                  installedCredential: undefined,
                 });
                 const readOnly = preparedInput.readOnly === true;
                 const threadReadAllowed = usableThread;
@@ -637,6 +649,14 @@ export const layerWithOptions = (
                     : { dispatchScopes: preparedInput.dispatchScopes }),
                 });
                 const issuedPolicy = { grant, policyEpoch: committed.epoch };
+                const publishInstalledCredential = (id: string) => {
+                  const prepared = memoryPrepareInputs.get(threadId);
+                  if (prepared)
+                    memoryPrepareInputs.set(threadId, {
+                      ...prepared,
+                      installedCredential: { id, policy: issuedPolicy },
+                    });
+                };
                 const grantedScopes: ReadonlyArray<AuthEnvironmentScope> = [
                   ...(grant === "none" ? [] : ["memory:read" as const]),
                   ...(grant === "read_write" ? ["memory:write" as const] : []),
@@ -718,6 +738,7 @@ export const layerWithOptions = (
                     resolved.memoryPolicy?.grant === grant &&
                     resolved.memoryPolicy.policyEpoch === committed.epoch
                   ) {
+                    publishInstalledCredential(existing.providerSessionId);
                     return { mcpCredentialId: existing.providerSessionId, issued: false };
                   }
                   dropMcpCredentialReservation(threadId, existing.providerSessionId);
@@ -763,6 +784,7 @@ export const layerWithOptions = (
                 };
                 if (Option.isSome(admission)) yield* admission.value.rotated(rotation);
                 else yield* PubSub.publish(credentialRotations, rotation);
+                publishInstalledCredential(credential.config.providerSessionId);
                 reserveMcpCredential(threadId, credential.config.providerSessionId);
                 return { mcpCredentialId: credential.config.providerSessionId, issued: true };
               }),
@@ -2479,10 +2501,29 @@ export const layerWithOptions = (
             )
               return undefined;
             const config = yield* mcpSessions.read(threadId);
-            return config !== undefined &&
-              entry.mcpCredentialIdByThread.get(threadId) === config.providerSessionId
-              ? prepared
+            const committed = Option.isSome(memoryPolicy)
+              ? yield* memoryPolicy.value.read
               : undefined;
+            const installed = prepared.installedCredential;
+            if (
+              !config ||
+              !committed ||
+              !installed ||
+              installed.policy.grant === "none" ||
+              memoryPrepareInputs.get(threadId) !== prepared ||
+              installed.id !== config.providerSessionId ||
+              entry.mcpCredentialIdByThread.get(threadId) !== installed.id ||
+              installed.policy.policyEpoch !== committed.epoch ||
+              installed.policy.grant !==
+                MemoryAccess.effectiveMemoryGrant({
+                  ...committed,
+                  ...prepared,
+                  readOnly: prepared.readOnly === true,
+                  memoryGrantCeiling: prepared.memoryGrantCeiling,
+                })
+            )
+              return undefined;
+            return prepared;
           }),
         mcpCredentialRotations: Option.isSome(admission)
           ? admission.value.rotations
