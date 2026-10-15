@@ -51,19 +51,13 @@ it("retains a delegated row's saved ceiling across actual connection grant revoc
   view = renderNative(h, <DelegatedRow />);
   await view.render();
   expect(view.container.textContent).toContain("Synthetic delegated work");
-  expect(view.container.textContent).toContain(
-    "Saved memory access: read_write · Effective access: unknown",
-  );
+  expect(view.container.textContent).toContain("Memory: read_write");
   await act(async () => h.revoke());
   expect(view.container.textContent).toContain("Connection grant revoked");
-  expect(view.container.textContent).toContain(
-    "Saved memory access: read_write · Effective access: unknown",
-  );
+  expect(view.container.textContent).toContain("Memory: read_write");
   await act(async () => {
     const { memoryGrantCeiling: _ceiling, ...legacy } = h.registry.get(source);
     h.registry.set(source, legacy);
   });
-  expect(view.container.textContent).toContain(
-    "Saved memory access: none · Effective access: unknown",
-  );
+  expect(view.container.textContent).not.toContain("Memory:");
 });

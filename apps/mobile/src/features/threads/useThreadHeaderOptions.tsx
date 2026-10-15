@@ -1,5 +1,3 @@
-import { EnvironmentId, ThreadId } from "@goat/contracts";
-import { useMemoryNavigation } from "../settings/SettingsMemoryRouteScreen";
 import { StackActions, useNavigation } from "@react-navigation/native";
 import { useMemo } from "react";
 import { Platform } from "react-native";
@@ -25,12 +23,6 @@ export function useThreadHeaderOptions(props: {
   readonly gitControls: Parameters<typeof ThreadGitControls>[0];
   readonly onReturnToThread?: () => void;
 }) {
-  const memory = useMemoryNavigation(EnvironmentId.make(props.gitControls.environmentId), {
-    thread: {
-      environmentId: EnvironmentId.make(props.gitControls.environmentId),
-      threadId: ThreadId.make(props.gitControls.threadId),
-    },
-  });
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const usesDuoHeader = usesNativeWorkspaceColumns && Platform.OS === "ios" && !Platform.isPad;
   const navigation = useNavigation();
@@ -185,18 +177,6 @@ export function useThreadHeaderOptions(props: {
     // the git controls on the RIGHT (no center items — center space is
     // reserved for future breadcrumbs/status).
     unstable_headerRightItems: () => [
-      ...(memory.visible
-        ? [
-            withNativeGlassHeaderItem({
-              type: "button" as const,
-              identifier: "thread-memory",
-              label: "Memory",
-              accessibilityLabel: "Open memory",
-              icon: { name: "brain", type: "sfSymbol" as const },
-              onPress: memory.open,
-            }),
-          ]
-        : []),
       ...(usesDuoHeader
         ? duoRightHeaderItems
         : layout.usesSplitView
@@ -215,8 +195,6 @@ export function useThreadHeaderOptions(props: {
     // callbacks also read state the items do not display (a "Push" item runs `push` or
     // `commit_push` depending on the default ref), so that state is keyed too.
     optionsVersion: [
-      memory.visible,
-      memory.open,
       splitLeftHeaderItems,
       threadCenterHeaderItems,
       compactRightHeaderItems,

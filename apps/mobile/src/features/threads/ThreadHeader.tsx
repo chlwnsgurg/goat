@@ -1,5 +1,3 @@
-import { EnvironmentId, ThreadId } from "@goat/contracts";
-import { useMemoryNavigation } from "../settings/SettingsMemoryRouteScreen";
 import { useMemo } from "react";
 import { ScreenHeader } from "../../components/ScreenHeader";
 import { ScreenHeaderButton } from "../../components/ScreenHeaderButton";
@@ -24,16 +22,8 @@ export function ThreadHeader(
   const { layout, panes, toggleAuxiliaryPane } = useAdaptiveWorkspaceLayout();
   const { onOpenTerminal, onMergeBack } = props.gitControls;
   const native = useThreadHeaderOptions(props);
-  const memory = useMemoryNavigation(EnvironmentId.make(props.gitControls.environmentId), {
-    thread: {
-      environmentId: EnvironmentId.make(props.gitControls.environmentId),
-      threadId: ThreadId.make(props.gitControls.threadId),
-    },
-  });
   const androidHeaderActions = useMemo<ReadonlyArray<ScreenHeaderAction>>(() => {
-    const actions: ScreenHeaderAction[] = memory.visible
-      ? [{ accessibilityLabel: "Open memory", icon: "brain", onPress: memory.open }]
-      : [];
+    const actions: ScreenHeaderAction[] = [];
     if (props.onReturnToThread) {
       actions.push({
         accessibilityLabel: "Return to chat",
@@ -73,8 +63,6 @@ export function ThreadHeader(
     }
     return actions;
   }, [
-    memory.visible,
-    memory.open,
     props.inspectorMode,
     panes.auxiliaryPaneVisible,
     props.onOpenFilesInspector,

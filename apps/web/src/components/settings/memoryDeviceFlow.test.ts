@@ -6,7 +6,7 @@ import {
   type MemoryHubSettingsUpdateInput,
   type MemoryHubSettingsUpdateResult,
 } from "@goat/contracts";
-import { memoryDeviceFlow } from "./memoryDeviceFlow";
+import { memoryDeviceFlow } from "@goat/client-runtime/memory-device-flow";
 const hub = EnvironmentId.make("hub");
 const device = EnvironmentId.make("device");
 const requestIds = [1, 2, 3].map((n) =>
