@@ -5507,10 +5507,34 @@ const make = Effect.gen(function* () {
     const original = yield* receipt(space, result.receipt.operationId);
     if (!original || original.operationDigest !== result.operationDigest)
       return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    const prior = original.receipt.forgetExpansion;
+    const next = result.receipt.forgetExpansion;
+    if (
+      prior &&
+      (!next ||
+        prior.operationId !== next.operationId ||
+        prior.operationDigest !== next.operationDigest ||
+        prior.requestDigest !== next.requestDigest)
+    )
+      return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
     yield* stored(
       "forget-expansion-result",
       sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(result.receipt)} WHERE memory_space_id=${space} AND operation_id=${result.receipt.operationId}`,
     );
+    const compact = yield* stored(
+      "forget-expansion-compact",
+      sql<{
+        compact_json: string;
+      }>`SELECT compact_json FROM memory_compact_receipts WHERE space=${space} AND operation_id=${result.receipt.operationId}`,
+    );
+    if (compact[0]) {
+      const record = yield* compactCodec.decode(compact[0].compact_json, strict);
+      const receipt = yield* hubReceiptCodec.decode(
+        yield* receiptCodec.encode(result.receipt),
+        strict,
+      );
+      yield* persistCompactReceipt({ ...record, receipt });
+    }
     return result;
   });
   const readForgetReservation = Effect.fn("MemoryStore.readForgetReservation")(function* (
@@ -6016,7 +6040,9 @@ const make = Effect.gen(function* () {
         receipt_json: string;
         operation_digest: string;
       }>`SELECT receipt_json,operation_digest FROM memory_events WHERE memory_space_id=${space}
-       AND json_extract(receipt_json,'$.forgetExpansion.operationId')=${receipt.operationId}`,
+       AND json_extract(receipt_json,'$.forgetExpansion.operationId')=${receipt.operationId}
+      UNION SELECT receipt_json,operation_digest FROM memory_compact_receipts WHERE space=${space}
+      AND json_extract(receipt_json,'$.forgetExpansion.operationId')=${receipt.operationId}`,
     );
     for (const link of links) {
       const parent = yield* receiptCodec.decode(link.receipt_json, strict);
@@ -6377,7 +6403,8 @@ const make = Effect.gen(function* () {
       (SELECT coalesce(sum(length(CAST(metadata_json AS BLOB))),0) FROM memory_inbox_pending)+
       (SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_keys)+
       (SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_lineage)+
-      (SELECT coalesce(sum(reserve_bytes),0) FROM memory_identity_ledger) AS bytes`,
+      (SELECT coalesce(sum(reserve_bytes),0) FROM memory_identity_ledger)+
+      (SELECT coalesce(sum(value),0) FROM memory_quota_counters WHERE space='_hub_global' AND dimension='import_metadata' AND scope_key='') AS bytes`,
     );
     return rows[0]!.bytes;
   });
@@ -6392,7 +6419,7 @@ const make = Effect.gen(function* () {
           ...input,
           receipt: {
             ...input.receipt,
-            ...(old?.receipt.forgetExpansion
+            ...(!input.receipt.forgetExpansion && old?.receipt.forgetExpansion
               ? { forgetExpansion: old.receipt.forgetExpansion }
               : {}),
             ...(old?.receipt.forgetRetryOf ? { forgetRetryOf: old.receipt.forgetRetryOf } : {}),

@@ -29,6 +29,11 @@ export default Effect.gen(function* () {
     const reserve = `(${bytes}+64)`;
     return (
       counter("'_hub_global'", "import_lineage_bytes", `${sign}*${bytes}`) +
+      counter(
+        "'_hub_global'",
+        "hub_receipts",
+        `${sign}*(CASE WHEN ${p}.record_kind='batch' THEN 1 ELSE 0 END)`,
+      ) +
       counter("'_hub_global'", "hub_metadata", `${sign}*${bytes}`) +
       counter(`${p}.space`, "hub_snapshot_bytes", `${sign}*${bytes}`) +
       counter(`${p}.space`, "hub_snapshot_rows", `${sign}`) +
@@ -82,6 +87,7 @@ export default Effect.gen(function* () {
   const metrics = [
     ["import_metadata", (p: string) => `(${rawBytes(p)})+(${guardBytes(p)})`],
     ["import_staging", stagingBytes],
+    ["import_receipts", (p: string) => `CASE WHEN ${p}record_kind='batch' THEN 1 ELSE 0 END`],
     ["import_sources", (p: string) => `CASE WHEN ${p}record_kind='source' THEN 1 ELSE 0 END`],
     ["import_source_items", (p: string) => `CASE WHEN ${p}record_kind='item' THEN 1 ELSE 0 END`],
     ["import_aliases", (p: string) => `CASE WHEN ${p}record_kind='item' THEN 1 ELSE 0 END`],
@@ -106,6 +112,13 @@ export default Effect.gen(function* () {
   yield* sql.unsafe(`INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
     SELECT space,'hub_snapshot_rows','',count(*) FROM memory_import_receipts GROUP BY space
     ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`);
+  yield* sql.unsafe(
+    counter(
+      "'_hub_global'",
+      "hub_receipts",
+      `(SELECT count(*) FROM memory_import_receipts WHERE record_kind='batch')`,
+    ),
+  );
   const receiptDelta = (p: string, sign: number) => {
     const bytes = `((${rawBytes(p + ".")})+(${guardBytes(p + ".")}))`;
     return (

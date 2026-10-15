@@ -756,7 +756,7 @@ describe("MemoryImport M3c final fences", () => {
     ["rejected", "deletion"],
     ["suppressed", "binding"],
     ["suppressed", "deletion"],
-  ] as const)("metadata %s refuses %s before durable mutation", (outcome, race) =>
+  ] as const)("metadata %j before durable mutation", ([outcome, race]) =>
     Effect.gen(function* () {
       yield* setupImport;
       const service = yield* Service.MemoryService;
@@ -1166,20 +1166,36 @@ describe("MemoryImport target frontiers", () => {
       const approval = yield* remoteApproval(operation);
       yield* store.acknowledgeOutbox(`sync:${space}:${first.selection.operationId}`, approval);
       const previous = (yield* service.importPorts.readItem(first.next, Effect.void))!;
-      for (const n of [210, 220])
-        yield* service.upsert(
-          {
+      yield* seedMember;
+      for (const n of [210, 220]) {
+        const operationId = M.MemoryOperationId.make(uuid(n));
+        const revisionId = M.MemoryRevisionId.make(uuid(n + 1));
+        yield* service.admitHubOperation({
+          authority,
+          operation: {
+            protocolVersion: 1,
+            kind: "upsert",
             memorySpaceId: space,
             memoryId,
-            operationId: M.MemoryOperationId.make(uuid(n)),
+            operationId,
+            originEnvironmentId: environmentId,
             expectedHeads: [first.selection.revisionId],
-            scope: { kind: "user" },
-            assertionKind: "inference",
-            baseBoundary: null,
+            revision: {
+              memorySpaceId: space,
+              memoryId,
+              operationId,
+              revisionId,
+              payloadRef: revisionId,
+              parents: [first.selection.revisionId],
+              scope: { kind: "user" },
+              assertionKind: "inference",
+              provenance: { environmentId },
+              createdAtUtc: stamp,
+            },
             payload: { ...first.candidate.payload, text: `synthetic branch ${n}` },
           },
-          Effect.void,
-        );
+        });
+      }
       const target = yield* service.importPorts.prepareTarget(
         {
           ...address,
@@ -1402,7 +1418,7 @@ describe("MemoryImport origin admission", () => {
     ["import_digests", M.MEMORY_IMPORT_MAX_CONTENT_DIGESTS, 1],
     ["import_live_items", M.MEMORY_IMPORT_MAX_LIVE_ITEMS, 1],
     ["import_live_bytes", M.MEMORY_IMPORT_MAX_LIVE_BODY_BYTES, 16],
-  ] as const)("origin %s admits equality and refuses +1 atomically", (dimension, limit, delta) =>
+  ] as const)("origin %j admits equality and refuses +1 atomically", ([dimension, limit, delta]) =>
     Effect.gen(function* () {
       yield* setupImport;
       const service = yield* Service.MemoryService;
