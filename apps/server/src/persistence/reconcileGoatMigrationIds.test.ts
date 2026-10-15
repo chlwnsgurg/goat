@@ -84,6 +84,7 @@ describe("GOAT migration ids", () => {
         [72, "MemoryHubSync"],
         [73, "MemorySearchCounters"],
         [74, "MemoryTaskGrantCeiling"],
+        [75, "MemoryImportLineage"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);

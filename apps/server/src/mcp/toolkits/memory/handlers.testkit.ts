@@ -9,6 +9,7 @@ import { McpSchema, McpServer } from "effect/ai";
 import migration from "../../../persistence/Migrations/071_Memory.ts";
 import searchMigration from "../../../persistence/Migrations/073_MemorySearchCounters.ts";
 import hubMigration from "../../../persistence/Migrations/072_MemoryHubSync.ts";
+import lineageMigration from "../../../persistence/Migrations/075_MemoryImportLineage.ts";
 import * as RepositoryResolver from "../../../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as Store from "../../../memory/MemoryStore.ts";
@@ -29,7 +30,11 @@ const identity = Layer.succeed(Environment.ServerEnvironmentIdentity, {
   getEnvironmentId: Effect.succeed(M.EnvironmentId.make("fixture-memory-mcp")),
 });
 const database = Layer.effectDiscard(
-  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
+  migration.pipe(
+    Effect.andThen(hubMigration),
+    Effect.andThen(searchMigration),
+    Effect.andThen(lineageMigration),
+  ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storage = Store.layer.pipe(Layer.provideMerge(database));
 const makeCore = (serviceLayer: typeof Service.layer) =>

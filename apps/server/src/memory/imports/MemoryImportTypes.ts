@@ -67,6 +67,7 @@ export type ImportCandidate = {
   readonly sourceFingerprint: string;
   readonly contentFingerprint: string;
   readonly title?: string;
+  /** Parser emits evidence=[]; L4 attaches import evidence before preparing commit. */
   readonly payload: M.MemoryPayload;
   readonly byteCount: number;
 };
@@ -110,6 +111,9 @@ export type ImportRegistration = ImportSourceAddress & {
   readonly session: ImportSession | null;
 };
 export type ImportFrozenSelection = {
+  /** Body-free settlement link, captured by the Store when this selection commits. */
+  readonly observation?: NonNullable<ImportItem["pending"]>;
+  readonly settled?: boolean;
   readonly selector: ImportSelector;
   readonly memoryId: M.MemoryId;
   readonly operationId: M.MemoryOperationId;
@@ -129,6 +133,7 @@ export type ImportBatch = ImportBatchAddress & {
 };
 export type ImportRetiredBatchGuard = {
   readonly kind: "retired";
+  readonly codecVersion: 1;
   readonly selectionDigest: string;
 };
 export type ImportItem = ImportSourceAddress & {
@@ -165,6 +170,16 @@ export type ImportMatch =
       readonly revision: M.MemoryRevision;
       readonly payload: M.MemoryPayload;
     };
+/** Captured under the writer lock; commit rechecks heads, binding and previous independently. */
+export type ImportTarget = {
+  readonly identity: M.MemoryIdentityRecord | null;
+  readonly heads: readonly M.MemoryRevisionId[];
+  readonly forgotten: boolean;
+  readonly pendingForget: boolean;
+  readonly acceptedParent: Store.MemoryParentState | null;
+  /** Only an active single head with a canonical hub approval can be an alias parent. */
+  readonly alias: { readonly revision: M.MemoryRevision; readonly payload: M.MemoryPayload } | null;
+};
 export type ImportBatchPreflight =
   | { readonly kind: "new" }
   | {
@@ -180,6 +195,11 @@ export type LocalImportReadiness = {
 };
 /** Bounded candidate and captured CAS/parent fences, never a Reader or raw file handle. */
 export type PreparedImportCommit = {
+  /** Batch-only rejection: preserve previous exactly, or leave a new identity unallocated (next rejected, no observations). */
+  readonly rejectOnly?: {
+    readonly issue: M.MemoryImportIssue;
+    readonly capacity?: M.MemoryCapacityExceeded;
+  };
   readonly registrationVersion: number;
   readonly registration: ImportRegistration;
   readonly batch: ImportBatch;
@@ -216,6 +236,14 @@ export type ImportPorts = {
     input: ImportAddress & { source: M.MemorySourceKey; content: M.MemoryContentSuppression },
     permit: Permit,
   ) => Effect.Effect<ImportMatch, MemoryServiceError, never>;
+  readonly prepareTarget: (
+    input: ImportAddress & {
+      readonly memoryId: M.MemoryId;
+      readonly scope: M.MemoryScope;
+      readonly acceptedRevisionId: M.MemoryRevisionId | null;
+    },
+    permit: Permit,
+  ) => Effect.Effect<ImportTarget, MemoryServiceError, never>;
   readonly binding: (
     input: M.MemoryProjectBindingGetInput,
     permit: Permit,
@@ -292,6 +320,8 @@ export type ImportStorePorts = {
     batch: ImportBatch;
     previous: ImportItem | null;
     next: ImportItem;
+    preserveItem?: boolean;
+    contentFingerprint: string;
     commitIntent: Effect.Effect<void, MemoryServiceError, Store.Transaction>;
   }) => Store.InTx<M.MemoryImportItemResult, MemoryServiceError>;
 };

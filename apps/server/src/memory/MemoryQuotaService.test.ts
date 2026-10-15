@@ -8,6 +8,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
+import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import { memoryOperationDigest } from "./MemoryDecider.ts";
@@ -76,9 +77,9 @@ const decision = (op = operation()): Store.MemoryDecision => ({
     : {}),
 });
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
-const setup = Layer.effectDiscard(migration.pipe(Effect.andThen(hubMigration))).pipe(
-  Layer.provideMerge(database),
-);
+const setup = Layer.effectDiscard(
+  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(lineageMigration)),
+).pipe(Layer.provideMerge(database));
 const live = Store.layer.pipe(Layer.provideMerge(setup));
 
 const services = Quota.layer.pipe(Layer.provideMerge(live));
@@ -379,7 +380,7 @@ describe("MemoryQuotaService", () => {
       const expansion = result.receipt.forgetExpansion;
       if (!expansion) throw new Error("Missing expansion disposition");
       assert.strictEqual(expansion.requestDigest, request.operationDigest);
-      assert.strictEqual(expansion.status, extra ? "rejected" : "accepted");
+      assert.strictEqual(expansion.status, extra ? "rejected" : "pending");
       assert.notStrictEqual(expansion.operationId, op.operationId);
       const additional = (yield* store.readOperation(space, expansion.operationId))!;
       const additionalReceipt = (yield* store.receipt(space, expansion.operationId))!;

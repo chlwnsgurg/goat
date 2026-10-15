@@ -713,7 +713,9 @@ const make = Effect.gen(function* () {
               memorySpaceId: row.ticket.memorySpaceId,
               memoryId: row.ticket.memoryId,
               inputRevisionIds: row.ticket.conflictHeadSet,
-              inputPayloadRefs: row.ticket.conflictHeadSet,
+              inputPayloadRefs: row.ticket.conflictHeadSet.map(
+                (id) => heads.find((head) => head.revision.revisionId === id)!.revision.payloadRef,
+              ),
               judgmentRef: resolutionId,
               requestedModelSelection: row.ticket.frozenDefaultModelSelection,
               effectiveProvider: trusted.execution.effectiveProvider,
