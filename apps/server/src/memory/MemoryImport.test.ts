@@ -316,7 +316,7 @@ const remoteApproval = (operation: M.MemoryOperation, forgotten = false) =>
     return yield* (yield* Store.MemoryStore).transact(
       service.admitHubOperationTx({ authority, operation }),
     );
-  }).pipe(Effect.provide(importLive));
+  }).pipe(Effect.provide(Layer.fresh(importLive)));
 const compactorLive = Compactor.layer.pipe(
   Layer.provideMerge(importLive),
   Layer.provideMerge(Hub.activityLayer),
