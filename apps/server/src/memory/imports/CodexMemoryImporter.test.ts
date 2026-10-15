@@ -2,7 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { parseCodexMemory } from "./CodexMemoryImporter.ts";
+import { parseCodexMemory as parseUncheckedCodexMemory } from "./CodexMemoryImporter.ts";
 import {
   buildMemoryImportFixture,
   MEMORY_IMPORT_FIXTURE_PARSER_VERSIONS,
@@ -11,6 +11,14 @@ import {
 import type { ImportParsedItem, ImportSnapshot } from "./MemoryImportTypes.ts";
 
 const decodePayload = Schema.decodeUnknownSync(M.MemoryPayload);
+// Validate every returned candidate, including mixed candidate/rejection results.
+const parseCodexMemory = (snapshot: ImportSnapshot) =>
+  Effect.map(parseUncheckedCodexMemory(snapshot), (items) => {
+    for (const item of items)
+      if (item.kind === "candidate")
+        assert.deepEqual(decodePayload(item.candidate.payload), item.candidate.payload);
+    return items;
+  });
 const handbook = (body = "Use focused verification.", title = "Guidance", metadata = "") =>
   `# Task Group: ${title}\nscope: synthetic work\n${metadata}\n## Task 1: Check\n\n### learnings\n${body}`;
 const note = "extensions/ad_hoc/notes/note.md";
@@ -170,6 +178,7 @@ describe("Codex memory pure profiles", () => {
           const renamed = yield* get(handbook("First", "Renamed"));
           assert.notEqual(a.sourceItemKey, renamed.sourceItemKey);
           assert.equal(a.contentFingerprint, renamed.contentFingerprint);
+          assert.notEqual(a.sourceFingerprint, renamed.sourceFingerprint);
           const adHoc = yield* buildMemoryImportFixture("codex-ad-hoc-v1");
           const [n1] = candidates(
             yield* parseCodexMemory(files(adHoc.snapshot, { [note]: "same" })),
@@ -352,6 +361,43 @@ describe("Codex memory pure profiles", () => {
         yield* failure({ ...snapshot, format: "claude" }, "unsupported_format");
       }),
     ),
+  );
+
+  it.effect.each(["codex-handbook-v1", "codex-ad-hoc-v1"] as const)(
+    "encoded payload equality, +1 and JSON escape expansion for %s",
+    (profile) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { snapshot } = yield* buildMemoryImportFixture(profile);
+          const isHandbook = profile === "codex-handbook-v1";
+          const selector = isHandbook ? "MEMORY.md" : note;
+          const sourceItemKey = isHandbook ? "MEMORY.md#task-group:Guidance" : `${note}#body`;
+          const input = (text: string) =>
+            files(snapshot, {
+              [selector]: isHandbook
+                ? `# Task Group: Guidance\nscope: synthetic work\n${text}`
+                : text,
+            });
+          const encodedBytes = (text: string) =>
+            new TextEncoder().encode(
+              JSON.stringify({ text, evidence: [], derivedFromMemoryRevisions: [] }),
+            ).length;
+          const prefix = "a" + "\u0001".repeat(10_000);
+          const at = prefix + "x".repeat(M.MEMORY_PAYLOAD_MAX_UTF8_BYTES - encodedBytes(prefix));
+          assert.equal(encodedBytes(at), M.MEMORY_PAYLOAD_MAX_UTF8_BYTES);
+          assert.equal(encodedBytes(at + "x"), M.MEMORY_PAYLOAD_MAX_UTF8_BYTES + 1);
+          const [accepted] = candidates(yield* parseCodexMemory(input(at)));
+          assert.equal(accepted!.payload.text, at);
+          for (const text of [at + "x", "a" + "\u0001".repeat(12_000)]) {
+            const byteCount = new TextEncoder().encode(text).length;
+            assert.ok(byteCount <= M.MEMORY_BODY_MAX_UTF8_BYTES);
+            assert.ok(encodedBytes(text) > M.MEMORY_PAYLOAD_MAX_UTF8_BYTES);
+            assert.deepEqual(yield* parseCodexMemory(input(text)), [
+              { kind: "rejected", sourceItemKey, byteCount, issue: "limit_exceeded" },
+            ]);
+          }
+        }),
+      ),
   );
 
   it.effect("body/title equality and +1 reject entire items without truncation", () =>

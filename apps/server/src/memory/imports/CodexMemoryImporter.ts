@@ -91,7 +91,9 @@ export const parseCodexMemory: MemoryImportParser = (input) =>
           return "secret_detected" as const;
         if (bytes(key) > M.MEMORY_IMPORT_KEY_MAX_UTF8_BYTES || control(key))
           return "path_rejected" as const;
+        const payload = { text, evidence: [], derivedFromMemoryRevisions: [] };
         const issue =
+          bytes(JSON.stringify(payload)) > M.MEMORY_PAYLOAD_MAX_UTF8_BYTES ||
           byteCount > M.MEMORY_BODY_MAX_UTF8_BYTES ||
           (title !== undefined && [...title].length > TITLE_MAX_CODE_POINTS)
             ? "limit_exceeded"
@@ -109,7 +111,7 @@ export const parseCodexMemory: MemoryImportParser = (input) =>
               ),
               contentFingerprint: hash(text),
               ...(title === undefined ? {} : { title }),
-              payload: { text, evidence: [], derivedFromMemoryRevisions: [] },
+              payload,
               byteCount,
             },
           });
