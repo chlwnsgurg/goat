@@ -3,16 +3,22 @@ import { makeSubagentChildThread } from "@goat/provider-core/server/subagentProj
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
+const encodeThread = Schema.encodeSync(Schema.fromJsonString(M.OrchestrationV2AppThreadJson));
+const encodeProvider = Schema.encodeSync(
+  Schema.fromJsonString(M.OrchestrationV2ProviderThreadJson),
+);
+const encodeTransfer = Schema.encodeSync(
+  Schema.fromJsonString(M.OrchestrationV2ContextTransferJson),
+);
 const now = DateTime.makeUnsafe("2026-10-14T00:00:00.000Z");
 const parent = M.ThreadId.make("parent");
 const selection = { instanceId: M.ProviderInstanceId.make("fixture"), model: "fixture" };
-type OriginEvent = {
-  readonly type:
-    | "provider-thread.updated"
-    | "context-transfer.created"
-    | "context-transfer.updated";
-  readonly payload: M.OrchestrationV2ProviderThread | M.OrchestrationV2ContextTransfer;
-};
+type OriginEvent =
+  | { readonly type: "provider-thread.updated"; readonly payload: M.OrchestrationV2ProviderThread }
+  | {
+      readonly type: "context-transfer.created" | "context-transfer.updated";
+      readonly payload: M.OrchestrationV2ContextTransfer;
+    };
 
 /** Canonical persisted shapes from threadCreate, delegateTask, ThreadForkService and imports.
  * Launcher/parent/node metadata identifies relationships; only fork/import/transfer carries history.
@@ -108,17 +114,13 @@ export function threadProvenanceCases(threadId: M.ThreadId) {
   ) => ({
     name,
     state,
-    createdJson: Schema.encodeSync(Schema.fromJsonString(M.OrchestrationV2AppThreadJson))(thread),
+    createdJson: encodeThread(thread),
     events: events.map((event) => ({
       type: event.type,
       payloadJson:
         event.type === "provider-thread.updated"
-          ? Schema.encodeSync(Schema.fromJsonString(M.OrchestrationV2ProviderThreadJson))(
-              event.payload as M.OrchestrationV2ProviderThread,
-            )
-          : Schema.encodeSync(Schema.fromJsonString(M.OrchestrationV2ContextTransferJson))(
-              event.payload as M.OrchestrationV2ContextTransfer,
-            ),
+          ? encodeProvider(event.payload)
+          : encodeTransfer(event.payload),
     })),
   });
   const launched = (via: NonNullable<M.OrchestrationV2AppThread["launchedBy"]>["via"]) => ({
@@ -150,6 +152,36 @@ export function threadProvenanceCases(threadId: M.ThreadId) {
       ...fresh,
       activeProviderThreadId: providerThread.id,
     }),
+    row(
+      "native prompt-only subagent",
+      "tracked",
+      {
+        ...child,
+        creationSource: "provider",
+        activeProviderThreadId: providerThread.id,
+      },
+      [
+        {
+          type: "provider-thread.updated",
+          payload: {
+            ...providerThread,
+            status: "active",
+            providerSessionId: M.ProviderSessionId.make("synthetic-session"),
+          },
+        },
+      ],
+    ),
+    row("native fork origin", "unknown", {
+      ...fresh,
+      forkedFrom: {
+        type: "provider_thread",
+        providerThreadId: M.ProviderThreadId.make("source-native"),
+      },
+    }),
+    row("spawn followed by real context transfer", "unknown", child, [
+      { type: "context-transfer.created", payload: transfer("subagent_spawn") },
+      { type: "context-transfer.updated", payload: transfer("provider_handoff") },
+    ]),
     row("fork", "unknown", fork, [{ type: "context-transfer.created", payload: transfer("fork") }]),
     row("fork side chat", "unknown", { ...fork, sideChatOf: parent }),
     row("legacy import", "unknown", { ...fresh, historyOrigin: "v1_import" }),

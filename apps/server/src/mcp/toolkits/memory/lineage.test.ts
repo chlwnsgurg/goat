@@ -99,7 +99,6 @@ it.effect(
   () =>
     Effect.gen(function* () {
       yield* setup;
-      const store = yield* Store.MemoryStore;
       const service = yield* Service.MemoryService;
       const a = yield* seed(16000);
       expect(yield* admitSnapshot).toBeDefined();
@@ -175,7 +174,7 @@ it.effect.each(["fork", "import", "transfer", "overflow"] as const)(
       else {
         const payload =
           kind === "fork"
-            ? '{"forkedFrom":{}}'
+            ? '{"forkedFrom":{"type":"run","threadId":"other","runId":"source-run"}}'
             : kind === "import"
               ? '{"historyOrigin":"v1_import"}'
               : '{"targetThreadId":"r5-caller","sourceThreadId":"other"}';

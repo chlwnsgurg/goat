@@ -4,6 +4,7 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 // eslint-disable-next-line goat/no-raw-mcp-registration -- Test harness calls only toolkits registered through McpHttpServer.toolkitRegistration.
 import { McpSchema, McpServer } from "effect/ai";
 import migration from "../../../persistence/Migrations/071_Memory.ts";
@@ -32,17 +33,23 @@ const database = Layer.effectDiscard(
   migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storage = Store.layer.pipe(Layer.provideMerge(database));
-const makeCore = (serviceLayer: typeof Service.layer) =>
+const makeCore = <E, R>(
+  serviceLayer: typeof Service.layer,
+  databaseLayer: Layer.Layer<SqlClient.SqlClient, E, R>,
+  environmentLayer = identity,
+) =>
   serviceLayer.pipe(
-    Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(storage))),
-    Layer.provide(identity),
+    Layer.provideMerge(
+      Quota.layer.pipe(Layer.provideMerge(Store.layer.pipe(Layer.provideMerge(databaseLayer)))),
+    ),
+    Layer.provide(environmentLayer),
     Layer.provide(
       Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
         resolve: () => Effect.succeed(null),
       }),
     ),
   );
-export const core = makeCore(Service.layer);
+export const core = makeCore(Service.layer, database);
 const settings = Settings.layerTest({}, "memoryHub");
 const admin = Layer.effect(Hub.MemoryHubAdministrator, Hub.makeAdministrator).pipe(
   Layer.provideMerge(storage),
@@ -70,7 +77,7 @@ const sync = Layer.unwrap(
   }),
 ).pipe(Layer.provide(admin));
 
-const makeLayer = (serviceCore: typeof core) =>
+const makeLayer = <E, R>(serviceCore: Layer.Layer<Layer.Success<typeof core>, E, R>) =>
   Layer.mergeAll(
     McpHttpServer.layerMemoryToolkit,
     McpHttpServer.layerMemoryAdministrationToolkit,
@@ -82,9 +89,34 @@ const makeLayer = (serviceCore: typeof core) =>
     Layer.provide(NodeServices.layer),
   );
 export const layer = makeLayer(core);
+/** Session admission and memory calls must share the environment identity and event database. */
+export const layerForThreadEnvironment = <E, R>(
+  environmentId: M.EnvironmentId,
+  databaseLayer: Layer.Layer<SqlClient.SqlClient, E, R>,
+) =>
+  McpHttpServer.layerMemoryToolkit.pipe(
+    Layer.provideMerge(
+      makeCore(
+        Service.layer,
+        databaseLayer,
+        Layer.succeed(Environment.ServerEnvironmentIdentity, {
+          getEnvironmentId: Effect.succeed(environmentId),
+        }),
+      ),
+    ),
+    Layer.provide(
+      Layer.mock(Sync.MemorySyncService)({
+        syncStatus: (_input, permit) =>
+          permit.pipe(Effect.andThen(Effect.fail(new M.MemoryHubError({ code: "hub_disabled" })))),
+      }),
+    ),
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+    Layer.provide(NodeServices.layer),
+  );
 export const layerWithSourceReadAuthority = (
   authority: Service.MemorySourceReadAuthority["readSource"],
-) => makeLayer(makeCore(Service.layerWithSourceReadAuthority(authority)));
+) => makeLayer(makeCore(Service.layerWithSourceReadAuthority(authority), database));
 const client = McpSchema.McpServerClient.of({
   clientId: 1,
   clientCapabilities: {},

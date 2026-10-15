@@ -272,10 +272,6 @@ function makeThreadCreatedEvent(input: {
       (yield* input.idAllocator.allocate.project({
         fixtureName: "provider-session-manager",
       }));
-    const providerThreadId = input.idAllocator.derive.providerThread({
-      driver: CODEX_DRIVER,
-      nativeThreadId: "native-thread",
-    });
     const thread: OrchestrationV2AppThread = {
       createdBy: "user",
       creationSource: "web",
@@ -288,7 +284,7 @@ function makeThreadCreatedEvent(input: {
       interactionMode: "default",
       branch: null,
       worktreePath: null,
-      activeProviderThreadId: providerThreadId,
+      activeProviderThreadId: null,
       lineage: {
         parentThreadId: null,
         relationshipToParent: null,
@@ -5408,7 +5404,10 @@ it.effect(
           Layer.mergeAll(
             layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
             settingsLayer,
-            MemoryToolkitFixture.layer,
+            MemoryToolkitFixture.layerForThreadEnvironment(
+              EnvironmentId.make("environment-provider-session-manager"),
+              layerTestDatabase,
+            ),
           ),
         ),
       );
@@ -5551,7 +5550,10 @@ it.effect.each(["new", "existing"] as const)(
           Layer.mergeAll(
             layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
             settingsLayer,
-            MemoryToolkitFixture.layer,
+            MemoryToolkitFixture.layerForThreadEnvironment(
+              EnvironmentId.make("environment-provider-session-manager"),
+              layerTestDatabase,
+            ),
           ),
         ),
       );
@@ -5645,7 +5647,10 @@ it.effect.each([
           Layer.mergeAll(
             layerTest({ state, idleTimeoutMs: 60_000, serverSettingsLayer: settingsLayer }),
             settingsLayer,
-            MemoryToolkitFixture.layer,
+            MemoryToolkitFixture.layerForThreadEnvironment(
+              EnvironmentId.make("environment-provider-session-manager"),
+              layerTestDatabase,
+            ),
           ),
         ),
       );
