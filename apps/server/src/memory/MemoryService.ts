@@ -303,6 +303,7 @@ const normalizeMemoryDependencies = Effect.fn("MemoryService.normalizeMemoryDepe
     payload: M.MemoryPayload,
     allowPruned = false,
     resolutionHeads: ReadonlyArray<M.MemoryRevisionId> = [],
+    resolvingMemoryId?: M.MemoryId,
   ) {
     const sql = yield* SqlClient.SqlClient;
     const revisions = [...new Set(payload.derivedFromMemoryRevisions)];
@@ -310,6 +311,8 @@ const normalizeMemoryDependencies = Effect.fn("MemoryService.normalizeMemoryDepe
       if (revisions.length > 100)
         return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
       const revision = revisions[index]!;
+      // Only authoritative resolution inputs may use this memory's own history
+      // while its current frontier is quarantined. Foreign owners still need visibility.
       const rows = yield* sql<{ dependencies_json: string | null }>`
         SELECT p.dependencies_json FROM memory_revisions r
         JOIN memory_items i ON i.space=r.space AND i.memory_id=r.memory_id
@@ -317,7 +320,7 @@ const normalizeMemoryDependencies = Effect.fn("MemoryService.normalizeMemoryDepe
         WHERE r.space=${space} AND r.revision_id=${revision}
         AND NOT EXISTS (SELECT 1 FROM memory_inbox_pending q WHERE q.space=r.space AND q.operation_id=r.operation_id AND q.record_kind='operation')
         AND (i.status='active' AND json_extract(i.availability_json,'$.exposure')='visible'
-          OR r.revision_id IN (SELECT value FROM json_each(${encodeHeads(resolutionHeads)})))
+          OR r.memory_id=${resolvingMemoryId ?? null} AND r.revision_id IN (SELECT value FROM json_each(${encodeHeads(resolutionHeads)})))
         AND i.status NOT IN ('forgotten','blocked')
         AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=r.space AND f.memory_id=r.memory_id)
       `.pipe(
@@ -337,8 +340,21 @@ const normalizeMemoryDependencies = Effect.fn("MemoryService.normalizeMemoryDepe
 );
 /** Consumers of a previously admitted closed set verify every still-available edge. */
 export const validateSummaryDependencies = Effect.fn("MemoryService.validateSummaryDependencies")(
-  function* (space: M.MemorySpaceId, payload: M.MemoryPayload) {
-    const normalized = yield* normalizeMemoryDependencies(space, payload, true);
+  function* (
+    space: M.MemorySpaceId,
+    payload: M.MemoryPayload,
+    resolution?: {
+      readonly memoryId: M.MemoryId;
+      readonly revisions: ReadonlyArray<M.MemoryRevisionId>;
+    },
+  ) {
+    const normalized = yield* normalizeMemoryDependencies(
+      space,
+      payload,
+      true,
+      resolution?.revisions ?? [],
+      resolution?.memoryId,
+    );
     if (
       normalized.derivedFromMemoryRevisions.length !==
       new Set(payload.derivedFromMemoryRevisions).size
@@ -2264,10 +2280,14 @@ const make = Effect.fnUntraced(function* (
           encodeHeads([...dependencies].sort())
         )
           return yield* invalid();
-        yield* validateSummaryDependencies(op.memorySpaceId, {
-          ...payload,
-          derivedFromMemoryRevisions: inherited.filter((id) => !op.expectedHeads.includes(id)),
-        }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+        yield* validateSummaryDependencies(
+          op.memorySpaceId,
+          {
+            ...payload,
+            derivedFromMemoryRevisions: inherited.filter((id) => !op.expectedHeads.includes(id)),
+          },
+          { memoryId: op.memoryId, revisions: dependencies },
+        ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
         const iso = (value: number) =>
           M.MemoryUtcTimestamp.make(DateTime.formatIso(DateTime.makeUnsafe(value)));
         approval = {
@@ -2281,8 +2301,9 @@ const make = Effect.fnUntraced(function* (
         const normalized = yield* normalizeMemoryDependencies(
           op.memorySpaceId,
           op.payload,
-          false,
-          op.kind === "resolve" ? op.expectedHeads : [],
+          op.kind === "resolve",
+          op.kind === "resolve" ? op.payload.derivedFromMemoryRevisions : [],
+          op.kind === "resolve" ? op.memoryId : undefined,
         ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
         // The member signs the operation digest. Never rewrite its payload under that ID.
         if (

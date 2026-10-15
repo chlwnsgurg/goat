@@ -5741,6 +5741,10 @@ it.effect.each(["claim", "paired"] as const)(
 
 const resolutionLineageModes = [
   "valid",
+  "self-history",
+  "self-history-pruned",
+  "self-history-omitted",
+  "quarantined-source",
   "limit",
   "generation-race",
   "omitted",
@@ -5752,6 +5756,7 @@ it.effect.each(resolutionLineageModes)(
   (mode) =>
     Effect.gen(function* () {
       const submitted = yield* Deferred.make<void>();
+      const milestone = yield* Deferred.make<"submitted" | "released">();
       const released = yield* Deferred.make<void>();
       let submission: M.MemoryHubApplyResolutionInput | undefined;
       let calls = 0;
@@ -5763,9 +5768,14 @@ it.effect.each(resolutionLineageModes)(
           Effect.gen(function* () {
             submission = input;
             yield* Deferred.succeed(submitted, undefined);
+            yield* Deferred.succeed(milestone, "submitted");
             return yield* new M.MemoryHubError({ code: "unavailable" });
           }),
-        release: () => Deferred.succeed(released, undefined).pipe(Effect.as({ released: true })),
+        release: () =>
+          Deferred.succeed(released, undefined).pipe(
+            Effect.andThen(Deferred.succeed(milestone, "released")),
+            Effect.as({ released: true }),
+          ),
       });
       const model = realGeneration({
         resolveMemoryConflict: (input) =>
@@ -5807,29 +5817,43 @@ it.effect.each(resolutionLineageModes)(
           const deps =
             mode === "limit"
               ? Array.from({ length: 100 }, (_, i) => M.MemoryRevisionId.make(id(9200 + i)))
-              : [source.revision.revisionId];
+              : [
+                  source.revision.revisionId,
+                  ...(mode.startsWith("self-history")
+                    ? [
+                        original.revisions.find(
+                          (r) => !original.heads.includes(r.revision.revisionId),
+                        )!.revision.revisionId,
+                      ]
+                    : []),
+                ];
           for (const head of original.heads)
             yield* sql`UPDATE memory_payloads SET body_json=json_set(body_json,'$.derivedFromMemoryRevisions',json(${encode(deps)})),dependencies_json=${encode(deps)} WHERE payload_ref=${head}`;
+          if (mode === "self-history-pruned")
+            yield* sql`DELETE FROM memory_payloads WHERE payload_ref=${deps[1]!}`;
+          if (mode === "quarantined-source")
+            yield* sql`UPDATE memory_items SET status='quarantined' WHERE memory_id=${source.memoryId}`;
           const sync = yield* Sync.MemorySyncService;
           yield* sync.syncOnce;
-          if (mode === "limit" || mode === "generation-race") {
+          if (mode === "limit" || mode === "generation-race" || mode === "quarantined-source") {
             yield* Deferred.await(released);
             yield* sync.shutdown;
             assert.isUndefined(submission);
-            assert.strictEqual(calls, mode === "limit" ? 0 : 1);
+            assert.strictEqual(calls, mode === "generation-race" ? 1 : 0);
             assert.deepStrictEqual(
               (yield* store.loadAggregate(space, target)).heads,
               original.heads,
             );
             return;
           }
+          assert.strictEqual(yield* Deferred.await(milestone), "submitted");
           yield* Deferred.await(submitted);
           yield* sync.shutdown;
           if (!submission || submission.operation.kind !== "resolve") throw new Error("fixture");
           const op = submission.operation;
           assert.deepStrictEqual(
             [...op.payload.derivedFromMemoryRevisions].sort(),
-            [...original.heads, source.revision.revisionId].sort(),
+            [...original.heads, ...deps].sort(),
           );
           yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${local},${"a".repeat(64)},1,'active')`;
           const authority: Store.HubAuthority = {
@@ -5863,7 +5887,7 @@ it.effect.each(resolutionLineageModes)(
           if (mode === "admission-race")
             yield* sql`UPDATE memory_items SET status='forgotten' WHERE memory_id=${source.memoryId}`;
           const candidate =
-            mode === "omitted"
+            mode === "omitted" || mode === "self-history-omitted"
               ? { ...op, payload: { ...op.payload, derivedFromMemoryRevisions: original.heads } }
               : mode === "omitted-heads"
                 ? { ...op, payload: { ...op.payload, derivedFromMemoryRevisions: deps } }
@@ -5873,8 +5897,10 @@ it.effect.each(resolutionLineageModes)(
             operation: candidate,
             resolutionRequest: { ...submission, operation: candidate },
           });
-          assert.strictEqual(receipt.outcome, mode === "valid" ? "accepted" : "rejected");
-          if (mode !== "valid") {
+          const accepted =
+            mode === "valid" || mode === "self-history" || mode === "self-history-pruned";
+          assert.strictEqual(receipt.outcome, accepted ? "accepted" : "rejected");
+          if (!accepted) {
             assert.strictEqual(
               receipt.failureCode,
               mode === "admission-race" ? "source_invalidated" : "invalid_output",

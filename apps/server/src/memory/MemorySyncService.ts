@@ -600,12 +600,16 @@ const make = Effect.gen(function* () {
           evidence: [],
           derivedFromMemoryRevisions: dependencies,
         }).pipe(Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })));
-        const recheckDependencies = Service.validateSummaryDependencies(row.ticket.memorySpaceId, {
-          ...lineage,
-          derivedFromMemoryRevisions: inheritedDependencies.filter(
-            (id) => !row.ticket.conflictHeadSet.includes(id),
-          ),
-        }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+        const recheckDependencies = Service.validateSummaryDependencies(
+          row.ticket.memorySpaceId,
+          {
+            ...lineage,
+            derivedFromMemoryRevisions: inheritedDependencies.filter(
+              (id) => !row.ticket.conflictHeadSet.includes(id),
+            ),
+          },
+          { memoryId: row.ticket.memoryId, revisions: dependencies },
+        ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
         yield* recheckDependencies;
         const input = yield* decodeResolveInput({
           cwd: runtime.cwd,
