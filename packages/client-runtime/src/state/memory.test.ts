@@ -460,7 +460,11 @@ describe("shared memory client", () => {
           h.registry.mount(otherEdit);
           h.registry.set(edit, { text: "Derived body", memoryIds: [id] });
           h.registry.set(fresh, { text: "New draft", memoryIds: [] });
-          h.registry.set(otherEdit, { text: "Unrelated edit", memoryIds: [unrelated] });
+          h.registry.set(otherEdit, {
+            text: "Unrelated edit",
+            memoryIds: [unrelated],
+            hasRevisionDependencies: false,
+          });
           const source = h.memory.read(readTarget);
           const read = Atom.make((get) => Option.flatten(AsyncResult.value(get(source))));
           h.registry.mount(read);
@@ -1397,6 +1401,38 @@ it.effect.each(["read", "history", "draft"] as const)(
         if (consumer === "history")
           expect(h.registry.get(past)).toEqual(AsyncResult.success(Option.none()));
         if (consumer === "draft") expect(h.registry.get(edit)).toBeNull();
+        expect(h.readCount()).toBe(1);
+      }),
+    ),
+);
+
+it.effect(
+  "preserves an already open independent memory and its edit after another memory is forgotten",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        if (unrelatedItem.status !== "active") throw new Error("Active fixture required");
+        const h = yield* harness();
+        const exposure = h.memory.exposureAtom(target);
+        h.registry.mount(exposure);
+        yield* Queue.offer(h.queue, signal("reset"));
+        yield* waitFor(h.registry, exposure, (state) => state.ready);
+        const read = h.memory.read({ ...target, input: { ...target.input, memoryId: unrelated } });
+        const body = hasBody(read);
+        h.registry.mount(body);
+        yield* Deferred.succeed(h.reply, unrelatedItem);
+        yield* waitFor(h.registry, body, Boolean);
+        const edit = h.memory.draftAtom({ ...target, draftId: "independent" });
+        h.registry.mount(edit);
+        h.registry.set(edit, {
+          text: unrelatedItem.payload.text,
+          memoryIds: [unrelated],
+          hasRevisionDependencies: unrelatedItem.payload.derivedFromMemoryRevisions.length > 0,
+        });
+        yield* Queue.offer(h.queue, signal("forget", id));
+        yield* waitFor(h.registry, exposure, (state) => state.forgotten.has(id));
+        expect(h.registry.get(body)).toBe(true);
+        expect(h.registry.get(edit)).toBe(unrelatedItem.payload.text);
         expect(h.readCount()).toBe(1);
       }),
     ),

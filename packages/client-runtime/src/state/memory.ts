@@ -397,6 +397,7 @@ export function createMemoryEnvironmentAtoms<R, E>(
     const stored = Atom.make<{
       readonly text: string;
       readonly memoryIds: ReadonlyArray<MemoryId>;
+      readonly hasRevisionDependencies?: boolean;
       readonly exposure: MemoryExposure;
     } | null>(null).pipe(Atom.setIdleTTL(0));
     return Atom.writable(
@@ -404,10 +405,11 @@ export function createMemoryEnvironmentAtoms<R, E>(
         const draft = get(stored);
         if (draft === null || draft.memoryIds.length === 0) return draft?.text ?? null;
         const current = get(state);
-        // Drafts carry no complete revision lineage. Purge existing-memory edits on
-        // any same-space forget; ordinary unrelated upserts retain the draft.
+        // Only a caller with a decoded, non-derived payload can prove independence.
+        // Unknown or derived edits close on any same-space forget.
         if (
-          draft.exposure.forgetGeneration !== current.forgetGeneration ||
+          (draft.hasRevisionDependencies !== false &&
+            draft.exposure.forgetGeneration !== current.forgetGeneration) ||
           !memoryExposureMatches(draft.exposure, current, draft.memoryIds)
         ) {
           // Purge the retained text, rather than only hiding it from the view.
@@ -418,7 +420,11 @@ export function createMemoryEnvironmentAtoms<R, E>(
       },
       (
         ctx,
-        draft: { readonly text: string; readonly memoryIds: ReadonlyArray<MemoryId> } | null,
+        draft: {
+          readonly text: string;
+          readonly memoryIds: ReadonlyArray<MemoryId>;
+          readonly hasRevisionDependencies?: boolean;
+        } | null,
       ) => {
         ctx.set(stored, draft === null ? null : { ...draft, exposure: ctx.get(state) });
       },

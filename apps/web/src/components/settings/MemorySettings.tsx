@@ -1159,7 +1159,12 @@ function MemoryEditor({
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
-    if (item) registry.set(draft, { text: item.payload.text, memoryIds: [id] });
+    if (item)
+      registry.set(draft, {
+        text: item.payload.text,
+        memoryIds: [id],
+        hasRevisionDependencies: item.payload.derivedFromMemoryRevisions.length > 0,
+      });
     return () => {
       mounted.current = false;
       registry.set(draft, null);
@@ -1221,7 +1226,13 @@ function MemoryEditor({
         value={text ?? ""}
         disabled={busy || operationId !== null}
         onChange={(event) =>
-          setText({ text: event.currentTarget.value, memoryIds: item ? [id] : [] })
+          setText({
+            text: event.currentTarget.value,
+            memoryIds: item ? [id] : [],
+            hasRevisionDependencies: item
+              ? item.payload.derivedFromMemoryRevisions.length > 0
+              : false,
+          })
         }
       />
       {error ? <p role="alert">{error}</p> : null}
