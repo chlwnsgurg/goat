@@ -6,8 +6,9 @@ import type {
 import type { EnvironmentId, ProjectEntry } from "@goat/contracts";
 import { FileTree, useFileTree, useFileTreeSearch, useFileTreeSelector } from "@pierre/trees/react";
 import { serializeComposerFileLink } from "@goat/shared/composerTrigger";
+import { resolveWorkspaceFilePath } from "@goat/shared/path";
 import { ChevronsDownUp, ChevronsUpDown } from "~/components/solar/nodes";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { InputGroup, InputGroupInput } from "~/components/ui/input-group";
@@ -32,6 +33,7 @@ import { useProjectPathSearch } from "~/state/queries";
 interface FileBrowserPanelProps {
   environmentId: EnvironmentId;
   cwd: string;
+  workspaceRoot: string;
   projectName: string;
   /** Entry currently open in the surface; revealed and selected in the tree. A directory is expanded. */
   selectedPath: string | null;
@@ -98,6 +100,7 @@ function FileSearchField(props: {
 export default function FileBrowserPanel({
   environmentId,
   cwd,
+  workspaceRoot,
   projectName,
   selectedPath,
   selectedPathRevealId,
@@ -105,6 +108,10 @@ export default function FileBrowserPanel({
   onRefreshSelectedFile,
   workspaceMutationId,
 }: FileBrowserPanelProps) {
+  const resolvePath = useCallback(
+    (path: string) => (cwd === workspaceRoot ? path : resolveWorkspaceFilePath(path, cwd)),
+    [cwd, workspaceRoot],
+  );
   const { resolvedTheme } = useTheme();
   const composerRef = useComposerHandleContext();
   const fileContextMenu = useFileContextMenu(environmentId);
@@ -171,7 +178,7 @@ export default function FileBrowserPanel({
       context.close();
       return;
     }
-    const relativePath = item.path.replace(/\/$/, "");
+    const relativePath = resolvePath(item.path.replace(/\/$/, ""));
     const mention = serializeComposerFileLink(relativePath);
     const pointer = contextMenuPointerRef.current;
     const pointerIsFresh = pointer !== null && performance.now() - pointer.at < 1000;
@@ -248,8 +255,9 @@ export default function FileBrowserPanel({
     () =>
       createFileTreeDragMentionController({
         deselect: (path) => treeModelRef.current?.getItem(path)?.deselect(),
+        resolvePath,
       }),
-    [],
+    [resolvePath],
   );
   const { model } = useFileTree({
     composition: {
@@ -283,7 +291,7 @@ export default function FileBrowserPanel({
       const selectedPath = selectedPaths.at(-1)?.replace(/\/$/, "");
       if (selectedPath && entryKindsRef.current.get(selectedPath) === "file") {
         treeSelectionPathRef.current = selectedPath;
-        onOpenFile(selectedPath);
+        onOpenFile(resolvePath(selectedPath));
       }
     },
     paths: [],

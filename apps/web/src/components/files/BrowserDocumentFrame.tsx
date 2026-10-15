@@ -21,7 +21,18 @@ import {
   matchesKeybindingShortcut,
   normalizeEventKey,
 } from "@goat/shared/keybindings";
-import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
+import { FileSurfaceLoading } from "./fileSurfaceChrome";
 
 import { useOpenLink } from "~/browser/useOpenLink";
 import { useHtmlRenderTheme } from "~/hooks/useHtmlRenderTheme";
@@ -31,13 +42,7 @@ import { readLocalApi } from "~/localApi";
 import { cn } from "~/lib/utils";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "~/state/server";
 
-/**
- * Chromium's viewer opens with its own toolbar, a thumbnail rail and a small
- * zoom. The panel header is the only chrome we want, so ask for the page
- * alone, fitted to the panel width. Pinch and keyboard zoom, scrolling, text
- * selection and find still work inside the frame.
- */
-const PDF_VIEWER_FRAGMENT = "#toolbar=0&view=FitH";
+const PdfFilePreview = lazy(() => import("./pdf/PdfFilePreview"));
 
 /**
  * Shortcuts that still work while a focused HTML render holds the keyboard.
@@ -71,26 +76,29 @@ export const isPdfPreviewFile = (path: string): boolean =>
 /**
  * Renders an HTML or PDF document from its URL. HTML runs in a sandboxed frame
  * with an opaque origin, so a page cannot reach the app's session or storage.
- * The built-in PDF viewer needs an unsandboxed frame; a PDF runs no scripts.
+ * PDFs are rendered on demand by pdf.js without an unsandboxed frame.
  * An agent's HTML render also wears the app theme.
  */
 export function BrowserDocumentFrame(props: {
   readonly src: string;
   readonly title: string;
   readonly pdf: boolean;
+  readonly onRetry?: (() => Promise<string | null>) | undefined;
   readonly htmlRender?: boolean;
   /** The thread an HTML render's links open beside. */
   readonly threadRef?: ScopedThreadRef | undefined;
 }) {
   const className = "min-h-0 flex-1 border-0 bg-white";
   return props.pdf ? (
-    // oxlint-disable-next-line react/iframe-missing-sandbox -- the built-in PDF viewer needs an unsandboxed frame.
-    <iframe
-      key={props.src}
-      src={`${props.src}${PDF_VIEWER_FRAGMENT}`}
-      title={props.title}
-      className={className}
-    />
+    <Suspense fallback={<FileSurfaceLoading />}>
+      <PdfFilePreview
+        key={props.src}
+        src={props.src}
+        title={props.title}
+        onRetry={props.onRetry}
+        threadRef={props.threadRef}
+      />
+    </Suspense>
   ) : props.htmlRender ? (
     <HtmlRenderDocument
       key={props.src}

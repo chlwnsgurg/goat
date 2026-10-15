@@ -16,6 +16,7 @@ import {
   type PreviewAutomationSelectResult,
   type PreviewAutomationSetColorSchemeResult,
   type PreviewAutomationSnapshot,
+  type PreviewAutomationLogs,
   type PreviewAutomationStatus,
   type PreviewTabId,
 } from "@goat/contracts";
@@ -75,7 +76,11 @@ const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(tabId === undefined ? {} : { tabId }),
   });
-  if (["status", "open", "navigate", "back", "forward", "reload", "snapshot"].includes(operation))
+  if (
+    ["status", "open", "navigate", "back", "forward", "reload", "snapshot", "logs"].includes(
+      operation,
+    )
+  )
     return { result };
   const statusTabId =
     (operation !== "evaluate" && typeof result === "object" && result !== null
@@ -223,6 +228,9 @@ const handlers = {
     const { includeImage: _includeImage, save: _save, ...operationInput } = input ?? {};
     return invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
   }),
+  preview_logs: McpToolAccess.readsAsCaller((input) =>
+    invokeTargeted<PreviewAutomationLogs>("logs", input),
+  ),
   preview_click: McpToolAccess.actsAsCaller((input) =>
     invokeTargeted<object>("click", input, input.timeoutMs),
   ),

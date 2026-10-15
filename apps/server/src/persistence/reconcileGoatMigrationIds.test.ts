@@ -66,6 +66,7 @@ describe("GOAT migration ids", () => {
         [76, "MemoryCheckpointAccounting"],
         [77, "MemoryReportLifecycle"],
         [78, "MemoryUsageCounters"],
+        [79, "MemoryRevertResults"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -92,6 +93,7 @@ describe("GOAT migration ids", () => {
         [76, "MemoryCheckpointAccounting"],
         [77, "MemoryReportLifecycle"],
         [78, "MemoryUsageCounters"],
+        [79, "MemoryRevertResults"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -125,6 +127,7 @@ describe("GOAT migration ids", () => {
           [76, "MemoryCheckpointAccounting"],
           [77, "MemoryReportLifecycle"],
           [78, "MemoryUsageCounters"],
+          [79, "MemoryRevertResults"],
         ]);
         assert.deepStrictEqual(yield* history, migrationManifest);
         assert.deepStrictEqual(yield* runMigrations(), []);
@@ -265,11 +268,12 @@ it.effect("restarts the current WP5 registry without rewriting lineage or accoun
     const before =
       yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`;
     const schema = yield* sql`SELECT name,sql FROM sqlite_master ORDER BY name`;
-    assert.deepStrictEqual(migrationManifest.slice(-4), [
+    assert.deepStrictEqual(migrationManifest.slice(-5), [
       [75, "MemoryImportLineage"],
       [76, "MemoryCheckpointAccounting"],
       [77, "MemoryReportLifecycle"],
       [78, "MemoryUsageCounters"],
+      [79, "MemoryRevertResults"],
     ]);
     assert.deepStrictEqual(yield* runMigrations(), []);
     assert.deepStrictEqual(yield* history, migrationManifest);

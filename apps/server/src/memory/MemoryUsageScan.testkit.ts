@@ -248,3 +248,12 @@ export const assertUsageCounters = Effect.gen(function* () {
 });
 
 export const checkUsage = Effect.tap(() => assertUsageCounters);
+
+// The local input meter includes resolution metadata independently of 078 usage_*.
+// Compare this scan with input-meter deltas in slot/migration transaction tests.
+export const scanRevertResultBytes = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return yield* sql<{ space: string; bytes: number }>`SELECT space,
+    coalesce(sum(coalesce(length(CAST(revert_operation_id AS BLOB)),0)+coalesce(length(CAST(revert_result_json AS BLOB)),0)),0) AS bytes
+    FROM memory_resolutions GROUP BY space`;
+});

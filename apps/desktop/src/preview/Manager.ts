@@ -83,6 +83,7 @@ import {
 import { isPreviewAnnotationPayload } from "./PickedElementPayload.ts";
 import { captureFavicon, safeHttpOrigin, selectFaviconCandidates } from "./FaviconCapture.ts";
 import { DEFAULT_RECORDING_INPUT_OPTIONS, type RecordingInputOptions } from "./RecordingInput.ts";
+import { createPreviewPopupLifecycle, isBlankPopupUrl, popupWebOrigin } from "./PopupLifecycle.ts";
 
 export type PreviewNavStatus =
   | { kind: "Idle" }
@@ -418,44 +419,6 @@ type PointerEventListener = (event: DesktopPreviewPointerEvent) => Effect.Effect
 type OpenLinkListener = (event: DesktopPreviewOpenLinkEvent) => Effect.Effect<void>;
 
 /**
- * Protocols a preview page may open in a real popup window.
- *
- * `about:blank` stays out: Chromium skips browser-side navigation for it, so the
- * child copies the guest's `contextIsolation: false` preferences and Electron
- * gives no way to override them. Those popups keep loading in the preview tab.
- *
- * Deliberately not `ElectronShell.parseSafeExternalUrl`: that also admits
- * `vscode://vscode-remote/...` deep links, which belong in `shell.openExternal`
- * and not in a window spawned by a third-party page in the preview.
- */
-const POPUP_PROTOCOLS = new Set(["http:", "https:"]);
-
-const isPopupUrl = (rawUrl: string): boolean => {
-  try {
-    return POPUP_PROTOCOLS.has(new URL(rawUrl).protocol);
-  } catch {
-    return false;
-  }
-};
-
-/**
- * Preferences for a popup a preview page opens.
- *
- * A popup is not a webview attach, so the `will-attach-webview` hardening in
- * `DesktopWindow` never sees it, and an unoverridden child would inherit the
- * guest's relaxed posture: the picker preload needs `contextIsolation: false`
- * to share `globalThis` with the previewed page, and no OAuth provider should
- * get that. The window keeps the opener and the guest session either way.
- */
-const POPUP_WINDOW_OPTIONS = {
-  webPreferences: {
-    contextIsolation: true,
-    nodeIntegration: false,
-    sandbox: true,
-  },
-} satisfies Electron.BrowserWindowConstructorOptions;
-
-/**
  * Decides what a preview page's `window.open` should do.
  *
  * `"popup"` opens a real window, which scripted popups need: denying them makes
@@ -465,26 +428,20 @@ const POPUP_WINDOW_OPTIONS = {
  *
  * `"new-tab"` hands a `target="_blank"` link (a tab disposition) to the web
  * app, which opens it as another preview tab so the page that held the link
- * stays put. Schemes a popup cannot be hardened for keep loading in place, and
- * so does a form POST with a body, which a new tab could only reopen as a GET.
- *
- * `"deny"` is for a blank window (`""` or `about:blank`). It cannot get a real
- * window (see `POPUP_PROTOCOLS`), and loading it into the preview tab would
- * replace the opener with an empty page. Denying makes `window.open()` return
- * `null`, which SDKs such as MSAL treat as a blocked popup and fall back from.
+ * stays put. Blank children and POSTs stay native so a later redirect, opener
+ * messaging and the request body survive. Unsafe/custom schemes are denied.
  */
 export const previewWindowOpenAction = (details: {
   readonly url: string;
   readonly disposition: Electron.HandlerDetails["disposition"];
   readonly postBody?: Electron.PostBody;
-}): "popup" | "new-tab" | "navigate" | "deny" => {
-  if (details.url === "" || details.url === "about:blank") return "deny";
-  if (!isPopupUrl(details.url)) return "navigate";
-  if (details.disposition === "new-window") return "popup";
-  return !details.postBody &&
-    (details.disposition === "foreground-tab" || details.disposition === "background-tab")
+}): "popup" | "new-tab" | "deny" => {
+  if (isBlankPopupUrl(details.url)) return "popup";
+  if (!popupWebOrigin(details.url)) return "deny";
+  if (details.disposition === "new-window" || details.postBody) return "popup";
+  return details.disposition === "foreground-tab" || details.disposition === "background-tab"
     ? "new-tab"
-    : "navigate";
+    : "popup";
 };
 
 export const isPreviewRefreshShortcut = (input: Electron.Input): boolean =>
@@ -1257,6 +1214,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const scope = yield* Scope.fork(parentScope, "sequential");
     const attachmentId = Symbol();
     let detachPasskeys = () => {};
+    let popups: ReturnType<typeof createPreviewPopupLifecycle> | undefined;
     let documentId = 0;
     let nextRequestId = 0;
     let activeCapture: {
@@ -1519,16 +1477,6 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           webContents.getFocusedWebContents() !== contents,
       );
     };
-    // A popup opens with Electron's default handler, so the page inside it could
-    // otherwise spawn native windows without limit. Nothing in an OAuth flow
-    // opens a second popup, so the chain stops at the first one.
-    const windowCreated = (window: Electron.BrowserWindow): void => {
-      window.webContents.setIgnoreMenuShortcuts(true);
-      window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-      window.webContents.on("before-input-event", (_event, input) => {
-        syncMenuShortcuts(window.webContents, input);
-      });
-    };
     const beforeInput = (event: Electron.Event, input: Electron.Input): void => {
       syncMenuShortcuts(wc, input);
       const host = wc.hostWebContents;
@@ -1577,6 +1525,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       scope,
       attempt({ operation: "detachListeners", tabId, webContentsId: wc.id }, () => {
         cancelFaviconCapture();
+        popups?.dispose();
         wc.off("did-start-navigation", navigationStarted);
         wc.off("did-navigate", syncNavigation);
         wc.off("did-navigate-in-page", syncInPageNavigation);
@@ -1587,7 +1536,6 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.off("dom-ready", restoreRecordingCursor);
         wc.off("did-fail-load", failed as never);
         wc.off("audio-state-changed", audioStateChanged);
-        wc.off("did-create-window", windowCreated);
         wc.off("before-input-event", beforeInput);
         wc.ipc.off(HUMAN_INPUT_CHANNEL, humanInput);
         wc.ipc.off(RECORDING_INPUT_CHANNEL, recordingInput);
@@ -1597,6 +1545,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     );
     const install = Effect.fn("PreviewManager.installWebContentsListeners")(function* () {
       yield* attempt({ operation: "attachListeners", tabId, webContentsId: wc.id }, () => {
+        const popupLifecycle = createPreviewPopupLifecycle(wc, syncMenuShortcuts);
+        popups = popupLifecycle;
         // Only focused native editing shortcuts may reach the application menu.
         // Other preview input, including CDP keys, belongs to the page.
         wc.setIgnoreMenuShortcuts(true);
@@ -1617,7 +1567,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.setWindowOpenHandler((details) => {
           const action = previewWindowOpenAction(details);
           if (action === "popup") {
-            return { action: "allow", overrideBrowserWindowOptions: POPUP_WINDOW_OPTIONS };
+            return popupLifecycle.open(details);
           }
           if (action === "deny") return { action: "deny" };
           if (action === "new-tab") {
@@ -1630,14 +1580,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             );
             return { action: "deny" };
           }
-          runFork(
-            attemptPromise({ operation: "openPreviewWindow", tabId, webContentsId: wc.id }, () =>
-              wc.loadURL(details.url),
-            ).pipe(Effect.ignore),
-          );
           return { action: "deny" };
         });
-        wc.on("did-create-window", windowCreated);
         wc.on("before-input-event", beforeInput);
       });
       yield* Ref.update(attachedRef, (attached) =>

@@ -1268,6 +1268,7 @@ export const MemoryMutationReceipt = struct({
 export type MemoryMutationReceipt = typeof MemoryMutationReceipt.Type;
 
 export const MemoryRevertStatus = Schema.Literals([
+  "refused",
   "pending",
   "accepted",
   "revision_changed",
@@ -1277,6 +1278,14 @@ export const MemoryRevertStatus = Schema.Literals([
 export type MemoryRevertStatus = typeof MemoryRevertStatus.Type;
 
 const revertArms = Schema.Union([
+  struct({
+    operationId: MemoryOperationId,
+    memoryId: MemoryId,
+    resolutionId: MemoryResolutionId,
+    revertDeadlineUtc: MemoryUtcTimestamp,
+    status: Schema.Literal("refused"),
+    failureCode: MemoryFailureCode,
+  }),
   struct({
     operationId: MemoryOperationId,
     memoryId: MemoryId,
@@ -1381,6 +1390,7 @@ const resolutionPair = struct({
   payload: Schema.NullOr(MemoryResolutionPayload),
 });
 
+/** Live keyset traversal: restart from the first page to observe new changes behind the cursor. */
 export const MemoryHistoryPage = bounded(
   struct({
     memoryId: MemoryId,
@@ -1432,6 +1442,23 @@ const paging = { limit, cursor: Schema.optionalKey(canonical) };
 /** Server-owned task metadata. Missing legacy values never acquire managed defaults. */
 export const MemoryTaskGrantCeiling = Schema.Literals(["none", "read", "read_write"]);
 export type MemoryTaskGrantCeiling = typeof MemoryTaskGrantCeiling.Type;
+/**
+ * Response-time destination assessment, never evidence of a past issued grant.
+ * Consumers refresh after policy changes; absent destination inputs leave this omitted.
+ */
+export const MemoryCurrentAccess = Schema.Struct({
+  access: MemoryTaskGrantCeiling,
+  reason: Schema.Literals([
+    "policy_unready",
+    "environment_off",
+    "legacy_none",
+    "ceiling",
+    "read_only_destination",
+    "dispatch_scope",
+  ]),
+});
+export type MemoryCurrentAccess = typeof MemoryCurrentAccess.Type;
+
 export const MemoryTaskGrantCeilingField = MemoryTaskGrantCeiling.pipe(
   Schema.withDecodingDefault(Effect.succeed("none")),
   // Keep older in-process producers assignable; missing and none are omitted on encode and decode to none.
@@ -1558,7 +1585,13 @@ export const MemoryResetReportAttemptsResult = struct({
 }).check(Schema.makeFilter((v) => v.resetCount + v.unchangedCount <= 32));
 export type MemoryResetReportAttemptsResult = typeof MemoryResetReportAttemptsResult.Type;
 
-export const MemoryHistoryInput = struct({ ...space, ...paging, memoryId: MemoryId });
+export const MemoryHistoryInput = struct({
+  ...space,
+  ...paging,
+  memoryId: MemoryId,
+  /** Send only when the environment advertises memory.refusedReverts. */
+  includeRefusedReverts: Schema.optionalKey(Schema.Literal(true)),
+});
 export type MemoryHistoryInput = typeof MemoryHistoryInput.Type;
 
 export const MemorySyncStatusInput = struct({});

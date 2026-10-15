@@ -200,6 +200,7 @@ import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
 import { useDiffPanelStore } from "../diffPanelStore";
 import { useActiveThreadRef } from "../hooks/useActiveThreadRef";
+import { useBrowserHistoryProject } from "../hooks/useBrowserHistoryProject";
 import {
   type ComposerSubmissionIntent,
   collapseExpandedComposerCursor,
@@ -316,6 +317,7 @@ import { WizardPopup } from "./ui/wizard";
 import { BranchToolbar, type BranchToolbarHandle } from "./BranchToolbar";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import { isEditableFocused } from "../lib/editableFocus";
+import { isPdfFindShortcut } from "./files/pdf/pdfShortcuts";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@goat/shared/keybindings";
 import { resolveChatShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
@@ -2772,6 +2774,14 @@ export default function ChatView(props: ChatViewProps) {
   // drive the environment picker in BranchToolbar.
   const allProjects = useProjects();
   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
+  useBrowserHistoryProject({
+    threadRef: activeThreadRef,
+    project: activeProject,
+    projects: allProjects,
+    settings: projectGroupingSettings,
+    primaryEnvironmentId,
+    clientSettingsHydrated,
+  });
   useEffect(() => {
     if (!activeThreadRef || !activeProjectRef) return;
     registerFaviconProjectForThread(activeThreadRef, activeProjectRef);
@@ -8287,6 +8297,7 @@ export default function ChatView(props: ChatViewProps) {
   useEffect(() => {
     if (embedded) return;
     const handler = (event: globalThis.KeyboardEvent) => {
+      if (isPdfFindShortcut(event)) return;
       if (preventRepeatedTerminalCloseShortcut(event, keybindings)) {
         event.stopPropagation();
         return;

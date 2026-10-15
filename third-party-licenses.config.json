@@ -2,6 +2,20 @@
   "customNotices": [
     {
       "bundles": ["desktop", "web"],
+      "license": "Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND MIT AND OFL-1.1",
+      "name": "PDF.js font, CMap and image decoder data",
+      "sourceUrl": "https://github.com/mozilla/pdfjs-dist",
+      "noticeFiles": ["apps/web/src/components/files/pdf/PDFJS-ASSET-NOTICES"]
+    },
+    {
+      "bundles": ["desktop", "web"],
+      "license": "MIT",
+      "name": "Synara PDF viewer",
+      "sourceUrl": "https://github.com/Emanuele-web04/synara",
+      "noticeFiles": ["apps/web/src/components/files/pdf/SYNARA-LICENSE"]
+    },
+    {
+      "bundles": ["desktop", "web"],
       "license": "OFL-1.1",
       "name": "Pretendard",
       "sourceUrl": "https://github.com/orioncactus/pretendard",
