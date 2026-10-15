@@ -8,6 +8,7 @@ import {
   validateCheckpointInventory,
   selectCheckpointMemory,
   selectCheckpointReceipt,
+  selectCheckpointIndependent,
 } from "./MemoryCheckpointInventory.ts";
 import { futureForgetReserve } from "./MemoryCheckpointBound.ts";
 
@@ -43,9 +44,15 @@ export const refreshCheckpointAccounting = Effect.fnUntraced(function* () {
       }
     }
     const space = yield* decodeSpace(key.dimension);
+    const independent = key.scope_key.startsWith("l:") || key.scope_key.startsWith("s:");
     const inventory = memory
-      ? yield* selectCheckpointMemory(space, yield* decodeMemory(id), now)
-      : yield* selectCheckpointReceipt(space, id);
+      ? yield* selectCheckpointMemory(space, yield* decodeMemory(id), now, false)
+      : independent
+        ? yield* selectCheckpointIndependent(space, undefined, {
+            kind: key.scope_key.startsWith("l:") ? "l" : "s",
+            rowid: id,
+          })
+        : yield* selectCheckpointReceipt(space, id);
     yield* validateCheckpointInventory(space, inventory);
     const size = checkpointInventorySize(inventory);
     if (memory) {
@@ -59,14 +66,26 @@ export const refreshCheckpointAccounting = Effect.fnUntraced(function* () {
         size.rows += reserve.rows;
       }
     }
+    const table = key.scope_key.startsWith("l:") ? "memory_import_lineage" : "memory_import_keys";
+    const cached = independent
+      ? yield* sql.unsafe<{ checkpoint_bytes: number; checkpoint_rows: number }>(
+          `SELECT checkpoint_bytes,checkpoint_rows FROM ${table} WHERE space=? AND rowid=?`,
+          [space, id],
+        )
+      : [];
     for (const [dimension, value] of [
       ["hub_snapshot_bytes", size.bytes],
       ["hub_snapshot_rows", size.rows],
     ] as const) {
-      const previous = yield* sql<{
-        value: number;
-      }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension=${dimension} AND scope_key=${key.scope_key}`;
-      const delta = value - (previous[0]?.value ?? 0);
+      const previous = independent
+        ? ((dimension === "hub_snapshot_bytes"
+            ? cached[0]?.checkpoint_bytes
+            : cached[0]?.checkpoint_rows) ?? 0)
+        : ((yield* sql<{
+            value: number;
+          }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension=${dimension} AND scope_key=${key.scope_key}`)[0]
+            ?.value ?? 0);
+      const delta = value - previous;
       if (delta < 0) {
         const updated =
           yield* sql`UPDATE memory_quota_counters SET value=value+${delta} WHERE space=${space} AND dimension=${dimension} AND scope_key='' RETURNING value`;
@@ -74,8 +93,14 @@ export const refreshCheckpointAccounting = Effect.fnUntraced(function* () {
           return yield* new CheckpointAccountingError({ stage: "missing-total" });
       } else
         yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${space},${dimension},'',${delta}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`;
-      yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${space},${dimension},${key.scope_key},${value}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=excluded.value`;
+      if (!independent)
+        yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${space},${dimension},${key.scope_key},${value}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=excluded.value`;
     }
+    if (independent && cached.length)
+      yield* sql.unsafe(
+        `UPDATE ${table} SET checkpoint_bytes=?,checkpoint_rows=? WHERE space=? AND rowid=?`,
+        [size.bytes, size.rows, space, id],
+      );
     yield* sql`DELETE FROM memory_quota_counters WHERE space='_checkpoint_dirty' AND dimension=${space} AND scope_key=${key.scope_key}`;
   }
   // The marker is installed only after the additive migration's atomic recalculation.

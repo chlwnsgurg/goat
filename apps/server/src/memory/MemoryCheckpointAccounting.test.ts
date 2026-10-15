@@ -117,7 +117,7 @@ it.effect(
       assert.isTrue(after.some((r) => r.dimension === "import_staging" && Number(r.value) > 0));
       const triggers = yield* sql<{
         sql: string;
-      }>`SELECT sql FROM sqlite_master WHERE name LIKE 'memory_import_lineage_%' AND type='trigger'`;
+      }>`SELECT sql FROM sqlite_master WHERE name IN ('memory_import_lineage_insert','memory_import_lineage_update','memory_import_lineage_delete') AND type='trigger'`;
       assert.isTrue(
         triggers.every(
           (t) => !t.sql.includes("'hub_snapshot_bytes'") && !t.sql.includes("'hub_snapshot_rows'"),
@@ -433,4 +433,84 @@ it.effect("completed result codec slot rejects changed, empty and body-bearing o
         "Failure",
       );
   }),
+);
+
+it.effect(
+  "tracks independent lineage and suppression keys across first forget, rollback and delete",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* seed;
+      yield* checkpoint;
+      const record: M.MemoryImportLineageRecord = {
+        memorySpaceId: space,
+        memoryId,
+        kind: "sourceKey",
+        sourceKey: {
+          environmentId,
+          sourceId: M.MemoryImportSourceId.make(id(81)),
+          sourceItemKey: "\u0000".repeat(512),
+        },
+      };
+      const expected = Effect.gen(function* () {
+        const size = checkpointInventorySize(yield* selectCheckpointMemory(space, memoryId, 0));
+        const ledger = yield* sql<{
+          reserve_bytes: number;
+          reserve_keys: number;
+          forgotten: number;
+        }>`SELECT reserve_bytes,reserve_keys,EXISTS(SELECT 1 FROM memory_tombstones WHERE space=${space} AND memory_id=${memoryId}) AS forgotten FROM memory_identity_ledger WHERE space=${space} AND memory_id=${memoryId}`;
+        const reserve = ledger[0]!.forgotten
+          ? { bytes: 0, rows: 0 }
+          : futureForgetReserve(ledger[0]!.reserve_bytes, ledger[0]!.reserve_keys);
+        assert.deepStrictEqual(yield* readSize, {
+          bytes: size.bytes + reserve.bytes,
+          rows: size.rows + reserve.rows,
+        });
+      });
+      yield* sql`INSERT INTO memory_import_lineage(space,memory_id,kind,key,record_json) VALUES (${space},${memoryId},'sourceKey','synthetic',${JSON.stringify(record)})`;
+      yield* refreshCheckpointAccounting();
+      yield* expected;
+      const cache = yield* sql<{
+        scope_key: string;
+        value: number;
+      }>`SELECT key AS scope_key,checkpoint_bytes AS value FROM memory_import_lineage WHERE space=${space}`;
+      assert.strictEqual(cache.length, 1);
+      assert.strictEqual(
+        cache[0]!.value,
+        new TextEncoder().encode(encodeCheckpointRecord(record)).length,
+      );
+      const suppression = { ...record, deleteOperationId: M.MemoryOperationId.make(id(82)) };
+      yield* sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${space},'sourceKey','suppression',${memoryId},${JSON.stringify(suppression)})`;
+      yield* refreshCheckpointAccounting();
+      yield* expected;
+      const before = yield* counters;
+      const forget = Effect.gen(function* () {
+        yield* sql`INSERT INTO memory_tombstones VALUES (${space},${memoryId},${id(82)},${environmentId},0,'[]','[]','[]')`;
+        yield* refreshCheckpointAccounting();
+        yield* expected;
+        assert.strictEqual(
+          (yield* selectCheckpointMemory(space, memoryId, 0)).suppressions.length,
+          1,
+        );
+      });
+      yield* sql
+        .withTransaction(forget.pipe(Effect.andThen(Effect.fail("interrupted"))))
+        .pipe(Effect.flip);
+      assert.deepStrictEqual(yield* counters, before);
+      yield* forget;
+      yield* sql`DELETE FROM memory_import_lineage WHERE space=${space} AND memory_id=${memoryId}`;
+      yield* refreshCheckpointAccounting();
+      yield* expected;
+      yield* sql`DELETE FROM memory_tombstones WHERE space=${space} AND memory_id=${memoryId}`;
+      yield* refreshCheckpointAccounting();
+      yield* expected;
+      assert.strictEqual(
+        (yield* selectCheckpointMemory(space, memoryId, 0)).suppressions.length,
+        0,
+      );
+      const plan = yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT record_json FROM memory_import_lineage WHERE space=${space} AND memory_id=${memoryId} AND kind='sourceKey' AND key='synthetic'`;
+      assert.isTrue(plan.every((r) => r.detail.includes("SEARCH")));
+    }).pipe(Effect.provide(old)),
 );

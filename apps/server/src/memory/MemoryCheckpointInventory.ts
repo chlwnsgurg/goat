@@ -79,6 +79,7 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
   space: M.MemorySpaceId,
   id: M.MemoryId,
   now: number,
+  includeIndependent = true,
 ) {
   const sql = yield* SqlClient.SqlClient;
   const all = emptyCheckpointInventory();
@@ -89,10 +90,11 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
   if (!ledgers[0]) return all;
   all.identities.push(yield* decodeIdentity(ledgers[0].identity_json));
   all.fences.push(yield* decodeFence(ledgers[0].fence_json));
-  const lineage = yield* sql<{
-    record_json: string;
-  }>`SELECT record_json FROM memory_import_lineage WHERE space=${space} AND memory_id=${id} ORDER BY kind,key`;
-  for (const row of lineage) all.importLineage.push(yield* decodeLineage(row.record_json));
+  if (includeIndependent) {
+    const independent = yield* selectCheckpointIndependent(space, id);
+    all.importLineage = independent.importLineage;
+    all.suppressions = independent.suppressions;
+  }
   const items = yield* sql<{
     item_json: string;
     heads_json: string;
@@ -162,10 +164,6 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
         sourceExclusions: [],
       }),
     );
-    const suppressions = yield* sql<{
-      record_json: string;
-    }>`SELECT record_json FROM memory_import_keys WHERE space=${space} AND memory_id=${id} AND key_kind IN ('sourceKey','content','sourceExclusion') ORDER BY key_kind,key`;
-    for (const r of suppressions) all.suppressions.push(yield* decodeSuppression(r.record_json));
     return all;
   }
   const resolutions = yield* sql<{
@@ -290,4 +288,33 @@ export const validateCheckpointInventory = Effect.fnUntraced(function* (
         strict,
       );
     }
+});
+
+/** Bulk publication and keyed admission share these exact independent-record predicates.
+ * Keyed refresh uses the row's transient SQLite address; cached sizes live ON the
+ * row, so vacuum/rowid reuse cannot associate a durable cache with another record.
+ */
+export const selectCheckpointIndependent = Effect.fnUntraced(function* (
+  space: M.MemorySpaceId,
+  id: M.MemoryId | undefined,
+  selection?: { kind: "l" | "s"; rowid: string },
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const all = emptyCheckpointInventory();
+  const owner = id === undefined ? sql`1=1` : sql`memory_id=${id}`;
+  if (!selection || selection.kind === "l") {
+    const match = selection ? sql`l.rowid=${selection.rowid}` : sql`1=1`;
+    const rows = yield* sql<{
+      record_json: string;
+    }>`SELECT record_json FROM memory_import_lineage l WHERE space=${space} AND ${owner} AND ${match} AND EXISTS(SELECT 1 FROM memory_identity_ledger i WHERE i.space=l.space AND i.memory_id=l.memory_id) ORDER BY kind,key`;
+    for (const row of rows) all.importLineage.push(yield* decodeLineage(row.record_json));
+  }
+  if (!selection || selection.kind === "s") {
+    const match = selection ? sql`k.rowid=${selection.rowid}` : sql`1=1`;
+    const rows = yield* sql<{
+      record_json: string;
+    }>`SELECT record_json FROM memory_import_keys k WHERE space=${space} AND ${owner} AND key_kind IN ('sourceKey','content','sourceExclusion') AND ${match} AND EXISTS(SELECT 1 FROM memory_identity_ledger i WHERE i.space=k.space AND i.memory_id=k.memory_id) AND EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=k.space AND t.memory_id=k.memory_id) ORDER BY key_kind,key`;
+    for (const row of rows) all.suppressions.push(yield* decodeSuppression(row.record_json));
+  }
+  return all;
 });

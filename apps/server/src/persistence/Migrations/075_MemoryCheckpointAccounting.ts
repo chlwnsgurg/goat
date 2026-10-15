@@ -151,10 +151,37 @@ export default Effect.gen(function* () {
     for (const action of ["insert", "update", "delete"])
       yield* sql.unsafe(`DROP TRIGGER IF EXISTS ${table}_snapshot_generation_${action}`);
 
+  // Independent records keep two numeric sizes on their existing row. Do not
+  // duplicate source keys into an index/cache table. Rowid invalidations are
+  // transaction-local and are always drained before commit.
+  for (const table of ["memory_import_lineage", "memory_import_keys"]) {
+    yield* sql.unsafe(
+      `ALTER TABLE ${table} ADD COLUMN checkpoint_bytes INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_bytes>=0)`,
+    );
+    yield* sql.unsafe(
+      `ALTER TABLE ${table} ADD COLUMN checkpoint_rows INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_rows>=0)`,
+    );
+    yield* sql.unsafe(`CREATE TRIGGER ${table}_checkpoint_release BEFORE DELETE ON ${table} BEGIN
+      UPDATE memory_quota_counters SET value=value-OLD.checkpoint_bytes WHERE space=OLD.space AND dimension='hub_snapshot_bytes' AND scope_key='';
+      UPDATE memory_quota_counters SET value=value-OLD.checkpoint_rows WHERE space=OLD.space AND dimension='hub_snapshot_rows' AND scope_key='';
+    END`);
+    yield* sql.unsafe(`CREATE TRIGGER ${table}_checkpoint_move AFTER UPDATE OF space ON ${table} WHEN OLD.space IS NOT NEW.space BEGIN
+      UPDATE memory_quota_counters SET value=value-OLD.checkpoint_bytes WHERE space=OLD.space AND dimension='hub_snapshot_bytes' AND scope_key='';
+      UPDATE memory_quota_counters SET value=value-OLD.checkpoint_rows WHERE space=OLD.space AND dimension='hub_snapshot_rows' AND scope_key='';
+      UPDATE ${table} SET checkpoint_bytes=0,checkpoint_rows=0 WHERE rowid=NEW.rowid;
+    END`);
+  }
   // Invalidation keys use only the existing quota counter PK, and are drained
   // synchronously inside the writer transaction before admission/publication/commit.
   const mark = (space: string, key: string) =>
     `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES ('_checkpoint_dirty',${space},${key},1) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=1;`;
+  const related = (p: string) => `
+    INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
+    SELECT '_checkpoint_dirty',space,'l:'||rowid,1 FROM memory_import_lineage WHERE space=${p}.space AND memory_id=${p}.memory_id
+    ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=1;
+    INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
+    SELECT '_checkpoint_dirty',space,'s:'||rowid,1 FROM memory_import_keys WHERE space=${p}.space AND memory_id=${p}.memory_id AND key_kind IN ('sourceKey','content','sourceExclusion')
+    ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=1;`;
   for (const table of [
     "memory_items",
     "memory_revisions",
@@ -174,7 +201,15 @@ export default Effect.gen(function* () {
         .map((p) =>
           table === "memory_compact_receipts"
             ? mark(`${p}.space`, `'c:'||${p}.operation_id`)
-            : `${table === "memory_outbox" ? `SELECT 1;` : ""}${mark(`${p}.space`, `'m:'||${p}.memory_id`)}`,
+            : table === "memory_import_lineage"
+              ? mark(`${p}.space`, `'l:'||${p}.rowid`)
+              : table === "memory_import_keys"
+                ? mark(`${p}.space`, `'s:'||${p}.rowid`)
+                : mark(`${p}.space`, `'m:'||${p}.memory_id`) +
+                  ((table === "memory_identity_ledger" || table === "memory_tombstones") &&
+                  action !== "UPDATE"
+                    ? related(p)
+                    : ""),
         )
         .join("");
       const when =
@@ -191,6 +226,8 @@ export default Effect.gen(function* () {
   yield* sql`DELETE FROM memory_quota_counters WHERE dimension IN ('hub_snapshot_bytes','hub_snapshot_rows')`;
   yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT '_checkpoint_dirty',space,'m:'||memory_id,1 FROM memory_identity_ledger`;
   yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT '_checkpoint_dirty',space,'c:'||operation_id,1 FROM memory_compact_receipts`;
+  yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT '_checkpoint_dirty',space,'l:'||rowid,1 FROM memory_import_lineage`;
+  yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT '_checkpoint_dirty',space,'s:'||rowid,1 FROM memory_import_keys WHERE key_kind IN ('sourceKey','content','sourceExclusion')`;
   yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES ('_hub_global','checkpoint_codec','',1)`;
   yield* refreshCheckpointAccounting();
 });
