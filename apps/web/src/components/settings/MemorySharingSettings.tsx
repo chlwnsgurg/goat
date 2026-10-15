@@ -2,6 +2,7 @@ import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
   type EnvironmentId,
   MemoryOperationId,
+  MemoryHubEndpoint,
   type MemoryHubSettingsUpdateInput,
   type MemoryHubSettingsView,
   type MemoryOwnerSourceReadPolicyView,
@@ -15,6 +16,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { useEnvironments } from "../../state/environments";
 import { readPreparedConnection, usePreparedConnection } from "../../state/session";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import { memoryEnvironment } from "../../state/memory";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { randomUUID } from "../../lib/utils";
@@ -109,6 +111,15 @@ export function MemoryAdministration({
       current = false;
     };
   }, [environmentId, getHub, getOwner, registry, reload]);
+  useEffect(() => {
+    const refresh = () => {
+      if (pending !== null || busy) return;
+      setReload((n) => n + 1);
+      onSharingRefresh?.();
+    };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [pending, busy, onSharingRefresh]);
   async function saveHub(input: MemoryHubSettingsUpdateInput) {
     if (busy || !live() || !writable(environmentId)) return;
     intent.current = input;
@@ -161,6 +172,12 @@ export function MemoryAdministration({
     if (!hub || !device || busy || !live() || !writable(environmentId) || !writable(device)) return;
     if (!readPreparedConnection(device)) {
       setError("Connect the device in Settings → Connections first.");
+      return;
+    }
+    try {
+      Schema.decodeUnknownSync(MemoryHubEndpoint)(endpoint);
+    } catch {
+      setError("Enter a valid Hub address using HTTPS, or HTTP for localhost.");
       return;
     }
     setBusy(true);
@@ -517,7 +534,11 @@ export function MemoryAdministration({
           />
         ))}
         {owner?.policy.removals
-          .filter((r) => r.state === "pending")
+          .filter(
+            (r) =>
+              r.state === "pending" &&
+              !policy?.desiredRequesterEnvironmentIds.includes(r.requesterEnvironmentId),
+          )
           .map((r) => (
             <SettingsRow
               key={r.requesterEnvironmentId}

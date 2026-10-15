@@ -229,7 +229,7 @@ beforeEach(() => {
   }));
   state.result = { _tag: "Failure" };
   state.responses.clear();
-  state.connection = {};
+  state.connection = { httpBaseUrl: "https://hub.example" };
 });
 
 const decodeRevision = Schema.decodeUnknownSync(MemoryRevision);
@@ -435,7 +435,7 @@ it("rejects a disconnected destination at admission and discards a late result a
   await renderRevert();
   settled.mockClear();
   await click("Revert resolution");
-  state.connection = {};
+  state.connection = { httpBaseUrl: "https://hub.example" };
   await act(async () =>
     complete({
       _tag: "Success",
