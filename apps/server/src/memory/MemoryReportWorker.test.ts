@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -24,6 +25,71 @@ const makeWorker = Layer.build(Layer.fresh(Worker.layer)).pipe(
 );
 
 describe("MemoryReportWorker", () => {
+  it.effect.each(["drain", "start"])(
+    "serializes a pre-start drain against another %s",
+    (contender) => {
+      const harness = makeReportHarness();
+      return Effect.gen(function* () {
+        yield* TestClock.setTime(0);
+        yield* setupBot;
+        yield* insertReport(1);
+        yield* insertReport(2);
+        const adapter = yield* Adapter.MemoryReportAdapter;
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let active = 0;
+        let maximum = 0;
+        let calls = 0;
+        const worker = yield* makeWorker.pipe(
+          Effect.provideService(Adapter.MemoryReportAdapter, {
+            deliver: (report) =>
+              Effect.gen(function* () {
+                active++;
+                maximum = Math.max(maximum, active);
+                calls++;
+                if (calls === 1) {
+                  yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                }
+                return yield* adapter.deliver(report);
+              }).pipe(Effect.ensuring(Effect.sync(() => active--))),
+          }),
+        );
+        const first = yield* worker.drain.pipe(Effect.forkScoped);
+        yield* Deferred.await(entered);
+        const second = yield* (contender === "drain" ? worker.drain : worker.start()).pipe(
+          Effect.forkScoped,
+        );
+        // Advancing by zero waits for runnable fibers to suspend: the competing pass
+        // must reach either the shared permit or its adapter before release.
+        yield* TestClock.adjust(0);
+        const maximumWhileBlocked = maximum;
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(first);
+        yield* Fiber.join(second);
+        yield* worker.drain;
+        assert.strictEqual(maximumWhileBlocked, 1);
+        assert.strictEqual(maximum, 1);
+        assert.strictEqual(active, 0);
+        assert.strictEqual(calls, 2);
+        assert.deepStrictEqual(yield* reportRows, [
+          { state: "delivered", automatic_attempts: 1, claimed_until: null },
+          { state: "delivered", automatic_attempts: 1, claimed_until: null },
+        ]);
+        const sql = yield* SqlClient.SqlClient;
+        assert.deepStrictEqual(
+          yield* sql`SELECT key FROM memory_import_keys WHERE key_kind='report_delivered' ORDER BY key`,
+          [{ key: reportId(1) }, { key: reportId(2) }],
+        );
+        const timeline = yield* botMessages;
+        assert.strictEqual(timeline.messages.length, 2);
+        assert.strictEqual(new Set(timeline.messages.map((message) => message.id)).size, 2);
+        assert.isEmpty(timeline.runs);
+        assert.isEmpty(harness.providerCalls);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    },
+  );
+
   it.effect.each(["due", "lease"])("delivers at %s without an unrelated commit", (reason) => {
     const harness = makeReportHarness();
     return Effect.gen(function* () {
