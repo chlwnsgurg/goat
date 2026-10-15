@@ -12,6 +12,10 @@ import {
   MemoryOperationId,
   MemorySpaceId,
   MemoryId,
+  type MemoryHistoryPage,
+  type MemoryRevisionId,
+  type MemoryRevertResolutionInput,
+  type MemoryRevertResult,
   type ScopedThreadRef,
   type MessageId,
   type MemoryItem,
@@ -24,6 +28,7 @@ import {
 import {
   presentMemoryItem,
   presentMemoryResolution,
+  presentMemoryRevert,
   presentMemoryRevertResult,
   presentMemoryForget,
   presentMemoryOwnerPolicy,
@@ -35,7 +40,11 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { useContext, useEffect, useRef, useState } from "react";
 import { useEnvironment, useEnvironments } from "../../state/environments";
-import { useEnvironmentScope, usePreparedConnection } from "../../state/session";
+import {
+  readPreparedConnection,
+  useEnvironmentScope,
+  usePreparedConnection,
+} from "../../state/session";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { memoryEnvironment } from "../../state/memory";
@@ -880,10 +889,18 @@ function MemoryDetails({
                 <p>
                   {entry.payload ? JSON.stringify(entry.payload) : "Retained judgment unavailable."}
                 </p>
-                <Button size="sm" variant="outline" disabled>
-                  Revert resolution
-                </Button>
-                <p>Revert controls are unavailable while eligibility support is being updated.</p>
+                {item ? (
+                  <MemoryRevertControl
+                    environmentId={environmentId}
+                    item={item}
+                    entry={entry}
+                    history={value}
+                    onSettled={() => {
+                      read.refresh();
+                      history.refresh();
+                    }}
+                  />
+                ) : null}
               </details>
             );
           })}
@@ -938,6 +955,144 @@ function MemoryDetails({
         <p>History unavailable.</p>
       )}
     </SettingsSection>
+  );
+}
+
+/** Revalidate the selected original and live destination at admission and settlement. */
+export function MemoryRevertControl({
+  environmentId,
+  item,
+  entry,
+  history,
+  onSettled,
+}: {
+  environmentId: EnvironmentId;
+  item: MemoryItem;
+  entry: MemoryHistoryPage["resolutions"][number];
+  history: Pick<MemoryHistoryPage, "revertResults" | "revisions" | "nextCursor">;
+  onSettled: () => void;
+}) {
+  const registry = useContext(RegistryContext);
+  const canWrite = useAtomValue(memoryEnvironment.revertResolution.permissionAtom(environmentId));
+  const connection = Option.getOrNull(usePreparedConnection(environmentId));
+  const revert = useAtomCommand(memoryEnvironment.revertResolution, { reportFailure: false });
+  const [selected, setSelected] = useState<MemoryRevisionId | null>(null);
+  const [intent, setIntent] = useState<MemoryRevertResolutionInput | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<MemoryRevertResult | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const display = presentMemoryRevert({
+    item,
+    entry,
+    history,
+    now: Date.now(),
+    ...(selected ? { restoredRevisionId: selected } : {}),
+  });
+  const available = canWrite && connection !== null && display.canRevert;
+  if (
+    (!available ||
+      (intent &&
+        (item.status !== "active" || intent.expectedHeads[0] !== item.revision.revisionId))) &&
+    selected !== null
+  ) {
+    setSelected(null);
+    setIntent(null);
+    setError(null);
+  }
+  function liveDestination() {
+    return (
+      mounted.current &&
+      connection !== null &&
+      readPreparedConnection(environmentId) === connection &&
+      registry.get(memoryEnvironment.revertResolution.permissionAtom(environmentId))
+    );
+  }
+  async function submit() {
+    if (!selected || busy || result || !liveDestination() || item.status !== "active") return;
+    const eligibility = presentMemoryRevert({
+      item,
+      entry,
+      history,
+      restoredRevisionId: selected,
+      now: Date.now(),
+    });
+    if (!eligibility.canRevert) return;
+    const input = intent ?? {
+      operationId: MemoryOperationId.make(randomUUID()),
+      memorySpaceId: item.memorySpaceId,
+      memoryId: item.memoryId,
+      resolutionId: entry.resolution.resolutionId,
+      restoredRevisionId: selected,
+      expectedHeads: [item.revision.revisionId],
+    };
+    setIntent(input);
+    setBusy(true);
+    setError(null);
+    const response = await revert({ environmentId, input });
+    if (!liveDestination()) return;
+    setBusy(false);
+    if (response._tag === "Failure") {
+      setError("Revert request failed. Retry this request with the same operation ID.");
+      return;
+    }
+    setResult(response.value);
+    setSelected(null);
+    setIntent(null);
+    onSettled();
+  }
+  return (
+    <div>
+      <p>{display.windowLabel}</p>
+      {display.timeNotice ? <p>{display.timeNotice}</p> : null}
+      {display.reason ? <p>{display.reason}</p> : null}
+      {result ? <p role="status">{presentMemoryRevertResult(result).label}</p> : null}
+      {error ? <p role="alert">{error}</p> : null}
+      {!result && available ? (
+        <div role="group" aria-label="Revert confirmation">
+          <p>Choose the retained original to restore.</p>
+          {display.restorableRevisionIds.map((revisionId) => (
+            <label key={revisionId}>
+              <input
+                type="radio"
+                name={`revert-${entry.resolution.resolutionId}`}
+                value={revisionId}
+                checked={selected === revisionId}
+                disabled={busy || intent !== null}
+                onChange={() => setSelected(revisionId)}
+              />
+              {revisionId}
+            </label>
+          ))}
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!selected || busy}
+            onClick={() => void submit()}
+          >
+            Revert resolution
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() => {
+              setSelected(null);
+              setIntent(null);
+              setError(null);
+            }}
+          >
+            Cancel
+          </Button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
