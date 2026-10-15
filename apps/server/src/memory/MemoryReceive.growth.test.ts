@@ -121,7 +121,7 @@ describe.runIf(process.env.GOAT_MEMORY_GROWTH === "1")("service receive scaling"
         );
         // Large samples absorb startup/JIT noise; optional scheduled benchmark, no millisecond deadline.
         if (process.env.GOAT_RECEIVE_BASELINE !== "1") assert.isBelow(ratio, 3.25);
-      }),
+      }).pipe(Effect.provideService(Console.Console, console)),
     { timeout: 1500000 },
   );
 });
