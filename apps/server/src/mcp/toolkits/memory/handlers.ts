@@ -49,7 +49,15 @@ export const memoryError = (error: unknown): M.MemoryRpcError => {
       : new M.MemoryRpcError({ code: "storage_failed" });
   }
   if ("code" in error && isFailureCode(error.code) && error.code !== "capacity_exceeded")
-    return new M.MemoryRpcError({ code: error.code });
+    return new M.MemoryRpcError({
+      code: error.code,
+      ...(error.code === "thread_lineage_incomplete"
+        ? {
+            guidance:
+              "This conversation has incomplete memory provenance and cannot save new memories. Start a new conversation to save this memory." as const,
+          }
+        : {}),
+    });
   return new M.MemoryRpcError({ code: "storage_failed" });
 };
 
@@ -93,23 +101,41 @@ const decodeUpsert = Schema.decodeUnknownEffect(M.MemoryUpsertInput);
 const decodeForget = Schema.decodeUnknownEffect(M.MemoryForgetInput);
 const decodeRevertResolution = Schema.decodeUnknownEffect(M.MemoryRevertResolutionInput);
 const receipt = Schema.decodeUnknownEffect(M.MemoryMutationReceipt);
+const callerThread = Effect.gen(function* () {
+  const caller = yield* McpInvocationContext.McpInvocationContext;
+  return caller.thread
+    ? { environmentId: caller.environmentId, threadId: caller.thread.threadId }
+    : undefined;
+});
 const handlers = {
   memory_search: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
-      return yield* service.search(yield* decodeSearch(input), yield* invocationPermit("read"));
+      return yield* service.search(
+        yield* decodeSearch(input),
+        yield* invocationPermit("read"),
+        yield* callerThread,
+      );
     }).pipe(Effect.mapError(memoryError)),
   ),
   memory_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
-      return yield* service.list(yield* decodeList(input), yield* invocationPermit("read"));
+      return yield* service.list(
+        yield* decodeList(input),
+        yield* invocationPermit("read"),
+        yield* callerThread,
+      );
     }).pipe(Effect.mapError(memoryError)),
   ),
   memory_read: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
-      return yield* service.read(yield* decodeRead(input), yield* invocationPermit("read"));
+      return yield* service.read(
+        yield* decodeRead(input),
+        yield* invocationPermit("read"),
+        yield* callerThread,
+      );
     }).pipe(Effect.mapError(memoryError)),
   ),
   memory_read_source: McpToolAccess.reads((input) =>
@@ -118,13 +144,18 @@ const handlers = {
       return yield* service.readSource(
         yield* decodeReadSource(input),
         yield* invocationPermit("source"),
+        yield* callerThread,
       );
     }).pipe(Effect.mapError(memoryError)),
   ),
   memory_history: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
-      return yield* service.history(yield* decodeHistory(input), yield* invocationPermit("read"));
+      return yield* service.history(
+        yield* decodeHistory(input),
+        yield* invocationPermit("read"),
+        yield* callerThread,
+      );
     }).pipe(Effect.mapError(memoryError)),
   ),
   memory_sync_status: McpToolAccess.reads((input) =>
@@ -139,8 +170,15 @@ const handlers = {
   memory_upsert: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
+      const caller = yield* McpInvocationContext.McpInvocationContext;
       return yield* service
-        .upsert(yield* decodeUpsert(input), yield* invocationPermit("write"))
+        .upsert(
+          yield* decodeUpsert(input),
+          yield* invocationPermit("write"),
+          caller.thread
+            ? { environmentId: caller.environmentId, threadId: caller.thread.threadId }
+            : undefined,
+        )
         .pipe(Effect.flatMap((stored) => receipt(stored.receipt)));
     }).pipe(Effect.mapError(memoryError)),
   ),
@@ -158,6 +196,7 @@ const handlers = {
       return yield* service.revertResolution(
         yield* decodeRevertResolution(input),
         yield* invocationPermit("write"),
+        yield* callerThread,
       );
     }).pipe(Effect.mapError(memoryError)),
   ),

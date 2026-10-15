@@ -1,6 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -452,4 +453,99 @@ it.effect.each(["grantedScopes", "reauthorize", "both"] as const)(
           code: "unavailable",
         });
     }).pipe(Effect.provide(Fixture.layer)),
+);
+
+it.effect("r4 tracked MCP writes inherit injected context and forget purges them", () =>
+  Effect.gen(function* () {
+    const service = yield* MemoryService.MemoryService;
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`CREATE TABLE orchestration_events(application_event_version INTEGER,aggregate_kind TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT)`;
+    const caller = {
+      ...Fixture.scope(),
+      thread: {
+        threadId: M.ThreadId.make("mcp-lineage"),
+        providerSessionId: "synthetic",
+        providerInstanceId: M.ProviderInstanceId.make("codex"),
+      },
+      client: undefined,
+    };
+    const a = Fixture.upsert(15000);
+    yield* service.upsert(a, Effect.void);
+    const rA = (yield* store.loadAggregate(Fixture.space, a.memoryId)).heads[0]!;
+    yield* store.appendThreadLineage(
+      { environmentId: caller.environmentId, threadId: caller.thread.threadId },
+      Fixture.space,
+      [rA],
+    );
+    const s = { ...Fixture.upsert(15001), memoryId: M.MemoryId.make(Fixture.id(15002)) };
+    const result = yield* Fixture.call("memory_upsert", s, caller);
+    expect(result.result.isError).not.toBe(true);
+    const saved = yield* store.loadAggregate(Fixture.space, s.memoryId);
+    expect(
+      saved.revisions.find((p) => p.revision.revisionId === saved.heads[0])?.payload
+        ?.derivedFromMemoryRevisions,
+    ).toEqual([rA]);
+    yield* service.forget(
+      {
+        memorySpaceId: Fixture.space,
+        memoryId: a.memoryId,
+        operationId: M.MemoryOperationId.make(Fixture.id(15003)),
+        expectedHeads: [rA],
+      },
+      Effect.void,
+    );
+    expect(yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${s.memoryId}`).toHaveLength(0);
+  }).pipe(Effect.provide(Fixture.layer)),
+);
+
+it.effect(
+  "r5 source text records the locator revision before returning, and recording failure withholds text",
+  () =>
+    Effect.gen(function* () {
+      const { input, page } = yield* sourceFixture;
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* Store.MemoryStore;
+      yield* sql`CREATE TABLE orchestration_events(application_event_version INTEGER,aggregate_kind TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT)`;
+      const invocation = {
+        ...Fixture.scope(["memory:read", "orchestration:read"]),
+        client: undefined,
+        thread: {
+          threadId: M.ThreadId.make("source-consumer"),
+          providerSessionId: "synthetic",
+          providerInstanceId: M.ProviderInstanceId.make("codex"),
+        },
+      };
+      const failedCaller = {
+        ...invocation,
+        thread: { ...invocation.thread, threadId: M.ThreadId.make("failed-source-consumer") },
+      };
+      expect((yield* Fixture.call("memory_read_source", input, invocation)).body).toEqual(page);
+      expect(
+        (yield* store.readThreadLineage(
+          { environmentId: invocation.environmentId, threadId: invocation.thread.threadId },
+          Fixture.space,
+        )).revisions,
+      ).toEqual((yield* store.loadAggregate(Fixture.space, input.memoryId)).heads);
+      yield* sql`CREATE TRIGGER fail_lineage BEFORE INSERT ON memory_outbox WHEN NEW.space='_worker' BEGIN SELECT RAISE(ABORT,'synthetic failure'); END`;
+      const failed = yield* Fixture.call("memory_read_source", input, failedCaller);
+      expect(failed.result.isError).toBe(true);
+      expect(JSON.stringify(failed.body)).not.toContain("synthetic original");
+    }).pipe(
+      Effect.provide(
+        Fixture.layerWithSourceReadAuthority((validated) =>
+          Effect.succeed({
+            kind: "available",
+            page: {
+              sourceThread: validated.request.sourceThread,
+              watermark: validated.request.sourceWatermark,
+              messages: [
+                { messageId: validated.request.messageIds[0]!, text: "synthetic original" },
+              ],
+              nextCursor: null,
+            },
+          }),
+        ),
+      ),
+    ),
 );
