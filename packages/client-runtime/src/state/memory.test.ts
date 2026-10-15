@@ -383,6 +383,57 @@ describe("shared memory client", () => {
       ),
   );
 
+  it.effect("allows core commands but rejects import on a core-only environment", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness();
+        const coreOnlyConfig = {
+          environment: { capabilities: { memory: { protocolVersion: 1 } } },
+        } as ServerConfig;
+        const coreReply = { settings: { mode: "disabled" as const }, version: 0 };
+        const coreRequest = vi.fn(() => Effect.succeed(coreReply));
+        const importRequest = vi.fn(h.rpc[WS_METHODS.memoryImportProvider]);
+        yield* SubscriptionRef.set(
+          h.active,
+          Option.some({
+            client: {
+              ...h.rpc,
+              [WS_METHODS.memoryHubSettingsGet]: coreRequest,
+              [WS_METHODS.memoryImportProvider]: importRequest,
+            },
+            initialConfig: Effect.succeed(coreOnlyConfig),
+          } as unknown as RpcSession),
+        );
+        h.registry.set(
+          grants(env),
+          AsyncResult.success(sessionScopes(["settings:write", "memory:write", "filesystem:read"])),
+        );
+        h.registry.set(configs(env), coreOnlyConfig);
+        const importInput = {
+          memorySpaceId: space,
+          action: "discover" as const,
+          format: "claude" as const,
+        };
+        expect(h.registry.get(h.memory.hubSettingsGet.permissionAtom(env, {}))).toBe(true);
+        expect(h.registry.get(h.memory.importProvider.permissionAtom(env, importInput))).toBe(
+          false,
+        );
+        const coreResult = yield* Effect.promise(() =>
+          h.memory.hubSettingsGet.run(h.registry, { environmentId: env, input: {} }),
+        );
+        expect(coreResult._tag).toBe("Success");
+        if (coreResult._tag === "Success") expect(coreResult.value).toEqual(coreReply);
+        expect(coreRequest).toHaveBeenCalledExactlyOnceWith({});
+        expect(
+          (yield* Effect.promise(() =>
+            h.memory.importProvider.run(h.registry, { environmentId: env, input: importInput }),
+          ))._tag,
+        ).toBe("Failure");
+        expect(importRequest).not.toHaveBeenCalled();
+      }),
+    ),
+  );
+
   it.effect.each(["reset", "forget", "invalidate"] as const)(
     "discards a delayed read after %s and clears derived edits only",
     (kind) =>
