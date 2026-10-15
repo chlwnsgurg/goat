@@ -1069,6 +1069,64 @@ describe("native WP6 Settings commands", () => {
       expect(view.container.textContent).not.toContain("synthetic-session");
     },
   );
+  it("keeps earlier rejection reasons after a successful final import batch", async () => {
+    setupImport(33);
+    await show();
+    await select(33);
+    const handler = h.responses.get(WS_METHODS.memoryImportProvider)!;
+    let batches = 0;
+    h.responses.set(WS_METHODS.memoryImportProvider, (input) => {
+      const result = handler(input) as { receipt: { items: Array<{ sourceItemKey: string }> } };
+      if (++batches !== 1) return result;
+      return {
+        ...result,
+        receipt: {
+          ...result.receipt,
+          items: result.receipt.items.map((item, index) => ({
+            ...item,
+            outcome: "rejected",
+            issue:
+              index === 0
+                ? "capacity_exceeded"
+                : index === 1
+                  ? "source_changed"
+                  : "mapping_changed",
+            ...(index === 0
+              ? {
+                  capacity: {
+                    code: "capacity_exceeded",
+                    dimension: "import_live_bytes",
+                    current: 100,
+                    limit: 100,
+                    reclaimable: 0,
+                  },
+                }
+              : {}),
+          })),
+        },
+      };
+    });
+    await view.click("Apply selected memories");
+    expect(batches).toBe(2);
+    const text = view.container.textContent;
+    expect(text).toContain("Import completed");
+    expect(text).toContain("1 results in the latest batch; 0 remaining. Completed batches: 2");
+    expect(text).toContain("Totals across all import batches");
+    expect(text).toContain("Added: 1");
+    expect(text).toContain("Could not import: 32");
+    expect(text).toContain("Storage limit reached: 1");
+    expect(text).toContain("Imported memory storage limit reached: 1");
+    expect(text).toContain("Source changed; preview again: 1");
+    expect(text).toContain("Destination changed; preview again: 30");
+    for (const raw of [
+      "capacity_exceeded",
+      "import_live_bytes",
+      "source_changed",
+      "mapping_changed",
+      "key-0",
+    ])
+      expect(text).not.toContain(raw);
+  });
   it("renders settled chunk totals while the next command is still pending", async () => {
     setupImport(33);
     await show();
@@ -1689,6 +1747,90 @@ describe("native WP6 Settings commands", () => {
     await view.rerender(<SettingsMemoryRouteScreen route={{ params }} />);
     expect(h.secureValues.size).toBe(0);
   });
+  it("bounds project rows with a thousand candidates and supports selection, binding and reverse", async () => {
+    setupImport();
+    h.projects.push(
+      ...Array.from({ length: 1000 }, (_, index) => ({
+        id: `project-${index}`,
+        title: `Fixture project ${index}`,
+        environmentId: nativeEnv,
+      })),
+    );
+    const repositoryKey = { kind: "repository", groupingKey: "private-repository" };
+    h.responses.set(WS_METHODS.memoryProjectBindingGet, (input) => ({
+      memorySpaceId: nativeSpace,
+      project: (input as { project: unknown }).project,
+      version: 1,
+      projectKey: { kind: "explicit", sharedProjectId: "private-shared-key" },
+      repositoryKey,
+    }));
+    h.responses.set(WS_METHODS.memoryProjectBindingUpdate, (value) => {
+      const input = value as {
+        project: unknown;
+        action: string;
+        requestId: string;
+        expectedVersion: number;
+      };
+      return {
+        requestId: input.requestId,
+        binding: {
+          memorySpaceId: nativeSpace,
+          project: input.project,
+          version: input.expectedVersion + 1,
+          projectKey:
+            input.action === "useRepository"
+              ? repositoryKey
+              : { kind: "explicit", sharedProjectId: "private-shared-key" },
+          repositoryKey,
+        },
+      };
+    });
+    await show();
+    const candidateRows = () =>
+      [...view.container.querySelectorAll("button")].filter((row) =>
+        /^(Select project: |Use shared binding from )/.test(row.textContent ?? ""),
+      );
+    expect(candidateRows()).toHaveLength(0);
+    expect(view.container.querySelectorAll("button").length).toBeLessThan(80);
+    await view.click("Choose project…");
+    expect(candidateRows()).toHaveLength(20);
+    await view.click("Next projects");
+    expect(candidateRows()).toHaveLength(20);
+    expect(candidateRows()[0]?.textContent).toBe("Select project: Fixture project 20");
+    await view.click("Previous projects");
+    expect(candidateRows()[0]?.textContent).toBe("Select project: Fixture project 0");
+    await view.type("Search projects", "Fixture project 999");
+    expect(candidateRows()).toHaveLength(1);
+    await view.click("Select project: Fixture project 999");
+    expect(candidateRows()).toHaveLength(0);
+    expect(view.container.querySelectorAll("button").length).toBeLessThan(80);
+    await view.click("Scope: project");
+    await view.click("Choose shared binding project…");
+    expect(candidateRows()).toHaveLength(20);
+    await view.type("Search projects", "Fixture project 999");
+    expect(candidateRows()).toHaveLength(0);
+    expect(view.container.textContent).toContain("No matching projects");
+    await view.click("Close project chooser");
+    await view.click("Choose shared binding project…");
+    await view.type("Search projects", "Fixture project 998");
+    await view.click("Use shared binding from Fixture project 998");
+    expect(candidateRows()).toHaveLength(0);
+    const updates = () =>
+      h.calls.filter((call) => call.method === WS_METHODS.memoryProjectBindingUpdate);
+    expect(updates().at(-1)?.input).toMatchObject({
+      project: { environmentId: nativeEnv, projectId: "project-999" },
+      action: "setExplicit",
+      expectedVersion: 1,
+      sharedProjectId: "private-shared-key",
+    });
+    await view.click("Use repository binding");
+    expect(updates().at(-1)?.input).toMatchObject({ action: "useRepository", expectedVersion: 2 });
+    await view.click("Clear selected project");
+    expect(view.container.textContent).toContain("No project selected");
+    expect(view.container.textContent).not.toContain("Choose shared binding project…");
+    expect(candidateRows()).toHaveLength(0);
+    expect(view.container.textContent).not.toContain("private-shared-key");
+  });
   it("selects a shared binding by project title without rendering its internal key", async () => {
     setupImport();
     const project = { environmentId: nativeEnv, projectId: "synthetic-project" as never };
@@ -1711,6 +1853,7 @@ describe("native WP6 Settings commands", () => {
       },
     }));
     await show({ environmentId: nativeEnv, project });
+    await view.click("Choose shared binding project…");
     await view.click("Use shared binding from Other project");
     expect(
       h.calls.findLast((call) => call.method === WS_METHODS.memoryProjectBindingUpdate)?.input,

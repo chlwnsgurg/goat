@@ -11,7 +11,7 @@ import {
 import * as Crypto from "expo-crypto";
 import { MemoryOperationId } from "@goat/contracts";
 import { memoryEnvironment as memory } from "../../state/memory";
-import { useProjects } from "../../state/entities";
+import { MemoryProjectPicker } from "./MemoryProjectPicker";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { AppText as Text } from "../../components/AppText";
 import { SettingsSection } from "./components/SettingsSection";
@@ -32,9 +32,6 @@ export function MemoryProjectSettings({
   beforeChange: () => Promise<void>;
 }) {
   const registry = useContext(RegistryContext);
-  const projects = useProjects().filter(
-    (candidate) => candidate.environmentId === environmentId && candidate.id !== project.projectId,
-  );
   const get = useAtomCommand(memory.projectBindingGet, { reportFailure: false });
   const update = useAtomCommand(memory.projectBindingUpdate, { reportFailure: false });
   const allowed = useAtomValue(memory.projectBindingUpdate.permissionAtom(environmentId));
@@ -138,29 +135,28 @@ export function MemoryProjectSettings({
         disabled={!allowed || !binding || busy}
         onPress={() => void save("setExplicit")}
       />
-      {projects.map((candidate) => (
-        <SettingsActionRow
-          key={candidate.id}
-          icon="brain"
-          label={`Use shared binding from ${candidate.title}`}
-          disabled={!allowed || !binding || busy}
-          onPress={() => {
-            const token = generation.current;
-            void get({
-              environmentId,
-              input: { memorySpaceId, project: { environmentId, projectId: candidate.id } },
-            }).then((result) => {
-              if (token !== generation.current) return;
-              if (result._tag === "Success" && result.value.projectKey?.kind === "explicit")
-                void save("setExplicit", result.value.projectKey.sharedProjectId);
-              else
-                setNotice(
-                  "That project has no shared binding. Create a shared binding there first, then select it here.",
-                );
-            });
-          }}
-        />
-      ))}
+      <MemoryProjectPicker
+        environmentId={environmentId}
+        excludeProjectId={project.projectId}
+        label="Choose shared binding project…"
+        candidateLabel="Use shared binding from "
+        disabled={!allowed || !binding || busy}
+        onSelect={(projectId) => {
+          const token = generation.current;
+          void get({
+            environmentId,
+            input: { memorySpaceId, project: { environmentId, projectId } },
+          }).then((result) => {
+            if (token !== generation.current) return;
+            if (result._tag === "Success" && result.value.projectKey?.kind === "explicit")
+              void save("setExplicit", result.value.projectKey.sharedProjectId);
+            else
+              setNotice(
+                "That project has no shared binding. Create a shared binding there first, then select it here.",
+              );
+          });
+        }}
+      />
       <SettingsActionRow
         icon="brain"
         label="Use repository binding"

@@ -55,6 +55,7 @@ import { SettingsActionRow } from "./components/SettingsActionRow";
 import { MemorySyncDiagnostics } from "./MemorySyncDiagnostics";
 import { MemoryImportSettings } from "./MemoryImportSettings";
 import { MemoryProjectSettings } from "./MemoryProjectSettings";
+import { MemoryProjectPicker } from "./MemoryProjectPicker";
 import { MemoryAdministration } from "./MemorySharingSettings";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SettingsRow } from "./components/SettingsRow";
@@ -641,24 +642,23 @@ function MemoryBrowser({
                 No project selected. User scope is available; select a project for project scope.
               </Copy>
             )}
-            {projects.map((project) => (
-              <Action
-                key={project.id}
-                label={`Select project: ${project.title}`}
-                onPress={() => {
-                  void (async () => {
-                    await retireImport.current();
-                    setBinding(null);
-                    setScopeKind(null);
-                    setProjectRef({ environmentId: params.environmentId, projectId: project.id });
-                  })().catch(() =>
-                    setNotice(
-                      "Could not clear the previous import. Reopen Settings before changing projects.",
-                    ),
-                  );
-                }}
-              />
-            ))}
+            <MemoryProjectPicker
+              environmentId={params.environmentId}
+              label="Choose project…"
+              candidateLabel="Select project: "
+              onSelect={(projectId) => {
+                void (async () => {
+                  await retireImport.current();
+                  setBinding(null);
+                  setScopeKind(null);
+                  setProjectRef({ environmentId: params.environmentId, projectId });
+                })().catch(() =>
+                  setNotice(
+                    "Could not clear the previous import. Reopen Settings before changing projects.",
+                  ),
+                );
+              }}
+            />
             {projectRef ? (
               <Action
                 label="Clear selected project"

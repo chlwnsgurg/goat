@@ -371,9 +371,14 @@ export function MemoryImportSettings({
           processing.
         </Copy>
       ) : null}
-      {state.receipt
-        ? nativeMemoryImportOutcomes(state.totals).map((label) => <Copy key={label}>{label}</Copy>)
-        : null}
+      {state.receipt ? (
+        <>
+          <Copy>Totals across all import batches</Copy>
+          {nativeMemoryImportOutcomes(state.totals).map((label) => (
+            <Copy key={label}>{label}</Copy>
+          ))}
+        </>
+      ) : null}
       {error ? <Copy>{error}</Copy> : null}
     </SettingsSection>
   );
