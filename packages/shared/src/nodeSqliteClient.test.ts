@@ -205,6 +205,112 @@ it.effect("waits for WAL recovery when executing writer statements", () =>
   }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
 );
 
+it.effect("isolates a writer waiting for WAL recovery from another transaction's rollback", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`CREATE TABLE isolated_recovery(value TEXT)`;
+    const insert = sql`INSERT INTO isolated_recovery VALUES ('survives')`;
+    // Exercise a cached statement, rather than serializing on a pending prepare.
+    yield* insert;
+    yield* sql`DELETE FROM isolated_recovery`;
+    const attempted = yield* Deferred.make<void>();
+    const entered = yield* Deferred.make<void>();
+    const rollback = yield* Deferred.make<void>();
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        vi.spyOn(NodeSqlite.StatementSync.prototype, "run").mockImplementationOnce(() => {
+          Deferred.doneUnsafe(attempted, Effect.void);
+          throw recoveryBusy();
+        }),
+      ),
+      () =>
+        Effect.gen(function* () {
+          const writer = yield* insert.pipe(Effect.forkChild);
+          yield* Deferred.await(attempted);
+          // Run B until it blocks on the permit (or, on the broken client,
+          // enters its transaction and blocks on the rollback barrier).
+          const transaction = yield* sql
+            .withTransaction(
+              Effect.gen(function* () {
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(rollback);
+                return yield* Effect.fail("rollback B");
+              }),
+            )
+            .pipe(Effect.flip, Effect.forkChild({ startImmediately: true }));
+          const enteredDuringRecovery = yield* Deferred.isDone(entered);
+          yield* TestClock.adjust("10 millis");
+          yield* Fiber.join(writer);
+          yield* Deferred.await(entered);
+          yield* Deferred.succeed(rollback, undefined);
+          assert.equal(yield* Fiber.join(transaction), "rollback B");
+          // A must survive B's rollback even though A resumed on the same DB.
+          assert.deepEqual(yield* sql`SELECT value FROM isolated_recovery`, [
+            { value: "survives" },
+          ]);
+          assert.equal(enteredDuringRecovery, false);
+        }),
+      (spy) => Effect.sync(() => spy.mockRestore()),
+    );
+  }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("isolates values waiting for WAL recovery from the same cached object query", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const select = sql<{ value: number }>`SELECT 42 AS value`;
+    yield* select;
+    const attempted = yield* Deferred.make<void>();
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        vi.spyOn(NodeSqlite.StatementSync.prototype, "all").mockImplementationOnce(() => {
+          Deferred.doneUnsafe(attempted, Effect.void);
+          throw recoveryBusy();
+        }),
+      ),
+      () =>
+        Effect.gen(function* () {
+          const values = yield* select.values.pipe(Effect.forkChild);
+          yield* Deferred.await(attempted);
+          const objects = yield* select.pipe(Effect.forkChild({ startImmediately: true }));
+          yield* TestClock.adjust("10 millis");
+          assert.deepEqual(yield* Fiber.join(values), [[42]]);
+          assert.deepEqual(yield* Fiber.join(objects), [{ value: 42 }]);
+          assert.deepEqual(yield* select, [{ value: 42 }]);
+        }),
+      (spy) => Effect.sync(() => spy.mockRestore()),
+    );
+  }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("releases statement permits and result mode after interrupted WAL recovery", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const select = sql<{ value: number }>`SELECT 42 AS value`;
+    yield* select;
+    const attempted = yield* Deferred.make<void>();
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        vi.spyOn(NodeSqlite.StatementSync.prototype, "all").mockImplementationOnce(() => {
+          Deferred.doneUnsafe(attempted, Effect.void);
+          throw recoveryBusy();
+        }),
+      ),
+      () =>
+        Effect.gen(function* () {
+          const values = yield* select.values.pipe(Effect.forkChild);
+          yield* Deferred.await(attempted);
+          const waiter = yield* select.pipe(Effect.forkChild({ startImmediately: true }));
+          yield* Fiber.interrupt(waiter);
+          yield* Fiber.interrupt(values);
+          assert.deepEqual(yield* select, [{ value: 42 }]);
+          assert.deepEqual(yield* sql.withTransaction(select), [{ value: 42 }]);
+        }),
+      (spy) => Effect.sync(() => spy.mockRestore()),
+    );
+  }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+);
+
 it.effect("waits for WAL recovery when preparing a writer statement", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
