@@ -1,3 +1,5 @@
+import * as MemoryService from "./memory/MemoryService.ts";
+import { makeMemoryImportHandlers } from "./ws.ts";
 import * as Schema from "effect/Schema";
 import * as RpcTest from "effect/rpc/RpcTest";
 import {
@@ -482,4 +484,28 @@ it.live.each(["thread", "shell"] as const)(
         [after!.sequence, liveSequence],
       );
     }).pipe(Effect.scoped, Effect.provide(ReplayTestLayer)),
+);
+
+it.effect("an unavailable import runtime rejects before invoking the service facade", () =>
+  Effect.gen(function* () {
+    const handlers = yield* makeMemoryImportHandlers(
+      Effect.succeed(["memory:write", "filesystem:read"]),
+      ["memory:write", "filesystem:read"],
+    ).pipe(
+      Effect.provide(
+        Layer.mock(MemoryService.MemoryService)({
+          importPorts: {} as MemoryService.MemoryService["Service"]["importPorts"],
+          importProvider: () => Effect.die("unavailable runtime must not call facade"),
+        }),
+      ),
+    );
+    const result = yield* handlers[WS_METHODS.memoryImportProvider]({
+      action: "discover",
+      memorySpaceId:
+        "00000000-0000-4000-8000-000000000001" as import("@goat/contracts").MemorySpaceId,
+      format: "codex",
+    }).pipe(Effect.flip);
+    assert.equal(result._tag, "MemoryRpcError");
+    assert.equal(result.code, "unavailable");
+  }),
 );
