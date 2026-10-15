@@ -144,6 +144,11 @@ it("dismisses the floating action when the enclosing file viewport scrolls", asy
   await render();
   await select();
   expect(action()).not.toBeNull();
+  // Another surface (e.g. a streaming chat transcript) scrolling keeps the action.
+  const transcript = document.createElement("div");
+  document.body.append(transcript);
+  await act(async () => transcript.dispatchEvent(new Event("scroll")));
+  expect(action()).not.toBeNull();
   await act(async () => document.body.dispatchEvent(new Event("scroll")));
   expect(action()).toBeNull();
 });

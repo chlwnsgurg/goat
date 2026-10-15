@@ -100,6 +100,11 @@ function SelectionToolbar({
       actions.cancel();
       clear();
     };
+    // Only scrolling that moves this file's viewport invalidates the action's
+    // position; a chat transcript following a streaming turn must not.
+    const dismissOnAncestorScroll = (event: Event) => {
+      if (event.target instanceof Node && event.target.contains(viewport)) dismiss();
+    };
     const focusActions = (event: KeyboardEvent) => {
       const toolbar = toolbarRef.current;
       if (
@@ -122,11 +127,11 @@ function SelectionToolbar({
     document.addEventListener("keydown", focusActions, true);
     document.addEventListener("selectionchange", actions.selectionChanged);
     // The file's ScrollArea viewport is an ancestor of this Markdown wrapper.
-    document.addEventListener("scroll", dismiss, true);
+    document.addEventListener("scroll", dismissOnAncestorScroll, true);
     return () => {
       document.removeEventListener("keydown", focusActions, true);
       document.removeEventListener("selectionchange", actions.selectionChanged);
-      document.removeEventListener("scroll", dismiss, true);
+      document.removeEventListener("scroll", dismissOnAncestorScroll, true);
       actions.dispose();
       actionsRef.current = null;
     };
