@@ -113,6 +113,24 @@ export const LAUNCH_LINEAGE_PROBE_TIMEOUT = "5 seconds";
 /** How a remote that predates goat_thread_status refuses it; callers fall back to goat_thread_read. */
 export const REMOTE_THREAD_STATUS_UNSUPPORTED = "does not have goat_thread_status";
 
+/** Whether a JSON-RPC refusal says the remote has no such tool, as an older GOAT answers. */
+const isUnknownToolRefusal = (error: AcpMcpBridgeError, tool: string) =>
+  error.kind === "rpc" &&
+  (error.message.includes(`Tool '${tool}' not found`) ||
+    error.message.includes(`Unknown tool: ${tool}`));
+
+/**
+ * Names the build each side runs and the fix. Starts with "GOAT on <host> does
+ * not have <tool>", which callers match to fall back for older remotes.
+ */
+export function missingRemoteToolMessage(
+  host: string,
+  tool: string,
+  remoteVersion: string | undefined,
+): string {
+  return `GOAT on ${host} does not have ${tool}; it runs ${remoteVersion ?? "an older build"} and this machine runs ${packageJson.version}. Update GOAT on ${host}; a runtime this machine installed there is refreshed once that host is idle.`;
+}
+
 type SshDispatchDestination =
   | { readonly host: string; readonly target?: undefined }
   | { readonly target: DesktopSshEnvironmentTarget; readonly host?: undefined };
@@ -1400,6 +1418,14 @@ const make = Effect.gen(function* () {
                   ),
                 )
               : attempt(true);
+          }
+          if (isUnknownToolRefusal(error, call.tool)) {
+            return Effect.fail(
+              failure(
+                "remote_refused",
+                missingRemoteToolMessage(target.alias, call.tool, bootstrap.remoteServerVersion),
+              ),
+            );
           }
           return Effect.fail(
             error.kind === "transport" || error.kind === "http"
