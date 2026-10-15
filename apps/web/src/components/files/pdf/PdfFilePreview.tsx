@@ -182,8 +182,9 @@ function PdfDocument(props: {
   );
   const selected = matches[matchIndex];
   const revealMatch = useEffectEvent((number: number) => navigate(number));
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (selected) revealMatch(selected.page + 1);
+    // Navigate before PdfPage's passive effect reveals the selected occurrence.
     // Navigating is driven by the selected match, not subsequent manual scrolling.
   }, [selected]);
   useEffect(() => {
@@ -194,8 +195,6 @@ function PdfDocument(props: {
     if (!matches.length) return;
     const next = (matchIndex + direction + matches.length) % matches.length;
     setMatchIndex(next);
-    const match = matches[next];
-    if (match) navigate(match.page + 1);
   };
   const showFind = () => {
     setFindOpen(true);

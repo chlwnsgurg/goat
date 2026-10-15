@@ -24,9 +24,10 @@ vi.mock("./pdfEngine", () => ({
         this.textContentItemsStr = options.textContentSource.items.map((item) => item.str);
       }
       async render() {
-        this.textDivs = this.textContentItemsStr.map((str) => {
+        this.textDivs = this.textContentItemsStr.map((str, index) => {
           const span = document.createElement("span");
           span.textContent = str;
+          span.style.top = `${560 + index * 160}px`;
           this.container.append(span);
           return span;
         });
@@ -36,7 +37,7 @@ vi.mock("./pdfEngine", () => ({
   }),
 }));
 
-function makeDocument() {
+function makeDocument(firstPageText = ["Page 1 needle"]) {
   return {
     numPages: 30,
     destroy: vi.fn(async () => {}),
@@ -56,12 +57,10 @@ function makeDocument() {
             ]
           : [],
       getTextContent: async () => ({
-        items: [
-          {
-            str: number === 1 || number === 30 ? `Page ${number} needle` : `Page ${number}`,
-            hasEOL: false,
-          },
-        ],
+        items: (number === 1
+          ? firstPageText
+          : [number === 30 ? `Page ${number} needle` : `Page ${number}`]
+        ).map((str) => ({ str, hasEOL: true })),
       }),
       render: () => ({ promise: Promise.resolve(), cancel: vi.fn() }),
       cleanup: vi.fn(),
@@ -123,7 +122,17 @@ beforeEach(() => {
   );
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(632);
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(432);
-  HTMLElement.prototype.scrollIntoView = vi.fn();
+  // jsdom has no layout: model centered scrolling using the fixture's text positions.
+  HTMLElement.prototype.scrollIntoView = function () {
+    const page = this.closest<HTMLElement>("[data-pdf-page]");
+    const wrapper = page?.parentElement;
+    const viewport = wrapper?.parentElement?.parentElement;
+    if (!wrapper || !viewport) throw new Error("Missing PDF scroll viewport");
+    const textTop = Number.parseFloat(this.parentElement!.style.top);
+    viewport.scrollTop =
+      Number.parseFloat(wrapper.style.top) + textTop + 8 - viewport.clientHeight / 2;
+    viewport.dispatchEvent(new Event("scroll"));
+  };
   load.mockReset().mockImplementation(async () => makeDocument());
   openLink.mockReset().mockResolvedValue(undefined);
   host = document.createElement("div");
@@ -138,6 +147,29 @@ afterEach(async () => {
 });
 
 describe("integrated PDF surface", () => {
+  it.each([false, true])(
+    "leaves the selected occurrence centered below the fold (next match: %s)",
+    async (next) => {
+      load.mockImplementation(async () => makeDocument(["First needle", "Second needle"]));
+      await open();
+      const page = host.querySelector<HTMLElement>('[aria-label="Page 1"]')!;
+      const viewport = page.parentElement!.parentElement!.parentElement!;
+      expect(viewport.scrollTop).toBe(0);
+      await click("Find");
+      await type(
+        host.querySelector<HTMLInputElement>('input[aria-label="Find in PDF"]')!,
+        "needle",
+      );
+      if (next) await click("Next match");
+
+      expect(host.querySelector('[aria-label="Page 1"]')).toBe(page);
+      const selected = page.querySelector<HTMLElement>('mark[data-selected="true"]')!;
+      expect(selected.parentElement?.textContent).toBe(next ? "Second needle" : "First needle");
+      // Page top 16 + text top 560/720 + half the 16px mark - half the 432px viewport.
+      expect(viewport.scrollTop).toBe(next ? 528 : 368);
+    },
+  );
+
   it("keeps focused PDF find out of the global chat capture handler", async () => {
     const threadFind = vi.fn();
     const capture = (event: KeyboardEvent) => {
