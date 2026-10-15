@@ -9,12 +9,13 @@ import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as Registry from "../provider/ProviderInstanceRegistry.ts";
 import * as Client from "./MemoryHubClient.ts";
-import * as Service from "./MemoryService.ts";
+import * as Owner from "./MemoryOwnerSourceReader.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Sync from "./MemorySyncService.ts";
 
 const make = Effect.gen(function* () {
   const config = yield* Config.ServerConfig;
+  const owner = yield* Owner.MemoryOwnerSourceReader;
   const settings = yield* Settings.MemoryHubCommittedSettings;
   const store = yield* Store.MemoryStore;
   const registry = yield* Registry.ProviderInstanceRegistry;
@@ -102,10 +103,9 @@ const make = Effect.gen(function* () {
     release: (c, i) => observe(c, client.release(c, i)),
     requestSourceRead: (c, i) => observe(c, client.requestSourceRead(c, i)),
     collectSourceReads: (c, i) => observe(c, client.collectSourceReads(c, i)),
-    respondSourceRead: (c, i) => observe(c, client.respondSourceRead(c, i)),
+    respondSourceRead: (c, i, prepare) => observe(c, client.respondSourceRead(c, i, prepare)),
     resultSourceRead: (c, i) => observe(c, client.resultSourceRead(c, i)),
   });
-  const denied = Effect.fail(new Service.MemoryAccessError({ code: "route_unavailable" }));
   const runtime = Sync.MemorySyncRuntime.of({
     cwd: config.cwd,
     readIntentBinding: settings.read.pipe(
@@ -165,10 +165,9 @@ const make = Effect.gen(function* () {
                 : Effect.void,
           ),
         ),
-    // WP4 owns live same-owner delegated orchestration:read authority. A sync
-    // credential cannot open transcripts. No reader is activated before that gate.
-    ownerPermit: () => denied,
-    ownerReader: { readCommitted: () => denied },
+    ...(owner.policy ? { ownerPolicy: owner.policy } : {}),
+    ownerPermit: owner.permit,
+    ownerReader: owner.reader,
   });
   return Layer.mergeAll(
     Layer.succeed(Sync.MemorySyncRuntime, runtime),
@@ -177,4 +176,6 @@ const make = Effect.gen(function* () {
 });
 
 /** The raw Client is constructed once; consumers receive only its observed boundary. */
-export const layer = Layer.unwrap(make).pipe(Layer.provide(Client.layer));
+export const layer = Layer.unwrap(make).pipe(
+  Layer.provide(Layer.mergeAll(Client.layer, Owner.layer)),
+);

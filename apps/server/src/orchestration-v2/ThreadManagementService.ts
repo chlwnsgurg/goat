@@ -103,12 +103,15 @@ export function withCreationProvenance(
     case "thread.create": {
       if (provenance.createdBy !== "user") return { ...command, ...provenance };
       const { launchedBy: _launcher, ...userCommand } = command;
-      return { ...userCommand, ...provenance };
+      return { ...userCommand, memoryGrantCeiling: "none", ...provenance };
     }
     case "message.dispatch":
+    case "delegated_task.request":
+      return provenance.createdBy === "user"
+        ? { ...command, memoryGrantCeiling: "none", ...provenance }
+        : { ...command, ...provenance };
     case "thread.fork":
     case "thread.merge_back":
-    case "delegated_task.request":
       return { ...command, ...provenance };
     default:
       return command;
@@ -162,6 +165,7 @@ export interface ThreadManagementSendInput {
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
   readonly scheduledTaskId?: ScheduledTaskId;
+  readonly memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling;
   readonly senderThreadId?: ThreadId;
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
@@ -958,6 +962,7 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const dispatched = yield* dispatch({
         type: "message.dispatch",
+        memoryGrantCeiling: input.memoryGrantCeiling ?? "none",
         commandId,
         threadId: input.threadId,
         messageId: input.messageId,

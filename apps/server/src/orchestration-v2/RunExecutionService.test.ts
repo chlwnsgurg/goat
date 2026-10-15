@@ -13,6 +13,8 @@ import {
   EventId,
   MessageId,
   NodeId,
+  type OrchestrationV2ConversationMessage,
+  ScheduledTaskId,
   type OrchestrationV2AppThread,
   type OrchestrationV2CheckpointScope,
   type OrchestrationV2DomainEvent,
@@ -891,6 +893,12 @@ it.effect(
     Effect.gen(function* () {
       const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
       const calls: Array<string> = [];
+      let refreshes = 0;
+      const refreshMemoryContext = () =>
+        Effect.sync(() => {
+          refreshes++;
+          return undefined;
+        });
       const attachment = ChatFileAttachment.make({
         type: "file",
         id: ChatAttachmentId.make("compact-file-12345678-1234-1234-1234-123456789abc"),
@@ -902,24 +910,46 @@ it.effect(
         { text: " /compact ", attachments: [], expected: "compact" },
         { text: "/compact", attachments: [attachment], expected: "prompt" },
         { text: "Continue the work", attachments: [], expected: "prompt" },
+        { text: "saved cloud prompt", attachments: [], expected: "observation", reattach: true },
       ];
       for (const [index, testCase] of cases.entries()) {
         const threadId = ThreadId.make(`thread:compact-routing:${index}`);
         const attemptId = RunAttemptId.make(`attempt:compact-routing:${index}`);
         yield* runExecution.startRootRun({
           commandId: CommandId.make(`command:compact-routing:${index}`),
+          refreshMemoryContext,
+          reattach: "reattach" in testCase,
           appThread: { id: threadId } as OrchestrationV2AppThread,
           providerSessionId: ProviderSessionId.make(`session:compact-routing:${index}`),
           session: {
             events: Stream.never,
-            startTurn: () =>
+            resumeTurn: (
+              input: Parameters<
+                NonNullable<ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeTurn"]>
+              >[0],
+            ) =>
               Effect.sync(() => {
-                calls.push("prompt");
+                assert.isUndefined(
+                  (input as unknown as { refreshMemoryContext?: unknown }).refreshMemoryContext,
+                );
+                calls.push("observation");
               }),
-            compactThread: () =>
-              Effect.sync(() => {
-                calls.push("compact");
-              }),
+            startTurn: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+              input.refreshMemoryContext!().pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    calls.push("prompt");
+                  }),
+                ),
+              ),
+            compactThread: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+              input.refreshMemoryContext!().pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    calls.push("compact");
+                  }),
+                ),
+              ),
           } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
           run: {
             id: RunId.make(`run:compact-routing:${index}`),
@@ -961,6 +991,7 @@ it.effect(
           },
         });
       }
+      assert.equal(refreshes, 3);
       assert.deepEqual(
         calls,
         cases.map((testCase) => testCase.expected),
@@ -4628,4 +4659,155 @@ it.effect.each(["accepted", "rejected", "skipped", "compact"] as const)(
         );
       }).pipe(Effect.provide(Layer.merge(testLayer, RemoteReportInbox.layer)));
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+const memoryNow = DateTime.makeUnsafe("2026-10-15T00:00:00.000Z");
+const memoryRun = (
+  index: number,
+  fields: Partial<OrchestrationV2Run> = {},
+): OrchestrationV2Run => ({
+  id: RunId.make(`memory-run:${index}`),
+  threadId: ThreadId.make("memory-thread"),
+  ordinal: index,
+  providerInstanceId: ProviderInstanceId.make("codex"),
+  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+  providerThreadId: null,
+  userMessageId: MessageId.make(`memory-message:${index}`),
+  rootNodeId: null,
+  activeAttemptId: null,
+  status: "starting",
+  requestedAt: memoryNow,
+  startedAt: null,
+  completedAt: null,
+  checkpointId: null,
+  contextHandoffId: null,
+  ...fields,
+});
+const memoryMessage = (
+  run: OrchestrationV2Run,
+  fields: Partial<OrchestrationV2ConversationMessage> = {},
+): OrchestrationV2ConversationMessage => ({
+  id: run.userMessageId,
+  threadId: run.threadId,
+  runId: run.id,
+  nodeId: null,
+  role: "user",
+  text: "Synthetic",
+  attachments: [],
+  streaming: false,
+  createdBy: "user",
+  creationSource: "web",
+  createdAt: memoryNow,
+  updatedAt: memoryNow,
+  ...fields,
+});
+it.each([
+  { name: "web user", source: "web", expected: null },
+  { name: "mobile user", source: "mobile", expected: null },
+  ...(["server", "mcp", "provider"] as const).flatMap((source) => [
+    { name: `${source} user without ceiling`, source, expected: "none" },
+    {
+      name: `${source} user with read ceiling`,
+      source,
+      ceiling: "read",
+      expected: "read",
+    } as const,
+  ]),
+  { name: "agent", source: "web", author: "agent", expected: "none" },
+  { name: "system", source: "web", author: "system", expected: "none" },
+  { name: "scheduled", source: "web", scheduled: true, ceiling: "read", expected: "read" },
+  { name: "delegated", source: "mobile", delegated: true, ceiling: "read", expected: "read" },
+  { name: "legacy task", source: "server", delegated: true, expected: "none" },
+] as const)("memory prepare classification: $name", (testCase) => {
+  const run = memoryRun(1, {
+    ...("ceiling" in testCase ? { memoryGrantCeiling: testCase.ceiling } : {}),
+    ...("delegated" in testCase ? { delegatedTaskId: NodeId.make("memory-task") } : {}),
+  });
+  const message = memoryMessage(run, {
+    creationSource: testCase.source,
+    createdBy: "author" in testCase ? testCase.author : "user",
+    ...("scheduled" in testCase
+      ? { scheduledTaskId: ScheduledTaskId.make("memory-schedule") }
+      : {}),
+  });
+  assert.deepEqual(
+    RunExecutionService.runMemoryPrepareInput({
+      run,
+      message,
+      projection: { runs: [run], messages: [message] },
+    }),
+    { memoryGrantCeiling: testCase.expected },
+  );
+});
+it.each(["usageLimitContinuationOfRunId", "restartContinuationOfRunId"] as const)(
+  "memory prepare ancestry: %s",
+  (field) => {
+    for (const delegated of [false, true]) {
+      const source = memoryRun(
+        1,
+        delegated
+          ? { delegatedTaskId: NodeId.make("memory-task"), memoryGrantCeiling: "read" }
+          : {},
+      );
+      const sourceMessage = memoryMessage(source);
+      const run = memoryRun(2, { [field]: source.id, memoryGrantCeiling: "read_write" });
+      const message = memoryMessage(run, { creationSource: "server" });
+      const projection = { runs: [source, run], messages: [sourceMessage, message] };
+      assert.deepEqual(RunExecutionService.runMemoryPrepareInput({ run, message, projection }), {
+        memoryGrantCeiling: delegated ? "read" : null,
+      });
+      assert.deepEqual(
+        RunExecutionService.runMemoryPrepareInput({
+          run,
+          message,
+          projection: { ...projection, runs: [run] },
+        }),
+        { memoryGrantCeiling: "none" },
+      );
+      assert.deepEqual(
+        RunExecutionService.runMemoryPrepareInput({
+          run,
+          message,
+          projection: { ...projection, messages: [message] },
+        }),
+        { memoryGrantCeiling: "none" },
+      );
+    }
+    const runs = [memoryRun(1)];
+    for (let index = 2; index <= 5; index++)
+      runs.push(
+        memoryRun(index, {
+          [index % 2 ? "restartContinuationOfRunId" : "usageLimitContinuationOfRunId"]:
+            runs.at(-1)!.id,
+        }),
+      );
+    const messages = runs.map((run) =>
+      memoryMessage(run, { creationSource: run.ordinal === 1 ? "web" : "server" }),
+    );
+    assert.deepEqual(
+      RunExecutionService.runMemoryPrepareInput({
+        run: runs[3]!,
+        message: messages[3]!,
+        projection: { runs, messages },
+      }),
+      { memoryGrantCeiling: null },
+    );
+    assert.deepEqual(
+      RunExecutionService.runMemoryPrepareInput({
+        run: runs[4]!,
+        message: messages[4]!,
+        projection: { runs, messages },
+      }),
+      { memoryGrantCeiling: "none" },
+    );
+    const cyclic = memoryRun(1, { [field]: runs[0]!.id });
+    assert.deepEqual(
+      RunExecutionService.runMemoryPrepareInput({
+        run: cyclic,
+        message: messages[0]!,
+        projection: { runs: [cyclic], messages },
+      }),
+      { memoryGrantCeiling: "none" },
+    );
+  },
 );

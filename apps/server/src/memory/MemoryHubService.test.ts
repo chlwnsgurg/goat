@@ -454,6 +454,8 @@ describe("MemoryHubService source relay", () => {
           1,
         );
         const response = {
+          kind: "normal" as const,
+          ownerPolicyEpoch: 1,
           protocolVersion: 1 as const,
           memorySpaceId: space,
           requestId: sourceRequest.requestId,
@@ -505,7 +507,14 @@ describe("MemoryHubService source relay", () => {
       );
       assert.strictEqual(
         (yield* hub.respondSourceRead(
-          { protocolVersion: 1, memorySpaceId: space, requestId: sourceRequest.requestId, outcome },
+          {
+            kind: "normal",
+            ownerPolicyEpoch: 0,
+            protocolVersion: 1,
+            memorySpaceId: space,
+            requestId: sourceRequest.requestId,
+            outcome,
+          },
           principal(otherEnv),
         )).accepted,
         false,
@@ -1146,6 +1155,7 @@ const resolutionSubmission = Effect.gen(function* () {
     ...base,
     kind: "resolve",
     expectedHeads: claim.conflictHeadSet,
+    payload: { ...base.payload, derivedFromMemoryRevisions: claim.conflictHeadSet },
     revision: { ...base.revision, parents: claim.conflictHeadSet },
     conflictId: claim.conflictId,
     fencingToken: lease.fencingToken,
@@ -1267,7 +1277,14 @@ describe("MemoryHubService resolution approval", () => {
       yield* hub.push(pushInput(op), principal());
       const response = yield* hub
         .respondSourceRead(
-          { protocolVersion: 1, memorySpaceId: space, requestId: sourceRequest.requestId, outcome },
+          {
+            kind: "normal",
+            ownerPolicyEpoch: 0,
+            protocolVersion: 1,
+            memorySpaceId: space,
+            requestId: sourceRequest.requestId,
+            outcome,
+          },
           principal(otherEnv),
         )
         .pipe(Effect.flip);

@@ -25,7 +25,21 @@ import { MEMORY_SCANNER_POLICY_VERSION, scanMemoryValue } from "./MemorySecretSc
 
 export class MemoryWorkerError extends Schema.TaggedError<MemoryWorkerError>()(
   "MemoryWorkerError",
-  { code: M.MemoryFailureCode, cause: Schema.optionalKey(Schema.Defect()) },
+  {
+    code: M.MemoryFailureCode,
+    stage: Schema.optionalKey(
+      Schema.Literals([
+        "catch-up",
+        "deferred",
+        "due-work",
+        "claim-work",
+        "read-work",
+        "execute",
+        "maintenance",
+      ]),
+    ),
+    cause: Schema.optionalKey(Schema.Defect()),
+  },
 ) {
   override get message() {
     return "Memory work failed.";
@@ -46,6 +60,7 @@ const decodeMessage = Schema.decodeUnknownEffect(
 const decodeRun = Schema.decodeUnknownEffect(Schema.fromJsonString(M.OrchestrationV2RunJson));
 const decodeSelection = Schema.decodeUnknownEffect(M.MemoryModelSelection);
 const decodeInput = Schema.decodeUnknownEffect(M.GenerateMemorySummaryInput);
+const decodePayload = Schema.decodeEffect(M.MemoryPayload);
 const encodeIds = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(M.MessageId)));
 const encodeGenerationMessage = Schema.encodeEffect(
   Schema.fromJsonString(
@@ -74,7 +89,16 @@ const safeCode = (error: unknown): M.MemoryFailureCode => {
   }
   return "storage_failed";
 };
-const workerError = (cause: unknown) => new MemoryWorkerError({ code: safeCode(cause), cause });
+const isWorkerError = Schema.is(MemoryWorkerError);
+const workerError = (cause: unknown) =>
+  isWorkerError(cause) ? cause : new MemoryWorkerError({ code: safeCode(cause), cause });
+const sweepStage = <A, E>(
+  stage: NonNullable<MemoryWorkerError["stage"]>,
+  effect: Effect.Effect<A, E>,
+) =>
+  effect.pipe(
+    Effect.mapError((cause) => new MemoryWorkerError({ code: safeCode(cause), stage, cause })),
+  );
 const make = Effect.gen(function* () {
   const store = yield* Store.MemoryStore;
   const service = yield* Service.MemoryService;
@@ -136,35 +160,54 @@ const make = Effect.gen(function* () {
             AND NOT EXISTS (SELECT 1 FROM orchestration_events n WHERE n.application_event_version=2 AND n.aggregate_kind='thread' AND n.stream_id=e.stream_id AND n.event_type='message.updated' AND json_extract(n.payload_json,'$.id')=json_extract(e.payload_json,'$.id') AND n.sequence>e.sequence AND n.sequence<=${meta.observedThroughSequence ?? meta.sourceWatermark.throughSequence})
             AND (CASE WHEN json_extract(e.payload_json,'$.runId') IS NULL THEN '' ELSE coalesce((SELECT json_extract(r.payload_json,'$.status') FROM orchestration_events r WHERE r.application_event_version=2 AND r.aggregate_kind='thread' AND r.stream_id=e.stream_id AND r.event_type IN ('run.created','run.updated') AND json_extract(r.payload_json,'$.id')=json_extract(e.payload_json,'$.runId') AND r.sequence<=${meta.observedThroughSequence ?? meta.sourceWatermark.throughSequence} ORDER BY r.sequence DESC LIMIT 1),'') END)!='rolled_back'
             AND (json_extract(e.payload_json,'$.role')='user' OR (SELECT json_extract(r.payload_json,'$.status') FROM orchestration_events r WHERE r.application_event_version=2 AND r.aggregate_kind='thread' AND r.stream_id=e.stream_id AND r.event_type IN ('run.created','run.updated') AND json_extract(r.payload_json,'$.id')=json_extract(e.payload_json,'$.runId') AND r.sequence<=${meta.observedThroughSequence ?? meta.sourceWatermark.throughSequence} ORDER BY r.sequence DESC LIMIT 1)='completed')
-            ORDER BY e.sequence LIMIT 101`);
+            ORDER BY e.sequence LIMIT 102`);
           const messages: M.GenerateMemorySummaryInput["messages"][number][] = [];
           let bytes = 0;
           let last = rows[0];
-          for (const row of rows) {
+          let hasMore = false;
+          // One lookahead row distinguishes a full filtered page from actual EOF.
+          for (const row of rows.slice(0, 101)) {
             const message = yield* query(decodeMessage(row.payload_json));
-            const input = { messageId: message.id, text: message.text, completed: true };
+            // Native history imports can contain the provider-only WP4 frame. It is
+            // reference data, not a new transcript fact (including an unfinished frame).
+            const text = message.text
+              .replace(/<external_goat_memory>[\s\S]*?(?:<\/external_goat_memory>|$)/g, "")
+              .trim();
+            if (!text) {
+              last = row;
+              continue;
+            }
+            const input = { messageId: message.id, text, completed: true };
             const size = new TextEncoder().encode(
               yield* query(encodeGenerationMessage(input)),
             ).length;
-            if (messages.length === 100 || bytes + size > 180000) break;
+            if (messages.length === 100 || bytes + size > 180000) {
+              if (!messages.length) return yield* new MemoryWorkerError({ code: "invalid_output" });
+              hasMore = true;
+              break;
+            }
             messages.push(input);
             bytes += size;
             last = row;
           }
-          if (!messages.length) return yield* new MemoryWorkerError({ code: "source_invalidated" });
           if (scanMemoryValue({ messages }).kind !== "allowed")
             return yield* new MemoryWorkerError({ code: "secret_detected" });
           return {
             messages,
             watermark:
-              messages.length < rows.length && last
+              (hasMore || rows.length > 101) && last
                 ? {
                     ...meta.sourceWatermark,
                     fromEventId: M.EventId.make(rows[0]!.event_id),
                     toEventId: M.EventId.make(last.event_id),
                     throughSequence: last.sequence,
                   }
-                : { ...meta.sourceWatermark, fromEventId: M.EventId.make(rows[0]!.event_id) },
+                : {
+                    ...meta.sourceWatermark,
+                    fromEventId: M.EventId.make(
+                      rows[0]?.event_id ?? meta.sourceWatermark.fromEventId,
+                    ),
+                  },
           };
         }),
       )
@@ -242,7 +285,10 @@ const make = Effect.gen(function* () {
       ORDER BY e.sequence LIMIT 100`);
     if (!rows.length && !continuations.length) return;
     const snapshot = yield* query(settings.getSettings);
-    const modelSelection = yield* query(decodeSelection(snapshot.defaultModelSelection, strict));
+    const modelSelection =
+      snapshot.defaultModelSelection === null
+        ? null
+        : yield* query(decodeSelection(snapshot.defaultModelSelection, strict));
     const space = snapshot.memoryHub.mode === "disabled" ? null : snapshot.memoryHub.memorySpaceId;
     const work: Store.MemoryWork[] = [];
     yield* store
@@ -251,6 +297,7 @@ const make = Effect.gen(function* () {
           for (const row of [...rows, ...continuations]) {
             const thread = { environmentId, threadId: M.ThreadId.make(row.stream_id) };
             if (row.event_type === "thread.deleted") {
+              yield* store.deleteThreadLineage(thread);
               yield* store.cancelThreadWork(thread);
               yield* store
                 .forgetLocalIntent(environmentId, `${environmentId}:${row.stream_id}:summary`)
@@ -274,6 +321,9 @@ const make = Effect.gen(function* () {
               continue;
             }
             if (!terminal.has(run.status)) continue;
+            // A fresh install has no default model. Still process deletion/rollback and
+            // advance the hook; continuations recover these summaries once a model is set.
+            if (modelSelection === null) continue;
             const source = yield* query(
               sql<{
                 event_id: string;
@@ -456,6 +506,13 @@ const make = Effect.gen(function* () {
         : (current?.revisions.find(
             (pair) => current.heads.length === 1 && current.heads[0] === pair.revision.revisionId,
           )?.payload ?? undefined);
+      const dependencySpace = M.MemorySpaceId.make(
+        work.space.startsWith("_local:") ? Service.memoryStableUuid(work.space) : work.space,
+      );
+      if (previousSummary)
+        yield* Service.validateSummaryDependencies(dependencySpace, previousSummary).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+        );
       if (previousSummary && scanMemoryValue(previousSummary).kind !== "allowed")
         return yield* new MemoryWorkerError({ code: "secret_detected" });
       let sourceWork = work;
@@ -464,15 +521,71 @@ const make = Effect.gen(function* () {
         sourceWork = { ...work, metadata: { ...meta, fromSequence: 0 } };
         source = yield* readSource(sourceWork);
       }
+      const readDependencies = Effect.gen(function* () {
+        const lineage = yield* store.readThreadLineage(meta.sourceThread, dependencySpace);
+        if (lineage.state !== "tracked")
+          return yield* new MemoryWorkerError({ code: "source_invalidated" });
+        const deps = [
+          ...new Set([
+            ...lineage.revisions,
+            ...(previousSummary?.derivedFromMemoryRevisions ?? []),
+          ]),
+        ];
+        // Use the existing payload contract: no truncation and no unbounded generation.
+        const payload = yield* query(
+          decodePayload(
+            {
+              text: "lineage admission",
+              evidence: [],
+              derivedFromMemoryRevisions: deps,
+            },
+            strict,
+          ),
+        );
+        yield* Service.validateSummaryDependencies(dependencySpace, payload).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+        );
+        return deps;
+      });
+      const dependencies = yield* readDependencies;
       const recheckSource = Effect.gen(function* () {
         yield* readSource(work);
+        const latest = yield* readDependencies;
+        if (
+          latest.length !== dependencies.length ||
+          latest.some((id) => !dependencies.includes(id))
+        )
+          return yield* new MemoryWorkerError({ code: "source_invalidated" });
+        if (previousSummary)
+          yield* Service.validateSummaryDependencies(dependencySpace, previousSummary).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+          );
         if (previousSummary && !(yield* summaryEvidenceValid(work, previousSummary)))
           return yield* new MemoryWorkerError({ code: "source_invalidated" });
       });
       const generated = yield* Effect.scoped(
         Effect.gen(function* () {
           const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "memory-generation-" });
+          let lastGenerated:
+            | {
+                input: M.GenerateMemorySummaryInput;
+                output: M.GenerateMemorySummaryExecutionResult;
+              }
+            | undefined;
           while (true) {
+            // Empty filtered pages still consume their bounded source range. A trailing
+            // empty page completes the work without sending an invalid empty model input.
+            if (!source.messages.length) {
+              if (source.watermark.throughSequence >= meta.sourceWatermark.throughSequence)
+                return lastGenerated;
+              yield* renewClaim;
+              sourceWork = {
+                ...work,
+                metadata: { ...meta, fromSequence: source.watermark.throughSequence },
+              };
+              source = yield* readSource(sourceWork);
+              continue;
+            }
             const input = yield* query(
               decodeInput(
                 {
@@ -500,10 +613,11 @@ const make = Effect.gen(function* () {
               return yield* new MemoryWorkerError({ code: "secret_detected" });
             if (source.watermark.throughSequence >= meta.sourceWatermark.throughSequence)
               return { input, output };
+            lastGenerated = { input, output };
             previousSummary = {
               text: output.result.text,
               evidence: output.result.evidence,
-              derivedFromMemoryRevisions: [],
+              derivedFromMemoryRevisions: dependencies,
             };
             sourceWork = {
               ...work,
@@ -513,6 +627,16 @@ const make = Effect.gen(function* () {
           }
         }),
       );
+      if (!generated) {
+        yield* store.transact(
+          Effect.gen(function* () {
+            yield* recheckSource;
+            if (!(yield* store.completeSummaryWork(owned)))
+              return yield* new MemoryWorkerError({ code: "attempt_expired" });
+          }),
+        );
+        return;
+      }
       if (work.space.startsWith("_local:")) {
         if (
           generated.output.execution.environmentId !== environmentId ||
@@ -544,7 +668,7 @@ const make = Effect.gen(function* () {
               payload: {
                 text: generated.output.result.text,
                 evidence: generated.output.result.evidence,
-                derivedFromMemoryRevisions: [],
+                derivedFromMemoryRevisions: dependencies,
               },
               provenance: {
                 environmentId,
@@ -708,17 +832,22 @@ const make = Effect.gen(function* () {
   });
   const sweepDue = Effect.fn("MemoryWorker.sweepDue")(
     function* () {
-      yield* catchUp();
-      yield* deferred();
+      yield* sweepStage("catch-up", catchUp());
+      yield* sweepStage("deferred", deferred());
       const now = yield* Clock.currentTimeMillis;
-      for (const candidate of yield* store.dueWork(now, 100)) {
+      for (const candidate of yield* sweepStage("due-work", store.dueWork(now, 100))) {
         if (!["summary", "consolidate", "rebuild"].includes(candidate.kind)) continue;
-        if (!(yield* store.claimWork(candidate.id, runtime.instanceId, now, now + workClaimMs)))
+        if (
+          !(yield* sweepStage(
+            "claim-work",
+            store.claimWork(candidate.id, runtime.instanceId, now, now + workClaimMs),
+          ))
+        )
           continue;
-        const work = yield* store.readWork(candidate.id);
-        if (work) yield* execute(work);
+        const work = yield* sweepStage("read-work", store.readWork(candidate.id));
+        if (work) yield* sweepStage("execute", execute(work));
       }
-      yield* maintenance.cycle(environmentId);
+      yield* sweepStage("maintenance", maintenance.cycle(environmentId));
     },
     Effect.mapError(workerError),
     sweepLock.withPermits(1),
@@ -730,7 +859,9 @@ const make = Effect.gen(function* () {
     const worker = yield* makeDrainableWorker<void, never, never>(() =>
       Ref.set(queued, false).pipe(
         Effect.andThen(sweepDue()),
-        Effect.catch((error) => Effect.logWarning("Memory sweep deferred", { code: error.code })),
+        Effect.catch((error) =>
+          Effect.logWarning("Memory sweep deferred", { code: error.code, stage: error.stage }),
+        ),
       ),
     );
     const wake = Ref.getAndSet(queued, true).pipe(

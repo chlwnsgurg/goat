@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as Context from "effect/Context";
 import * as Logger from "effect/Logger";
 import * as Console from "effect/Console";
 import * as References from "effect/References";
@@ -11,8 +12,11 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as FileSystem from "effect/FileSystem";
 import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
+import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import * as Store from "./MemoryStore.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
@@ -42,6 +46,9 @@ const beginFixtureCheckpoint = Effect.gen(function* () {
     }),
   );
 });
+const encodeSourceCollect = Schema.encodeEffect(
+  Schema.fromJsonString(M.MemoryHubSourceReadCollectResult),
+);
 const encodeOperationJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryOperation));
 const encodePayload = Schema.encodeEffect(Schema.fromJsonString(M.MemoryPayload));
 const encodeCheckpointPage = Schema.encodeEffect(Schema.fromJsonString(M.MemoryHubCheckpointPage));
@@ -102,9 +109,9 @@ const decision = (op = operation()): Store.MemoryDecision => ({
     : {}),
 });
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
-const setup = Layer.effectDiscard(migration.pipe(Effect.andThen(hubMigration))).pipe(
-  Layer.provideMerge(database),
-);
+const setup = Layer.effectDiscard(
+  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
+).pipe(Layer.provideMerge(database));
 const live = Store.layer.pipe(Layer.provideMerge(setup));
 
 const checkpoint = () => {
@@ -411,6 +418,159 @@ describe("MemoryStore", () => {
       );
     }).pipe(Effect.provide(live)),
   );
+  it.effect("examines an empty 1000-row window and reaches a later match in both modes", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const op = operation();
+      yield* store.apply(decision(op));
+      const item = yield* store.loadAggregate(space, memory);
+      if (op.kind === "forget") throw new Error("Fixture kind");
+      yield* store.index({
+        memorySpaceId: space,
+        memoryId: memory,
+        revisionId: op.revision.revisionId,
+        generation: item.generation,
+      });
+      // Real keyset rows with no searchable body precede the active item.
+      yield* sql`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<1001)
+        INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json)
+        SELECT ${space},printf('00000000-0000-4000-8000-%012d',n),'{}','user','[]','quarantined',0,'{}','{}' FROM ids WHERE n!=2`;
+      // Move the fixture to the tail while preserving its projection identity.
+      const tail = M.MemoryId.make(id(1002));
+      yield* sql`UPDATE memory_items SET memory_id=${tail},item_json=json_set(item_json,'$.memoryId',${tail},'$.revision.memoryId',${tail}) WHERE space=${space} AND memory_id=${memory}`;
+      yield* store.searchCoverage({ memorySpaceId: space, scope: { kind: "user" }, limit: 100 });
+      yield* store.searchCoverage({ memorySpaceId: space, scope: { kind: "user" }, limit: 100 });
+      for (const mode of ["fts", "substring"] as const) {
+        const first = yield* store.search(
+          { memorySpaceId: space, scope: { kind: "user" }, limit: 100 },
+          "synthetic",
+          mode,
+        );
+        assert.deepStrictEqual(first.items, []);
+        assert.strictEqual(first.examinedAfterMemoryId, id(1001));
+        assert.isFalse(first.exhausted);
+        const last = yield* store.search(
+          {
+            memorySpaceId: space,
+            scope: { kind: "user" },
+            limit: 100,
+            afterMemoryId: first.examinedAfterMemoryId!,
+          },
+          "synthetic",
+          mode,
+        );
+        assert.deepStrictEqual(
+          last.items.map((i) => i.memoryId),
+          [tail],
+        );
+        assert.strictEqual(last.examinedAfterMemoryId, tail);
+        assert.isTrue(last.exhausted);
+        const absent = yield* store.search(
+          { memorySpaceId: space, scope: { kind: "user" }, limit: 100, afterMemoryId: tail },
+          "synthetic",
+          mode,
+        );
+        assert.isTrue(absent.exhausted);
+      }
+      const plan = yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN WITH window AS MATERIALIZED (SELECT rowid,memory_id FROM memory_items WHERE space=${space} AND scope_key='user' AND memory_id>'' ORDER BY memory_id LIMIT 1000) SELECT memory_id,EXISTS(SELECT 1 FROM memory_items_fts WHERE rowid=window.rowid AND memory_items_fts MATCH 'synthetic') FROM window ORDER BY memory_id`;
+      assert.isTrue(plan.some((row) => row.detail.includes("MATERIALIZE window")));
+      assert.isTrue(plan.some((row) => row.detail.includes("SEARCH memory_items USING")));
+      assert.isTrue(
+        plan.some((row) => row.detail.includes("VIRTUAL TABLE INDEX") && row.detail.includes("=")),
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("keeps the first unreturned match after the byte cap", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const op = operation();
+      if (op.kind === "forget") throw new Error("Fixture kind");
+      const large = { ...op, payload: { ...op.payload, text: "synthetic " + "x".repeat(15000) } };
+      yield* store.apply(decision(large));
+      for (const n of [100, 101, 102, 103]) {
+        const second = M.MemoryId.make(id(n));
+        yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,item_json,availability_json,generation)
+          SELECT space,${second},scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,json_set(item_json,'$.memoryId',${second},'$.revision.memoryId',${second}),availability_json,generation FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
+      }
+      const first = yield* store.search(
+        { memorySpaceId: space, scope: { kind: "user" }, limit: 100 },
+        "synthetic",
+        "substring",
+      );
+      assert.isTrue(first.items.length > 0 && first.items.length < 5);
+      assert.strictEqual(first.examinedAfterMemoryId, first.items.at(-1)!.memoryId);
+      assert.isFalse(first.exhausted);
+      const wire = yield* Schema.encodeEffect(Schema.fromJsonString(M.MemoryPage))({
+        items: first.items,
+        nextCursor: first.examinedAfterMemoryId,
+        projectionWatermark: 0,
+      });
+      assert.isTrue(new TextEncoder().encode(wire).length <= M.MEMORY_PAGE_MAX_UTF8_BYTES);
+      const next = yield* store.search(
+        {
+          memorySpaceId: space,
+          scope: { kind: "user" },
+          limit: 100,
+          afterMemoryId: first.examinedAfterMemoryId!,
+        },
+        "synthetic",
+        "substring",
+      );
+      assert.deepStrictEqual(
+        [...first.items, ...next.items].map((i) => i.memoryId),
+        [memory, ...[100, 101, 102, 103].map((n) => M.MemoryId.make(id(n)))],
+      );
+      assert.isTrue(next.exhausted);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "maintains scoped counters through index/hold/scope/delete and transaction rollback",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const filter = { memorySpaceId: space, scope: { kind: "user" as const }, limit: 100 };
+        const op = operation();
+        if (op.kind === "forget") throw new Error("Fixture kind");
+        yield* store.apply(decision(op));
+        const initial = yield* store.searchCoverage(filter);
+        assert.deepStrictEqual(initial, {
+          ready: true,
+          eligible: 1,
+          indexed: 0,
+          textBytes: new TextEncoder().encode(op.payload.text).length,
+        });
+        const item = yield* store.loadAggregate(space, memory);
+        yield* store.index({
+          memorySpaceId: space,
+          memoryId: memory,
+          revisionId: op.revision.revisionId,
+          generation: item.generation,
+        });
+        assert.strictEqual((yield* store.searchCoverage(filter)).indexed, 1);
+        yield* store
+          .transact(
+            Effect.gen(function* () {
+              yield* sql`UPDATE memory_items SET status='blocked' WHERE space=${space}`;
+              return yield* new Store.MemoryStoreConflict({ code: "unavailable" });
+            }),
+          )
+          .pipe(Effect.flip);
+        assert.strictEqual((yield* store.searchCoverage(filter)).indexed, 1);
+        yield* sql`UPDATE memory_items SET scope_key='explicit:fixture' WHERE space=${space}`;
+        assert.strictEqual((yield* store.searchCoverage(filter)).eligible, 0);
+        yield* sql`UPDATE memory_items SET scope_key='user',status='blocked' WHERE space=${space}`;
+        assert.strictEqual((yield* store.searchCoverage(filter)).textBytes, 0);
+        yield* sql`UPDATE memory_items SET status='active',generation=generation+1 WHERE space=${space}`;
+        assert.strictEqual((yield* store.searchCoverage(filter)).indexed, 0);
+        yield* sql`DELETE FROM memory_items WHERE space=${space}`;
+        assert.strictEqual((yield* store.searchCoverage(filter)).eligible, 0);
+      }).pipe(Effect.provide(live)),
+  );
   it.effect("escapes FTS input and caps pages", () =>
     Effect.gen(function* () {
       const store = yield* Store.MemoryStore;
@@ -425,7 +585,7 @@ describe("MemoryStore", () => {
           { memorySpaceId: space, scope: { kind: "user" }, limit: 100 },
           '" OR *',
           "fts",
-        )).length,
+        )).items.length,
         0,
       );
     }).pipe(Effect.provide(live)),
@@ -651,7 +811,7 @@ describe("MemoryStore", () => {
         "fts",
       );
       assert.deepStrictEqual(
-        results.map((item) => item.memoryId),
+        results.items.map((item) => item.memoryId),
         [memory],
       );
     }).pipe(Effect.provide(live)),
@@ -1719,6 +1879,18 @@ it("measures the versioned compact maximum and preserves approval and correlatio
     fencingToken: null,
     reportGuard: null,
   });
+  const replayRecord = M.MemoryCompactReceipt.make({
+    ...legacyRecord,
+    upsertRequestDigest: hash,
+    revisionId: null,
+    receipt: { ...rejected.receipt },
+  });
+  const replayBytes = Store.encodeCompactReceipt(replayRecord, () => Number.MAX_SAFE_INTEGER);
+  assert.isAtMost(replayBytes.length, M.MEMORY_COMPACT_RECEIPT_ENCODING_MAX_BYTES);
+  assert.deepStrictEqual(
+    Store.decodeCompactReceipt(replayBytes, space, () => env),
+    replayRecord,
+  );
   const v2 = Store.encodeCompactReceipt(legacyRecord, () => 1);
   const v1 = v2.slice(0, -3);
   v1[0] = 1;
@@ -2346,6 +2518,8 @@ describe("MemoryStore transient source relay", () => {
           },
         };
         const response = {
+          kind: "normal" as const,
+          ownerPolicyEpoch: 1,
           protocolVersion: 1 as const,
           memorySpaceId: space,
           requestId: request.requestId,
@@ -2530,6 +2704,348 @@ describe("MemoryStore transient source relay", () => {
       assert.strictEqual(cleanup.removedRows, 1);
       assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_source_reads`).length, 0);
     }).pipe(Effect.provide(live)),
+  );
+  it.effect.each(["pending", "completed"] as const)(
+    `revoke terminal-denies %s, survives a new Store, and old revoke cannot touch reenrollment`,
+    (state) =>
+      Effect.gen(function* () {
+        yield* seed;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        yield* store.transact(store.requestHubSourceReadTx(authority(), request));
+        const outcome: M.MemorySourceReadOutcome = {
+          kind: "available",
+          page: {
+            sourceThread: thread,
+            watermark,
+            messages: [{ messageId, text: "synthetic original" }],
+            nextCursor: null,
+          },
+        };
+        const response: M.MemoryHubSourceReadRespondInput = {
+          kind: "normal",
+          protocolVersion: 1,
+          memorySpaceId: space,
+          requestId: request.requestId,
+          ownerPolicyEpoch: 1,
+          outcome,
+        };
+        if (state === "completed")
+          yield* store.transact(store.respondHubSourceReadTx(authority(owner), response));
+        const revoke: M.MemoryHubSourceReadRespondInput = {
+          kind: "revoke",
+          protocolVersion: 1,
+          memorySpaceId: space,
+          requesterEnvironmentId: env,
+          ownerPolicyEpoch: 2,
+        };
+        const ack = yield* store.transact(store.respondHubSourceReadTx(authority(owner), revoke));
+        assert.deepStrictEqual(ack, {
+          kind: "revoke",
+          accepted: true,
+          ack: {
+            memorySpaceId: space,
+            ownerEnvironmentId: owner,
+            requesterEnvironmentId: env,
+            removalEpoch: 2,
+            revokedThroughEpoch: 2,
+          },
+        });
+        assert.deepStrictEqual(
+          yield* store.transact(store.respondHubSourceReadTx(authority(owner), revoke)),
+          ack,
+        );
+        const resultInput = {
+          protocolVersion: 1 as const,
+          memorySpaceId: space,
+          requestId: request.requestId,
+        };
+        assert.deepStrictEqual(
+          yield* store.transact(store.resultHubSourceReadTx(authority(), resultInput)),
+          {
+            state: "completed",
+            outcome: { kind: "denied", requiredPermission: "orchestration:read" },
+          },
+        );
+        assert.isFalse(
+          (yield* store.transact(
+            store.respondHubSourceReadTx(authority(owner), { ...response, ownerPolicyEpoch: 3 }),
+          )).accepted,
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref LIKE 'relay:%'`).length,
+          0,
+        );
+        const fresh = yield* Layer.build(Store.layer);
+        const restarted = Context.get(fresh, Store.MemoryStore);
+        assert.deepStrictEqual(
+          yield* restarted.transact(restarted.resultHubSourceReadTx(authority(), resultInput)),
+          {
+            state: "completed",
+            outcome: { kind: "denied", requiredPermission: "orchestration:read" },
+          },
+        );
+        const nextRequest = { ...request, requestId: M.MemorySourceReadRequestId.make(id(320)) };
+        yield* restarted.transact(restarted.requestHubSourceReadTx(authority(), nextRequest));
+        assert.isTrue(
+          (yield* restarted.transact(
+            restarted.respondHubSourceReadTx(authority(owner), {
+              ...response,
+              requestId: nextRequest.requestId,
+              ownerPolicyEpoch: 3,
+            }),
+          )).accepted,
+        );
+        yield* restarted.transact(restarted.respondHubSourceReadTx(authority(owner), revoke));
+        assert.deepStrictEqual(
+          yield* restarted.transact(
+            restarted.resultHubSourceReadTx(authority(), {
+              ...resultInput,
+              requestId: nextRequest.requestId,
+            }),
+          ),
+          { state: "completed", outcome },
+        );
+        const fences = yield* sql<{
+          record_json: string;
+        }>`SELECT record_json FROM memory_import_keys WHERE key_kind='hub_source_fences'`;
+        assert.strictEqual(fences.length, 1);
+      }).pipe(Effect.provide(live)),
+  );
+
+  it.effect.each(["legacy", "digest", "deadline", "credential"] as const)(
+    `terminally denies corrupted persisted relay %s`,
+    (mutation) =>
+      Effect.gen(function* () {
+        yield* seed;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        yield* store.transact(store.requestHubSourceReadTx(authority(), request));
+        if (mutation === "legacy")
+          yield* sql`UPDATE memory_hub_source_reads SET locator_json=json_remove(locator_json,'$.stamp')`;
+        if (mutation === "digest")
+          yield* sql`UPDATE memory_hub_source_reads SET locator_json=json_set(locator_json,'$.stamp.locatorDigest',${"c".repeat(64)})`;
+        if (mutation === "deadline")
+          yield* sql`UPDATE memory_hub_source_reads SET locator_json=json_set(locator_json,'$.expiresAtHubTime','1970-01-01T00:02:00.000Z')`;
+        if (mutation === "credential")
+          yield* sql`UPDATE memory_hub_source_reads SET locator_json=json_set(locator_json,'$.stamp.requesterCredentialVersion',2)`;
+        const result = yield* store.transact(
+          store.resultHubSourceReadTx(authority(), {
+            protocolVersion: 1,
+            memorySpaceId: space,
+            requestId: request.requestId,
+          }),
+        );
+        assert.deepStrictEqual(result, {
+          state: "completed",
+          outcome: { kind: "denied", requiredPermission: "orchestration:read" },
+        });
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect("bounds source admission to 32 per requester and 128 per hub", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const extra = ["requester-c", "requester-d", "requester-e"].map((value) =>
+        M.EnvironmentId.make(value),
+      );
+      for (const [n, e] of extra.entries())
+        yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${e},${String(n + 3).repeat(64)},1,'active',0)`;
+      let ordinal = 9300;
+      for (const e of [env, owner, ...extra.slice(0, 2)]) {
+        for (let n = 0; n < 32; n++)
+          yield* store.transact(
+            store.requestHubSourceReadTx(authority(e), {
+              ...request,
+              requestId: M.MemorySourceReadRequestId.make(id(ordinal++)),
+            }),
+          );
+        if (e === env) {
+          const error = yield* store
+            .transact(
+              store.requestHubSourceReadTx(authority(e), {
+                ...request,
+                requestId: M.MemorySourceReadRequestId.make(id(ordinal++)),
+              }),
+            )
+            .pipe(Effect.flip);
+          assert.strictEqual(error._tag, "MemoryCapacityError");
+          if (error._tag === "MemoryCapacityError")
+            assert.strictEqual(error.dimension, "relay_environment");
+        }
+      }
+      const error = yield* store
+        .transact(
+          store.requestHubSourceReadTx(authority(extra[2]!), {
+            ...request,
+            requestId: M.MemorySourceReadRequestId.make(id(ordinal++)),
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(error._tag, "MemoryCapacityError");
+      if (error._tag === "MemoryCapacityError") assert.strictEqual(error.dimension, "relay_hub");
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_source_reads`).length, 128);
+      const collected = yield* store.transact(
+        store.collectHubSourceReadsTx(authority(owner), {
+          protocolVersion: 1,
+          memorySpaceId: space,
+          limit: 32,
+        }),
+      );
+      assert.strictEqual(collected.requests.length, 32);
+      const encoded = yield* encodeSourceCollect(collected);
+      assert.isAtMost(new TextEncoder().encode(encoded).length, 65536);
+    }).pipe(Effect.provide(live)),
+  );
+
+  it.effect("rejects an oversized source outcome without retaining its body", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.transact(store.requestHubSourceReadTx(authority(), request));
+      const response: M.MemoryHubSourceReadRespondInput = {
+        protocolVersion: 1,
+        kind: "normal",
+        ownerPolicyEpoch: 1,
+        memorySpaceId: space,
+        requestId: request.requestId,
+        outcome: {
+          kind: "available",
+          page: {
+            sourceThread: thread,
+            watermark,
+            messages: [{ messageId, text: "x".repeat(65536) }],
+            nextCursor: null,
+          },
+        },
+      };
+      const result = yield* Effect.result(
+        store.transact(store.respondHubSourceReadTx(authority(owner), response)),
+      );
+      assert.strictEqual(result._tag, "Failure");
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref LIKE 'relay:%'`).length,
+        0,
+      );
+      assert.strictEqual(
+        (yield* store.transact(
+          store.resultHubSourceReadTx(authority(), {
+            protocolVersion: 1,
+            memorySpaceId: space,
+            requestId: request.requestId,
+          }),
+        )).state,
+        "pending",
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "reopens SQLite with the original relay deadline, unconsumed body and durable pair fence",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const dir = yield* fs.makeTempDirectoryScoped({ prefix: "source-relay-restart-" });
+        const filename = `${dir}/relay.sqlite`;
+        const db = NodeSqliteClient.layer({ filename });
+        const firstLayer = Store.layer.pipe(
+          Layer.provideMerge(
+            Layer.effectDiscard(
+              migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
+            ).pipe(Layer.provideMerge(db)),
+          ),
+        );
+        const resultInput = {
+          protocolVersion: 1 as const,
+          memorySpaceId: space,
+          requestId: request.requestId,
+        };
+        const outcome: M.MemorySourceReadOutcome = {
+          kind: "available",
+          page: {
+            sourceThread: thread,
+            watermark,
+            messages: [{ messageId, text: "synthetic restart original" }],
+            nextCursor: null,
+          },
+        };
+        const first = yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* seed;
+            const store = yield* Store.MemoryStore;
+            const requested = yield* store.transact(
+              store.requestHubSourceReadTx(authority(), request),
+            );
+            yield* store.transact(
+              store.respondHubSourceReadTx(authority(owner), {
+                protocolVersion: 1,
+                kind: "normal",
+                ownerPolicyEpoch: 1,
+                memorySpaceId: space,
+                requestId: request.requestId,
+                outcome,
+              }),
+            );
+            return requested;
+          }).pipe(Effect.provide(firstLayer)),
+        );
+        yield* TestClock.adjust(1000);
+        const reopenedLayer = () =>
+          Store.layer.pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename })));
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* Store.MemoryStore;
+            assert.deepStrictEqual(
+              yield* store.transact(store.requestHubSourceReadTx(authority(), request)),
+              first,
+            );
+            assert.deepStrictEqual(
+              yield* store.transact(store.resultHubSourceReadTx(authority(), resultInput)),
+              { state: "completed", outcome },
+            );
+            const next = { ...request, requestId: M.MemorySourceReadRequestId.make(id(9550)) };
+            yield* store.transact(store.requestHubSourceReadTx(authority(), next));
+            yield* store.transact(
+              store.respondHubSourceReadTx(authority(owner), {
+                protocolVersion: 1,
+                kind: "revoke",
+                memorySpaceId: space,
+                requesterEnvironmentId: env,
+                ownerPolicyEpoch: 2,
+              }),
+            );
+          }).pipe(Effect.provide(reopenedLayer())),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* Store.MemoryStore;
+            assert.deepStrictEqual(
+              yield* store.transact(
+                store.resultHubSourceReadTx(authority(), {
+                  ...resultInput,
+                  requestId: M.MemorySourceReadRequestId.make(id(9550)),
+                }),
+              ),
+              {
+                state: "completed",
+                outcome: { kind: "denied", requiredPermission: "orchestration:read" },
+              },
+            );
+            const ack = yield* store.transact(
+              store.respondHubSourceReadTx(authority(owner), {
+                protocolVersion: 1,
+                kind: "revoke",
+                memorySpaceId: space,
+                requesterEnvironmentId: env,
+                ownerPolicyEpoch: 2,
+              }),
+            );
+            assert.strictEqual(ack.kind, "revoke");
+            if (ack.kind === "revoke") assert.strictEqual(ack.ack.revokedThroughEpoch, 2);
+          }).pipe(Effect.provide(reopenedLayer())),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
 
@@ -3878,6 +4394,16 @@ it.effect.each(["current", "replaced-compactor", "replaced-prune"] as const)(
           );
         }
       }
+      // Revision identities can outlive their bodies for one bounded sweep while
+      // the judgment is still a dependent. Once it is collected, identities can go too.
+      yield* store.transact(
+        store.compactEligibleHistoryTx({
+          memorySpaceId: space,
+          expectedFloor: nextFloor,
+          now: expiresAt + M.MEMORY_LOG_RETENTION_MS + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          limit: 100,
+        }),
+      );
       for (const revisionId of op.resolution.inputRevisionIds)
         assert.strictEqual(
           (yield* sql`SELECT 1 FROM memory_revisions WHERE space=${space} AND revision_id=${revisionId}`)
@@ -7245,5 +7771,409 @@ it.effect("r18 discovery surfaces storage failure instead of reporting no holds"
       .pipe(Effect.flip);
     assert.strictEqual(failure._tag, "MemoryStorageError");
     assert.strictEqual(failure.stage, "persisted-hold-discovery");
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "enforces substring item/text equality and +1, refreshing bytes on payload_ref replacement",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const filter = { memorySpaceId: space, scope: { kind: "user" as const }, limit: 1 };
+      const op = operation();
+      if (op.kind === "forget") throw new Error("Fixture kind");
+      yield* store.apply(decision(op));
+      const body = (length: number) =>
+        JSON.stringify({ ...op.payload, text: "synthetic" + "x".repeat(length - 9) });
+      const sharedLength = 4194;
+      const lastLength = M.MEMORY_SUBSTRING_MAX_UTF8_BYTES - 1999 * sharedLength;
+      yield* sql`UPDATE memory_payloads SET body_json=${body(sharedLength)} WHERE space=${space}`;
+      yield* sql`UPDATE memory_items SET search_text_bytes=${sharedLength} WHERE space=${space}`;
+      yield* sql`WITH RECURSIVE ids(n) AS (SELECT 3 UNION ALL SELECT n+1 FROM ids WHERE n<2001)
+      INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,item_json,availability_json,generation)
+      SELECT space,printf('00000000-0000-4000-8000-%012d',n),scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,
+      json_set(item_json,'$.memoryId',printf('00000000-0000-4000-8000-%012d',n),'$.revision.memoryId',printf('00000000-0000-4000-8000-%012d',n)),availability_json,generation FROM memory_items,ids WHERE space=${space} AND memory_id=${memory}`;
+      const shortRef = id(9000);
+      const longRef = id(9001);
+      const longerRef = id(9002);
+      for (const [ref, length] of [
+        [shortRef, 10],
+        [longRef, lastLength],
+        [longerRef, lastLength + 1],
+      ] as const)
+        yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},${ref},${id(2001)},${body(length)},'[]')`;
+      yield* sql`UPDATE memory_items SET payload_ref=${longRef} WHERE space=${space} AND memory_id=${id(2001)}`;
+      yield* store.searchCoverage(filter);
+      yield* store.searchCoverage(filter);
+      assert.deepStrictEqual(yield* store.searchCoverage(filter), {
+        ready: true,
+        eligible: 2000,
+        indexed: 0,
+        textBytes: M.MEMORY_SUBSTRING_MAX_UTF8_BYTES,
+      });
+      assert.strictEqual((yield* store.search(filter, "synthetic", "substring")).items.length, 1);
+      yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,item_json,availability_json)
+      SELECT space,${id(2002)},scope_json,scope_key,heads_json,status,${shortRef},projection_watermark,json_set(item_json,'$.memoryId',${id(2002)},'$.revision.memoryId',${id(2002)}),availability_json FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
+      // Reduce bytes so this refusal independently proves the item ceiling.
+      yield* sql`UPDATE memory_items SET payload_ref=${shortRef} WHERE space=${space} AND memory_id=${id(2001)}`;
+      assert.strictEqual((yield* store.searchCoverage(filter)).eligible, 2001);
+      assert.isTrue(
+        (yield* store.searchCoverage(filter)).textBytes < M.MEMORY_SUBSTRING_MAX_UTF8_BYTES,
+      );
+      assert.strictEqual(
+        (yield* store.search(filter, "synthetic", "substring").pipe(Effect.flip))._tag,
+        "MemoryCapacityError",
+      );
+      yield* sql`DELETE FROM memory_items WHERE space=${space} AND memory_id=${id(2002)}`;
+      yield* sql`UPDATE memory_items SET payload_ref=${longerRef} WHERE space=${space} AND memory_id=${id(2001)}`;
+      assert.strictEqual(
+        (yield* store.searchCoverage(filter)).textBytes,
+        M.MEMORY_SUBSTRING_MAX_UTF8_BYTES + 1,
+      );
+      assert.strictEqual(
+        (yield* store.search(filter, "synthetic", "substring").pipe(Effect.flip))._tag,
+        "MemoryCapacityError",
+      );
+      yield* sql`UPDATE memory_items SET payload_ref=${shortRef} WHERE space=${space} AND memory_id=${id(2001)}`;
+      assert.strictEqual((yield* store.searchCoverage(filter)).textBytes, 1999 * sharedLength + 10);
+      assert.strictEqual((yield* store.search(filter, "synthetic", "substring")).items.length, 1);
+    }).pipe(Effect.provide(live)),
+);
+it.effect.each(["fts", "substring"] as const)(
+  "%s continues across more than 100 matches at the item and byte ceilings",
+  (mode) =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const op = operation();
+      if (op.kind === "forget") throw new Error("Fixture kind");
+      yield* store.apply(decision(op));
+      const aggregate = yield* store.loadAggregate(space, memory);
+      yield* store.index({
+        memorySpaceId: space,
+        memoryId: memory,
+        revisionId: op.revision.revisionId,
+        generation: aggregate.generation,
+      });
+      yield* sql`WITH RECURSIVE ids(n) AS (SELECT 3 UNION ALL SELECT n+1 FROM ids WHERE n<106)
+        INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,item_json,availability_json,generation,index_state,indexed_generation)
+        SELECT space,printf('00000000-0000-4000-8000-%012d',n),scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,
+        json_set(item_json,'$.memoryId',printf('00000000-0000-4000-8000-%012d',n),'$.revision.memoryId',printf('00000000-0000-4000-8000-%012d',n)),availability_json,generation,index_state,indexed_generation FROM memory_items,ids WHERE space=${space} AND memory_id=${memory}`;
+      yield* sql`INSERT INTO memory_items_fts(rowid,body) SELECT rowid,'synthetic searchable text' FROM memory_items WHERE memory_id!=${memory}`;
+      const filter = { memorySpaceId: space, scope: { kind: "user" as const }, limit: 100 };
+      const first = yield* store.search(filter, "synthetic", mode);
+      assert.isTrue(first.items.length > 0 && first.items.length <= 100);
+      assert.isFalse(first.exhausted);
+      assert.strictEqual(first.examinedAfterMemoryId, first.items.at(-1)!.memoryId);
+      const next = yield* store.search(
+        { ...filter, afterMemoryId: first.examinedAfterMemoryId! },
+        "synthetic",
+        mode,
+      );
+      assert.strictEqual(next.items.length, 105 - first.items.length);
+      assert.isTrue(next.exhausted);
+      assert.deepStrictEqual(
+        [...first.items, ...next.items].map((i) => i.memoryId),
+        Array.from({ length: 105 }, (_, n) => id(n + 2)),
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "r2 compacts dependency bodies but preserves forget identity until dependents are purged",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* TestClock.setTime(Date.parse(now));
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${env},${hash},1,'active')`;
+      const first = operation(8800);
+      const successor = operation(8801);
+      const derived = operation(8802);
+      if (first.kind !== "upsert" || successor.kind !== "upsert" || derived.kind !== "upsert")
+        throw new Error("fixture");
+      const target = M.MemoryId.make(id(8803));
+      const operations: M.MemoryOperation[] = [
+        first,
+        {
+          ...successor,
+          expectedHeads: [first.revision.revisionId],
+          revision: { ...successor.revision, parents: [first.revision.revisionId] },
+        },
+        {
+          ...derived,
+          memoryId: target,
+          revision: { ...derived.revision, memoryId: target },
+          payload: { ...derived.payload, derivedFromMemoryRevisions: [first.revision.revisionId] },
+        },
+      ];
+      for (const op of operations) {
+        const ledger = yield* store.transact(
+          store.appendHubEntryTx({
+            operation: op,
+            operationDigest: memoryOperationDigest(op),
+            outcome: "accepted",
+            now: Date.parse(now),
+          }),
+        );
+        yield* store.apply({
+          ...decideMemoryOperation(
+            yield* store.loadAggregate(space, op.memoryId),
+            op,
+            Store.hubAdmission,
+            { kind: "allowed" },
+          ),
+          receipt: ledger.entry.receipt,
+        });
+      }
+      const at = Date.parse(now) + 2 * M.MEMORY_LOG_RETENTION_MS;
+      yield* sql`UPDATE memory_payloads SET purge_eligible_after=0 WHERE payload_ref=${first.revision.payloadRef}`;
+      const handle = yield* store.transact(
+        store.prepareHubCheckpointTx({
+          authority: { ...leaseAuthority, now: Effect.succeed(at) },
+          checkpointId: "r2-lineage",
+          snapshotToken: "r2-lineage",
+          hubEnvironmentId: env,
+        }),
+      );
+      yield* store.transact(
+        store.publishCheckpointAndFloorTx({
+          memorySpaceId: space,
+          checkpointId: "r2-lineage",
+          expectedFloor: 0,
+          nextFloor: handle.checkpointSequence,
+          now: at,
+        }),
+      );
+      for (let i = 0; i < 3; i++)
+        yield* store.transact(
+          store.compactEligibleHistoryTx({
+            memorySpaceId: space,
+            expectedFloor: handle.checkpointSequence,
+            now: at + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+            limit: 100,
+          }),
+        );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${first.revision.payloadRef}`)
+          .length,
+        0,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_revisions WHERE revision_id=${first.revision.revisionId}`)
+          .length,
+        1,
+      );
+      const snapshotRows = yield* sql<{
+        metadata_json: string;
+      }>`SELECT metadata_json FROM memory_inbox_pending WHERE checkpoint_id='hub:r2-lineage' ORDER BY page_ordinal`;
+      const pages = yield* Effect.forEach(snapshotRows, (row) =>
+        decodeCheckpointPage(row.metadata_json),
+      );
+      const dependency = pages
+        .flatMap((page) => page.revisions)
+        .find((pair) => pair.revision.revisionId === first.revision.revisionId);
+      assert.isDefined(dependency);
+      assert.isNull(dependency!.payload);
+      const forgotten: M.MemoryOperation = {
+        protocolVersion: 1,
+        kind: "forget",
+        memorySpaceId: space,
+        memoryId: memory,
+        operationId: M.MemoryOperationId.make(id(8810)),
+        originEnvironmentId: env,
+        expectedHeads: [successor.revision.revisionId],
+        tombstone: {
+          memorySpaceId: space,
+          memoryId: memory,
+          deleteOperationId: M.MemoryOperationId.make(id(8810)),
+          deletingEnvironmentId: env,
+          deletedAtUtc: M.MemoryUtcTimestamp.make(now),
+          suppressedSourceKeys: [],
+          suppressedContent: [],
+          sourceExclusions: [],
+        },
+      };
+      yield* store.apply(
+        decideMemoryOperation(
+          yield* store.loadAggregate(space, memory),
+          forgotten,
+          Store.hubAdmission,
+          { kind: "allowed" },
+        ),
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${target}`).length,
+        0,
+      );
+      assert.strictEqual((yield* store.loadAggregate(space, target)).item?.status, "blocked");
+      yield* store.transact(
+        store.compactEligibleHistoryTx({
+          memorySpaceId: space,
+          expectedFloor: handle.checkpointSequence,
+          now: at + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          limit: 100,
+        }),
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_revisions WHERE revision_id=${first.revision.revisionId}`)
+          .length,
+        0,
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect("r3 thread lineage pins identity without retaining revision bodies", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* TestClock.setTime(Date.parse(now));
+    yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${env},${hash},1,'active')`;
+    const first = operation(8800);
+    const successor = operation(8801);
+    const derived = operation(8802);
+    if (first.kind !== "upsert" || successor.kind !== "upsert" || derived.kind !== "upsert")
+      throw new Error("fixture");
+    const thread = { environmentId: env, threadId: M.ThreadId.make("lineage-owner") };
+    yield* sql`CREATE TABLE orchestration_events (application_event_version INTEGER,aggregate_kind TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT)`;
+    yield* store.appendThreadLineage(thread, space, [first.revision.revisionId]);
+    const target = M.MemoryId.make(id(8803));
+    const operations: M.MemoryOperation[] = [
+      first,
+      {
+        ...successor,
+        expectedHeads: [first.revision.revisionId],
+        revision: { ...successor.revision, parents: [first.revision.revisionId] },
+      },
+      {
+        ...derived,
+        memoryId: target,
+        revision: { ...derived.revision, memoryId: target },
+        payload: { ...derived.payload, derivedFromMemoryRevisions: [] },
+      },
+    ];
+    for (const op of operations) {
+      const ledger = yield* store.transact(
+        store.appendHubEntryTx({
+          operation: op,
+          operationDigest: memoryOperationDigest(op),
+          outcome: "accepted",
+          now: Date.parse(now),
+        }),
+      );
+      yield* store.apply({
+        ...decideMemoryOperation(
+          yield* store.loadAggregate(space, op.memoryId),
+          op,
+          Store.hubAdmission,
+          { kind: "allowed" },
+        ),
+        receipt: ledger.entry.receipt,
+      });
+    }
+    const at = Date.parse(now) + 2 * M.MEMORY_LOG_RETENTION_MS;
+    yield* sql`UPDATE memory_payloads SET purge_eligible_after=0 WHERE payload_ref=${first.revision.payloadRef}`;
+    const handle = yield* store.transact(
+      store.prepareHubCheckpointTx({
+        authority: { ...leaseAuthority, now: Effect.succeed(at) },
+        checkpointId: "r2-lineage",
+        snapshotToken: "r2-lineage",
+        hubEnvironmentId: env,
+      }),
+    );
+    yield* store.transact(
+      store.publishCheckpointAndFloorTx({
+        memorySpaceId: space,
+        checkpointId: "r2-lineage",
+        expectedFloor: 0,
+        nextFloor: handle.checkpointSequence,
+        now: at,
+      }),
+    );
+    for (let i = 0; i < 3; i++)
+      yield* store.transact(
+        store.compactEligibleHistoryTx({
+          memorySpaceId: space,
+          expectedFloor: handle.checkpointSequence,
+          now: at + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          limit: 100,
+        }),
+      );
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${first.revision.payloadRef}`)
+        .length,
+      0,
+    );
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_revisions WHERE revision_id=${first.revision.revisionId}`)
+        .length,
+      1,
+    );
+    // No payload referenced rA while compaction ran. Create a dependent afterwards,
+    // proving that the surviving identity still supports forget's reverse closure.
+    const next = operation(8820);
+    if (next.kind !== "upsert") throw new Error("fixture");
+    const nextDerived: M.MemoryOperation = {
+      ...next,
+      memoryId: target,
+      expectedHeads: [derived.revision.revisionId],
+      revision: { ...next.revision, memoryId: target, parents: [derived.revision.revisionId] },
+      payload: { ...next.payload, derivedFromMemoryRevisions: [first.revision.revisionId] },
+    };
+    yield* store.apply(
+      decideMemoryOperation(
+        yield* store.loadAggregate(space, target),
+        nextDerived,
+        Store.hubAdmission,
+        { kind: "allowed" },
+      ),
+    );
+    const forgotten: M.MemoryOperation = {
+      protocolVersion: 1,
+      kind: "forget",
+      memorySpaceId: space,
+      memoryId: memory,
+      operationId: M.MemoryOperationId.make(id(8810)),
+      originEnvironmentId: env,
+      expectedHeads: [successor.revision.revisionId],
+      tombstone: {
+        memorySpaceId: space,
+        memoryId: memory,
+        deleteOperationId: M.MemoryOperationId.make(id(8810)),
+        deletingEnvironmentId: env,
+        deletedAtUtc: M.MemoryUtcTimestamp.make(now),
+        suppressedSourceKeys: [],
+        suppressedContent: [],
+        sourceExclusions: [],
+      },
+    };
+    yield* store.apply(
+      decideMemoryOperation(
+        yield* store.loadAggregate(space, memory),
+        forgotten,
+        Store.hubAdmission,
+        { kind: "allowed" },
+      ),
+    );
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${target}`).length,
+      0,
+    );
+    assert.strictEqual((yield* store.loadAggregate(space, target)).item?.status, "blocked");
+    yield* store.deleteThreadLineage(thread);
+    yield* store.transact(
+      store.compactEligibleHistoryTx({
+        memorySpaceId: space,
+        expectedFloor: handle.checkpointSequence,
+        now: at + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+        limit: 100,
+      }),
+    );
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_revisions WHERE revision_id=${first.revision.revisionId}`)
+        .length,
+      0,
+    );
   }).pipe(Effect.provide(live)),
 );

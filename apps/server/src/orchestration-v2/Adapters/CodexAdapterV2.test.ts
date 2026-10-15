@@ -1,3 +1,11 @@
+import * as McpProviderSession from "@goat/provider-core/server/mcpSession";
+import * as Queue from "effect/Queue";
+import * as MemoryDerivedCache from "../../memory/MemoryDerivedCache.ts";
+import * as MemorySnapshot from "../../memory/MemorySnapshot.ts";
+import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
+import * as Exit from "effect/Exit";
+import * as M from "@goat/contracts";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import * as NodeOS from "node:os";
 
 import { historyResponseItems } from "@goat/provider-core/server/handoffBudget";
@@ -66,11 +74,77 @@ import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 import { makeReplayServerConfig, withCodexReplayChildMetadata } from "./CodexAdapterV2.testkit.ts";
 import * as CodexAdapterV2Testkit from "./CodexAdapterV2.testkit.ts";
 
+const layerAdapterTest = Layer.mergeAll(
+  MemoryDerivedCache.layer,
+  IdAllocator.layer,
+  McpProviderSessions.layer,
+  NodeServices.layer,
+);
+
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const replayTranscriptJson = Schema.fromJsonString(CodexReplay.CodexAppServerReplayTranscript);
 const encodeReplayTranscriptJson = Schema.encodeEffect(replayTranscriptJson);
 const decodeReplayTranscriptJson = Schema.decodeUnknownEffect(replayTranscriptJson);
 const encodeStringJson = Schema.encodeEffect(Schema.fromJsonString(Schema.String));
+
+const wp4Memory = () =>
+  MemoryContext.packMemoryContext({
+    memorySpaceId: M.MemorySpaceId.make("00000000-0000-4000-8000-000000000099"),
+    projectionWatermark: 1,
+    items: [
+      {
+        memoryId: M.MemoryId.make("00000000-0000-4000-8000-000000000001"),
+        revisionId: M.MemoryRevisionId.make("00000000-0000-4000-8000-000000000002"),
+        scope: { kind: "user" },
+        provenance: { environmentId: M.EnvironmentId.make("fixture") },
+        assertionKind: "fact",
+        text: "& <untrusted> 'quoted' \"data\"",
+      },
+    ],
+  })!;
+describe("Codex WP4 native MCP grant configuration", () => {
+  it("disables and reallows exact memory tools with each issued credential", () => {
+    const grants = [
+      ["memory:read", "memory:write", "orchestration:read"],
+      [],
+      ["memory:read", "orchestration:read"],
+      ["memory:read", "memory:write", "orchestration:read"],
+    ] as const;
+    for (const [index, grantedScopes] of grants.entries()) {
+      const credential = `Bearer fixture-${index}`;
+      const params = CodexAdapterV2.codexThreadRuntimeParams({
+        mcpSession: {
+          environmentId: EnvironmentId.make("fixture"),
+          threadId: ThreadId.make("fixture"),
+          providerSessionId: `fixture-${index}`,
+          providerInstanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+          endpoint: "http://127.0.0.1:1/mcp",
+          authorizationHeader: credential,
+          browserToolsAvailable: false,
+          grantedScopes,
+        },
+      });
+      const servers = params.config.mcp_servers as {
+        readonly goat: {
+          readonly disabled_tools: ReadonlyArray<string>;
+          readonly http_headers: { readonly Authorization: string };
+        };
+      };
+      assert.equal(servers.goat.http_headers.Authorization, credential);
+      for (const name of ["memory_upsert", "memory_forget", "memory_revert_resolution"])
+        assert.equal(servers.goat.disabled_tools.includes(name), index === 1 || index === 2);
+      for (const name of [
+        "memory_list",
+        "memory_search",
+        "memory_read",
+        "memory_history",
+        "memory_sync_status",
+        "memory_read_source",
+      ])
+        assert.equal(servers.goat.disabled_tools.includes(name), index === 1);
+    }
+  });
+});
 
 describe("Codex context usage compatibility", () => {
   const previous: ModelSelection = {
@@ -669,6 +743,17 @@ describe("CodexAdapterV2 process spawning", () => {
           mcp_servers: {
             goat: {
               url: "http://127.0.0.1:43123/mcp",
+              disabled_tools: [
+                "memory_list",
+                "memory_search",
+                "memory_read",
+                "memory_history",
+                "memory_sync_status",
+                "memory_read_source",
+                "memory_upsert",
+                "memory_forget",
+                "memory_revert_resolution",
+              ],
               http_headers: {
                 Authorization: "Bearer secret-codex-token",
               },
@@ -822,12 +907,7 @@ describe("CodexAdapterV2 process spawning", () => {
         .pipe(Effect.scoped, Effect.exit);
 
       assert.deepEqual(spawnedCommands, [path.join(NodeOS.homedir(), "bin", "codex")]);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-      Effect.provideService(HostProcess.Platform, "linux"),
-    ),
+    }).pipe(Effect.provide(layerAdapterTest), Effect.provideService(HostProcess.Platform, "linux")),
   );
 });
 
@@ -853,7 +933,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
         name: "Computer Use",
         kind: "computer",
       });
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each(["inProgress", "completed", "failed"] as const)(
@@ -871,7 +951,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
         });
         assert.equal(projection.title, "Read the desktop window");
         assert.equal(projection.toolSurface, "computer");
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each(["cua_repl", "node_repl"])(
@@ -905,7 +985,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
           (yield* CodexAdapterV2.projectCodexDynamicToolItem({ ...call, server: "github" })).title,
           "js",
         );
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each(["inProgress", "completed", "failed"] as const)(
@@ -927,7 +1007,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
           kind: "integration",
         });
         assert.deepEqual(projection.input, { city: "Berlin" });
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect("uses Codex connector names without reading a display title from arguments", () =>
@@ -956,7 +1036,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
         logoUrl: "https://example.com/weather.png",
       });
       assert.deepEqual(projection.toolSource?.icon, projection.toolIcon);
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect("preserves native browser and app icons alongside MCP tool output", () =>
@@ -1011,7 +1091,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
         app: { _tag: "app-id", appId: "com.apple.finder" },
       });
       assert.equal(app.toolSource?.name, "Finder");
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect("preserves MCP arguments and prefers structured output", () =>
@@ -1043,7 +1123,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
         },
         status: "completed",
       });
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect("preserves namespaced dynamic tool output", () =>
@@ -1065,7 +1145,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
         output: [{ type: "inputText", text: "inspection failed" }],
         status: "failed",
       });
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 });
 
@@ -1860,12 +1940,7 @@ describe("CodexAdapterV2 session initialize", () => {
         providerThreads.map((providerThread) => providerThread.nativeThreadRef?.nativeId),
         ["concurrent-first", "concurrent-second"],
       );
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("retries initialize after a failed handshake", () =>
@@ -1891,12 +1966,7 @@ describe("CodexAdapterV2 session initialize", () => {
       const providerThread = yield* session.ensureThread("thread-initialize-retry");
       assert.equal(providerThread.nativeThreadRef?.nativeId, "initialize-retry");
       assert.equal(session.initializeRequests(), 2);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("completes the handshake after a caller is interrupted mid-initialize", () =>
@@ -1939,12 +2009,7 @@ describe("CodexAdapterV2 session initialize", () => {
       const providerThread = yield* session.ensureThread("thread-initialize-interrupted");
       assert.equal(providerThread.nativeThreadRef?.nativeId, "initialize-interrupted");
       assert.equal(session.initializeRequests(), 2);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 });
 
@@ -1966,6 +2031,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
+    beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1975,7 +2041,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         [];
       const clientFactory: CodexAdapterV2.CodexAppServerClientFactoryShape = {
         open: (openInput) =>
-          Layer.build(CodexReplay.layerReplay(transcript)).pipe(
+          Effect.gen(function* () {
+            const driver = yield* CodexReplay.makeReplayDriver(
+              transcript,
+              beforeEmitInbound ? { beforeEmitInbound } : {},
+            );
+            return yield* Layer.build(CodexReplay.layerReplayWithDriver(driver));
+          }).pipe(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterOpenSessionError({
@@ -2185,12 +2257,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.equal(requests.filter((method) => method === "turn/start").length, 1);
         assert.isBelow(requests.indexOf("thread/inject_items"), requests.indexOf("turn/start"));
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("identifies sessions to Codex with the same client info as main", () =>
@@ -2226,12 +2293,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           },
         },
       ]);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("unsubscribes from the native thread when it is unloaded", () =>
@@ -2269,12 +2331,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.isDefined(harness.runtime.unloadThread);
       yield* harness.runtime.unloadThread!({ providerThread: harness.providerThread });
       assert.deepEqual(requests, ["initialize", "thread/start", "thread/unsubscribe"]);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("keeps the app-server failure as the cause when an unload is rejected", () =>
@@ -2308,12 +2365,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.equal(error._tag, "ProviderAdapterProtocolError");
       const cause = error._tag === "ProviderAdapterProtocolError" ? error.cause : undefined;
       assert.equal((cause as { _tag?: string } | undefined)?._tag, "CodexAppServerRequestError");
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("waits for native start before interrupting an acknowledged queued turn", () =>
@@ -2407,12 +2459,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
       assert.lengthOf(harness.terminalEvents(), 1);
       assert.isFalse(yield* harness.hasPendingBackgroundWork);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("settles Stop when a queued native turn fails before starting", () =>
@@ -2494,12 +2541,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.lengthOf(harness.terminalEvents(), 1);
       assert.isFalse(interruptSent, "A terminal native turn must not receive turn/interrupt");
       assert.isFalse(yield* harness.hasPendingBackgroundWork);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("bounds Stop when a queued native turn never starts", () =>
@@ -2559,12 +2601,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.lengthOf(harness.terminalEvents(), 1);
       assert.isFalse(interruptSent, "An unstarted native turn must not receive turn/interrupt");
       assert.isFalse(yield* harness.hasPendingBackgroundWork);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("sends currency-sigil skill mentions to Codex as $ mentions", () =>
@@ -2623,12 +2660,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           text: "then £ship it",
         },
       });
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   const assistantMessages = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
@@ -2778,12 +2810,566 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           });
         }
         assert.isEmpty(assistantMessages(harness.events));
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
+  );
+
+  it.effect.each(["ttl", "stop"] as const)(
+    "releases the adapter's retained memory body without another turn (%s)",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = `wp4-cache-${mode}`;
+          const snapshot = wp4Memory();
+          const preamble = codexReplayPreamble({
+            nativeThreadId,
+            nativeTurnId: "cache-turn",
+            prompt: "work",
+          });
+          const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId,
+            codexInput: [{ type: "text", text: "work" }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            memoryContext: snapshot,
+          });
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({
+              scenario: `wp4-cache-${mode}`,
+              entries: [
+                ...preamble.slice(0, 5),
+                { type: "expect_outbound", frame: { id: 3, method: "turn/start", params } },
+                ...preamble.slice(6),
+                ...(mode === "stop"
+                  ? [
+                      {
+                        type: "expect_outbound" as const,
+                        frame: {
+                          id: 4,
+                          method: "turn/interrupt",
+                          params: { threadId: nativeThreadId, turnId: "cache-turn" },
+                        },
+                      },
+                      { type: "emit_inbound" as const, frame: { id: 4, result: {} } },
+                    ]
+                  : []),
+                {
+                  type: "emit_inbound",
+                  frame: {
+                    method: "turn/completed",
+                    params: {
+                      threadId: nativeThreadId,
+                      turn: makeCodexReplayTurn({
+                        id: "cache-turn",
+                        status: mode === "stop" ? "interrupted" : "completed",
+                      }),
+                    },
+                  },
+                },
+              ],
+            }),
+          );
+          const base = makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("cache-turn"),
+            text: "work",
+          });
+          yield* harness.runtime.startTurn({
+            ...base,
+            refreshMemoryContext: () => Effect.succeed(snapshot),
+          });
+          if (mode === "ttl") yield* harness.firstTerminal;
+          const cache = yield* MemoryDerivedCache.MemoryDerivedCache;
+          assert.equal((yield* cache.usage).owners, 1);
+          if (mode === "ttl") yield* TestClock.adjust(M.MEMORY_DERIVED_CACHE_TTL_MS);
+          else
+            yield* harness.runtime.interruptTurn({
+              providerThread: harness.providerThread,
+              providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+                driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+                nativeTurnId: "cache-turn",
+              }),
+            });
+          if (mode === "stop") yield* harness.firstTerminal;
+          assert.deepEqual(yield* cache.usage, { bytes: 0, owners: 0 });
+        }),
+      ).pipe(Effect.provide(layerAdapterTest)),
+  );
+
+  it.effect.each(["availability", "resume-rotation"] as const)(
+    "replays successful native attachment authority (%s)",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scenario = `wp4-attachment-${mode}`;
+          const nativeThreadId = scenario;
+          const threadId = ThreadId.make(`thread-${scenario}`);
+          const config: McpProviderSession.McpProviderSessionConfig = {
+            environmentId: M.EnvironmentId.make("fixture"),
+            threadId,
+            providerSessionId: "credential-1",
+            providerInstanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+            endpoint: "http://127.0.0.1:43123/mcp",
+            authorizationHeader: "Bearer fixture-1",
+            browserToolsAvailable: false,
+            grantedScopes: ["memory:read", "memory:write", "orchestration:read"],
+          };
+          const next = {
+            ...config,
+            providerSessionId: "credential-2",
+            authorizationHeader: "Bearer fixture-2",
+          };
+          const stale = { ...config, grantedScopes: [] };
+          const sessions = yield* McpProviderSessions.McpProviderSessions;
+          yield* sessions.set(config);
+          let valid = true;
+          const preamble = codexReplayPreamble({
+            nativeThreadId,
+            nativeTurnId: "unused",
+            prompt: "unused",
+          });
+          const threadResult = preamble[4]!;
+          const entries: CodexReplay.CodexAppServerReplayEntry[] = [
+            ...preamble.slice(0, 3),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 2,
+                method: "thread/start",
+                params: CodexAdapterV2.codexThreadRuntimeParams({
+                  mcpSession: config,
+                  modelSelection: CODEX_TEST_MODEL_SELECTION,
+                  runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+                }),
+              },
+            },
+            threadResult,
+          ];
+          const resume = (
+            id: number,
+            attachment: McpProviderSession.McpProviderSessionConfig,
+            label?: string,
+          ) => {
+            entries.push({
+              type: "expect_outbound",
+              frame: {
+                id,
+                method: "thread/resume",
+                params: {
+                  threadId: nativeThreadId,
+                  excludeTurns: true,
+                  ...CodexAdapterV2.codexThreadRuntimeParams({
+                    mcpSession: attachment,
+                    modelSelection: CODEX_TEST_MODEL_SELECTION,
+                    runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+                  }),
+                },
+              },
+            });
+            entries.push({ ...withReplayRequestId(threadResult, id), ...(label ? { label } : {}) });
+          };
+          const turn = (id: number, ordinal: number) =>
+            Effect.gen(function* () {
+              const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+                nativeThreadId,
+                codexInput: [{ type: "text", text: `turn-${ordinal}` }],
+                runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+                modelSelection: CODEX_TEST_MODEL_SELECTION,
+                hasGoatMcp: true,
+                browserToolsAvailable: false,
+              });
+              entries.push(
+                { type: "expect_outbound", frame: { id, method: "turn/start", params } },
+                {
+                  type: "emit_inbound",
+                  frame: {
+                    id,
+                    result: {
+                      turn: makeCodexReplayTurn({ id: `turn-${ordinal}`, status: "inProgress" }),
+                    },
+                  },
+                },
+                {
+                  type: "emit_inbound",
+                  frame: {
+                    method: "turn/completed",
+                    params: {
+                      threadId: nativeThreadId,
+                      turn: makeCodexReplayTurn({ id: `turn-${ordinal}`, status: "completed" }),
+                    },
+                  },
+                },
+              );
+            });
+          if (mode === "availability") {
+            yield* turn(3, 1);
+            resume(4, stale);
+            yield* turn(5, 2);
+            resume(6, config);
+            yield* turn(7, 3);
+          } else {
+            resume(3, config, "delayed-resume");
+            resume(4, next);
+            yield* turn(5, 1);
+          }
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const terminals = yield* Queue.unbounded<void>();
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({ scenario, entries }),
+            (event) =>
+              event.type === "turn.terminal" ? Queue.offer(terminals, undefined) : Effect.void,
+            undefined,
+            undefined,
+            (entry) =>
+              entry.label === "delayed-resume"
+                ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+                : Effect.void,
+          ).pipe(
+            Effect.provideService(McpSessionRegistry.McpSessionRegistry, {
+              issue: () => Effect.die("unused"),
+              resolve: () => Effect.succeed(undefined),
+              touch: () => Effect.void,
+              revokeProviderSession: () => Effect.void,
+              revokeThread: () => Effect.void,
+              revokeAll: Effect.void,
+              currentMemoryPolicy: () =>
+                Effect.sync(() =>
+                  valid ? { grant: "read_write" as const, policyEpoch: 1 } : undefined,
+                ),
+            }),
+          );
+          if (mode === "resume-rotation") {
+            const resumed = yield* harness.runtime
+              .resumeThread({
+                threadId,
+                providerThread: harness.providerThread,
+                runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+                modelSelection: CODEX_TEST_MODEL_SELECTION,
+              })
+              .pipe(Effect.forkChild);
+            yield* Deferred.await(entered);
+            yield* sessions.set(next);
+            yield* Deferred.succeed(release, undefined);
+            yield* Fiber.join(resumed);
+          }
+          for (let ordinal = 1; ordinal <= (mode === "availability" ? 3 : 1); ordinal++) {
+            valid = ordinal !== 2;
+            yield* harness.runtime.startTurn(
+              makeCodexTestTurnInput({
+                threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make(`attachment-${ordinal}`),
+                text: `turn-${ordinal}`,
+              }),
+            );
+            yield* Queue.take(terminals);
+          }
+        }),
+      ).pipe(Effect.provide(layerAdapterTest)),
+  );
+
+  it.effect(
+    "refreshes memory on first and second actual native sends and clears an omitted snapshot",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = "wp4-memory-thread";
+          const snapshot = wp4Memory();
+          const first = codexReplayPreamble({
+            nativeThreadId,
+            nativeTurnId: "memory-turn-1",
+            prompt: "first",
+          });
+          const firstParams = yield* CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId,
+            codexInput: [{ type: "text", text: "first" }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            memoryContext: snapshot,
+            appContext: [{ key: "goat_memory", text: "app cannot replace reserved memory" }],
+          });
+          const secondParams = yield* CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId,
+            codexInput: [{ type: "text", text: "second" }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            clearMemoryContext: true,
+          });
+          const terminal = (id: string): CodexReplay.CodexAppServerReplayEntry => ({
+            type: "emit_inbound",
+            frame: {
+              method: "turn/completed",
+              params: {
+                threadId: nativeThreadId,
+                turn: makeCodexReplayTurn({ id, status: "completed" }),
+              },
+            },
+          });
+          const transcript = makeCodexReplayTranscript({
+            scenario: "wp4-memory",
+            entries: [
+              ...first.slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: { id: 3, method: "turn/start", params: firstParams },
+              },
+              ...first.slice(6),
+              terminal("memory-turn-1"),
+              {
+                type: "expect_outbound",
+                frame: { id: 4, method: "turn/start", params: secondParams },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 4,
+                  result: {
+                    turn: makeCodexReplayTurn({ id: "memory-turn-2", status: "inProgress" }),
+                  },
+                },
+              },
+              terminal("memory-turn-2"),
+            ],
+          });
+          const secondDone = yield* Deferred.make<void>();
+          let completedTurns = 0;
+          const delivered: unknown[] = [];
+          const harness = yield* makeCodexReplayHarness(
+            transcript,
+            (event) =>
+              Effect.gen(function* () {
+                if (event.type === "turn.terminal" && ++completedTurns === 2)
+                  yield* Deferred.succeed(secondDone, undefined);
+              }),
+            (method, params) =>
+              Effect.sync(() => {
+                if (method === "turn/start") delivered.push(params);
+              }),
+          );
+          let refreshes = 0;
+          const base = makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("wp4-memory-1"),
+            text: "first",
+          });
+          yield* harness.runtime.startTurn({
+            ...base,
+            memoryContext: { ...snapshot, renderedText: "stale" },
+            appContext: [{ key: "goat_memory", text: "app cannot replace reserved memory" }],
+            refreshMemoryContext: () =>
+              Effect.sync(() => {
+                refreshes++;
+                return snapshot;
+              }),
+          });
+          yield* harness.firstTerminal;
+          yield* harness.runtime.startTurn({
+            ...base,
+            runId: RunId.make("wp4-memory-run-2"),
+            attemptId: RunAttemptId.make("wp4-memory-2"),
+            providerTurnOrdinal: 2,
+            message: { ...base.message, text: "second" },
+            memoryContext: snapshot,
+            refreshMemoryContext: () =>
+              Effect.sync(() => {
+                refreshes++;
+                return undefined;
+              }),
+          });
+          yield* Deferred.await(secondDone);
+          assert.equal(refreshes, 2);
+          assert.equal(delivered.length, 2);
+          assert.deepEqual(firstParams.additionalContext?.goat_memory, {
+            kind: "untrusted",
+            value: snapshot.renderedText,
+          });
+          assert.equal(secondParams.additionalContext?.goat_memory?.value, "");
+          assert.notInclude(JSON.stringify(firstParams.collaborationMode ?? {}), "untrusted&gt;");
+        }).pipe(Effect.provide(layerAdapterTest)),
+      ),
+  );
+
+  it.effect.each(["ordinary", "compact"] as const)(
+    "rejects altered memory at the actual adapter %s boundary",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const entries = codexReplayPreamble({
+            nativeThreadId: "wp4-tamper",
+            nativeTurnId: "unused",
+            prompt: "work",
+          });
+          let nativeSends = 0;
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({ scenario: "wp4-tamper", entries: entries.slice(0, 5) }),
+            () => Effect.void,
+            (method) =>
+              Effect.sync(() => {
+                if (method === "turn/start" || method === "thread/compact/start") nativeSends++;
+              }),
+          );
+          const snapshot = wp4Memory();
+          const send =
+            mode === "ordinary" ? harness.runtime.startTurn : harness.runtime.compactThread!;
+          const result = yield* send({
+            ...makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("wp4-tamper"),
+              text: "work",
+            }),
+            refreshMemoryContext: () =>
+              Effect.succeed({ ...snapshot, renderedText: snapshot.renderedText + " tampered" }),
+          }).pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(result));
+          assert.equal(nativeSends, 0);
+        }).pipe(Effect.provide(layerAdapterTest)),
+      ),
+  );
+
+  it.effect.each(["survives", "revoked"] as const)(
+    "revalidates the original snapshot before native restore (%s)",
+    (outcome) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = `wp4-restore-${outcome}`;
+          const nativeTurnId = "restore-turn";
+          const scenario = `wp4-restore-${outcome}`;
+          const threadId = ThreadId.make(`thread-${scenario}`);
+          const snapshot = wp4Memory();
+          const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId,
+            codexInput: [{ type: "text", text: "work" }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            hasGoatMcp: true,
+            memoryContext: snapshot,
+          });
+          const context = { ...params.additionalContext };
+          if (outcome === "revoked") delete context.goat_memory;
+          const original = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "work" });
+          const items = Object.entries(context).map(([key, entry]) => ({
+            type: "message",
+            role: entry.kind === "untrusted" ? "user" : "developer",
+            content: [
+              {
+                type: "input_text",
+                text:
+                  entry.kind === "untrusted"
+                    ? `<external_${key}>${entry.value}</external_${key}>`
+                    : `<${key}>${entry.value}</${key}>`,
+              },
+            ],
+          }));
+          const transcript = makeCodexReplayTranscript({
+            scenario,
+            entries: [
+              ...original.slice(0, 5),
+              { type: "expect_outbound", frame: { id: 3, method: "turn/start", params } },
+              ...original.slice(6),
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "item/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: nativeTurnId,
+                    item: { type: "contextCompaction", id: "restore-item" },
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "thread/inject_items",
+                  params: { threadId: nativeThreadId, items },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 4, result: {} } },
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          });
+          yield* (yield* McpProviderSessions.McpProviderSessions).set({
+            environmentId: EnvironmentId.make("fixture"),
+            threadId,
+            providerSessionId: "wp4-restore-credential",
+            providerInstanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+            endpoint: "http://127.0.0.1:43123/mcp",
+            authorizationHeader: "Bearer fixture",
+            browserToolsAvailable: true,
+            grantedScopes: ["memory:read", "orchestration:read"],
+          });
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          let execution: { threadId: M.ThreadId; runId: M.RunId } | undefined;
+          let revalidations = 0;
+          const harness = yield* makeCodexReplayHarness(transcript).pipe(
+            Effect.provideService(MemorySnapshot.MemorySnapshot, {
+              forThread: () => Effect.die("restoration must not reselect"),
+              invalidate: () => Effect.void,
+              revalidate: (originalSnapshot, currentExecution, policy) =>
+                Effect.gen(function* () {
+                  assert.strictEqual(originalSnapshot, snapshot);
+                  execution = currentExecution;
+                  revalidations++;
+                  assert.deepEqual(yield* policy, { grant: "read", policyEpoch: 1 });
+                  yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                  return outcome === "survives" ? originalSnapshot : undefined;
+                }),
+            }),
+            Effect.provideService(McpSessionRegistry.McpSessionRegistry, {
+              issue: () => Effect.die("unused"),
+              resolve: () => Effect.succeed(undefined),
+              touch: () => Effect.void,
+              revokeProviderSession: () => Effect.void,
+              revokeThread: () => Effect.void,
+              revokeAll: Effect.void,
+              currentMemoryPolicy: () => Effect.succeed({ grant: "read", policyEpoch: 1 }),
+            }),
+          );
+          const input = makeCodexTestTurnInput({
+            threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("wp4-restore"),
+            text: "work",
+          });
+          yield* harness.runtime.startTurn({
+            ...input,
+            refreshMemoryContext: () => Effect.succeed(snapshot),
+          });
+          yield* Deferred.await(entered);
+          assert.deepEqual(execution, { threadId: input.threadId, runId: input.runId });
+          yield* Deferred.succeed(release, undefined);
+          yield* harness.firstTerminal;
+          assert.equal(revalidations, 1);
+          const memoryItem = items.find((item) =>
+            item.content[0]?.text.includes("external_goat_memory"),
+          );
+          if (outcome === "survives") {
+            assert.equal(memoryItem?.role, "user");
+            assert.include(memoryItem!.content[0]!.text, "&lt;untrusted&gt;");
+          } else assert.isUndefined(memoryItem);
+        }).pipe(Effect.provide(layerAdapterTest)),
+      ),
   );
 
   it.effect("preserves T3 context on the wire and restores it after compaction", () =>
@@ -2855,16 +3441,16 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             },
           ],
         });
-        const harness = yield* makeCodexReplayHarness(transcript);
         yield* (yield* McpProviderSessions.McpProviderSessions).set({
           environmentId: EnvironmentId.make("test"),
-          threadId: harness.threadId,
+          threadId: ThreadId.make("thread-restore-context"),
           providerSessionId: "context-session",
           providerInstanceId: ProviderInstanceId.make("codex"),
           endpoint: "http://127.0.0.1:43123/mcp",
           authorizationHeader: "Bearer test",
           browserToolsAvailable: true,
         });
+        const harness = yield* makeCodexReplayHarness(transcript);
         yield* harness.runtime.startTurn(
           makeCodexTestTurnInput({
             threadId: harness.threadId,
@@ -2876,11 +3462,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         yield* harness.firstTerminal;
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -2956,11 +3538,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.equal(items[0]?.id, items[1]?.id);
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3008,11 +3586,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(resumed.nativeThreadRef?.nativeId, nativeThreadId);
         assert.equal(resumed.status, "idle");
         assert.equal(DateTime.toEpochMillis(resumed.updatedAt), 1782622450000);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3167,11 +3741,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.equal(resumed.status, "idle");
         assert.equal(DateTime.toEpochMillis(resumed.updatedAt), 1782622450000);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3253,11 +3823,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           restartContinuationOfRunId: RunId.make("run-before-restart"),
         });
         assert.equal(resumed.nativeThreadRef?.nativeId, nativeThreadId);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3405,11 +3971,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isAtLeast(recoveredIndex, 0);
         assert.isAbove(resumedCommandIndex, recoveredIndex);
         assert.isAbove(terminalIndex, resumedCommandIndex);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3508,11 +4070,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ["compaction", 1782622565000],
           ],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3676,11 +4234,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             );
           }
           assert.deepEqual(assistantMessages(harness.events), []);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -3764,11 +4318,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           planItems.map((item) => item.streaming),
           [...Array.from({ length: planItems.length - 1 }, () => true), false],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3897,11 +4447,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           ["CODEX_RECOVERY_OK"],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3944,11 +4490,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           })),
           [{ text: "CODEX_RECOVERY_OK", streaming: false }],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3992,11 +4534,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           ["CODEX_RECOVERY_OK"],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4115,11 +4653,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           new Set(assistantMessages(harness.events).map((event) => event.message.id)).size,
           1,
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4147,11 +4681,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           [""],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4180,11 +4710,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           [""],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4213,11 +4739,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           ["Working on it.", ""],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4246,11 +4768,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           ["CODEX_RECOVERY_OK"],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4279,11 +4797,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           ["CODEX_RECOVERY_OK"],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4312,11 +4826,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           ["", "CODEX_RECOVERY_OK"],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4472,11 +4982,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           );
           assert.lengthOf(harness.terminalEvents(), 1);
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -4631,11 +5137,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.lengthOf(harness.terminalEvents(), 1);
           assert.equal(harness.terminalEvents()[0]?.status, "completed");
           assert.lengthOf(harness.continuationRequests, 0);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       );
     },
   );
@@ -4764,7 +5266,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ),
           ),
         );
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(layerAdapterTest)),
     );
   });
 
@@ -4884,7 +5386,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ),
           ),
         );
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4995,11 +5497,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.lengthOf(harness.continuationRequests, 0);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
         assert.lengthOf(harness.terminalEvents(), 1);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5288,11 +5786,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.isAtLeast(commandUpdates.length, 2, "start + interrupt terminalization");
         assert.equal(commandUpdates[commandUpdates.length - 1]?.turnItem.status, "interrupted");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5520,11 +6014,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(harness.subagentUpdates().at(-1)?.subagent.status, "interrupted");
         assertChildProviderTerminalBeforeRoot(harness.events, harness.threadId);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5609,11 +6099,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "interrupted root terminal");
         assertChildProviderTerminalBeforeRoot(harness.events, harness.threadId);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5701,11 +6187,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "interrupted root terminal");
         assertChildProviderTerminalBeforeRoot(harness.events, harness.threadId);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5816,11 +6298,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(lateChildUpdates.at(-1)?.providerTurn.status, "interrupted");
         assertChildProviderTerminalBeforeRoot(harness.events, harness.threadId);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5985,11 +6463,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assertChildProviderTerminalBeforeRoot(harness.events, harness.threadId);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6254,11 +6728,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           commandUpdatesBeforeLateEvents.length,
           "late starts and completions must not project after timeout",
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6365,11 +6835,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "interrupted terminal");
         assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6541,11 +7007,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               .slice(0, outcome === "stop" ? 1 : 3)
               .map((retryDelayMs, index) => ({ attempt: index + 1, maxAttempts: 3, retryDelayMs })),
           );
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
     );
 
@@ -6604,11 +7066,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           // The backoff timer that fires later must not start a second retry.
           yield* TestClock.adjust("10 minutes");
           assert.lengthOf(harness.terminalEvents(), 1);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
     );
 
@@ -6673,11 +7131,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           yield* harness.firstTerminal;
           assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
           assert.lengthOf(harness.terminalEvents(), 1);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
     );
 
@@ -6716,11 +7170,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 event.turnItem.retry !== undefined,
             ),
           );
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
     );
   });
@@ -6957,11 +7407,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.isDefined(item);
         }
         if (scenario.name === "retry") assert.equal(terminal.retry?.attempt, 1);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7059,11 +7505,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
         assert.lengthOf(harness.continuationRequests, 0);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7224,11 +7666,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.include(stored, "connect-src https://api.weather.test");
         assert.isBelow(stored.indexOf("Content-Security-Policy"), stored.indexOf("<script>"));
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7314,11 +7752,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         const output = rows[0]!.turnItem.type === "dynamic_tool" ? rows[0]!.turnItem.output : null;
         assert.isUndefined((output as Record<string, unknown> | null)?.[MCP_APP_OUTPUT_KEY]);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7560,11 +7994,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           );
           assert.lengthOf(harness.terminalEvents(), 1);
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -7798,11 +8228,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ]);
         }
         assert.equal(metadataRequests, name === "current Codex Sol" ? 1 : 2);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7859,11 +8285,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           yield* harness.firstTerminal;
           assert.equal(harness.subagentUpdates().at(-1)?.subagent.model, model);
           assert.deepEqual(metadataRequests, ["thread/read", "thread/resume"]);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -7962,11 +8384,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             { id: "reasoningEffort", value: "low" },
             { id: "serviceTier", value: "ultrafast" },
           ]);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -8028,11 +8446,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
         assert.lengthOf(harness.terminalEvents(), 1);
         assert.lengthOf(harness.continuationRequests, 0);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -8112,11 +8526,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isNull(row?.completedAt);
         assert.isNotNull(row?.startedAt);
         assert.equal(DateTime.toEpochMillis(row!.startedAt!), 1782622470000);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -8278,11 +8688,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               DateTime.toEpochMillis(first.subagent.completedAt!),
             );
           }
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -8430,12 +8836,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         "thread/rollback",
         "thread/rollback must not be sent to a legacy Codex thread",
       );
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect(
@@ -8574,12 +8975,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.notEqual(forkedProviderThread.id, harness.providerThread.id);
         assert.equal(forkedProviderThread.forkedFrom?.providerTurnId, firstTurn.id);
         assert.deepEqual(outbound.slice(-2), ["thread/turns/list", "thread/revert"]);
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect(
@@ -8681,12 +9077,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           "thread/rollback",
           "thread/rollback must not be sent to a legacy Codex fork",
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("propagates native thread/fork failures as typed fork errors", () =>
@@ -8742,12 +9133,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
 
       assert.instanceOf(error, ProviderAdapter.ProviderAdapterForkThreadError);
       assert.include(errorCauseChainText(error), "fork exploded");
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   describe("native goals", () => {
@@ -8911,12 +9297,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ],
         );
         assert.equal(providerGoals(harness.events).at(-1), "complete");
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("settles /goal pause with a reply instead of a native turn", () =>
@@ -8960,12 +9341,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           "Goal paused. Send /goal resume to continue.",
         );
         assert.equal(providerGoals(harness.events).at(-1), "paused");
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("settles a run held for the next goal turn when Stop arrives in between", () =>
@@ -9056,12 +9432,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           harness.terminalEvents().map((event) => event.status),
           ["interrupted"],
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("moves a Stop that names an earlier goal turn to the turn Codex continued with", () =>
@@ -9140,12 +9511,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           harness.terminalEvents().map((event) => event.status),
           ["interrupted"],
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("stops a held goal run's background command when Stop arrives between turns", () =>
@@ -9247,12 +9613,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ),
           "the background command to be interrupted",
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("moves Stop to a continuation Codex starts while the goal pause is in flight", () =>
@@ -9334,12 +9695,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           harness.terminalEvents().map((event) => event.status),
           ["interrupted"],
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("stops a subagent an earlier goal turn left running when Stop settles the run", () =>
@@ -9436,12 +9792,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ),
           "the subagent turn to be interrupted",
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("stops an earlier goal turn's subagent when the run settles during the pause", () =>
@@ -9554,12 +9905,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ),
           "the subagent turn to be interrupted",
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("pauses an active goal before Stop interrupts its turn", () =>
@@ -9623,12 +9969,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           harness.terminalEvents().map((event) => event.status),
           ["interrupted"],
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
   });
 });

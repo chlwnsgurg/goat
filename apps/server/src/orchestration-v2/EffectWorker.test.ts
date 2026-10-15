@@ -1,6 +1,9 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  MessageId,
+  ProviderInstanceId,
+  type OrchestrationV2ServerCommand,
   NodeId,
   ProviderSessionId,
   ProviderThreadId,
@@ -20,6 +23,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
 
+import { idleThreadProjection, liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
@@ -82,6 +86,7 @@ function layerExecutorFor(input: {
   readonly failFirstStart?: Ref.Ref<boolean>;
   readonly threads?: Partial<ThreadManagementService.ThreadManagementService["Service"]>;
   readonly continueAfterRestart?: boolean;
+  readonly steer?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["steer"];
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
@@ -90,7 +95,7 @@ function layerExecutorFor(input: {
       ProviderTurnControlService.ProviderTurnControlServiceV2,
       ProviderTurnControlService.ProviderTurnControlServiceV2.of({
         interrupt: input.interrupt ?? (() => Effect.void),
-        steer: () => Effect.void,
+        steer: input.steer ?? (() => Effect.void),
         interruptAndAwaitTerminal: (request) =>
           record(
             request.replacementProviderSessionId === undefined
@@ -905,5 +910,93 @@ it.effect.each(["confirmed", "unconfirmed", "failed"] as const)(
         yield* Ref.get(events),
         outcome === "confirmed" ? ["stop-child", "settle-child"] : ["stop-child"],
       );
+    }),
+);
+
+it.effect.each(["read_write", "read", "none", undefined] as const)(
+  "turnCompleted steer follow-up preserves %s ceiling (legacy defaults to none)",
+  (ceiling) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const commands = yield* Ref.make<ReadonlyArray<OrchestrationV2ServerCommand>>([]);
+      const messageId = MessageId.make("message:steer-memory");
+      const projection = idleThreadProjection(liveThreadShell(threadId));
+      const records = {
+        ...projection,
+        runs: [
+          {
+            id: runId,
+            threadId,
+            ordinal: 1,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "fixture" },
+            providerThreadId,
+            userMessageId: messageId,
+            rootNodeId: null,
+            activeAttemptId: null,
+            status: "completed" as const,
+            requestedAt: now,
+            startedAt: now,
+            completedAt: now,
+            checkpointId: null,
+            contextHandoffId: null,
+            ...(ceiling === undefined ? {} : { memoryGrantCeiling: ceiling }),
+          },
+        ],
+        messages: [
+          {
+            id: messageId,
+            threadId,
+            runId,
+            nodeId: null,
+            role: "user" as const,
+            text: "Synthetic steer follow-up",
+            attachments: [],
+            streaming: false,
+            createdBy: "agent" as const,
+            creationSource: "mcp" as const,
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+      };
+      const layer = layerExecutorFor({
+        events,
+        steer: () =>
+          new ProviderTurnControlService.ProviderTurnControlError({
+            threadId,
+            operation: "steer",
+            providerTurnId,
+            turnCompleted: true,
+          }),
+        threads: {
+          getThreadRecords: () => Effect.succeed(records),
+          dispatch: (command) =>
+            Ref.update(commands, (items) => [...items, command]).pipe(
+              Effect.as({ sequence: 1, storedEvents: [] }),
+            ),
+        },
+      });
+      yield* Effect.gen(function* () {
+        const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+        yield* executor.execute({
+          ...restartEffect(now, { type: "detach" }),
+          request: {
+            type: "provider-turn.steer",
+            providerSessionId: oldSessionId,
+            providerThreadId,
+            providerTurnId,
+            messageId,
+          },
+        });
+      }).pipe(Effect.provide(layer));
+      const captured = yield* Ref.get(commands);
+      assert.equal(captured.length, 1);
+      assert.equal(captured[0]?.type, "message.dispatch");
+      if (captured[0]?.type === "message.dispatch") {
+        assert.equal(captured[0].memoryGrantCeiling, ceiling ?? "none");
+        assert.equal(captured[0].messageId, messageId);
+      }
     }),
 );

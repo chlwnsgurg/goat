@@ -108,6 +108,8 @@ import {
   type McpThreadInvocationScope,
   requireThreadScope,
 } from "./McpInvocationContext.ts";
+import { captureRpcMemoryGrantCeiling } from "../auth/RpcAuthorization.ts";
+
 import * as Metrics from "../observability/Metrics.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
@@ -2169,8 +2171,13 @@ const make = Effect.gen(function* () {
                 }),
               }),
         };
+        const memoryGrantCeiling = yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
+          Effect.mapError(() =>
+            failure("invalid_request", "Caller memory authority is no longer available."),
+          ),
+        );
         const { task } = yield* scheduledTasks
-          .upsert(upsertInput)
+          .upsert(upsertInput, { memoryGrantCeiling })
           .pipe(
             Effect.mapError((error) =>
               failure("orchestration_error", `Could not schedule task: ${error.message}`),
@@ -2240,8 +2247,13 @@ const make = Effect.gen(function* () {
           createdBy: existing.createdBy,
           creationSource: existing.creationSource,
         };
+        const memoryGrantCeiling = yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
+          Effect.mapError(() =>
+            failure("invalid_request", "Caller memory authority is no longer available."),
+          ),
+        );
         const { task } = yield* scheduledTasks
-          .upsert(upsertInput)
+          .upsert(upsertInput, { memoryGrantCeiling })
           .pipe(
             Effect.mapError((error) =>
               failure("orchestration_error", `Could not update scheduled task: ${error.message}`),
@@ -2483,6 +2495,11 @@ const make = Effect.gen(function* () {
     delegateTask: (callerScope, input) =>
       Effect.gen(function* () {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
+        const memoryGrantCeiling = yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
+          Effect.mapError(() =>
+            failure("invalid_request", "Caller memory authority is no longer available."),
+          ),
+        );
         const parentRun = parent.runs
           .filter(ThreadManagementService.isActiveRun)
           .toSorted((left, right) => right.ordinal - left.ordinal)[0];
@@ -2537,6 +2554,7 @@ const make = Effect.gen(function* () {
             yield* threadManagement
               .dispatch({
                 type: "delegated_task.remote.register",
+                memoryGrantCeiling: record.memoryGrantCeiling,
                 commandId,
                 parentThreadId: scope.thread.threadId,
                 parentRunId: parentRun.id,
@@ -2564,6 +2582,7 @@ const make = Effect.gen(function* () {
                 launch: {
                   host,
                   cwd: remote.cwd,
+                  memoryGrantCeiling,
                   workspace: remote.workspace ?? { type: "cwd" },
                   title: input.title ?? taskPrompt(input).slice(0, 72),
                   message: taskPrompt(input),
@@ -2616,9 +2635,14 @@ const make = Effect.gen(function* () {
                 ? hostFailure(launched.failure)
                 : isOrchestratorMcpFailure(launched.failure)
                   ? launched.failure
-                  : failure(
-                      "orchestration_error",
-                      "Remote dispatch failed before task registration.",
+                  : Object.defineProperty(
+                      failure(
+                        "orchestration_error",
+                        "Remote dispatch failed before task registration.",
+                      ),
+                      // Keep diagnostics out of both the wire schema and JSON serialization.
+                      "cause",
+                      { value: launched.failure, configurable: true, writable: true },
                     );
             const failedTask = refreshed.subagents.find((task) => task.id === taskId);
             if (failedTask?.remote === undefined || failedTask.runId === null)
@@ -2709,9 +2733,15 @@ const make = Effect.gen(function* () {
             parent.thread.worktreePath,
             parent.thread.branch,
           );
+        yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
+          Effect.mapError(() =>
+            failure("invalid_request", "Caller memory authority is no longer available."),
+          ),
+        );
         const result = yield* threadManagement
           .dispatch({
             type: "delegated_task.request",
+            memoryGrantCeiling,
             createdBy: "agent",
             creationSource: "mcp",
             commandId,
@@ -3548,3 +3578,11 @@ export const layer: Layer.Layer<
   | SshRemoteDispatch.SshRemoteDispatch
   | ServerSettings.ServerSettingsService
 > = Layer.effect(OrchestratorMcpService, make);
+
+/** OAuth and managed callers use the same live grant port, never thread modes as authority. */
+export const captureMcpTaskMemoryGrantCeiling = (scope: McpInvocationScope, readOnly: boolean) =>
+  captureRpcMemoryGrantCeiling({
+    grantedScopes: scope.grantedScopes,
+    reauthorize: scope.reauthorize,
+    readOnly: readOnly || scope.client?.access === "read-only",
+  });

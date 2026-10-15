@@ -56,6 +56,8 @@ import * as Stream from "effect/Stream";
 
 import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import { mcpToolPresentation } from "@goat/provider-core/server/mcpToolPresentation";
+import * as McpProviderSession from "@goat/provider-core/server/mcpSession";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
 import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
 import {
@@ -970,6 +972,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
 
         const mcpSession = yield* mcpSessions.read(input.threadId);
         const hasGoatMcp = mcpSession !== undefined && !connection.external;
+        let installedMcpSession = hasGoatMcp ? mcpSession : undefined;
         const orchestrationSystemPrompt = goatOrchestrationSystemPrompt(hasGoatMcp);
         if (hasGoatMcp) {
           yield* OpenCodeRuntime.runOpenCodeSdk("mcp.add", () =>
@@ -2940,6 +2943,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             sessionID: string;
           },
           abortController: AbortController,
+          memoryInput?: ProviderAdapter.ProviderAdapterV2TurnInput,
         ) {
           const text = payload.parts
             ?.filter((part) => part.type === "text")
@@ -2953,9 +2957,83 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 Effect.orElseSucceed(() => []),
               )).find((entry) => entry.name === match[1])
             : undefined;
+          const currentMcp =
+            memoryInput === undefined ? undefined : yield* mcpSessions.read(memoryInput.threadId);
+          if (
+            memoryInput !== undefined &&
+            !connection.external &&
+            (currentMcp?.authorizationHeader !== installedMcpSession?.authorizationHeader ||
+              currentMcp?.endpoint !== installedMcpSession?.endpoint)
+          ) {
+            if (currentMcp === undefined) {
+              yield* sdkCall("mcp.disconnect", { name: "goat" }, (signal) =>
+                client.mcp.disconnect({ name: "goat" }, { signal }),
+              );
+            } else {
+              yield* sdkCall("mcp.add", { name: "goat" }, (signal) =>
+                client.mcp.add(
+                  {
+                    name: "goat",
+                    config: {
+                      type: "remote",
+                      url: currentMcp.endpoint,
+                      headers: { Authorization: currentMcp.authorizationHeader },
+                      oauth: false,
+                    },
+                  },
+                  { signal },
+                ),
+              );
+            }
+            installedMcpSession = currentMcp;
+          }
+          // Native workspace commands accept file parts only, so snapshots stay on prompts.
           if (!command) {
-            return yield* sdkCall("session.promptAsync", payload, (signal) =>
-              client.session.promptAsync(payload, {
+            const snapshot =
+              memoryInput === undefined
+                ? undefined
+                : memoryInput.refreshMemoryContext
+                  ? yield* memoryInput.refreshMemoryContext()
+                  : memoryInput.memoryContext;
+            const memory =
+              snapshot === undefined
+                ? undefined
+                : yield* Effect.try({
+                    try: () => MemoryContext.memoryContextText(snapshot),
+                    catch: () =>
+                      new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: OPENCODE_PROVIDER,
+                        detail: "Invalid memory context frame",
+                      }),
+                  });
+            const availability = McpProviderSession.memoryToolAvailability(
+              !connection.external &&
+                currentMcp?.authorizationHeader === installedMcpSession?.authorizationHeader &&
+                currentMcp?.endpoint === installedMcpSession?.endpoint
+                ? currentMcp
+                : undefined,
+            );
+            const hasMemoryTools = availability.read || availability.write || availability.source;
+            const prepared =
+              memory === undefined && !hasMemoryTools
+                ? payload
+                : {
+                    ...payload,
+                    system: [
+                      payload.system,
+                      memory === undefined
+                        ? undefined
+                        : MemoryContext.MEMORY_DATA_BOUNDARY_REMINDER,
+                      hasMemoryTools
+                        ? `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`
+                        : undefined,
+                      memory,
+                    ]
+                      .filter((part) => part !== undefined)
+                      .join("\n\n"),
+                  };
+            return yield* sdkCall("session.promptAsync", prepared, (signal) =>
+              client.session.promptAsync(prepared, {
                 signal: AbortSignal.any([signal, abortController.signal]),
               }),
             ).pipe(Effect.asVoid);
@@ -3282,6 +3360,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   parts,
                 },
                 admissionAbortController!,
+                turnInput,
               ).pipe(
                 Effect.tapError((cause) =>
                   admissionAbortController!.signal.aborted

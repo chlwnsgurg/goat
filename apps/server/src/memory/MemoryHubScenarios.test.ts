@@ -422,14 +422,26 @@ describe("Memory hub assembled HTTP scenarios", () => {
           M.MemoryHubPullResult,
         );
         assert.strictEqual(initial.checkpoint?.bootstrapComplete, true);
+        const sourceBase = operation(9, s.hubEnv);
+        const sourceId = M.MemoryId.make(id(3));
+        const source = {
+          ...sourceBase,
+          memoryId: sourceId,
+          revision: { ...sourceBase.revision, memoryId: sourceId },
+        };
+        assert.strictEqual((yield* s.push([source])).receipts[0]!.outcome, "accepted");
         const first = operation(10, s.hubEnv);
-        assert.strictEqual((yield* s.push([first])).receipts[0]!.hubSequence, 1);
+        assert.strictEqual((yield* s.push([first])).receipts[0]!.hubSequence, 2);
         const sibling = (n: number) => {
           const op = operation(n, s.hubEnv);
           return {
             ...op,
             expectedHeads: [first.revision.revisionId],
             revision: { ...op.revision, parents: [first.revision.revisionId] },
+            payload: {
+              ...op.payload,
+              derivedFromMemoryRevisions: [source.revision.revisionId],
+            },
           };
         };
         yield* s.push([sibling(11), sibling(12)]);
@@ -472,6 +484,11 @@ describe("Memory hub assembled HTTP scenarios", () => {
           kind: "resolve",
           expectedHeads: aggregate.heads,
           revision: { ...base.revision, parents: aggregate.heads },
+          // Match the resolver: preserve both direct inputs and their inherited lineage.
+          payload: {
+            ...base.payload,
+            derivedFromMemoryRevisions: [...aggregate.heads, source.revision.revisionId],
+          },
           conflictId: claim.conflictId,
           fencingToken: lease.fencingToken,
           resolution: {
@@ -504,8 +521,8 @@ describe("Memory hub assembled HTTP scenarios", () => {
           apply,
           M.MemoryHubReceipt,
         );
-        assert.strictEqual(receipt.outcome, "accepted");
-        assert.strictEqual(receipt.hubSequence, 4);
+        assert.strictEqual(receipt.outcome, "accepted", receipt.failureCode);
+        assert.strictEqual(receipt.hubSequence, 5);
         assert.deepStrictEqual(
           yield* s.call(M.MEMORY_HUB_PATHS.applyResolution, apply, M.MemoryHubReceipt),
           receipt,
@@ -521,8 +538,19 @@ describe("Memory hub assembled HTTP scenarios", () => {
           },
           M.MemoryHubPullResult,
         );
-        assert.strictEqual(pull.entries.length, 4);
-        assert.strictEqual(pull.throughSequence, 4);
+        assert.strictEqual(pull.entries.length, 5);
+        assert.strictEqual(pull.throughSequence, 5);
+        const resolved = yield* s.run(
+          Store.MemoryStore.use((store) => store.loadAggregate(space, memoryId)),
+        );
+        assert.deepStrictEqual(
+          [
+            ...resolved.revisions.find(
+              (pair) => pair.revision.revisionId === base.revision.revisionId,
+            )!.payload!.derivedFromMemoryRevisions,
+          ].sort(),
+          [...aggregate.heads, source.revision.revisionId].sort(),
+        );
         assert.deepStrictEqual(
           (yield* s.run(Store.MemoryStore.use((store) => store.loadAggregate(space, memoryId))))
             .heads,
@@ -552,6 +580,33 @@ describe("Memory hub assembled HTTP scenarios", () => {
           M.MemoryHubPullResult,
         );
         assert.deepStrictEqual(pinned.checkpoint, initial.checkpoint);
+        yield* s.run(
+          Service.MemoryService.use((service) =>
+            service.forget(
+              {
+                memorySpaceId: space,
+                memoryId: sourceId,
+                operationId: M.MemoryOperationId.make(id(82)),
+                expectedHeads: [source.revision.revisionId],
+              },
+              Effect.void,
+            ),
+          ),
+        );
+        const forgotten = yield* s.run(
+          Store.MemoryStore.use((store) => store.loadAggregate(space, memoryId)),
+        );
+        assert.strictEqual(forgotten.item?.status, "blocked");
+        assert.ok(forgotten.revisions.every((pair) => pair.payload === null));
+        assert.strictEqual(
+          (yield* s.run(
+            SqlClient.SqlClient.use(
+              (sql) =>
+                sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND memory_id=${memoryId}`,
+            ),
+          )).length,
+          0,
+        );
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -647,7 +702,14 @@ describe("Memory hub assembled HTTP scenarios", () => {
         };
         yield* s.call(
           M.MEMORY_HUB_PATHS.sourceReadRespond,
-          { protocolVersion: 1, memorySpaceId: space, requestId, outcome },
+          {
+            protocolVersion: 1,
+            kind: "normal",
+            ownerPolicyEpoch: 1,
+            memorySpaceId: space,
+            requestId,
+            outcome,
+          },
           M.MemoryHubSourceReadRespondResult,
           provisioned.credential.credential,
         );

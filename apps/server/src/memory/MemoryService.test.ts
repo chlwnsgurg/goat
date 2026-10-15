@@ -13,30 +13,34 @@ import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
+import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as Service from "./MemoryService.ts";
+import { memoryAccessPermit } from "./MemoryAccess.ts";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const space = M.MemorySpaceId.make(id(1));
 const memoryId = M.MemoryId.make(id(2));
 const environmentId = M.EnvironmentId.make("fixture");
-const database = Layer.effectDiscard(migration.pipe(Effect.andThen(hubMigration))).pipe(
-  Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
-);
+const database = Layer.effectDiscard(
+  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
+).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const store = Store.layer.pipe(Layer.provideMerge(database));
-const live = Service.layer.pipe(
-  Layer.provide(
-    Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
-      resolve: () => Effect.succeed(null),
-    }),
-  ),
-  Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(store))),
-  Layer.provide(
-    Layer.succeed(Environment.ServerEnvironmentIdentity, {
-      getEnvironmentId: Effect.succeed(environmentId),
-    }),
-  ),
-);
+const serviceLive = (serviceLayer = Service.layer) =>
+  serviceLayer.pipe(
+    Layer.provide(
+      Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+        resolve: () => Effect.succeed(null),
+      }),
+    ),
+    Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(store))),
+    Layer.provide(
+      Layer.succeed(Environment.ServerEnvironmentIdentity, {
+        getEnvironmentId: Effect.succeed(environmentId),
+      }),
+    ),
+  );
+const live = serviceLive();
 const input = (n = 3): M.MemoryUpsertInput => ({
   memorySpaceId: space,
   memoryId,
@@ -47,6 +51,9 @@ const input = (n = 3): M.MemoryUpsertInput => ({
   payload: { text: "synthetic memory", evidence: [], derivedFromMemoryRevisions: [] },
   baseBoundary: null,
 });
+const decodeRpcError = Schema.decodeUnknownEffect(M.MemoryRpcError);
+const encodeRpcError = Schema.encodeEffect(M.MemoryRpcError);
+const encodeItemJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryItem));
 const encodeResolution = Schema.encodeEffect(Schema.fromJsonString(M.MemoryResolution));
 const encodeSelectionJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryModelSelection));
 const encodeRevisionIds = Schema.encodeEffect(
@@ -140,6 +147,14 @@ describe("MemoryService hub admission", () => {
         assert.deepStrictEqual(aggregate.heads, [M.MemoryRevisionId.make(id(91))]);
         assert.strictEqual(aggregate.revisions[0]?.payload?.text, "synthetic remote memory");
         assert.strictEqual(aggregate.item?.pendingSync, false);
+        const coverage = yield* store.searchCoverage({
+          memorySpaceId: space,
+          scope: { kind: "user" },
+          limit: 100,
+        });
+        assert.isTrue(coverage.ready);
+        assert.strictEqual(coverage.eligible, 1);
+        assert.strictEqual(coverage.textBytes, new TextEncoder().encode(op.payload.text).length);
         assert.strictEqual((yield* store.transact(store.readHubUsageTx(space))).tailRows, 1);
       }).pipe(Effect.provide(live)),
   );
@@ -247,6 +262,77 @@ describe("MemoryService", () => {
         Effect.void,
       );
       assert.deepStrictEqual(page.items, []);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("consumes read-only write denial before any domain mutation", () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const permit = memoryAccessPermit(
+        {
+          grantedScopes: ["memory:read", "memory:write"],
+          reauthorize: () => Effect.void,
+          readOnly: true,
+        },
+        "write",
+      );
+      assert.strictEqual(
+        (yield* service.upsert(input(), permit).pipe(Effect.flip))._tag,
+        "MemoryAccessError",
+      );
+      assert.deepStrictEqual(
+        (yield* service.list(
+          { memorySpaceId: space, limit: 100, includeQuarantined: true },
+          Effect.void,
+        )).items,
+        [],
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("binds search continuation to normalized query, mode, space and scope", () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      yield* service.upsert(input(), Effect.void);
+      const request = {
+        memorySpaceId: space,
+        query: "synthetic",
+        limit: 1,
+        mode: "substring" as const,
+      };
+      const first = yield* service.search(request, Effect.void);
+      assert.isTrue(first.nextCursor?.startsWith("ms1:"));
+      assert.isFalse(first.nextCursor!.includes("synthetic"));
+      const last = yield* service.search(
+        { ...request, query: "synthetic", cursor: first.nextCursor! },
+        Effect.void,
+      );
+      assert.deepStrictEqual(last.items, []);
+      assert.isNull(last.nextCursor);
+      for (const mismatch of [
+        { query: "other" },
+        { mode: "fts" as const },
+        { memorySpaceId: M.MemorySpaceId.make(id(999)) },
+        {
+          scope: {
+            kind: "project" as const,
+            projectKey: { kind: "explicit" as const, sharedProjectId: "fixture" },
+          },
+        },
+      ]) {
+        const failure = yield* service
+          .search({ ...request, ...mismatch, cursor: first.nextCursor! }, Effect.void)
+          .pipe(Effect.flip);
+        assert.isTrue("code" in failure && failure.code === "invalid_cursor");
+      }
+      const codec = Schema.fromJsonString(M.MemoryPage);
+      const wire = yield* Schema.encodeEffect(codec)(first);
+      assert.deepStrictEqual(yield* Schema.decodeEffect(codec)(wire), first);
+      // Both MCP/RPC receive this page: transport serialization preserves the examined cursor.
+      let checks = 0;
+      const revoked = Effect.suspend(() => (++checks === 1 ? Effect.void : denied));
+      assert.strictEqual(
+        (yield* service.search(request, revoked).pipe(Effect.flip))._tag,
+        "MemoryAccessError",
+      );
     }).pipe(Effect.provide(live)),
   );
   it.effect("returns index coverage on empty search", () =>
@@ -2138,3 +2224,570 @@ it.effect(
       );
     }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "classifies only cursor schema errors as invalid_cursor and binds NFC-equivalent queries",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const value = input();
+      yield* service.upsert(
+        { ...value, payload: { ...value.payload, text: "synthetic café" } },
+        Effect.void,
+      );
+      const request = { memorySpaceId: space, query: "café", limit: 1, mode: "substring" as const };
+      const first = yield* service.search(request, Effect.void);
+      assert.strictEqual(first.items.length, 1);
+      assert.isNotNull(first.nextCursor);
+      const next = yield* service.search(
+        { ...request, query: "cafe\u0301", cursor: first.nextCursor! },
+        Effect.void,
+      );
+      assert.deepStrictEqual(next.items, []);
+      for (const cursor of [
+        id(2),
+        "ms1:%",
+        "ms1:" + encodeURIComponent("{}"),
+        "ms1:" + "x".repeat(20000),
+        "",
+      ]) {
+        const failure = yield* service
+          .search({ ...request, cursor }, Effect.void)
+          .pipe(Effect.flip);
+        assert.isTrue("code" in failure && failure.code === "invalid_cursor");
+      }
+      for (const invalid of [
+        { limit: 0 },
+        { query: "" },
+        { query: " cafe " },
+        { unexpected: true },
+      ]) {
+        const failure = yield* service
+          .search({ ...request, ...invalid, cursor: "ms1:%" }, Effect.void)
+          .pipe(Effect.flip);
+        assert.isTrue("code" in failure && failure.code === "invalid_output");
+      }
+    }).pipe(Effect.provide(live)),
+);
+it.effect("reauthorizes immediately before returning unready FTS coverage", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<1001)
+      INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json)
+      SELECT ${space},printf('00000000-0000-4000-8000-%012d',n),'{}','user','[]','quarantined',0,'{}','{}' FROM ids`;
+    let checks = 0;
+    const permit = Effect.suspend(() => (++checks < 3 ? Effect.void : denied));
+    const failure = yield* service
+      .search({ memorySpaceId: space, query: "synthetic", limit: 10, mode: "fts" }, permit)
+      .pipe(Effect.flip);
+    assert.strictEqual(failure._tag, "MemoryAccessError");
+    assert.strictEqual(checks, 3);
+    assert.deepStrictEqual(yield* sql`SELECT after_rowid,ready FROM memory_search_backfill`, [
+      { after_rowid: 1000, ready: 0 },
+    ]);
+  }).pipe(Effect.provide(live)),
+);
+it.effect("list byte cap retains the quarantined row cursor before a visible short tail", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const sql = yield* SqlClient.SqlClient;
+    const value = input();
+    yield* service.upsert(
+      { ...value, payload: { ...value.payload, text: "synthetic " + "x".repeat(14500) } },
+      Effect.void,
+    );
+    for (const n of [10, 11, 12, 13, 14])
+      yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,item_json,availability_json)
+        SELECT space,${id(n)},scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,json_set(item_json,'$.memoryId',${id(n)},'$.revision.memoryId',${id(n)}),availability_json FROM memory_items WHERE memory_id=${memoryId}`;
+    const quarantined: M.MemoryItem = {
+      memorySpaceId: space,
+      memoryId: M.MemoryId.make(id(13)),
+      status: "quarantined",
+      scope: { kind: "user" },
+      pendingSync: false,
+      localAvailability: { exposure: "held", reasons: [], deferred: [], cleanupPending: false },
+      conflict: {
+        memorySpaceId: space,
+        memoryId: M.MemoryId.make(id(13)),
+        conflictId: M.MemoryConflictId.make(id(500)),
+        heads: [M.MemoryRevisionId.make(id(501)), M.MemoryRevisionId.make(id(502))],
+        status: "quarantined",
+      },
+    };
+    const json = yield* encodeItemJson(quarantined);
+    yield* sql`UPDATE memory_items SET status='quarantined',payload_ref=NULL,item_json=${json} WHERE memory_id=${id(13)}`;
+    const request = { memorySpaceId: space, limit: 100, includeQuarantined: false };
+    const first = yield* service.list(request, Effect.void);
+    assert.deepStrictEqual(
+      first.items.map((i) => i.memoryId),
+      [memoryId, id(10), id(11), id(12)],
+    );
+    assert.strictEqual(first.nextCursor, id(13));
+    const tail = yield* service.list({ ...request, cursor: first.nextCursor! }, Effect.void);
+    assert.deepStrictEqual(
+      tail.items.map((i) => i.memoryId),
+      [id(14)],
+    );
+    assert.isNull(tail.nextCursor);
+  }).pipe(Effect.provide(live)),
+);
+it.effect("list refuses a valid first item exceeding the reserved page envelope", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* service.upsert(input(), Effect.void);
+    const current = yield* service.read({ memorySpaceId: space, memoryId }, Effect.void);
+    if (current.status !== "active") throw new Error("Fixture kind");
+    const base = new TextEncoder().encode(yield* encodeItemJson(current)).length;
+    const large = {
+      ...current,
+      revision: {
+        ...current.revision,
+        provenance: {
+          ...current.revision.provenance,
+          environmentId: M.EnvironmentId.make(
+            "m".repeat(M.MEMORY_PAGE_MAX_UTF8_BYTES - 1000 - base),
+          ),
+        },
+      },
+    };
+    const encoded = yield* encodeItemJson(large);
+    assert.isTrue(new TextEncoder().encode(encoded).length + 2048 > M.MEMORY_PAGE_MAX_UTF8_BYTES);
+    // Store projection does not duplicate the immutable payload.
+    const { payload: _payload, ...projection } = large;
+    yield* sql`UPDATE memory_items SET item_json=${JSON.stringify(projection)} WHERE memory_id=${memoryId}`;
+    const failure = yield* service
+      .list({ memorySpaceId: space, limit: 100, includeQuarantined: true }, Effect.void)
+      .pipe(Effect.flip);
+    assert.isTrue("code" in failure && failure.code === "payload_too_large");
+  }).pipe(Effect.provide(live)),
+);
+
+const sourceFixture = Effect.gen(function* () {
+  const store = yield* Store.MemoryStore;
+  const sourceThread = {
+    environmentId: M.EnvironmentId.make("synthetic-owner"),
+    threadId: M.ThreadId.make("synthetic-thread"),
+  };
+  const watermark = {
+    fromEventId: M.EventId.make("synthetic-from"),
+    toEventId: M.EventId.make("synthetic-to"),
+    throughSequence: 8,
+  };
+  const messageId = M.MessageId.make("synthetic-message");
+  const operationId = M.MemoryOperationId.make(id(9000));
+  const revisionId = M.MemoryRevisionId.make(id(9001));
+  const op: M.MemoryOperation = {
+    protocolVersion: 1,
+    kind: "upsert",
+    memorySpaceId: space,
+    memoryId,
+    operationId,
+    originEnvironmentId: environmentId,
+    expectedHeads: [],
+    revision: {
+      memorySpaceId: space,
+      memoryId,
+      operationId,
+      revisionId,
+      payloadRef: revisionId,
+      parents: [],
+      scope: { kind: "user" },
+      assertionKind: "inference",
+      createdAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+      provenance: { environmentId, sourceThread, sourceWatermark: watermark },
+    },
+    payload: {
+      text: "synthetic linked summary",
+      evidence: [{ origin: "thread", sourceThread, watermark, messageIds: [messageId] }],
+      derivedFromMemoryRevisions: [],
+    },
+  };
+  const aggregate = yield* store.loadAggregate(space, memoryId);
+  yield* store.apply(decideMemoryOperation(aggregate, op, Store.localIntent, scanMemoryValue(op)));
+  const input: M.MemoryReadSourceInput = {
+    memorySpaceId: space,
+    memoryId,
+    sourceThread,
+    messageIds: [messageId],
+    limit: 10,
+  };
+  const page: M.MemorySourcePage = {
+    sourceThread,
+    watermark,
+    messages: [{ messageId, text: "synthetic original" }],
+    nextCursor: null,
+  };
+  return { input, page };
+});
+it.effect("public readSource returns the validated page through the injected authority", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const fixture = yield* sourceFixture;
+    const actual = yield* service.readSource(fixture.input, Effect.void);
+    assert.deepStrictEqual(actual, fixture.page);
+  }).pipe(
+    Effect.provide(
+      serviceLive(
+        Service.layerWithSourceReadAuthority((validated, permit) =>
+          permit.pipe(
+            Effect.as({
+              kind: "available",
+              page: {
+                sourceThread: validated.request.sourceThread,
+                watermark: validated.request.sourceWatermark,
+                messages: validated.request.messageIds.map((messageId) => ({
+                  messageId,
+                  text: "synthetic original",
+                })),
+                nextCursor: null,
+              },
+            }),
+          ),
+        ),
+      ),
+    ),
+  ),
+);
+it.effect.each([
+  "source_unavailable",
+  "forgotten",
+  "source_invalidated",
+  "secret_detected",
+] as const)("public readSource preserves unavailable %s", (code) =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const fixture = yield* sourceFixture;
+    const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+    assert.strictEqual(failure._tag, "MemoryStoreConflict");
+    assert.isTrue("code" in failure && failure.code === code);
+  }).pipe(
+    Effect.provide(
+      serviceLive(
+        Service.layerWithSourceReadAuthority(() => Effect.succeed({ kind: "unavailable", code })),
+      ),
+    ),
+  ),
+);
+it.effect.each(["outcome", "error", "missing"] as const)(
+  "public readSource retains auth denial from %s",
+  (kind) => {
+    const authority: Service.MemorySourceReadAuthority["readSource"] = () =>
+      kind === "error"
+        ? denied
+        : Effect.succeed({ kind: "denied", requiredPermission: "orchestration:read" });
+    return Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const fixture = yield* sourceFixture;
+      const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryAccessError");
+      assert.isTrue(
+        "code" in failure &&
+          failure.code === (kind === "error" ? "identity_mismatch" : "unavailable"),
+      );
+    }).pipe(
+      Effect.provide(
+        kind === "missing" ? live : serviceLive(Service.layerWithSourceReadAuthority(authority)),
+      ),
+    );
+  },
+);
+it.effect("public readSource fences post-await revocation", () => {
+  let revoke = false;
+  return Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const fixture = yield* sourceFixture;
+    const permit = Effect.suspend(() => (revoke ? denied : Effect.void));
+    const failure = yield* service.readSource(fixture.input, permit).pipe(Effect.flip);
+    assert.strictEqual(failure._tag, "MemoryAccessError");
+  }).pipe(
+    Effect.provide(
+      serviceLive(
+        Service.layerWithSourceReadAuthority((validated, permit) =>
+          Effect.gen(function* () {
+            yield* permit;
+            revoke = true;
+            return {
+              kind: "available" as const,
+              page: {
+                sourceThread: validated.request.sourceThread,
+                watermark: validated.request.sourceWatermark,
+                messages: [],
+                nextCursor: null,
+              },
+            };
+          }),
+        ),
+      ),
+    ),
+  );
+});
+it.effect.each(["before-authority", "before-return"] as const)(
+  "public readSource repeats permit %s",
+  (boundary) => {
+    let calls = 0;
+    let authorityCalls = 0;
+    const at = boundary === "before-authority" ? 3 : 6;
+    const authority: Service.MemorySourceReadAuthority["readSource"] = (validated) => {
+      authorityCalls++;
+      return Effect.succeed({
+        kind: "available",
+        page: {
+          sourceThread: validated.request.sourceThread,
+          watermark: validated.request.sourceWatermark,
+          messages: [],
+          nextCursor: null,
+        },
+      });
+    };
+    return Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const fixture = yield* sourceFixture;
+      const permit = Effect.suspend(() => (++calls === at ? denied : Effect.void));
+      const failure = yield* service.readSource(fixture.input, permit).pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryAccessError");
+      assert.strictEqual(calls, at);
+      assert.strictEqual(authorityCalls, boundary === "before-authority" ? 0 : 1);
+    }).pipe(Effect.provide(serviceLive(Service.layerWithSourceReadAuthority(authority))));
+  },
+);
+it.effect("public readSource discards an available body whose locator changed during await", () => {
+  let invalidate: Effect.Effect<void, Service.MemoryServiceError> = Effect.void;
+  const authority: Service.MemorySourceReadAuthority["readSource"] = (validated) =>
+    Effect.gen(function* () {
+      yield* invalidate;
+      return {
+        kind: "available" as const,
+        page: {
+          sourceThread: validated.request.sourceThread,
+          watermark: validated.request.sourceWatermark,
+          messages: [
+            { messageId: validated.request.messageIds[0]!, text: "synthetic stale original" },
+          ],
+          nextCursor: null,
+        },
+      };
+    });
+  return Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const fixture = yield* sourceFixture;
+    invalidate = service
+      .forget(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(id(9002)),
+          expectedHeads: [],
+        },
+        Effect.void,
+      )
+      .pipe(Effect.asVoid);
+    const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+    assert.isTrue("code" in failure && failure.code === "forgotten");
+  }).pipe(Effect.provide(serviceLive(Service.layerWithSourceReadAuthority(authority))));
+});
+
+it.effect.each([0, 7])(
+  "public readSource preserves Hub capacity with reclaimable %s",
+  (reclaimable) => {
+    const capacity: M.MemoryCapacityExceeded = {
+      code: "capacity_exceeded",
+      dimension: "relay_environment",
+      current: 32,
+      limit: 32,
+      reclaimable,
+    };
+    return Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const fixture = yield* sourceFixture;
+      const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryCapacityError");
+      if (failure._tag !== "MemoryCapacityError") return;
+      assert.deepStrictEqual(
+        {
+          dimension: failure.dimension,
+          current: failure.current,
+          limit: failure.limit,
+          reclaimable: failure.reclaimable,
+        },
+        { dimension: "relay_environment", current: 32, limit: 32, reclaimable },
+      );
+      // Planned transport projection: the service fields alone must satisfy the safe wire codec.
+      const safe = yield* decodeRpcError({
+        _tag: "MemoryRpcError",
+        code: "capacity_exceeded",
+        capacity: {
+          code: "capacity_exceeded",
+          dimension: failure.dimension,
+          current: failure.current,
+          limit: failure.limit,
+          reclaimable: failure.reclaimable,
+        },
+      });
+      const encoded = yield* encodeRpcError(safe);
+      assert.deepStrictEqual(encoded, {
+        _tag: "MemoryRpcError",
+        code: "capacity_exceeded",
+        capacity,
+      });
+      assert.isFalse("cause" in failure);
+    }).pipe(
+      Effect.provide(
+        serviceLive(
+          Service.layerWithSourceReadAuthority(() =>
+            Effect.fail(new M.MemoryHubError({ code: "capacity_exceeded", capacity })),
+          ),
+        ),
+      ),
+    );
+  },
+);
+it.effect.each([
+  "source_unavailable",
+  "forgotten",
+  "source_invalidated",
+  "secret_detected",
+  "hub_disabled",
+  "identity_mismatch",
+  "invalid_output",
+] as const)("public readSource preserves Hub error code %s without capacity or cause", (code) =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const fixture = yield* sourceFixture;
+    const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+    assert.strictEqual(failure._tag, "MemoryStoreConflict");
+    assert.isTrue("code" in failure && failure.code === code);
+    assert.isFalse("capacity" in failure);
+    assert.isFalse("cause" in failure);
+    const safe = yield* decodeRpcError({
+      _tag: "MemoryRpcError",
+      code,
+    });
+    assert.deepStrictEqual(yield* encodeRpcError(safe), {
+      _tag: "MemoryRpcError",
+      code,
+    });
+  }).pipe(
+    Effect.provide(
+      serviceLive(
+        Service.layerWithSourceReadAuthority(() => Effect.fail(new M.MemoryHubError({ code }))),
+      ),
+    ),
+  ),
+);
+it.effect("public readSource does not invent capacity for a code-only service conflict", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const fixture = yield* sourceFixture;
+    const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+    assert.strictEqual(failure._tag, "MemoryStoreConflict");
+    assert.isTrue("code" in failure && failure.code === "capacity_exceeded");
+    assert.isFalse("current" in failure);
+    assert.isFalse("capacity" in failure);
+  }).pipe(
+    Effect.provide(
+      serviceLive(
+        Service.layerWithSourceReadAuthority(() =>
+          Effect.fail(new Store.MemoryStoreConflict({ code: "capacity_exceeded" })),
+        ),
+      ),
+    ),
+  ),
+);
+
+for (const mutation of ["forget", "hold", "replace"] as const) {
+  it.effect.each(["denied", "malformed", "available"] as const)(
+    `public readSource validates %s after authority await with ${mutation}`,
+    (kind) => {
+      let invalidate: Effect.Effect<void, Service.MemoryServiceError> = Effect.void;
+      const authority: Service.MemorySourceReadAuthority["readSource"] = (validated) =>
+        Effect.gen(function* () {
+          yield* invalidate;
+          if (kind === "malformed") {
+            // Simulate a faulty authority crossing the runtime boundary with excess properties.
+            const malformed = {
+              kind: "denied" as const,
+              requiredPermission: "orchestration:read" as const,
+              unexpected: true,
+            };
+            return malformed;
+          }
+          if (kind === "denied")
+            return { kind: "denied" as const, requiredPermission: "orchestration:read" as const };
+          return {
+            kind: "available" as const,
+            page: {
+              sourceThread: validated.request.sourceThread,
+              watermark: validated.request.sourceWatermark,
+              messages: [],
+              nextCursor: null,
+            },
+          };
+        });
+      return Effect.gen(function* () {
+        const service = yield* Service.MemoryService;
+        const fixture = yield* sourceFixture;
+        const sql = yield* SqlClient.SqlClient;
+        if (mutation === "forget") {
+          invalidate = service
+            .forget(
+              {
+                memorySpaceId: space,
+                memoryId,
+                operationId: M.MemoryOperationId.make(id(9002)),
+                expectedHeads: [],
+              },
+              Effect.void,
+            )
+            .pipe(Effect.asVoid);
+        } else if (mutation === "replace") {
+          // Replace the linked head with an actual local revision without a source locator.
+          invalidate = service
+            .upsert(
+              { ...input(9003), expectedHeads: [M.MemoryRevisionId.make(id(9001))] },
+              Effect.void,
+            )
+            .pipe(Effect.asVoid);
+        } else {
+          const held: M.MemoryItem = {
+            memorySpaceId: space,
+            memoryId,
+            status: "blocked",
+            scope: { kind: "user" },
+            pendingSync: false,
+            failureCode: "scanner_pending",
+            localAvailability: {
+              exposure: "held",
+              reasons: ["scanner_pending"],
+              deferred: [],
+              cleanupPending: false,
+            },
+          };
+          const json = yield* encodeItemJson(held);
+          invalidate =
+            sql`UPDATE memory_items SET status='blocked',item_json=${json} WHERE space=${space} AND memory_id=${memoryId}`.pipe(
+              Effect.asVoid,
+              Effect.mapError((cause) => new Store.MemoryStorageError({ stage: "fixture", cause })),
+            );
+        }
+        const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+        assert.strictEqual(
+          failure._tag,
+          kind === "denied" ? "MemoryAccessError" : "MemoryStoreConflict",
+        );
+        assert.isTrue(
+          "code" in failure &&
+            failure.code ===
+              (kind === "denied"
+                ? "unavailable"
+                : kind === "malformed"
+                  ? "invalid_output"
+                  : mutation === "forget"
+                    ? "forgotten"
+                    : "source_invalidated"),
+        );
+      }).pipe(Effect.provide(serviceLive(Service.layerWithSourceReadAuthority(authority))));
+    },
+  );
+}

@@ -1,9 +1,39 @@
+import * as MemorySnapshot from "../memory/MemorySnapshot.ts";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
+import * as MemoryContracts from "@goat/contracts";
+import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
+import * as RemoteReportInbox from "../remoteReports/RemoteReportInbox.ts";
+import * as CheckpointService from "./CheckpointService.ts";
+import * as AdapterInfrastructure from "../provider/ProviderOrchestrationAdapterInfrastructure.ts";
+import * as Orchestrator from "./Orchestrator.ts";
+import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import * as ChannelDispatcher from "../channels/ChannelDispatcher.ts";
+import * as ChannelLedger from "../channels/ChannelLedger.ts";
+import * as ChannelRemoteWorkers from "../channels/ChannelRemoteWorkers.ts";
+import * as SlackChannelSettings from "../channels/SlackChannelSettings.ts";
+import * as ThreadManagement from "./ThreadManagementService.ts";
+import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import * as ProjectStore from "./ProjectStore.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as ServerConfig from "../config.ts";
+import * as Path from "effect/Path";
+import * as MemoryToolkitFixture from "../mcp/toolkits/memory/handlers.testkit.ts";
 import * as NetAddress from "effect/net/NetAddress";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@goat/shared/AgentScope";
 import {
+  CommandId,
+  MessageId,
+  TurnItemId,
+  ChannelTaskId,
+  ChannelTaskEventId,
+  ChannelQuestionId,
   EnvironmentId,
+  CheckpointScopeId,
+  ScheduledTaskId,
+  NodeId,
+  type OrchestrationV2ThreadProjection,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
@@ -43,6 +73,12 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
+import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
+import * as ContextHandoffService from "./ContextHandoffService.ts";
+import * as RunExecutionService from "./RunExecutionService.ts";
+import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as GitWorkflow from "../git/GitWorkflowService.ts";
+import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -236,10 +272,6 @@ function makeThreadCreatedEvent(input: {
       (yield* input.idAllocator.allocate.project({
         fixtureName: "provider-session-manager",
       }));
-    const providerThreadId = input.idAllocator.derive.providerThread({
-      driver: CODEX_DRIVER,
-      nativeThreadId: "native-thread",
-    });
     const thread: OrchestrationV2AppThread = {
       createdBy: "user",
       creationSource: "web",
@@ -252,7 +284,7 @@ function makeThreadCreatedEvent(input: {
       interactionMode: "default",
       branch: null,
       worktreePath: null,
-      activeProviderThreadId: providerThreadId,
+      activeProviderThreadId: null,
       lineage: {
         parentThreadId: null,
         relationshipToParent: null,
@@ -337,6 +369,9 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     /** False models a runtime whose background tasks can outlive its process. */
     readonly backgroundTasksEndWithProcess?: boolean;
     readonly hangSessionScopeClose?: boolean;
+    readonly onTurnInput?: (
+      input: ProviderAdapter.ProviderAdapterV2TurnInput,
+    ) => Effect.Effect<void, ProviderAdapter.ProviderAdapterTurnStartError>;
     readonly startTurn?: Effect.Effect<void>;
     readonly resumeTurn?: Effect.Effect<void>;
     readonly beforeUnload?: Effect.Effect<void>;
@@ -436,7 +471,8 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
               ...current,
               resumeCount: current.resumeCount + 1,
             })).pipe(Effect.as(threadInput.providerThread)),
-          startTurn: () => options.startTurn ?? Effect.void,
+          startTurn: (turnInput) =>
+            options.onTurnInput?.(turnInput) ?? options.startTurn ?? Effect.void,
           ...(options.resumeTurn === undefined ? {} : { resumeTurn: () => options.resumeTurn! }),
           steerTurn: () => Effect.void,
           interruptTurn: () =>
@@ -492,6 +528,9 @@ function layerTest(input: {
   readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
   readonly backgroundTasksEndWithProcess?: boolean;
   readonly hangSessionScopeClose?: boolean;
+  readonly onTurnInput?: (
+    input: ProviderAdapter.ProviderAdapterV2TurnInput,
+  ) => Effect.Effect<void, ProviderAdapter.ProviderAdapterTurnStartError>;
   readonly startTurn?: Effect.Effect<void>;
   readonly resumeTurn?: Effect.Effect<void>;
   readonly beforeUnload?: Effect.Effect<void>;
@@ -499,7 +538,32 @@ function layerTest(input: {
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
+  readonly projectionReads?: { getThread: number; getThreadShell: number };
+  readonly fileSystem?: FileSystem.FileSystem;
 }) {
+  const reads = input.projectionReads;
+  const layerConfiguredStores = reads
+    ? Layer.merge(
+        layerTestStores,
+        Layer.effect(
+          ProjectionStore.ProjectionStoreV2,
+          Effect.gen(function* () {
+            const delegate = yield* ProjectionStore.ProjectionStoreV2;
+            return ProjectionStore.ProjectionStoreV2.of({
+              ...delegate,
+              getThread: (threadId) =>
+                Effect.sync(() => reads.getThread++).pipe(
+                  Effect.andThen(delegate.getThread(threadId)),
+                ),
+              getThreadShell: (threadId) =>
+                Effect.sync(() => reads.getThreadShell++).pipe(
+                  Effect.andThen(delegate.getThreadShell(threadId)),
+                ),
+            });
+          }),
+        ).pipe(Layer.provide(layerTestStores)),
+      )
+    : layerTestStores;
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
       ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
@@ -528,6 +592,7 @@ function layerTest(input: {
       ...(input.hangSessionScopeClose === undefined
         ? {}
         : { hangSessionScopeClose: input.hangSessionScopeClose }),
+      ...(input.onTurnInput === undefined ? {} : { onTurnInput: input.onTurnInput }),
       ...(input.startTurn === undefined ? {} : { startTurn: input.startTurn }),
       ...(input.resumeTurn === undefined ? {} : { resumeTurn: input.resumeTurn }),
       ...(input.beforeUnload === undefined ? {} : { beforeUnload: input.beforeUnload }),
@@ -546,13 +611,14 @@ function layerTest(input: {
       Layer.mergeAll(
         layerConfiguredEventSink,
         IdAllocator.layer,
-        layerTestStores,
+        layerConfiguredStores,
         ThreadCommandExecutor.layer,
       ),
     ),
   );
   return Layer.mergeAll(
-    layerTestStores,
+    AdapterInfrastructure.layerMemoryAdmission,
+    layerConfiguredStores,
     layerConfiguredEventSink,
     IdAllocator.layer,
     layerConfiguredMcpRegistry,
@@ -564,17 +630,24 @@ function layerTest(input: {
       Layer.provide(
         Layer.mergeAll(
           layerRegistry.pipe(Layer.provideMerge(McpProviderSessions.layer)),
+          AdapterInfrastructure.layerMemoryAdmission,
           layerConfiguredEventSink,
           IdAllocator.layer,
           layerProviderEventIngestorTest,
           layerConfiguredMcpRegistry,
-          layerTestStores,
+          layerConfiguredStores,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
         ),
       ),
     ),
-  ).pipe(Layer.provide(NodeServices.layer));
+  ).pipe(
+    Layer.provide(
+      input.fileSystem === undefined
+        ? NodeServices.layer
+        : Layer.merge(NodeServices.layer, Layer.succeed(FileSystem.FileSystem, input.fileSystem)),
+    ),
+  );
 }
 
 const fakeHttpServer = HttpServer.HttpServer.of({
@@ -5120,4 +5193,1266 @@ it.effect.each([false, true])(
         ),
       );
     }),
+);
+
+it.effect(
+  "managed settings produce grants, task ceilings bound reuse, live runs and epoch rotations fence toolkit calls",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const projection = yield* ProjectionStore.ProjectionStoreV2;
+        const admission = yield* AdapterInfrastructure.ProviderMemoryAdmission;
+        const adapterChanges = yield* Queue.unbounded<{
+          threadId: ThreadId;
+          providerInstanceId: ProviderInstanceId;
+        }>();
+        yield* admission.rotations.pipe(
+          Stream.runForEach((event) => Queue.offer(adapterChanges, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const changes = yield* Queue.unbounded<ProviderSessionManager.McpCredentialRotation>();
+        yield* manager.mcpCredentialRotations!.pipe(
+          Stream.runForEach((change) => Queue.offer(changes, change)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const threadId = ThreadId.make("thread-memory-policy");
+        const now = yield* DateTime.now;
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+          memoryGrantCeiling: null,
+        });
+        assert.equal((yield* admission.currentPolicy(threadId)).grant, "read_write");
+        yield* Queue.take(changes);
+        const initialAdapterRotation = yield* Queue.take(adapterChanges);
+        assert.equal(initialAdapterRotation.threadId, threadId);
+        assert.equal(initialAdapterRotation.providerInstanceId, modelSelection.instanceId);
+        assert.deepEqual(
+          yield* admission.currentPolicy(threadId),
+          yield* manager.currentMemoryPolicy!(threadId),
+        );
+        assert.equal((yield* admission.currentPolicy(threadId)).grant, "read_write");
+        const readScope = () =>
+          Effect.gen(function* () {
+            const config = yield* configs.read(threadId);
+            assert.isDefined(config);
+            const scope = yield* registry.resolve(
+              config!.authorizationHeader.replace(/^Bearer\s+/, ""),
+            );
+            assert.isDefined(scope);
+            return scope!;
+          });
+        const initial = yield* readScope();
+        assert.deepEqual(initial.grantedScopes, [
+          "memory:read",
+          "memory:write",
+          "orchestration:read",
+        ]);
+        assert.equal(
+          (yield* initial.reauthorize!(["memory:read"]).pipe(Effect.flip))._tag,
+          "EnvironmentAuthorizationError",
+        );
+        const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+        yield* runtime.startTurn({
+          appThread: (yield* projection.getThreadProjection(threadId)).thread,
+          threadId,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId }),
+          providerThread: makeProviderThread({ idAllocator, threadId, providerSessionId, now }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+            text: "synthetic memory turn",
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        });
+        const savedMemory = yield* MemoryToolkitFixture.call(
+          "memory_upsert",
+          MemoryToolkitFixture.upsert(),
+          yield* readScope(),
+        );
+        assert.notEqual(savedMemory.result.isError, true, JSON.stringify(savedMemory.body));
+        assert.notEqual(
+          (yield* MemoryToolkitFixture.call(
+            "memory_list",
+            { memorySpaceId: MemoryToolkitFixture.space, includeQuarantined: false },
+            yield* readScope(),
+          )).result.isError,
+          true,
+        );
+        for (const [ceiling, grant] of [
+          ["none", "none"],
+          ["read", "read"],
+          ["read_write", "read_write"],
+          [undefined, "none"],
+          [null, "read_write"],
+        ] as const) {
+          const oldConfig = yield* configs.read(threadId);
+          yield* manager.prepareMcpSession!({
+            threadId,
+            providerInstanceId: modelSelection.instanceId,
+            ...(ceiling === undefined ? {} : { memoryGrantCeiling: ceiling }),
+          });
+          const admitted = yield* readScope();
+          assert.equal(admitted.memoryPolicy?.grant, grant);
+          assert.equal(admitted.grantedScopes?.includes("orchestration:read"), true);
+          if (grant !== "read_write")
+            assert.equal(
+              (yield* admitted.reauthorize!(["memory:write"]).pipe(Effect.flip))._tag,
+              "EnvironmentAuthorizationError",
+            );
+          if ((yield* configs.read(threadId))?.providerSessionId !== oldConfig?.providerSessionId)
+            assert.isUndefined(
+              yield* registry.resolve(oldConfig!.authorizationHeader.replace(/^Bearer\s+/, "")),
+            );
+        }
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: null,
+          readOnly: true,
+        });
+        assert.equal((yield* readScope()).memoryPolicy?.grant, "read");
+        assert.equal(
+          (yield* MemoryToolkitFixture.call(
+            "memory_upsert",
+            MemoryToolkitFixture.upsert(40),
+            yield* readScope(),
+          )).result.isError,
+          true,
+        );
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: null,
+          readOnly: false,
+        });
+        yield* Queue.clear(changes);
+        yield* Queue.clear(adapterChanges);
+        const old = yield* configs.read(threadId);
+        const offReady = yield* Deferred.make<ProviderSessionManager.McpCredentialRotation>();
+        yield* manager.mcpCredentialRotations!.pipe(
+          Stream.filter((event) => event.memoryPolicy.grant === "none"),
+          Stream.take(1),
+          Stream.runForEach((event) => Deferred.succeed(offReady, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        yield* settings.updateSettings({ enableAgentMemoryAccess: false });
+        assert.isUndefined(
+          yield* registry.resolve(old!.authorizationHeader.replace(/^Bearer\s+/, "")),
+        );
+        const off = yield* Deferred.await(offReady);
+        assert.deepEqual(off.grantedScopes, ["orchestration:read"]);
+        const offAdapterRotation = yield* Queue.take(adapterChanges);
+        assert.equal(offAdapterRotation.threadId, off.threadId);
+        assert.equal(offAdapterRotation.providerInstanceId, off.providerInstanceId);
+        assert.equal((yield* admission.currentPolicy(threadId)).grant, "none");
+        assert.deepEqual((yield* admission.fence(yield* configs.read(threadId)))?.grantedScopes, [
+          "orchestration:read",
+        ]);
+        assert.equal((yield* readScope()).memoryPolicy?.grant, "none");
+        const offConfig = yield* configs.read(threadId);
+        const onReady = yield* Deferred.make<ProviderSessionManager.McpCredentialRotation>();
+        yield* manager.mcpCredentialRotations!.pipe(
+          Stream.filter((event) => event.memoryPolicy.grant === "read_write"),
+          Stream.take(1),
+          Stream.runForEach((event) => Deferred.succeed(onReady, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        yield* settings.updateSettings({ enableAgentMemoryAccess: true });
+        assert.isUndefined(
+          yield* registry.resolve(offConfig!.authorizationHeader.replace(/^Bearer\s+/, "")),
+        );
+        const on = yield* Deferred.await(onReady);
+        assert.deepEqual(on.grantedScopes, ["memory:read", "memory:write", "orchestration:read"]);
+        const admitted = yield* readScope();
+        assert.isDefined(yield* registry.currentMemoryPolicy!(admitted.thread.providerSessionId));
+        yield* admitted.reauthorize!(["memory:read"]);
+        const attachedConfig = yield* configs.read(threadId);
+        yield* manager.close(providerSessionId);
+        assert.isUndefined(yield* admission.fence(attachedConfig));
+        assert.equal((yield* admission.currentPolicy(threadId)).grant, "none");
+        assert.equal(
+          (yield* admitted.reauthorize!(["memory:read"]).pipe(Effect.flip))._tag,
+          "EnvironmentAuthorizationError",
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
+            settingsLayer,
+            MemoryToolkitFixture.layerForThreadEnvironment(
+              EnvironmentId.make("environment-provider-session-manager"),
+              layerTestDatabase,
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped),
+);
+
+it.effect.each(["new", "existing"] as const)(
+  "prepare admission survives %s open, replacement restores grants, provider mismatch denies",
+  (branch) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const projection = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = ThreadId.make("thread-memory-policy");
+        const now = yield* DateTime.now;
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+
+        if (branch === "existing")
+          yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: "read_write",
+          dispatchScopes: ["memory:read"],
+          readOnly: true,
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+          memoryGrantCeiling: "read_write",
+        });
+        const readScope = () =>
+          Effect.gen(function* () {
+            const config = yield* configs.read(threadId);
+            const scope = yield* registry.resolve(
+              config!.authorizationHeader.replace(/^Bearer\s+/, ""),
+            );
+            assert.isDefined(scope);
+            return scope!;
+          });
+        const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+        yield* runtime.startTurn({
+          appThread: (yield* projection.getThreadProjection(threadId)).thread,
+          threadId,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId }),
+          providerThread: makeProviderThread({ idAllocator, threadId, providerSessionId, now }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+            text: "synthetic memory turn",
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        });
+
+        const restricted = yield* readScope();
+        assert.equal(restricted.readOnly, true);
+        assert.equal(restricted.memoryPolicy?.grant, "read");
+        assert.equal(
+          (yield* MemoryToolkitFixture.call(
+            "memory_upsert",
+            MemoryToolkitFixture.upsert(),
+            restricted,
+          )).result.isError,
+          true,
+        );
+        for (const restriction of [
+          { dispatchScopes: ["memory:read"] as const, readOnly: false },
+          { dispatchScopes: ["memory:read", "memory:write"] as const, readOnly: true },
+        ]) {
+          yield* manager.prepareMcpSession!({
+            threadId,
+            providerInstanceId: modelSelection.instanceId,
+            memoryGrantCeiling: "read_write",
+            ...restriction,
+          });
+          yield* manager.open({
+            threadId,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy,
+            memoryGrantCeiling: "read_write",
+          });
+          assert.equal((yield* readScope()).memoryPolicy?.grant, "read");
+          assert.equal(
+            (yield* MemoryToolkitFixture.call(
+              "memory_upsert",
+              MemoryToolkitFixture.upsert(),
+              yield* readScope(),
+            )).result.isError,
+            true,
+          );
+        }
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: null,
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        assert.equal((yield* readScope()).memoryPolicy?.grant, "read_write");
+        const savedMemory = yield* MemoryToolkitFixture.call(
+          "memory_upsert",
+          MemoryToolkitFixture.upsert(),
+          yield* readScope(),
+        );
+        assert.notEqual(savedMemory.result.isError, true, JSON.stringify(savedMemory.body));
+        // A subsequent open without a fresh prepare cannot reuse the old admission.
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        assert.equal((yield* readScope()).memoryPolicy?.grant, "none");
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: ProviderInstanceId.make("different-provider"),
+          memoryGrantCeiling: null,
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        assert.equal((yield* readScope()).memoryPolicy?.grant, "none");
+        yield* manager.close(providerSessionId);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
+            settingsLayer,
+            MemoryToolkitFixture.layerForThreadEnvironment(
+              EnvironmentId.make("environment-provider-session-manager"),
+              layerTestDatabase,
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped),
+);
+
+it.effect.each([
+  { branch: "new", ceiling: undefined },
+  { branch: "new", ceiling: "none" },
+  { branch: "existing", ceiling: undefined },
+  { branch: "existing", ceiling: "none" },
+] as const)(
+  "failed $branch open consumes admission before retry with ceiling=$ceiling",
+  ({ branch, ceiling }) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const root = yield* fileSystem.makeTempDirectoryScoped();
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const projection = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = ThreadId.make("thread-memory-policy");
+        const now = yield* DateTime.now;
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const input = { threadId, providerSessionId, modelSelection, runtimePolicy };
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        if (branch === "existing") yield* manager.open(input);
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: null,
+        });
+        const error = yield* manager
+          .open({
+            ...input,
+            runtimePolicy: { ...runtimePolicy, cwd: `${root}/missing` },
+          })
+          .pipe(Effect.flip);
+        assert.instanceOf(error, ProviderWorkspaceMissingError);
+        const runtime = yield* manager.open({
+          ...input,
+          ...(ceiling === undefined ? {} : { memoryGrantCeiling: ceiling }),
+        });
+        const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+        yield* runtime.startTurn({
+          appThread: (yield* projection.getThreadProjection(threadId)).thread,
+          threadId,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId }),
+          providerThread: makeProviderThread({ idAllocator, threadId, providerSessionId, now }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+            text: "synthetic memory turn",
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        });
+        const config = yield* configs.read(threadId);
+        const scope = yield* registry.resolve(
+          config!.authorizationHeader.replace(/^Bearer\s+/, ""),
+        );
+        assert.isDefined(scope);
+        assert.equal(scope!.memoryPolicy?.grant, "none");
+        for (const [tool, payload] of [
+          ["memory_list", { memorySpaceId: MemoryToolkitFixture.space, includeQuarantined: false }],
+          ["memory_upsert", MemoryToolkitFixture.upsert()],
+        ] as const) {
+          const result = yield* MemoryToolkitFixture.call(tool, payload, scope!);
+          assert.equal(result.result.isError, true);
+          assert.deepInclude(result.body, { code: "unavailable" });
+        }
+        yield* manager.close(providerSessionId);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerTest({ state, idleTimeoutMs: 60_000, serverSettingsLayer: settingsLayer }),
+            settingsLayer,
+            MemoryToolkitFixture.layerForThreadEnvironment(
+              EnvironmentId.make("environment-provider-session-manager"),
+              layerTestDatabase,
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each([
+  { branch: "new", outcome: "failure" },
+  { branch: "new", outcome: "interrupt" },
+  { branch: "existing", outcome: "failure" },
+  { branch: "existing", outcome: "interrupt" },
+] as const)(
+  "$branch open preflight $outcome preserves a later explicit admission",
+  ({ branch, outcome }) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const root = yield* fileSystem.makeTempDirectoryScoped();
+      const cwd = `${root}/missing`;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const threadId = ThreadId.make("thread-memory-policy");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const input = { threadId, providerSessionId, modelSelection, runtimePolicy };
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({
+              idAllocator,
+              threadId,
+              now: yield* DateTime.now,
+            }),
+          ],
+        });
+        if (branch === "existing") yield* manager.open(input);
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: "none",
+        });
+        const opening = yield* manager
+          .open({
+            ...input,
+            runtimePolicy: { ...runtimePolicy, cwd },
+          })
+          .pipe(Effect.exit, Effect.forkChild);
+        yield* Deferred.await(entered);
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: null,
+        });
+        if (outcome === "interrupt") {
+          yield* Fiber.interrupt(opening);
+        } else {
+          yield* Deferred.succeed(release, undefined);
+          const exit = yield* Fiber.join(opening);
+          assert.isTrue(Exit.isFailure(exit));
+        }
+        yield* manager.open(input);
+        const config = yield* configs.read(threadId);
+        const scope = yield* registry.resolve(
+          config!.authorizationHeader.replace(/^Bearer\s+/, ""),
+        );
+        assert.equal(scope?.memoryPolicy?.grant, "read_write");
+        // The new admission is also single-use.
+        yield* manager.open(input);
+        const next = yield* configs.read(threadId);
+        const nextScope = yield* registry.resolve(
+          next!.authorizationHeader.replace(/^Bearer\s+/, ""),
+        );
+        assert.equal(nextScope?.memoryPolicy?.grant, "none");
+        yield* manager.close(providerSessionId);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            serverSettingsLayer: settingsLayer,
+            fileSystem: FileSystem.FileSystem.of({
+              ...fileSystem,
+              stat: (path) =>
+                path === cwd
+                  ? Deferred.succeed(entered, undefined).pipe(
+                      Effect.andThen(Deferred.await(release)),
+                      Effect.andThen(fileSystem.stat(path)),
+                    )
+                  : fileSystem.stat(path),
+            }),
+          }),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each(["failure", "interrupt"] as const)(
+  "adapter open %s cleanup preserves a later explicit admission with the same credential",
+  (outcome) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const first = yield* Ref.make(true);
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const threadId = ThreadId.make("thread-memory-policy");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const input = { threadId, providerSessionId, modelSelection, runtimePolicy };
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({
+              idAllocator,
+              threadId,
+              now: yield* DateTime.now,
+            }),
+          ],
+        });
+        // No prepare before the first open: its freshly issued credential is
+        // cleared on adapter failure. A concurrent prepare can reuse that id.
+        const opening = yield* manager.open(input).pipe(Effect.exit, Effect.forkChild);
+        yield* Deferred.await(entered);
+        const before = yield* configs.read(threadId);
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: "none",
+        });
+        assert.equal((yield* configs.read(threadId))?.providerSessionId, before?.providerSessionId);
+        if (outcome === "interrupt") {
+          yield* Fiber.interrupt(opening);
+        } else {
+          yield* Deferred.succeed(release, undefined);
+          assert.isTrue(Exit.isFailure(yield* Fiber.join(opening)));
+        }
+        // A surviving none admission must still narrow this explicit null open.
+        // If cleanup deleted it, the retry would incorrectly grant read_write.
+        yield* manager.open({ ...input, memoryGrantCeiling: null });
+        const config = yield* configs.read(threadId);
+        const scope = yield* registry.resolve(
+          config!.authorizationHeader.replace(/^Bearer\s+/, ""),
+        );
+        assert.equal(scope?.memoryPolicy?.grant, "none");
+        yield* manager.close(providerSessionId);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            serverSettingsLayer: settingsLayer,
+            beforeOpen: () =>
+              Effect.gen(function* () {
+                if (!(yield* Ref.getAndSet(first, false))) return;
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(release);
+                return yield* Effect.die("synthetic adapter handshake failure");
+              }),
+          }),
+        ),
+      );
+    }).pipe(Effect.scoped),
+);
+
+// Exercise recovery admission through the real turn-start service and manager.
+// The provider fixture resumes a native thread; run delivery is an explicit milestone.
+const turnStartMemoryCases = [
+  { name: "ordinary", kind: "ordinary", ceiling: undefined, expected: "read_write" },
+  { name: "channel reply", kind: "channel", ceiling: undefined, expected: "none" },
+  {
+    name: "usage-limit ordinary",
+    kind: "ordinary",
+    ceiling: undefined,
+    expected: "read_write",
+    continuation: true,
+  },
+  {
+    name: "usage-limit delegated read",
+    kind: "delegated",
+    ceiling: "read",
+    expected: "read",
+    continuation: true,
+  },
+  ...(["scheduled", "delegated"] as const).flatMap((kind) =>
+    (["none", "read", "read_write"] as const).map(
+      (ceiling) =>
+        ({
+          name: `${kind} ${ceiling}`,
+          kind,
+          ceiling,
+          expected: ceiling,
+        }) as const,
+    ),
+  ),
+  { name: "legacy task", kind: "delegated", ceiling: undefined, expected: "none" },
+  {
+    name: "read-only sandbox",
+    kind: "ordinary",
+    ceiling: undefined,
+    expected: "read",
+    readOnly: true,
+  },
+  {
+    name: "pending admission",
+    kind: "delegated",
+    ceiling: "none",
+    expected: "read",
+    pending: true,
+  },
+  {
+    name: "pending admission plus read-only sandbox",
+    kind: "delegated",
+    ceiling: "none",
+    expected: "read",
+    pending: true,
+    readOnly: true,
+  },
+  {
+    name: "missing message",
+    kind: "ordinary",
+    ceiling: undefined,
+    expected: "none",
+    missingMessage: true,
+  },
+] as const;
+
+type TurnStartMemoryCase = (typeof turnStartMemoryCases)[number];
+
+it.effect.each(turnStartMemoryCases)(
+  "turn-start memory admission: $name",
+  (testCase: TurnStartMemoryCase) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest({ enableAgentMemoryAccess: true });
+      const delivered = yield* Deferred.make<void>();
+      let selections = 0;
+      const projectionReads = { getThread: 0, getThreadShell: 0 };
+      const refreshReads: Array<{ getThread: number; getThreadShell: number; selections: number }> =
+        [];
+      const frame = MemoryContext.packMemoryContext({
+        memorySpaceId: MemoryContracts.MemorySpaceId.make("00000000-0000-4000-8000-000000000099"),
+        projectionWatermark: 1,
+        items: [
+          {
+            memoryId: MemoryContracts.MemoryId.make("00000000-0000-4000-8000-000000000001"),
+            revisionId: MemoryContracts.MemoryRevisionId.make(
+              "00000000-0000-4000-8000-000000000002",
+            ),
+            scope: { kind: "user" },
+            provenance: { environmentId: EnvironmentId.make("fixture") },
+            assertionKind: "fact",
+            text: "memory & fixture",
+          },
+        ],
+      });
+      const onTurnInput = (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+        Effect.gen(function* () {
+          assert.isDefined(turnInput.refreshMemoryContext);
+          // Admission is complete at the provider send boundary. Count only refresh work,
+          // including a second send with the same callback (native retry).
+          for (let send = 0; send < 2; send++) {
+            projectionReads.getThread = 0;
+            projectionReads.getThreadShell = 0;
+            const beforeSelections = selections;
+            const snapshot = yield* turnInput.refreshMemoryContext!();
+            if (testCase.expected === "none") {
+              assert.isUndefined(snapshot);
+            } else {
+              assert.equal(
+                MemoryContext.memoryContextText(snapshot),
+                MemoryContext.memoryContextText(frame),
+              );
+            }
+            refreshReads.push({ ...projectionReads, selections: selections - beforeSelections });
+          }
+          yield* Deferred.succeed(delivered, undefined);
+        });
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-turn-start-memory");
+        const providerSessionId = yield* ids.allocate.providerSession({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const runId = ids.derive.run({ threadId, ordinal: 1 });
+        const rootNodeId = ids.derive.rootNode({ runId });
+        const attemptId = ids.derive.runAttempt({ runId, attemptOrdinal: 1 });
+        const messageId = yield* ids.allocate.message({ threadId, ordinal: 1 });
+        const scopeId = CheckpointScopeId.make("scope-turn-start-memory");
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        const run: OrchestrationV2ThreadProjection["runs"][number] = {
+          id: runId,
+          threadId,
+          ordinal: 1,
+          providerInstanceId: modelSelection.instanceId,
+          modelSelection,
+          providerThreadId: providerThread.id,
+          userMessageId: messageId,
+          rootNodeId,
+          activeAttemptId: attemptId,
+          status: "starting",
+          requestedAt: now,
+          startedAt: null,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+          ...(testCase.ceiling === undefined ? {} : { memoryGrantCeiling: testCase.ceiling }),
+          ...(testCase.kind === "delegated"
+            ? { delegatedTaskId: NodeId.make("task-turn-start-memory") }
+            : {}),
+        };
+        const message: OrchestrationV2ThreadProjection["messages"][number] = {
+          id: messageId,
+          threadId,
+          runId,
+          nodeId: rootNodeId,
+          role: "user",
+          text: "Synthetic recovery prompt",
+          attachments: [],
+          streaming: false,
+          createdBy: testCase.kind === "delegated" ? "agent" : "user",
+          creationSource: testCase.kind === "ordinary" ? "web" : "server",
+          createdAt: now,
+          updatedAt: now,
+          ...(testCase.kind === "scheduled"
+            ? { scheduledTaskId: ScheduledTaskId.make("schedule-turn-start-memory") }
+            : {}),
+        };
+        const node: OrchestrationV2ThreadProjection["nodes"][number] = {
+          id: rootNodeId,
+          threadId,
+          runId,
+          parentNodeId: null,
+          rootNodeId,
+          kind: "root_turn",
+          status: "pending",
+          countsForRun: true,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: scopeId,
+          startedAt: null,
+          completedAt: null,
+        };
+        const attempt: OrchestrationV2ThreadProjection["attempts"][number] = {
+          id: attemptId,
+          runId,
+          rootNodeId,
+          attemptOrdinal: 1,
+          providerInstanceId: modelSelection.instanceId,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          reason: "initial",
+          status: "pending",
+          startedAt: null,
+          completedAt: null,
+        };
+        const checkpoint: OrchestrationV2ThreadProjection["checkpointScopes"][number] = {
+          id: scopeId,
+          threadId,
+          runId,
+          nodeId: rootNodeId,
+          parentScopeId: null,
+          providerThreadId: providerThread.id,
+          kind: "root_run",
+          ordinalWithinParent: 0,
+          advancesAppRunCount: true,
+          cwd: process.cwd(),
+          createdAt: now,
+        };
+        const eventBase = { threadId, occurredAt: now };
+        const issued = yield* Queue.unbounded<ProviderSessionManager.McpCredentialRotation>();
+        yield* manager.mcpCredentialRotations!.pipe(
+          Stream.runForEach((change) => Queue.offer(issued, change)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const initialEvents: Array<OrchestrationV2DomainEvent> = [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            ...eventBase,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "run.updated",
+            payload: run,
+          },
+          {
+            ...eventBase,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "node.updated",
+            payload: node,
+          },
+          {
+            ...eventBase,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "run-attempt.updated",
+            payload: attempt,
+          },
+          {
+            ...eventBase,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "provider-thread.updated",
+            payload: providerThread,
+          },
+          {
+            ...eventBase,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "checkpoint-scope.created",
+            payload: checkpoint,
+          },
+        ];
+        if (!("missingMessage" in testCase))
+          initialEvents.push({
+            ...eventBase,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "message.updated",
+            payload: message,
+          });
+        yield* sink.write({ events: initialEvents });
+        let startRunId = runId;
+        if ("continuation" in testCase || testCase.kind === "channel") {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const original = { ...run, status: "failed" as const, completedAt: now };
+          const resetAt = DateTime.formatIso(now);
+          const requestId = CommandId.make("memory-recovery-request");
+          const projection = yield* projections.getThreadProjection(threadId);
+          yield* sink.write({
+            commandId: CommandId.make("command:runtime-reconcile:memory-source"),
+            events: [
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "run.updated",
+                payload: original,
+              },
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "thread.metadata-updated",
+                payload: {
+                  ...projection.thread,
+                  limitRecovery: { runId, resetAt, autoResume: true, snooze: false, requestId },
+                },
+              },
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "turn-item.updated",
+                payload: {
+                  id: TurnItemId.make("memory-source-failure"),
+                  type: "error",
+                  threadId,
+                  runId,
+                  nodeId: rootNodeId,
+                  providerThreadId: providerThread.id,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 2,
+                  status: "failed",
+                  title: "Usage limit",
+                  startedAt: now,
+                  completedAt: now,
+                  updatedAt: now,
+                  failure: {
+                    class: "usage_limit",
+                    message: "Synthetic limit",
+                    code: null,
+                    retryable: null,
+                    resetAt,
+                  },
+                },
+              },
+            ],
+          });
+          if (testCase.kind === "channel") {
+            const taskId = ChannelTaskId.make("memory-channel-task");
+            const dispatcherLayer = ChannelDispatcher.layer.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  Layer.mock(ChannelLedger.ChannelLedger)({
+                    getTask: () =>
+                      Effect.succeed({
+                        ownerId: "owner",
+                        pendingAnswerMessageId: undefined,
+                        completionHold: undefined,
+                        task: {
+                          taskId,
+                          worker: { threadId },
+                          target: { projectId: ProjectId.make("project-1") },
+                          requester: {
+                            displayName: "Requester",
+                            runtimeModeCeiling: "full-access",
+                          },
+                        },
+                      } as ChannelLedger.ChannelStoredTask),
+                    completeForward: () => Effect.void,
+                  }),
+                  Layer.mock(ThreadManagement.ThreadManagementService)({
+                    sendToThread: (input) =>
+                      orchestrator
+                        .dispatch({
+                          type: "message.dispatch",
+                          commandId: input.commandId!,
+                          threadId,
+                          messageId: input.messageId,
+                          text: input.text,
+                          attachments: input.attachments,
+                          createdBy: input.createdBy,
+                          creationSource: input.creationSource,
+                          dispatchMode: { type: "queue_after_active" },
+                        })
+                        .pipe(Effect.as({ threadId } as never)),
+                  }),
+                  Layer.mock(ProjectStore.ProjectStoreV2)({}),
+                  Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+                  Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({}),
+                  Layer.mock(ChannelRemoteWorkers.ChannelRemoteWorkers)({}),
+                  Layer.mock(SlackChannelSettings.SlackChannelSettings)({}),
+                  Layer.succeed(ServerEnvironment.ServerEnvironment, fakeEnvironment),
+                  settingsLayer,
+                  ServerConfig.layerTest(process.cwd(), { prefix: "memory-channel-" }).pipe(
+                    Layer.provide(NodeServices.layer),
+                  ),
+                  Path.layer,
+                  FileSystem.layerNoop({}),
+                ),
+              ),
+            );
+            yield* Effect.flatMap(ChannelDispatcher.ChannelDispatcher, (dispatcher) =>
+              dispatcher.forward(
+                {
+                  sequence: 1,
+                  event: {
+                    taskId,
+                    eventId: ChannelTaskEventId.make("memory-channel-answer"),
+                    type: "task.question.answered",
+                    payload: { answer: "Continue", questionId: ChannelQuestionId.make("question") },
+                    sequence: 1,
+                    taskVersion: 1,
+                    actor: "user",
+                    occurredAt: DateTime.formatIso(now),
+                  },
+                },
+                "owner",
+              ),
+            ).pipe(Effect.provide(dispatcherLayer));
+          } else {
+            // An invalid public continuation command must not create a run.
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make("memory-invalid-recovery"),
+              threadId,
+              messageId: MessageId.make("memory-invalid-recovery"),
+              text: "Continue",
+              attachments: [],
+              createdBy: "user",
+              creationSource: "web",
+              dispatchMode: { type: "start_immediately" },
+              usageLimitContinuationOfRunId: runId,
+              usageLimitRecoveryRequestId: CommandId.make("wrong-request"),
+            });
+            assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 1);
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make("memory-valid-recovery"),
+              threadId,
+              messageId: MessageId.make("memory-valid-recovery"),
+              text: "Continue",
+              attachments: [],
+              createdBy: "user",
+              creationSource: "server",
+              dispatchMode: { type: "start_immediately" },
+              usageLimitContinuationOfRunId: runId,
+              usageLimitRecoveryRequestId: requestId,
+            });
+          }
+          const continued = (yield* projections.getThreadProjection(threadId)).runs.at(-1)!;
+          assert.notEqual(continued.id, runId);
+          if (testCase.kind !== "channel")
+            assert.equal(continued.usageLimitContinuationOfRunId, runId);
+          startRunId = continued.id;
+          // Supply the native resume fixture's execution records for the admitted run.
+          yield* sink.write({
+            events: [
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "run.updated",
+                payload: {
+                  ...continued,
+                  providerThreadId: providerThread.id,
+                  rootNodeId: continued.rootNodeId,
+                  activeAttemptId: continued.activeAttemptId,
+                  status: "starting",
+                },
+              },
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "node.updated",
+                payload: {
+                  ...node,
+                  id: continued.rootNodeId!,
+                  rootNodeId: continued.rootNodeId!,
+                  runId: startRunId,
+                },
+              },
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "run-attempt.updated",
+                payload: {
+                  ...attempt,
+                  id: continued.activeAttemptId!,
+                  rootNodeId: continued.rootNodeId!,
+                  runId: startRunId,
+                },
+              },
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "checkpoint-scope.created",
+                payload: { ...checkpoint, nodeId: continued.rootNodeId!, runId: startRunId },
+              },
+            ],
+          });
+        }
+        if ("pending" in testCase) {
+          yield* manager.prepareMcpSession!({
+            threadId,
+            providerInstanceId: modelSelection.instanceId,
+            memoryGrantCeiling: "read_write",
+            ...("readOnly" in testCase ? {} : { dispatchScopes: ["memory:read"] as const }),
+          });
+        }
+        const policy = {
+          ...runtimePolicy,
+          ...("readOnly" in testCase ? { sandboxPolicy: "read-only" as const } : {}),
+        };
+        // The replay harness also builds this layer; use the manager under test here.
+        const startLayer = Layer.fresh(ProviderTurnStart.layer).pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(EventSink.EventSinkV2, sink),
+              Layer.succeed(ProjectionStore.ProjectionStoreV2, projections),
+              Layer.succeed(IdAllocator.IdAllocatorV2, ids),
+              Layer.succeed(ProviderSessionManager.ProviderSessionManagerV2, manager),
+              ContextHandoffService.layer.pipe(
+                Layer.provide(Layer.succeed(IdAllocator.IdAllocatorV2, ids)),
+              ),
+              FileSystem.layerNoop({}),
+              Layer.mock(GitWorkflow.GitWorkflowService)({}),
+              Layer.mock(ProjectService.ProjectService)({}),
+              Layer.mock(ProviderAuthService.ProviderAuthService)({
+                tryHandlePromptCommand: () => Effect.succeed(false),
+              }),
+              Layer.mock(RuntimePolicy.RuntimePolicyV2)({ resolve: () => Effect.succeed(policy) }),
+              Layer.mock(MemorySnapshot.MemorySnapshot)({
+                forThread: (_threadId, issued, current) =>
+                  Effect.gen(function* () {
+                    selections++;
+                    assert.deepEqual(issued, yield* current);
+                    return frame;
+                  }),
+              }),
+              RunExecutionService.layer.pipe(
+                Layer.provide(
+                  Layer.mergeAll(
+                    McpAppModelContext.layerEmpty,
+                    RemoteReportInbox.layerEmpty,
+                    settingsLayer,
+                    Layer.succeed(EventSink.EventSinkV2, sink),
+                    Layer.succeed(IdAllocator.IdAllocatorV2, ids),
+                    Layer.mock(CheckpointService.CheckpointServiceV2)({
+                      captureBaseline: () => Effect.void,
+                    }),
+                    Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+                      ingestNormalized: () => Effect.succeed([]),
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        const start = Effect.flatMap(ProviderTurnStart.ProviderTurnStartServiceV2, (service) =>
+          service.start({ threadId, runId: startRunId }),
+        ).pipe(Effect.provide(startLayer));
+        if ("missingMessage" in testCase) {
+          assert.equal((yield* start.pipe(Effect.flip))._tag, "ProviderTurnStartError");
+          assert.equal((yield* Ref.get(state)).openCount, 0);
+          assert.isUndefined(yield* configs.read(threadId));
+        } else {
+          yield* start;
+          assert.isTrue(
+            yield* Deferred.isDone(delivered),
+            "actual send must reach fixture before start returns",
+          );
+          yield* Deferred.await(delivered);
+          // Check counters outside the provider: a regression must report the actual reads,
+          // rather than being translated into a failed send by the manager.
+          const expectedReads =
+            testCase.expected === "none"
+              ? { getThread: 0, getThreadShell: 0, selections: 0 }
+              : { getThread: 2, getThreadShell: 2, selections: 1 };
+          // Allowed refreshes check initial authority and the snapshot's live checkpoint.
+          assert.deepEqual(refreshReads, [expectedReads, expectedReads]);
+          assert.equal(selections, testCase.expected === "none" ? 0 : 2);
+          const config = yield* configs.read(threadId);
+          assert.isDefined(config);
+          const expectedScopes =
+            testCase.expected === "none"
+              ? []
+              : testCase.expected === "read"
+                ? ["memory:read"]
+                : ["memory:read", "memory:write"];
+          const admission = yield* AdapterInfrastructure.ProviderMemoryAdmission;
+          assert.deepEqual(
+            yield* admission.currentPolicy(threadId),
+            yield* manager.currentMemoryPolicy!(threadId),
+          );
+          assert.equal((yield* admission.currentPolicy(threadId)).grant, testCase.expected);
+          const fenced = yield* admission.fence(config);
+          assert.deepEqual(
+            fenced?.grantedScopes?.filter((scope) => scope.startsWith("memory:")),
+            expectedScopes,
+          );
+          const publication = (yield* Queue.takeAll(issued)).at(-1);
+          assert.isDefined(publication);
+          assert.deepEqual(
+            publication!.grantedScopes.filter((scope) => scope.startsWith("memory:")),
+            expectedScopes,
+          );
+          assert.equal(
+            (yield* projections.getThreadProjection(threadId)).runs.find(
+              (candidate) => candidate.id === startRunId,
+            )?.status,
+            "running",
+          );
+          assert.equal((yield* Ref.get(state)).openCount, 1);
+        }
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerTest({
+              state,
+              idleTimeoutMs: 1000,
+              serverSettingsLayer: settingsLayer,
+              projectionReads,
+              onTurnInput,
+            }),
+            settingsLayer,
+            Layer.effect(
+              Orchestrator.OrchestratorV2,
+              Effect.gen(function* () {
+                return yield* Orchestrator.OrchestratorV2;
+              }),
+            ).pipe(
+              Layer.provide(
+                ProviderReplayHarness.layerWithRegistry(
+                  { name: "memory-start-admission" },
+                  ProviderAdapterRegistry.layerFromAdapters([
+                    {
+                      instanceId: modelSelection.instanceId,
+                      driver: ProviderDriverKind.make("codex"),
+                      getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+                      planSelectionTransition: () =>
+                        Effect.succeed({ type: "apply_on_next_turn" as const }),
+                      openSession: () => Effect.die("unused replay provider"),
+                    } as ProviderAdapter.ProviderAdapterV2["Service"],
+                  ]),
+                  { databaseLayer: layerTestDatabase, runEffectWorker: false },
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped),
 );

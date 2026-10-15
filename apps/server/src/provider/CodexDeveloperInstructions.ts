@@ -1,3 +1,4 @@
+import { MEMORY_DATA_BOUNDARY_REMINDER } from "@goat/provider-core/server/memoryContext";
 import type { ProviderInteractionMode } from "@goat/contracts";
 import type { V2TurnStartParams__AdditionalContextEntry } from "effect-codex-app-server/schema";
 import { buildRuntimeInstructions } from "@goat/provider-core/server/runtimeInstructions";
@@ -33,6 +34,7 @@ const toolInstructions = (availability: boolean | GoatToolAvailability): string 
   return [
     tools.browser ? GOAT_BROWSER_TOOL_INSTRUCTIONS : "",
     tools.device ? GOAT_DEVICE_TOOL_INSTRUCTIONS : "",
+    MEMORY_DATA_BOUNDARY_REMINDER,
   ]
     .filter(Boolean)
     .join("\n\n");

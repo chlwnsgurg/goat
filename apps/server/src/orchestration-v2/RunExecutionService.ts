@@ -1,3 +1,4 @@
+import { MAX_CONTINUATION_CHAIN } from "./ContinuationChain.ts";
 import * as RemoteReportInbox from "../remoteReports/RemoteReportInbox.ts";
 import { framePendingReports } from "../remoteReports/reportFrame.ts";
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
@@ -528,7 +529,47 @@ export type RunExecutionServiceV2Error = typeof RunExecutionServiceV2Error.Type;
 /**
  * SERVICE DEFINITION
  */
+/** L2 consumes this at provider prepare/reuse, before issuing credentials or snapshots. */
+export interface RunMemoryPrepareInput {
+  readonly memoryGrantCeiling: import("@goat/contracts").MemoryTaskGrantCeiling | null;
+}
+
+export function runMemoryPrepareInput(input: {
+  readonly run: OrchestrationV2Run;
+  readonly message: Pick<
+    import("@goat/contracts").OrchestrationV2ConversationMessage,
+    "createdBy" | "creationSource" | "scheduledTaskId"
+  >;
+  readonly projection: Pick<
+    import("@goat/contracts").OrchestrationV2ThreadProjection,
+    "runs" | "messages"
+  >;
+}): RunMemoryPrepareInput {
+  let { run, message } = input;
+  let depth = 0;
+  for (;;) {
+    const sourceId = run.restartContinuationOfRunId ?? run.usageLimitContinuationOfRunId;
+    if (sourceId === undefined) break;
+    if (depth >= MAX_CONTINUATION_CHAIN) return { memoryGrantCeiling: "none" };
+    const source = input.projection.runs.find((candidate) => candidate.id === sourceId);
+    const sourceMessage = input.projection.messages.find(
+      (candidate) => candidate.id === source?.userMessageId,
+    );
+    if (source === undefined || sourceMessage === undefined) return { memoryGrantCeiling: "none" };
+    run = source;
+    message = sourceMessage;
+    depth++;
+  }
+  const ordinary =
+    message.createdBy === "user" &&
+    (message.creationSource === "web" || message.creationSource === "mobile") &&
+    message.scheduledTaskId === undefined &&
+    run.delegatedTaskId === undefined;
+  return { memoryGrantCeiling: ordinary ? null : (run.memoryGrantCeiling ?? "none") };
+}
+
 export interface RunExecutionServiceV2StartRootRunInput {
+  readonly refreshMemoryContext?: ProviderAdapter.ProviderAdapterV2TurnInput["refreshMemoryContext"];
   readonly cloudSource?: import("@goat/contracts").OrchestrationV2CloudTask["source"];
   readonly reattach?: boolean;
   readonly cloudLaunchSource?: ProviderAdapter.ProviderAdapterV2CloudLaunchSource;
@@ -1557,6 +1598,9 @@ export const layer: Layer.Layer<
             input.message.attachments.length === 0 &&
             input.message.text.trim().toLowerCase() === "/compact";
           const turnInput = {
+            ...(input.reattach === true || input.refreshMemoryContext === undefined
+              ? {}
+              : { refreshMemoryContext: input.refreshMemoryContext }),
             ...(input.cloudSource === undefined ? {} : { cloudSource: input.cloudSource }),
             ...(input.cloudLaunchSource === undefined
               ? {}

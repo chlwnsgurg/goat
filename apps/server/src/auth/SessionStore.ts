@@ -18,6 +18,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
@@ -386,6 +387,10 @@ export class SessionStore extends Context.Service<
       /** Replace only this session, of the same method, in the issuance transaction. */
       readonly replaceSessionId?: AuthSessionId;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
+    /** Token-free live authority; revocation and expiry are checked on every read. */
+    readonly readActiveScopes: (
+      sessionId: AuthSessionId,
+    ) => Effect.Effect<ReadonlyArray<AuthEnvironmentScope>, SessionCredentialError>;
     readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
     readonly issueWebSocketToken: (
       sessionId: AuthSessionId,
@@ -541,17 +546,34 @@ export const make = Effect.gen(function* () {
       );
   }
 
+  const activeScopeRows = yield* authSessions.listActive({
+    now: yield* DateTime.now,
+    connectedSessionIds: [],
+  });
+  const activeScopes = yield* Ref.make(
+    new Map(
+      activeScopeRows.map((row) => [
+        row.sessionId,
+        { scopes: row.scopes, expiresAt: row.expiresAt },
+      ]),
+    ),
+  );
+
+  // Serialize auth mutations through publication: a delayed activity event must
+  // never restore a removed grant, and a committed revoke must update the Ref.
+  const authorityLock = yield* Semaphore.make(1);
   const emitUpsert = (clientSession: AuthClientSession) =>
-    PubSub.publish(changesPubSub, {
-      type: "clientUpserted",
-      clientSession,
-    }).pipe(Effect.asVoid);
+    PubSub.publish(changesPubSub, { type: "clientUpserted", clientSession }).pipe(Effect.asVoid);
 
   const emitRemoved = (sessionId: AuthSessionId) =>
-    PubSub.publish(changesPubSub, {
-      type: "clientRemoved",
-      sessionId,
-    }).pipe(Effect.asVoid);
+    Ref.update(activeScopes, (current) => {
+      const next = new Map(current);
+      next.delete(sessionId);
+      return next;
+    }).pipe(
+      Effect.andThen(PubSub.publish(changesPubSub, { type: "clientRemoved", sessionId })),
+      Effect.asVoid,
+    );
 
   const loadActiveSession = (sessionId: AuthSessionId) =>
     Effect.gen(function* () {
@@ -776,6 +798,13 @@ export const make = Effect.gen(function* () {
           discard: true,
         });
       }
+      yield* Ref.update(activeScopes, (current) =>
+        new Map(
+          Array.from(current).filter(
+            ([, record]) => record.expiresAt.epochMilliseconds > issuedAt.epochMilliseconds,
+          ),
+        ).set(sessionId, { scopes: claims.scopes, expiresAt }),
+      );
       yield* emitUpsert(
         toAuthClientSession({
           sessionId,
@@ -801,6 +830,21 @@ export const make = Effect.gen(function* () {
       } satisfies IssuedSession;
     },
   );
+
+  const readActiveScopes: SessionStore["Service"]["readActiveScopes"] = Effect.fn(
+    "SessionStore.readActiveScopes",
+  )(function* (sessionId) {
+    const record = (yield* Ref.get(activeScopes)).get(sessionId);
+    if (!record) return yield* new UnknownSessionTokenError({ sessionId });
+    const observedAt = yield* DateTime.now;
+    if (record.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds)
+      return yield* new SessionTokenExpiredError({
+        sessionId,
+        expiresAt: record.expiresAt,
+        observedAt,
+      });
+    return record.scopes;
+  });
 
   const verify: SessionStore["Service"]["verify"] = Effect.fn("SessionStore.verify")(
     function* (token) {
@@ -1119,9 +1163,10 @@ export const make = Effect.gen(function* () {
   });
 
   return SessionStore.of({
+    readActiveScopes,
     cookieName,
     legacyCookieName,
-    issue,
+    issue: (input) => authorityLock.withPermit(issue(input).pipe(Effect.uninterruptible)),
     verify,
     issueWebSocketToken,
     verifyWebSocketToken,
@@ -1130,8 +1175,9 @@ export const make = Effect.gen(function* () {
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub);
     },
-    revoke,
-    revokeAllExcept,
+    revoke: (sessionId) => authorityLock.withPermit(revoke(sessionId).pipe(Effect.uninterruptible)),
+    revokeAllExcept: (sessionId) =>
+      authorityLock.withPermit(revokeAllExcept(sessionId).pipe(Effect.uninterruptible)),
     markConnected,
     markUsed,
     markDisconnected,

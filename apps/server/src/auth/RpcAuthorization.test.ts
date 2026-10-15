@@ -19,7 +19,6 @@ import {
   AuthTerminalReadScope,
   AuthTerminalOperateScope,
   WS_METHODS,
-  WsRpcGroup,
 } from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -27,11 +26,15 @@ import * as Layer from "effect/Layer";
 import * as RpcTest from "effect/rpc/RpcTest";
 
 import {
-  RPC_REQUIRED_SCOPES,
+  AuthorizedWsRpcGroup as WsRpcGroup,
+  RPC_REQUIRED_SCOPES as BASE_RPC_REQUIRED_SCOPES,
+  MEMORY_RPC_REQUIRED_SCOPES,
   requiredScopeForRpcMethod,
   requiredScopeForDeviceList,
 } from "./RpcAuthorization.ts";
 import * as RpcAuthorization from "./RpcAuthorization.ts";
+
+const RPC_REQUIRED_SCOPES = { ...BASE_RPC_REQUIRED_SCOPES, ...MEMORY_RPC_REQUIRED_SCOPES };
 
 describe("RPC authorization scopes", () => {
   it.effect("accepts only the owning desktop with settings write scope as a catalog host", () =>
@@ -600,4 +603,74 @@ it.effect("SSH fetchBack permits source-control write without orchestration oper
     expect(yield* client[WS_METHODS.sshWorkspaceFetchBack](sshFetchInput)).toEqual(output);
     expect(handled).toBe(1);
   }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "guards all installed memory routes, including compound source and settings-only owner administration",
+  () =>
+    Effect.gen(function* () {
+      const reads = [
+        WS_METHODS.memorySearch,
+        WS_METHODS.memoryList,
+        WS_METHODS.memoryRead,
+        WS_METHODS.memoryHistory,
+        WS_METHODS.memoryChanges,
+        WS_METHODS.memorySyncStatus,
+      ];
+      const writes = [
+        WS_METHODS.memoryUpsert,
+        WS_METHODS.memoryForget,
+        WS_METHODS.memoryRevertResolution,
+        WS_METHODS.memoryProjectBindingGet,
+        WS_METHODS.memoryProjectBindingUpdate,
+      ];
+      const settings = [
+        WS_METHODS.memoryHubSettingsGet,
+        WS_METHODS.memoryHubSettingsUpdate,
+        WS_METHODS.memoryOwnerSourceReadPolicyGet,
+        WS_METHODS.memoryOwnerSourceReadPolicyUpdate,
+      ];
+      const cases = [
+        ...reads.map((method) => ({ method, scopes: ["memory:read"] as const })),
+        ...writes.map((method) => ({ method, scopes: ["memory:write"] as const })),
+        ...settings.map((method) => ({ method, scopes: ["settings:write"] as const })),
+        {
+          method: WS_METHODS.memoryReadSource,
+          scopes: ["memory:read", "orchestration:read"] as const,
+        },
+      ];
+      expect(new Set(cases.map((c) => c.method))).toEqual(
+        new Set([...WsRpcGroup.requests.keys()].filter((tag) => tag.startsWith("memory."))),
+      );
+      expect(WsRpcGroup.requests.has(WS_METHODS.memoryImportProvider)).toBe(false);
+      for (const { method, scopes } of cases) {
+        let calls = 0;
+        const invoke = (grants: ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>) =>
+          RpcAuthorization.authorizeRpcCall(grants, method, {}).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                calls++;
+              }),
+            ),
+          );
+        expect((yield* Effect.flip(invoke([])))._tag).toBe("EnvironmentAuthorizationError");
+        expect(calls).toBe(0);
+        yield* invoke(scopes);
+        expect(calls).toBe(1);
+        for (const missing of scopes) {
+          expect(
+            (yield* Effect.flip(invoke(scopes.filter((scope) => scope !== missing))))
+              .requiredPermission,
+          ).toBe(missing);
+          expect(calls).toBe(1);
+        }
+        if (settings.includes(method as (typeof settings)[number])) {
+          expect(
+            (yield* Effect.flip(
+              invoke(["memory:read", "memory:write", "orchestration:read", "providers:manage"]),
+            )).requiredPermission,
+          ).toBe("settings:write");
+        }
+      }
+    }).pipe(Effect.scoped),
 );

@@ -1,3 +1,7 @@
+import { MemoryToolkit } from "./toolkits/memory/tools.ts";
+import * as MemoryHandlers from "./toolkits/memory/handlers.ts";
+import { MemoryAdministrationToolkit } from "./toolkits/memoryAdministration/tools.ts";
+import * as MemoryAdministrationHandlers from "./toolkits/memoryAdministration/handlers.ts";
 import * as ConnectionHandlers from "./toolkits/connection/handlers.ts";
 import { ConnectionToolkit } from "./toolkits/connection/tools.ts";
 import * as Cause from "effect/Cause";
@@ -1045,4 +1049,11 @@ export const layer = Layer.mergeAll(
   // Run results for the report tool and the thread read and wait tools.
   Layer.provide(ThreadResultService.layer),
   Layer.provideMerge(layerMcpTransport),
+);
+
+// L5 composes these after the domain and committed policy producers are ready.
+export const layerMemoryToolkit = toolkitRegistration(MemoryToolkit, MemoryHandlers.layer);
+export const layerMemoryAdministrationToolkit = toolkitRegistration(
+  MemoryAdministrationToolkit,
+  MemoryAdministrationHandlers.layer,
 );

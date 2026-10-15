@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./state/memory": {
+      "types": "./src/state/memory.ts",
+      "default": "./src/state/memory.ts"
+    },
     "./state/cloud-task": {
       "types": "./src/state/cloudTask.ts",
       "default": "./src/state/cloudTask.ts"

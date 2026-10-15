@@ -60,6 +60,7 @@ import { formatReadToolLabel, formatSearchToolLabel } from "@goat/shared/toolAct
 import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import { makeAcpMcpOverAcpBridge, type AcpMcpOverAcpBridge } from "./mcpOverAcpBridge.ts";
 import { mcpToolPresentation } from "@goat/provider-core/server/mcpToolPresentation";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
 import * as McpProviderSession from "@goat/provider-core/server/mcpSession";
 import {
@@ -1497,6 +1498,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
     threadId === null
       ? Effect.succeed(acpMcpContext(undefined, self))
       : mcpSessions.read(threadId).pipe(Effect.map((session) => acpMcpContext(session, self)));
+  // Claims belong to native conversations, not runtime attachments. Unknown resumed
+  // IDs stay silent until this adapter advertises tools; replacement IDs start empty.
+  const memoryToolClaims = new Set<string>();
   const driver = flavor.driver;
   const continuationRequests = options.continuationRequests;
   const postSettleContinuationEnabled =
@@ -2197,6 +2201,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         let runtimeScope: Scope.Closeable | undefined;
         let runtime!: AcpSessionRuntime.AcpSessionRuntime["Service"];
         let runtimeMcpBridge: AcpMcpOverAcpBridge | undefined;
+        let runtimeMcpContext: AcpMcpContext | undefined;
         yield* Effect.addFinalizer(() =>
           runtimeScope === undefined
             ? Effect.void
@@ -5574,7 +5579,20 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           targetRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"],
           mcpBridge: AcpMcpOverAcpBridge | undefined,
         ) {
-          if (mcpBridge === undefined) return;
+          if (mcpBridge === undefined) {
+            const denied = () =>
+              Effect.fail(
+                new EffectAcpErrors.AcpRequestError({
+                  code: -32603,
+                  errorMessage: "GOAT MCP is unavailable",
+                }),
+              );
+            yield* targetRuntime.handleMcpConnect(denied);
+            yield* targetRuntime.handleMcpMessage(denied);
+            yield* targetRuntime.handleMcpNotification(denied);
+            yield* targetRuntime.handleMcpDisconnect(denied);
+            return;
+          }
           const mapMcpBridgeError = Effect.mapError(
             (error: Error) =>
               new EffectAcpErrors.AcpRequestError({
@@ -6006,6 +6024,19 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           return mcpBridge;
         });
 
+        /** Keeps the live HTTP bridge aligned with the context used for native activation. */
+        const refreshRuntimeMcpBridge = Effect.fnUntraced(function* (mcpContext: AcpMcpContext) {
+          if (
+            runtimeMcpContext?.authorization === mcpContext.authorization &&
+            runtimeMcpContext?.endpoint === mcpContext.endpoint
+          )
+            return;
+          yield* runtimeMcpBridge?.dispose ?? Effect.void;
+          runtimeMcpBridge = yield* makeRuntimeMcpBridge(mcpContext, runtimeScope!);
+          yield* wireAcpRuntimeMcpHandlers(runtime, runtimeMcpBridge);
+          runtimeMcpContext = mcpContext;
+        });
+
         const spawnAcpRuntime = Effect.fnUntraced(function* (
           threadId: ThreadId | null,
           resumeSessionId?: string,
@@ -6016,6 +6047,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           runtimeScope = yield* Scope.make();
           const mcpContext = yield* readMcpContext(threadId);
           runtimeMcpBridge = yield* makeRuntimeMcpBridge(mcpContext, runtimeScope);
+          runtimeMcpContext = mcpContext;
           const runtimeGeneration = yield* Ref.get(runtimeCallbackGeneration);
           runtime = yield* flavor
             .makeRuntime(makeRuntimeInput(runtimeGeneration, mcpContext, resumeSessionId))
@@ -6049,6 +6081,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           threadId: ThreadId | null,
           commitSessionState: (
             replacement: AcpSessionRuntime.AcpSessionRuntimeStartResult,
+            mcpContext: AcpMcpContext,
           ) => Effect.Effect<void>,
         ) {
           const previousScope = runtimeScope;
@@ -6115,7 +6148,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             );
             yield* wireAcpRuntimeMcpHandlers(replacementRuntime, replacementMcpBridge);
             const started = yield* replacementRuntime.start();
-            return { replacementRuntime, started };
+            return { replacementRuntime, started, mcpContext };
           });
           const replacementExit = yield* Effect.exit(
             (flavor.withRuntimeStartup?.(startup) ?? startup).pipe(
@@ -6158,13 +6191,17 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   runtime = replacementExit.value.replacementRuntime;
                   runtimeScope = replacementScope;
                   runtimeMcpBridge = replacementMcpBridge;
+                  runtimeMcpContext = replacementExit.value.mcpContext;
                   yield* Ref.set(runtimeCallbackGeneration, replacementGeneration);
                   prepareTerminalEnvironment(
-                    yield* readMcpContext(threadId),
+                    replacementExit.value.mcpContext,
                     replacementExit.value.started.sessionId,
                   );
                   yield* wireAcpRuntimeTerminalHandlers(replacementExit.value.replacementRuntime);
-                  yield* commitSessionState(replacementExit.value.started);
+                  yield* commitSessionState(
+                    replacementExit.value.started,
+                    replacementExit.value.mcpContext,
+                  );
                   while (true) {
                     const buffered = stagedSessionUpdates.splice(0, stagedSessionUpdates.length);
                     if (buffered.length === 0) {
@@ -6239,9 +6276,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               prepareClaimableTerminalEnvironment(yield* readMcpContext(input.threadId));
               return yield* startAcpRuntime(input.threadId);
             });
+        if (input.initialNativeThreadId !== started.sessionId) {
+          memoryToolClaims.delete(started.sessionId);
+        }
         yield* Ref.set(activeSessionId, started.sessionId);
         yield* Ref.set(activeSessionSetup, started);
-        rememberTerminalEnvironment(started.sessionId, yield* readMcpContext(input.threadId));
+        rememberTerminalEnvironment(started.sessionId, runtimeMcpContext!);
         const capabilities = negotiatedCapabilities(flavor.capabilities, started);
         const canLoadSession = started.initializeResult.agentCapabilities?.loadSession === true;
         const canResumeSession =
@@ -6273,7 +6313,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   driver,
                   detail: `ACP driver cannot load or resume session ${sessionId}`,
                 });
-          rememberTerminalEnvironment(activated.sessionId, yield* readMcpContext(threadId));
+          yield* refreshRuntimeMcpBridge(mcpContext);
+          rememberTerminalEnvironment(activated.sessionId, mcpContext);
           return activated;
         });
 
@@ -6899,8 +6940,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const restartAfterInterrupt = yield* restartRuntimeAfterTeardownIfRequired(
               turnInput.threadId,
             );
+            const currentMcpContext = yield* readMcpContext(turnInput.threadId);
+            const installedEnvironment = terminalEnvironmentBySessionId.get(requestedSessionId);
+            const attachmentChanged =
+              installedEnvironment?.GOAT_ACP_MCP_AUTHORIZATION !==
+                currentMcpContext.authorization ||
+              installedEnvironment?.GOAT_ACP_MCP_ENDPOINT !== currentMcpContext.endpoint;
             const needsSessionActivation =
-              (yield* Ref.get(activeSessionId)) !== requestedSessionId || restartAfterInterrupt;
+              (yield* Ref.get(activeSessionId)) !== requestedSessionId ||
+              restartAfterInterrupt ||
+              attachmentChanged;
             if (needsSessionActivation) {
               const activated = yield* activateSession(requestedSessionId, turnInput.threadId);
               yield* Ref.set(activeSessionId, activated.sessionId);
@@ -7003,8 +7052,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 new Map(current).set(requestedSessionId, initialNativeMetadata),
               );
             }
+            // Background bookkeeping must not retain snapshot bodies or admission closures.
+            const {
+              memoryContext: _memoryContext,
+              refreshMemoryContext: _refreshMemoryContext,
+              ...turnOwner
+            } = turnInput;
             const context: ActiveAcpTurn = {
-              input: turnInput,
+              input: turnOwner,
               providerTurnId,
               nativeThreadId: requestedSessionId,
               nativeTurnId,
@@ -7164,7 +7219,56 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               return;
             }
             const promptGeneration = yield* Ref.get(runtimeCallbackGeneration);
-            yield* runtime.prompt({ prompt: promptParts!.prompt }).pipe(
+            const prompt = yield* Effect.gen(function* () {
+              const snapshot =
+                isAppOwnedWakeTurn ||
+                (flavor.supportsCompaction === true &&
+                  turnInput.message.text.trim() === "/compact" &&
+                  turnInput.message.attachments.length === 0)
+                  ? undefined
+                  : turnInput.refreshMemoryContext
+                    ? yield* turnInput.refreshMemoryContext()
+                    : turnInput.memoryContext;
+              const memory =
+                snapshot === undefined
+                  ? undefined
+                  : yield* Effect.try({
+                      try: () => MemoryContext.memoryContextText(snapshot),
+                      catch: () =>
+                        new ProviderAdapter.ProviderAdapterProtocolError({
+                          driver,
+                          detail: "Invalid memory context frame",
+                        }),
+                    });
+              const config = yield* mcpSessions.read(turnInput.threadId);
+              // Only the attachment installed on this native session can advertise tools.
+              const attached = terminalEnvironmentBySessionId.get(requestedSessionId);
+              const availability = McpProviderSession.memoryToolAvailability(
+                config !== undefined &&
+                  attached?.GOAT_ACP_MCP_AUTHORIZATION === config.authorizationHeader &&
+                  attached?.GOAT_ACP_MCP_ENDPOINT === config.endpoint
+                  ? config
+                  : undefined,
+              );
+              const hasMemoryTools = availability.read || availability.write || availability.source;
+              const announceMemoryTools =
+                hasMemoryTools || memoryToolClaims.has(requestedSessionId);
+              if (hasMemoryTools) memoryToolClaims.add(requestedSessionId);
+              else memoryToolClaims.delete(requestedSessionId);
+              return [
+                ...promptParts!.prompt,
+                ...(announceMemoryTools
+                  ? [
+                      {
+                        type: "text" as const,
+                        text: `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`,
+                      },
+                    ]
+                  : []),
+                ...(memory === undefined ? [] : [{ type: "text" as const, text: memory }]),
+              ];
+            }).pipe(Effect.tapError(() => finalizeTurn(context, "failed")));
+            yield* runtime.prompt({ prompt }).pipe(
               Effect.tap(() =>
                 Ref.update(promptInstructionStates, (current) => {
                   if (promptParts?.instructionState === undefined) return current;
@@ -7849,10 +7953,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       sessionId,
                       acpMcpActivation(mcpContext),
                     );
-                    rememberTerminalEnvironment(
-                      activated.sessionId,
-                      yield* readMcpContext(snapshotInput.providerThread.appThreadId),
-                    );
+                    yield* refreshRuntimeMcpBridge(mcpContext);
+                    rememberTerminalEnvironment(activated.sessionId, mcpContext);
                     yield* Ref.set(activeSessionId, activated.sessionId);
                     yield* Ref.set(activeSessionSetup, activated);
                     yield* Ref.set(activeSelection, null);
@@ -7912,12 +8014,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   );
                   const replacement = yield* startReplacementAcpRuntime(
                     rollbackInput.providerThread.appThreadId,
-                    (candidate) =>
+                    (candidate, mcpContext) =>
                       Effect.gen(function* () {
-                        rememberTerminalEnvironment(
-                          candidate.sessionId,
-                          yield* readMcpContext(rollbackInput.providerThread.appThreadId),
-                        );
+                        // Rollback created a new conversation, even if a runtime reuses its ID.
+                        memoryToolClaims.delete(candidate.sessionId);
+                        rememberTerminalEnvironment(candidate.sessionId, mcpContext);
                         yield* Ref.set(runtimeRestartRequired, false);
                         yield* Ref.set(activeSessionId, candidate.sessionId);
                         yield* Ref.set(activeSessionSetup, candidate);
@@ -8015,10 +8116,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     sourceSessionId,
                     acpMcpActivation(mcpContext),
                   );
-                  rememberTerminalEnvironment(
-                    forked.sessionId,
-                    yield* readMcpContext(forkInput.targetThreadId),
-                  );
+                  yield* refreshRuntimeMcpBridge(mcpContext);
+                  memoryToolClaims.delete(forked.sessionId);
+                  rememberTerminalEnvironment(forked.sessionId, mcpContext);
                   yield* Ref.set(activeSessionId, forked.sessionId);
                   yield* Ref.set(activeSessionSetup, forked);
                   yield* Ref.set(activeSelection, null);

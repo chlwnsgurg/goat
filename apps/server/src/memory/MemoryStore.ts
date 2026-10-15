@@ -57,6 +57,7 @@ export class MemoryCapacityError extends Schema.TaggedError<MemoryCapacityError>
     dimension: Schema.String,
     limit: Schema.Int,
     current: Schema.optionalKey(Schema.Int),
+    reclaimable: Schema.optionalKey(Schema.Int),
   },
 ) {
   override get message() {
@@ -140,7 +141,19 @@ const ThreadHookMetadata = Schema.Struct({
   kind: Schema.Literal("threadHook"),
   watermark: Schema.Int.check(Schema.makeFilter((n) => n >= 0)),
 });
+// One body-free cumulative set per native context owner, never one receipt per run.
+const ThreadLineageMetadata = Schema.Struct({
+  kind: Schema.Literal("threadLineage"),
+  sourceThread: M.ScopedThreadRef,
+  memorySpaceId: M.MemorySpaceId,
+  state: Schema.Literals(["tracked", "unknown", "overflow"]),
+  revisions: Schema.Array(M.MemoryRevisionId).check(Schema.isMaxLength(100)),
+});
+type ThreadLineage = typeof ThreadLineageMetadata.Type;
+const threadLineageId = (thread: M.ScopedThreadRef) =>
+  `memory:thread-lineage:${JSON.stringify([thread.environmentId, thread.threadId])}`;
 const WorkMetadata = Schema.Union([
+  ThreadLineageMetadata,
   ThreadHookMetadata,
   Metadata,
   LocalIntentMetadata,
@@ -345,7 +358,7 @@ export function encodeCompactReceipt(
   record: M.MemoryCompactReceipt,
   environmentOrdinal: (id: M.EnvironmentId) => number,
 ): Uint8Array {
-  const bytes: number[] = [2];
+  const bytes: number[] = [record.upsertRequestDigest === undefined ? 2 : 3];
   const byte = (value: number) => bytes.push(value);
   const number = (value: number) => {
     let remaining = BigInt(value);
@@ -411,10 +424,11 @@ export function encodeCompactReceipt(
     uuid(record.receipt.forgetRetryOf.operationId);
     hash(record.receipt.forgetRetryOf.operationDigest);
   }
+  if (record.upsertRequestDigest !== undefined) hash(record.upsertRequestDigest);
   return Uint8Array.from(bytes);
 }
 
-/** Decode stored v1/v2 rows without granting old resolve rows authoritative approval. */
+/** Decode stored v1/v2/v3 rows without granting old resolve rows authoritative approval. */
 export function decodeCompactReceipt(
   bytes: Uint8Array,
   space: M.MemorySpaceId,
@@ -426,7 +440,8 @@ export function decodeCompactReceipt(
     return bytes[offset++]!;
   };
   const version = byte();
-  if (version !== 1 && version !== 2) throw new RangeError("Unsupported compact receipt");
+  if (version !== 1 && version !== 2 && version !== 3)
+    throw new RangeError("Unsupported compact receipt");
   const number = () => {
     let value = 0n;
     let shift = 0n;
@@ -481,9 +496,9 @@ export function decodeCompactReceipt(
         reclaimable: number(),
       }
     : undefined;
-  const appliedAt = version === 2 && byte() ? (byte() ? -1 : 1) * number() : undefined;
+  const appliedAt = version >= 2 && byte() ? (byte() ? -1 : 1) * number() : undefined;
   const forgetExpansion =
-    version === 2 && byte()
+    version >= 2 && byte()
       ? {
           requestDigest: hash(),
           operationId: uuid(),
@@ -492,7 +507,8 @@ export function decodeCompactReceipt(
         }
       : undefined;
   const forgetRetryOf =
-    version === 2 && byte() ? { operationId: uuid(), operationDigest: hash() } : undefined;
+    version >= 2 && byte() ? { operationId: uuid(), operationDigest: hash() } : undefined;
+  const upsertRequestDigest = version === 3 ? hash() : undefined;
   if (offset !== bytes.length) throw new RangeError("Trailing compact receipt bytes");
   // Legacy storage accepts approval-free resolves. It must not pass the current wire decoder.
   const storedSchema =
@@ -515,6 +531,7 @@ export function decodeCompactReceipt(
       memorySpaceId: space,
       originEnvironmentId,
       operationKind,
+      ...(upsertRequestDigest !== undefined ? { upsertRequestDigest } : {}),
       receipt: {
         operationId,
         memoryId,
@@ -862,6 +879,18 @@ export class MemoryStore extends Context.Service<
       effect: Effect.Effect<A, E, R>,
       options?: { requireOuter: boolean },
     ) => Effect.Effect<A, E | MemoryStorageError, Exclude<R, Transaction>>;
+    readonly readThreadLineage: (
+      thread: M.ScopedThreadRef,
+      space: M.MemorySpaceId,
+    ) => Effect.Effect<ThreadLineage, MemoryStorageError>;
+    readonly appendThreadLineage: (
+      thread: M.ScopedThreadRef,
+      space: M.MemorySpaceId,
+      revisions: ReadonlyArray<M.MemoryRevisionId>,
+    ) => Effect.Effect<boolean, MemoryStorageError>;
+    readonly deleteThreadLineage: (
+      thread: M.ScopedThreadRef,
+    ) => Effect.Effect<void, MemoryStorageError>;
     readonly acquireSyncWorkTx: (input: {
       workId: string;
       operationId: M.MemoryOperationId;
@@ -1329,12 +1358,18 @@ export class MemoryStore extends Context.Service<
     readonly list: (
       filter: MemoryReadFilter,
     ) => Effect.Effect<ReadonlyArray<M.MemoryItem>, MemoryStorageError | MemoryStoreConflict>;
+    readonly searchCoverage: (
+      filter: MemoryReadFilter,
+    ) => Effect.Effect<
+      { ready: boolean; eligible: number; indexed: number; textBytes: number },
+      MemoryStorageError
+    >;
     readonly search: (
       filter: MemoryReadFilter,
       text: string,
       mode: "fts" | "substring",
     ) => Effect.Effect<
-      ReadonlyArray<M.MemoryItem>,
+      M.MemorySearchPage,
       MemoryStorageError | MemoryStoreConflict | MemoryCapacityError
     >;
     readonly dueWork: (
@@ -1635,6 +1670,7 @@ const resolutionReasonsCodec = codec(Schema.Array(M.MemoryDeferredReason));
 const hubReceiptCodec = codec(M.MemoryHubReceipt);
 const decodeFailureEnvironment = Schema.decodeUnknownEffect(M.EnvironmentId);
 const threadHookCodec = codec(ThreadHookMetadata);
+const threadLineageCodec = codec(ThreadLineageMetadata);
 const deferredRowCodec = codec(DeferredRow);
 const decodeLocalIntent = Schema.decodeUnknownEffect(LocalMemoryIntent);
 const localMetadataCodec = codec(LocalIntentMetadata);
@@ -1678,6 +1714,7 @@ const Projection = Schema.Union([
 ]);
 const projectionCodec = codec(Projection);
 const decodeItem = Schema.decodeUnknownEffect(M.MemoryItem);
+const encodeSearchItem = Schema.encodeEffect(Schema.fromJsonString(M.MemoryItem));
 const payloadCodec = codec(M.MemoryPayload);
 const resolutionPayloadCodec = codec(M.MemoryResolutionPayload);
 const scopeCodec = codec(M.MemoryScope);
@@ -2790,7 +2827,7 @@ const make = Effect.gen(function* () {
             if (!execution) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
             yield* stored(
               "judgment",
-              sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json,resolved_at,revert_deadline,purge_eligible_after) VALUES (${op.memorySpaceId},${resolution.judgmentRef},${op.memoryId},${yield* resolutionPayloadCodec.encode(op.resolutionPayload)},${yield* headsCodec.encode(resolution.inputRevisionIds)},${Date.parse(resolution.appliedAtUtc)},${Date.parse(resolution.revertDeadlineUtc)},${Date.parse(resolution.appliedAtUtc) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS}) ON CONFLICT(space,payload_ref) DO NOTHING`,
+              sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json,resolved_at,revert_deadline,purge_eligible_after) VALUES (${op.memorySpaceId},${resolution.judgmentRef},${op.memoryId},${yield* resolutionPayloadCodec.encode(op.resolutionPayload)},${yield* headsCodec.encode([...new Set([...resolution.inputRevisionIds, ...op.payload.derivedFromMemoryRevisions])])},${Date.parse(resolution.appliedAtUtc)},${Date.parse(resolution.revertDeadlineUtc)},${Date.parse(resolution.appliedAtUtc) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS}) ON CONFLICT(space,payload_ref) DO NOTHING`,
             );
             yield* stored(
               "resolution",
@@ -3041,6 +3078,51 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  // A request advances at most one durable batch; mutations of counted rows adjust totals in SQL.
+  const searchCoverage = Effect.fn("MemoryStore.searchCoverage")(function* (
+    filter: MemoryReadFilter,
+  ) {
+    const state = (yield* stored(
+      "search-backfill-state",
+      sql<{
+        after_rowid: number;
+        ready: number;
+      }>`SELECT after_rowid,ready FROM memory_search_backfill WHERE singleton=1`,
+    ))[0]!;
+    let ready = state.ready === 1;
+    if (!ready) {
+      const rows = yield* stored(
+        "search-backfill-window",
+        sql<{
+          rowid: number;
+        }>`SELECT rowid FROM memory_items WHERE rowid>${state.after_rowid} ORDER BY rowid LIMIT 1000`,
+      );
+      for (const row of rows)
+        yield* stored(
+          "search-backfill-row",
+          sql`UPDATE memory_items SET search_counted=1,search_text_bytes=coalesce((SELECT length(CAST(json_extract(body_json,'$.text') AS BLOB)) FROM memory_payloads p WHERE p.space=memory_items.space AND p.payload_ref=memory_items.payload_ref),0) WHERE rowid=${row.rowid} AND search_counted=0`,
+        );
+      ready = rows.length < 1000;
+      yield* stored(
+        "search-backfill-progress",
+        sql`UPDATE memory_search_backfill SET after_rowid=${rows.at(-1)?.rowid ?? state.after_rowid},ready=${ready ? 1 : 0} WHERE singleton=1`,
+      );
+    }
+    const rows = yield* stored(
+      "search-coverage",
+      sql<{
+        eligible: number;
+        indexed: number;
+        text_bytes: number;
+      }>`SELECT eligible,indexed,text_bytes FROM memory_search_counters WHERE space=${filter.memorySpaceId} AND scope_key=${scopeKey(filter.scope)}`,
+    );
+    return {
+      ready,
+      eligible: rows[0]?.eligible ?? 0,
+      indexed: rows[0]?.indexed ?? 0,
+      textBytes: rows[0]?.text_bytes ?? 0,
+    };
+  });
   const search = Effect.fn("MemoryStore.search")(function* (
     filter: MemoryReadFilter,
     text: string,
@@ -3053,43 +3135,58 @@ const make = Effect.gen(function* () {
     )
       return yield* new MemoryStoreConflict({ code: "payload_too_large" });
     const key = scopeKey(yield* stored("scope-codec", decodeScope(filter.scope, strict)));
-    if (mode === "substring") {
-      const counts = yield* stored(
-        "substring-count",
-        sql<{
-          items: number;
-          bytes: number;
-        }>`SELECT count(*) AS items,coalesce(sum(length(CAST(json_extract(p.body_json,'$.text') AS BLOB))),0) AS bytes FROM memory_items i JOIN memory_payloads p ON p.space=i.space AND p.payload_ref=i.payload_ref WHERE i.space=${filter.memorySpaceId} AND i.scope_key=${key} AND i.status='active'`,
-      );
-      if (
-        (counts[0]?.items ?? 0) > M.MEMORY_SUBSTRING_MAX_ITEMS ||
-        (counts[0]?.bytes ?? 0) > M.MEMORY_SUBSTRING_MAX_UTF8_BYTES
-      )
-        return yield* new MemoryCapacityError({
-          dimension: "substring",
-          limit: M.MEMORY_SUBSTRING_MAX_ITEMS,
-        });
+    const coverage = yield* searchCoverage(filter);
+    if (!coverage.ready) {
+      if (mode === "substring") return yield* new MemoryStoreConflict({ code: "unavailable" });
+      return { items: [], examinedAfterMemoryId: filter.afterMemoryId ?? null, exhausted: false };
     }
+    if (
+      mode === "substring" &&
+      (coverage.eligible > M.MEMORY_SUBSTRING_MAX_ITEMS ||
+        coverage.textBytes > M.MEMORY_SUBSTRING_MAX_UTF8_BYTES)
+    )
+      return yield* new MemoryCapacityError({
+        dimension: "substring",
+        limit: M.MEMORY_SUBSTRING_MAX_ITEMS,
+      });
+    // MATERIALIZED prevents MATCH/instr from being flattened ahead of the indexed keyset LIMIT.
+    // Correlated rowid MATCH visits only the selected FTS row, including for absent terms.
     const rows =
       mode === "fts"
         ? yield* stored(
             "fts-search",
-            sql<{
-              memory_id: string;
-            }>`SELECT i.memory_id FROM memory_items i JOIN memory_items_fts f ON f.rowid=i.rowid WHERE memory_items_fts MATCH ${'"' + text.replaceAll('"', '""') + '"'} AND i.space=${filter.memorySpaceId} AND i.scope_key=${key} AND i.status='active' AND i.index_state='ready' AND i.indexed_generation=i.generation AND i.memory_id>${filter.afterMemoryId ?? ""} ORDER BY i.memory_id LIMIT ${filter.limit}`,
+            sql<{ memory_id: string; matches: number }>`WITH window AS MATERIALIZED (
+        SELECT rowid,memory_id,status,index_state,indexed_generation,generation FROM memory_items
+        WHERE space=${filter.memorySpaceId} AND scope_key=${key} AND memory_id>${filter.afterMemoryId ?? ""} ORDER BY memory_id LIMIT 1000
+      ) SELECT memory_id,CASE WHEN status='active' AND index_state='ready' AND indexed_generation=generation THEN EXISTS(SELECT 1 FROM memory_items_fts WHERE rowid=window.rowid AND memory_items_fts MATCH ${'"' + text.replaceAll('"', '""') + '"'}) ELSE 0 END AS matches FROM window ORDER BY memory_id`,
           )
         : yield* stored(
             "substring-search",
-            sql<{
-              memory_id: string;
-            }>`SELECT i.memory_id FROM memory_items i JOIN memory_payloads p ON p.space=i.space AND p.payload_ref=i.payload_ref WHERE i.space=${filter.memorySpaceId} AND i.scope_key=${key} AND i.status='active' AND instr(json_extract(p.body_json,'$.text'),${text})>0 AND i.memory_id>${filter.afterMemoryId ?? ""} ORDER BY i.memory_id LIMIT ${filter.limit}`,
+            sql<{ memory_id: string; matches: number }>`WITH window AS MATERIALIZED (
+        SELECT memory_id,status,payload_ref FROM memory_items WHERE space=${filter.memorySpaceId} AND scope_key=${key} AND memory_id>${filter.afterMemoryId ?? ""} ORDER BY memory_id LIMIT 1000
+      ) SELECT memory_id,CASE WHEN status='active' THEN coalesce((SELECT instr(json_extract(body_json,'$.text'),${text})>0 FROM memory_payloads WHERE space=${filter.memorySpaceId} AND payload_ref=window.payload_ref),0) ELSE 0 END AS matches FROM window ORDER BY memory_id`,
           );
-    return yield* Effect.forEach(rows, (row) =>
-      Effect.gen(function* () {
-        const id = yield* stored("item-id", decodeMemoryId(row.memory_id));
-        return (yield* readItem(filter.memorySpaceId, id))!.item;
-      }),
-    );
+    const items: M.MemoryItem[] = [];
+    let examinedAfterMemoryId = filter.afterMemoryId ?? null;
+    let bytes = 2048; // Reserve the bounded server cursor, watermark and coverage envelope.
+    for (const row of rows) {
+      const id = yield* stored("item-id", decodeMemoryId(row.memory_id));
+      if (row.matches) {
+        const item = (yield* readItem(filter.memorySpaceId, id))!.item;
+        const size =
+          new TextEncoder().encode(yield* stored("search-item-codec", encodeSearchItem(item)))
+            .length + 1;
+        if (bytes + size > M.MEMORY_PAGE_MAX_UTF8_BYTES) {
+          if (!items.length) return yield* new MemoryStoreConflict({ code: "payload_too_large" });
+          return { items, examinedAfterMemoryId, exhausted: false };
+        }
+        items.push(item);
+        bytes += size;
+      }
+      examinedAfterMemoryId = id;
+      if (items.length === filter.limit) return { items, examinedAfterMemoryId, exhausted: false };
+    }
+    return { items, examinedAfterMemoryId, exhausted: rows.length < 1000 };
   });
   const workRows = Effect.fnUntraced(function* (
     rows: ReadonlyArray<{
@@ -3142,6 +3239,103 @@ const make = Effect.gen(function* () {
       sql<WorkRow>`SELECT * FROM memory_outbox WHERE id=${id} AND admin_json IS NULL`,
     );
     return (yield* workRows(rows))[0];
+  });
+  const readThreadLineage = Effect.fn("MemoryStore.readThreadLineage")(function* (
+    thread: M.ScopedThreadRef,
+    space: M.MemorySpaceId,
+  ) {
+    const rows = yield* stored(
+      "thread-lineage-read",
+      sql<{ metadata_json: string }>`
+      SELECT metadata_json FROM memory_outbox WHERE id=${threadLineageId(thread)}`,
+    );
+    const lineage: ThreadLineage = rows[0]
+      ? yield* threadLineageCodec
+          .decode(rows[0].metadata_json, strict)
+          .pipe(
+            Effect.mapError(
+              (cause) => new MemoryStorageError({ stage: "thread-lineage-codec", cause }),
+            ),
+          )
+      : {
+          kind: "threadLineage",
+          sourceThread: thread,
+          memorySpaceId: space,
+          state: "tracked",
+          revisions: [],
+        };
+    // App-owned delegation sends a task, not parent history; its node/spawn links
+    // alone do not fence writes. Provider-native children cannot prove non-inheritance.
+    // An active provider pointer alone also says nothing about inherited context.
+    // Same-thread handoffs/compaction keep the cumulative set; rollback cannot clear it.
+    const unknown = yield* stored(
+      "thread-lineage-origin",
+      sql`SELECT 1 FROM orchestration_events
+      WHERE application_event_version=2 AND aggregate_kind='thread' AND stream_id=${thread.threadId}
+      AND ((event_type='thread.created' AND (
+        json_extract(payload_json,'$.forkedFrom.type') IN ('run','provider_thread')
+        OR json_extract(payload_json,'$.lineage.relationshipToParent')='fork'
+        OR json_extract(payload_json,'$.historyOrigin')='v1_import'
+        OR (json_extract(payload_json,'$.creationSource')='provider' AND (
+          json_extract(payload_json,'$.lineage.relationshipToParent')='subagent'
+          OR json_extract(payload_json,'$.forkedFrom.type')='node'
+          OR json_extract(payload_json,'$.lineage.parentThreadId') IS NOT NULL))))
+        OR (event_type='provider-thread.updated' AND json_extract(payload_json,'$.forkedFrom.providerThreadId') IS NOT NULL)
+        OR (event_type='provider-thread.updated' AND json_extract(payload_json,'$.status')='not_loaded' AND json_extract(payload_json,'$.nativeThreadRef') IS NOT NULL AND json_extract(payload_json,'$.providerSessionId') IS NULL)
+        OR (event_type IN ('context-transfer.created','context-transfer.updated')
+          AND json_extract(payload_json,'$.type') IS NOT 'subagent_spawn'
+          AND json_extract(payload_json,'$.targetThreadId')=${thread.threadId}
+          AND json_extract(payload_json,'$.sourceThreadId')!=${thread.threadId})) LIMIT 1`,
+    );
+    return lineage.memorySpaceId !== space || unknown.length
+      ? { ...lineage, state: "unknown" as const }
+      : lineage;
+  });
+  const appendThreadLineage = Effect.fn("MemoryStore.appendThreadLineage")(function* (
+    thread: M.ScopedThreadRef,
+    space: M.MemorySpaceId,
+    revisions: ReadonlyArray<M.MemoryRevisionId>,
+  ) {
+    return yield* transact(
+      Effect.gen(function* () {
+        const previous = yield* readThreadLineage(thread, space);
+        const union = [...new Set([...previous.revisions, ...revisions])];
+        const state =
+          previous.state !== "tracked"
+            ? previous.state
+            : union.length > 100
+              ? "overflow"
+              : "tracked";
+        // Injection remains available for unknown/overflow contexts. Persist the fence
+        // before delivery so every thread-derived producer stays disabled thereafter.
+        // Overflow preserves the previous set, including an initially empty set.
+        const metadata = yield* stored(
+          "thread-lineage-codec",
+          threadLineageCodec.encode({
+            ...previous,
+            state,
+            revisions: union.length > 100 ? previous.revisions : union,
+          }),
+        );
+        yield* stored(
+          "thread-lineage-write",
+          sql`INSERT INTO memory_outbox
+        (id,space,kind,status,metadata_json,next_attempt_at)
+        VALUES (${threadLineageId(thread)},'_worker','rebuild','completed',${metadata},0)
+        ON CONFLICT(id) DO UPDATE SET metadata_json=excluded.metadata_json
+        WHERE memory_outbox.metadata_json!=excluded.metadata_json`,
+        );
+        return true;
+      }),
+    );
+  });
+  const deleteThreadLineage = Effect.fn("MemoryStore.deleteThreadLineage")(function* (
+    thread: M.ScopedThreadRef,
+  ) {
+    yield* stored(
+      "thread-lineage-delete",
+      sql`DELETE FROM memory_outbox WHERE id=${threadLineageId(thread)}`,
+    );
   });
   const retryWork = Effect.fn("MemoryStore.retryWork")(function* (
     work: MemoryWork,
@@ -3275,12 +3469,24 @@ const make = Effect.gen(function* () {
     now: number,
     limit: number,
   ) {
+    // Filter before LIMIT: a page of derived work must not hide its unsent inputs.
+    // Payload deps are bounded to 100; CROSS JOIN keeps edge iteration ahead of
+    // revision/outbox PK probes instead of letting SQLite scan all revisions in a space.
+    // Only live local submissions wait. Missing/GC/terminal inputs still reach the hub's
+    // authoritative typed rejection, without inventing a receipt or retry attempt here.
     const rows = yield* stored(
       "sync-outbox",
       sql<WorkRow & { sync_version: number; operation_digest: string | null }>`
       SELECT o.* FROM memory_outbox o LEFT JOIN memory_events e ON e.memory_space_id=o.space AND e.operation_id=json_extract(o.metadata_json,'$.operationId')
       WHERE o.space=${space} AND o.kind IN ('sync','revert_intent')
       AND (o.status IN ('pending','retry') OR (o.status='running' AND o.claimed_until<=${now})) AND o.next_attempt_at<=${now}
+      AND NOT EXISTS (
+        SELECT 1 FROM memory_payloads p CROSS JOIN json_each(p.dependencies_json) dep
+        CROSS JOIN memory_revisions r ON r.space=o.space AND r.revision_id=dep.value
+        CROSS JOIN memory_outbox prerequisite ON prerequisite.id='sync:'||r.space||':'||r.operation_id
+        WHERE p.space=o.space AND p.payload_ref=o.payload_ref
+          AND prerequisite.status IN ('pending','retry','running')
+      )
       ORDER BY CASE WHEN json_extract(o.metadata_json,'$.kind')='forget'
         THEN CASE WHEN json_extract(e.receipt_json,'$.forgetRetryOf') IS NOT NULL OR
           EXISTS (SELECT 1 FROM memory_events b WHERE b.memory_space_id=o.space AND json_extract(b.receipt_json,'$.forgetExpansion.operationId')=json_extract(o.metadata_json,'$.operationId'))
@@ -3363,6 +3569,15 @@ const make = Effect.gen(function* () {
           yield* stored(
             "ack-settle",
             sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(acknowledged)} WHERE memory_space_id=${work.space} AND operation_id=${result.operationId}`,
+          );
+        if (
+          result.outcome === "rejected" &&
+          result.failureCode === "source_invalidated" &&
+          work.metadata.kind === "upsert"
+        )
+          yield* stored(
+            "derived-admission-refusal",
+            sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${work.space},'derived_admission_rejected','',1) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=min(value+1,2147483647)`,
           );
         yield* finishWork(id, result.outcome === "rejected" ? "failed" : "completed", result);
         if (
@@ -6526,7 +6741,7 @@ const make = Effect.gen(function* () {
         return yield* new MemoryStoreConflict({ code: "capacity_exceeded" });
       yield* stored(
         "submission-body",
-        sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json,purge_eligible_after) VALUES (${op.memorySpaceId},${payloadRef},${op.memoryId},${body},'[]',${Date.parse(row.ticket.attemptDeadlineHubTime) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS})`,
+        sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json,purge_eligible_after) VALUES (${op.memorySpaceId},${payloadRef},${op.memoryId},${body},${yield* headsCodec.encode(op.payload.derivedFromMemoryRevisions)},${Date.parse(row.ticket.attemptDeadlineHubTime) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS})`,
       );
       yield* stored(
         "submission-ref",
@@ -7141,6 +7356,38 @@ const make = Effect.gen(function* () {
   const sourceCollectCodec = codec(M.MemoryHubSourceReadCollectResult);
   const sourceThreadCodec = codec(M.ScopedThreadRef);
   const sourceWatermarkCodec = codec(M.MemorySourceWatermark);
+  // Relay authority metadata shares the existing body-free replay registry. One
+  // bounded map per member; membership itself is capped and retained on retirement.
+  const pairFencesCodec = codec(M.MemorySourceReadPairFences);
+  const settlementCodec = codec(
+    Schema.Struct({
+      responseDigest: Schema.NullOr(Schema.String),
+      ownerPolicyEpoch: M.MemoryOwnerPolicyEpoch,
+      denied: Schema.Boolean,
+    }),
+  );
+  const readPairFences = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    owner: M.EnvironmentId,
+  ) {
+    const rows = yield* stored(
+      "relay-pair-fences",
+      sql<{
+        record_json: string;
+      }>`SELECT record_json FROM memory_import_keys WHERE space=${space} AND key_kind='hub_source_fences' AND key=${owner}`,
+    );
+    const fences = rows[0] ? yield* pairFencesCodec.decode(rows[0].record_json, strict) : [];
+    if (fences.some((f) => f.memorySpaceId !== space || f.ownerEnvironmentId !== owner))
+      return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+    return fences;
+  });
+  const pairFence = Effect.fnUntraced(function* (space: M.MemorySpaceId, row: RelayRow) {
+    return (
+      (yield* readPairFences(space, M.EnvironmentId.make(row.owner))).find(
+        (f) => f.requesterEnvironmentId === row.requester,
+      )?.revokedThroughEpoch ?? -1
+    );
+  });
   type RelayRow = {
     request_id: string;
     memory_id: string;
@@ -7220,6 +7467,46 @@ const make = Effect.gen(function* () {
       "relay-expire",
       sql`UPDATE memory_hub_source_reads SET state='expired',locator_json='{}',payload_ref=NULL WHERE space=${space} AND request_id=${row.request_id}`,
     );
+  });
+  const settleDenied = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    row: RelayRow,
+    epoch: number,
+  ) {
+    if (row.payload_ref)
+      yield* stored(
+        "relay-denied-purge",
+        sql`DELETE FROM memory_payloads WHERE space=${space} AND payload_ref=${row.payload_ref}`,
+      );
+    yield* stored(
+      "relay-denied",
+      sql`UPDATE memory_hub_source_reads SET state='completed',payload_ref=NULL,response_digest=${yield* settlementCodec.encode({ responseDigest: null, ownerPolicyEpoch: epoch, denied: true })} WHERE space=${space} AND request_id=${row.request_id}`,
+    );
+  });
+  const relayRequest = Effect.fnUntraced(function* (space: M.MemorySpaceId, row: RelayRow) {
+    const request = yield* sourceRequestCodec
+      .decode(row.locator_json, strict)
+      .pipe(Effect.orElseSucceed(() => null));
+    if (
+      !request?.stamp ||
+      request.memorySpaceId !== space ||
+      request.requestId !== row.request_id ||
+      request.memoryId !== row.memory_id ||
+      request.sourceThread.environmentId !== row.owner ||
+      request.requesterEnvironmentId !== row.requester ||
+      request.stamp.requesterCredentialVersion !== row.credential_version ||
+      request.stamp.locatorDigest !== row.request_digest ||
+      Date.parse(request.expiresAtHubTime) !== row.deadline
+    )
+      return null;
+    const {
+      stamp: _stamp,
+      requesterEnvironmentId: _requester,
+      expiresAtHubTime: _expiry,
+      ...locator
+    } = request;
+    const digest = hashText(yield* sourceInputCodec.encode({ protocolVersion: 1, ...locator }));
+    return digest === row.request_digest ? request : null;
   });
   const adminReplayJson = Effect.fnUntraced(function* (record: AdminRecord) {
     const { action, ...replay } = record;
@@ -7317,7 +7604,12 @@ const make = Effect.gen(function* () {
         return yield* new M.MemoryHubError({ code: "operation_id_reused" });
       if (old.deadline <= now || old.state === "expired")
         return yield* new M.MemoryHubError({ code: "source_unavailable" });
-      return { request: yield* sourceRequestCodec.decode(old.locator_json, strict) };
+      const request = yield* relayRequest(input.memorySpaceId, old);
+      if (!request) {
+        yield* settleDenied(input.memorySpaceId, old, 0);
+        return yield* new M.MemoryHubError({ code: "source_unavailable" });
+      }
+      return { request };
     }
     const owner = yield* readHubMember(input.memorySpaceId, input.sourceThread.environmentId);
     if (!owner || owner.status !== "active")
@@ -7341,6 +7633,7 @@ const make = Effect.gen(function* () {
       ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
       authorizedScopes: request.authorizedScopes,
       requesterEnvironmentId: request.requesterEnvironmentId,
+      stamp: { requesterCredentialVersion: member.credentialVersion, locatorDigest: requestDigest },
       expiresAtHubTime: request.expiresAtHubTime,
     };
     if (!(yield* relayEligible(input.memorySpaceId, locator)))
@@ -7394,7 +7687,11 @@ const make = Effect.gen(function* () {
         input.memorySpaceId,
         M.EnvironmentId.make(row.requester),
       );
-      const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
+      const request = yield* relayRequest(input.memorySpaceId, row);
+      if (!request) {
+        yield* settleDenied(input.memorySpaceId, row, 0);
+        continue;
+      }
       if (
         !requester ||
         requester.status !== "active" ||
@@ -7416,6 +7713,49 @@ const make = Effect.gen(function* () {
     "MemoryStore.respondHubSourceReadTx",
   )(function* (authority, input) {
     const { member, now } = yield* authorizeSource(authority, input.memorySpaceId);
+    if (input.kind === "revoke") {
+      if (!(yield* readHubMember(input.memorySpaceId, input.requesterEnvironmentId)))
+        return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+      const fences = yield* readPairFences(input.memorySpaceId, member.environmentId);
+      const previous = fences.find(
+        (f) => f.requesterEnvironmentId === input.requesterEnvironmentId,
+      );
+      const epoch = Math.max(previous?.revokedThroughEpoch ?? -1, input.ownerPolicyEpoch);
+      if (!previous || epoch > previous.revokedThroughEpoch) {
+        const next = [
+          ...fences.filter((f) => f.requesterEnvironmentId !== input.requesterEnvironmentId),
+          {
+            memorySpaceId: input.memorySpaceId,
+            ownerEnvironmentId: member.environmentId,
+            requesterEnvironmentId: input.requesterEnvironmentId,
+            revokedThroughEpoch: epoch,
+          },
+        ];
+        const json = yield* pairFencesCodec.encode(next);
+        yield* stored(
+          "relay-pair-revoke",
+          sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${input.memorySpaceId},'hub_source_fences',${member.environmentId},${input.memorySpaceId},${json}) ON CONFLICT(space,key_kind,key) DO UPDATE SET record_json=excluded.record_json`,
+        );
+        const rows = yield* stored(
+          "relay-pair-settle",
+          sql<RelayRow>`SELECT request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline,response_digest,payload_ref FROM memory_hub_source_reads WHERE space=${input.memorySpaceId} AND owner=${member.environmentId} AND requester=${input.requesterEnvironmentId} AND state IN ('pending','completed') ORDER BY request_id LIMIT ${M.MEMORY_SOURCE_READ_MAX_PER_HUB + 1}`,
+        );
+        if (rows.length > M.MEMORY_SOURCE_READ_MAX_PER_HUB)
+          return yield* new M.MemoryHubError({ code: "capacity_exceeded" });
+        for (const row of rows) yield* settleDenied(input.memorySpaceId, row, epoch);
+      }
+      return {
+        kind: "revoke" as const,
+        accepted: true as const,
+        ack: {
+          memorySpaceId: input.memorySpaceId,
+          ownerEnvironmentId: member.environmentId,
+          requesterEnvironmentId: input.requesterEnvironmentId,
+          removalEpoch: input.ownerPolicyEpoch,
+          revokedThroughEpoch: epoch,
+        },
+      };
+    }
     const row = yield* readRelay(input.memorySpaceId, input.requestId);
     if (!row || row.owner !== member.environmentId)
       return yield* new M.MemoryHubError({ code: "identity_mismatch" });
@@ -7431,18 +7771,41 @@ const make = Effect.gen(function* () {
       requester.credentialVersion !== row.credential_version
     ) {
       yield* eraseRelayPayload(input.memorySpaceId, row);
-      return { accepted: false };
+      return { kind: "normal" as const, accepted: false };
     }
-    const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
+    const request = yield* relayRequest(input.memorySpaceId, row);
+    if (!request) {
+      yield* settleDenied(input.memorySpaceId, row, 0);
+      return { kind: "normal" as const, accepted: false };
+    }
+    const previous = row.response_digest
+      ? yield* settlementCodec
+          .decode(row.response_digest, strict)
+          .pipe(Effect.orElseSucceed(() => null))
+      : null;
+    const responseDigest = hashText(yield* sourceRespondCodec.encode(input));
+    if (previous?.denied && previous.responseDigest === responseDigest)
+      return { kind: "normal" as const, accepted: true };
+    if (
+      previous?.denied ||
+      (input.outcome.kind === "available" && input.ownerPolicyEpoch === 0) ||
+      input.ownerPolicyEpoch <= (yield* pairFence(input.memorySpaceId, row))
+    ) {
+      yield* settleDenied(
+        input.memorySpaceId,
+        row,
+        Math.max(input.ownerPolicyEpoch, previous?.ownerPolicyEpoch ?? 0),
+      );
+      return { kind: "normal" as const, accepted: false };
+    }
     if (!(yield* relayEligible(input.memorySpaceId, request))) {
       yield* eraseRelayPayload(input.memorySpaceId, row);
-      return { accepted: false };
+      return { kind: "normal" as const, accepted: false };
     }
-    const responseDigest = hashText(yield* sourceRespondCodec.encode(input));
     if (row.response_digest) {
-      if (row.response_digest !== responseDigest)
+      if (previous?.responseDigest !== responseDigest)
         return yield* new M.MemoryHubError({ code: "operation_id_reused" });
-      return { accepted: row.state === "completed" };
+      return { kind: "normal" as const, accepted: row.state === "completed" };
     }
     if (
       input.outcome.kind === "available" &&
@@ -7461,15 +7824,16 @@ const make = Effect.gen(function* () {
     const json = yield* sourceOutcomeCodec.encode(outcome);
     const payloadRef = `relay:${input.requestId}`;
     // A transient body has no revision, event, report, checkpoint or FTS reference.
-    yield* stored(
-      "relay-response-payload",
-      sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json,purge_eligible_after) VALUES (${input.memorySpaceId},${payloadRef},${request.memoryId},${json},'[]',${row.deadline})`,
-    );
+    if (outcome.kind !== "denied")
+      yield* stored(
+        "relay-response-payload",
+        sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json,purge_eligible_after) VALUES (${input.memorySpaceId},${payloadRef},${request.memoryId},${json},'[]',${row.deadline})`,
+      );
     yield* stored(
       "relay-response",
-      sql`UPDATE memory_hub_source_reads SET state='completed',response_digest=${responseDigest},payload_ref=${payloadRef} WHERE space=${input.memorySpaceId} AND request_id=${input.requestId}`,
+      sql`UPDATE memory_hub_source_reads SET state='completed',response_digest=${yield* settlementCodec.encode({ responseDigest, ownerPolicyEpoch: input.ownerPolicyEpoch, denied: outcome.kind === "denied" })},payload_ref=${outcome.kind === "denied" ? null : payloadRef} WHERE space=${input.memorySpaceId} AND request_id=${input.requestId}`,
     );
-    return { accepted: true };
+    return { kind: "normal" as const, accepted: true };
   });
   const resultHubSourceReadTx: MemoryStore["Service"]["resultHubSourceReadTx"] = Effect.fn(
     "MemoryStore.resultHubSourceReadTx",
@@ -7487,7 +7851,29 @@ const make = Effect.gen(function* () {
       yield* eraseRelayPayload(input.memorySpaceId, row);
       return { state: "expired", code: "source_unavailable" };
     }
-    const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
+    const settlement = row.response_digest
+      ? yield* settlementCodec
+          .decode(row.response_digest, strict)
+          .pipe(Effect.orElseSucceed(() => null))
+      : null;
+    if (
+      settlement?.denied ||
+      (settlement && settlement.ownerPolicyEpoch <= (yield* pairFence(input.memorySpaceId, row)))
+    ) {
+      yield* settleDenied(input.memorySpaceId, row, settlement.ownerPolicyEpoch);
+      return {
+        state: "completed",
+        outcome: { kind: "denied", requiredPermission: "orchestration:read" },
+      };
+    }
+    const request = yield* relayRequest(input.memorySpaceId, row);
+    if (!request || (row.state === "completed" && !settlement)) {
+      yield* settleDenied(input.memorySpaceId, row, 0);
+      return {
+        state: "completed",
+        outcome: { kind: "denied", requiredPermission: "orchestration:read" },
+      };
+    }
     if (!(yield* relayEligible(input.memorySpaceId, request))) {
       yield* eraseRelayPayload(input.memorySpaceId, row);
       return { state: "completed", outcome: { kind: "unavailable", code: "source_invalidated" } };
@@ -7666,6 +8052,15 @@ const make = Effect.gen(function* () {
     const approved = new Set(
       receipts.filter((r) => r.receipt.outcome !== "rejected").map((r) => r.receipt.operationId),
     );
+    // A joining member also needs body-free revision identity for the reverse
+    // forget closure, even after the dependency is no longer a head.
+    const lineageRows = yield* stored(
+      "hub-snapshot-lineage",
+      sql<{
+        revision_id: string;
+      }>`SELECT DISTINCT r.revision_id FROM memory_payloads p, json_each(p.dependencies_json) d JOIN memory_revisions r ON r.space=p.space AND r.revision_id=d.value WHERE p.space=${space}`,
+    );
+    const lineage = new Set(lineageRows.map((row) => row.revision_id));
     const identities = yield* stored(
       "hub-snapshot-identities",
       sql<{
@@ -7729,10 +8124,15 @@ const make = Effect.gen(function* () {
         ...current.heads,
         ...retained.flatMap((r) => [...r.inputRevisionIds, r.resultRevisionId]),
       ]);
-      for (const pair of current.revisions.filter((pair) => needed.has(pair.revision.revisionId))) {
+      for (const pair of current.revisions.filter(
+        (pair) => needed.has(pair.revision.revisionId) || lineage.has(pair.revision.revisionId),
+      )) {
         if (!approved.has(pair.revision.operationId))
           return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
-        all.revisions = [...all.revisions, pair];
+        all.revisions = [
+          ...all.revisions,
+          needed.has(pair.revision.revisionId) ? pair : { ...pair, payload: null },
+        ];
       }
       for (const resolution of retained) {
         const receipt = receipts.find(
@@ -8095,14 +8495,17 @@ const make = Effect.gen(function* () {
         revision_id: string;
         operation_id: string;
         payload_ref: string;
+        payload_bytes: number;
         bytes: number;
-      }>`SELECT r.revision_id,r.operation_id,r.payload_ref,coalesce(length(CAST(p.body_json AS BLOB)),0)+length(CAST(r.parents_json AS BLOB))+length(CAST(r.provenance_json AS BLOB))+length(CAST(r.scope_json AS BLOB)) AS bytes FROM memory_revisions r JOIN memory_compact_receipts c ON c.space=r.space AND c.operation_id=r.operation_id LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${input.memorySpaceId} AND c.hub_sequence<=${input.expectedFloor} AND (p.purge_eligible_after<=${input.now} OR p.payload_ref IS NULL AND r.created_at<=${input.now - M.MEMORY_LOG_RETENTION_MS})
+      }>`SELECT r.revision_id,r.operation_id,r.payload_ref,coalesce(length(CAST(p.body_json AS BLOB)),0) AS payload_bytes,coalesce(length(CAST(p.body_json AS BLOB)),0)+length(CAST(r.parents_json AS BLOB))+length(CAST(r.provenance_json AS BLOB))+length(CAST(r.scope_json AS BLOB)) AS bytes FROM memory_revisions r JOIN memory_compact_receipts c ON c.space=r.space AND c.operation_id=r.operation_id LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${input.memorySpaceId} AND c.hub_sequence<=${input.expectedFloor} AND (p.purge_eligible_after<=${input.now} OR p.payload_ref IS NULL AND r.created_at<=${input.now - M.MEMORY_LOG_RETENTION_MS})
       AND NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h WHERE i.space=r.space AND h.value=r.revision_id)
       AND NOT EXISTS (SELECT 1 FROM memory_conflicts f JOIN json_each(f.heads_json) h WHERE f.space=r.space AND f.status!='resolved' AND h.value=r.revision_id)
       AND NOT EXISTS (SELECT 1 FROM memory_resolutions v JOIN json_each(v.input_revision_ids_json) h WHERE v.space=r.space AND v.revert_deadline>${input.now} AND h.value=r.revision_id)
       AND NOT EXISTS (SELECT 1 FROM memory_revert_intents v WHERE v.space=r.space AND (v.restored_revision_id=r.revision_id OR v.payload_ref=r.payload_ref))
       AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.space=r.space AND o.status IN ('pending','running','retry') AND (o.payload_ref=r.payload_ref OR instr(o.metadata_json,r.revision_id)>0 OR instr(coalesce(o.ticket_json,''),r.revision_id)>0 OR instr(coalesce(o.frozen_claim_json,''),r.revision_id)>0))
-      AND NOT EXISTS (SELECT 1 FROM memory_inbox_pending b WHERE b.space=r.space AND (b.payload_ref=r.payload_ref OR b.reason='hub_snapshot' AND b.checkpoint_id IN (SELECT value FROM json_each(${keep})) AND EXISTS (SELECT 1 FROM json_each(b.metadata_json,'$.revisions') j WHERE json_extract(j.value,'$.revision.revisionId')=r.revision_id)))
+      AND NOT EXISTS (SELECT 1 FROM memory_inbox_pending b WHERE b.space=r.space AND (b.payload_ref=r.payload_ref OR b.reason='hub_snapshot' AND b.checkpoint_id IN (SELECT value FROM json_each(${keep})) AND EXISTS (SELECT 1 FROM json_each(b.metadata_json,'$.revisions') j WHERE json_extract(j.value,'$.revision.revisionId')=r.revision_id AND json_type(j.value,'$.payload')!='null')))
+      AND (p.payload_ref IS NOT NULL OR (NOT EXISTS (SELECT 1 FROM memory_payloads d, json_each(d.dependencies_json) dep WHERE d.space=r.space AND dep.value=r.revision_id)
+        AND NOT EXISTS (SELECT 1 FROM memory_outbox o,json_each(o.metadata_json,'$.revisions') dep WHERE o.space='_worker' AND json_extract(o.metadata_json,'$.kind')='threadLineage' AND json_extract(o.metadata_json,'$.memorySpaceId')=r.space AND dep.value=r.revision_id)))
       ORDER BY coalesce(p.purge_eligible_after,r.created_at),r.revision_id LIMIT ${Math.max(0, limit - removedRows)}`,
     );
     for (const revision of revisions) {
@@ -8111,6 +8514,18 @@ const make = Effect.gen(function* () {
         "hub-compact-payload-delete",
         sql`DELETE FROM memory_payloads WHERE space=${input.memorySpaceId} AND payload_ref=${revision.payload_ref}`,
       );
+      // Keep only canonical identity metadata while a live payload needs the
+      // revision->memory edge for forget's reverse closure. Its body was deleted above.
+      const retained = yield* stored(
+        "hub-compact-lineage-reference",
+        sql`SELECT 1 FROM memory_payloads p, json_each(p.dependencies_json) d WHERE p.space=${input.memorySpaceId} AND d.value=${revision.revision_id}
+          UNION ALL SELECT 1 FROM memory_outbox o,json_each(o.metadata_json,'$.revisions') d WHERE o.space='_worker' AND json_extract(o.metadata_json,'$.kind')='threadLineage' AND json_extract(o.metadata_json,'$.memorySpaceId')=${input.memorySpaceId} AND d.value=${revision.revision_id} LIMIT 1`,
+      );
+      if (retained.length) {
+        removedRows++;
+        reclaimedLogicalBytes += revision.payload_bytes;
+        continue;
+      }
       yield* stored(
         "hub-compact-revision-delete",
         sql`DELETE FROM memory_revisions WHERE space=${input.memorySpaceId} AND revision_id=${revision.revision_id}`,
@@ -8333,7 +8748,7 @@ const make = Effect.gen(function* () {
         AND NOT EXISTS(SELECT 1 FROM memory_resolutions x,json_each(x.input_revision_ids_json) h WHERE x.space=v.space AND x.revert_deadline>${now} AND h.value=v.revision_id)
         AND NOT EXISTS(SELECT 1 FROM memory_revert_intents x WHERE x.space=v.space AND (x.restored_revision_id=v.revision_id OR x.payload_ref=v.payload_ref))
         AND NOT EXISTS(SELECT 1 FROM memory_outbox w WHERE w.space=v.space AND w.status IN ('pending','running','retry') AND (w.payload_ref=v.payload_ref OR instr(w.metadata_json,v.revision_id)>0 OR instr(coalesce(w.ticket_json,''),v.revision_id)>0 OR instr(coalesce(w.frozen_claim_json,''),v.revision_id)>0))
-        AND NOT EXISTS(SELECT 1 FROM memory_inbox_pending b WHERE b.space=v.space AND (b.payload_ref=v.payload_ref OR b.reason='hub_snapshot' AND EXISTS(SELECT 1 FROM json_each(b.metadata_json,'$.revisions') j WHERE json_extract(j.value,'$.revision.revisionId')=v.revision_id) AND (b.checkpoint_id='hub:'||r.checkpoint_id OR EXISTS(SELECT 1 FROM json_each(r.handles_json) h WHERE 'hub:'||json_extract(h.value,'$.checkpointId')=b.checkpoint_id AND json_extract(h.value,'$.expiresAt')>${now}))))) AS history_bytes`,
+        AND NOT EXISTS(SELECT 1 FROM memory_inbox_pending b WHERE b.space=v.space AND (b.payload_ref=v.payload_ref OR b.reason='hub_snapshot' AND EXISTS(SELECT 1 FROM json_each(b.metadata_json,'$.revisions') j WHERE json_extract(j.value,'$.revision.revisionId')=v.revision_id AND json_type(j.value,'$.payload')!='null') AND (b.checkpoint_id='hub:'||r.checkpoint_id OR EXISTS(SELECT 1 FROM json_each(r.handles_json) h WHERE 'hub:'||json_extract(h.value,'$.checkpointId')=b.checkpoint_id AND json_extract(h.value,'$.expiresAt')>${now}))))) AS history_bytes`,
     );
     const inventoryRow = inventory[0]!;
     const adminRows = yield* stored(
@@ -8493,6 +8908,9 @@ const make = Effect.gen(function* () {
       memorySpaceId: op.memorySpaceId,
       originEnvironmentId: op.originEnvironmentId,
       operationKind: op.kind,
+      ...(op.kind === "upsert" && op.revision.provenance.upsertRequestDigest !== undefined
+        ? { upsertRequestDigest: op.revision.provenance.upsertRequestDigest }
+        : {}),
       receipt,
       revisionId:
         op.kind === "forget" || input.outcome === "rejected" ? null : op.revision.revisionId,
@@ -8924,7 +9342,9 @@ const make = Effect.gen(function* () {
       withHubBudget(requestHubSourceReadTx(authority, input)),
     collectHubSourceReadsTx,
     respondHubSourceReadTx: (authority, input) =>
-      withHubBudget(respondHubSourceReadTx(authority, input)),
+      input.kind === "revoke"
+        ? respondHubSourceReadTx(authority, input)
+        : withHubBudget(respondHubSourceReadTx(authority, input)),
     resultHubSourceReadTx,
     readHubAdminTx,
     writeHubAdminTx: (input) => withHubBudget(writeHubAdminTx(input)),
@@ -8992,13 +9412,29 @@ const make = Effect.gen(function* () {
     pendingReceived,
     stageRevertIntent,
     list: (filter) => transact(list(filter)),
-    search: (filter, text, mode) => transact(search(filter, text, mode)),
+    search: (filter, text, mode) =>
+      Effect.gen(function* () {
+        const coverage = yield* transact(searchCoverage(filter));
+        if (!coverage.ready) {
+          if (mode === "substring") return yield* new MemoryStoreConflict({ code: "unavailable" });
+          return {
+            items: [],
+            examinedAfterMemoryId: filter.afterMemoryId ?? null,
+            exhausted: false,
+          };
+        }
+        return yield* transact(search(filter, text, mode));
+      }),
+    searchCoverage: (filter) => transact(searchCoverage(filter)),
     dueWork,
     readWork,
     retryWork,
     renewWork,
     readThreadHookWatermark,
     cancelThreadWork,
+    readThreadLineage,
+    appendThreadLineage,
+    deleteThreadLineage,
     commitThreadHook,
     readParked,
     enqueueWork,

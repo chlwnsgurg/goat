@@ -32,6 +32,7 @@ import {
 } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2RunJson,
   OrchestrationV2QuestionEscalation,
   OrchestrationV2QuestionResolution,
   OrchestrationV2AppThread,
@@ -650,6 +651,7 @@ describe("orchestration V2 contracts", () => {
       throw new Error(`Expected run.created, received ${event.type}.`);
     }
     expect(event.payload.id).toBe(RunId.make("run-1"));
+    expect(event.payload.memoryGrantCeiling).toBe("none");
   });
 
   it("decodes app-owned delegated task commands", () => {
@@ -2370,4 +2372,97 @@ describe("memory provider capability replay", () => {
       ).toEqual(memory);
     }
   });
+});
+
+describe("WP4 task ceiling propagation codecs", () => {
+  const delegate = {
+    type: "delegated_task.request",
+    createdBy: "agent",
+    creationSource: "mcp",
+    commandId: "delegate",
+    parentThreadId: "parent",
+    parentRunId: "run",
+    parentNodeId: "node",
+    task: "Synthetic task",
+    modelSelection: { instanceId: "codex", model: "model" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+  };
+  it("defaults legacy commands to none and preserves explicit ceiling", () => {
+    const legacy = decodeOrchestrationV2Command(delegate);
+    expect(legacy).toMatchObject({ memoryGrantCeiling: "none" });
+    for (const memoryGrantCeiling of ["none", "read", "read_write"])
+      expect(decodeOrchestrationV2Command({ ...delegate, memoryGrantCeiling })).toMatchObject({
+        memoryGrantCeiling,
+      });
+    expect(() =>
+      decodeOrchestrationV2Command({ ...delegate, memoryGrantCeiling: "write" }),
+    ).toThrow();
+  });
+  it("preserves persisted child metadata through JSON and legacy restart", () => {
+    const child = {
+      id: "child",
+      threadId: "parent",
+      runId: "run",
+      parentNodeId: "node",
+      origin: "app_owned",
+      createdBy: "agent",
+      driver: "codex",
+      providerInstanceId: "codex",
+      providerThreadId: null,
+      childThreadId: "child-thread",
+      nativeTaskRef: null,
+      prompt: "Synthetic task",
+      title: null,
+      model: null,
+      status: "pending",
+      result: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: now,
+    };
+    expect(decodeOrchestrationV2Subagent(child)).toMatchObject({ memoryGrantCeiling: "none" });
+    expect(
+      encodeOrchestrationV2SubagentJson(decodeOrchestrationV2Subagent(child)),
+    ).not.toHaveProperty("memoryGrantCeiling");
+    for (const memoryGrantCeiling of ["none", "read", "read_write"] as const) {
+      const current = decodeOrchestrationV2Subagent({ ...child, memoryGrantCeiling });
+      const json = JSON.parse(JSON.stringify(encodeOrchestrationV2SubagentJson(current)));
+      if (memoryGrantCeiling === "none") {
+        expect(json).not.toHaveProperty("memoryGrantCeiling");
+      } else {
+        expect(json).toHaveProperty("memoryGrantCeiling", memoryGrantCeiling);
+      }
+      expect(Schema.decodeUnknownSync(OrchestrationV2SubagentJson)(json)).toMatchObject({
+        memoryGrantCeiling,
+      });
+    }
+  });
+});
+
+const decodeMemoryRun = Schema.decodeUnknownSync(OrchestrationV2RunJson);
+const encodeMemoryRun = Schema.encodeSync(OrchestrationV2RunJson);
+it("round-trips usage-limit run ancestry and omits absent ancestry on the wire", () => {
+  const legacy = {
+    id: "run-memory-contract",
+    threadId: "thread-memory-contract",
+    ordinal: 1,
+    providerInstanceId: "codex",
+    modelSelection: { instanceId: "codex", model: "test" },
+    providerThreadId: null,
+    userMessageId: "message-memory-contract",
+    rootNodeId: null,
+    activeAttemptId: null,
+    status: "starting",
+    requestedAt: "2026-10-15T00:00:00.000Z",
+    startedAt: null,
+    completedAt: null,
+    checkpointId: null,
+    contextHandoffId: null,
+  };
+  expect(encodeMemoryRun(decodeMemoryRun(legacy))).not.toHaveProperty(
+    "usageLimitContinuationOfRunId",
+  );
+  const continuation = { ...legacy, usageLimitContinuationOfRunId: "run-original" };
+  expect(encodeMemoryRun(decodeMemoryRun(continuation))).toEqual(continuation);
 });

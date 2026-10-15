@@ -1,3 +1,4 @@
+import * as MemorySnapshot from "../memory/MemorySnapshot.ts";
 import { modelSelectionsEqual } from "@goat/shared/model";
 import { projectComposerContextForProvider } from "@goat/shared/composerContextReferences";
 import {
@@ -117,6 +118,7 @@ export const layer: Layer.Layer<
     const providerAuth = yield* ProviderAuthService.ProviderAuthService;
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const memorySnapshot = yield* Effect.serviceOption(MemorySnapshot.MemorySnapshot);
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
     const adapterRegistry = yield* Effect.serviceOption(ProviderAdapters.ProviderAdapterRegistryV2);
@@ -187,6 +189,32 @@ export const layer: Layer.Layer<
             .pipe(Effect.catchCause(() => Effect.succeed(false))),
       };
     };
+
+    // Run workers keep this callback after startup. Capture only service references
+    // and scalar ids, outside start's scope containing the projection and history.
+    const makeRefreshMemoryContext = (threadId: ThreadId, runId: RunId) => () =>
+      Effect.gen(function* () {
+        if (Option.isNone(memorySnapshot) || !providerSessions.currentMemoryPolicy)
+          return undefined;
+        const currentPolicy = providerSessions.currentMemoryPolicy(threadId);
+        const policy = yield* currentPolicy;
+        if (policy.grant === "none") return undefined;
+        if ((yield* projectionStore.getThreadShell(threadId))?.activeRunId !== runId)
+          return undefined;
+        const snapshot = yield* memorySnapshot.value.forThread(threadId, policy, currentPolicy);
+        return (yield* projectionStore.getThreadShell(threadId))?.activeRunId === runId
+          ? snapshot
+          : undefined;
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.interrupt
+            : Effect.logWarning("Memory refresh unavailable", {
+                threadId,
+                runId,
+              }).pipe(Effect.as(undefined)),
+        ),
+      );
 
     const makeDeliverySession = (
       session: ProviderAdapter.ProviderAdapterV2SessionRuntime,
@@ -583,7 +611,7 @@ export const layer: Layer.Layer<
                   ),
                   Effect.catchCause((cause) =>
                     Cause.hasInterruptsOnly(cause)
-                      ? Effect.failCause(cause)
+                      ? Effect.interrupt
                       : Effect.logWarning("provider turn start failed to recreate worktree", {
                           threadId: projection.thread.id,
                           worktreePath,
@@ -633,6 +661,7 @@ export const layer: Layer.Layer<
           providerSessionId,
           modelSelection: run.modelSelection,
           runtimePolicy: resolvedRuntimePolicy,
+          ...RunExecutionService.runMemoryPrepareInput({ run, message, projection }),
           ...(existingSessionProjection === undefined
             ? {}
             : { resumeFromSession: existingSessionProjection }),
@@ -1381,6 +1410,11 @@ export const layer: Layer.Layer<
           ? {}
           : { cloudLaunchSource: cloudSource.launchSource }),
         reattach: input.reattach === true,
+        ...(input.reattach === true
+          ? {}
+          : {
+              refreshMemoryContext: makeRefreshMemoryContext(input.threadId, runId),
+            }),
         providerThread: runningProviderThread,
         attempt: runningAttempt,
         attemptId: attempt.id,

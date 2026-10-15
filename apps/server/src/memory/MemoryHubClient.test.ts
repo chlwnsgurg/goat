@@ -9,6 +9,7 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as Client from "./MemoryHubClient.ts";
+import { sourceReadLocatorDigest } from "./MemoryOwnerSourceReader.ts";
 import * as Secrets from "../auth/ServerSecretStore.ts";
 import * as Settings from "../serverSettings.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
@@ -451,5 +452,135 @@ it.effect("a configured loopback HTTP hub passes the same pinned preflight", () 
         .pipe(Effect.provideService(FetchHttpClient.Fetch, fetch)),
       { requests: [] },
     );
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect.each(["missing", "digest", "locator"] as const)(
+  "refuses a source request reply with %s stamp integrity",
+  (fault) =>
+    Effect.gen(function* () {
+      yield* seed;
+      const client = yield* Client.MemoryHubClient;
+      const { protocolVersion: _version, ...fields } = source;
+      const stamp = {
+        requesterCredentialVersion: 1,
+        locatorDigest: sourceReadLocatorDigest(source),
+      };
+      const request = {
+        ...fields,
+        requesterEnvironmentId: M.EnvironmentId.make("requester"),
+        expiresAtHubTime: "1970-01-01T00:01:15.000Z",
+        ...(fault === "missing"
+          ? {}
+          : { stamp: fault === "digest" ? { ...stamp, locatorDigest: "f".repeat(64) } : stamp }),
+        ...(fault === "locator" ? { limit: 1 } : {}),
+      };
+      const fetch: typeof globalThis.fetch = async (_url, init) =>
+        init?.method === "GET" ? json(descriptor) : json({ request });
+      const result = yield* client
+        .requestSourceRead(connection, source)
+        .pipe(Effect.provideService(FetchHttpClient.Fetch, fetch), Effect.flip);
+      assert.strictEqual(result._tag, "MemoryHubError");
+      if (result._tag === "MemoryHubError") assert.strictEqual(result.code, "invalid_output");
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect.each(["normal arm", "wrong space", "wrong requester", "wrong epoch"] as const)(
+  "refuses revoke acknowledgement: %s",
+  (fault) =>
+    Effect.gen(function* () {
+      yield* seed;
+      const client = yield* Client.MemoryHubClient;
+      const input: M.MemoryHubSourceReadRevokeInput = {
+        protocolVersion: 1,
+        kind: "revoke",
+        memorySpaceId: space,
+        requesterEnvironmentId: M.EnvironmentId.make("requester"),
+        ownerPolicyEpoch: 2,
+      };
+      const ack = {
+        memorySpaceId: fault === "wrong space" ? M.MemorySpaceId.make(id(90)) : space,
+        ownerEnvironmentId: M.EnvironmentId.make("owner"),
+        requesterEnvironmentId:
+          fault === "wrong requester"
+            ? M.EnvironmentId.make("other")
+            : input.requesterEnvironmentId,
+        removalEpoch: fault === "wrong epoch" ? 1 : 2,
+        revokedThroughEpoch: 2,
+      };
+      const fetch: typeof globalThis.fetch = async (_url, init) =>
+        init?.method === "GET"
+          ? json(descriptor)
+          : json(
+              fault === "normal arm"
+                ? { kind: "normal", accepted: true }
+                : { kind: "revoke", accepted: true, ack },
+            );
+      const result = yield* client
+        .respondSourceRead(connection, input)
+        .pipe(Effect.provideService(FetchHttpClient.Fetch, fetch), Effect.flip);
+      assert.strictEqual(result._tag, "MemoryHubError");
+      if (result._tag === "MemoryHubError") assert.strictEqual(result.code, "invalid_output");
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect("revalidates source after descriptor preparation and on every retry", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const client = yield* Client.MemoryHubClient;
+    const failed = yield* Deferred.make<void>();
+    let descriptors = 0;
+    let validations = 0;
+    const outcomes: string[] = [];
+    const response: M.MemoryHubSourceReadRespondInput = {
+      protocolVersion: 1,
+      kind: "normal",
+      memorySpaceId: space,
+      ownerPolicyEpoch: 1,
+      requestId: M.MemorySourceReadRequestId.make("00000000-0000-4000-8000-000000000088"),
+      outcome: {
+        kind: "available",
+        page: {
+          sourceThread: { environmentId: environment, threadId: M.ThreadId.make("fixture") },
+          watermark: {
+            fromEventId: M.EventId.make("fixture-event"),
+            toEventId: M.EventId.make("fixture-event"),
+            throughSequence: 1,
+          },
+          messages: [],
+          nextCursor: null,
+        },
+      },
+    };
+    const prepare = Effect.sync(() => {
+      validations++;
+      assert.strictEqual(validations, descriptors);
+      return validations === 1
+        ? response
+        : {
+            ...response,
+            outcome: { kind: "unavailable" as const, code: "source_invalidated" as const },
+          };
+    });
+    const fetch: typeof globalThis.fetch = async (_url, init) => {
+      if (init?.method === "GET") {
+        descriptors++;
+        return json(descriptor);
+      }
+      outcomes.push(JSON.parse(String(init?.body)).outcome.kind);
+      if (outcomes.length === 1) {
+        Deferred.doneUnsafe(failed, Effect.void);
+        return json({}, 503);
+      }
+      return json({ kind: "normal", accepted: true });
+    };
+    const fiber = yield* client
+      .respondSourceRead(connection, response, prepare)
+      .pipe(Effect.provideService(FetchHttpClient.Fetch, fetch), Effect.forkChild);
+    yield* Deferred.await(failed);
+    yield* TestClock.adjust("250 millis");
+    yield* Fiber.join(fiber);
+    assert.strictEqual(validations, 2);
+    assert.deepStrictEqual(outcomes, ["available", "unavailable"]);
   }).pipe(Effect.provide(live)),
 );

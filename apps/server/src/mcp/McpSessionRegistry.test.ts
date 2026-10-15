@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@goat/contracts";
+import * as MemoryFixture from "./toolkits/memory/handlers.testkit.ts";
 import * as Effect from "effect/Effect";
 import { HttpServer } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
@@ -42,6 +43,7 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
       providerInstanceId: ProviderInstanceId.make("codex"),
       capabilities: new Set(["preview"]),
     });
+    expect(issued.config.grantedScopes).toEqual([]);
     expect(issued.config.endpoint).toBe("http://127.0.0.1:43123/mcp");
     const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
     expect(token.length).toBeGreaterThan(20);
@@ -179,4 +181,103 @@ it.effect("does not keep credentials of other threads alive", () =>
 
     expect(yield* registry.resolve(token)).toBeUndefined();
   }),
+);
+
+it.effect(
+  "live authority denies epoch drift, unready policy, ended caller and revoked snapshot handles",
+  () =>
+    Effect.gen(function* () {
+      const registry = yield* makeRegistry(() => 1000);
+      let current: McpSessionRegistry.McpMemoryPolicy | undefined = {
+        grant: "read_write",
+        policyEpoch: 1,
+      };
+      let live = false;
+      const issue = () =>
+        registry.issue({
+          threadId: ThreadId.make("thread-memory-epochs"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          grantedScopes: ["memory:read", "memory:write"],
+          memoryPolicy: current!,
+          readCurrentPolicy: () => Effect.sync(() => current),
+          isLiveCaller: Effect.sync(() => live),
+        });
+      const first = yield* issue();
+      const token = first.config.authorizationHeader.replace(/^Bearer\s+/, "");
+      const scope = yield* registry.resolve(token);
+      expect(scope).toBeDefined();
+      expect((yield* scope!.reauthorize!(["memory:read"]).pipe(Effect.flip))._tag).toBe(
+        "EnvironmentAuthorizationError",
+      );
+      live = true;
+      yield* scope!.reauthorize!(["memory:read"]);
+      current = undefined;
+      expect(yield* registry.resolve(token)).toBeUndefined();
+      expect(yield* registry.currentMemoryPolicy!(first.config.providerSessionId)).toBeUndefined();
+      current = { grant: "read_write", policyEpoch: 4 };
+      // The intermediate stream epochs need not be observed: the latest Ref is authoritative.
+      expect(yield* registry.resolve(token)).toBeUndefined();
+      expect((yield* scope!.reauthorize!(["memory:write"]).pipe(Effect.flip))._tag).toBe(
+        "EnvironmentAuthorizationError",
+      );
+      const last = yield* issue();
+      expect(yield* registry.currentMemoryPolicy!(last.config.providerSessionId)).toEqual(current);
+      yield* registry.revokeProviderSession(last.config.providerSessionId);
+      expect(yield* registry.currentMemoryPolicy!(last.config.providerSessionId)).toBeUndefined();
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([
+  "memoryPolicy",
+  "readCurrentPolicy",
+  "isLiveCaller",
+  "all",
+  "unready",
+  "ended",
+] as const)(
+  "actual read toolkit refuses incomplete or inactive registry authority: %s",
+  (missing) =>
+    Effect.gen(function* () {
+      const registry = yield* makeRegistry(() => 1000);
+      let ready = true;
+      let live = true;
+      const policy = { grant: "read" as const, policyEpoch: 1 };
+      const issued = yield* registry.issue({
+        threadId: ThreadId.make("thread-memory-missing"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        capabilities: new Set(["memory"]),
+        grantedScopes: ["memory:read"],
+        ...(missing === "memoryPolicy" || missing === "all" ? {} : { memoryPolicy: policy }),
+        ...(missing === "readCurrentPolicy" || missing === "all"
+          ? {}
+          : {
+              readCurrentPolicy: () => Effect.sync(() => (ready ? policy : undefined)),
+            }),
+        ...(missing === "isLiveCaller" || missing === "all"
+          ? {}
+          : {
+              isLiveCaller: Effect.sync(() => live),
+            }),
+      });
+      const scope = yield* registry.resolve(
+        issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+      );
+      expect(scope).toBeDefined();
+      if (missing === "unready") ready = false;
+      if (missing === "ended") live = false;
+      const result = yield* MemoryFixture.call(
+        "memory_list",
+        {
+          memorySpaceId: MemoryFixture.space,
+          includeQuarantined: false,
+        },
+        scope!,
+      );
+      expect(result.result.isError).toBe(true);
+      expect(result.body).toMatchObject({ code: "unavailable" });
+      if (["memoryPolicy", "readCurrentPolicy", "isLiveCaller", "all", "unready"].includes(missing))
+        expect(
+          yield* registry.currentMemoryPolicy!(issued.config.providerSessionId),
+        ).toBeUndefined();
+    }).pipe(Effect.provide(MemoryFixture.layer)),
 );

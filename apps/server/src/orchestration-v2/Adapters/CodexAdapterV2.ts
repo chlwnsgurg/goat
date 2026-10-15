@@ -1,3 +1,9 @@
+import * as MemoryDerivedCache from "../../memory/MemoryDerivedCache.ts";
+import { MemoryContextSnapshot } from "@goat/contracts";
+import type { RunId } from "@goat/contracts";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
+import * as MemorySnapshot from "../../memory/MemorySnapshot.ts";
+import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@goat/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -201,6 +207,7 @@ export function codexProviderTurnTokenUsage(
     updatedAt,
   };
 }
+const encodeMemorySnapshot = Schema.encodeSync(Schema.fromJsonString(MemoryContextSnapshot));
 const DEFAULT_CODEX_SETTINGS = Schema.decodeSync(CodexSettings)({});
 const CODEX_ASSISTANT_DELTA_FLUSH_INTERVAL_MS = 50;
 // Each plan flush stores the whole plan three times (node, plan, turn item), so
@@ -727,6 +734,8 @@ export function buildCodexTurnStartParams(input: {
   readonly deviceToolsAvailable?: boolean;
   /** ChatGPT token sharing does not accept service tiers. */
   readonly omitServiceTier?: boolean;
+  readonly memoryContext?: ProviderAdapter.ProviderAdapterV2TurnInput["memoryContext"];
+  readonly clearMemoryContext?: boolean;
   /** What the thread's MCP Apps want the agent to know (`ui/update-model-context`). */
   readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
 }) {
@@ -758,10 +767,9 @@ export function buildCodexTurnStartParams(input: {
     // context: Codex renders it as quoted user-side input, never as developer
     // instructions. Codex resends it only when it changes.
     const appContext = Object.fromEntries(
-      (input.appContext ?? []).map((entry) => [
-        entry.key,
-        { kind: "untrusted" as const, value: entry.text },
-      ]),
+      (input.appContext ?? [])
+        .filter((entry) => entry.key !== "goat_memory")
+        .map((entry) => [entry.key, { kind: "untrusted" as const, value: entry.text }]),
     );
     const goatContext =
       input.hasGoatMcp === true
@@ -773,10 +781,25 @@ export function buildCodexTurnStartParams(input: {
             },
           )
         : undefined;
+    const memoryContext =
+      input.memoryContext === undefined
+        ? input.clearMemoryContext
+          ? { goat_memory: { kind: "untrusted" as const, value: "" } }
+          : {}
+        : {
+            goat_memory: {
+              kind: "untrusted" as const,
+              value: (yield* Effect.try(() =>
+                MemoryContext.validateMemoryContext(input.memoryContext),
+              )).renderedText,
+            },
+          };
     const additionalContext =
-      goatContext === undefined && Object.keys(appContext).length === 0
+      goatContext === undefined &&
+      Object.keys(appContext).length === 0 &&
+      Object.keys(memoryContext).length === 0
         ? undefined
-        : { ...goatContext, ...appContext };
+        : { ...goatContext, ...appContext, ...memoryContext };
     const collaborationMode: CodexSchema.ClientRequest__CollaborationMode | undefined =
       input.runtimePolicy.interactionMode !== "plan" && developerInstructions === undefined
         ? undefined
@@ -1353,6 +1376,14 @@ export function codexThreadRuntimeParams(input: {
   readonly config: Readonly<Record<string, Schema.Json>>;
 } {
   const { mcpSession } = input;
+  const memory = McpProviderSession.memoryToolAvailability(mcpSession);
+  const disabledMemoryTools = [
+    ...(!memory.read
+      ? ["memory_list", "memory_search", "memory_read", "memory_history", "memory_sync_status"]
+      : []),
+    ...(!memory.source ? ["memory_read_source"] : []),
+    ...(!memory.write ? ["memory_upsert", "memory_forget", "memory_revert_resolution"] : []),
+  ];
   return {
     ...(input.runtimePolicy?.cwd == null ? {} : { cwd: input.runtimePolicy.cwd }),
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
@@ -1364,6 +1395,7 @@ export function codexThreadRuntimeParams(input: {
             mcp_servers: {
               goat: {
                 url: mcpSession.endpoint,
+                disabled_tools: disabledMemoryTools,
                 http_headers: {
                   Authorization: mcpSession.authorizationHeader,
                 },
@@ -1607,6 +1639,7 @@ export type CodexAdapterV2DriverEnv =
   | FileSystem.FileSystem
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
+  | MemoryDerivedCache.MemoryDerivedCache
   | Path.Path
   | ServerConfig;
 
@@ -1672,6 +1705,7 @@ const layer: Layer.Layer<
   | FileSystem.FileSystem
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
+  | MemoryDerivedCache.MemoryDerivedCache
   | ServerConfig
 > = Layer.effect(
   ProviderAdapter.ProviderAdapterV2,
@@ -1699,6 +1733,15 @@ const layer: Layer.Layer<
 );
 
 export interface CodexAdapterV2Options {
+  /** L5 binds committed snapshot authority, including snapshot-only sessions. */
+  readonly currentMemoryPolicy?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<MemorySnapshot.MemorySnapshotPolicy>;
+  /** L5 supplies the manager's scoped credential publication stream. */
+  readonly mcpCredentialRotations?: Stream.Stream<{
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+  }>;
   readonly instanceId: ProviderInstanceId;
   readonly settings: CodexSettings;
   readonly environment: NodeJS.ProcessEnv;
@@ -1726,12 +1769,44 @@ export interface CodexAdapterV2Options {
   };
 }
 
+const withoutMemoryBody = (input: ProviderAdapter.ProviderAdapterV2TurnInput) => {
+  const { memoryContext: _body, ...rest } = input;
+  return rest;
+};
+
 export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   adapterOptions: CodexAdapterV2Options,
 ) {
+  const derivedCache = yield* MemoryDerivedCache.MemoryDerivedCache;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const memorySnapshots = Option.getOrUndefined(
+    yield* Effect.serviceOption(MemorySnapshot.MemorySnapshot),
+  );
+  const memoryRegistry = Option.getOrUndefined(
+    yield* Effect.serviceOption(McpSessionRegistry.McpSessionRegistry),
+  );
+  const currentMemoryPolicy = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      if (adapterOptions.currentMemoryPolicy)
+        return yield* adapterOptions.currentMemoryPolicy(threadId);
+      const config = yield* mcpSessions.read(threadId);
+      return config && memoryRegistry?.currentMemoryPolicy
+        ? ((yield* memoryRegistry.currentMemoryPolicy(config.providerSessionId)) ?? {
+            grant: "none" as const,
+            policyEpoch: -1,
+          })
+        : { grant: "none" as const, policyEpoch: -1 };
+    });
   const readMcpSession = (threadId: ThreadId | null) =>
-    threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
+    Effect.gen(function* () {
+      if (threadId === null) return undefined;
+      const config = yield* mcpSessions.read(threadId);
+      if (!config) return undefined;
+      const policy = memoryRegistry?.currentMemoryPolicy
+        ? yield* memoryRegistry.currentMemoryPolicy(config.providerSessionId)
+        : undefined;
+      return !policy || policy.grant === "none" ? { ...config, grantedScopes: [] } : config;
+    });
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
 
@@ -1764,18 +1839,108 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           settings: resolvedRuntime?.config ?? adapterOptions.settings,
           environment: resolvedRuntime?.environment ?? adapterOptions.environment,
         });
+        const memoryByThread = new Map<
+          string,
+          {
+            snapshot: NonNullable<ProviderAdapter.ProviderAdapterV2TurnInput["memoryContext"]>;
+            threadId: ThreadId;
+            runId: RunId;
+            generation: number;
+            unregister?: Effect.Effect<void>;
+          }
+        >();
+        let memoryGeneration = 0;
+        const restoredCompactions = new Set<string>();
+        const restorePermit = yield* Semaphore.make(1);
+        // Only successful native attachments enter this cache, including effective authority.
+        const attachmentKey = (config: McpProviderSession.McpProviderSessionConfig) => {
+          const { read, write, source } = McpProviderSession.memoryToolAvailability(config);
+          return `${config.providerSessionId}:${read}:${write}:${source}`;
+        };
+        const credentialsByThread = new Map<string, string>();
         const additionalContextByThread = yield* Ref.make(
           new Map<
             string,
             NonNullable<CodexTurnStartParamsWithCollaborationMode["additionalContext"]>
           >(),
         );
+        const dropMemoryBody = (nativeId: string) =>
+          Effect.gen(function* () {
+            memoryByThread.delete(nativeId);
+            yield* Ref.update(additionalContextByThread, (current) => {
+              const context = current.get(nativeId);
+              if (!context?.goat_memory) return current;
+              return new Map(current).set(nativeId, {
+                ...context,
+                goat_memory: { kind: "untrusted", value: "" },
+              });
+            });
+          });
+        const clearMemoryDelivery = (nativeId: string, appThreadId?: ThreadId) =>
+          Effect.gen(function* () {
+            const selected = memoryByThread.get(nativeId);
+            if (selected?.unregister) yield* selected.unregister;
+            yield* dropMemoryBody(nativeId);
+            if (appThreadId && memorySnapshots) yield* memorySnapshots.invalidate(appThreadId);
+          });
+        const retainMemory = Effect.fnUntraced(function* (
+          nativeId: string,
+          snapshot: MemoryContextSnapshot,
+          turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
+        ) {
+          const selected: NonNullable<ReturnType<typeof memoryByThread.get>> = {
+            snapshot,
+            threadId: turnInput.threadId,
+            runId: turnInput.runId,
+            generation: ++memoryGeneration,
+          };
+          memoryByThread.set(nativeId, selected);
+          selected.unregister = yield* derivedCache
+            .retain({
+              // Snapshot encoding plus its rendered additionalContext copy.
+              bytes:
+                new TextEncoder().encode(encodeMemorySnapshot(snapshot)).length +
+                new TextEncoder().encode(snapshot.renderedText).length,
+              release: Effect.gen(function* () {
+                if (memoryByThread.get(nativeId) === selected) yield* dropMemoryBody(nativeId);
+              }),
+            })
+            .pipe(Effect.provideService(Scope.Scope, scope));
+        });
         // Codex drops client developer messages during compaction but only
         // resends additionalContext when it changes. Restore the current entries.
-        const restoreAdditionalContext = (threadId: string) =>
+        const restoreAdditionalContext = (threadId: string, compactionId: string) =>
           Effect.gen(function* () {
-            const context = (yield* Ref.get(additionalContextByThread)).get(threadId);
-            if (!context) return;
+            const cachedContext = (yield* Ref.get(additionalContextByThread)).get(threadId);
+            if (!cachedContext) return;
+            const context = { ...cachedContext };
+            const selected = memoryByThread.get(threadId);
+            const restoreKey = `${threadId}:${compactionId}:${selected?.generation ?? memoryGeneration}`;
+            if (restoredCompactions.has(restoreKey)) return;
+            delete context.goat_memory;
+            if (selected && memorySnapshots) {
+              const snapshot = yield* memorySnapshots
+                .revalidate(
+                  selected.snapshot,
+                  { threadId: selected.threadId, runId: selected.runId },
+                  currentMemoryPolicy(selected.threadId),
+                )
+                .pipe(
+                  Effect.catch(() =>
+                    Effect.logWarning("Codex memory restoration unavailable.").pipe(
+                      Effect.as(undefined),
+                    ),
+                  ),
+                );
+              if (memoryByThread.get(threadId) !== selected) return;
+              if (snapshot) {
+                const validated = yield* Effect.try(() =>
+                  MemoryContext.validateMemoryContext(snapshot),
+                );
+                context.goat_memory = { kind: "untrusted", value: validated.renderedText };
+              } else yield* clearMemoryDelivery(threadId, selected.threadId);
+            } else yield* clearMemoryDelivery(threadId);
+            if (Object.keys(context).length === 0) return;
             yield* client.request("thread/inject_items", {
               threadId,
               // Restored as Codex sent them: application context as developer
@@ -1799,13 +1964,30 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     },
               ),
             });
+            restoredCompactions.add(restoreKey);
+            if (restoredCompactions.size > 256)
+              restoredCompactions.delete(restoredCompactions.values().next().value!);
           }).pipe(
+            restorePermit.withPermits(1),
+            Effect.onError(() => clearMemoryDelivery(threadId)),
             Effect.timeout("10 seconds"),
-            Effect.catch((cause) =>
-              Effect.logWarning("Failed to restore Codex additional context after compaction.", {
-                cause,
+            Effect.catch(() =>
+              Effect.logWarning("Failed to restore Codex additional context after compaction."),
+            ),
+          );
+        if (adapterOptions.mcpCredentialRotations)
+          yield* adapterOptions.mcpCredentialRotations.pipe(
+            Stream.runForEach((rotation) =>
+              Effect.gen(function* () {
+                if (rotation.providerInstanceId !== adapterOptions.instanceId) return;
+                for (const [nativeId, selected] of memoryByThread)
+                  if (selected.threadId === rotation.threadId)
+                    yield* clearMemoryDelivery(nativeId, rotation.threadId);
+                if (memorySnapshots) yield* memorySnapshots.invalidate(rotation.threadId);
+                // Attachment refresh is serialized with the next ordinary start. Existing stale tokens are denied immediately.
               }),
             ),
+            Effect.forkIn(scope),
           );
         const initialized = yield* Ref.make(false);
         // Threads share this app-server, and Codex rejects a second
@@ -2046,7 +2228,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ...(input.waitForNativeStart
                 ? { nativeStartReady: yield* Deferred.make<void>() }
                 : {}),
-              input: input.turnInput,
+              input: withoutMemoryBody(input.turnInput),
               projectionAppThread: input.turnInput.appThread,
               projectionThreadId: input.turnInput.threadId,
               projectionRunId: input.turnInput.runId,
@@ -4850,7 +5032,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (payload.item.type === "contextCompaction")
               // The notification callback runs on the input reader. Let it read
               // the injection response while the session-scoped request waits.
-              yield* restoreAdditionalContext(payload.threadId).pipe(
+              yield* restoreAdditionalContext(payload.threadId, payload.item.id).pipe(
                 Effect.forkIn(scope, { startImmediately: true }),
               );
             if (
@@ -6215,7 +6397,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           const now = yield* DateTime.now;
           const nativeId = `goal-command:${turnInput.attemptId}`;
           const context: ActiveCodexTurnContext = {
-            input: turnInput,
+            input: withoutMemoryBody(turnInput),
             projectionAppThread: turnInput.appThread,
             projectionThreadId: turnInput.threadId,
             projectionRunId: turnInput.runId,
@@ -6386,10 +6568,47 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         ) =>
           Effect.gen(function* () {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
-            const mcpSession = yield* mcpSessions.read(turnInput.threadId);
+            const mcpSession = yield* readMcpSession(turnInput.threadId);
+            if (mcpSession && credentialsByThread.get(threadId) !== attachmentKey(mcpSession)) {
+              // Reconfigure the same native conversation; stale credentials are already denied by the registry.
+              yield* client.raw.request("thread/resume", {
+                threadId,
+                excludeTurns: true,
+                ...codexThreadRuntimeParams({
+                  mcpSession,
+                  modelSelection: turnInput.modelSelection,
+                  runtimePolicy: turnInput.runtimePolicy,
+                }),
+              });
+              credentialsByThread.set(threadId, attachmentKey(mcpSession));
+            }
+            if (!mcpSession && credentialsByThread.has(threadId)) {
+              yield* client.raw.request("thread/resume", {
+                threadId,
+                excludeTurns: true,
+                config: {
+                  ...CODEX_THREAD_CONFIG,
+                  mcp_servers: { goat: { enabled: false } },
+                },
+              });
+              credentialsByThread.delete(threadId);
+            }
+            const memoryContext = turnInput.refreshMemoryContext
+              ? yield* turnInput.refreshMemoryContext()
+              : turnInput.memoryContext;
+            const clearMemoryContext =
+              memoryByThread.has(threadId) ||
+              (yield* Ref.get(additionalContextByThread)).get(threadId)?.goat_memory !== undefined;
+            yield* clearMemoryDelivery(threadId);
+            const validatedMemory =
+              memoryContext === undefined
+                ? undefined
+                : yield* Effect.try(() => MemoryContext.validateMemoryContext(memoryContext));
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
               codexInput,
+              memoryContext: validatedMemory,
+              clearMemoryContext,
               runtimePolicy: turnInput.runtimePolicy,
               modelSelection: turnInput.modelSelection,
               hasGoatMcp: mcpSession !== undefined,
@@ -6400,7 +6619,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             });
             yield* Ref.update(pendingRootTurns, (current) => {
               const updated = new Map(current);
-              updated.set(threadId, turnInput);
+              updated.set(threadId, withoutMemoryBody(turnInput));
               return updated;
             });
             yield* Ref.update(additionalContextByThread, (current) => {
@@ -6410,6 +6629,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               else next.delete(threadId);
               return next;
             });
+            if (validatedMemory) yield* retainMemory(threadId, memoryContext!, turnInput);
             const started = yield* client.request("turn/start", turnStartParams);
             yield* registerRootTurn({
               turnInput,
@@ -6418,6 +6638,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               waitForNativeStart: started.turn.startedAt === null,
             }).pipe(turnTerminalizationPermit.withPermits(1));
           }).pipe(
+            Effect.onError(() =>
+              getNativeThreadId(turnInput.providerThread).pipe(
+                Effect.flatMap((nativeId) => clearMemoryDelivery(nativeId, turnInput.threadId)),
+                Effect.ignore,
+              ),
+            ),
             Effect.ensuring(
               Effect.flatMap(getNativeThreadId(turnInput.providerThread), (threadId) =>
                 Ref.update(pendingRootTurns, (current) => {
@@ -6665,16 +6891,25 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             }),
           ensureThread: (threadInput) =>
             ensureInitialized.pipe(
-              Effect.andThen(mcpSessions.read(threadInput.threadId)),
+              Effect.andThen(readMcpSession(threadInput.threadId)),
               Effect.flatMap((mcpSession) =>
-                client.request(
-                  "thread/start",
-                  codexThreadRuntimeParams({
-                    mcpSession,
-                    modelSelection: threadInput.modelSelection,
-                    runtimePolicy: threadInput.runtimePolicy,
-                  }),
-                ),
+                client
+                  .request(
+                    "thread/start",
+                    codexThreadRuntimeParams({
+                      mcpSession,
+                      modelSelection: threadInput.modelSelection,
+                      runtimePolicy: threadInput.runtimePolicy,
+                    }),
+                  )
+                  .pipe(
+                    Effect.tap((response) =>
+                      Effect.sync(() => {
+                        if (mcpSession)
+                          credentialsByThread.set(response.thread.id, attachmentKey(mcpSession));
+                      }),
+                    ),
+                  ),
               ),
               Effect.map((response): OrchestrationV2ProviderThread =>
                 providerThreadFromCodexThread({
@@ -6698,14 +6933,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           resumeThread: (threadInput) =>
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
+              const resumedMcp = yield* readMcpSession(
+                threadInput.threadId ?? threadInput.providerThread.appThreadId,
+              );
               // excludeTurns is not in the generated request schema yet.
               const resume = client.raw.request("thread/resume", {
                 threadId: nativeThreadId,
                 excludeTurns: true,
                 ...codexThreadRuntimeParams({
-                  mcpSession: yield* readMcpSession(
-                    threadInput.threadId ?? threadInput.providerThread.appThreadId,
-                  ),
+                  mcpSession: resumedMcp,
                   ...(threadInput.modelSelection === undefined
                     ? {}
                     : { modelSelection: threadInput.modelSelection }),
@@ -6736,6 +6972,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
                 Effect.flatMap(decodeCodexResumeMetadata),
               );
+              if (resumedMcp) credentialsByThread.set(nativeThreadId, attachmentKey(resumedMcp));
+              else credentialsByThread.delete(nativeThreadId);
               // Codex follows a resume with a goal snapshot notification; the
               // run's first turn writes it if it differs from the stored goal.
               return {
@@ -6765,21 +7003,48 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           compactThread: (turnInput) =>
             Effect.gen(function* () {
               const threadId = yield* getNativeThreadId(turnInput.providerThread);
+              const previous = (yield* Ref.get(additionalContextByThread)).get(threadId);
+              const fresh = turnInput.refreshMemoryContext
+                ? yield* turnInput.refreshMemoryContext()
+                : turnInput.memoryContext;
+              const validated =
+                fresh === undefined
+                  ? undefined
+                  : yield* Effect.try(() => MemoryContext.validateMemoryContext(fresh));
+              yield* clearMemoryDelivery(threadId);
+              const context = { ...previous };
+              delete context.goat_memory;
+              if (fresh && validated)
+                context.goat_memory = { kind: "untrusted", value: validated.renderedText };
+              yield* Ref.update(additionalContextByThread, (current) =>
+                new Map(current).set(threadId, context),
+              );
+              if (fresh && validated) yield* retainMemory(threadId, fresh, turnInput);
               yield* Ref.update(pendingRootTurns, (current) =>
-                new Map(current).set(threadId, turnInput),
+                new Map(current).set(threadId, withoutMemoryBody(turnInput)),
               );
               // Cleared on interrupt too, as startTurn does: an interrupted start
               // must not adopt the native turn that a late turn/started reports.
               yield* client.request("thread/compact/start", { threadId }).pipe(
                 Effect.onError(() =>
-                  Ref.update(pendingRootTurns, (current) => {
-                    const next = new Map(current);
-                    next.delete(threadId);
-                    return next;
-                  }),
+                  clearMemoryDelivery(threadId, turnInput.threadId).pipe(
+                    Effect.andThen(
+                      Ref.update(pendingRootTurns, (current) => {
+                        const next = new Map(current);
+                        next.delete(threadId);
+                        return next;
+                      }),
+                    ),
+                  ),
                 ),
               );
             }).pipe(
+              Effect.onError(() =>
+                getNativeThreadId(turnInput.providerThread).pipe(
+                  Effect.flatMap((nativeId) => clearMemoryDelivery(nativeId, turnInput.threadId)),
+                  Effect.ignore,
+                ),
+              ),
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterTurnStartError({
@@ -6901,6 +7166,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           unloadThread: (unloadInput) =>
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
+              yield* clearMemoryDelivery(nativeThreadId);
+              credentialsByThread.delete(nativeThreadId);
+              yield* Ref.update(additionalContextByThread, (current) => {
+                const next = new Map(current);
+                next.delete(nativeThreadId);
+                return next;
+              });
               yield* client.request("thread/unsubscribe", { threadId: nativeThreadId });
             }).pipe(
               Effect.mapError((cause) =>
@@ -6916,6 +7188,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           interruptTurn: (requestedInput) =>
             Effect.gen(function* () {
               const nativeThreadId = requestedInput.providerThread.nativeThreadRef?.nativeId;
+              if (nativeThreadId)
+                yield* clearMemoryDelivery(
+                  nativeThreadId,
+                  requestedInput.providerThread.appThreadId ?? undefined,
+                );
               const retryHold = nativeThreadId == null ? undefined : retryHolds.get(nativeThreadId);
               if (
                 nativeThreadId != null &&

@@ -198,6 +198,7 @@ interface PendingCode {
   readonly codeChallenge: string;
   readonly resource: string;
   readonly access: AuthMcpClientAccess;
+  readonly memoryScopes: ReadonlyArray<"memory:read" | "memory:write">;
   readonly expiresAtMs: number;
 }
 
@@ -405,7 +406,11 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => undefined),
     );
 
-  const mintCode = (authorization: AuthorizationRequest, access: AuthMcpClientAccess) =>
+  const mintCode = (
+    authorization: AuthorizationRequest,
+    access: AuthMcpClientAccess,
+    memoryScopes: ReadonlyArray<"memory:read" | "memory:write">,
+  ) =>
     Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       const code = Buffer.from(yield* crypto.randomBytes(32).pipe(Effect.orDie)).toString(
@@ -422,6 +427,7 @@ const make = Effect.gen(function* () {
           codeChallenge: authorization.codeChallenge,
           resource: authorization.resource,
           access,
+          memoryScopes: [...memoryScopes],
           expiresAtMs: now + AUTHORIZATION_CODE_TTL_MS,
         });
         return next;
@@ -433,25 +439,27 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const { decision } = input;
       if (decision._tag === "pairing-code") {
-        yield* environmentAuth.consumeMcpApprovalCode(decision.code, decision.access).pipe(
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
-            Effect.logError("MCP approval code check failed.", { cause }).pipe(
-              Effect.andThen(
-                Effect.fail(
-                  new McpOAuthPageError({
-                    description: "The code could not be checked. Try again.",
-                  }),
+        yield* environmentAuth
+          .consumeMcpApprovalCode(decision.code, decision.access, decision.memoryScopes)
+          .pipe(
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
+              Effect.logError("MCP approval code check failed.", { cause }).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new McpOAuthPageError({
+                      description: "The code could not be checked. Try again.",
+                    }),
+                  ),
                 ),
               ),
             ),
-          ),
-        );
+          );
       } else {
         const session = yield* approvingBrowserSession(input.request, input.authorization);
         if (
           session === undefined ||
           !timingSafeEqualBase64Url(decision.csrfToken, session.csrfToken) ||
-          !EnvironmentAuth.mcpClientScopes(decision.access).every((scope) =>
+          !EnvironmentAuth.mcpClientScopes(decision.access, decision.memoryScopes).every((scope) =>
             session.scopes.includes(scope),
           )
         ) {
@@ -460,7 +468,11 @@ const make = Effect.gen(function* () {
           });
         }
       }
-      const code = yield* mintCode(input.authorization, decision.access);
+      const code = yield* mintCode(
+        input.authorization,
+        decision.access,
+        decision.memoryScopes ?? [],
+      );
       yield* Effect.logInfo("Approved an MCP client sign-in.", {
         client: input.authorization.client.name,
         access: decision.access,
@@ -522,6 +534,7 @@ const make = Effect.gen(function* () {
         .issueMcpClientSession({
           label: pending.clientName,
           access: pending.access,
+          memoryScopes: pending.memoryScopes,
           client: deriveAuthClientMetadata({ request }),
         })
         .pipe(
@@ -537,7 +550,9 @@ const make = Effect.gen(function* () {
         access_token: issued.token,
         token_type: "Bearer",
         expires_in: Math.max(0, Math.floor((issued.expiresAt.epochMilliseconds - now) / 1000)),
-        scope: encodeOAuthScope(EnvironmentAuth.mcpClientScopes(pending.access)),
+        scope: encodeOAuthScope(
+          EnvironmentAuth.mcpClientScopes(pending.access, pending.memoryScopes),
+        ),
       };
     });
 
@@ -571,6 +586,10 @@ export const layerMcpClientAuthenticator = Layer.effect(
             Clock.currentTimeMillis.pipe(
               Effect.map((issuedAt): McpInvocationContext.McpInvocationScope => ({
                 environmentId,
+                ...(client.grantedScopes === undefined
+                  ? {}
+                  : { grantedScopes: client.grantedScopes }),
+                ...(client.reauthorize === undefined ? {} : { reauthorize: client.reauthorize }),
                 requestNamespace: `client:${client.sessionId}`,
                 thread: undefined,
                 client: {
@@ -580,6 +599,11 @@ export const layerMcpClientAuthenticator = Layer.effect(
                   approvals: client.approvals,
                 },
                 capabilities: new Set<McpInvocationContext.McpCapability>([
+                  ...(client.grantedScopes?.some(
+                    (scope) => scope === "memory:read" || scope === "memory:write",
+                  )
+                    ? ["memory" as const]
+                    : []),
                   "orchestration",
                   "worktree",
                   "pull-requests",

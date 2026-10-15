@@ -1,3 +1,4 @@
+import * as MemoryDerivedCache from "../memory/MemoryDerivedCache.ts";
 import type { SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -434,7 +435,12 @@ it.effect.each(["child completion", "scheduled message", "user steering"] as con
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),

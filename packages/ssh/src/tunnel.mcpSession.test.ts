@@ -45,7 +45,7 @@ describe("remote MCP session script", () => {
     NodeFS.rmSync(home, { recursive: true, force: true });
   });
 
-  const fakeCli = (rejectCeiling: boolean, issuedToken = token) => `#!/bin/sh
+  const fakeCli = (rejectCeiling: boolean, issuedToken = token, rejectMemory = false) => `#!/bin/sh
 set -eu
 if [ "$1" = --version ]; then printf 'goat v${archiveVersion}\\n'; exit 0; fi
 if [ "$1" = __ssh-helper ] && [ "$2" = protocol ]; then
@@ -62,6 +62,7 @@ else
 fi
 printf '%s\\n' "$@" > "$ARGS"
 for ARG in "$@"; do
+  if [ "$ARG" = "memory:read" ] && [ "${rejectMemory ? "1" : "0"}" = "1" ]; then exit 2; fi
   if [ "$ARG" = "--runtime-mode-ceiling" ] && [ "${rejectCeiling ? "1" : "0"}" = "1" ]; then
     if [ -f "$HOME/change-runner" ]; then printf '# changed during auth\\n' >> "$HOME/.goat/ssh-launch/${stateKey}/run-t3.sh"; fi
     printf 'unknown option: --runtime-mode-ceiling\\n' >&2
@@ -73,8 +74,8 @@ ${JSON.stringify({ sessionId: "fake-session-id", token: issuedToken, expiresAt, 
 JSON
 `;
 
-  const installFakeRunner = (rejectCeiling: boolean) => {
-    const script = fakeCli(rejectCeiling);
+  const installFakeRunner = (rejectCeiling: boolean, rejectMemory = false) => {
+    const script = fakeCli(rejectCeiling, token, rejectMemory);
     const directory = NodePath.join(home, ".goat/runtime/goat/versions", archiveVersion);
     NodeFS.mkdirSync(directory, { recursive: true });
     NodeFS.writeFileSync(NodePath.join(directory, "goat"), script, { mode: 0o700 });
@@ -98,10 +99,11 @@ JSON
     runtimeModeCeiling: string | null = options.runtimeModeCeiling,
     retainedSha = NodeCrypto.createHash("sha256").update(NodeFS.readFileSync(runner)).digest("hex"),
     approvals = false,
+    memoryScopes: ReadonlyArray<"memory:read" | "memory:write"> = [],
   ) => {
     const script = buildRemoteMcpSessionScript(
       stateKey,
-      { ...options, runtimeModeCeiling, ...(approvals ? { approvals: true } : {}) },
+      { ...options, runtimeModeCeiling, memoryScopes, ...(approvals ? { approvals: true } : {}) },
       {
         archiveVersion,
         keepExistingRunner,
@@ -203,6 +205,43 @@ JSON
         ...baseArgs().slice(ttlAt),
       ]);
     }),
+  );
+
+  it.effect("issues explicit read and read-write task scopes without widening none", () =>
+    Effect.gen(function* () {
+      for (const memoryScopes of [[], ["memory:read"], ["memory:read", "memory:write"]] as const) {
+        installFakeRunner(false);
+        NodeFS.rmSync(NodePath.join(home, "call-1.args"), { force: true });
+        yield* runSession(true, options.runtimeModeCeiling, undefined, false, memoryScopes);
+        const ttlAt = expectedArgs.indexOf("--ttl");
+        expect(receivedArgs(1)).toEqual([
+          ...baseArgs().slice(0, ttlAt),
+          ...memoryScopes.flatMap((scope) => ["--scope", scope]),
+          ...baseArgs().slice(ttlAt),
+          "--runtime-mode-ceiling",
+          options.runtimeModeCeiling,
+        ]);
+      }
+    }),
+  );
+
+  it.effect(
+    "never retries memory issuance after an older CLI rejects the scope or runtime ceiling",
+    () =>
+      Effect.gen(function* () {
+        for (const [rejectCeiling, rejectMemory] of [
+          [false, true],
+          [true, false],
+        ] as const) {
+          installFakeRunner(rejectCeiling, rejectMemory);
+          NodeFS.rmSync(NodePath.join(home, "call-1.args"), { force: true });
+          const result = yield* runSession(true, options.runtimeModeCeiling, undefined, false, [
+            "memory:read",
+          ]).pipe(Effect.result);
+          expect(result._tag).toBe("Failure");
+          expect(() => receivedArgs(2)).toThrow();
+        }
+      }),
   );
 
   it.effect("issues one session with the remote default when no ceiling is requested", () =>

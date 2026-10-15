@@ -7,6 +7,7 @@ import { assert, it } from "@effect/vitest";
 import {
   EnvironmentId,
   EventId,
+  OrchestratorMcpFailure,
   type OrchestrationV2StoredEvent,
   MessageId,
   NodeId,
@@ -29,7 +30,9 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlError from "effect/sql/SqlError";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -43,6 +46,7 @@ import Migration0062 from "../persistence/Migrations/064_RemoteReports.ts";
 import Migration0063 from "../persistence/Migrations/065_RemoteDispatches.ts";
 import Migration0065 from "../persistence/Migrations/067_RemoteDispatchQuestions.ts";
 import Migration0068 from "../persistence/Migrations/069_RemoteReportRelay.ts";
+import Migration0073 from "../persistence/Migrations/074_MemoryTaskGrantCeiling.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
@@ -106,6 +110,8 @@ const fixture = Effect.gen(function* () {
   yield* Migration0063;
   yield* Migration0065;
   yield* Migration0068;
+  yield* sql`CREATE TABLE scheduled_tasks (task_id TEXT PRIMARY KEY)`;
+  yield* Migration0073;
   const now = yield* DateTime.now;
   let shell: OrchestrationV2ThreadShell | null = liveThreadShell(threadId, {
     activeRunId: parentRunId,
@@ -387,6 +393,41 @@ const fixture = Effect.gen(function* () {
   };
 });
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
+const encodeFailure = Schema.encodeEffect(OrchestratorMcpFailure);
+const isRemoteDispatchError = Schema.is(RemoteDispatchCoordinator.RemoteDispatchError);
+
+it.effect(
+  "preserves a pre-registration storage failure without exposing its cause on the wire",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      // Reproduce the stale fixture schema without changing caller authority or SSH behavior.
+      yield* f.sql`ALTER TABLE remote_dispatches DROP COLUMN memory_grant_ceiling`;
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const result = yield* service.delegateTask(scope, input).pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        if (result._tag !== "Failure") return;
+        const error = result.failure;
+        assert.equal(error.code, "orchestration_error");
+        assert.ok(isRemoteDispatchError(error.cause));
+        assert.equal(error.cause.stage, "storage");
+        assert.ok(SqlError.isSqlError(error.cause.cause));
+        const driverCause = error.cause.cause.reason.cause;
+        assert.ok(driverCause instanceof Error);
+        assert.match(driverCause.message, /no column named memory_grant_ceiling/u);
+        const encoded = yield* encodeFailure(error);
+        assert.deepStrictEqual(encoded, {
+          _tag: "OrchestratorMcpFailure",
+          code: "orchestration_error",
+          message: "Remote dispatch failed before task registration.",
+        });
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(error)), encoded);
+        assert.equal(f.launches.length, 0);
+        assert.equal(f.projection.subagents.length, 0);
+      }).pipe(Effect.provide(f.layer));
+    }).pipe(Effect.provide(database)),
+);
 
 it.effect(
   "remote async delegation, retries and cancellation do not await optional task metadata",

@@ -2960,3 +2960,169 @@ it.effect(
       );
     }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+it.effect("provider memory policy starts unready and publishes default-on only after load", () =>
+  Effect.gen(function* () {
+    const service = yield* ServerSettingsModule.ServerSettingsService;
+    const policy = yield* ServerSettingsModule.MemoryProviderCommittedPolicy;
+    assert.deepStrictEqual(yield* policy.read, {
+      policyReady: false,
+      enableAgentMemoryAccess: false,
+      epoch: 0,
+    });
+    yield* service.start;
+    assert.deepStrictEqual(yield* policy.read, {
+      policyReady: true,
+      enableAgentMemoryAccess: true,
+      epoch: 1,
+    });
+    yield* service.updateSettings({ enableAgentMemoryAccess: false });
+    assert.deepStrictEqual(yield* policy.read, {
+      policyReady: true,
+      enableAgentMemoryAccess: false,
+      epoch: 2,
+    });
+    yield* service.updateSettings({ enableAgentMemoryAccess: false });
+    assert.strictEqual((yield* policy.read).epoch, 2);
+    yield* service.updateSettings({ standingInstructions: "synthetic policy test" });
+    assert.strictEqual((yield* policy.read).epoch, 2);
+    yield* service.updateSettings({ enableAgentMemoryAccess: true });
+    assert.strictEqual((yield* policy.read).epoch, 3);
+  }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect(
+  "provider policy and rotation are visible in SQL while settings cleanup holds its lock",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let hold = false;
+      const controlledFs = FileSystem.FileSystem.of({
+        ...fs,
+        remove: (path, options) =>
+          Effect.gen(function* () {
+            if (hold && path.includes("settings.json.")) {
+              hold = false;
+              yield* Deferred.succeed(entered, undefined);
+              yield* Deferred.await(release);
+            }
+            yield* fs.remove(path, options);
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const settings = yield* ServerSettingsModule.ServerSettingsService;
+        const policy = yield* ServerSettingsModule.MemoryProviderCommittedPolicy;
+        const sql = yield* SqlClient.SqlClient;
+        yield* settings.start;
+        const rotations = yield* policy.subscribeRotations;
+        const observed = yield* rotations.pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+        hold = true;
+        const writer = yield* settings
+          .updateSettings({ enableAgentMemoryAccess: false })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        assert.deepStrictEqual(yield* sql.withTransaction(policy.read), {
+          policyReady: true,
+          enableAgentMemoryAccess: false,
+          epoch: 2,
+        });
+        assert.deepStrictEqual(yield* Fiber.join(observed), [
+          { policyReady: true, enableAgentMemoryAccess: true, epoch: 1 },
+          { policyReady: true, enableAgentMemoryAccess: false, epoch: 2 },
+        ]);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(writer);
+      }).pipe(
+        Effect.provide(layerServerSettings()),
+        Effect.provideService(FileSystem.FileSystem, controlledFs),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("invalid external provider settings retain the last committed memory policy", () =>
+  withRegisteredSettingsWatchers((awaitWatch, notify) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const config = yield* ServerConfig.ServerConfig;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const policy = yield* ServerSettingsModule.MemoryProviderCommittedPolicy;
+      yield* fs.writeFileString(
+        config.settingsPath,
+        JSON.stringify({ enableAgentMemoryAccess: false }),
+      );
+      yield* service.start;
+      yield* awaitWatch(path.dirname(config.settingsPath), 2);
+      const committed = yield* policy.read;
+      const changes = yield* service.subscribeChanges;
+      yield* fs.writeFileString(
+        config.settingsPath,
+        JSON.stringify({ enableAgentMemoryAccess: true, defaultTheme: 42 }),
+      );
+      yield* notify(config.settingsPath);
+      yield* TestClock.adjust(100);
+      yield* changes.pipe(Stream.runHead);
+      assert.deepStrictEqual(yield* policy.read, committed);
+      assert.strictEqual((yield* service.getSettings).enableAgentMemoryAccess, false);
+      const repaired = yield* service.subscribeChanges;
+      yield* fs.writeFileString(
+        config.settingsPath,
+        JSON.stringify({ enableAgentMemoryAccess: true }),
+      );
+      yield* notify(config.settingsPath);
+      yield* TestClock.adjust(100);
+      yield* repaired.pipe(Stream.runHead);
+      assert.deepStrictEqual(yield* policy.read, {
+        policyReady: true,
+        enableAgentMemoryAccess: true,
+        epoch: committed.epoch + 1,
+      });
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("invalid initial settings leave provider memory policy unready", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const config = yield* ServerConfig.ServerConfig;
+    yield* fs.writeFileString(config.settingsPath, '{ "enableAgentMemoryAccess":');
+    const service = yield* ServerSettingsModule.ServerSettingsService;
+    const policy = yield* ServerSettingsModule.MemoryProviderCommittedPolicy;
+    yield* service.start;
+    assert.deepStrictEqual(yield* policy.read, {
+      policyReady: false,
+      enableAgentMemoryAccess: false,
+      epoch: 0,
+    });
+    assert.strictEqual((yield* service.getSettings).enableAgentMemoryAccess, false);
+  }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect("deleted provider settings retain the committed disabled policy and epoch", () =>
+  withRegisteredSettingsWatchers((awaitWatch, notify) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const config = yield* ServerConfig.ServerConfig;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const policy = yield* ServerSettingsModule.MemoryProviderCommittedPolicy;
+      yield* fs.writeFileString(
+        config.settingsPath,
+        JSON.stringify({ enableAgentMemoryAccess: false }),
+      );
+      yield* service.start;
+      yield* awaitWatch(path.dirname(config.settingsPath), 2);
+      const committed = yield* policy.read;
+      const changes = yield* service.subscribeChanges;
+      yield* fs.remove(config.settingsPath);
+      yield* notify(config.settingsPath);
+      yield* TestClock.adjust(100);
+      yield* changes.pipe(Stream.runHead);
+      assert.deepStrictEqual(yield* policy.read, committed);
+      assert.strictEqual((yield* service.getSettings).enableAgentMemoryAccess, false);
+      assert.strictEqual(yield* fs.exists(config.settingsPath), false);
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
+);
