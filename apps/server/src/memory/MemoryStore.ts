@@ -6700,15 +6700,17 @@ const make = Effect.gen(function* () {
         credential_version: number;
         status: M.MemoryHubMemberView["status"];
         joined_at: number | null;
-      }>`SELECT m.environment,m.credential_version,m.joined_at,
+      }>`WITH pending AS MATERIALIZED (
+        SELECT json_extract(admin_json,'$.action.environmentId') AS environment,
+          json_extract(admin_json,'$.memberVersion') AS version,
+          json_extract(admin_json,'$.result.view.settings.memorySpaceId') AS space
+        FROM memory_outbox WHERE space='_admin' AND kind='admin' AND status='pending'
+          AND json_extract(admin_json,'$.stage') IN ('activated','ready')
+          AND json_extract(admin_json,'$.action.action') IN ('provisionMember','rotateMemberCredential')
+      ) SELECT m.environment,m.credential_version,m.joined_at,
       CASE WHEN EXISTS (
-        SELECT 1 FROM memory_outbox AS a
-        WHERE a.space='_admin' AND a.kind='admin' AND a.status='pending'
-        AND json_extract(a.admin_json,'$.stage') IN ('activated','ready')
-        AND json_extract(a.admin_json,'$.action.action') IN ('provisionMember','rotateMemberCredential')
-        AND json_extract(a.admin_json,'$.action.environmentId')=m.environment
-        AND json_extract(a.admin_json,'$.memberVersion')=m.credential_version
-        AND json_extract(a.admin_json,'$.result.view.settings.memorySpaceId')=m.space
+        SELECT 1 FROM pending AS p WHERE p.environment=m.environment
+          AND p.version=m.credential_version AND (p.space IS NULL OR p.space=m.space)
       ) THEN 'pending_ack' ELSE 'active' END AS status
       FROM memory_hub_members AS m WHERE m.space=${space} AND m.status='active'
       ORDER BY m.environment LIMIT ${M.MEMORY_HUB_MAX_MEMBERS}`,
@@ -6892,15 +6894,15 @@ const make = Effect.gen(function* () {
     const expectedAction =
       input.next === "revoked"
         ? "revokeMember"
-        : input.expectedCredentialVersion === null || old?.status === "revoked"
+        : input.expectedCredentialVersion === null
           ? "provisionMember"
           : "rotateMemberCredential";
     if (
       record.action.action !== expectedAction &&
       !(
-        record.action.action === "rotateMemberCredential" &&
-        old?.status === "revoked" &&
-        input.next !== "revoked"
+        record.action.action === "provisionMember" &&
+        input.next !== "revoked" &&
+        (old?.status === "revoked" || record.memberVersion !== null)
       ) &&
       !(
         record.action.action === "configure" &&

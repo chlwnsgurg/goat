@@ -47,42 +47,45 @@ function options(
     isActive: () => true,
   };
 }
-it("provisions on the hub, installs on the member, then acknowledges on the hub", async () => {
-  const update = vi.fn(async () => result);
-  await memoryDeviceFlow(options(update)).run();
-  expect(update.mock.calls).toEqual([
-    [
-      hub,
-      {
-        action: "provisionMember",
-        environmentId: device,
-        requestId: requestIds[0],
-        expectedVersion: 4,
-      },
-    ],
-    [
-      device,
-      {
-        action: "installCredential",
-        hubEnvironmentId: hub,
-        endpoint: "https://hub.example",
-        memorySpaceId: result.credential!.memorySpaceId,
-        credential: result.credential!.credential,
-        requestId: requestIds[1],
-        expectedVersion: 8,
-      },
-    ],
-    [
-      hub,
-      {
-        action: "acknowledgeCredential",
-        credentialRequestId: requestIds[0],
-        requestId: requestIds[2],
-        expectedVersion: 5,
-      },
-    ],
-  ]);
-});
+it.each(["provisionMember", "rotateMemberCredential"] as const)(
+  "%s on the hub, installs on the member, then acknowledges on the hub",
+  async (action) => {
+    const update = vi.fn(async () => result);
+    await memoryDeviceFlow({ ...options(update), action }).run();
+    expect(update.mock.calls).toEqual([
+      [
+        hub,
+        {
+          action,
+          environmentId: device,
+          requestId: requestIds[0],
+          expectedVersion: 4,
+        },
+      ],
+      [
+        device,
+        {
+          action: "installCredential",
+          hubEnvironmentId: hub,
+          endpoint: "https://hub.example",
+          memorySpaceId: result.credential!.memorySpaceId,
+          credential: result.credential!.credential,
+          requestId: requestIds[1],
+          expectedVersion: 8,
+        },
+      ],
+      [
+        hub,
+        {
+          action: "acknowledgeCredential",
+          credentialRequestId: requestIds[0],
+          requestId: requestIds[2],
+          expectedVersion: 5,
+        },
+      ],
+    ]);
+  },
+);
 it.each(["provisionMember", "installCredential", "acknowledgeCredential"])(
   "retries %s with the same bytes and does not repeat completed stages",
   async (stage) => {

@@ -68,7 +68,7 @@ export function MemoryAdministration({
   const [endpoint, setEndpoint] = useState(connection?.httpBaseUrl ?? "");
   const [confirm, setConfirm] = useState<"disable" | "add" | "rotate" | EnvironmentId | null>(null);
   const members = hub?.members ?? [];
-  const knownMembers = members.map((member) => member.environmentId);
+  const knownMembers = new Set(members.map((member) => member.environmentId));
   const intent = useRef<MemoryHubSettingsUpdateInput | null>(null);
   const ownerIntent = useRef<Parameters<typeof updateOwner>[0]["input"] | null>(null);
   const flow = useRef<ReturnType<typeof memoryDeviceFlow> | null>(null);
@@ -426,12 +426,12 @@ export function MemoryAdministration({
                 {picker(
                   device,
                   setDevice,
-                  candidates.filter((e) => !knownMembers.includes(e.environmentId)),
+                  candidates.filter((e) => !knownMembers.has(e.environmentId)),
                   "Device",
                 )}
                 <Button
                   size="sm"
-                  disabled={blocked || !device || knownMembers.includes(device)}
+                  disabled={blocked || !device || knownMembers.has(device)}
                   onClick={() => setConfirm("add")}
                 >
                   Add
