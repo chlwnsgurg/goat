@@ -7902,7 +7902,9 @@ it.effect.each(missingCheckpointCases)(
         for (const table of tables)
           rows.push({
             table: table.name,
-            rows: yield* sql.unsafe(`SELECT * FROM "${table.name}" ORDER BY rowid`),
+            rows: (yield* sql.unsafe(`SELECT * FROM "${table.name}"`)).toSorted((a, b) =>
+              JSON.stringify(a).localeCompare(JSON.stringify(b)),
+            ),
           });
         return rows;
       });
