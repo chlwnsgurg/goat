@@ -1,6 +1,6 @@
 import * as M from "@goat/contracts";
 import * as Schema from "effect/Schema";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import {
   MEMORY_IMPORT_RECOVERY_TTL_MS as TTL,
   MemoryImportRecoveryHandle,
@@ -737,4 +737,128 @@ describe("observable import progress and retry", () => {
       }
     },
   );
+});
+
+describe("import subscription isolation and admission", () => {
+  it("isolates a throwing listener while publishing successful completion to the next", async () => {
+    const f = workflowFixture(33);
+    await f.ready();
+    await Promise.resolve();
+    const error = new Error("broken subscriber");
+    const report = vi.spyOn(console, "error").mockImplementation(() => {});
+    const snapshots: ReturnType<typeof f.workflow.getSnapshot>[] = [];
+    const unsubscribe = f.workflow.subscribe(() => {
+      throw error;
+    });
+    f.workflow.subscribe(() => snapshots.push(f.workflow.getSnapshot()));
+    try {
+      await f.workflow.apply();
+      expect(f.calls.filter((input) => input.action === "apply")).toHaveLength(2);
+      expect(f.workflow.getSnapshot()).toMatchObject({ phase: "completed", settledChunks: 2 });
+      expect(snapshots.at(-1)).toBe(f.workflow.getSnapshot());
+      expect(report).toHaveBeenCalledWith("Memory import listener failed", error);
+    } finally {
+      unsubscribe();
+      report.mockRestore();
+    }
+  });
+
+  it.each(
+    (["invalidate", "destination", "stop", "revoke"] as const).flatMap((action) =>
+      [0, 1].map((admittedChunks) => ({ action, admittedChunks })),
+    ),
+  )(
+    "does not admit an apply after $action in applying notification with $admittedChunks chunks already sent",
+    async ({ action, admittedChunks }) => {
+      const f = workflowFixture(33);
+      await f.ready();
+      let observed = false;
+      f.workflow.subscribe(() => {
+        const snapshot = f.workflow.getSnapshot();
+        if (observed || snapshot.phase !== "applying" || snapshot.settledChunks !== admittedChunks)
+          return;
+        observed = true;
+        if (action === "invalidate") f.workflow.invalidate();
+        if (action === "destination")
+          f.workflow.invalidate({
+            environmentId: M.EnvironmentId.make("other-device"),
+            memorySpaceId: M.MemorySpaceId.make(uuid(900)),
+            session: "other-session",
+          });
+        if (action === "stop") f.workflow.stop();
+        if (action === "revoke") f.setPermitted(false);
+      });
+      await f.workflow.apply();
+      expect(observed).toBe(true);
+      expect(f.calls.filter((input) => input.action === "apply")).toHaveLength(admittedChunks);
+      expect(await f.store.load(destination)).toBeNull();
+      expect(f.workflow.getSnapshot().phase).toBe(
+        action === "invalidate" || action === "destination" ? "idle" : "partial",
+      );
+    },
+  );
+
+  it.each(["invalidate", "destination", "stop", "revoke"] as const)(
+    "keeps a recovery handle without sending status after %s in checking notification",
+    async (action) => {
+      const f = workflowFixture(1);
+      await f.store.save(destination, operationId);
+      f.workflow.subscribe(() => {
+        if (f.workflow.getSnapshot().phase !== "checking") return;
+        if (action === "invalidate") f.workflow.invalidate();
+        if (action === "destination")
+          f.workflow.invalidate({ ...fence, environmentId: M.EnvironmentId.make("other-device") });
+        if (action === "stop") f.workflow.stop();
+        if (action === "revoke") f.setPermitted(false);
+      });
+      await f.workflow.recover();
+      expect(f.calls).toHaveLength(0);
+      expect((await f.store.load(destination))?.operationId).toBe(operationId);
+      expect(f.workflow.getSnapshot().phase).toBe(
+        action === "invalidate" || action === "destination" ? "idle" : "recovery",
+      );
+    },
+  );
+
+  it("preserves the new idle generation when receipt notification invalidates recovery", async () => {
+    const f = workflowFixture(1);
+    await f.store.save(destination, operationId);
+    let observed = false;
+    f.workflow.subscribe(() => {
+      if (f.workflow.getSnapshot().receipt === null) return;
+      observed = true;
+      f.workflow.invalidate();
+    });
+    await f.workflow.recover();
+    await Promise.resolve();
+    expect(observed).toBe(true);
+    expect(f.workflow.getSnapshot()).toEqual(initialMemoryImportWorkflowState);
+    expect(f.calls.map((input) => input.action)).toEqual(["status"]);
+  });
+
+  it("coalesces synchronous changes into the final snapshot and excludes removed listeners", async () => {
+    const f = workflowFixture(1);
+    const snapshots: ReturnType<typeof f.workflow.getSnapshot>[] = [];
+    const removed = vi.fn();
+    let unsubscribeRemoved = () => {};
+    f.workflow.subscribe(() => {
+      snapshots.push(f.workflow.getSnapshot());
+      unsubscribeRemoved();
+    });
+    unsubscribeRemoved = f.workflow.subscribe(removed);
+    f.workflow.stop();
+    f.workflow.invalidate();
+    expect(snapshots).toHaveLength(0);
+    await Promise.resolve();
+    expect(snapshots).toEqual([f.workflow.getSnapshot()]);
+    expect(snapshots[0]).toEqual(initialMemoryImportWorkflowState);
+    expect(removed).not.toHaveBeenCalled();
+    const removedBeforeFlush = vi.fn();
+    const unsubscribe = f.workflow.subscribe(removedBeforeFlush);
+    f.workflow.stop();
+    unsubscribe();
+    await Promise.resolve();
+    expect(removedBeforeFlush).not.toHaveBeenCalled();
+    expect(snapshots.at(-1)).toBe(f.workflow.getSnapshot());
+  });
 });

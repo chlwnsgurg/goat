@@ -209,21 +209,42 @@ export function createMemoryImportWorkflow(options: {
   const current = (token: number) => token === generation;
   const permitted = () => options.canImport(fence);
   const listeners = new Set<() => void>();
+  let notificationQueued = false;
+  const notify = () => {
+    if (notificationQueued) return;
+    notificationQueued = true;
+    queueMicrotask(() => {
+      notificationQueued = false;
+      for (const listener of Array.from(listeners)) {
+        if (!listeners.has(listener)) continue;
+        try {
+          listener();
+        } catch (error) {
+          // This Promise-based client store reports subscriber failures outside workflow control flow.
+          // @effect-diagnostics-next-line globalConsole:off
+          console.error("Memory import listener failed", error);
+        }
+      }
+    });
+  };
   const setState = (patch: Partial<MemoryImportWorkflowState>) => {
     const next = { ...state, ...patch };
     if (JSON.stringify(next) === JSON.stringify(state)) return;
     state = freezeSnapshot(next);
-    const notifying = Array.from(listeners);
-    for (const listener of notifying) {
-      if (listeners.has(listener)) listener();
-    }
+    notify();
   };
   const progress = (event: MemoryImportProgressEvent) =>
     setState(reduceMemoryImportProgress(state, event));
   let chunkIndex = 0;
-  const request = (input: MemoryImportProviderInput) => {
-    if (!permitted()) throw new Error("Memory import is unavailable");
-    return options.request(fence.environmentId, input);
+  const canSend = (token: number, destination: MemoryImportFence) =>
+    current(token) &&
+    !state.stopped &&
+    sameMemoryImportFence(destination, fence) &&
+    options.canImport(destination);
+  const request = (input: MemoryImportProviderInput, destination = { ...fence }) => {
+    if (!options.canImport(destination) || !sameMemoryImportFence(destination, fence))
+      throw new Error("Memory import is unavailable");
+    return options.request(destination.environmentId, input);
   };
   function invalidate(next = fence) {
     fence = { ...next };
@@ -287,21 +308,31 @@ export function createMemoryImportWorkflow(options: {
           );
           return;
         }
-        if (!current(token) || state.stopped || !permitted()) {
+        if (!canSend(token, destination)) {
           await options.recovery.clear(destination, chunk.operationId);
           if (current(token)) setState({ phase: "partial" });
           break;
         }
         setState({ phase: "applying" });
+        // Deliver the pending notification before admitting this chunk.
+        await Promise.resolve();
+        if (!canSend(token, destination)) {
+          await options.recovery.clear(destination, chunk.operationId);
+          if (current(token)) setState({ phase: "partial" });
+          return;
+        }
         try {
-          const result = await request({
-            action: "apply",
-            memorySpaceId: destination.memorySpaceId,
-            sourceId: fixedPreview.sourceId,
-            sessionId: fixedPreview.sessionId,
-            operationId: chunk.operationId,
-            items: chunk.items,
-          });
+          const result = await request(
+            {
+              action: "apply",
+              memorySpaceId: destination.memorySpaceId,
+              sourceId: fixedPreview.sourceId,
+              sessionId: fixedPreview.sessionId,
+              operationId: chunk.operationId,
+              items: chunk.items,
+            },
+            destination,
+          );
           if (!current(token)) return;
           if (
             result.action !== "apply" ||
@@ -335,6 +366,7 @@ export function createMemoryImportWorkflow(options: {
   return {
     getState: () => state,
     getSnapshot: () => state,
+    /** Notifications coalesce in a microtask; read the latest snapshot, not every phase. */
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => {
@@ -457,12 +489,20 @@ export function createMemoryImportWorkflow(options: {
           return;
         }
         setState({ phase: "checking" });
+        await Promise.resolve();
+        if (!canSend(token, destination)) {
+          if (current(token)) setState({ phase: "recovery" });
+          return;
+        }
         try {
-          const result = await request({
-            action: "status",
-            memorySpaceId: destination.memorySpaceId,
-            operationId: handle.operationId,
-          });
+          const result = await request(
+            {
+              action: "status",
+              memorySpaceId: destination.memorySpaceId,
+              operationId: handle.operationId,
+            },
+            destination,
+          );
           if (!current(token)) return;
           if (result.action !== "status" || result.receipt.operationId !== handle.operationId)
             throw new Error("Unexpected import status");
@@ -471,8 +511,8 @@ export function createMemoryImportWorkflow(options: {
           if (!current(token)) return;
           preview = null;
           chunks = [];
-          progress({ type: "receipt", receipt: result.receipt });
           setState({
+            ...reduceMemoryImportProgress(state, { type: "receipt", receipt: result.receipt }),
             phase: result.receipt.state === "partial" ? "recovery" : "repreview",
             message: "Review the result and preview again before importing more items.",
           });
