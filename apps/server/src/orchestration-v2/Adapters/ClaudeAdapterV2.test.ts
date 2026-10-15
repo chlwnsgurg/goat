@@ -3245,6 +3245,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       yield* start(1);
       yield* Queue.offer(harness.sdkMessages, limit());
       const pause = (yield* Queue.take(harness.systemNoticeReceipts)).turnItem;
+      yield* harness.awaitEventsRecorded;
       assert.equal(pause.type, "system_notice");
       if (pause.type !== "system_notice") return;
       assert.equal(
@@ -3861,8 +3862,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               makeResultFrame({ uuid: "successful-steer-result", result: "done" }),
             );
           }
-          // The SDK processing acknowledgement precedes event-stream delivery.
-          // A new ordinary admission proves the active turn was cleared, and
+          // The frame and its enqueued events are acknowledged.
+          // A new ordinary admission also proves the active turn was cleared, and
           // fails immediately on the old poisoned-steer path.
           yield* harness.runtime.startTurn({
             ...base,
@@ -9246,6 +9247,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         harness
           .offerAndWait(makeResultFrame({ uuid: uuid(), result: "Launched." }))
           .pipe(Effect.andThen(Queue.take(harness.terminalReceipts)));
+      yield* harness.awaitEventsRecorded;
       yield* startTurn();
       yield* start();
       yield* Queue.take(harness.subagentReceipts);
@@ -9299,6 +9301,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.isTrue(yield* fixture.hasPendingBackgroundWork);
         yield* fixture.notify("completed");
         assert.equal((yield* Queue.take(fixture.subagentReceipts)).subagent.status, "completed");
+        yield* fixture.awaitEventsRecorded;
         assert.isFalse(yield* fixture.hasPendingBackgroundWork);
       }).pipe(Effect.provide(layerAdapterTest)),
     ),
@@ -9333,6 +9336,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           const resume = yield* Queue.take(resumptions);
           yield* fixture.notify("completed");
           const completed = yield* Queue.take(fixture.subagentReceipts);
+          yield* fixture.awaitEventsRecorded;
           yield* Effect.sync(resume);
           yield* TestClock.adjust("2 seconds");
           assert.deepEqual(
@@ -9355,6 +9359,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         });
         yield* fixture.notify("completed");
         const completed = yield* Queue.take(fixture.subagentReceipts);
+        yield* fixture.awaitEventsRecorded;
         yield* fixture.offerAndWait(
           claudeSdkFrame({
             type: "user",
@@ -9370,6 +9375,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
         );
         assert.equal((yield* Queue.take(fixture.subagentReceipts)).subagent.result, "Tool result.");
+        yield* fixture.awaitEventsRecorded;
         assert.deepEqual(yield* fixture.stop(), {
           status: "completed",
           completedAt: completed.subagent.completedAt!,
@@ -9392,6 +9398,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* TestClock.adjust("1 second");
           yield* fixture.notify(status);
           const completed = yield* Queue.take(fixture.subagentReceipts);
+          yield* fixture.awaitEventsRecorded;
           const expected = status === "stopped" ? "cancelled" : status;
           assert.equal(completed.subagent.status, expected);
           assert.lengthOf(fixture.offeredMessages, 1);
@@ -9411,6 +9418,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           const beforeReplay = fixture.events.length;
           yield* fixture.replay();
           const reopened = yield* Queue.take(fixture.subagentReceipts);
+          yield* fixture.awaitEventsRecorded;
           assert.equal(reopened.subagent.status, "running");
           assert.isNull(reopened.subagent.completedAt);
           assert.isFalse(
@@ -9425,6 +9433,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.equal(stops, 1);
           yield* fixture.notify("completed", "Resumed outcome.", "toolu-resume");
           const resumed = yield* Queue.take(fixture.subagentReceipts);
+          yield* fixture.awaitEventsRecorded;
           assert.equal(resumed.subagent.result, "Resumed outcome.");
           assert.isAbove(
             DateTime.toEpochMillis(resumed.subagent.completedAt!),
@@ -13634,6 +13643,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               yield* TestClock.adjust("10 seconds");
               yield* Fiber.join(stop);
               assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "interrupted");
+              yield* harness.awaitEventsRecorded;
               assert.isFalse(yield* harness.hasPendingBackgroundWork);
             } else {
               yield* interrupt;
