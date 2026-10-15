@@ -772,8 +772,10 @@ function MemoryBrowser({
           {AsyncResult.isFailure(result)
             ? "Could not load memory. Refresh to try again."
             : page
-              ? (presentMemoryCoverage(page.indexCoverage, page.items.length).emptyLabel ??
-                "No memories found")
+              ? page.indexCoverage
+                ? (presentMemoryCoverage(page.indexCoverage, page.items.length).emptyLabel ??
+                  "No memories found")
+                : "No matching memories on this page."
               : "Waiting for memory access or fresh data. Refresh to try again."}
         </Copy>
       }

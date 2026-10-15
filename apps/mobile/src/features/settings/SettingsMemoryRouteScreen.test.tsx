@@ -106,6 +106,18 @@ function receipt(input: unknown, rejected = false) {
 describe("native Memory with shared factory", () => {
   it("searches the selected destination, retains an empty page's cursor, and clears search", async () => {
     await mount();
+    h.responses.set(WS_METHODS.memorySearch, () => ({
+      items: [],
+      nextCursor: "synthetic-next",
+      projectionWatermark: 1,
+      indexCoverage: {
+        status: "unknown",
+        eligibleItems: 0,
+        indexedItems: 0,
+        unindexedItems: 0,
+        projectionWatermark: 1,
+      },
+    }));
     expect(view.container.textContent).toContain("Synthetic memory body");
     await view.type("Search memory", "absent");
     await view.click("Search");
@@ -1356,32 +1368,51 @@ describe("native WP6 Settings commands", () => {
       h.calls.findLast((call) => call.method === WS_METHODS.memoryProjectBindingUpdate)?.input,
     ).toMatchObject({ expectedVersion: 3, action: "useRepository" });
   });
-  it("distinguishes incomplete coverage from an empty complete search", async () => {
+  it("shows the original empty list message when index coverage is absent", async () => {
     setupImport();
-    const coverage = {
-      status: "partial",
-      eligibleItems: 2,
-      indexedItems: 0,
-      unindexedItems: 2,
-      projectionWatermark: 1,
-    };
     h.responses.set(WS_METHODS.memoryList, () => ({
       items: [],
       nextCursor: null,
       projectionWatermark: 1,
-      indexCoverage: coverage,
     }));
     await show();
-    expect(view.container.textContent).toContain("Results are incomplete");
-    h.responses.set(WS_METHODS.memoryList, () => ({
-      items: [],
-      nextCursor: null,
-      projectionWatermark: 1,
-      indexCoverage: { ...coverage, status: "available", eligibleItems: 0, unindexedItems: 0 },
-    }));
-    await view.click("Include quarantined");
-    expect(view.container.textContent).toContain("No memories found");
+    expect(view.container.textContent).toContain("No matching memories on this page.");
+    expect(view.container.textContent).not.toContain("Results are incomplete");
+    expect(h.calls.some((call) => call.method === WS_METHODS.memoryList)).toBe(true);
   });
+  it.each(["unknown", "partial", "available"])(
+    "uses %s coverage for empty search results",
+    async (status) => {
+      setupImport();
+      h.responses.set(WS_METHODS.memorySearch, () => ({
+        items: [],
+        nextCursor: null,
+        projectionWatermark: 1,
+        indexCoverage: {
+          status,
+          eligibleItems: status === "partial" ? 2 : 0,
+          indexedItems: 0,
+          unindexedItems: status === "partial" ? 2 : 0,
+          projectionWatermark: 1,
+        },
+      }));
+      await show();
+      await view.type("Search memory", "absent");
+      await view.click("Search");
+      expect(
+        h.calls.findLast((call) => call.method === WS_METHODS.memorySearch)?.input,
+      ).toMatchObject({
+        query: "absent",
+      });
+      expect(view.container.textContent).toContain(
+        status === "available" ? "No memories found" : "Results are incomplete",
+      );
+      expect(view.container.textContent).not.toContain("No matching memories on this page.");
+      if (status === "available") {
+        expect(view.container.textContent).not.toContain("Results are incomplete");
+      }
+    },
+  );
   it("selects only exhausted owner reports, preserves Unknown and displays reset counts", async () => {
     setupImport();
     const report = {
