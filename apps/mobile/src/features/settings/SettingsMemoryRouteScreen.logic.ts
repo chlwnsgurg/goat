@@ -4,6 +4,8 @@ import {
   MemorySpaceId,
   MemoryResolutionId,
   type MemoryItem,
+  type MemoryImportReceipt,
+  type MemoryImportOutcome,
   type MemoryScope,
   type MemoryOwnerSourceReadPolicyView,
   type ScopedProjectRef,
@@ -67,4 +69,21 @@ export function memoryScopeForSelection(
   return params.thread
     ? { kind, thread: params.thread, ...(projectKey ? { projectKey } : {}) }
     : undefined;
+}
+
+/** Counts are scoped to the latest receipt; earlier chunks are not reconstructed from status. */
+export function nativeMemoryImportOutcomes(receipt: MemoryImportReceipt) {
+  const labels: Record<MemoryImportOutcome, string> = {
+    created: "Added",
+    revised: "Updated",
+    noop: "Unchanged",
+    aliased: "Linked to an existing memory",
+    suppressed: "Previously forgotten; not imported",
+    rejected: "Could not import",
+    conflicted: "Conflicting memories on hold",
+  };
+  return (Object.keys(labels) as MemoryImportOutcome[]).flatMap((outcome) => {
+    const count = receipt.items.filter((item) => item.outcome === outcome).length;
+    return count ? [`${labels[outcome]}: ${count}`] : [];
+  });
 }

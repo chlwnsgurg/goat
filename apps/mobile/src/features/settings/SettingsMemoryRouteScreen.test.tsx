@@ -953,7 +953,7 @@ describe("native sharing workflow", () => {
 describe("native WP6 Settings commands", () => {
   const importCalls = () =>
     h.calls.filter((call) => call.method === WS_METHODS.memoryImportProvider);
-  const sourceId = "synthetic-profile";
+  const sourceId = "00000000-0000-4000-8000-000000000025";
   function setupImport(count = 1) {
     h = createNativeMemoryHarness();
     h.grant(["memory:read", "memory:write", "filesystem:read", "settings:write"]);
@@ -1001,7 +1001,7 @@ describe("native WP6 Settings commands", () => {
           items:
             input.items?.map((item) => ({
               sourceItemKey: item.sourceItemKey,
-              outcome: "accepted",
+              outcome: "created",
               memoryId: null,
               revisionId: null,
             })) ?? [],
@@ -1064,6 +1064,7 @@ describe("native WP6 Settings commands", () => {
       ]);
       expect(view.container.textContent).toContain("Import completed");
       expect(h.secureValues.size).toBe(0);
+      expect(view.container.textContent).toContain("Added: 1");
       expect(view.container.textContent).not.toContain("/private/path");
       expect(view.container.textContent).not.toContain("synthetic-session");
     },
@@ -1092,7 +1093,7 @@ describe("native WP6 Settings commands", () => {
           state: "completed",
           items: input.items.map((item) => ({
             sourceItemKey: item.sourceItemKey,
-            outcome: "accepted",
+            outcome: "created",
             memoryId: null,
             revisionId: null,
           })),

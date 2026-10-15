@@ -8,6 +8,8 @@ import {
   MemorySpaceId,
   MemoryItem,
   MemorySyncStatus,
+  MemoryImportProviderInput,
+  MemoryImportProviderResult,
   MemoryOwnerSourceReadPolicyView,
   WS_METHODS,
   sessionGrantsScope,
@@ -269,6 +271,9 @@ vi.mock("../features/settings/components/SettingsRow", () => ({
   ),
 }));
 
+const decodeImportInput = Schema.decodeUnknownSync(MemoryImportProviderInput);
+const decodeImportResult = Schema.decodeUnknownSync(MemoryImportProviderResult);
+
 export const nativeDevice = EnvironmentId.make("synthetic-device");
 export const nativeEnv = EnvironmentId.make("synthetic-selected-tunnel");
 export const nativeSpace = MemorySpaceId.make("00000000-0000-4000-8000-000000000001");
@@ -484,6 +489,7 @@ export function createNativeMemoryHarness() {
               Stream.fromQueue(queue),
             );
           return Effect.suspend(() => {
+            if (method === WS_METHODS.memoryImportProvider) decodeImportInput(input);
             calls.push({ method: String(method), input, environmentId });
             waiters
               .filter(
@@ -493,7 +499,10 @@ export function createNativeMemoryHarness() {
               )
               .forEach((waiter) => waiter.resolve());
             const response = responses.get(String(method))?.(input);
-            return Effect.isEffect(response) ? response : Effect.succeed(response);
+            const effect = Effect.isEffect(response) ? response : Effect.succeed(response);
+            return method === WS_METHODS.memoryImportProvider
+              ? Effect.map(effect, decodeImportResult)
+              : effect;
           });
         },
       },

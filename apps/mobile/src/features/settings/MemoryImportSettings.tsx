@@ -20,6 +20,7 @@ import { AppText as Text } from "../../components/AppText";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsActionRow } from "./components/SettingsActionRow";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
+import { nativeMemoryImportOutcomes } from "./SettingsMemoryRouteScreen.logic";
 import type { MemoryScreenParams } from "./SettingsMemoryRouteScreen.logic";
 import type { EnvironmentId } from "@goat/contracts";
 
@@ -359,6 +360,9 @@ export function MemoryImportSettings({
           processing.
         </Copy>
       ) : null}
+      {state.receipt
+        ? nativeMemoryImportOutcomes(state.receipt).map((label) => <Copy key={label}>{label}</Copy>)
+        : null}
       {error ? <Copy>{error}</Copy> : null}
     </SettingsSection>
   );
