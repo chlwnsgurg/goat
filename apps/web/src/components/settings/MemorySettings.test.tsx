@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, type ReactNode } from "react";
+import { act, useSyncExternalStore, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import {
@@ -16,6 +16,8 @@ import * as Option from "effect/Option";
 const state = vi.hoisted(() => ({
   allowed: true,
   write: true,
+  version: 0,
+  listeners: new Set<() => void>(),
   queries: new Map<string, unknown>(),
   refresh: vi.fn(),
   calls: vi.fn(),
@@ -26,10 +28,27 @@ const state = vi.hoisted(() => ({
   executors: new Map<string, (input: unknown) => Promise<unknown>>(),
   connection: {} as object | null,
 }));
+function useFixtureVersion() {
+  useSyncExternalStore(
+    (listener) => {
+      state.listeners.add(listener);
+      return () => {
+        state.listeners.delete(listener);
+      };
+    },
+    () => state.version,
+  );
+}
+function notifyFixture() {
+  state.version += 1;
+  for (const listener of state.listeners) listener();
+}
 vi.mock("@effect/atom-react", async (original) => ({
   ...(await original<typeof import("@effect/atom-react")>()),
-  useAtomValue: (atom: { label: string }) =>
-    state.allowed && (!["forget", "upsert"].includes(atom.label) || state.write),
+  useAtomValue: (atom: { label: string }) => {
+    useFixtureVersion();
+    return state.allowed && (!["forget", "upsert"].includes(atom.label) || state.write);
+  },
 }));
 vi.mock("../../state/memory", async () => {
   const { Atom } = await import("effect/reactivity");
@@ -65,11 +84,10 @@ vi.mock("../../state/memory", async () => {
   };
 });
 vi.mock("../../state/query", () => ({
-  useEnvironmentQuery: ({ label }: { label: string }) => ({
-    data: state.queries.get(label) ?? Option.none(),
-    error: null,
-    refresh: state.refresh,
-  }),
+  useEnvironmentQuery: ({ label }: { label: string }) => {
+    useFixtureVersion();
+    return { data: state.queries.get(label) ?? Option.none(), error: null, refresh: state.refresh };
+  },
 }));
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: { label: string }) => {
@@ -209,7 +227,8 @@ async function renderRevert(
   const { AtomRegistry } = await import("effect/reactivity");
   const registry = AtomRegistry.make();
   vi.spyOn(registry, "get").mockImplementation(() => state.allowed as never);
-  await act(async () =>
+  await act(async () => {
+    notifyFixture();
     root.render(
       <RegistryContext value={registry}>
         <MemoryRevertControl
@@ -220,8 +239,8 @@ async function renderRevert(
           onSettled={settled}
         />
       </RegistryContext>,
-    ),
-  );
+    );
+  });
 }
 async function chooseOriginal() {
   const original = container.querySelector<HTMLInputElement>('input[type="radio"]')!;
@@ -368,13 +387,14 @@ async function renderForget() {
   const { AtomRegistry } = await import("effect/reactivity");
   const registry = AtomRegistry.make();
   vi.spyOn(registry, "get").mockImplementation(() => state.allowed as never);
-  await act(async () =>
+  await act(async () => {
+    notifyFixture();
     root.render(
       <RegistryContext value={registry}>
         <MemoryForgetControl environmentId={EnvironmentId.make("remote-owner")} item={item} />
       </RegistryContext>,
-    ),
-  );
+    );
+  });
 }
 async function click(label: string) {
   const button = [...container.querySelectorAll("button")].find(
@@ -423,7 +443,8 @@ it("cancels without mutation and removes an open intent when permission is revok
   expect(container.querySelector('[aria-label="Forget confirmation"]')).toBeNull();
 });
 it("does not mount memory consumers for an unsupported explicit foreign deep link", async () => {
-  await act(async () =>
+  await act(async () => {
+    notifyFixture();
     root.render(
       <MemorySettings
         target={validateMemorySettingsSearch({
@@ -432,8 +453,8 @@ it("does not mount memory consumers for an unsupported explicit foreign deep lin
           memoryId: id(2),
         })}
       />,
-    ),
-  );
+    );
+  });
   expect(container.textContent).toContain("Update or reconnect");
   expect(container.textContent).toContain("foreign-owner");
   expect(state.calls).not.toHaveBeenCalled();
@@ -478,13 +499,14 @@ it("keeps pending reenrollment when removing another owner permission and render
   const { AtomRegistry } = await import("effect/reactivity");
   const registry = AtomRegistry.make();
   vi.spyOn(registry, "get").mockImplementation(() => state.allowed as never);
-  await act(async () =>
+  await act(async () => {
+    notifyFixture();
     root.render(
       <RegistryContext value={registry}>
         <MemoryAdministration environmentId={EnvironmentId.make("remote-owner")} />
       </RegistryContext>,
-    ),
-  );
+    );
+  });
   expect(container.textContent).toContain("pending-device");
   expect(container.textContent).toContain("active-device");
   const remove = [...container.querySelectorAll("li")]
@@ -558,13 +580,14 @@ async function supportedScreen(withDetails = true) {
     ...(withDetails ? { memorySpaceId: id(1), memoryId: id(2) } : {}),
   });
   const render = () =>
-    act(async () =>
+    act(async () => {
+      notifyFixture();
       root.render(
         <RegistryContext value={registry}>
           <MemorySettings target={target} />
         </RegistryContext>,
-      ),
-    );
+      );
+    });
   await render();
   return { render, registry };
 }
