@@ -659,6 +659,23 @@ export const cleanupMemoryImportSnapshots = (config: MemoryImportReaderConfig) =
     budgets.delete(config.stateDir);
   });
 
+/** Read-only startup admission check; acquisition still rechecks the full no-follow chain. */
+export const preflightMemoryImportStateDirectory = (stateDir: string) =>
+  Effect.tryPromise({
+    try: async () => {
+      absolute(stateDir);
+      const stat = await fs.lstat(stateDir, { bigint: true });
+      if (
+        !stat.isDirectory() ||
+        stat.isSymbolicLink() ||
+        (posixPermissions &&
+          (stat.uid !== BigInt(process.getuid!()) || (stat.mode & 0o022n) !== 0n))
+      )
+        throw error("path_rejected");
+    },
+    catch: normalize,
+  });
+
 /** Acquire once in L5's Scope; discover/read themselves have no Scope requirement. */
 export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
   Effect.gen(function* () {

@@ -172,9 +172,11 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
+  // Prepare the private parent before any recursive child mkdir can create it.
+  // mkdir leaves an existing state directory and its permissions unchanged.
+  yield* fs.makeDirectory(derivedPaths.stateDir, { recursive: true, mode: 0o700 });
   yield* Effect.all(
     [
-      fs.makeDirectory(derivedPaths.stateDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.logsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.providerLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.terminalLogsDir, { recursive: true }),

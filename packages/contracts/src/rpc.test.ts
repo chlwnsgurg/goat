@@ -187,7 +187,7 @@ it.effect("applies scope middleware to SSH workspace RPCs", () =>
   }),
 );
 
-describe("staged memory RPC", () => {
+describe("memory RPC groups", () => {
   it("declares eighteen memory methods with typed inputs and authorization middleware", () => {
     expect(WsMemoryRpcGroup.requests.size).toBe(18);
     expect(WsMemoryCoreRpcGroup.requests.size).toBe(14);
@@ -206,7 +206,7 @@ describe("staged memory RPC", () => {
     }
     expect(WsMemoryRpcGroup.requests.has("memory.changes")).toBe(true);
   });
-  it("keeps memory out of live group until handlers exist", () => {
+  it("keeps the non-memory base group composable", () => {
     expect([...WsRpcGroup.requests.keys()].filter((key) => key.startsWith("memory."))).toEqual([]);
   });
   it("rejects upsert provenance and arbitrary import paths", () => {
@@ -308,4 +308,16 @@ it("binding commands have exact input result and errors", () => {
       binding: {},
     }),
   ).toThrow();
+});
+
+it("import transport retains both typed import refusal and authorization errors", () => {
+  const rpc = WsMemoryImportRpcGroup.requests.get("memory.importProvider")!;
+  for (const issue of ["source_unreadable", "source_changed", "operation_id_reused"] as const) {
+    expect(
+      Schema.decodeUnknownSync(rpc.errorSchema)({ _tag: "MemoryImportRpcError", issue }),
+    ).toEqual(new Memory.MemoryImportRpcError({ issue }));
+  }
+  expect(
+    Schema.decodeUnknownSync(rpc.errorSchema)({ _tag: "MemoryRpcError", code: "unavailable" }),
+  ).toEqual(new Memory.MemoryRpcError({ code: "unavailable" }));
 });
