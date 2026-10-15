@@ -41,7 +41,7 @@ it.effect(
       yield* runMigrations({ toMigrationInclusive: 73 });
       yield* insertTask;
       yield* insertDispatches;
-      assert.deepStrictEqual(yield* runMigrations(), [[74, "MemoryTaskGrantCeiling"], [75, "MemoryImportLineage"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [[74, "MemoryTaskGrantCeiling"], [75, "MemoryImportLineage"], [76, "MemoryCheckpointAccounting"]]);
       assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
         { memory_grant_ceiling: "none" },
       ]);

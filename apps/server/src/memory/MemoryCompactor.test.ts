@@ -23,6 +23,7 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
+import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Store from "./MemoryStore.ts";
@@ -44,7 +45,11 @@ const principal = (environmentId = hubEnv): M.MemoryHubPrincipal => ({
   scopes: ["memory:sync"],
 });
 const database = Layer.effectDiscard(
-  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(lineageMigration)),
+  migration.pipe(
+    Effect.andThen(hubMigration),
+    Effect.andThen(lineageMigration),
+    Effect.andThen(checkpointMigration),
+  ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storeLayer = Store.layer.pipe(Layer.provideMerge(database));
 const core = Service.layer.pipe(
@@ -109,6 +114,53 @@ const pull = (afterSequence: number, environmentId = hubEnv): M.MemoryHubPullInp
   afterSequence,
   limit: 100,
 });
+
+const escapedOperation = () => {
+  const base = operation(15);
+  const sourceThread = {
+    environmentId: hubEnv,
+    threadId: M.ThreadId.make("\u0000".repeat(1024)),
+  };
+  const op = {
+    ...base,
+    revision: {
+      ...base.revision,
+      scope: { kind: "thread" as const, thread: sourceThread },
+      provenance: {
+        environmentId: hubEnv,
+        sourceThread,
+        sourceWatermark: {
+          fromEventId: M.EventId.make('"'.repeat(1024)),
+          toEventId: M.EventId.make("\\".repeat(1024)),
+          throughSequence: Number.MAX_SAFE_INTEGER,
+        },
+        importSource: {
+          sourceId: M.MemoryImportSourceId.make(id(8000)),
+          format: "codex" as const,
+          parserVersion: '"'.repeat(1024),
+          sourceLocator: "\u0000".repeat(1024),
+          sourceItemKey: "\u0000".repeat(512),
+          sourceFingerprint: "a".repeat(64),
+          contentFingerprint: "b".repeat(64),
+          sourceAliases: Array.from({ length: 3 }, (_, i) => ({
+            environmentId: hubEnv,
+            sourceId: M.MemoryImportSourceId.make(id(8100 + i)),
+            sourceItemKey: "\u0000".repeat(512),
+          })),
+          acceptedContentFingerprints: Array.from({ length: 100 }, (_, i) =>
+            String(i).padStart(64, "0"),
+          ),
+        },
+      },
+    },
+    payload: {
+      text: '\u0000\u0001"\\한🙂'.repeat(100),
+      evidence: [],
+      derivedFromMemoryRevisions: [],
+    },
+  };
+  return op;
+};
 
 describe("MemoryCompactor", () => {
   it.effect(
@@ -454,6 +506,138 @@ describe("MemoryCompactor", () => {
         2,
       );
     }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "producer covers escaped embedded payload, maximal source fields and mixed lifetime lineage",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const op = escapedOperation();
+        assert.strictEqual((yield* push(op)).receipts[0]!.outcome, "accepted");
+        const store = yield* Store.MemoryStore;
+        const usage = yield* store.transact(store.readHubUsageTx(space));
+        const result = yield* (yield* Compactor.MemoryCompactor).compact(principal());
+        const sql = yield* SqlClient.SqlClient;
+        const rows = yield* sql<{
+          metadata_json: string;
+        }>`SELECT metadata_json FROM memory_inbox_pending WHERE space=${space} AND checkpoint_id=${"hub:" + result.checkpointId} ORDER BY page_ordinal`;
+        assert.isAbove(rows.length, 1);
+        const pages = rows.map((r) => JSON.parse(r.metadata_json) as M.MemoryHubCheckpointPage);
+        assert.isTrue(M.validateMemoryCheckpointRecords(pages));
+        assert.strictEqual(
+          pages.flatMap((p) => p.items).find((i) => i.status === "active")!.payload.text,
+          op.payload.text,
+        );
+        assert.strictEqual(pages.flatMap((p) => p.revisions)[0]!.payload!.text, op.payload.text);
+        assert.strictEqual(pages.flatMap((p) => p.importLineage).length, 105);
+        assert.isAtMost(
+          rows.reduce((sum, r) => sum + new TextEncoder().encode(r.metadata_json).length, 0),
+          usage.requiredCheckpointBoundBytes,
+        );
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "canonical pinned publication counts shared handles once and admits equality, rolls back plus one",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        yield* push();
+        const escaped = escapedOperation();
+        const otherMemory = M.MemoryId.make(id(3));
+        yield* push({
+          ...escaped,
+          memoryId: otherMemory,
+          revision: { ...escaped.revision, memoryId: otherMemory },
+        });
+
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const compactor = yield* Compactor.MemoryCompactor;
+        const old = yield* compactor.compact(principal());
+        const authority = (environmentId = hubEnv): Store.HubAuthority => ({
+          principal: principal(environmentId),
+          now: Clock.currentTimeMillis,
+          reauthorize: Effect.void,
+        });
+        for (const [environmentId, snapshotToken] of [
+          [hubEnv, "shared_a"],
+          [memberEnv, "shared_b"],
+        ] as const)
+          yield* store.transact(
+            store.prepareHubCheckpointTx({
+              authority: authority(environmentId),
+              checkpointId: old.checkpointId!,
+              snapshotToken,
+              hubEnvironmentId: hubEnv,
+            }),
+          );
+        const unique = yield* sql<{
+          bytes: number;
+        }>`SELECT sum(length(CAST(metadata_json AS BLOB))) AS bytes FROM memory_inbox_pending WHERE space=${space} AND reason='hub_snapshot'`;
+        const usage = yield* store.transact(store.readHubUsageTx(space));
+        assert.strictEqual(usage.liveHandles, 2);
+        assert.strictEqual(usage.publishedPinnedBytes, unique[0]!.bytes);
+        const next = operation(11);
+        yield* push({
+          ...next,
+          expectedHeads: [M.MemoryRevisionId.make(id(110))],
+          revision: { ...next.revision, parents: [M.MemoryRevisionId.make(id(110))] },
+        });
+        const publish = Effect.gen(function* () {
+          const prepared = yield* store.prepareHubProducerCheckpointTx({
+            authority: authority(),
+            checkpointId: "equality_new",
+            hubEnvironmentId: hubEnv,
+          });
+          yield* store.publishCheckpointAndFloorTx({
+            memorySpaceId: space,
+            checkpointId: prepared.checkpointId,
+            expectedFloor: old.retentionFloor,
+            nextFloor: old.retentionFloor,
+            now: 0,
+          });
+          return yield* store.readHubUsageTx(space);
+        });
+        const measured = yield* store
+          .transact(publish.pipe(Effect.flatMap((value) => Effect.fail(value))))
+          .pipe(Effect.flip);
+        if (!("stagingBytes" in measured)) throw new Error("measurement failed");
+        const privateBytes = M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - measured.stagingBytes;
+        yield* sql`INSERT INTO memory_quota_counters VALUES ('_hub_global','import_staging','',${privateBytes + 1}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=excluded.value`;
+        const snapshot = Effect.gen(function* () {
+          return {
+            retention: yield* sql`SELECT * FROM memory_hub_retention`,
+            pages: yield* sql`SELECT * FROM memory_inbox_pending ORDER BY pending_key`,
+            members: yield* sql`SELECT * FROM memory_hub_members ORDER BY environment`,
+            leases: yield* sql`SELECT * FROM memory_hub_leases ORDER BY memory_id`,
+            receipts: yield* sql`SELECT * FROM memory_compact_receipts ORDER BY operation_id`,
+            guards: yield* sql`SELECT * FROM memory_import_keys ORDER BY key_kind,key`,
+            counters:
+              yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`,
+          };
+        });
+        const before = yield* snapshot;
+        const failure = yield* store.transact(publish).pipe(Effect.flip);
+        assert.strictEqual(failure._tag, "MemoryCapacityError");
+        if (failure._tag === "MemoryCapacityError") {
+          assert.strictEqual(failure.dimension, "checkpoint_staging");
+          assert.strictEqual(failure.current, M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES + 1);
+        }
+        assert.deepStrictEqual(yield* snapshot, before);
+        yield* sql`UPDATE memory_quota_counters SET value=${privateBytes} WHERE space='_hub_global' AND dimension='import_staging' AND scope_key=''`;
+        const accepted = yield* store.transact(publish);
+        assert.strictEqual(
+          accepted.stagingBytes + privateBytes,
+          M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
+        );
+        assert.strictEqual(accepted.liveHandles, 2);
+        const finalBytes = yield* sql<{
+          bytes: number;
+          publications: number;
+        }>`SELECT sum(length(CAST(metadata_json AS BLOB))) AS bytes,count(DISTINCT checkpoint_id) AS publications FROM memory_inbox_pending WHERE space=${space} AND reason='hub_snapshot'`;
+        assert.strictEqual(finalBytes[0]!.publications, 2);
+        assert.strictEqual(accepted.publishedPinnedBytes, finalBytes[0]!.bytes);
+      }).pipe(Effect.provide(live)),
   );
   it.effect(
     "daily scheduling survives service reconstruction and preserves nonexpired history",

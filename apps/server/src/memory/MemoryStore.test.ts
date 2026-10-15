@@ -18,7 +18,9 @@ import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
+import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import * as Store from "./MemoryStore.ts";
+import { CheckpointAccountingError } from "./MemoryCheckpointAccounting.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -114,6 +116,7 @@ const setup = Layer.effectDiscard(
   migration.pipe(
     Effect.andThen(hubMigration),
     Effect.andThen(lineageMigration),
+    Effect.andThen(checkpointMigration),
     Effect.andThen(searchMigration),
   ),
 ).pipe(Layer.provideMerge(database));
@@ -2961,6 +2964,7 @@ describe("MemoryStore transient source relay", () => {
               migration.pipe(
                 Effect.andThen(hubMigration),
                 Effect.andThen(lineageMigration),
+                Effect.andThen(checkpointMigration),
                 Effect.andThen(searchMigration),
               ),
             ).pipe(Layer.provideMerge(db)),
@@ -5767,7 +5771,7 @@ it.effect("pull bootstrap retry survives restart with version CAS and untouched 
     const bytes = () =>
       sql<{
         value: number;
-      }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_bytes' AND scope_key=''`;
+      }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='memory_input_bytes' AND scope_key=''`;
     assert.strictEqual((yield* bytes())[0]!.value, retryBytes);
     const fresh = yield* Effect.service(Store.MemoryStore).pipe(
       Effect.provide(Layer.fresh(Store.layer)),
@@ -6612,70 +6616,68 @@ it.effect("review-r11 held resolution sweep cannot advance past 100 live owners"
   }).pipe(Effect.provide(live)),
 );
 
-it.effect(
-  "review-r11 retry-only change invalidates snapshot staging and creates six triggers",
-  () =>
-    Effect.gen(function* () {
-      const store = yield* Store.MemoryStore;
-      const sql = yield* SqlClient.SqlClient;
-      const triggers = yield* sql<{
-        name: string;
-      }>`SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='memory_sync_cursors'`;
+it.effect("private retry charges its own input meter without invalidating producer staging", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const triggers = yield* sql<{
+      name: string;
+    }>`SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='memory_sync_cursors'`;
 
-      yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES (${space},${env},0,'ready')`;
-      yield* sql`INSERT INTO memory_hub_retention(space,handles_json,reserved_snapshot_id,snapshot_generation,published_pinned_bytes) VALUES (${space},'[]','review-stage',7,2)`;
-      yield* sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,metadata_json,reason,checkpoint_id,missing_parents_json) VALUES (${space},'review-page','checkpoint','{}','hub_snapshot','hub:review-stage','[]')`;
-      const before =
-        yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`;
-      yield* store.transact(
-        store.writePullRetryTx({
-          memorySpaceId: space,
-          hubEnvironmentId: env,
-          expectedVersion: 0,
-          retry: { attempts: 1, nextAttemptAt: 10, failureCode: "unavailable", holdClass: null },
-        }),
-      );
-      const after =
-        yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`;
+    yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES (${space},${env},0,'ready')`;
+    yield* sql`INSERT INTO memory_hub_retention(space,handles_json,reserved_snapshot_id,snapshot_generation,published_pinned_bytes) VALUES (${space},'[]','review-stage',7,2)`;
+    yield* sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,metadata_json,reason,checkpoint_id,missing_parents_json) VALUES (${space},'review-page','checkpoint','{}','hub_snapshot','hub:review-stage','[]')`;
+    const before =
+      yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`;
+    yield* store.transact(
+      store.writePullRetryTx({
+        memorySpaceId: space,
+        hubEnvironmentId: env,
+        expectedVersion: 0,
+        retry: { attempts: 1, nextAttemptAt: 10, failureCode: "unavailable", holdClass: null },
+      }),
+    );
+    const after =
+      yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`;
 
-      assert.strictEqual(after[0]!.reserved_snapshot_id, "review-stage");
-      assert.deepStrictEqual(after, before);
-      assert.strictEqual(triggers.length, 3);
-      assert.strictEqual(
-        (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:review-stage'`)
-          .length,
-        1,
-      );
-      const charged = (yield* sql<{
+    assert.strictEqual(after[0]!.reserved_snapshot_id, "review-stage");
+    assert.deepStrictEqual(after, before);
+    assert.strictEqual(triggers.length, 6);
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:review-stage'`)
+        .length,
+      1,
+    );
+    const charged = (yield* sql<{
+      value: number;
+    }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='memory_input_bytes' AND scope_key=''`)[0]!
+      .value;
+    const generation =
+      yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation' AND scope_key=''`;
+    yield* store.transact(
+      store.writePullRetryTx({
+        memorySpaceId: space,
+        hubEnvironmentId: env,
+        expectedVersion: 1,
+        retry: { attempts: 2, nextAttemptAt: 20, failureCode: "unavailable", holdClass: null },
+      }),
+    );
+    assert.deepStrictEqual(
+      yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`,
+      before,
+    );
+    assert.deepStrictEqual(
+      yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation' AND scope_key=''`,
+      generation,
+    );
+    assert.strictEqual(
+      (yield* sql<{
         value: number;
-      }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_bytes' AND scope_key=''`)[0]!
-        .value;
-      const generation =
-        yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation' AND scope_key=''`;
-      yield* store.transact(
-        store.writePullRetryTx({
-          memorySpaceId: space,
-          hubEnvironmentId: env,
-          expectedVersion: 1,
-          retry: { attempts: 2, nextAttemptAt: 20, failureCode: "unavailable", holdClass: null },
-        }),
-      );
-      assert.deepStrictEqual(
-        yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`,
-        before,
-      );
-      assert.deepStrictEqual(
-        yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation' AND scope_key=''`,
-        generation,
-      );
-      assert.strictEqual(
-        (yield* sql<{
-          value: number;
-        }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_bytes' AND scope_key=''`)[0]!
-          .value,
-        charged,
-      );
-    }).pipe(Effect.provide(live)),
+      }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='memory_input_bytes' AND scope_key=''`)[0]!
+        .value,
+      charged,
+    );
+  }).pipe(Effect.provide(live)),
 );
 
 it.effect("sync hold rearm advances across unrelated history within the inspected budget", () =>
@@ -8186,4 +8188,131 @@ it.effect("r3 thread lineage pins identity without retaining revision bodies", (
       0,
     );
   }).pipe(Effect.provide(live)),
+);
+
+const missingCheckpointCases = [
+  "hub_snapshot_bytes",
+  "hub_snapshot_rows",
+  "both",
+  "marker",
+  "marker-and-bytes",
+  "marker-and-rows",
+].flatMap((missing) =>
+  ["usage", "other-space-admission", "new-record"].map((path) => ({ missing, path })),
+);
+it.effect.each(missingCheckpointCases)(
+  "rejects missing checkpoint totals $missing before $path and rolls back all writes",
+  ({ missing, path }) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* Store.MemoryStore;
+      yield* store.apply({ ...approved(), identity: checkpoint().identities[0]! });
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_quota_counters WHERE space='_checkpoint_dirty'`,
+        [],
+      );
+      assert.strictEqual(
+        (yield* sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='checkpoint_initialized' AND scope_key=''`)[0]
+          ?.value,
+        1,
+      );
+      yield* sql`DELETE FROM memory_quota_counters WHERE space=${space} AND scope_key='' AND
+        (dimension=${missing} OR (${missing}='both' AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows'))
+         OR (${missing} IN ('marker','marker-and-bytes','marker-and-rows') AND dimension='checkpoint_initialized')
+         OR (${missing}='marker-and-bytes' AND dimension='hub_snapshot_bytes')
+         OR (${missing}='marker-and-rows' AND dimension='hub_snapshot_rows'))`;
+      // Snapshot every memory table, including row caches, counters, FTS and outbox.
+      const inventory = Effect.gen(function* () {
+        const tables = yield* sql<{
+          name: string;
+        }>`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'memory_%' ORDER BY name`;
+        const rows = [];
+        for (const table of tables)
+          rows.push({
+            table: table.name,
+            rows: (yield* sql.unsafe(`SELECT * FROM "${table.name}"`)).toSorted((a, b) =>
+              JSON.stringify(a).localeCompare(JSON.stringify(b)),
+            ),
+          });
+        return rows;
+      });
+      const before = yield* inventory;
+      const other = M.MemorySpaceId.make(id(900));
+      const failed = yield* store
+        .transact(
+          Effect.gen(function* () {
+            yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES ('_rollback_probe','probe','',1)`;
+            if (path === "usage") return yield* store.readHubUsageTx(space);
+            if (path === "other-space-admission")
+              return yield* store.reserveHubCheckpointTx({
+                memorySpaceId: other,
+                checkpointDeltaBytes: 1,
+                publishedPinnedDeltaBytes: 0,
+              });
+            const identity: M.MemoryIdentityRecord = {
+              memorySpaceId: space,
+              memoryId: M.MemoryId.make(id(901)),
+              scope: { kind: "user" },
+              creatingEnvironmentId: env,
+              createOperationId: M.MemoryOperationId.make(id(902)),
+              createdAtUtc: M.MemoryUtcTimestamp.make(now),
+            };
+            const fence: M.MemoryFenceRecord = {
+              memorySpaceId: space,
+              memoryId: identity.memoryId,
+              highestFencingToken: 0,
+              activeLease: null,
+            };
+            yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${space},${identity.memoryId},${JSON.stringify(identity)},${JSON.stringify(fence)},66560,0)`;
+            const cache = yield* sql<{
+              checkpoint_bytes: number;
+              checkpoint_rows: number;
+            }>`SELECT checkpoint_bytes,checkpoint_rows FROM memory_identity_ledger WHERE memory_id=${identity.memoryId}`;
+            assert.deepStrictEqual(cache, [{ checkpoint_bytes: 0, checkpoint_rows: 0 }]);
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.instanceOf(failed, Store.MemoryStorageError);
+      assert.strictEqual(failed.stage, "checkpoint-accounting");
+      assert.instanceOf(failed.cause, CheckpointAccountingError);
+      assert.strictEqual((failed.cause as CheckpointAccountingError).stage, "missing-total");
+      assert.deepStrictEqual(yield* inventory, before);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "initializes a genuinely new checkpoint space and keeps its lifecycle after the last record",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* Store.MemoryStore;
+      assert.strictEqual(
+        (yield* store.transact(store.readHubUsageTx(space))).requiredCheckpointBoundBytes,
+        4096,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_quota_counters WHERE space=${space} AND dimension='checkpoint_initialized'`,
+        [],
+      );
+      yield* store.apply({ ...approved(), identity: checkpoint().identities[0]! });
+      yield* store.transact(sql`DELETE FROM memory_identity_ledger WHERE space=${space}`);
+      assert.deepStrictEqual(
+        yield* sql`SELECT dimension,value FROM memory_quota_counters WHERE space=${space} AND scope_key='' AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows','checkpoint_initialized') ORDER BY dimension`,
+        [
+          { dimension: "checkpoint_initialized", value: 1 },
+          { dimension: "hub_snapshot_bytes", value: 0 },
+          { dimension: "hub_snapshot_rows", value: 0 },
+        ],
+      );
+      assert.strictEqual(
+        (yield* store.transact(store.readHubUsageTx(space))).requiredCheckpointBoundBytes,
+        4096,
+      );
+      yield* sql`DELETE FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_bytes' AND scope_key=''`;
+      const failed = yield* store.transact(store.readHubUsageTx(space)).pipe(Effect.flip);
+      assert.instanceOf(failed, Store.MemoryStorageError);
+      assert.instanceOf(failed.cause, CheckpointAccountingError);
+    }).pipe(Effect.provide(live)),
 );

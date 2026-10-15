@@ -956,7 +956,7 @@ const make = Effect.fnUntraced(function* (
               operationId: input.operationId,
             });
           if (batch.kind === "retired") return { kind: "retired" as const };
-          return batch.receipt.state === "completed"
+          return batch.kind === "completed-noop-ref" || batch.receipt.state === "completed"
             ? { kind: "completed" as const, receipt: batch.receipt }
             : { kind: "partial" as const, batch, receipt: batch.receipt };
         }),

@@ -1,3 +1,4 @@
+import { checkpointLedgerFixture } from "./MemoryCheckpoint.testkit.ts";
 import * as Config from "effect/Config";
 import * as DateTime from "effect/DateTime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -27,6 +28,7 @@ import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
+import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import * as Service from "./MemoryService.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
@@ -48,6 +50,7 @@ const database = Layer.effectDiscard(
     Effect.andThen(hubMigration),
     Effect.andThen(searchMigration),
     Effect.andThen(lineageMigration),
+    Effect.andThen(checkpointMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const live = Store.layer.pipe(Layer.provideMerge(database));
@@ -64,7 +67,7 @@ const record = (n: number): M.MemoryImportLineageRecord => ({
 const seed = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys)
-    VALUES (${space},${memoryId},'{}','{}',20000,0)`;
+    VALUES (${space},${memoryId},${checkpointLedgerFixture(space, memoryId, environmentId).identity},${checkpointLedgerFixture(space, memoryId, environmentId).fence},20000,0)`;
 });
 const inventory = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -271,6 +274,8 @@ const durableInventory = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   return {
     imports: yield* sql`SELECT * FROM memory_import_receipts ORDER BY receipt_id`,
+    noopResults:
+      yield* sql`SELECT * FROM memory_import_noop_results ORDER BY space,environment_id,source_id,result_ref`,
     outbox: yield* sql`SELECT * FROM memory_outbox ORDER BY id`,
     events: yield* sql`SELECT * FROM memory_events ORDER BY sequence`,
     revisions: yield* sql`SELECT * FROM memory_revisions ORDER BY revision_id`,
@@ -1455,7 +1460,7 @@ describe("MemoryImport refused forget expansion", () => {
       );
       // Canonical replica restoration may leave local metadata above its admission ceiling.
       yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys)
-        VALUES (${space},${M.MemoryId.make(uuid(900))},'{}','{}',${M.MEMORY_PERMANENT_METADATA_MAX_BYTES},0)`;
+        VALUES (${space},${M.MemoryId.make(uuid(900))},${checkpointLedgerFixture(space, uuid(900), environmentId).identity},${checkpointLedgerFixture(space, uuid(900), environmentId).fence},${M.MEMORY_PERMANENT_METADATA_MAX_BYTES},0)`;
       const result = yield* service.forget(
         {
           memorySpaceId: space,
@@ -2237,6 +2242,350 @@ describe("MemoryImport M3d alias ownership", () => {
 });
 
 // Service-level source workload. Factory integration remains a separate L4 gate.
+const committedNoop = Effect.fnUntraced(function* (n: number, at = stamp, partial = false) {
+  const ports = (yield* Service.MemoryService).importPorts;
+  const reg = (yield* ports.readRegistration({ ...address, sourceId, by: "source" }, Effect.void))!;
+  const previous = (yield* ports.readItem(
+    { ...address, sourceId, sourceItemKey: "synthetic-item" },
+    Effect.void,
+  ))!;
+  const base = prepared(reg, n, previous);
+  const selection = { ...base.selection, selector: prepared().selection.selector, result: null };
+  const value = {
+    ...base,
+    candidate: prepared().candidate,
+    previous,
+    next: { ...previous, outcome: "noop" as const },
+    selection,
+    expectedHeads: [(previous.pending ?? previous.accepted)!.revisionId],
+    batch: {
+      ...base.batch,
+      createdAtUtc: at,
+      sessionId: reg.session!.sessionId,
+      receipt: { ...base.batch.receipt, sessionId: reg.session!.sessionId },
+      selections: partial
+        ? [
+            selection,
+            {
+              ...selection,
+              selector: { ...selection.selector, sourceItemKey: "unfinished" },
+              memoryId: M.MemoryId.make(uuid(n + 4)),
+              operationId: M.MemoryOperationId.make(uuid(n + 5)),
+              revisionId: M.MemoryRevisionId.make(uuid(n + 6)),
+            },
+          ]
+        : [selection],
+    },
+  };
+  yield* ports.commit(value, Effect.void);
+  return value;
+});
+const approvedImport = Effect.gen(function* () {
+  yield* setupImport;
+  const ports = (yield* Service.MemoryService).importPorts;
+  const store = yield* Store.MemoryStore;
+  const p = prepared();
+  yield* ports.commit(p, Effect.void);
+  const op = (yield* store.readOperation(space, p.selection.operationId))!;
+  yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, yield* remoteApproval(op));
+  return p;
+});
+describe("MemoryImport shared settled noop", () => {
+  it.effect(
+    "shares exact immutable items across guards and replays without the reader runtime",
+    () =>
+      Effect.gen(function* () {
+        yield* approvedImport;
+        const service = yield* Service.MemoryService;
+        const sql = yield* SqlClient.SqlClient;
+        const a = yield* committedNoop(400);
+        const expected = yield* service.importPorts.readReceipt(a.batch, Effect.void);
+        const reg = (yield* service.importPorts.readRegistration(
+          { ...address, sourceId, by: "source" },
+          Effect.void,
+        ))!;
+        yield* service.importPorts.saveRegistration(
+          {
+            ...address,
+            expectedVersion: reg.version,
+            next: {
+              ...reg,
+              version: reg.version + 1,
+              session: {
+                ...reg.session!,
+                sessionId: "session-2",
+                newItems: 0,
+                bodyBytes: 0,
+                applied: [],
+              },
+            },
+          },
+          Effect.void,
+        );
+        const b = yield* committedNoop(410);
+        const otherReceipt = yield* service.importPorts.readReceipt(b.batch, Effect.void);
+        assert.strictEqual(otherReceipt.sessionId, "session-2");
+        assert.strictEqual(otherReceipt.sessionBodyBytes, 0);
+        assert.strictEqual(expected.sessionBodyBytes, 16);
+        assert.deepStrictEqual(otherReceipt.items, expected.items);
+        const objects = yield* sql`SELECT * FROM memory_import_noop_results`;
+        assert.strictEqual(objects.length, 1);
+        const guards = yield* sql<{
+          result_ref: string | null;
+        }>`SELECT result_ref FROM memory_import_receipts WHERE batch_operation_id IN (${a.batch.operationId},${b.batch.operationId})`;
+        assert.isTrue(guards.every((r) => r.result_ref !== null));
+        const before = yield* durableInventory;
+        // No Reader or ProviderMemoryImportRuntime is installed: any source access dies.
+        const recreated = yield* Effect.service(Service.MemoryService).pipe(
+          Effect.provide(serviceLayer),
+        );
+        const ports = recreated.importPorts;
+        assert.deepStrictEqual(yield* ports.preflightBatch(a.batch, Effect.void), {
+          kind: "completed",
+          receipt: expected,
+        });
+        assert.deepStrictEqual(yield* ports.readReceipt(a.batch, Effect.void), expected);
+        const changed = yield* ports
+          .preflightBatch({ ...a.batch, selectionDigest: "f".repeat(64) }, Effect.void)
+          .pipe(Effect.flip);
+        assert.strictEqual(changed._tag, "MemoryImportRpcError");
+        assert.strictEqual(
+          (yield* ports
+            .preflightBatch(
+              { ...a.batch, environmentId: M.EnvironmentId.make("other") },
+              Effect.void,
+            )
+            .pipe(Effect.exit))._tag,
+          "Failure",
+        );
+        assert.deepStrictEqual(yield* durableInventory, before);
+      }).pipe(Effect.provide(importLive)),
+  );
+  it.effect(
+    "converts legacy settled detail only when the exact private allocation cannot grow",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const p = prepared();
+        const result = { ...p.selection.result!, outcome: "noop" as const };
+        const selection = { ...p.selection, result, observation: p.next.pending!, settled: true };
+        for (const env of [M.EnvironmentId.make("origin".repeat(400)), environmentId]) {
+          const batch = {
+            ...p.batch,
+            environmentId: env,
+            selections: [selection],
+            receipt: { ...p.batch.receipt, items: [result] },
+          };
+          yield* sql`INSERT INTO memory_import_receipts(receipt_id,space,environment_id,record_kind,source_id,batch_operation_id,request_digest,completed_items_json,observed_at_utc)
+          VALUES (${env},${space},${env},'batch',${sourceId},${batch.operationId},${batch.selectionDigest},${encodeUnknown(batch)},${stamp})`;
+          const before = yield* sql<{
+            value: number;
+          }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='import_metadata'`;
+          const replay = yield* store.transact(store.readImportBatchTx(batch));
+          assert.strictEqual(
+            replay?.kind,
+            env === environmentId ? "completed-noop-ref" : "detailed",
+          );
+          if (replay && replay.kind !== "retired")
+            assert.deepStrictEqual(replay.receipt, batch.receipt);
+          const after = yield* sql<{
+            value: number;
+          }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='import_metadata'`;
+          assert.isAtMost(after[0]!.value, before[0]!.value);
+        }
+        assert.strictEqual((yield* sql`SELECT * FROM memory_import_noop_results`).length, 1);
+      }).pipe(Effect.provide(importLive)),
+  );
+  it.effect("retires at original 30-day boundary and collects only the final reference", () =>
+    Effect.gen(function* () {
+      yield* approvedImport;
+      const ports = (yield* Service.MemoryService).importPorts;
+      const sql = yield* SqlClient.SqlClient;
+      const a = yield* committedNoop(400);
+      const later = M.MemoryUtcTimestamp.make("2026-10-16T00:00:00.000Z");
+      yield* TestClock.setTime(Date.parse(later));
+      const b = yield* committedNoop(410, later);
+      const original = yield* ports.readReceipt(a.batch, Effect.void);
+      yield* TestClock.setTime(Date.parse(stamp) + M.MEMORY_IMPORT_BATCH_RETENTION_MS - 1);
+      assert.deepStrictEqual(yield* ports.readReceipt(a.batch, Effect.void), original);
+      yield* TestClock.adjust(1);
+      assert.strictEqual((yield* ports.preflightBatch(a.batch, Effect.void)).kind, "retired");
+      assert.strictEqual((yield* sql`SELECT * FROM memory_import_noop_results`).length, 1);
+      assert.strictEqual(
+        (yield* ports.readReceipt(b.batch, Effect.void)).operationId,
+        b.batch.operationId,
+      );
+      yield* TestClock.setTime(Date.parse(later) + M.MEMORY_IMPORT_BATCH_RETENTION_MS);
+      assert.strictEqual((yield* ports.preflightBatch(b.batch, Effect.void)).kind, "retired");
+      assert.strictEqual((yield* sql`SELECT * FROM memory_import_noop_results`).length, 0);
+      const changed = yield* ports
+        .preflightBatch({ ...a.batch, selectionDigest: "f".repeat(64) }, Effect.void)
+        .pipe(Effect.flip);
+      assert.strictEqual(changed._tag, "MemoryImportRpcError");
+    }).pipe(Effect.provide(importLive)),
+  );
+  it.effect("rolls back object insertion and final-reference retirement failures atomically", () =>
+    Effect.gen(function* () {
+      yield* approvedImport;
+      const ports = (yield* Service.MemoryService).importPorts;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TRIGGER fail_noop BEFORE INSERT ON memory_import_noop_results BEGIN SELECT RAISE(ABORT,'synthetic fault'); END`;
+      const before = yield* durableInventory;
+      assert.strictEqual((yield* committedNoop(400).pipe(Effect.exit))._tag, "Failure");
+      assert.deepStrictEqual(yield* durableInventory, before);
+      yield* sql`DROP TRIGGER fail_noop`;
+      const a = yield* committedNoop(400);
+      yield* sql`CREATE TRIGGER fail_gc BEFORE DELETE ON memory_import_noop_results BEGIN SELECT RAISE(ABORT,'synthetic fault'); END`;
+      const retained = yield* durableInventory;
+      yield* TestClock.setTime(Date.parse(stamp) + M.MEMORY_IMPORT_BATCH_RETENTION_MS);
+      assert.strictEqual(
+        (yield* ports.readReceipt(a.batch, Effect.void).pipe(Effect.exit))._tag,
+        "Failure",
+      );
+      assert.deepStrictEqual(yield* durableInventory, retained);
+      yield* sql`DROP TRIGGER fail_gc`;
+      assert.strictEqual((yield* ports.preflightBatch(a.batch, Effect.void)).kind, "retired");
+    }).pipe(Effect.provide(importLive)),
+  );
+  it.effect.each(["hub_receipts", "hub_metadata", "import_staging"] as const)(
+    "charges shared guards at exact capacity and refuses +1 atomically: %s",
+    (dimension) =>
+      Effect.gen(function* () {
+        yield* approvedImport;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        yield* committedNoop(400);
+        const counter = Effect.gen(function* () {
+          return (yield* sql<{
+            value: number;
+          }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension=${dimension} AND scope_key=''`)[0]!
+            .value;
+        });
+        const before = yield* counter;
+        yield* committedNoop(410);
+        const delta = (yield* counter) - before;
+        assert.isAbove(delta, 0);
+        const usage = yield* store.transact(store.readHubUsageTx(space));
+        const limit =
+          dimension === "hub_receipts"
+            ? M.MEMORY_DEDUP_MAX_RECEIPTS
+            : dimension === "hub_metadata"
+              ? M.MEMORY_PERMANENT_METADATA_MAX_BYTES
+              : M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - usage.requiredCheckpointBoundBytes;
+        yield* sql`UPDATE memory_quota_counters SET value=${limit - delta} WHERE space='_hub_global' AND dimension=${dimension} AND scope_key=''`;
+        yield* committedNoop(420);
+        assert.strictEqual(yield* counter, limit);
+        yield* sql`UPDATE memory_quota_counters SET value=${limit - delta + 1} WHERE space='_hub_global' AND dimension=${dimension} AND scope_key=''`;
+        const inventory = yield* durableInventory;
+        const failure = yield* committedNoop(430).pipe(Effect.flip);
+        assert.strictEqual(failure._tag, "MemoryCapacityError");
+        assert.deepStrictEqual(yield* durableInventory, inventory);
+        assert.strictEqual((yield* sql`SELECT * FROM memory_import_noop_results`).length, 1);
+      }).pipe(Effect.provide(importLive)),
+  );
+  it.effect("fails closed on collision, broken reference and forged cross-origin result", () =>
+    Effect.gen(function* () {
+      yield* approvedImport;
+      const ports = (yield* Service.MemoryService).importPorts;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const a = yield* committedNoop(400);
+      for (const mutation of [
+        sql`UPDATE memory_import_receipts SET result_ref=NULL WHERE batch_operation_id=${a.batch.operationId}`,
+        sql`UPDATE memory_import_receipts SET source_id=${uuid(999)} WHERE batch_operation_id=${a.batch.operationId}`,
+        sql`UPDATE memory_import_receipts SET space=${uuid(999)} WHERE batch_operation_id=${a.batch.operationId}`,
+        sql`UPDATE memory_import_receipts SET environment_id='other' WHERE batch_operation_id=${a.batch.operationId}`,
+      ])
+        assert.strictEqual((yield* mutation.pipe(Effect.exit))._tag, "Failure");
+      yield* sql`DROP TRIGGER memory_import_result_immutable`;
+      const rows = yield* sql<{
+        result_json: string;
+      }>`SELECT result_json FROM memory_import_noop_results`;
+      const bad = JSON.parse(rows[0]!.result_json);
+      bad.items[0].sourceItemKey = "forged";
+      yield* sql`UPDATE memory_import_noop_results SET result_json=${encodeUnknown(bad)}`;
+      const before = yield* durableInventory;
+      assert.strictEqual(
+        (yield* ports.readReceipt(a.batch, Effect.void).pipe(Effect.exit))._tag,
+        "Failure",
+      );
+      assert.strictEqual((yield* committedNoop(410).pipe(Effect.exit))._tag, "Failure");
+      assert.deepStrictEqual(yield* durableInventory, before);
+      yield* sql`DROP TRIGGER memory_import_result_delete`;
+      yield* sql`DELETE FROM memory_import_noop_results`;
+      assert.strictEqual(
+        (yield* ports.preflightBatch(a.batch, Effect.void).pipe(Effect.exit))._tag,
+        "Failure",
+      );
+      yield* TestClock.setTime(Date.parse(stamp) + M.MEMORY_IMPORT_BATCH_RETENTION_MS + 1);
+      assert.strictEqual(
+        (yield* ports.preflightBatch(a.batch, Effect.void).pipe(Effect.exit))._tag,
+        "Failure",
+      );
+      const broken = yield* sql<{
+        kind: string;
+      }>`SELECT json_extract(completed_items_json,'$.kind') AS kind FROM memory_import_receipts WHERE batch_operation_id=${a.batch.operationId}`;
+      assert.strictEqual(broken[0]!.kind, "completed-noop-ref");
+      assert.strictEqual(
+        yield* store.transact(
+          store.readImportBatchTx({ ...a.batch, memorySpaceId: M.MemorySpaceId.make(uuid(99)) }),
+        ),
+        undefined,
+      );
+      const forged =
+        yield* sql`UPDATE memory_import_receipts SET environment_id='other' WHERE batch_operation_id=${a.batch.operationId}`.pipe(
+          Effect.exit,
+        );
+      assert.strictEqual(forged._tag, "Failure");
+    }).pipe(Effect.provide(importLive)),
+  );
+  it.effect(
+    "partial and pending noop stay detailed, late acceptance shares only completed results",
+    () =>
+      Effect.gen(function* () {
+        yield* setupImport;
+        const ports = (yield* Service.MemoryService).importPorts;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const a = prepared();
+        yield* ports.commit(a, Effect.void);
+        const b = yield* committedNoop(400);
+        const partial = yield* committedNoop(420, stamp, true);
+        assert.strictEqual(
+          (yield* ports.preflightBatch(partial.batch, Effect.void)).kind,
+          "partial",
+        );
+        assert.strictEqual((yield* sql`SELECT * FROM memory_import_noop_results`).length, 0);
+        const op = (yield* store.readOperation(space, a.selection.operationId))!;
+        yield* store.acknowledgeOutbox(
+          `sync:${space}:${op.operationId}`,
+          yield* remoteApproval(op),
+        );
+        assert.strictEqual((yield* sql`SELECT * FROM memory_import_noop_results`).length, 1);
+        assert.strictEqual(
+          (yield* ports.readReceipt(b.batch, Effect.void)).items[0]!.outcome,
+          "noop",
+        );
+        const partialAfter = yield* ports.preflightBatch(partial.batch, Effect.void);
+        assert.strictEqual(partialAfter.kind, "partial");
+        if (partialAfter.kind === "partial") {
+          assert.strictEqual(partialAfter.batch.selections[0]!.settled, true);
+          assert.strictEqual(partialAfter.batch.selections[1]!.result, null);
+        }
+        const c = yield* committedNoop(410);
+        assert.strictEqual((yield* sql`SELECT * FROM memory_import_noop_results`).length, 1);
+        const before = yield* durableInventory;
+        yield* store.acknowledgeOutbox(
+          `sync:${space}:${op.operationId}`,
+          yield* remoteApproval(op),
+        );
+        assert.deepStrictEqual(yield* durableInventory, before);
+        assert.strictEqual((yield* ports.preflightBatch(c.batch, Effect.void)).kind, "completed");
+      }).pipe(Effect.provide(importLive)),
+  );
+});
+
 const growthLayer = (filename: string) => {
   const db = Layer.effectDiscard(
     Effect.gen(function* () {
@@ -2244,6 +2593,7 @@ const growthLayer = (filename: string) => {
       yield* hubMigration;
       yield* searchMigration;
       yield* lineageMigration;
+      yield* checkpointMigration;
       const sql = yield* SqlClient.SqlClient;
       yield* sql.unsafe("PRAGMA journal_mode=WAL");
       yield* sql`CREATE TABLE orchestration_events(sequence INTEGER PRIMARY KEY,event_id TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT,occurred_at TEXT,application_event_version INTEGER,aggregate_kind TEXT)`;
@@ -2737,6 +3087,8 @@ describe("MemoryImport physical-growth source harness", () => {
                   Effect.map((s) => Number(s.size)),
                   Effect.orElseSucceed(() => null),
                 );
+                // Read both total pages and harness allocation before writing this sample.
+                const allocation = yield* store.measureAllocation();
                 const growth = yield* quota.recordStorageSample(environmentId, { walBytes });
                 const counts = (yield* sql<{
                   identities: number;
@@ -2758,6 +3110,13 @@ describe("MemoryImport physical-growth source harness", () => {
             (SELECT count(*) FROM memory_items WHERE space=${space} AND status='active') AS active,
             (SELECT count(*) FROM memory_import_receipts WHERE space=${space}) AS receipts,
             (SELECT count(*) FROM memory_import_keys WHERE space=${space} AND key_kind IN ('sourceKey','content','sourceExclusion')) AS suppression`)[0]!;
+                const sampleTable = allocation.tables.find(
+                  (t) => t.table === "memory_storage_samples",
+                );
+                const noopRows = yield* sql<{ kind: string; rows: number; bytes: number }>`
+                  SELECT json_extract(completed_items_json,'$.kind') AS kind,count(*) AS rows,
+                  sum(length(CAST(completed_items_json AS BLOB))) AS bytes FROM memory_import_receipts
+                  WHERE record_kind='batch' GROUP BY kind`;
                 const metrics = {
                   phase,
                   iteration,
@@ -2773,8 +3132,28 @@ describe("MemoryImport physical-growth source harness", () => {
                   walBytes,
                   checkpoint: checkpoint[0] ?? null,
                   sample: growth.current,
-                  freshAllocation: yield* store.measureAllocation(),
+                  freshAllocation: allocation,
+                  harnessSampleAllocatedBytes: sampleTable?.allocatedBytes ?? 0,
+                  productUsedBytes: (pages - free) * pageSize - (sampleTable?.allocatedBytes ?? 0),
+                  noopGuards: noopRows,
+                  sharedNoopResults:
+                    yield* sql`SELECT count(*) AS rows,coalesce(sum(length(CAST(result_json AS BLOB))),0) AS bytes FROM memory_import_noop_results`,
+                  workKinds:
+                    yield* sql`SELECT kind,status,count(*) AS rows FROM memory_outbox GROUP BY kind,status`,
                   freshLogicalBytes: yield* store.logicalBytes,
+                  checkpointAccounting: {
+                    usage: yield* store.transact(store.readHubUsageTx(space)).pipe(
+                      Effect.map((u) => ({
+                        requiredCheckpointBoundBytes: u.requiredCheckpointBoundBytes,
+                        stagingBytes: u.stagingBytes,
+                        checkpointBytes: u.checkpointBytes,
+                        publishedPinnedBytes: u.publishedPinnedBytes,
+                        consumedBytes: u.checkpointReservationConsumedBytes,
+                      })),
+                    ),
+                    counters:
+                      yield* sql`SELECT space,dimension,value FROM memory_quota_counters WHERE scope_key='' AND (space='_hub_global' OR space=${space}) AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows','hub_snapshot_generation','import_metadata','import_staging','hub_private_metadata') ORDER BY space,dimension`,
+                  },
                   counts,
                 };
                 samples.push(metrics);
@@ -2893,9 +3272,19 @@ describe("MemoryImport physical-growth source harness", () => {
             const spread = (samples: readonly (typeof baseline)[]) =>
               Math.max(...samples.map((s) => s.usedBytes)) -
               Math.min(...samples.map((s) => s.usedBytes));
+            const positiveGrowth = (measured: readonly (typeof baseline)[]) => {
+              let low = Infinity;
+              let growth = 0;
+              for (const s of measured) {
+                low = Math.min(low, s.productUsedBytes);
+                growth = Math.max(growth, s.productUsedBytes - low);
+              }
+              return growth;
+            };
             const gates = {
               noopSpreadBytes: spread(noopSamples),
               rebuildSpreadBytes: spread(rebuildSamples.slice(8)),
+              rebuildProductGrowthBytes: positiveGrowth(rebuildSamples.slice(8)),
               activeAfterChange: changed.counts.active,
               resolutionRefusals,
               refusals,
@@ -2905,6 +3294,7 @@ describe("MemoryImport physical-growth source harness", () => {
             yield* fs.writeFileString(`${directory}/gates.json`, encodeUnknown(gates));
             yield* Console.log(`WP5_GROWTH_GATES ${encodeUnknown(gates)}`);
             assert.isEmpty(resolutionRefusals, "synthetic resolutions must all be admitted");
+            assert.isEmpty(refusals, "all local imports and claims must be admitted");
             assert.strictEqual(
               changed.counts.active,
               16,
@@ -2916,13 +3306,14 @@ describe("MemoryImport physical-growth source harness", () => {
               "noop physical growth must plateau after warmup",
             );
             assert.isAtMost(
-              spread(rebuildSamples.slice(8)),
+              positiveGrowth(rebuildSamples.slice(8)),
               1048576,
-              "forget-rebuild physical growth must plateau after warmup",
+              "forget-rebuild product increase from a preceding post-warmup minimum must stay within allowance",
             );
           }).pipe(Effect.provide(growthLayer(filename)));
         }),
       ).pipe(Effect.provide(NodeServices.layer)),
-    { timeout: 1800000 },
+    // Full admission now retains all 16 rounds instead of stopping growth at capacity.
+    { timeout: 3600000 },
   );
 });

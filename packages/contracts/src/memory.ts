@@ -969,6 +969,7 @@ export const MemoryStorageTable = Schema.Literals([
   "memory_inbox_pending",
   "memory_sync_cursors",
   "memory_import_receipts",
+  "memory_import_noop_results",
   "memory_report_outbox",
   "memory_items_fts",
   "memory_project_bindings",
