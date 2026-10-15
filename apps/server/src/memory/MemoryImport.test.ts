@@ -2160,7 +2160,8 @@ describe("MemoryImport physical-growth source harness", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
-          const directory = yield* fs.makeTempDirectoryScoped({ prefix: "wp5-growth-" });
+          // Preserve synthetic DB and metrics until the remote evidence collector retrieves them.
+          const directory = yield* fs.makeTempDirectory({ prefix: "wp5-growth-" });
           const filename = `${directory}/synthetic.sqlite`;
           yield* Effect.gen(function* () {
             yield* TestClock.setTime(Date.parse(stamp));
@@ -2431,6 +2432,10 @@ describe("MemoryImport physical-growth source harness", () => {
                   ),
                 ),
               );
+            const samples: unknown[] = [];
+            const csv = [
+              "phase,iteration,clock,page_size,page_count,freelist_count,used_bytes,allocated_bytes,wal_bytes,identities,bodies,body_bytes,revisions,lineage,fts_rows,active,receipts,suppression",
+            ];
             const sample = (phase: string, iteration: number) =>
               Effect.gen(function* () {
                 yield* worker.drain;
@@ -2490,6 +2495,31 @@ describe("MemoryImport physical-growth source harness", () => {
                   freshLogicalBytes: yield* store.logicalBytes,
                   counts,
                 };
+                samples.push(metrics);
+                csv.push(
+                  [
+                    phase,
+                    iteration,
+                    metrics.clock,
+                    pageSize,
+                    pages,
+                    free,
+                    metrics.usedBytes,
+                    metrics.allocatedBytes,
+                    walBytes ?? "unavailable",
+                    counts.identities,
+                    counts.bodies,
+                    counts.bodyBytes,
+                    counts.revisions,
+                    counts.lineage,
+                    counts.fts,
+                    counts.active,
+                    counts.receipts,
+                    counts.suppression,
+                  ].join(","),
+                );
+                yield* fs.writeFileString(`${directory}/samples.json`, encodeUnknown(samples));
+                yield* fs.writeFileString(`${directory}/samples.csv`, csv.join("\n") + "\n");
                 yield* Console.log(`WP5_GROWTH_SAMPLE ${encodeUnknown(metrics)}`);
                 return metrics;
               });
@@ -2581,9 +2611,16 @@ describe("MemoryImport physical-growth source harness", () => {
             const spread = (samples: readonly (typeof baseline)[]) =>
               Math.max(...samples.map((s) => s.usedBytes)) -
               Math.min(...samples.map((s) => s.usedBytes));
-            yield* Console.log(
-              `WP5_GROWTH_GATES ${encodeUnknown({ noopSpreadBytes: spread(noopSamples), rebuildSpreadBytes: spread(rebuildSamples.slice(8)), activeAfterChange: changed.counts.active, refusals, allowanceBytes: 1048576, packaged: "NOT_RUN" })}`,
-            );
+            const gates = {
+              noopSpreadBytes: spread(noopSamples),
+              rebuildSpreadBytes: spread(rebuildSamples.slice(8)),
+              activeAfterChange: changed.counts.active,
+              refusals,
+              allowanceBytes: 1048576,
+              packaged: "NOT_RUN",
+            };
+            yield* fs.writeFileString(`${directory}/gates.json`, encodeUnknown(gates));
+            yield* Console.log(`WP5_GROWTH_GATES ${encodeUnknown(gates)}`);
             assert.strictEqual(
               changed.counts.active,
               16,

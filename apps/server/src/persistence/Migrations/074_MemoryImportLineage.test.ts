@@ -1,5 +1,9 @@
 import { assert, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
+import * as Service from "../../memory/MemoryService.ts";
+import * as Quota from "../../memory/MemoryQuotaService.ts";
+import * as Environment from "../../environment/ServerEnvironment.ts";
+import * as Repository from "../../project/RepositoryIdentityResolver.ts";
 import * as Store from "../../memory/MemoryStore.ts";
 import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
@@ -180,6 +184,37 @@ it.effect.each(["event", "compact", "hubReceipt"] as const)(
       });
       const store = yield* Store.MemoryStore;
       const before = yield* snapshot;
+      yield* Effect.gen(function* () {
+        const service = yield* Service.MemoryService;
+        const failure = yield* service.importPorts
+          .readItem(
+            { memorySpaceId: space, environmentId, sourceId, sourceItemKey: "key-0" },
+            Effect.void,
+          )
+          .pipe(Effect.flip);
+        assert.strictEqual(failure._tag, "MemoryStoreConflict");
+        if (failure._tag === "MemoryStoreConflict")
+          assert.strictEqual(failure.code, "bootstrap_required");
+      }).pipe(
+        Effect.provide(
+          Service.layer.pipe(
+            Layer.provide(Quota.layer),
+            Layer.provide(Layer.succeed(Store.MemoryStore, store)),
+            Layer.provide(
+              Layer.succeed(Environment.ServerEnvironmentIdentity, {
+                getEnvironmentId: Effect.succeed(environmentId),
+              }),
+            ),
+            Layer.provide(
+              Layer.mock(Repository.RepositoryIdentityResolver)({
+                resolve: () => Effect.succeed(null),
+              }),
+            ),
+          ),
+        ),
+      );
+      assert.deepStrictEqual(yield* snapshot, before);
+
       const publication = {
         memorySpaceId: space,
         checkpointId: "synthetic-checkpoint",
