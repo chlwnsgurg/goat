@@ -314,9 +314,9 @@ it("import transport retains both typed import refusal and authorization errors"
   for (const issue of ["source_unreadable", "source_changed", "operation_id_reused"] as const) {
     expect(
       Schema.decodeUnknownSync(rpc.errorSchema)({ _tag: "MemoryImportRpcError", issue }),
-    ).toEqual({ _tag: "MemoryImportRpcError", issue });
+    ).toEqual(new Memory.MemoryImportRpcError({ issue }));
   }
   expect(
     Schema.decodeUnknownSync(rpc.errorSchema)({ _tag: "MemoryRpcError", code: "unavailable" }),
-  ).toEqual({ _tag: "MemoryRpcError", code: "unavailable" });
+  ).toEqual(new Memory.MemoryRpcError({ code: "unavailable" }));
 });
