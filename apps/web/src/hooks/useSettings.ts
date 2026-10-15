@@ -137,7 +137,6 @@ let clientSettingsHydrationStatus: ClientSettingsHydrationStatus = "pending";
 let clientSettingsHydrationPromise: Promise<void> | null = null;
 let clientSettingsHydrationGeneration = 0;
 let clientSettingsPersistenceQueue: Promise<void> = Promise.resolve();
-let deferredClientSettingsPatchCount = 0;
 
 function emitClientSettingsChange() {
   for (const listener of clientSettingsListeners) {
@@ -256,32 +255,15 @@ export function persistClientSettingsPatch(
   patch: ClientSettingsPatch,
   persist: (settings: ClientSettings) => Promise<void> = defaultClientSettingsPersistence,
 ): Promise<void> {
-  // Patches queued before hydration must publish before newer optimistic patches.
-  const deferPatch =
-    clientSettingsHydrationStatus !== "ready" || deferredClientSettingsPatchCount > 0;
-  if (deferPatch) {
-    deferredClientSettingsPatchCount += 1;
-  } else {
-    replaceClientSettingsSnapshot({ ...getClientSettingsSnapshot(), ...patch });
-  }
-  return enqueueClientSettingsPersistence(async () => {
-    if (deferPatch) {
-      try {
-        if (clientSettingsHydrationStatus !== "ready") {
-          await hydrateClientSettings();
-        }
-        replaceClientSettingsSnapshot({ ...getClientSettingsSnapshot(), ...patch });
-      } finally {
-        deferredClientSettingsPatchCount -= 1;
-      }
-    }
-    await persist(getClientSettingsSnapshot());
-  }).catch((error) => {
-    console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} persist failed`, {
-      operation: "persist",
-      ...safeErrorLogAttributes(error),
+  return persistClientSettingsUpdate((current) => ({ ...current, ...patch }), persist)
+    .then(() => undefined)
+    .catch((error) => {
+      console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} persist failed`, {
+        operation: "persist",
+        ...safeErrorLogAttributes(error),
+      });
+      throw error;
     });
-  });
 }
 
 /**
@@ -838,7 +820,7 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
         }
       }
       if (Object.keys(clientPatch).length > 0) {
-        void persistClientSettingsPatch(clientPatch);
+        void persistClientSettingsPatch(clientPatch).catch(reportClientSettingsFailure);
       }
     },
     [environmentId, environments, persist, persistServerSettings, sharedSettingsSyncTargetIds],
@@ -855,9 +837,23 @@ export function useUpdatePrimarySettings() {
   return useUpdateSettingsTarget(usePrimaryEnvironment()?.environmentId ?? null);
 }
 
+function reportClientSettingsFailure(): void {
+  toastManager.add({
+    type: "error",
+    title: "Setting not saved",
+    description: "Could not save settings on this device. Try again.",
+  });
+}
+
 export function useUpdateClientSettings() {
   return useCallback((patch: ClientSettingsPatch) => {
-    return persistClientSettingsPatch(patch);
+    return persistClientSettingsPatch(patch).then(
+      () => true,
+      () => {
+        reportClientSettingsFailure();
+        return false;
+      },
+    );
   }, []);
 }
 
@@ -867,7 +863,6 @@ export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationStatus = "pending";
   clientSettingsHydrationPromise = null;
   clientSettingsPersistenceQueue = Promise.resolve();
-  deferredClientSettingsPatchCount = 0;
   clientSettingsListeners.clear();
   clientSettingsHydrationListeners.clear();
   sidebarViewMirrorCache = undefined;

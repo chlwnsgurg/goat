@@ -138,8 +138,11 @@ describe("client settings hydration", () => {
     persistenceMocks.getClientSettings.mockRejectedValue(failure);
 
     const hydration = ensureClientSettingsHydrated();
-    persistClientSettingsPatch({ wordWrap: false });
-    await expect(hydration).rejects.toBe(failure);
+    const patch = persistClientSettingsPatch({ wordWrap: false });
+    await Promise.all([
+      expect(hydration).rejects.toBe(failure),
+      expect(patch).rejects.toBe(failure),
+    ]);
     expect(persistenceMocks.setClientSettings).not.toHaveBeenCalled();
 
     persistenceMocks.getClientSettings.mockResolvedValue(savedSettings);
@@ -197,6 +200,25 @@ describe("client settings hydration", () => {
 });
 
 describe("persistClientSettingsPatch", () => {
+  it("rejects failed patches, keeps the saved snapshot, and continues queued writes", async () => {
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+    const failure = new Error("disk full");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    persistenceMocks.setClientSettings.mockRejectedValueOnce(failure);
+
+    const failed = persistClientSettingsPatch({ wordWrap: false });
+    const later = persistClientSettingsPatch({ snapShotFlash: false });
+    await expect(failed).rejects.toBe(failure);
+    await later;
+    expect(getClientSettings()).toEqual({ ...DEFAULT_CLIENT_SETTINGS, snapShotFlash: false });
+    expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith({
+      ...DEFAULT_CLIENT_SETTINGS,
+      snapShotFlash: false,
+    });
+    await persistClientSettingsPatch({ wordWrap: false });
+    expect(getClientSettings()).toMatchObject({ wordWrap: false, snapShotFlash: false });
+  });
+
   it("waits for settings writes in request order", async () => {
     __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
     let finishFirst!: () => void;
@@ -218,7 +240,7 @@ describe("persistClientSettingsPatch", () => {
     const second = persistClientSettingsPatch({ snapShotPlaySound: false });
 
     expect(persistenceMocks.setClientSettings).toHaveBeenCalledTimes(1);
-    expect(getClientSettings()).toEqual(secondSettings);
+    expect(getClientSettings()).toBe(DEFAULT_CLIENT_SETTINGS);
     finishFirst();
     await Promise.all([first, second]);
 
@@ -264,7 +286,7 @@ describe("persistClientSettingsUpdate", () => {
     expect(getClientSettings()).toBe(DEFAULT_CLIENT_SETTINGS);
   });
 
-  it("preserves an optimistic write made while an awaited update persists", async () => {
+  it("preserves a patch queued while an awaited update persists", async () => {
     let finishFirstPersistence!: () => void;
     let durableSettings = DEFAULT_CLIENT_SETTINGS;
     const firstPersistence = new Promise<void>((resolve) => {
@@ -295,7 +317,7 @@ describe("persistClientSettingsUpdate", () => {
     finishFirstPersistence();
     await Promise.all([pending, patch]);
 
-    expect(persist).toHaveBeenCalledTimes(3);
+    expect(persist).toHaveBeenCalledTimes(2);
     expect(persist.mock.calls[1]?.[0]).toMatchObject({
       wordWrap: false,
     });
@@ -306,7 +328,7 @@ describe("persistClientSettingsUpdate", () => {
     expect(getClientSettings().browserProfiles).toContainEqual(importedProfile);
   });
 
-  it("orders an awaited update after an older optimistic write", async () => {
+  it("orders an awaited update after an older patch", async () => {
     let finishOldWrite!: () => void;
     let durableSettings = DEFAULT_CLIENT_SETTINGS;
     const oldWrite = new Promise<void>((resolve) => {
