@@ -19,7 +19,16 @@ import {
   type MemoryItem,
   type MemorySyncStatus,
   type MemoryReportDelivery,
+  type MemoryScope,
 } from "@goat/contracts";
+import {
+  memoryBrowseInput,
+  memorySearchInput,
+  memoryProjectScope,
+  memoryPreview,
+  memoryScopeLabel,
+  presentMemoryPage,
+} from "@goat/client-runtime/memory-browsing";
 import {
   presentMemoryItem,
   presentMemoryResolution,
@@ -33,6 +42,7 @@ import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useEnvironment, useEnvironments } from "../../state/environments";
+import { useProjects } from "../../state/entities";
 import {
   readEnvironmentScope,
   readPreparedConnection,
@@ -46,6 +56,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Switch } from "../ui/switch";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import { formatTimestamp } from "../../timestampFormat";
 import { SettingsPageContainer, SettingsSection, SettingsRow } from "./settingsLayout";
@@ -321,15 +332,135 @@ function MemoryBootstrapRefresh({
 export { MemoryAdministration } from "./MemorySharingSettings";
 
 function MemoryRecords({
-  target,
   environmentId,
   memorySpaceId,
-  memoryEnabled,
+  ...props
 }: {
   target: MemorySettingsSearch;
   environmentId: EnvironmentId;
   memorySpaceId: MemorySpaceId;
   memoryEnabled: boolean;
+}) {
+  const projects = useProjects().filter((project) => project.environmentId === environmentId);
+  const navigate = useNavigate();
+  const getBinding = useAtomCommand(memoryEnvironment.projectBindingGet, { reportFailure: false });
+  const canGetBinding = useAtomValue(
+    memoryEnvironment.projectBindingGet.permissionAtom(environmentId),
+  );
+  const [selection, setSelection] = useState<string | null>("user");
+  const [scope, setScope] = useState<MemoryScope | null>({ kind: "user" });
+  const [error, setError] = useState<string | null>(null);
+  const generation = useRef(0);
+  useEffect(
+    () => () => {
+      generation.current += 1;
+    },
+    [],
+  );
+  async function choose(project: (typeof projects)[number] | null) {
+    const attempt = ++generation.current;
+    setSelection(project ? `project:${project.id}` : "user");
+    setError(null);
+    setScope(project ? null : { kind: "user" });
+    void navigate({
+      to: "/settings/memory",
+      search: validateMemorySettingsSearch({ environmentId, memorySpaceId }),
+      hash: "",
+    });
+    if (!project) return;
+    const result = await getBinding({
+      environmentId,
+      input: {
+        memorySpaceId,
+        project: { environmentId, projectId: project.id },
+      },
+    });
+    if (generation.current !== attempt) return;
+    if (result._tag !== "Success") {
+      setSelection(null);
+      setError("Could not load project memory scope. Choose the project again to retry.");
+      return;
+    }
+    const next = memoryProjectScope(result.value, project.repositoryIdentity);
+    setScope(next);
+    if (!next) {
+      setSelection(null);
+      setError("This project needs a repository or an explicit shared memory key.");
+    }
+  }
+  return (
+    <>
+      <SettingsSection title="Memory scope">
+        <SettingsRow
+          title="Scope"
+          description={
+            error ? (
+              <span role="alert">{error}</span>
+            ) : !scope ? (
+              "Loading project memory scope"
+            ) : !canGetBinding && projects.length > 0 ? (
+              "Project scope requires memory write permission to look up its shared key."
+            ) : undefined
+          }
+          control={
+            <Select
+              value={selection}
+              onValueChange={(value) => {
+                if (value === "user") void choose(null);
+                else {
+                  const project = projects.find((item) => `project:${item.id}` === value);
+                  if (project && canGetBinding) void choose(project);
+                }
+              }}
+            >
+              <SelectTrigger aria-label="Memory scope">
+                <SelectValue placeholder="Choose memory scope">
+                  {selection === "user"
+                    ? "User"
+                    : projects.find((project) => `project:${project.id}` === selection)?.title}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup>
+                <SelectItem value="user">User</SelectItem>
+                {projects.map((project) => (
+                  <SelectItem
+                    key={project.id}
+                    value={`project:${project.id}`}
+                    disabled={!canGetBinding}
+                  >
+                    {project.title}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          }
+        />
+      </SettingsSection>
+      {scope ? (
+        <ScopedMemoryRecords
+          key={JSON.stringify(scope)}
+          {...props}
+          environmentId={environmentId}
+          memorySpaceId={memorySpaceId}
+          scope={scope}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function ScopedMemoryRecords({
+  target,
+  environmentId,
+  memorySpaceId,
+  memoryEnabled,
+  scope,
+}: {
+  target: MemorySettingsSearch;
+  environmentId: EnvironmentId;
+  memorySpaceId: MemorySpaceId;
+  memoryEnabled: boolean;
+  scope: MemoryScope;
 }) {
   const [queryInput, setQueryInput] = useState("");
   const [query, setQuery] = useState("");
@@ -341,10 +472,15 @@ function MemoryRecords({
   const [quarantine, setQuarantine] = useState(false);
   const navigate = useNavigate();
   if (!canWrite && adding) setAdding(false);
-  const input = { memorySpaceId, limit: 40, ...(cursor ? { cursor } : {}) };
+  const input = memoryBrowseInput({
+    memorySpaceId,
+    scope,
+    limit: 40,
+    ...(cursor ? { cursor } : {}),
+  });
   const page = useEnvironmentQuery(
     query
-      ? memoryEnvironment.search({ environmentId, input: { ...input, query, mode: "substring" } })
+      ? memoryEnvironment.search({ environmentId, input: memorySearchInput(input, query) })
       : memoryEnvironment.list({
           environmentId,
           input: { ...input, includeQuarantined: quarantine },
@@ -390,8 +526,9 @@ function MemoryRecords({
           }
         />
         {adding && canWrite ? (
-          <SettingsRow title="New memory">
+          <SettingsRow title={`New memory · ${memoryScopeLabel(scope)}`}>
             <MemoryEditor
+              scope={scope}
               environmentId={environmentId}
               memorySpaceId={memorySpaceId}
               onClose={() => {
@@ -464,16 +601,18 @@ function MemoryRecords({
           />
         ) : null}
         {notice ? <SettingsRow title={<span role="status">{notice}</span>} /> : null}
+        {value && items.length > 0 && presentMemoryPage(value, Boolean(query)) ? (
+          <SettingsRow
+            title={<span role="status">{presentMemoryPage(value, Boolean(query))}</span>}
+          />
+        ) : null}
         {!value && !page.error ? (
           <SettingsRow
             title="Loading memories"
             description="Reconnect this device if records do not appear."
           />
         ) : !value ? null : items.length === 0 ? (
-          <SettingsRow
-            title="No memories yet"
-            description="Memories saved on this device will appear here."
-          />
+          <SettingsRow title={presentMemoryPage(value, Boolean(query))} />
         ) : (
           <LegendList
             data={items}
@@ -502,7 +641,7 @@ function MemoryRecords({
               <SettingsRow
                 title={
                   item.status === "active" ? (
-                    item.payload.text.slice(0, 120)
+                    memoryPreview(item.payload.text)
                   ) : item.status === "forgotten" ? (
                     <span className="text-muted-foreground">Forgotten memory</span>
                   ) : (
@@ -1211,15 +1350,19 @@ function MemoryReportControl({ report }: { report: MemoryReportDelivery }) {
   );
 }
 
+const DEFAULT_MEMORY_SCOPE = { kind: "user" } as const;
+
 function MemoryEditor({
   environmentId,
   memorySpaceId,
   item,
+  scope = DEFAULT_MEMORY_SCOPE,
   onClose,
 }: {
   environmentId: EnvironmentId;
   memorySpaceId: MemorySpaceId;
   item?: Extract<MemoryItem, { status: "active" }>;
+  scope?: MemoryScope;
   onClose: () => void;
 }) {
   const [id] = useState(() => item?.memoryId ?? MemoryId.make(randomUUID()));
@@ -1278,7 +1421,7 @@ function MemoryEditor({
             memoryId: id,
             operationId: intentId,
             expectedHeads: item ? [item.revision.revisionId] : [],
-            scope: item?.scope ?? { kind: "user" },
+            scope: item?.scope ?? scope,
             assertionKind: item?.revision.assertionKind ?? "fact",
             payload: {
               text,
@@ -1299,6 +1442,7 @@ function MemoryEditor({
           setError("Memory update failed. Retry the same request or close the editor and reload.");
       }}
     >
+      <p>Save to: {memoryScopeLabel(item?.scope ?? scope)}</p>
       <Textarea
         aria-label="Memory text"
         value={text ?? ""}

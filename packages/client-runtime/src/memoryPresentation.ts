@@ -280,6 +280,7 @@ export function presentMemoryRunAccess(input: {
 }) {
   return {
     savedCeiling: input.memoryGrantCeiling ?? "none",
+    savedCeilingLabel: `Memory limit: ${{ none: "none", read: "read", read_write: "read & write" }[input.memoryGrantCeiling ?? "none"]}`,
     effectiveAccess: "unknown" as const,
     effectiveReason: null,
   };

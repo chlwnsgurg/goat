@@ -466,7 +466,7 @@ function ScheduledTaskRow({
           ) : null}
           {task.memoryGrantCeiling && task.memoryGrantCeiling !== "none" ? (
             <span className="text-xs text-muted-foreground">
-              Memory: {presentMemoryRunAccess(task).savedCeiling}
+              {presentMemoryRunAccess(task).savedCeilingLabel}
             </span>
           ) : null}
           {task.lastRunError ? <span className="text-destructive">{task.lastRunError}</span> : null}

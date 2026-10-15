@@ -164,5 +164,5 @@ export function SubagentMemoryAccess({
 }) {
   const view = presentMemoryRunAccess(subagent);
   if (view.savedCeiling === "none") return null;
-  return <Text className="text-xs text-foreground-muted">Memory: {view.savedCeiling}</Text>;
+  return <Text className="text-xs text-foreground-muted">{view.savedCeilingLabel}</Text>;
 }

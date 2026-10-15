@@ -473,6 +473,7 @@ describe("memory presentation boundaries", () => {
     );
     expect(presentMemoryRunAccess({})).toEqual({
       savedCeiling: "none",
+      savedCeilingLabel: "Memory limit: none",
       effectiveAccess: "unknown",
       effectiveReason: null,
     });

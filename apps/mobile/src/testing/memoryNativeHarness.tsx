@@ -24,6 +24,7 @@ import {
   type ConnectionCatalogEntry,
   type PreparedConnection,
 } from "@goat/client-runtime/connection";
+import type { ControlPillMenuProps } from "../components/ControlPillMenu.types";
 import type { RpcSession } from "@goat/client-runtime/rpc";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import * as Effect from "effect/Effect";
@@ -38,6 +39,7 @@ import * as Schema from "effect/Schema";
 // Synthetic native adapter only. Commands, permission checks, body queries and drafts are real.
 const bridge = vi.hoisted(() => ({
   current: null as unknown,
+  projects: [] as { id: string; title: string; environmentId: string; repositoryIdentity: null }[],
   platform: "ios",
   navigations: [] as unknown[],
   focus: new Map<() => void | (() => void), void | (() => void)>(),
@@ -185,6 +187,7 @@ vi.mock("@goat/client-runtime/state/session", () => ({
   }),
 }));
 vi.mock("../state/entities", () => ({
+  useProjects: () => bridge.projects,
   useThreadShell: () => null,
   useProject: () => null,
   useEnvironmentServerConfig: () => null,
@@ -242,10 +245,45 @@ vi.mock("../features/settings/components/SettingsSwitchRow", () => ({
     </button>
   ),
 }));
+vi.mock("../components/ControlPillMenu", () => ({
+  ControlPillMenu: function ControlPillMenu(
+    props: Pick<ControlPillMenuProps, "actions" | "onPressAction" | "children">,
+  ) {
+    const [open, setOpen] = React.useState(false);
+    const trigger = React.isValidElement<{ onPress?: () => void }>(props.children)
+      ? React.cloneElement(props.children, { onPress: () => setOpen(true) })
+      : props.children;
+    return (
+      <div>
+        {trigger}
+        {open
+          ? props.actions.map((action) => (
+              <button
+                key={action.id}
+                disabled={action.attributes?.disabled}
+                onClick={() => {
+                  setOpen(false);
+                  if (action.id) props.onPressAction?.({ nativeEvent: { event: action.id } });
+                }}
+              >
+                {action.title}
+              </button>
+            ))
+          : null}
+      </div>
+    );
+  },
+}));
 vi.mock("../features/settings/components/SettingsRow", () => ({
-  SettingsRow: (props: { label: string; disabled?: boolean; onPress: () => void }) => (
-    <button disabled={props.disabled} onClick={props.onPress}>
+  SettingsRow: (props: {
+    label: string;
+    value?: string;
+    disabled?: boolean;
+    onPress?: () => void;
+  }) => (
+    <button aria-label={props.label} disabled={props.disabled} onClick={props.onPress}>
       {props.label}
+      {props.value ? `: ${props.value}` : null}
     </button>
   ),
 }));
@@ -405,6 +443,7 @@ const scopes = (values: readonly AuthEnvironmentScope[]): AuthSessionState => ({
 
 export type NativeMemoryHarness = ReturnType<typeof createNativeMemoryHarness>;
 export function createNativeMemoryHarness() {
+  bridge.projects = [];
   const registry = AtomRegistry.make();
   const configs = Atom.family((_id: EnvironmentId | null) => Atom.make<ServerConfig | null>(null));
   const grants = Atom.family((_id: EnvironmentId | null) =>
@@ -540,6 +579,7 @@ export function createNativeMemoryHarness() {
   });
   const harness = {
     registry,
+    projects: bridge.projects,
     configs,
     grants,
     prepared,
