@@ -558,10 +558,10 @@ export function createNativeMemoryHarness() {
     updateSettings,
     navigations: bridge.navigations,
     focus: () => {
-      for (const callback of [...bridge.focus]) callback();
+      for (const callback of bridge.focus) callback();
     },
     active: () => {
-      for (const listener of [...bridge.active]) listener("active");
+      for (const listener of bridge.active) listener("active");
     },
     setPlatform: (platform: string) => {
       bridge.platform = platform;

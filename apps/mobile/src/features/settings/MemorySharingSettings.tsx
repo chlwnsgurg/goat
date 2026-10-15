@@ -177,7 +177,9 @@ export function MemoryAdministration({
   );
   const focusedOnce = useRef(false);
   const refreshBlocked = useRef(false);
-  refreshBlocked.current = busy || pending !== null || recovery;
+  useEffect(() => {
+    refreshBlocked.current = busy || pending !== null || recovery;
+  }, [busy, pending, recovery]);
   useFocusEffect(
     useCallback(() => {
       const refresh = () => {

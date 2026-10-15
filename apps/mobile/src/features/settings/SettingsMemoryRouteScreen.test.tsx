@@ -92,8 +92,9 @@ function revertHistory() {
     nextCursor: null,
   });
 }
+const decodeReceipt = Schema.decodeUnknownSync(MemoryMutationReceipt);
 function receipt(input: unknown, rejected = false) {
-  return Schema.decodeUnknownSync(MemoryMutationReceipt)({
+  return decodeReceipt({
     operationId: (input as MemoryForgetInput).operationId,
     memoryId: nativeId,
     revisionId: null,
@@ -175,6 +176,68 @@ describe("native Memory with shared factory", () => {
     expect(view.container.textContent).toContain(
       "Forgotten. Other devices remove it when they sync.",
     );
+  });
+  it.each([false, true])(
+    "shows provider retention notice only for imported memories (%s)",
+    async (imported) => {
+      await mount();
+      if (nativeItem.status !== "active") throw new Error("active fixture required");
+      const item = decodeItem({
+        ...nativeItem,
+        payload: {
+          ...nativeItem.payload,
+          evidence: imported
+            ? [{ origin: "import", importSourceId: originalId, messageIds: [] }]
+            : nativeItem.payload.evidence,
+        },
+      });
+      h.responses.set(WS_METHODS.memoryRead, () => item);
+      h.responses.set(WS_METHODS.memoryForget, (input) => receipt(input));
+      await view.click("Open memory: Synthetic memory body");
+      await view.click("Forget");
+      expect(
+        view.container.textContent!.includes("The provider's original conversation stays"),
+      ).toBe(imported);
+      await view.click("Confirm forget");
+      expect(view.container.textContent).toContain("Forgotten. Other devices");
+      expect(
+        view.container.textContent!.includes("The provider's original conversation stays"),
+      ).toBe(imported);
+    },
+  );
+  it("explains a metadata-only forgotten row without its removed body", async () => {
+    h = createNativeMemoryHarness();
+    const item = decodeItem({
+      memorySpaceId: nativeSpace,
+      memoryId: nativeId,
+      status: "forgotten",
+      pendingSync: false,
+      localAvailability: nativeItem.localAvailability,
+      tombstone: {
+        memorySpaceId: nativeSpace,
+        memoryId: nativeId,
+        deleteOperationId: originalId,
+        deletingEnvironmentId: nativeEnv,
+        deletedAtUtc: "2026-10-15T00:00:00.000Z",
+        suppressedSourceKeys: [],
+        suppressedContent: [],
+        sourceExclusions: [],
+      },
+    });
+    h.responses.set(WS_METHODS.memoryList, () => ({
+      items: [item],
+      nextCursor: null,
+      projectionWatermark: 1,
+    }));
+    await h.waitForAtom(h.memory.syncStatus.permissionAtom(nativeEnv), Boolean);
+    view = renderNative(
+      h,
+      <SettingsMemoryRouteScreen route={{ params: { environmentId: nativeEnv } }} />,
+    );
+    await view.render();
+    expect(view.container.textContent).toContain("Forgotten memory");
+    expect(view.container.textContent).toContain("The memory body has been removed.");
+    expect(view.container.textContent).not.toContain("Synthetic memory body");
   });
   it("keeps rejected forget open and reports failure with a schema-valid receipt", async () => {
     await mount();
@@ -570,11 +633,64 @@ describe("native sharing workflow", () => {
     expect(view.container.textContent).toContain("Review latest settings");
     expect(h.calls.filter((c) => c.method === WS_METHODS.memoryHubSettingsGet)).toHaveLength(reads);
   });
+  it("ignores a late settings and sync read after a newer active refresh", async () => {
+    await start();
+    const oldHub = h.deferred<unknown>();
+    const oldSync = h.deferred<unknown>();
+    h.responses.set(WS_METHODS.memoryHubSettingsGet, () => oldHub.response);
+    h.responses.set(WS_METHODS.memorySyncStatus, () => oldSync.response);
+    await act(async () => h.active());
+    h.responses.set(WS_METHODS.memoryHubSettingsGet, () => ({
+      settings: { mode: "disabled" },
+      members: [],
+      version: 9,
+    }));
+    h.responses.set(WS_METHODS.memorySyncStatus, () => ({
+      ...nativeSyncStatus,
+      state: "disabled",
+      memorySpaceId: null,
+    }));
+    await act(async () => h.active());
+    await act(async () => {
+      await oldHub.succeed({
+        settings: { mode: "hub", memorySpaceId: nativeSpace },
+        members: [],
+        version: 1,
+      });
+      await oldSync.succeed(nativeSyncStatus);
+    });
+    expect(view.container.textContent).toContain("Memory off");
+    expect(view.container.textContent).not.toContain("This device is the hub");
+    await view.click("Remember something");
+    expect(view.container.querySelector('input[aria-label="Memory text"]')).toBeNull();
+  });
+  it("preserves an in-flight device request across active and focus events", async () => {
+    await start();
+    const provision = h.deferred<unknown>();
+    h.responses.set(WS_METHODS.memoryHubSettingsUpdate, () => provision.response);
+    await view.click("Add Test device");
+    await view.type("Hub address", "https://hub.example.test");
+    await view.click("Confirm");
+    const reads = h.calls.filter((c) => c.method === WS_METHODS.memoryHubSettingsGet).length;
+    await act(async () => {
+      h.active();
+      h.focus();
+    });
+    expect(h.calls.filter((c) => c.method === WS_METHODS.memoryHubSettingsGet)).toHaveLength(reads);
+    expect(h.calls.filter((c) => c.method === WS_METHODS.memoryHubSettingsUpdate)).toHaveLength(1);
+    await act(async () => {
+      await provision.fail(new Error("Synthetic response lost"));
+    });
+    expect(view.container.textContent).toContain("Retry");
+    await act(async () => h.active());
+    expect(h.calls.filter((c) => c.method === WS_METHODS.memoryHubSettingsGet)).toHaveLength(reads);
+    expect(view.container.textContent).toContain("Retry");
+  });
   it("toggles quarantine without refreshing healthy lists and clears search", async () => {
     await start();
     expect(view.container.textContent).not.toContain("Refresh memories");
     await view.click("Include quarantined");
-    expect(h.calls.filter((c) => c.method === WS_METHODS.memoryList).at(-1)?.input).toMatchObject({
+    expect(h.calls.findLast((c) => c.method === WS_METHODS.memoryList)?.input).toMatchObject({
       includeQuarantined: true,
     });
     await view.type("Search memory", "absent");
