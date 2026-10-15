@@ -130,6 +130,57 @@ describe("Omo committed memory parser", () => {
       );
     }),
   );
+  it.effect.each(["'", '"'])(
+    "first-colon scalars preserve %s quotes in title and source metadata",
+    (quote) =>
+      Effect.gen(function* () {
+        const original = candidate(yield* parseOmoMemory(snapshot()));
+        for (const [field, value] of [
+          ["description", "Synthetic guidance"],
+          ["read_only", "false"],
+          ["kind", "observation"],
+        ]) {
+          const quoted = candidate(
+            yield* parseOmoMemory(
+              snapshot({
+                "notes/month.md": note().replace(
+                  `${field}: ${value}`,
+                  `${field}: ${quote}${value}${quote}`,
+                ),
+              }),
+            ),
+          );
+          assert.equal(
+            quoted.title,
+            field === "description" ? `${quote}Synthetic guidance${quote}` : "Synthetic guidance",
+          );
+          assert.equal(quoted.sourceItemKey, original.sourceItemKey);
+          assert.equal(quoted.contentFingerprint, original.contentFingerprint);
+          assert.notEqual(quoted.sourceFingerprint, original.sourceFingerprint);
+          const otherQuote = quote === "'" ? '"' : "'";
+          const differentlyQuoted = candidate(
+            yield* parseOmoMemory(
+              snapshot({
+                "notes/month.md": note().replace(
+                  `${field}: ${value}`,
+                  `${field}: ${otherQuote}${value}${otherQuote}`,
+                ),
+              }),
+            ),
+          );
+          assert.notEqual(quoted.sourceFingerprint, differentlyQuoted.sourceFingerprint);
+        }
+        const colon = candidate(
+          yield* parseOmoMemory(
+            snapshot({
+              "notes/month.md": note("hello", `description: ${quote}label: value${quote}`),
+            }),
+          ),
+        );
+        assert.equal(colon.title, `${quote}label: value${quote}`);
+        assert.equal(colon.contentFingerprint, original.contentFingerprint);
+      }),
+  );
   it.effect("allows each approved root; persona/identity remain untrusted text", () =>
     Effect.gen(function* () {
       const files = Object.fromEntries(
@@ -231,6 +282,47 @@ describe("Omo committed memory parser", () => {
       );
     },
   );
+  it.effect.each([
+    "ignored limit",
+    "normalized ignored scalar",
+    "normalized description",
+    "normalized decoded aliases",
+    "missing description",
+    "empty body",
+    "decoded aliases",
+    "decoded aliases missing description",
+    "decoded aliases after malformed field",
+    "decoded aliases before invalid aliases",
+  ])("secret preflight precedes item rejection: %s", (scenario) => {
+    const secret = "sk-" + "S".repeat(24);
+    const encoded = Array.from(
+      secret,
+      (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    ).join("");
+    const aliases = `aliases: ["${encoded}"]`;
+    // Kelvin sign canonically composes to ASCII K; this is synthetic scanner input.
+    const normalizedSecret = "A\u212aIA" + "S".repeat(16);
+    const normalizedAliases = `aliases: ["\\u0041\\u212aIA${"S".repeat(16)}"]`;
+    const fields = {
+      "ignored limit": `description: Safe\nlimit: ${secret}`,
+      "normalized ignored scalar": `custom: ${normalizedSecret}`,
+      "normalized description": `description: ${normalizedSecret}`,
+      "normalized decoded aliases": `description: Safe\n${normalizedAliases}`,
+      "missing description": `limit: ${secret}`,
+      "empty body": `description: Safe\ncustom: ${secret}`,
+      "decoded aliases": `description: Safe\n${aliases}`,
+      "decoded aliases missing description": aliases,
+      "decoded aliases after malformed field": `description: Safe\n  nested: invalid\n${aliases}`,
+      "decoded aliases before invalid aliases": `description: Safe\n${aliases}\naliases: [broken`,
+    }[scenario]!;
+    return failure(
+      snapshot({
+        "notes/first.md": note(),
+        "notes/second.md": note(scenario === "empty body" ? "" : "safe", fields),
+      }),
+      "secret_detected",
+    );
+  });
   it.effect.each(["\0", "\ud800"])("defensively refuses invalid text %s", (bad) =>
     failure(snapshot({ "notes/m.md": note(bad) }), "invalid_utf8"),
   );

@@ -21,6 +21,31 @@ const safeSelector = (selector: string) =>
     .split("/")
     .every((part) => part !== "" && part !== "." && part !== ".." && part !== ".git");
 
+/** Scan decoded aliases even when another header field will reject the item. */
+const hasDecodedAliasSecret = (text: string) => {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  if (lines[0] !== "---") return false;
+  const end = lines.indexOf("---", 1);
+  for (const line of lines.slice(1, end < 0 ? undefined : end)) {
+    const match = /^aliases:[ \t]*(.*)$/.exec(line);
+    if (!match) continue;
+    try {
+      const decoded: unknown = JSON.parse(match[1]!);
+      if (
+        Array.isArray(decoded) &&
+        decoded.some(
+          (alias) =>
+            typeof alias === "string" && scanMemoryValue(canonical(alias)).kind === "blocked",
+        )
+      )
+        return true;
+    } catch {
+      // Syntax rejection belongs to header(); keep scanning subsequent fields.
+    }
+  }
+  return false;
+};
+
 /** beta63 uses first-colon scalar fields, not general YAML or includes. */
 const header = (text: string) => {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
@@ -92,7 +117,11 @@ export const parseOmoMemory: MemoryImportParser = (input) =>
       totalBytes += size;
       if (size > 256 * 1024 || totalBytes > 8 * 1024 * 1024)
         return yield* Effect.fail(new M.MemoryImportRpcError({ issue: "limit_exceeded" }));
-      if (scanMemoryValue(file.text).kind === "blocked")
+      if (
+        scanMemoryValue(file.text).kind === "blocked" ||
+        scanMemoryValue(canonical(file.text)).kind === "blocked" ||
+        hasDecodedAliasSecret(file.text)
+      )
         return yield* Effect.fail(new M.MemoryImportRpcError({ issue: "secret_detected" }));
     }
     const files = input.files.filter((file) => allowed.test(file.selector));
