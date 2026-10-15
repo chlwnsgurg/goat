@@ -170,21 +170,38 @@ it.effect("waits for WAL recovery when executing writer statements", () =>
         (spy) => Effect.sync(() => spy.mockRestore()),
       );
     }
-    yield* Effect.acquireUseRelease(
-      Effect.sync(() =>
-        vi.spyOn(NodeSqlite.StatementSync.prototype, "run").mockImplementationOnce(() => {
-          throw recoveryBusy();
-        }),
-      ),
-      () =>
-        Effect.gen(function* () {
-          const fiber = yield* sql`INSERT INTO recovery_entries VALUES (2)`.pipe(Effect.forkChild);
-          yield* TestClock.adjust("10 millis");
-          yield* Fiber.join(fiber);
-        }),
-      (spy) => Effect.sync(() => spy.mockRestore()),
-    );
-    assert.deepEqual(yield* sql`SELECT value FROM recovery_entries`.values, [[1], [2]]);
+    const writes = [
+      () => sql`INSERT INTO recovery_entries VALUES (2)`,
+      () => sql`INSERT INTO recovery_entries VALUES (2)`.raw,
+      () => sql`INSERT INTO recovery_entries VALUES (2)`.values,
+      () => sql`INSERT INTO recovery_entries VALUES (2)`.valuesUnprepared,
+    ];
+    for (const write of writes) {
+      const attempted = yield* Deferred.make<void>();
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          vi.spyOn(NodeSqlite.StatementSync.prototype, "run").mockImplementationOnce(() => {
+            Deferred.doneUnsafe(attempted, Effect.void);
+            throw recoveryBusy();
+          }),
+        ),
+        () =>
+          Effect.gen(function* () {
+            const fiber = yield* write().pipe(Effect.forkChild);
+            yield* Deferred.await(attempted);
+            yield* TestClock.adjust("10 millis");
+            yield* Fiber.join(fiber);
+          }),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      );
+    }
+    assert.deepEqual(yield* sql`SELECT value FROM recovery_entries`.values, [
+      [1],
+      [2],
+      [2],
+      [2],
+      [2],
+    ]);
   }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
 );
 
