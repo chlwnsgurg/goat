@@ -83,8 +83,8 @@ function Diagnostics({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const permission = useRef({ canRead, allowed });
-  permission.current = { canRead, allowed };
   useEffect(() => {
+    permission.current = { canRead, allowed };
     if (!canRead || !allowed) setMessage(null);
   }, [canRead, allowed]);
   async function submit() {
