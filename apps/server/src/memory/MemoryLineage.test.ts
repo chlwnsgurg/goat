@@ -1,4 +1,3 @@
-import { assertUsageCounters } from "./MemoryUsageScan.testkit.ts";
 import * as Settings from "../serverSettings.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";

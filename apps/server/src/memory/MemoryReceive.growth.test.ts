@@ -4,7 +4,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Console from "effect/Console";
-import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Settings from "../serverSettings.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
@@ -49,8 +48,9 @@ const serviceLive = (
   );
 const live = serviceLive();
 
+const decodeOperation = Schema.decodeUnknownSync(M.MemoryOperation);
 const operation = (n: number, chain = false): M.MemoryOperation =>
-  Schema.decodeUnknownSync(M.MemoryOperation)({
+  decodeOperation({
     protocolVersion: 1,
     memorySpaceId: space,
     memoryId: id(chain ? 10 : 10000 + n),

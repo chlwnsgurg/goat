@@ -59,8 +59,8 @@ export default Effect.gen(function* () {
       (p) => ({
         log_rows: "1",
         log_bytes: `${bytes(`${p}.metadata_json`)}+${bytes(`${p}.receipt_json`)}`,
-        receipts: `NOT EXISTS(SELECT 1 FROM memory_compact_receipts c WHERE memory_quota_counters.space=${p}.memory_space_id AND c.operation_id=${p}.operation_id)`,
-        receipt_bytes: `${M.MEMORY_COMPACT_RECEIPT_MAX_BYTES}*(NOT EXISTS(SELECT 1 FROM memory_compact_receipts c WHERE memory_quota_counters.space=${p}.memory_space_id AND c.operation_id=${p}.operation_id))`,
+        receipts: `NOT EXISTS(SELECT 1 FROM memory_compact_receipts c WHERE c.space=${p}.memory_space_id AND c.operation_id=${p}.operation_id)`,
+        receipt_bytes: `${M.MEMORY_COMPACT_RECEIPT_MAX_BYTES}*(NOT EXISTS(SELECT 1 FROM memory_compact_receipts c WHERE c.space=${p}.memory_space_id AND c.operation_id=${p}.operation_id))`,
       }),
     ],
     [

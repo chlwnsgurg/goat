@@ -176,6 +176,7 @@ export const scanUsage = Effect.fn("scanUsage")(function* (
 });
 
 /** Full scan oracle is intentionally test-only; check every persisted space and scope. */
+const decodeScope = Schema.decodeEffect(Schema.fromJsonString(M.MemoryScope));
 export const assertUsageCounters = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const store = yield* Store.MemoryStore;
@@ -188,10 +189,7 @@ export const assertUsageCounters = Effect.gen(function* () {
       scope_json: string;
     }>`SELECT DISTINCT scope_json FROM memory_items WHERE space=${space}`;
     const candidates: M.MemoryScope[] = [{ kind: "user" }];
-    for (const row of scopes)
-      candidates.push(
-        yield* Schema.decodeEffect(Schema.fromJsonString(M.MemoryScope))(row.scope_json),
-      );
+    for (const row of scopes) candidates.push(yield* decodeScope(row.scope_json));
     for (const scope of candidates)
       assert.deepStrictEqual(yield* store.usage(id, scope), yield* scanUsage(id, scope));
   }

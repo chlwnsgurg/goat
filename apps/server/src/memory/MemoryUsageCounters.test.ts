@@ -1,9 +1,8 @@
-import { assert, it, describe } from "@effect/vitest";
+import { assert, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import * as Console from "effect/Console";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Settings from "../serverSettings.ts";
@@ -49,8 +48,10 @@ const serviceLive = (
   );
 const live = serviceLive();
 
+const decodeOperation = Schema.decodeUnknownSync(M.MemoryOperation);
+const decodeOperationEffect = Schema.decodeUnknownEffect(M.MemoryOperation);
 const operation = (n: number, chain = false): M.MemoryOperation =>
-  Schema.decodeUnknownSync(M.MemoryOperation)({
+  decodeOperation({
     protocolVersion: 1,
     memorySpaceId: space,
     memoryId: id(chain ? 10 : 10000 + n),
@@ -125,7 +126,7 @@ it.effect(
       yield* sql`DELETE FROM memory_outbox WHERE id='test'`;
       yield* check;
       const service = yield* Service.MemoryService;
-      const op = yield* Schema.decodeUnknownEffect(M.MemoryOperation)({
+      const op = yield* decodeOperationEffect({
         protocolVersion: 1,
         memorySpaceId: space,
         memoryId: id(10),
