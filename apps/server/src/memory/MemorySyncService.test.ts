@@ -5963,7 +5963,16 @@ it.effect.each(["offline", "next-page", "transport-retry", "chain", "rejected"] 
           // The hub forgot A while this member was offline: both submissions must terminate.
           if (scenario === "rejected") {
             yield* hService.upsert(
-              { ...a, operationId: M.MemoryOperationId.make(id(99991)) },
+              {
+                memorySpaceId: space,
+                memoryId: a.memoryId,
+                operationId: M.MemoryOperationId.make(id(99991)),
+                expectedHeads: [],
+                scope: a.scope,
+                assertionKind: a.assertionKind,
+                payload: a.payload,
+                baseBoundary: null,
+              },
               Effect.void,
             );
             yield* hService.forget(
