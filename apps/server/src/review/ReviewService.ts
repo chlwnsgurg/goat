@@ -136,6 +136,14 @@ export const make = Effect.gen(function* () {
       };
     }
 
+    const scope = input.file?.sourceKind ?? input.scope;
+    if (handle.kind !== "git" && (scope === "staged" || scope === "unstaged")) {
+      return yield* new VcsUnsupportedOperationError({
+        operation: "ReviewService.getDiffPreview",
+        kind: handle.kind,
+        detail: "Staged and unstaged review scopes require a Git index.",
+      });
+    }
     const getDriverDiffPreview = handle.driver.getDiffPreview;
     if (!getDriverDiffPreview) {
       if (handle.kind === "git") {

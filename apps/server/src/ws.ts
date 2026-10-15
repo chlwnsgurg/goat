@@ -1479,6 +1479,8 @@ const layerWsRpc = (
           memory.read(input, memoryRead).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryHistory]: (input) =>
           memory.history(input, memoryRead).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryHubDiagnostics]: (input) =>
+          memorySync.hubDiagnostics(input, memoryRead).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memorySyncStatus]: (input) =>
           memorySync.syncStatus(input, memoryRead).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryUpsert]: (input) =>
@@ -1501,6 +1503,8 @@ const layerWsRpc = (
           memorySync.updateHubSettings(input, memorySettings).pipe(Effect.mapError(memoryError)),
       });
       const ownerHandlers = WsMemoryAdministrationRpcGroup.middleware(RpcInstrumentation).of({
+        [WS_METHODS.memoryHubReconcile]: (input) =>
+          memorySync.reconcileHub(input, memorySettings).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryResetReportAttempts]: (input) =>
           memory.resetReportAttempts(input, memorySettings).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryOwnerSourceReadPolicyGet]: () => ownerPolicy.get(ownerSettings),

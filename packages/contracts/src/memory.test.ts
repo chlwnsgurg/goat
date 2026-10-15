@@ -2179,3 +2179,36 @@ it("report retry reset accepts at most 32 distinct exact-owner IDs and rejects e
     }),
   ).toThrow();
 });
+
+it("strictly bounds hub diagnostics and rejects unsafe or duplicated reasons", () => {
+  const diagnostic = {
+    version: 1,
+    publication: { state: "current" },
+    readiness: "ready",
+    connection: "unreachable",
+    recoverableHolds: ["protocol", "availability"],
+    permanentHolds: ["identity", "authorization"],
+    reconcile: "permanent_hold",
+  };
+  const decode = Schema.decodeUnknownSync(M.MemoryHubDiagnostics);
+  expect(decode(diagnostic)).toEqual(diagnostic);
+  for (const invalid of [
+    { ...diagnostic, reason: "raw endpoint or credential" },
+    { ...diagnostic, permanentHolds: ["identity", "identity"] },
+    { ...diagnostic, recoverableHolds: ["authorization"] },
+    { ...diagnostic, publication: { state: "last_valid", code: "raw exception" } },
+    { ...diagnostic, version: -1 },
+  ])
+    expect(() => decode(invalid)).toThrow();
+  const request = { memorySpaceId: id(), environmentId: "fixture", expectedVersion: 1 };
+  expect(Schema.decodeUnknownSync(M.MemoryHubReconcileInput)(request)).toEqual(request);
+  expect(() =>
+    Schema.decodeUnknownSync(M.MemoryHubReconcileInput)({ ...request, releaseAll: true }),
+  ).toThrow();
+  expect(() =>
+    Schema.decodeUnknownSync(M.MemoryHubReconcileResult)({
+      version: 1,
+      rearmedClasses: ["identity"],
+    }),
+  ).toThrow();
+});

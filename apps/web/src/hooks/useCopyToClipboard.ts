@@ -169,6 +169,7 @@ export async function writeTextToClipboard(
     await navigator.clipboard.writeText(value);
     return true;
   } catch (cause) {
+    if (writeTextWithExecCommand(value, extraFlavors)) return true;
     throw new ClipboardWriteError({
       target,
       cause,

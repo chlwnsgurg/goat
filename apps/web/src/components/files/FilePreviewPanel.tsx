@@ -82,6 +82,7 @@ import { BrowserDocumentFrame, isPdfPreviewFile } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
 import FileBrowserPanel from "./FileBrowserPanel";
 import { FileBreadcrumbs } from "./FileBreadcrumbs";
+import { FilePathCopyMenu } from "./FilePathCopyMenu";
 import { FileMarkdownPreview } from "./FileMarkdownPreview";
 import {
   type FileCommentAnnotationEntry,
@@ -1021,16 +1022,12 @@ function RenderedMarkdownSurface({
   relativePath,
   contents,
   threadRef,
+  composerDraftTarget,
   readOnly,
   onPendingChange,
 }: Omit<
   EditableFileSurfaceProps,
-  | "resolvedTheme"
-  | "composerDraftTarget"
-  | "revealLine"
-  | "revealRequestId"
-  | "wordWrap"
-  | "onPostRender"
+  "resolvedTheme" | "revealLine" | "revealRequestId" | "wordWrap" | "onPostRender"
 > & {
   threadRef: ScopedThreadRef;
   readOnly: boolean;
@@ -1051,6 +1048,7 @@ function RenderedMarkdownSurface({
           cwd={cwd}
           relativePath={relativePath}
           threadRef={threadRef}
+          composerDraftTarget={composerDraftTarget}
           onTaskListChange={
             readOnly || saveCoordinator.status === "reloading"
               ? undefined
@@ -1335,6 +1333,7 @@ export default function FilePreviewPanel({
               />
             </div>
           </ScrollArea>
+          <FilePathCopyMenu filePath={relativePath} workspaceRoot={cwd} />
           {absolutePath &&
           (environmentId === primaryEnvironmentId || remoteOpenState.mode !== "local-exec") ? (
             <OpenInPicker
@@ -1505,6 +1504,7 @@ export default function FilePreviewPanel({
                 cwd={cwd}
                 relativePath={relativePath}
                 threadRef={threadRef}
+                composerDraftTarget={composerDraftTarget}
                 contents={file.data.contents}
                 readOnly={
                   isHostFile ||

@@ -3,6 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./memory-import-recovery": {
+      "types": "./src/memoryImportRecovery.ts",
+      "default": "./src/memoryImportRecovery.ts"
+    },
+    "./memory-import-workflow": {
+      "types": "./src/memoryImportWorkflow.ts",
+      "default": "./src/memoryImportWorkflow.ts"
+    },
     "./memory-presentation": {
       "types": "./src/memoryPresentation.ts",
       "default": "./src/memoryPresentation.ts"
