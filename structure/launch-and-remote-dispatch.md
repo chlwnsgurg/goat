@@ -60,9 +60,9 @@ wait follows it into the joined run, and the follower reports that run under its
 
 `RemoteDispatchCoordinator` in `apps/server/src/remoteReports/RemoteDispatchCoordinator.ts` inserts
 a row in `remote_dispatches` and then calls `SshRemoteDispatch.launchThread`. Migration
-`apps/server/src/persistence/Migrations/064_RemoteDispatches.ts` creates that table. Reports use
-`apps/server/src/persistence/Migrations/063_RemoteReports.ts` and `RemoteReportService`.
-`apps/server/src/persistence/Migrations/066_RemoteDispatchQuestions.ts` adds
+`apps/server/src/persistence/Migrations/065_RemoteDispatches.ts` creates that table. Reports use
+`apps/server/src/persistence/Migrations/064_RemoteReports.ts` and `RemoteReportService`.
+`apps/server/src/persistence/Migrations/067_RemoteDispatchQuestions.ts` adds
 `pending_request_ids`, a JSON array of the launched run's open question ids. The coordinator
 writes that column from the host's observed `pendingRequestIds` before it announces questions.
 When delivery is `wake` and the remote thread id is set, it dispatches one notice per question
@@ -93,7 +93,7 @@ launch. The coordinator declares it for `kind: "thread"` dispatches only, so del
 older origins, which never declare it, keep the error that names the origin and suggests
 `goat_origin_report`. Every other host tool keeps that error too. The remote caller must still be
 a live thread in default interaction mode. Migration
-`apps/server/src/persistence/Migrations/068_RemoteReportRelay.ts` stores the flag on the binding
+`apps/server/src/persistence/Migrations/069_RemoteReportRelay.ts` stores the flag on the binding
 and the send on its report row, which travels as `RemoteReport.relay` and answers the agent with
 `delivery: "relayed"`. A retry with the same `clientRequestId` returns the same report, even
 after the origin collected it. Report retention never prunes a relay the origin has not collected;

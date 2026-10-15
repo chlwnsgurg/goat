@@ -71,6 +71,9 @@ vi.mock("../../state/session", async () => {
     readEnvironmentScope: (id: EnvironmentId) => state.registry!.get(state.grants!).has(id),
   };
 });
+vi.mock("../ChatMarkdown", () => ({
+  default: (props: { readonly text: string }) => <p>{props.text}</p>,
+}));
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: string) => (command === "approval" ? state.approval : state.userInput),
 }));
