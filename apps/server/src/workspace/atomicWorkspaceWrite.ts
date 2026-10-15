@@ -219,10 +219,8 @@ export async function atomicWorkspaceWrite(input: {
     await operation("open", target, () => NodeFS.promises.access(target, NodeFS.constants.W_OK));
   }
 
-  const temporary = NodePath.join(
-    parent,
-    `.${NodePath.basename(target)}.${process.pid}.${NodeCrypto.randomUUID()}.tmp`,
-  );
+  // Keep staging names bounded even when the destination is near NAME_MAX.
+  const temporary = NodePath.join(parent, `.goat.${NodeCrypto.randomUUID()}.tmp`);
   const mode = existing === null ? 0o666 : existing.mode & 0o7777;
   const handle = await operation("open", temporary, () =>
     NodeFS.promises.open(
