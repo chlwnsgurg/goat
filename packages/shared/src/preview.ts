@@ -58,6 +58,9 @@ function previewUrlProtocol(rawUrl: string): string | undefined {
 }
 
 const SEARCH_URL = "https://duckduckgo.com/?q=";
+/** The URL resolveAddressBarInput produces when it treats the input as a search. */
+export const addressBarSearchUrl = (query: string) =>
+  `${SEARCH_URL}${encodeURIComponent(query.trim())}`;
 /** A bare host that is always an address: localhost, an IPv4 literal, or a bracketed IPv6 one. */
 const ADDRESS_HOST_PATTERN = /^(?:localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[\da-f:.]+\])$/i;
 const BARE_HOST_PORT_PATTERN = /^[^/?#:@]+:\d+(?:[/?#]|$)/;
@@ -122,7 +125,7 @@ export function resolveAddressBarInput(rawInput: string): string {
       }
     }
   }
-  return `${SEARCH_URL}${encodeURIComponent(trimmed)}`;
+  return addressBarSearchUrl(trimmed);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { resolveAddressBarInput } from "@goat/shared/preview";
+import { addressBarSearchUrl, resolveAddressBarInput } from "@goat/shared/preview";
 
 export type BrowserAddressTab = { tabId: string; url: string; title: string };
 export type BrowserAddressSuggestion = {
@@ -43,7 +43,7 @@ export function buildBrowserAddressSuggestions(input: {
         kind: "navigate",
         url,
         title:
-          url === `https://duckduckgo.com/?q=${encodeURIComponent(input.query.trim())}`
+          url === addressBarSearchUrl(input.query)
             ? `Search for “${input.query.trim()}”`
             : `Go to ${url}`,
       });
