@@ -1,6 +1,8 @@
 import * as M from "@goat/contracts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- deterministic hashing only; identity and time are injected.
 import * as NodeCrypto from "node:crypto";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- pure structural comparison of typed fences.
+import * as NodeUtil from "node:util";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
@@ -22,7 +24,7 @@ import type {
 const bytes = (s: string) => new TextEncoder().encode(s).length;
 const json = (v: unknown): string => JSON.stringify(v);
 const hash = (v: string) => NodeCrypto.createHash("sha256").update(v).digest("hex");
-const same = (a: unknown, b: unknown) => json(a) === json(b);
+const same = NodeUtil.isDeepStrictEqual;
 const scan = (values: readonly string[]) =>
   values.some((v) => scanMemoryValue(v).kind === "blocked")
     ? Effect.fail(new M.MemoryImportRpcError({ issue: "secret_detected" }))
@@ -66,7 +68,7 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
           r ? Effect.succeed(r) : Effect.fail(new M.MemoryRpcError({ code: "not_found" })),
         ),
       );
-  const snapshot = (r: ImportRegistration) =>
+  const snapshot = (r: ImportRegistration, checkProfile = true) =>
     Effect.gen(function* () {
       const s = yield* reader.read({ slot: r.slot });
       yield* scan([
@@ -78,8 +80,8 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
       if (
         !same(s.slot, r.slot) ||
         s.format !== r.source.format ||
-        s.profile !== r.source.profile ||
-        s.parserVersion !== r.source.parserVersion ||
+        (checkProfile &&
+          (s.profile !== r.source.profile || s.parserVersion !== r.source.parserVersion)) ||
         s.sourceLocator !== r.sourceLocator
       )
         return yield* new M.MemoryImportRpcError({ issue: "source_changed" });
@@ -211,7 +213,7 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
         }
         if (input.action === "preview") {
           const r = yield* registration(input.memorySpaceId, input.sourceId, permit);
-          const { s, rows } = yield* snapshot(r);
+          const { s, rows } = yield* snapshot(r, false);
           const now = yield* primitives.now();
           const reuse =
             r.session &&
@@ -301,7 +303,12 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
             {
               ...address,
               expectedVersion: r.version,
-              next: { ...r, version: r.version + 1, session },
+              next: {
+                ...r,
+                source: { ...r.source, profile: s.profile, parserVersion: s.parserVersion },
+                version: r.version + 1,
+                session,
+              },
             },
             permit,
           );
@@ -309,7 +316,7 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
         }
         // Canonical selection identity is independent of object-property and caller item order.
         const selectors = [...input.items].sort((a, b) =>
-          a.sourceItemKey.localeCompare(b.sourceItemKey),
+          a.sourceItemKey < b.sourceItemKey ? -1 : a.sourceItemKey > b.sourceItemKey ? 1 : 0,
         );
         if (new Set(selectors.map((s) => s.sourceItemKey)).size !== selectors.length)
           return yield* new M.MemoryImportRpcError({ issue: "operation_id_reused" });

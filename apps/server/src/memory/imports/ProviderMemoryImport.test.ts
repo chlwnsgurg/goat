@@ -40,6 +40,8 @@ const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0
 const space = M.MemorySpaceId.make(uuid(1));
 const environmentId = M.EnvironmentId.make("synthetic-coordinator");
 const stamp = M.MemoryUtcTimestamp.make("2026-10-15T00:00:00.000Z");
+const isImportError = Schema.is(M.MemoryImportRpcError);
+const isPayload = Schema.is(M.MemoryPayload);
 const parsers: MemoryImportParsers = {
   codex: parseCodexMemory,
   claude: parseClaudeMemory,
@@ -291,6 +293,9 @@ const harness = (initial: ImportSnapshot) => {
     failCommit: (e?: Service.MemoryServiceError) => {
       commitError = e;
     },
+    seedItem: (item: ImportItem) => {
+      items.set(item.sourceItemKey, item);
+    },
     registration: () => registration,
     batch: () => batch,
   };
@@ -343,7 +348,7 @@ const fixtureTest = <E>(
   );
 const issue = (e: unknown, expected: string) => {
   assert.instanceOf(e, M.MemoryImportRpcError);
-  if (Schema.is(M.MemoryImportRpcError)(e)) assert.equal(e.issue, expected);
+  if (isImportError(e)) assert.equal(e.issue, expected);
 };
 
 describe("ProviderMemoryImport closed coordinator", () => {
@@ -589,13 +594,13 @@ describe("ProviderMemoryImport closed coordinator", () => {
         }),
       ),
   );
-  it.effect("evidence attachment revalidates the final payload byte limit", () =>
+  it.effect("rejects oversized parser output after evidence attachment", () =>
     fixtureTest((h) =>
       Effect.gen(function* () {
         const { input } = yield* prepare(h);
         const empty = { text: "", evidence: [], derivedFromMemoryRevisions: [] };
-        const text = "x".repeat(M.MEMORY_PAYLOAD_MAX_UTF8_BYTES - JSON.stringify(empty).length);
-        assert.ok(Schema.is(M.MemoryPayload)({ ...empty, text }));
+        const text = "x".repeat(M.MEMORY_PAYLOAD_MAX_UTF8_BYTES);
+        assert.isFalse(isPayload({ ...empty, text }));
         const oversized: MemoryImportParsers["codex"] = (s) =>
           parsers.codex(s).pipe(
             Effect.map((rows) =>
@@ -620,6 +625,196 @@ describe("ProviderMemoryImport closed coordinator", () => {
           assert.equal(a.receipt.items[0]!.issue, "limit_exceeded");
         }
       }),
+    ),
+  );
+  it.effect("re-preview refreshes parser version without changing source identity", () =>
+    fixtureTest((h, s) =>
+      Effect.gen(function* () {
+        const { sourceId, preview } = yield* prepare(h);
+        h.source({ ...s, parserVersion: "codex-ad-hoc-v2", snapshotDigest: "b".repeat(64) });
+        const p = yield* h
+          .make()
+          .run({ action: "preview", memorySpaceId: space, sourceId }, Effect.void);
+        assert.equal(p.action, "preview");
+        if (p.action === "preview") assert.notEqual(p.sessionId, preview.sessionId);
+        assert.equal(h.registration()!.sourceId, sourceId);
+        assert.equal(h.registration()!.source.parserVersion, "codex-ad-hoc-v2");
+      }),
+    ),
+  );
+  it.effect("same source cannot change stored scope and accepted parent", () =>
+    fixtureTest((h) =>
+      Effect.gen(function* () {
+        const { input } = yield* prepare(h);
+        yield* h.make().run(input, Effect.void);
+        const previous = h.commits[0]!.next;
+        const thread = { environmentId, threadId: M.ThreadId.make("synthetic-thread") };
+        const e = yield* h
+          .make()
+          .run(
+            {
+              ...input,
+              operationId: M.MemoryOperationId.make(uuid(900)),
+              items: input.items.map((s) => ({ ...s, scope: { kind: "thread", thread } })),
+            },
+            Effect.void,
+          )
+          .pipe(Effect.flip);
+        issue(e, "mapping_changed");
+        assert.equal(h.commits.length, 1);
+        assert.deepEqual(h.commits[0]!.next, previous);
+      }),
+    ),
+  );
+  it.effect("suppressed source commits metadata without a pending revision", () =>
+    fixtureTest((h) =>
+      Effect.gen(function* () {
+        const { input } = yield* prepare(h);
+        yield* h
+          .make({
+            findMatch: (_a, p) =>
+              p.pipe(
+                Effect.as({
+                  kind: "source_suppressed" as const,
+                  memoryId: M.MemoryId.make(uuid(901)),
+                }),
+              ),
+          })
+          .run(input, Effect.void);
+        assert.equal(h.commits[0]!.next.outcome, "suppressed");
+        assert.isNull(h.commits[0]!.next.pending);
+        assert.isNull(h.commits[0]!.next.accepted);
+      }),
+    ),
+  );
+  it.effect("refuses an unavailable current frontier instead of guessing pending ancestry", () =>
+    fixtureTest((h) =>
+      Effect.gen(function* () {
+        const { input } = yield* prepare(h);
+        yield* h.make().run(input, Effect.void);
+        const e = yield* h
+          .make()
+          .run({ ...input, operationId: M.MemoryOperationId.make(uuid(902)) }, Effect.void)
+          .pipe(Effect.flip);
+        assert.equal(e._tag, "MemoryStoreConflict");
+        if (e._tag === "MemoryStoreConflict") assert.equal(e.code, "revision_changed");
+        assert.equal(h.commits.length, 1);
+      }),
+    ),
+  );
+  it.effect.each(["noop", "revised", "conflicted", "aliased"] as const)(
+    "prepares %s with accepted parents and captured live head",
+    (outcome) =>
+      fixtureTest((h, s) =>
+        Effect.gen(function* () {
+          const { input } = yield* prepare(h);
+          const rows = yield* parsers.codex(s);
+          const row = rows[0]!;
+          assert.equal(row.kind, "candidate");
+          if (row.kind !== "candidate") return;
+          const c = row.candidate;
+          const memoryId = M.MemoryId.make(uuid(920));
+          const head = M.MemoryRevisionId.make(uuid(921));
+          const parent = outcome === "conflicted" ? M.MemoryRevisionId.make(uuid(922)) : head;
+          if (outcome !== "aliased")
+            h.seedItem({
+              memorySpaceId: space,
+              environmentId,
+              sourceId: input.sourceId,
+              codecVersion: 1,
+              sourceItemKey: c.sourceItemKey,
+              scope: { kind: "user" },
+              memoryId,
+              accepted: {
+                sourceFingerprint: outcome === "noop" ? c.sourceFingerprint : "e".repeat(64),
+                contentFingerprint: c.contentFingerprint,
+                revisionId: parent,
+                operationId: M.MemoryOperationId.make(uuid(923)),
+              },
+              pending: null,
+              rejected: null,
+              outcome: "created",
+            });
+          const revision: M.MemoryRevision = {
+            memorySpaceId: space,
+            memoryId,
+            revisionId: head,
+            operationId: M.MemoryOperationId.make(uuid(924)),
+            parents: [],
+            scope: { kind: "user" },
+            payloadRef: head,
+            assertionKind: "inference",
+            provenance: { environmentId },
+            createdAtUtc: stamp,
+          };
+          const payload =
+            outcome === "noop" || outcome === "aliased"
+              ? c.payload
+              : { ...c.payload, text: "old body" };
+          yield* h
+            .make({
+              findMatch: (_a, p) =>
+                p.pipe(Effect.as({ kind: "live" as const, memoryId, revision, payload })),
+            })
+            .run(input, Effect.void);
+          const commit = h.commits[0]!;
+          assert.equal(commit.next.outcome, outcome);
+          assert.equal(commit.next.memoryId, memoryId);
+          assert.deepEqual(commit.expectedHeads, [head]);
+          assert.deepEqual(commit.parents, outcome === "aliased" ? [head] : [parent]);
+          if (outcome === "noop") assert.isNull(commit.next.pending);
+          else assert.equal(commit.next.pending!.revisionId, commit.selection.revisionId);
+        }),
+      ),
+  );
+  it.effect("valid Claude item remains selectable beside malformed topic", () =>
+    fixtureTest(
+      (h, s) =>
+        Effect.gen(function* () {
+          const f = s.files[0]!;
+          h.source(
+            snapshotMemoryImportFiles(s, [
+              f,
+              { selector: "bad.md", text: "invalid", byteCount: 7 },
+            ]),
+          );
+          const d = yield* h
+            .make()
+            .run({ action: "discover", memorySpaceId: space, format: "claude" }, Effect.void);
+          assert.equal(d.action, "discover");
+          if (d.action !== "discover") return;
+          const sourceId = d.sources[0]!.sourceId;
+          const p = yield* h
+            .make()
+            .run({ action: "preview", memorySpaceId: space, sourceId }, Effect.void);
+          assert.equal(p.action, "preview");
+          if (p.action !== "preview") return;
+          assert.equal(p.items.length, 2);
+          assert.equal(
+            p.items.find((r) => r.sourceItemKey === "bad.md#body")!.issue,
+            "unsupported_format",
+          );
+          yield* h.make().run(
+            {
+              action: "apply",
+              memorySpaceId: space,
+              sourceId,
+              sessionId: p.sessionId,
+              operationId: M.MemoryOperationId.make(uuid(903)),
+              items: p.items
+                .filter((r) => r.sourceFingerprint)
+                .map((r) => ({
+                  sourceItemKey: r.sourceItemKey,
+                  sourceFingerprint: r.sourceFingerprint!,
+                  scope: { kind: "user" },
+                })),
+            },
+            Effect.void,
+          );
+          assert.equal(h.commits.length, 1);
+          assert.equal(h.commits[0]!.next.outcome, "created");
+        }),
+      "claude-topic-v1",
     ),
   );
   it.effect("resumes only unfinished selections with frozen IDs after a partial restart", () =>
@@ -681,68 +876,87 @@ const live = Service.layer.pipe(
   ),
 );
 describe("ProviderMemoryImport actual Service/Store ports", () => {
-  it.effect("commits parsed evidence and receipt atomically, then replays without reader", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fixture = yield* buildMemoryImportFixture("codex-ad-hoc-v1");
-        const h = harness(fixture.snapshot);
-        const service = yield* Service.MemoryService;
-        const sql = yield* SqlClient.SqlClient;
-        yield* sql`INSERT INTO memory_compaction_state(space,published) VALUES (${space},1)`;
-        const quota = yield* Quota.MemoryQuotaService;
-        const ports: ImportPorts = {
-          ...h.ports,
-          ...service.importPorts,
-          syncStatus: (_a, permit) =>
-            permit.pipe(
-              Effect.andThen(quota.readStorageStatus({ memorySpaceId: space, environmentId })),
-              Effect.map((storage) => ({ ...sync, storage })),
-            ),
-        };
-        const runtime = makeProviderMemoryImport(ports, h.reader, parsers, {
-          ...h.primitives,
-          now: () => Effect.succeed(Date.parse(stamp) + 12 * 60 * 60 * 1000),
-        });
-        const d = yield* runtime.run(
-          { action: "discover", memorySpaceId: space, format: "codex" },
-          Effect.void,
-        );
-        assert.equal(d.action, "discover");
-        if (d.action !== "discover") return;
-        const sourceId = d.sources[0]!.sourceId;
-        const p = yield* runtime.run(
-          { action: "preview", memorySpaceId: space, sourceId },
-          Effect.void,
-        );
-        assert.equal(p.action, "preview");
-        if (p.action !== "preview") return;
-        const input: Extract<M.MemoryImportProviderInput, { action: "apply" }> = {
-          action: "apply",
-          memorySpaceId: space,
-          sourceId,
-          sessionId: p.sessionId,
-          operationId: M.MemoryOperationId.make(uuid(60)),
-          items: p.items.map((r) => ({
-            sourceItemKey: r.sourceItemKey,
-            sourceFingerprint: r.sourceFingerprint!,
-            scope: { kind: "user" },
-          })),
-        };
-        const a = yield* runtime.run(input, Effect.void);
-        assert.equal(a.action, "apply");
-        if (a.action !== "apply") return;
-        assert.equal(a.receipt.items[0]!.outcome, "created");
-        const store = yield* Store.MemoryStore;
-        const aggregate = yield* store.loadAggregate(space, a.receipt.items[0]!.memoryId!);
-        assert.deepEqual(aggregate.revisions[0]!.payload!.evidence, [
-          { origin: "import", importSourceId: sourceId, messageIds: [] },
-        ]);
-        const before = h.counts();
-        const replay = yield* runtime.run(input, Effect.void);
-        assert.equal(replay.action, "apply");
-        if (replay.action === "apply") assert.deepEqual(replay.receipt, a.receipt);
-        assert.deepEqual(h.counts(), before);
-      }),
-    ).pipe(Effect.provide(live)),
+  it.effect.each([false, true])(
+    "actual ports rollback after-write denial=%s or replay committed receipt",
+    (deny) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* buildMemoryImportFixture("codex-ad-hoc-v1");
+          const h = harness(fixture.snapshot);
+          const service = yield* Service.MemoryService;
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`INSERT INTO memory_compaction_state(space,published) VALUES (${space},1)`;
+          const quota = yield* Quota.MemoryQuotaService;
+          const ports: ImportPorts = {
+            ...h.ports,
+            ...service.importPorts,
+            syncStatus: (_a, permit) =>
+              permit.pipe(
+                Effect.andThen(quota.readStorageStatus({ memorySpaceId: space, environmentId })),
+                Effect.map((storage) => ({ ...sync, storage })),
+              ),
+          };
+          const runtime = makeProviderMemoryImport(ports, h.reader, parsers, {
+            ...h.primitives,
+            now: () => Effect.succeed(Date.parse(stamp) + 12 * 60 * 60 * 1000),
+          });
+          const d = yield* runtime.run(
+            { action: "discover", memorySpaceId: space, format: "codex" },
+            Effect.void,
+          );
+          assert.equal(d.action, "discover");
+          if (d.action !== "discover") return;
+          const sourceId = d.sources[0]!.sourceId;
+          const p = yield* runtime.run(
+            { action: "preview", memorySpaceId: space, sourceId },
+            Effect.void,
+          );
+          assert.equal(p.action, "preview");
+          if (p.action !== "preview") return;
+          const input: Extract<M.MemoryImportProviderInput, { action: "apply" }> = {
+            action: "apply",
+            memorySpaceId: space,
+            sourceId,
+            sessionId: p.sessionId,
+            operationId: M.MemoryOperationId.make(uuid(60)),
+            items: p.items.map((r) => ({
+              sourceItemKey: r.sourceItemKey,
+              sourceFingerprint: r.sourceFingerprint!,
+              scope: { kind: "user" },
+            })),
+          };
+          if (deny) {
+            const before = yield* sql`SELECT * FROM memory_import_receipts ORDER BY receipt_id`;
+            const denial = new Service.MemoryAccessError({ code: "unavailable" });
+            // Keep only the access error typed; SQL fixture failures are defects.
+            const recheck = Effect.gen(function* () {
+              const rows = yield* sql`SELECT COUNT(*) AS n FROM memory_events`.pipe(Effect.orDie);
+              if (Number(rows[0]!.n) > 0) return yield* denial;
+            });
+            assert.strictEqual(yield* runtime.run(input, recheck).pipe(Effect.flip), denial);
+            assert.deepEqual(
+              yield* sql`SELECT * FROM memory_import_receipts ORDER BY receipt_id`,
+              before,
+            );
+            assert.equal((yield* sql`SELECT * FROM memory_events`).length, 0);
+            assert.equal((yield* sql`SELECT * FROM memory_outbox`).length, 0);
+            return;
+          }
+          const a = yield* runtime.run(input, Effect.void);
+          assert.equal(a.action, "apply");
+          if (a.action !== "apply") return;
+          assert.equal(a.receipt.items[0]!.outcome, "created");
+          const store = yield* Store.MemoryStore;
+          const aggregate = yield* store.loadAggregate(space, a.receipt.items[0]!.memoryId!);
+          assert.deepEqual(aggregate.revisions[0]!.payload!.evidence, [
+            { origin: "import", importSourceId: sourceId, messageIds: [] },
+          ]);
+          const before = h.counts();
+          const replay = yield* runtime.run(input, Effect.void);
+          assert.equal(replay.action, "apply");
+          if (replay.action === "apply") assert.deepEqual(replay.receipt, a.receipt);
+          assert.deepEqual(h.counts(), before);
+        }),
+      ).pipe(Effect.provide(live)),
   );
 });
