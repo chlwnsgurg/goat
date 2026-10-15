@@ -919,9 +919,12 @@ const inventory = Effect.gen(function* () {
   const tables = yield* sql<{ name: string }>`SELECT name FROM sqlite_master
     WHERE type='table' AND name LIKE 'memory_%' ORDER BY name`;
   return yield* Effect.forEach(tables, ({ name }) =>
-    sql
-      .unsafe(`SELECT * FROM "${name}" ORDER BY rowid`)
-      .pipe(Effect.map((rows) => ({ name, rows }))),
+    sql.unsafe(`SELECT * FROM "${name}"`).pipe(
+      Effect.map((rows) => ({
+        name,
+        rows: rows.toSorted((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+      })),
+    ),
   );
 });
 
