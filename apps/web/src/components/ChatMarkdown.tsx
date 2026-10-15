@@ -3,6 +3,7 @@ import {
   buildFileLinkParentSuffixByPath,
   fileLinkLabel,
   resolvePathLinkTarget,
+  splitFilePathPosition,
 } from "@goat/shared/fileLinks";
 import {
   isWindowsDrivePathHref,
@@ -2140,7 +2141,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           return;
         }
         if (clicked === "copy-full") {
-          await copyFilePath(targetPath, "Full path");
+          await copyFilePath(splitFilePathPosition(targetPath).path, "Full path");
         }
       } catch (cause) {
         reportMarkdownActionFailure(

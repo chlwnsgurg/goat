@@ -45,40 +45,44 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-it("copies through a copy-only menu while keeping editor and reveal actions unavailable", async () => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  let menu: ReturnType<typeof useFileContextMenu> | undefined;
-  function Harness() {
-    const contextMenu = useFileContextMenu(BASE_TARGET.environmentId);
-    useEffect(() => {
-      menu = contextMenu;
-    }, [contextMenu]);
-    return null;
-  }
-  let renderer: ReactTestRenderer | undefined;
-  await act(async () => {
-    renderer = create(createElement(Harness));
-  });
-  try {
-    NodeAssert.ok(menu);
-    expect(menu.buildItems(BASE_TARGET).map((item) => item.id)).toEqual([
-      "copy-relative",
-      "copy-full",
-    ]);
-    await menu.activate("copy-relative", BASE_TARGET);
-    await menu.activate("copy-full", BASE_TARGET);
-    expect(state.copy.mock.calls).toEqual([
-      ["src/index.ts", "relative path"],
-      ["/workspace/project/src/index.ts", "full path"],
-    ]);
-    await menu.activate("open", BASE_TARGET);
-    await menu.activate("reveal-in-folder", BASE_TARGET);
-    await menu.activate("editor:vscode", BASE_TARGET);
-    expect(state.openEditor).not.toHaveBeenCalled();
-  } finally {
-    await act(async () => renderer?.unmount());
-  }
-});
+it.each(["src/index.ts", "logs/build:2026"])(
+  "copies literal path %s through a copy-only menu while keeping host actions unavailable",
+  async (filePath) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let menu: ReturnType<typeof useFileContextMenu> | undefined;
+    function Harness() {
+      const contextMenu = useFileContextMenu(BASE_TARGET.environmentId);
+      useEffect(() => {
+        menu = contextMenu;
+      }, [contextMenu]);
+      return null;
+    }
+    let renderer: ReactTestRenderer | undefined;
+    await act(async () => {
+      renderer = create(createElement(Harness));
+    });
+    try {
+      NodeAssert.ok(menu);
+      const target = { ...BASE_TARGET, filePath };
+      expect(menu.buildItems(target).map((item) => item.id)).toEqual([
+        "copy-relative",
+        "copy-full",
+      ]);
+      await menu.activate("copy-relative", target);
+      await menu.activate("copy-full", target);
+      expect(state.copy.mock.calls).toEqual([
+        [filePath, "relative path"],
+        [`/workspace/project/${filePath}`, "full path"],
+      ]);
+      await menu.activate("open", BASE_TARGET);
+      await menu.activate("reveal-in-folder", BASE_TARGET);
+      await menu.activate("editor:vscode", BASE_TARGET);
+      expect(state.openEditor).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => renderer?.unmount());
+    }
+  },
+);
 
 describe("resolveFileContextMenuAbsolutePath", () => {
   it("joins workspace-relative diff paths onto the workspace root", () => {

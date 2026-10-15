@@ -1,5 +1,8 @@
-import { resolvePathLinkTarget, splitFilePathPosition } from "@goat/shared/fileLinks";
-import { isAbsolutePath, workspaceRelativeFilePath } from "@goat/shared/path";
+import {
+  isAbsolutePath,
+  resolveWorkspaceFilePath,
+  workspaceRelativeFilePath,
+} from "@goat/shared/path";
 
 import { resolveDiffPathForWorkspace } from "./diffFileActions";
 import { writeTextToClipboard } from "./hooks/useCopyToClipboard";
@@ -11,7 +14,7 @@ export function resolveFilePathCopyTargets(input: {
   readonly workspaceRoot: string | undefined;
   readonly repositoryRoot?: string | undefined;
 }) {
-  const path = splitFilePathPosition(input.filePath).path;
+  const path = input.filePath;
   const workspacePath = resolveDiffPathForWorkspace({
     ...input,
     filePath: path,
@@ -21,7 +24,7 @@ export function resolveFilePathCopyTargets(input: {
   const fullPath = isAbsolutePath(path)
     ? path
     : root && isAbsolutePath(root)
-      ? resolvePathLinkTarget(path, root)
+      ? resolveWorkspaceFilePath(path, root)
       : null;
   return {
     relativePath: fullPath
@@ -32,8 +35,7 @@ export function resolveFilePathCopyTargets(input: {
 }
 
 /** Reports success only after either the Clipboard API or its fallback succeeds. */
-export async function copyFilePath(value: string, kind: "Relative path" | "Full path") {
-  const path = splitFilePathPosition(value).path;
+export async function copyFilePath(path: string, kind: "Relative path" | "Full path") {
   try {
     if (!(await writeTextToClipboard(path, kind.toLowerCase()))) return;
     toastManager.add({ type: "success", title: `${kind} copied`, description: path });

@@ -207,14 +207,14 @@ it("removes host actions after revocation while keeping file preview and copying
 });
 
 it.each([
-  ["copy-relative", "docs/my file.md", "relative path"],
-  ["copy-full", "/work/docs/my file.md", "full path"],
+  ["copy-relative", "docs/copy path.md", "relative path"],
+  ["copy-full", "/work/docs/copy path.md", "full path"],
 ])(
   "routes %s through the shared clipboard helper without position suffixes",
   async (action, path, target) => {
     vi.stubGlobal("navigator", {});
     state.choose.mockResolvedValue(action);
-    await renderMarkdown("[Readme](<docs/my file.md:12:3>)");
+    await renderMarkdown("[Readme](<docs/copy path.md:12:3>)");
     await openContextMenu();
     expect(state.copy).toHaveBeenCalledWith(path, target);
     expect(state.toast).toHaveBeenCalledWith(

@@ -14,14 +14,23 @@ afterEach(() => {
 });
 
 describe("file path copy targets", () => {
-  it("preserves spaces and strips line and column suffixes", () => {
+  it("preserves spaces", () => {
     expect(
       resolveFilePathCopyTargets({
-        filePath: "src/my file.ts:12:3",
+        filePath: "src/my file.ts",
         workspaceRoot: "/remote/my project",
       }),
     ).toEqual({ relativePath: "src/my file.ts", fullPath: "/remote/my project/src/my file.ts" });
   });
+
+  it.each(["logs/build:2026", "logs/build:0012:0003", "logs/build:0"])(
+    "preserves the literal tree and preview header path %s",
+    (filePath) => {
+      expect(resolveFilePathCopyTargets({ filePath, workspaceRoot: "/remote/my project" })).toEqual(
+        { relativePath: filePath, fullPath: `/remote/my project/${filePath}` },
+      );
+    },
+  );
 
   it("resolves repository-relative diff paths against the repository, not the nested workspace", () => {
     expect(
@@ -36,7 +45,7 @@ describe("file path copy targets", () => {
   it("offers only a full path for host files outside the workspace", () => {
     expect(
       resolveFilePathCopyTargets({
-        filePath: "/tmp/my file.ts:12",
+        filePath: "/tmp/my file.ts",
         workspaceRoot: "/repo",
       }),
     ).toEqual({ relativePath: null, fullPath: "/tmp/my file.ts" });
@@ -55,7 +64,7 @@ describe("file path copy targets", () => {
   it("does not invent a full path when the host root is unknown", () => {
     expect(
       resolveFilePathCopyTargets({
-        filePath: "src/my file.ts:12",
+        filePath: "src/my file.ts",
         workspaceRoot: undefined,
       }),
     ).toEqual({ relativePath: "src/my file.ts", fullPath: null });
@@ -64,7 +73,7 @@ describe("file path copy targets", () => {
   it("preserves Windows drive paths and computes workspace-relative paths", () => {
     expect(
       resolveFilePathCopyTargets({
-        filePath: "C:\\repo\\my file.ts:12:3",
+        filePath: "C:\\repo\\my file.ts",
         workspaceRoot: "C:\\repo",
       }),
     ).toEqual({ relativePath: "my file.ts", fullPath: "C:\\repo\\my file.ts" });
@@ -72,6 +81,21 @@ describe("file path copy targets", () => {
 });
 
 describe("copyFilePath", () => {
+  it.each([
+    ["logs/build:2026", "Relative path"],
+    ["/remote/my project/logs/build:2026", "Full path"],
+  ] as const)("copies the literal path %s unchanged", async (path, kind) => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    await copyFilePath(path, kind);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(path);
+    expect(state.toast).toHaveBeenCalledWith({
+      type: "success",
+      title: `${kind} copied`,
+      description: path,
+    });
+  });
+
   it.each(["absent", "rejected"] as const)(
     "uses the fallback when the Clipboard API is %s",
     async (api) => {
@@ -84,14 +108,14 @@ describe("copyFilePath", () => {
       });
       Object.defineProperty(document, "execCommand", { configurable: true, value: execCommand });
       try {
-        await copyFilePath("/remote/my project/file.ts:12:3", "Full path");
-        expect(copied).toEqual(["/remote/my project/file.ts"]);
+        await copyFilePath("/remote/my project/logs/build:2026", "Full path");
+        expect(copied).toEqual(["/remote/my project/logs/build:2026"]);
         expect(execCommand).toHaveBeenCalledWith("copy");
         expect(document.querySelector("textarea")).toBeNull();
         expect(state.toast).toHaveBeenCalledWith({
           type: "success",
           title: "Full path copied",
-          description: "/remote/my project/file.ts",
+          description: "/remote/my project/logs/build:2026",
         });
       } finally {
         Reflect.deleteProperty(document, "execCommand");
