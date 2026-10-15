@@ -134,6 +134,7 @@ layer("OrchestrationEventStore", (it) => {
             providerThreadId: null,
             childThreadId: null,
             nativeTaskRef: { driver, nativeId: "subagent-prompt", strength: "strong" },
+            memoryGrantCeiling: "none",
             prompt: nextPrompt,
             progress,
             title: "Audit",
@@ -234,6 +235,7 @@ layer("OrchestrationEventStore", (it) => {
         occurredAt: now,
         payload: {
           id: NodeId.make("node:subagent-rollback"),
+          memoryGrantCeiling: "none",
           threadId,
           runId: null,
           parentNodeId: NodeId.make("node:subagent-rollback-parent"),
