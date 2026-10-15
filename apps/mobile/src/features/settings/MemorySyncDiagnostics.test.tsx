@@ -26,13 +26,13 @@ const diagnostics: MemoryHubDiagnostics = {
   permanentHolds: [],
   reconcile: "available",
 };
-async function mount(capability = true, write = true) {
+async function mount(capability = true, write = true, projection = diagnostics) {
   h = createNativeMemoryHarness();
   const config = h.registry.get(h.configs(nativeEnv))!;
   // The synthetic session's initial config and the published config share this fixture.
   Object.assign(config.environment.capabilities.memory!, { hubDiagnostics: capability });
   h.grant(write ? ["memory:read", "settings:write"] : ["memory:read"]);
-  h.responses.set(WS_METHODS.memoryHubDiagnostics, () => diagnostics);
+  h.responses.set(WS_METHODS.memoryHubDiagnostics, () => projection);
   h.responses.set(WS_METHODS.memoryHubReconcile, () => ({
     version: 7,
     rearmedClasses: ["availability"],
@@ -82,3 +82,26 @@ it("keeps diagnostics readable without settings write and removes administration
   await act(async () => h.revoke());
   expect(view.container.textContent).not.toContain("Last valid settings");
 });
+
+it.each([
+  ["disabled", "disabled", "Memory sharing off"],
+  ["unbound", "unknown", "Connect a memory space"],
+  ["staging", "connected", "Receiving initial memories"],
+  ["ready", "connected", "Hub connected"],
+] as const)(
+  "shows %s readiness independently from the legacy online status",
+  async (readiness, connection, label) => {
+    await mount(true, true, {
+      ...diagnostics,
+      readiness,
+      connection,
+      reconcile: "unavailable",
+      recoverableHolds: [],
+      permanentHolds: ["identity", "authorization"],
+    });
+    expect(view.container.textContent).toContain(label);
+    expect(view.container.textContent).toContain("identity hold");
+    expect(view.container.textContent).toContain("access hold");
+    expect(view.container.textContent).not.toContain("Reconcile");
+  },
+);

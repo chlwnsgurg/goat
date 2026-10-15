@@ -1764,11 +1764,14 @@ describe("native WP6 Settings commands", () => {
 it.each([
   ["pending", "Waiting for revert approval"],
   ["revision_changed", "Memory changed; cannot revert"],
-  ["refused", "Last revert attempt was refused: permission denied"],
+  ["refused", "Last revert attempt was refused: lease required"],
 ] as const)(
   "reads %s revert history through the shared query without a new mutation",
   async (status, label) => {
     await mount();
+    Object.assign(h.registry.get(h.configs(nativeEnv))!.environment.capabilities.memory!, {
+      refusedReverts: true,
+    });
     h.responses.set(WS_METHODS.memoryHistory, () => ({
       ...revertHistory(),
       revertResults: [
@@ -1778,7 +1781,7 @@ it.each([
           resolutionId,
           revertDeadlineUtc: "2000-01-31T00:00:00.000Z",
           status,
-          ...(status === "refused" ? { failureCode: "permission_denied" } : {}),
+          ...(status === "refused" ? { failureCode: "lease_required" } : {}),
         }),
       ],
     }));

@@ -1097,6 +1097,7 @@ function MemoryDetails({
             memoryId={memoryId}
           />
         ) : null}
+        <Copy>History is live. Return to the first page to see new changes.</Copy>
         <Action
           label="Next history page"
           disabled={!history?.nextCursor}
