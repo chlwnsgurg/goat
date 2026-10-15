@@ -1745,6 +1745,7 @@ const ImportBatchCodec = Schema.Struct({
   selections: Schema.Array(
     Schema.Struct({
       observation: Schema.optionalKey(ImportObservationCodec),
+      settled: Schema.optionalKey(Schema.Boolean),
       selector: ImportSelectorCodec,
       memoryId: M.MemoryId,
       operationId: M.MemoryOperationId,
@@ -5968,7 +5969,9 @@ const make = Effect.gen(function* () {
             s.result === null
               ? s.selector.sourceItemKey === next.sourceItemKey ||
                 batch.selections[i]!.result === null
-              : NodeUtil.isDeepStrictEqual(s.result, batch.selections[i]!.result),
+              : NodeUtil.isDeepStrictEqual(s.result, batch.selections[i]!.result) &&
+                NodeUtil.isDeepStrictEqual(s.observation, batch.selections[i]!.observation) &&
+                s.settled === batch.selections[i]!.settled,
           )
         )
           return yield* new MemoryStoreConflict({ code: "revision_changed" });
@@ -6066,10 +6069,26 @@ const make = Effect.gen(function* () {
           : ["created", "revised", "conflicted", "aliased"].includes(selection.result.outcome)
             ? next.pending
             : null;
+      const approval = observation
+        ? yield* receipt(batch.memorySpaceId, observation.operationId)
+        : undefined;
+      const settled =
+        approval !== undefined &&
+        (approval.receipt.outcome === "rejected" ||
+          ("hubSequence" in approval.receipt && approval.receipt.hubSequence !== null));
       const persisted = {
         ...batch,
         selections: batch.selections.map((s) =>
-          s === selection && observation ? { ...s, observation } : s,
+          s !== selection
+            ? s
+            : {
+                selector: s.selector,
+                memoryId: s.memoryId,
+                operationId: s.operationId,
+                revisionId: s.revisionId,
+                result: s.result,
+                ...(observation ? { observation, settled } : {}),
+              },
         ),
         receipt: {
           ...batch.receipt,
@@ -6246,6 +6265,7 @@ const make = Effect.gen(function* () {
           ? s
           : {
               ...s,
+              settled: true,
               result:
                 receipt.outcome === "rejected"
                   ? {
@@ -6290,6 +6310,8 @@ const make = Effect.gen(function* () {
       AND json_extract(completed_items_json,'$.kind')='detailed'
       AND (${operationId} IS NULL OR batch_operation_id=${operationId})
       AND observed_at_utc<=${DateTime.formatIso(DateTime.makeUnsafe(now - M.MEMORY_IMPORT_BATCH_RETENTION_MS))}
+      AND NOT EXISTS (SELECT 1 FROM json_each(b.completed_items_json,'$.selections') s
+        WHERE json_type(s.value,'$.observation')='object' AND coalesce(json_extract(s.value,'$.settled'),0)=0)
       AND NOT EXISTS (SELECT 1 FROM json_each(b.completed_items_json,'$.selections') s JOIN memory_import_receipts i
         ON i.space=b.space AND i.environment_id=b.environment_id AND i.record_kind='item'
         WHERE (json_extract(i.registration_json,'$.pending.operationId')=coalesce(json_extract(s.value,'$.observation.operationId'),json_extract(s.value,'$.operationId'))

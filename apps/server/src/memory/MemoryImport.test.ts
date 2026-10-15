@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Console from "effect/Console";
 import * as FileSystem from "effect/FileSystem";
 import * as Stream from "effect/Stream";
 import * as Worker from "./MemoryWorker.ts";
@@ -2022,6 +2023,8 @@ describe("MemoryImport M3d", () => {
         expectedHeads: [a.selection.revisionId],
       };
       yield* ports.commit(noop, Effect.void);
+      // Cancellation of transport work is not a canonical settlement.
+      yield* store.finishWork(`sync:${space}:${a.selection.operationId}`, "cancelled");
       yield* TestClock.setTime(Date.parse(stamp) + M.MEMORY_IMPORT_BATCH_RETENTION_MS + 1);
       assert.strictEqual(
         (yield* ports.preflightBatch(
@@ -2364,7 +2367,7 @@ describe("MemoryImport physical-growth source harness", () => {
                 yield* worker.drain;
               }).pipe(
                 Effect.tapError((error) =>
-                  Effect.logInfo(
+                  Console.log(
                     `WP5_GROWTH_REFUSAL ${encodeUnknown({
                       phase,
                       round,
@@ -2435,7 +2438,7 @@ describe("MemoryImport physical-growth source harness", () => {
                   freshLogicalBytes: yield* store.logicalBytes,
                   counts,
                 };
-                yield* Effect.logInfo(`WP5_GROWTH_SAMPLE ${encodeUnknown(metrics)}`);
+                yield* Console.log(`WP5_GROWTH_SAMPLE ${encodeUnknown(metrics)}`);
                 return metrics;
               });
             yield* runRound("seed", 0);

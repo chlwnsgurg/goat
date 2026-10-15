@@ -113,6 +113,7 @@ export type ImportRegistration = ImportSourceAddress & {
 export type ImportFrozenSelection = {
   /** Body-free settlement link, captured by the Store when this selection commits. */
   readonly observation?: NonNullable<ImportItem["pending"]>;
+  readonly settled?: boolean;
   readonly selector: ImportSelector;
   readonly memoryId: M.MemoryId;
   readonly operationId: M.MemoryOperationId;
