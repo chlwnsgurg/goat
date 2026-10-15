@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 // eslint-disable-next-line goat/no-raw-mcp-registration -- Test harness calls only toolkits registered through McpHttpServer.toolkitRegistration.
 import { McpSchema, McpServer } from "effect/ai";
 import migration from "../../../persistence/Migrations/070_Memory.ts";
+import checkpointMigration from "../../../persistence/Migrations/075_MemoryCheckpointAccounting.ts";
 import lineageMigration from "../../../persistence/Migrations/074_MemoryImportLineage.ts";
 import searchMigration from "../../../persistence/Migrations/072_MemorySearchCounters.ts";
 import hubMigration from "../../../persistence/Migrations/071_MemoryHubSync.ts";
@@ -34,6 +35,7 @@ const database = Layer.effectDiscard(
     Effect.andThen(hubMigration),
     Effect.andThen(searchMigration),
     Effect.andThen(lineageMigration),
+    Effect.andThen(checkpointMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storage = Store.layer.pipe(Layer.provideMerge(database));

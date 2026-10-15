@@ -86,7 +86,7 @@ export const refreshCheckpointAccounting = Effect.fnUntraced(function* () {
           }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension=${dimension} AND scope_key=${key.scope_key}`)[0]
             ?.value ?? 0);
       const delta = value - previous;
-      if (delta < 0) {
+      if (delta < 0 || previous > 0) {
         const updated =
           yield* sql`UPDATE memory_quota_counters SET value=value+${delta} WHERE space=${space} AND dimension=${dimension} AND scope_key='' RETURNING value`;
         if (!updated.length)

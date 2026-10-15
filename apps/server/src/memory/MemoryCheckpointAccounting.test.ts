@@ -484,6 +484,22 @@ it.effect(
       yield* refreshCheckpointAccounting();
       yield* expected;
       const before = yield* counters;
+      const recordsBefore = yield* sql`SELECT rowid,* FROM memory_import_keys ORDER BY rowid`;
+      const lineageBefore = yield* sql`SELECT rowid,* FROM memory_import_lineage ORDER BY rowid`;
+      const missing = yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* sql`DELETE FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_bytes' AND scope_key=''`;
+            yield* sql`DELETE FROM memory_import_lineage WHERE space=${space}`;
+          }),
+        )
+        .pipe(Effect.exit);
+      assert.strictEqual(missing._tag, "Failure");
+      assert.deepStrictEqual(yield* counters, before);
+      assert.deepStrictEqual(
+        yield* sql`SELECT rowid,* FROM memory_import_lineage ORDER BY rowid`,
+        lineageBefore,
+      );
       const forget = Effect.gen(function* () {
         yield* sql`INSERT INTO memory_tombstones(space,memory_id,delete_operation_id,deleting_environment_id,deleted_at,suppressed_source_keys_json,suppressed_content_json,source_exclusions_json) VALUES (${space},${memoryId},${id(82)},${environmentId},0,'[]','[]','[]')`;
         yield* refreshCheckpointAccounting();
@@ -497,6 +513,14 @@ it.effect(
         .withTransaction(forget.pipe(Effect.andThen(Effect.fail("interrupted"))))
         .pipe(Effect.flip);
       assert.deepStrictEqual(yield* counters, before);
+      assert.deepStrictEqual(
+        yield* sql`SELECT rowid,* FROM memory_import_keys ORDER BY rowid`,
+        recordsBefore,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT rowid,* FROM memory_import_lineage ORDER BY rowid`,
+        lineageBefore,
+      );
       yield* forget;
       yield* sql`DELETE FROM memory_import_lineage WHERE space=${space} AND memory_id=${memoryId}`;
       yield* refreshCheckpointAccounting();

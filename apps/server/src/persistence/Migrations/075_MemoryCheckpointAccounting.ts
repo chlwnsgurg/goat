@@ -161,11 +161,17 @@ export default Effect.gen(function* () {
     yield* sql.unsafe(
       `ALTER TABLE ${table} ADD COLUMN checkpoint_rows INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_rows>=0)`,
     );
+    const requireTotal = `SELECT CASE WHEN
+      (OLD.checkpoint_bytes>0 AND NOT EXISTS(SELECT 1 FROM memory_quota_counters WHERE space=OLD.space AND dimension='hub_snapshot_bytes' AND scope_key='')) OR
+      (OLD.checkpoint_rows>0 AND NOT EXISTS(SELECT 1 FROM memory_quota_counters WHERE space=OLD.space AND dimension='hub_snapshot_rows' AND scope_key=''))
+      THEN RAISE(ABORT,'missing checkpoint total') END;`;
     yield* sql.unsafe(`CREATE TRIGGER ${table}_checkpoint_release BEFORE DELETE ON ${table} BEGIN
+      ${requireTotal}
       UPDATE memory_quota_counters SET value=value-OLD.checkpoint_bytes WHERE space=OLD.space AND dimension='hub_snapshot_bytes' AND scope_key='';
       UPDATE memory_quota_counters SET value=value-OLD.checkpoint_rows WHERE space=OLD.space AND dimension='hub_snapshot_rows' AND scope_key='';
     END`);
     yield* sql.unsafe(`CREATE TRIGGER ${table}_checkpoint_move AFTER UPDATE OF space ON ${table} WHEN OLD.space IS NOT NEW.space BEGIN
+      ${requireTotal}
       UPDATE memory_quota_counters SET value=value-OLD.checkpoint_bytes WHERE space=OLD.space AND dimension='hub_snapshot_bytes' AND scope_key='';
       UPDATE memory_quota_counters SET value=value-OLD.checkpoint_rows WHERE space=OLD.space AND dimension='hub_snapshot_rows' AND scope_key='';
       UPDATE ${table} SET checkpoint_bytes=0,checkpoint_rows=0 WHERE rowid=NEW.rowid;
