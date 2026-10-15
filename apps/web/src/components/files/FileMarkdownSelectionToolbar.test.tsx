@@ -179,6 +179,25 @@ it("shows the action at release after ancestor autoscroll during a drag", async 
   expect(action()!.style.top).toBe("90px");
 });
 
+it("does not reopen a pending multi-click action at stale coordinates after ancestor scroll", async () => {
+  await render();
+  await act(async () => {
+    const list = viewport.querySelector("ul")!;
+    pointerDown(list);
+    const range = document.createRange();
+    range.selectNodeContents(list);
+    window.getSelection()!.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+    // A double-click release waits for the multi-click interval before opening.
+    window.dispatchEvent(
+      new MouseEvent("mouseup", { button: 0, detail: 2, clientX: 150, clientY: 90 }),
+    );
+    document.body.dispatchEvent(new Event("scroll"));
+    await vi.runAllTimersAsync();
+  });
+  expect(action()).toBeNull();
+});
+
 it("keeps assistant citations resolvable across unselectable code headers", () => {
   const style = document.createElement("style");
   style.textContent = ".select-none { user-select: none; }";

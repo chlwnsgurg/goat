@@ -164,6 +164,8 @@ export function observeSelectionActions({
       return timer !== null || frame !== null;
     },
     cancel,
+    /** A scroll outside the observed element that still moves it (an ancestor scroller). */
+    scrolled: onScroll,
     selectionChanged() {
       if (isActionTarget(document.activeElement)) return;
       if (pointerDown || gestureActive) {

@@ -99,8 +99,9 @@ function SelectionToolbar({
     // Only scrolling that moves this file's viewport invalidates the action's
     // position; a chat transcript following a streaming turn must not.
     const dismissOnAncestorScroll = (event: Event) => {
-      // Hide stale coordinates without cancelling an autoscrolling drag.
-      if (event.target instanceof Node && event.target.contains(viewport)) clear();
+      // Drop stale coordinates and pending reopen timers, but keep an
+      // autoscrolling drag alive so its release still shows the action.
+      if (event.target instanceof Node && event.target.contains(viewport)) actions.scrolled();
     };
     const focusActions = (event: KeyboardEvent) => {
       const toolbar = toolbarRef.current;
