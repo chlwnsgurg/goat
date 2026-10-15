@@ -1448,7 +1448,7 @@ it.effect.each(threadProvenanceCases(threadId))(
       const service = yield* Service.MemoryService;
       yield* sql`INSERT INTO orchestration_events VALUES (-10,${id(14500)},${threadId},'thread.created',${origin.createdJson},${now},2,'thread')`;
       for (const [i, event] of origin.events.entries())
-        yield* sql`INSERT INTO orchestration_events VALUES (${i - 9},${id(14510 + i)},${threadId},${event.type},${event.payloadJson},${now},2,'thread')`;
+        yield* sql`INSERT INTO orchestration_events VALUES (${i - 9},${id(14510 + i)},${event.streamId},${event.type},${event.payloadJson},${now},2,'thread')`;
       assert.strictEqual(
         (yield* store.readThreadLineage({ environmentId, threadId }, space)).state,
         origin.state,
