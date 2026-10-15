@@ -81,6 +81,7 @@ it.effect(
         ],
       };
       const snapshot = { schemaVersion: 2, snapshotSequence: 7, projection: source };
+      let recordsSource = source;
       const prepared = {
         threadId: shell.id,
         providerInstanceId: shell.providerInstanceId,
@@ -103,7 +104,7 @@ it.effect(
               getThreadProjection: () => Effect.succeed(source),
               getThreadSnapshot: () => Effect.succeed(snapshot),
               getThreadSnapshotWindow: () => Effect.succeed(snapshot),
-              getThreadRecords: () => Effect.succeed(source),
+              getThreadRecords: () => Effect.succeed(recordsSource),
             }),
           ),
         ),
@@ -173,6 +174,25 @@ it.effect(
         expect(source.runs[0]).not.toHaveProperty("currentMemoryAccess");
         expect(source.runs[0]?.memoryGrantCeiling).toBe("read_write");
         expect(source.subagents[0]).not.toHaveProperty("currentMemoryAccess");
+        // A runs-only scheduled read has no message provenance or delegated task id.
+        const { delegatedTaskId: _taskId, ...scheduledRun } = run;
+        recordsSource = { ...source, runs: [scheduledRun], messages: [] };
+        expect(
+          (yield* threads.getProjectThreadRecords(
+            { projectId: shell.projectId, threadId: shell.id },
+            ["runs"],
+          )).runs[0]?.currentMemoryAccess,
+        ).toEqual({ access: "read_write", reason: "ceiling" });
+        yield* settings.updateSettings({ enableAgentMemoryAccess: false });
+        expect(
+          (yield* threads.getThreadRecords(shell.id, ["runs"])).runs[0]?.currentMemoryAccess,
+        ).toEqual({ access: "none", reason: "environment_off" });
+        // An ordinary user admission's null ceiling cannot establish task permission.
+        inputs = { ...prepared, memoryGrantCeiling: null };
+        expect((yield* threads.getThreadRecords(shell.id, ["runs"])).runs[0]).not.toHaveProperty(
+          "currentMemoryAccess",
+        );
+
         expect(
           yield* threads.getProjectThreadRecords(
             { projectId: shell.projectId, threadId: shell.id },

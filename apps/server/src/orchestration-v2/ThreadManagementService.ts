@@ -717,6 +717,7 @@ const make = Effect.gen(function* () {
           | { readonly runId: RunId }
           | { readonly delegatedTaskId: import("@goat/contracts").NodeId },
         remote = false,
+        knownTask = true,
       ) =>
         Effect.gen(function* () {
           const { currentMemoryAccess: _previous, ...saved } = record;
@@ -727,7 +728,7 @@ const make = Effect.gen(function* () {
             readOnly: false,
             memoryGrantCeiling: record.memoryGrantCeiling,
           });
-          if (base.access === "none") return { ...saved, currentMemoryAccess: base };
+          if (knownTask && base.access === "none") return { ...saved, currentMemoryAccess: base };
           const inputs =
             threadId === null
               ? undefined
@@ -758,10 +759,14 @@ const make = Effect.gen(function* () {
           ? {}
           : {
               runs: yield* Effect.forEach(projection.runs, (run) => {
-                if (run.delegatedTaskId !== undefined || scheduledMessages.has(run.userMessageId))
-                  return project(run, run.threadId, run.providerInstanceId, { runId: run.id });
-                const { currentMemoryAccess: _previous, ...saved } = run;
-                return Effect.succeed(saved);
+                return project(
+                  run,
+                  run.threadId,
+                  run.providerInstanceId,
+                  { runId: run.id },
+                  false,
+                  run.delegatedTaskId !== undefined || scheduledMessages.has(run.userMessageId),
+                );
               }),
             }),
         ...(projection.subagents === undefined
