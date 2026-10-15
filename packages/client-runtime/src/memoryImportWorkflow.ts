@@ -81,7 +81,22 @@ export function memoryImportChunks(items: readonly MemoryImportSelection[]) {
   if (items.length === 0 || items.length > 128) throw new Error("Select between 1 and 128 items");
   if (new Set(items.map((item) => item.sourceItemKey)).size !== items.length)
     throw new Error("Select each item once");
-  const snapshot = structuredClone(items);
+  const snapshot = items.map((item) => ({
+    ...item,
+    scope:
+      item.scope.kind === "project"
+        ? { ...item.scope, projectKey: { ...item.scope.projectKey } }
+        : item.scope.kind === "thread"
+          ? {
+              ...item.scope,
+              thread: { ...item.scope.thread },
+              ...(item.scope.projectKey === undefined
+                ? {}
+                : { projectKey: { ...item.scope.projectKey } }),
+            }
+          : { ...item.scope },
+    ...(item.project === undefined ? {} : { project: { ...item.project } }),
+  }));
   return Array.from({ length: Math.ceil(snapshot.length / 32) }, (_, i) =>
     snapshot.slice(i * 32, (i + 1) * 32),
   );
@@ -111,7 +126,8 @@ export function createMemoryImportWorkflow(options: {
 }) {
   let fence = { ...options.fence };
   let generation = 0;
-  let busy = false;
+  let activeGeneration: number | null = null;
+  const isBusy = () => activeGeneration === generation;
   let state = initialMemoryImportWorkflowState;
   let preview: Preview | null = null;
   let chunks: Array<{ operationId: MemoryOperationId; items: Apply["items"] }> = [];
@@ -132,13 +148,13 @@ export function createMemoryImportWorkflow(options: {
     set({ phase: "idle", stopped: false, settledChunks: 0, receipt: null, message: null });
   }
   async function exclusive<T>(run: (token: number) => Promise<T>) {
-    if (busy) throw new Error("Wait for the current import request");
-    busy = true;
+    if (isBusy()) throw new Error("Wait for the current import request");
     const token = generation;
+    activeGeneration = token;
     try {
       return await run(token);
     } finally {
-      busy = false;
+      if (activeGeneration === token) activeGeneration = null;
     }
   }
   return {
@@ -151,7 +167,7 @@ export function createMemoryImportWorkflow(options: {
       await options.recovery.clear(previous);
     },
     stop: () => {
-      state = reduceMemoryImportProgress(state, { type: "stop", inFlight: busy });
+      state = reduceMemoryImportProgress(state, { type: "stop", inFlight: isBusy() });
     },
     discover: (format: MemoryImportFormat) =>
       exclusive(async (token) => {
@@ -193,13 +209,21 @@ export function createMemoryImportWorkflow(options: {
         if (!current(token)) return;
         if (result.action !== "preview" || result.sourceId !== sourceId)
           throw new Error("Unexpected import preview");
-        preview = structuredClone(result);
+        preview = { ...result, items: result.items.map((item) => ({ ...item })) };
         set({ phase: "selecting" });
         return result;
       }),
     /** Confirm once. Any later selection/scope change must invalidate and preview again. */
     select: (items: readonly MemoryImportSelection[]) => {
-      if (busy || state.phase !== "selecting" || preview === null)
+      if (state.phase === "previewed") {
+        invalidate();
+        set({
+          phase: "repreview",
+          message: "The selection changed. Preview again before importing.",
+        });
+        return;
+      }
+      if (isBusy() || state.phase !== "selecting" || preview === null)
         throw new Error("Preview before selecting items");
       const selected = memoryImportChunks(items);
       const fixedPreview = preview;

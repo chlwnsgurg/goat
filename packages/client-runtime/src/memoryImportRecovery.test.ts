@@ -507,3 +507,70 @@ describe("pure import progress", () => {
     await expect(f.workflow.apply()).rejects.toThrow("Preview");
   });
 });
+
+describe("preview mapping changes", () => {
+  it("invalidates a confirmed preview when the selection or scope changes", async () => {
+    const f = workflowFixture(2);
+    await f.ready();
+    f.workflow.select([
+      {
+        ...f.items[0]!,
+        scope: {
+          kind: "thread",
+          thread: {
+            environmentId: destination.environmentId,
+            threadId: M.ThreadId.make("other-thread"),
+          },
+        },
+      },
+    ]);
+    expect(f.workflow.getState().phase).toBe("repreview");
+    await expect(f.workflow.apply()).rejects.toThrow("Preview");
+    expect(f.calls.some((input) => input.action === "apply")).toBe(false);
+  });
+});
+
+describe("session recovery overlap", () => {
+  it("can check a saved ID on a new session while an old response is still pending", async () => {
+    const f = workflowFixture(1);
+    await f.ready();
+    const admitted = deferred<M.MemoryImportProviderInput>();
+    const lost = deferred<M.MemoryImportProviderResult>();
+    f.setRespond((input) => {
+      admitted.resolve(input);
+      return lost.promise;
+    });
+    const applying = f.workflow.apply();
+    const input = await admitted.promise;
+    f.workflow.invalidate({ ...fence, session: "reconnected" });
+    f.setRespond(async (next) => f.result(next));
+    await f.workflow.recover();
+    expect(f.workflow.getState().phase).toBe("repreview");
+    lost.resolve(f.result(input));
+    await applying;
+    expect(f.workflow.getState().phase).toBe("repreview");
+    expect(f.calls.filter((call) => call.action === "apply")).toHaveLength(1);
+  });
+});
+
+describe("scope snapshots", () => {
+  it("freezes project and thread mapping while callers change their selections", () => {
+    const scope = {
+      kind: "thread" as const,
+      thread: { environmentId: destination.environmentId, threadId: M.ThreadId.make("original") },
+      projectKey: { kind: "explicit" as const, sharedProjectId: "original" },
+    };
+    const project = {
+      environmentId: destination.environmentId,
+      projectId: M.ProjectId.make("original"),
+    };
+    const chunks = memoryImportChunks([{ ...selections(1)[0]!, scope, project }]);
+    scope.thread.threadId = M.ThreadId.make("changed");
+    scope.projectKey.sharedProjectId = "changed";
+    project.projectId = M.ProjectId.make("changed");
+    expect(chunks[0]![0]).toMatchObject({
+      scope: { thread: { threadId: "original" }, projectKey: { sharedProjectId: "original" } },
+      project: { projectId: "original" },
+    });
+  });
+});
