@@ -3582,3 +3582,54 @@ it.effect(
       assert.strictEqual(error._tag, "MemoryAccessError");
     }).pipe(checkUsage, Effect.provide(live)),
 );
+
+it.effect("A2 keeps a generic authoritative refusal without inventing revision_changed", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const sql = yield* SqlClient.SqlClient;
+    const { op } = yield* stageReportRevert;
+    yield* service.receiveHubPage({
+      memorySpaceId: space,
+      hubEnvironmentId: environmentId,
+      localEnvironmentId: environmentId,
+      expectedSequence: 0,
+      reauthorize: Effect.void,
+      page: {
+        entries: [
+          {
+            kind: "metadata",
+            operationKind: "revert",
+            memoryId,
+            hubSequence: 1,
+            receipt: {
+              operationId: op.operationId,
+              memoryId,
+              operationDigest: memoryOperationDigest(op),
+              outcome: "rejected",
+              hubSequence: 1,
+              failureCode: "unavailable",
+            },
+          },
+        ],
+        throughSequence: 1,
+        highWatermark: 1,
+        hasMore: false,
+      },
+    });
+    const page = yield* service.history(
+      { memorySpaceId: space, memoryId, limit: 100 },
+      Effect.void,
+    );
+    assert.isEmpty(page.revertResults);
+    assert.deepStrictEqual(
+      yield* sql`SELECT revert_operation_id,revert_result_json FROM memory_resolutions`,
+      [
+        {
+          revert_operation_id: op.operationId,
+          revert_result_json: '{"status":"refused","failureCode":"unavailable"}',
+        },
+      ],
+    );
+    assert.isEmpty(yield* sql`SELECT 1 FROM memory_revert_intents`);
+  }).pipe(checkUsage, Effect.provide(live)),
+);

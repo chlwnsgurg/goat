@@ -2761,32 +2761,36 @@ const make = Effect.gen(function* () {
               } else if (row.revert_result_json && row.revert_operation_id) {
                 const resolution = yield* resolutionCodec.decode(row.resolution_json, strict);
                 const slot = yield* revertSlotCodec.decode(row.revert_result_json, strict);
-                const common = {
-                  operationId: row.revert_operation_id,
-                  memoryId: id,
-                  resolutionId: resolution.resolutionId,
-                  revertDeadlineUtc: resolution.revertDeadlineUtc,
-                };
-                output = result = yield* stored(
-                  "history-revert-codec",
-                  decodeRevertResult(
-                    slot.status === "accepted"
-                      ? {
-                          ...common,
-                          status: slot.status,
-                          receipt: {
-                            operationId: row.revert_operation_id,
-                            memoryId: id,
-                            outcome: "accepted",
-                            revisionId: slot.revisionId,
-                            pendingSync: false,
-                          },
-                          localAvailability: item.localAvailability,
-                        }
-                      : { ...common, status: slot.status },
-                    strict,
-                  ),
-                );
+                // The public union has no generic refusal arm. Preserve the exact
+                // authority code in the slot without inventing revision_changed.
+                if (slot.status !== "refused") {
+                  const common = {
+                    operationId: row.revert_operation_id,
+                    memoryId: id,
+                    resolutionId: resolution.resolutionId,
+                    revertDeadlineUtc: resolution.revertDeadlineUtc,
+                  };
+                  output = result = yield* stored(
+                    "history-revert-codec",
+                    decodeRevertResult(
+                      slot.status === "accepted"
+                        ? {
+                            ...common,
+                            status: slot.status,
+                            receipt: {
+                              operationId: row.revert_operation_id,
+                              memoryId: id,
+                              outcome: "accepted",
+                              revisionId: slot.revisionId,
+                              pendingSync: false,
+                            },
+                            localAvailability: item.localAvailability,
+                          }
+                        : { ...common, status: slot.status },
+                      strict,
+                    ),
+                  );
+                }
               }
             }
           } else if (category === 2) {
