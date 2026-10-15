@@ -503,14 +503,16 @@ const make = Effect.gen(function* () {
             const expected = expectedIds.join(", ");
             if (input.answers === undefined)
               return yield* invalid(
-                `Send answers keyed by question id. Expected question ids: ${expected}.`,
+                `Send answers keyed by question id${expected === "" ? "" : `. Expected question ids: ${expected}`}.`,
               );
             const answers = input.answers;
+            // A request recorded without its questions cannot be checked; pass answers through.
             if (
-              Object.keys(answers).some((id) => !expectedIds.includes(id)) ||
-              questions.some(
-                (question) => question.required !== false && !Object.hasOwn(answers, question.id),
-              )
+              questions.length > 0 &&
+              (Object.keys(answers).some((id) => !expectedIds.includes(id)) ||
+                questions.some(
+                  (question) => question.required !== false && !Object.hasOwn(answers, question.id),
+                ))
             )
               return yield* invalid(
                 `Send answers using the question ids from goat_pending_request_read, including every required question. Expected question ids: ${expected}.`,
