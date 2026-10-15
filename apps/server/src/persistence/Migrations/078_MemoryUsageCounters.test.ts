@@ -27,8 +27,8 @@ it.effect(
         yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${space},'memory','{}','{}',100,2)`;
         yield* sql`INSERT INTO memory_events(protocol_version,memory_space_id,memory_id,operation_id,kind,origin_environment_id,operation_digest,metadata_json,receipt_json,created_at) VALUES (1,${space},'memory','op','upsert','synthetic','digest','{}','{}',0)`;
         yield* sql`INSERT INTO memory_compact_receipts(space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json) VALUES (${space},'op','digest',1,'{}','{}')`;
-        yield* sql`INSERT INTO memory_import_lineage VALUES (${space},'memory','content','key','{}')`;
-        yield* sql`INSERT INTO memory_import_keys VALUES (${space},'content','key','memory','{}')`;
+        yield* sql`INSERT INTO memory_import_lineage(space,memory_id,kind,key,record_json) VALUES (${space},'memory','content','key','{}')`;
+        yield* sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${space},'content','key','memory','{}')`;
       }
       const before =
         yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`;
