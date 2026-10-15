@@ -96,14 +96,11 @@ function SelectionToolbar({
     // A selectionchange left over from a previous file/thread is not a new gesture.
     actions.cancel();
     actionsRef.current = actions;
-    const dismiss = () => {
-      actions.cancel();
-      clear();
-    };
     // Only scrolling that moves this file's viewport invalidates the action's
     // position; a chat transcript following a streaming turn must not.
     const dismissOnAncestorScroll = (event: Event) => {
-      if (event.target instanceof Node && event.target.contains(viewport)) dismiss();
+      // Hide stale coordinates without cancelling an autoscrolling drag.
+      if (event.target instanceof Node && event.target.contains(viewport)) clear();
     };
     const focusActions = (event: KeyboardEvent) => {
       const toolbar = toolbarRef.current;

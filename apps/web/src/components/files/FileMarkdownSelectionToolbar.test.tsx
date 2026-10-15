@@ -6,6 +6,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 import { composerTargetKey, DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { reviewCommentContextRecord } from "~/lib/composerContextRecords";
+import {
+  captureAssistantTextSelection,
+  resolveAssistantCitationRange,
+} from "~/lib/assistantTextSelection";
 import { FileMarkdownSelectionToolbar } from "./FileMarkdownSelectionToolbar";
 
 const target = {
@@ -151,6 +155,56 @@ it("dismisses the floating action when the enclosing file viewport scrolls", asy
   expect(action()).not.toBeNull();
   await act(async () => document.body.dispatchEvent(new Event("scroll")));
   expect(action()).toBeNull();
+});
+
+it("shows the action at release after ancestor autoscroll during a drag", async () => {
+  await render();
+  await act(async () => {
+    const list = viewport.querySelector("ul")!;
+    pointerDown(list);
+    const range = document.createRange();
+    range.selectNodeContents(list);
+    window.getSelection()!.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+    document.body.dispatchEvent(new Event("scroll"));
+    await vi.runAllTimersAsync();
+  });
+  expect(action()).toBeNull();
+  await act(async () => {
+    window.dispatchEvent(new MouseEvent("mouseup", { button: 0, clientX: 150, clientY: 90 }));
+    await vi.runAllTimersAsync();
+  });
+  expect(action()).not.toBeNull();
+  expect(action()!.style.left).toBe("150px");
+  expect(action()!.style.top).toBe("90px");
+});
+
+it("keeps assistant citations resolvable across unselectable code headers", () => {
+  const style = document.createElement("style");
+  style.textContent = ".select-none { user-select: none; }";
+  viewport.innerHTML =
+    '<div data-assistant-citation-source="assistant"><p>Before</p><div class="select-none">example.ts</div><pre><code>run();</code></pre><p>After</p></div>';
+  document.body.append(style);
+  const source = viewport.firstElementChild as HTMLElement;
+  const range = document.createRange();
+  range.selectNodeContents(source);
+  const selection = window.getSelection()!;
+  selection.addRange(range);
+  const captured = captureAssistantTextSelection(viewport, selection)!;
+  expect(captured.selector).toEqual({
+    text: "Before\nrun();\nAfter",
+    start: 0,
+    end: 19,
+    prefix: "",
+    suffix: "",
+  });
+  source.querySelector(".select-none")!.textContent = "renamed.ts";
+  source.insertAdjacentHTML("afterbegin", "<p>Inserted</p>");
+  const resolved = resolveAssistantCitationRange(source, captured.selector)!;
+  expect(resolved.startContainer).toBe(source.querySelectorAll("p")[1]!.firstChild);
+  expect(resolved.startOffset).toBe(0);
+  expect(resolved.endContainer).toBe(source.lastElementChild!.firstChild);
+  expect(resolved.endOffset).toBe(5);
 });
 
 it.each([

@@ -133,8 +133,8 @@ type TextChunk = { node: Text; start: number; end: number };
 /**
  * Uses DOM text order, with a line break between HTML blocks and at <br>.
  * Inline markup, including code and links, contributes its displayed text.
- * Controls and subtrees marked hidden/aria-hidden do not contribute. No layout
- * reads, CSS-generated content, or soft-wrap line breaks enter the stream, so
+ * Controls, hidden/aria-hidden subtrees and user-select:none text do not contribute.
+ * No geometry reads, CSS-generated content, or soft-wrap line breaks enter the stream, so
  * reflow cannot move it.
  */
 function readAssistantText(root: HTMLElement) {
@@ -146,7 +146,7 @@ function readAssistantText(root: HTMLElement) {
   const visit = (node: Node) => {
     if (node.nodeType === 3) {
       const text = node as Text;
-      if (text.length === 0) return;
+      if (text.length === 0 || isUnselectable(text)) return;
       if (separator && length > 0) {
         parts.push("\n");
         length += 1;
