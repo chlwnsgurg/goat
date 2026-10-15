@@ -1,7 +1,7 @@
 import * as NodeEvents from "node:events";
 import type { Page } from "playwright-core";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { ServerBrowserDiagnostics } from "./ServerBrowserDiagnostics.ts";
+import { scanDiagnosticUrlTokens, ServerBrowserDiagnostics } from "./ServerBrowserDiagnostics.ts";
 
 const fixture = () => {
   const page = new NodeEvents.EventEmitter();
@@ -148,6 +148,7 @@ describe("ServerBrowserDiagnostics", () => {
     '"TOP SECRET"',
     "'TOP SECRET'",
     "`TOP SECRET`",
+    '\\"TOP SECRET',
     "<div> TOP SECRET",
     "> TOP SECRET",
     "] TOP SECRET",
@@ -186,6 +187,47 @@ describe("ServerBrowserDiagnostics", () => {
     );
   });
 
+  it.each(['\\"secret', "\\nsecret", "\\u0022secret", "\\\\secret"])(
+    "preserves JSON string escapes after a URL query: %s",
+    (suffix) => {
+      const { diagnostics, consoleMessage } = fixture();
+      const text = `{"url":"https://example.test/?q=prefix${suffix}","other":"keep"}`;
+      const expected = text.replace("q=prefix", "q=%5BREDACTED%5D");
+      consoleMessage(text);
+      const actual = diagnostics.read({}).console.entries[0]?.text;
+      expect(actual).toBe(expected);
+      expect(JSON.parse(actual!)).toEqual(JSON.parse(expected));
+    },
+  );
+
+  it("scans adversarial scheme candidates with a linear character budget", () => {
+    for (const length of [8_192, 65_536]) {
+      for (const text of [
+        "a-".repeat(length / 2),
+        "a-:// ".repeat(length / 8),
+        "9_a-:// ".repeat(length / 8),
+      ]) {
+        const result = scanDiagnosticUrlTokens(text);
+        expect(result.tokens).toEqual([]);
+        expect(result.examinedCharacters).toBeGreaterThanOrEqual(text.length);
+        expect(result.examinedCharacters).toBeLessThanOrEqual(text.length * 4);
+      }
+    }
+  });
+
+  it("preserves scheme support, case and word boundaries in the linear scan", () => {
+    const text =
+      "_https://example.test/ 9https://example.test/ 9-HTTPS://example.test/ WS://example.test/ custom+v1.2://example.test/ file:///tmp/example";
+    const result = scanDiagnosticUrlTokens(text);
+    expect(result.tokens.map(({ start, end }) => text.slice(start, end))).toEqual([
+      "HTTPS://example.test/",
+      "WS://example.test/",
+      "custom+v1.2://example.test/",
+      "file:///tmp/example",
+    ]);
+    expect(result.examinedCharacters).toBeLessThanOrEqual(text.length * 4);
+  });
+
   it.each([
     [
       '{"url":"https://example.test/a","other":"keep"}',
@@ -195,10 +237,16 @@ describe("ServerBrowserDiagnostics", () => {
       '{"url":"https://example.test/a?token=secret","other":"keep"}',
       '{"url":"https://example.test/a?token=%5BREDACTED%5D","other":"keep"}',
     ],
+    [
+      '{"url":"https://example.test/?q=\\"secret"}',
+      '{"url":"https://example.test/?q=%5BREDACTED%5D\\"secret"}',
+    ],
   ])("preserves surrounding JSON when redacting URL tokens: %s", (text, expected) => {
     const { diagnostics, consoleMessage } = fixture();
     consoleMessage(text);
-    expect(diagnostics.read({}).console.entries[0]?.text).toBe(expected);
+    const actual = diagnostics.read({}).console.entries[0]?.text;
+    expect(actual).toBe(expected);
+    expect(JSON.parse(actual!)).toEqual(JSON.parse(expected));
   });
 
   it.each([200, 10_000])("bounds query processing for %i parameters", (count) => {

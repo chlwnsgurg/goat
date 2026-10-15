@@ -71,17 +71,59 @@ const redactUrl = (raw: string) => {
 
 // URL credentials and URL query values are redacted, and fragments are dropped.
 // Within the output limits, other free-form console/error text is returned as the
-// page produced it and is not scrubbed for secrets. Quotes and closing brackets
-// delimit URL tokens; quoted query values are only parsed in structured URL fields.
+// page produced it and is not scrubbed for secrets. String escapes, quotes and closing
+// brackets delimit URL tokens; quoted query values are only parsed in structured fields.
+export const scanDiagnosticUrlTokens = (text: string) => {
+  const tokens: { start: number; end: number }[] = [];
+  let cursor = 0;
+  let examinedCharacters = 0;
+  while (cursor < text.length) {
+    // A fixed delimiter supports every scheme the old scan accepted. Charge the
+    // searched span as well as explicit character visits to expose the linear budget.
+    const separator = text.indexOf("://", cursor);
+    examinedCharacters += separator === -1 ? text.length - cursor : separator + 3 - cursor;
+    if (separator === -1) break;
+    let start = -1;
+    for (; cursor < separator; cursor++) {
+      examinedCharacters++;
+      const char = text[cursor]!;
+      if (!/[a-z0-9+.-]/i.test(char)) start = -1;
+      else if (
+        start === -1 &&
+        /[a-z]/i.test(char) &&
+        (cursor === 0 || !/\w/.test(text[cursor - 1]!))
+      ) {
+        start = cursor;
+      }
+    }
+    cursor = separator + 3;
+    if (start === -1) continue;
+    const contentStart = cursor;
+    while (cursor < text.length) {
+      examinedCharacters++;
+      if (/[\s"'`\\<>\])}]/.test(text[cursor]!)) break;
+      cursor++;
+    }
+    if (cursor > contentStart) tokens.push({ start, end: cursor });
+  }
+  return { tokens, examinedCharacters };
+};
+
 const redactText = (text: string, limit: number) => {
   const bounded = text.slice(0, INPUT_LIMIT);
-  return bounded
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>\])}]+/gi, (raw, offset: number) =>
-      text.length > INPUT_LIMIT && offset + raw.length === bounded.length
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const { start, end } of scanDiagnosticUrlTokens(bounded).tokens) {
+    parts.push(
+      bounded.slice(cursor, start),
+      text.length > INPUT_LIMIT && end === bounded.length
         ? "url:[redacted]"
-        : redactUrl(raw),
-    )
-    .slice(0, limit);
+        : redactUrl(bounded.slice(start, end)),
+    );
+    cursor = end;
+  }
+  parts.push(bounded.slice(cursor));
+  return parts.join("").slice(0, limit);
 };
 
 const contains = (value: string, filter: string | undefined) =>
