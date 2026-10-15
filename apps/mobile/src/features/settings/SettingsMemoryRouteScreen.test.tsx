@@ -234,6 +234,45 @@ describe("native Memory with shared factory", () => {
     });
     expect(view.container.textContent).not.toContain("Synthetic memory body");
   });
+  it("refuses a body-free forget retry before rendering read-only grant loss", async () => {
+    await mount();
+    await view.click(`Open memory ${nativeId}`);
+    h.responses.set(WS_METHODS.memoryForget, () => {
+      throw new Error("Synthetic forget response lost");
+    });
+    await view.click("Forget memory");
+    await act(async () => h.confirm());
+    await act(async () => {
+      await h.signal({
+        kind: "forget",
+        memorySpaceId: nativeSpace,
+        memoryId: nativeId,
+        projectionWatermark: 2,
+      });
+    });
+    expect(view.container.textContent).not.toContain("Synthetic memory body");
+    expect(view.container.textContent).toContain("Retry uses the same request");
+    const oldRetry = [...view.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Retry forget request",
+    )!;
+    const connection = h.registry.get(h.prepared(nativeEnv));
+    await act(async () => {
+      h.grant(["memory:write", "orchestration:read"]);
+      expect(h.registry.get(h.memory.forget.permissionAtom(nativeEnv))).toBe(true);
+      expect(h.registry.get(h.memory.syncStatus.permissionAtom(nativeEnv))).toBe(false);
+      expect(h.registry.get(h.prepared(nativeEnv))).toBe(connection);
+      // Invoke the existing rendered control synchronously, before React replaces its lifetime.
+      expect(view.container.contains(oldRetry)).toBe(true);
+      oldRetry.click();
+    });
+    expect(h.calls.filter((call) => call.method === WS_METHODS.memoryForget)).toHaveLength(1);
+    expect(view.container.textContent).not.toContain("Retry uses the same request");
+    expect(view.container.textContent).not.toContain("Retry forget request");
+    await act(async () => h.grant(["memory:read", "memory:write", "orchestration:read"]));
+    expect(view.container.textContent).not.toContain("Retry forget request");
+    await act(async () => oldRetry.click());
+    expect(h.calls.filter((call) => call.method === WS_METHODS.memoryForget)).toHaveLength(1);
+  });
   it("owns the sharing confirmation for the current connection lifetime", async () => {
     await mount(["memory:read", "memory:write", "settings:write"]);
     h.responses.set(WS_METHODS.memoryHubSettingsGet, () => ({
@@ -550,6 +589,69 @@ describe("native Memory with shared factory", () => {
     for (const call of h.calls.filter((call) => call.method === WS_METHODS.memoryList))
       expect(call.input).toMatchObject({ memorySpaceId: nativeSpace });
   });
+  it.each(["disabled", "rebound"] as const)(
+    "refreshes sharing after hub reload even when owner lookup fails (%s)",
+    async (mode) => {
+      await mount(["memory:read", "memory:write", "settings:write"]);
+      await view.click("Show sharing details");
+      expect(view.container.textContent).toContain("Hub connected");
+      expect(view.container.textContent).toContain("Pending sync: 0");
+      const nextSpace = nativeSpace.replace(/1$/, "9") as typeof nativeSpace;
+      h.responses.set(WS_METHODS.memoryHubSettingsGet, () => ({
+        settings:
+          mode === "disabled" ? { mode: "disabled" } : { mode: "hub", memorySpaceId: nextSpace },
+        version: 2,
+      }));
+      h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyGet, () => {
+        throw new Error("Synthetic owner lookup failed");
+      });
+      const refresh = h.deferred<typeof nativeSyncStatus>();
+      h.responses.set(WS_METHODS.memorySyncStatus, () => refresh.response);
+      await view.click("Load sharing and original access settings");
+      expect(h.calls.filter((call) => call.method === WS_METHODS.memorySyncStatus)).toHaveLength(2);
+      expect(view.container.textContent).toContain("Checking memory sharing");
+      expect(view.container.textContent).not.toContain("Hub connected");
+      expect(view.container.textContent).not.toContain("Pending sync: 0");
+      await act(async () => {
+        await refresh.succeed({
+          ...nativeSyncStatus,
+          state: mode === "disabled" ? "disabled" : "online",
+          memorySpaceId: mode === "disabled" ? null : nextSpace,
+        });
+      });
+      expect(view.container.textContent).toContain("Synthetic owner lookup failed");
+      expect(view.container.textContent).toContain("Retry administrative request");
+      expect(view.container.textContent).toContain(
+        mode === "disabled" ? "Memory sharing off" : "Hub connected",
+      );
+      expect(view.container.textContent).toContain(
+        `Current bound space: ${mode === "disabled" ? "None" : nextSpace}`,
+      );
+      expect(view.container.textContent).toContain(`Space: ${nativeSpace}`);
+      h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyGet, () => nativeOwnerPolicy);
+      h.responses.set(WS_METHODS.memorySyncStatus, () => ({
+        ...nativeSyncStatus,
+        state: mode === "disabled" ? "disabled" : "online",
+        memorySpaceId: mode === "disabled" ? null : nextSpace,
+      }));
+      await view.click("Retry administrative request");
+      expect(view.container.textContent).not.toContain("Synthetic owner lookup failed");
+      expect(
+        h.calls.filter((call) => call.method === WS_METHODS.memoryOwnerSourceReadPolicyGet),
+      ).toHaveLength(2);
+      await view.click("Remember something");
+      await view.type("Memory text", "Synthetic pinned destination after owner failure");
+      h.responses.set(WS_METHODS.memoryUpsert, () => ({ outcome: "accepted", pendingSync: false }));
+      await view.click("Save memory");
+      expect(h.calls.find((call) => call.method === WS_METHODS.memoryUpsert)).toMatchObject({
+        environmentId: nativeEnv,
+        input: { memorySpaceId: nativeSpace },
+      });
+      expect(h.calls.filter((call) => call.method === WS_METHODS.memorySyncStatus)).toHaveLength(3);
+      for (const call of h.calls.filter((call) => call.method === WS_METHODS.memoryList))
+        expect(call.input).toMatchObject({ memorySpaceId: nativeSpace });
+    },
+  );
   it("unmounts history bodies and discards original entry when only read becomes unavailable", async () => {
     await mount();
     if (nativeItem.status !== "active") throw new Error("Expected active fixture");

@@ -1,6 +1,7 @@
 import { RegistryContext, useAtomValue, useAtomSet } from "@effect/atom-react";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import {
+  AuthMemoryReadScope,
   AuthOrchestrationReadScope,
   EnvironmentId as EnvironmentIdSchema,
   MemorySpaceId as MemorySpaceIdSchema,
@@ -718,6 +719,7 @@ function MemoryDetails({
     const live = AsyncResult.isSuccess(current) ? Option.getOrNull(current.value) : null;
     if (
       !liveDestination() ||
+      !readEnvironmentScope(params.environmentId, AuthMemoryReadScope) ||
       busy.current ||
       !registry.get(memory.forget.permissionAtom(params.environmentId))
     )
@@ -1343,12 +1345,15 @@ function MemoryAdministration({
     const h = await getHub({ environmentId, input: {} });
     if (!active()) return;
     if (AsyncResult.isFailure(h)) throw squashAtomCommandFailure(h);
-    if (AsyncResult.isSuccess(h)) setHub(h.value);
+    if (AsyncResult.isSuccess(h)) {
+      setHub(h.value);
+      await onSyncRefresh();
+    }
+    if (!active()) return;
     const o = await getOwner({ environmentId, input: {} });
     if (!active()) return;
     if (AsyncResult.isFailure(o)) throw squashAtomCommandFailure(o);
     if (AsyncResult.isSuccess(o)) setOwner(o.value);
-    await onSyncRefresh();
   }
   async function loadBinding() {
     if (
