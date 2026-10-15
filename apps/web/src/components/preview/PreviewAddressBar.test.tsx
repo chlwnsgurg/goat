@@ -157,6 +157,56 @@ describe("PreviewAddressBar", () => {
     expect(input().value).toBe(props.url);
   });
 
+  it.each(["https://example.com/?x=1", "localhost:5173", "new search"])(
+    "submits the unhighlighted draft %s with Enter while the popup is open",
+    async (target) => {
+      await render();
+      await focus();
+      await type(target);
+      expect(input().getAttribute("aria-expanded")).toBe("true");
+      expect(document.querySelector('[role="option"]')).not.toBeNull();
+      expect(input().getAttribute("aria-activedescendant")).toBeNull();
+
+      await press("Enter");
+
+      expect(props.onSubmit).toHaveBeenCalledExactlyOnceWith(target);
+      expect(props.onActivateTab).not.toHaveBeenCalled();
+      expect(input().getAttribute("aria-expanded")).toBe("false");
+    },
+  );
+
+  it("navigates to the highlighted history item with Enter", async () => {
+    await render();
+    await focus();
+    await type("archive");
+    await press("ArrowDown");
+    await press("ArrowDown");
+    expect(input().getAttribute("aria-activedescendant")).toBe(
+      document.querySelectorAll('[role="option"]')[1]?.id,
+    );
+
+    await press("Enter");
+
+    expect(props.onSubmit).toHaveBeenCalledExactlyOnceWith("https://old.example.com/");
+    expect(props.onActivateTab).not.toHaveBeenCalled();
+    expect(input().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("ignores unhighlighted Enter during composition and restores the URL on Escape", async () => {
+    await render();
+    await focus();
+    await type("https://example.com/?x=1");
+    await press("Enter", true);
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    expect(input().value).toBe("https://example.com/?x=1");
+    expect(input().getAttribute("aria-expanded")).toBe("true");
+
+    await press("Escape");
+    expect(input().value).toBe(props.url);
+    expect(input().getAttribute("aria-expanded")).toBe("false");
+    expect(props.onSubmit).not.toHaveBeenCalled();
+  });
+
   it("keeps a draft when a tab result closes before selection", async () => {
     props.onActivateTab = vi.fn(() => false);
     await render();

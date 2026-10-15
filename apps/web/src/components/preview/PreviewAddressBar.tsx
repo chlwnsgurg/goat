@@ -42,6 +42,7 @@ export function PreviewAddressBar(props: PreviewAddressBarProps) {
   const localInputRef = useRef<HTMLInputElement | null>(null);
   const inputRef = props.inputRef ?? localInputRef;
   const anchorRef = useRef<HTMLDivElement | null>(null);
+  const highlightedItemRef = useRef<BrowserAddressSuggestion | undefined>(undefined);
   const draft = useBrowserAddressDraftStore((state) => state.drafts.get(props.addressKey));
   const setDraft = useBrowserAddressDraftStore((state) => state.setDraft);
   const [focused, setFocused] = useState(false);
@@ -94,7 +95,15 @@ export function PreviewAddressBar(props: PreviewAddressBarProps) {
         filter={null}
         value={value}
         onValueChange={(next, details) => {
-          if (details.reason !== "item-press") setDraft(props.addressKey, next);
+          if (details.reason === "item-press") {
+            const suggestion = suggestions.find((item) => item.url === next);
+            if (suggestion) choose(suggestion);
+          } else {
+            setDraft(props.addressKey, next);
+          }
+        }}
+        onItemHighlighted={(item) => {
+          highlightedItemRef.current = item;
         }}
         itemToStringValue={(item) => item.url}
         open={open && focused && !props.disabled && suggestions.length > 0}
@@ -127,6 +136,11 @@ export function PreviewAddressBar(props: PreviewAddressBarProps) {
                 event.preventBaseUIHandler();
                 setDraft(props.addressKey, undefined);
                 dismiss();
+              } else if (event.key === "Enter" && !highlightedItemRef.current) {
+                // Base UI owns highlighted-item activation; submit plain input explicitly.
+                event.preventDefault();
+                event.preventBaseUIHandler();
+                navigate(value);
               }
             }}
             placeholder="Search or enter URL"
@@ -161,14 +175,7 @@ export function PreviewAddressBar(props: PreviewAddressBarProps) {
         <AutocompletePopup anchor={anchorRef} className="w-(--anchor-width)">
           <AutocompleteList>
             {suggestions.map((suggestion) => (
-              <AutocompleteItem
-                key={suggestion.id}
-                value={suggestion}
-                onClick={(event) => {
-                  event.preventBaseUIHandler();
-                  choose(suggestion);
-                }}
-              >
+              <AutocompleteItem key={suggestion.id} value={suggestion}>
                 <PreviewFaviconIcon
                   threadRef={props.threadRef}
                   url={suggestion.url}
