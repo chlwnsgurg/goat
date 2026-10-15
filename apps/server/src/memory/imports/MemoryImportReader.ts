@@ -11,6 +11,9 @@ import {
 } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as Fiber from "effect/Fiber";
+import * as Semaphore from "effect/Semaphore";
 import { scanMemoryValue } from "../MemorySecretScanner.ts";
 import type {
   ImportDiscoveredSlot,
@@ -41,6 +44,8 @@ export type MemoryImportReaderConfig = {
   readonly gitExecutable: string;
   /** Python 3 supplies openat/dir_fd absent from Node FS; unavailable platforms refuse. */
   readonly descriptorExecutable: string;
+  /** Value-free lifecycle observation; no source bytes, paths, arguments or environment. */
+  readonly onProcessSpawn?: (event: { readonly operation: string; readonly pid: number }) => void;
 };
 
 // The broker has no provider write operation. All source opens are parent-descriptor relative.
@@ -85,10 +90,14 @@ def verify():
         if cmp(now)!=cmp(before) or cmp(os.fstat(fd))!=cmp(before): refuse('source_changed')
 
 def names(fd):
-    result=os.listdir(fd)
-    for name in result:
-        try: valid(name)
-        except UnicodeError: refuse('invalid_utf8')
+    result=[]
+    with os.scandir(fd) as entries:
+        for entry in entries:
+            name=entry.name
+            try: valid(name)
+            except UnicodeError: refuse('invalid_utf8')
+            result.append(name)
+            if len(result)>4096: refuse('limit_exceeded')
     return sorted(result)
 
 def read(fd, maximum):
@@ -131,7 +140,7 @@ def write(parent,name,data):
 
 c=json.loads(sys.argv[1]); action=c['action']; result={}
 try:
-    if not all(f in os.supports_dir_fd for f in (os.open,os.stat,os.mkdir,os.unlink,os.rmdir)) or os.listdir not in os.supports_fd or not hasattr(os,'O_NOFOLLOW'): refuse('path_rejected')
+    if not all(f in os.supports_dir_fd for f in (os.open,os.stat,os.mkdir,os.unlink,os.rmdir)) or os.scandir not in os.supports_fd or not hasattr(os,'O_NOFOLLOW'): refuse('path_rejected')
     if action in ('init','allocate','remove','cleanup'):
         state=absolute(c['stateDir']); own(state)
         if action=='init':
@@ -148,24 +157,30 @@ try:
         if action in ('cleanup','remove'):
             entries=names(state)
             if len(entries)>2: refuse('limit_exceeded')
-            count=0; total=0
-            def inspect(parent,name,depth):
-                global count,total
+            if action=='remove': entries=[c['id']] if c['id'] in entries else []
+            count=0; total=0; object_total=0; object_count=0
+            def inspect(parent,name,depth,rel):
+                global count,total,object_total,object_count
                 count+=1
-                if count>8192 or depth>10: refuse('limit_exceeded')
+                if rel: valid(rel[5:] if rel.startswith('repo/') else rel)
+                obj=rel=='repo/objects' or rel.startswith('repo/objects/')
+                if obj: object_count+=1
+                if count>4096 or object_count>3584 or depth>9: refuse('limit_exceeded')
                 s=os.stat(name,dir_fd=parent,follow_symlinks=False)
                 if s.st_uid!=os.getuid() or stat.S_ISLNK(s.st_mode): refuse('path_rejected')
                 if stat.S_ISDIR(s.st_mode):
                     fd=open_child(parent,name,True,False); own(fd)
-                    return (name,fd,[inspect(fd,n,depth+1) for n in names(fd)])
+                    return (name,fd,[inspect(fd,n,depth+1,rel+'/'+n if rel else n) for n in names(fd)])
                 if not stat.S_ISREG(s.st_mode) or stat.S_IMODE(s.st_mode)!=0o600: refuse('path_rejected')
                 total+=s.st_size
-                if total>134217728: refuse('limit_exceeded')
+                if obj: object_total+=s.st_size
+                if total>67108864 or object_total>62914560 : refuse('limit_exceeded')
                 return (name,None,[])
             trees=[]
             for name in entries:
                 if not name.startswith('snapshot-') or len(name)!=45: refuse('path_rejected')
-                trees.append(inspect(state,name,0))
+                count=0; total=0; object_total=0; object_count=0
+                trees.append(inspect(state,name,0,''))
             verify()
             def remove(parent,tree):
                 name,fd,children=tree
@@ -255,7 +270,13 @@ finally:
     for fd in reversed(held): os.close(fd)
 `;
 
-type Budget = { live: number; unavailable: boolean; owners: number };
+type Budget = {
+  live: number;
+  unavailable: boolean;
+  owners: number;
+  initializing: boolean;
+  slots: Semaphore.Semaphore;
+};
 // Deliberate server/stateDir admission ownership, shared by acquisitions in this process.
 const budgets = new Map<string, Budget>();
 const error = (issue: MemoryImportIssue) => new MemoryImportRpcError({ issue });
@@ -303,6 +324,7 @@ const execute = (
   cwd: string,
   maxBytes: number,
   gitDir?: string,
+  onSpawn?: (pid: number) => void,
 ) =>
   Effect.callback<{ code: number; bytes: Buffer }, MemoryImportRpcError>((resume) => {
     let child: NodeChildProcess.ChildProcessWithoutNullStreams;
@@ -353,6 +375,11 @@ const execute = (
           : Effect.succeed({ code: code ?? -1, bytes: Buffer.concat(chunks) }),
       );
     });
+    try {
+      if (child.pid !== undefined) onSpawn?.(child.pid);
+    } catch {
+      stop();
+    }
     return Effect.callback<void>((done) => {
       if (ended) done(Effect.void);
       else {
@@ -396,6 +423,8 @@ const broker = (config: MemoryImportReaderConfig, input: Record<string, unknown>
     ["-I", "-S", "-c", DESCRIPTORS, encodeJson(input)],
     config.stateDir,
     12 * 1024 * 1024,
+    undefined,
+    (pid) => config.onProcessSpawn?.({ operation: String(input.action), pid }),
   ).pipe(
     Effect.flatMap((result) =>
       Effect.try({
@@ -421,7 +450,7 @@ export const cleanupMemoryImportSnapshots = (config: MemoryImportReaderConfig) =
       catch: normalize,
     });
     const budget = budgets.get(config.stateDir);
-    if (budget && (budget.owners > 0 || budget.live > 0))
+    if (budget && (budget.owners > 0 || budget.live > 0 || budget.initializing))
       return yield* Effect.fail(error("source_unreadable"));
     yield* broker(config, { action: "init", stateDir: config.stateDir });
     yield* broker(config, { action: "cleanup", stateDir: config.stateDir });
@@ -450,9 +479,28 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
     });
     const roots = config.roots.map((root) => ({ ...root }));
     const previous = budgets.get(config.stateDir);
-    if (!previous) yield* cleanupMemoryImportSnapshots(config);
-    const budget = previous ?? { live: 0, unavailable: false, owners: 0 };
+    const slots = yield* Semaphore.make(2);
+    const budget: Budget = previous ?? {
+      live: 0,
+      unavailable: false,
+      owners: 0,
+      initializing: true,
+      slots,
+    };
+    if (previous?.initializing || previous?.unavailable)
+      return yield* Effect.fail(error("source_unreadable"));
     budgets.set(config.stateDir, budget);
+    if (!previous) {
+      yield* broker(config, { action: "init", stateDir: config.stateDir }).pipe(
+        Effect.andThen(broker(config, { action: "cleanup", stateDir: config.stateDir })),
+        Effect.onExit((exit) =>
+          Effect.sync(() => {
+            budget.initializing = false;
+            if (exit._tag === "Failure") budget.unavailable = true;
+          }),
+        ),
+      );
+    }
     yield* Effect.acquireRelease(
       Effect.sync(() => {
         budget.owners++;
@@ -463,46 +511,64 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
         }),
     );
     let closed = false;
-    yield* Effect.addFinalizer(() =>
+    const operations = yield* Scope.make();
+    yield* Effect.addFinalizer((exit) =>
       Effect.sync(() => {
         closed = true;
-      }),
+      }).pipe(Effect.andThen(Scope.close(operations, exit))),
     );
+    const manage = <A>(operation: Effect.Effect<A, MemoryImportRpcError>) =>
+      Effect.try({
+        try: () => {
+          if (closed || budget.unavailable) throw error("source_unreadable");
+        },
+        catch: normalize,
+      }).pipe(
+        Effect.andThen(
+          Effect.acquireUseRelease(
+            Effect.forkIn(operation, operations),
+            Fiber.join,
+            Fiber.interrupt,
+          ),
+        ),
+      );
     const available = () => {
       if (closed || budget.unavailable) throw error("source_unreadable");
     };
     const snapshot = <A>(use: (path: string) => Effect.Effect<A, MemoryImportRpcError>) =>
       Effect.gen(function* () {
-        const id = yield* Effect.try({
-          try: () => {
-            available();
-            if (budget.live >= 2) throw error("limit_exceeded");
-            budget.live++;
-            return `snapshot-${NodeCrypto.randomUUID()}`;
-          },
-          catch: normalize,
-        });
-        // Reservation is acquired before mkdir, and failure in mkdir also runs this finalizer.
-        const release = broker(config, { action: "remove", stateDir: config.stateDir, id }).pipe(
-          Effect.tap(() =>
-            Effect.sync(() => {
-              budget.live--;
-            }),
-          ),
-          Effect.catch(() =>
-            Effect.sync(() => {
-              budget.unavailable = true;
-            }),
-          ),
-        );
         return yield* Effect.scoped(
           Effect.gen(function* () {
-            yield* Effect.addFinalizer(() => release);
-            yield* broker(config, { action: "allocate", stateDir: config.stateDir, id });
-            const result = yield* use(
-              NodePath.join(config.stateDir, "memory-import", "snapshots", id),
+            const id = yield* Effect.acquireRelease(
+              Effect.gen(function* () {
+                const id = yield* Effect.try({
+                  try: () => {
+                    available();
+                    return `snapshot-${NodeCrypto.randomUUID()}`;
+                  },
+                  catch: normalize,
+                });
+                if (!(yield* budget.slots.takeIfAvailable(1)))
+                  return yield* Effect.fail(error("limit_exceeded"));
+                budget.live++;
+                return id;
+              }),
+              (id) =>
+                broker(config, { action: "remove", stateDir: config.stateDir, id }).pipe(
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      budget.live--;
+                    }).pipe(Effect.andThen(budget.slots.release(1))),
+                  ),
+                  Effect.catch(() =>
+                    Effect.sync(() => {
+                      budget.unavailable = true;
+                    }),
+                  ),
+                ),
             );
-            return result;
+            yield* broker(config, { action: "allocate", stateDir: config.stateDir, id });
+            return yield* use(NodePath.join(config.stateDir, "memory-import", "snapshots", id));
           }),
         ).pipe(
           Effect.catch((cause) =>
@@ -571,6 +637,7 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
                   NodePath.join(path, "cwd"),
                   cap,
                   repo,
+                  (pid) => config.onProcessSpawn?.({ operation: "git", pid }),
                 ).pipe(
                   Effect.flatMap((result) =>
                     result.code === 0
@@ -681,5 +748,8 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
         }
         return result;
       });
-    return { discover, read } satisfies MemoryImportReaderShape;
+    return {
+      discover: (input) => manage(discover(input)),
+      read: (input) => manage(read({ slot: { ...input.slot } })),
+    } satisfies MemoryImportReaderShape;
   });
