@@ -62,6 +62,7 @@ export function MemoryImportSettings({
   const [sources, setSources] = useState<readonly MemoryImportSource[]>([]);
   const [items, setItems] = useState<readonly MemoryImportPreviewItem[]>([]);
   const [selected, setSelected] = useState<readonly string[]>([]);
+  const [scopeEpoch, setScopeEpoch] = useState(0);
   const [scope, setScope] = useState<MemoryScopeSelection | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -144,6 +145,9 @@ export function MemoryImportSettings({
   );
   const invalidateDestination = useCallback(async () => {
     generation.current++;
+    previousScope.current = null;
+    setScope(null);
+    setScopeEpoch((current) => current + 1);
     workflow?.stop();
     workflow?.invalidate({ environmentId, memorySpaceId, session: randomUUID() });
     setError(changedImportDestinationMessage);
@@ -206,6 +210,7 @@ export function MemoryImportSettings({
             </SelectPopup>
           </Select>
           <MemoryScopeSettings
+            key={scopeEpoch}
             environmentId={environmentId}
             memorySpaceId={memorySpaceId}
             disabled={!canImport || locked}

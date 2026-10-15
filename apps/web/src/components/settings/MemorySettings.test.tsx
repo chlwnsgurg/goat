@@ -2246,6 +2246,8 @@ it("explains unavailable safe import admission while keeping Check import result
 it("storage generation notification stops selection without deleting recovery", async () => {
   const { memoryImportGenerationKey } = await import("../../lib/memoryImportRecoveryStorage");
   await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  await chooseControl("user", 1);
+  expect(container.querySelectorAll("select")[1]!.value).toBe("user");
   await act(async () =>
     window.dispatchEvent(
       new StorageEvent("storage", {
