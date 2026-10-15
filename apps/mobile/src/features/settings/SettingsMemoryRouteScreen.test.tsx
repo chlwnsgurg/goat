@@ -158,7 +158,7 @@ describe("native Memory with shared factory", () => {
     await mount(["memory:read", "memory:write", "settings:write"]);
     const policy = nativeOwnerPolicy;
     h.responses.set(WS_METHODS.memoryHubSettingsGet, () => ({
-      settings: { mode: "disabled" },
+      settings: { mode: "hub", memorySpaceId: nativeSpace },
       version: 1,
     }));
     h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyGet, () => policy);

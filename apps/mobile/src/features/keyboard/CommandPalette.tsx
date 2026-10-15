@@ -283,7 +283,18 @@ export function CommandPalette(props: {
             params: {
               screen: "SettingsMemory",
               params: activeThreadRef
-                ? { environmentId: activeThreadRef.environmentId, thread: activeThreadRef }
+                ? {
+                    environmentId: activeThreadRef.environmentId,
+                    thread: activeThreadRef,
+                    ...(activeThread
+                      ? {
+                          project: {
+                            environmentId: activeThread.environmentId,
+                            projectId: activeThread.projectId,
+                          },
+                        }
+                      : {}),
+                  }
                 : undefined,
             },
           }),

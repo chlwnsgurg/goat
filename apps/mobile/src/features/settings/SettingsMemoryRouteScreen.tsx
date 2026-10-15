@@ -131,7 +131,14 @@ export function MemoryEnvironmentEntry({
   readonly environmentId: EnvironmentId;
 }) {
   const { visible, open } = useMemoryNavigation(environmentId);
-  return visible ? <SettingsRow icon="brain" label="Memory" onPress={open} /> : null;
+  const { savedConnectionsById } = useSavedRemoteConnections();
+  return visible ? (
+    <SettingsRow
+      icon="brain"
+      label={`Memory · ${savedConnectionsById[environmentId]?.environmentLabel ?? environmentId}`}
+      onPress={open}
+    />
+  ) : null;
 }
 
 export function MemoryReportLink({ reference }: { readonly reference: MemoryReportReference }) {
@@ -205,8 +212,20 @@ function MemoryEnvironment({
   const writeAllowed = useAtomValue(memory.upsert.permissionAtom(environmentId));
   const supported = config !== null && supportsMemoryProtocol(config.environment.capabilities);
   // Remount all projections on connection replacement or loss of access. No late reply survives.
-  if (!supported) return <Copy>Update this environment's server and reconnect to use Memory.</Copy>;
-  if (Option.isNone(session)) return <Copy>Reconnect this environment to manage its memory.</Copy>;
+  if (!supported)
+    return (
+      <MemoryConnectionHelp
+        environmentId={environmentId}
+        message="Update this environment's server and reconnect to use Memory."
+      />
+    );
+  if (Option.isNone(session))
+    return (
+      <MemoryConnectionHelp
+        environmentId={environmentId}
+        message="Reconnect this environment to manage its memory."
+      />
+    );
   if (!readAllowed && !adminAllowed && !writeAllowed)
     return <Copy>This connection does not have permission to manage memory.</Copy>;
   return (
@@ -215,6 +234,36 @@ function MemoryEnvironment({
       params={params}
       readAllowed={readAllowed}
     />
+  );
+}
+
+function MemoryConnectionHelp({
+  environmentId,
+  message,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly message: string;
+}) {
+  const navigation = useNavigation();
+  return (
+    <>
+      <Copy>{message}</Copy>
+      <SettingsRow
+        icon="desktopcomputer"
+        label="Open environment connection"
+        onPress={() =>
+          navigation.navigate("SettingsSheet", {
+            screen: "SettingsContent",
+            params: { screen: "SettingsEnvironmentDetail", params: { environmentId } },
+          })
+        }
+      />
+      <SettingsRow
+        icon="desktopcomputer"
+        label="Saved environments"
+        target="SettingsEnvironments"
+      />
+    </>
   );
 }
 
@@ -1058,12 +1107,15 @@ function MemoryAdministration({
     }
   }
   const ownerView = owner ? presentMemoryOwnerPolicy(owner) : null;
+  const ownerSpaceMatches =
+    memorySpaceId === null ||
+    (hub?.settings.mode !== "disabled" && hub?.settings.memorySpaceId === memorySpaceId);
   return (
     <View className="gap-4">
       <SettingsSection title="Environment access">
         <Copy>
-          Saved task access is a ceiling. Turning access on does not widen existing task
-          permissions.
+          Saved task access is a ceiling. This setting does not confirm effective run access.
+          Turning access on does not widen existing task permissions.
         </Copy>
         <Action
           label={
@@ -1132,16 +1184,30 @@ function MemoryAdministration({
                     { text: "Cancel", style: "cancel" },
                     {
                       text: "Configure hub",
-                      onPress: () =>
-                        void run(() => configure({ mode: "hub", memorySpaceId: null })),
+                      onPress: () => void run(() => configure({ mode: "hub", memorySpaceId })),
                     },
                   ],
                 )
               }
             />
-            <Field label="Hub environment ID" value={hubId} onChange={setHubId} />
-            <Field label="Hub endpoint" value={endpoint} onChange={setEndpoint} />
-            <Field label="Installed credential name" value={secretName} onChange={setSecretName} />
+            <Field
+              label="Hub environment ID"
+              disabled={pending}
+              value={hubId}
+              onChange={setHubId}
+            />
+            <Field
+              label="Hub endpoint"
+              disabled={pending}
+              value={endpoint}
+              onChange={setEndpoint}
+            />
+            <Field
+              label="Installed credential name"
+              disabled={pending}
+              value={secretName}
+              onChange={setSecretName}
+            />
             <Action
               label="Connect to selected hub"
               disabled={pending || !hubId.trim() || !endpoint.trim() || !secretName.trim()}
@@ -1175,6 +1241,12 @@ function MemoryAdministration({
         />
       </SettingsSection>
       <SettingsSection title="Original access">
+        {!ownerSpaceMatches ? (
+          <Copy>
+            The selected memory space is not the currently bound space. Original access changes are
+            unavailable here.
+          </Copy>
+        ) : null}
         {ownerView && adminAllowed ? (
           <>
             <Copy>{ownerView.revocationLabel}</Copy>
@@ -1195,10 +1267,10 @@ function MemoryAdministration({
                 <Action
                   key={id}
                   label={`${ownerView.desiredRequesterEnvironmentIds.includes(id) ? "Remove" : "Allow"} ${savedConnectionsById[id]?.environmentLabel ?? id}`}
-                  disabled={pending}
+                  disabled={pending || !ownerSpaceMatches}
                   onPress={() =>
                     void run(async () => {
-                      if (!owner || !active()) return;
+                      if (!owner || !active() || !ownerSpaceMatches) return;
                       const result = await updateOwner({
                         environmentId,
                         input: {
@@ -1225,6 +1297,9 @@ function MemoryAdministration({
       </SettingsSection>
       {params.project && memorySpaceId ? (
         <SettingsSection title="Project memory">
+          <Copy>
+            Binding changes apply to future work. Existing memories keep their recorded scope.
+          </Copy>
           <Action
             label="Load project binding"
             disabled={pending || !bindingAllowed}
@@ -1241,6 +1316,7 @@ function MemoryAdministration({
               </Copy>
               <Field
                 label="Shared project ID"
+                disabled={pending}
                 value={sharedProjectId}
                 onChange={setSharedProjectId}
               />
