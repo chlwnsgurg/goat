@@ -2859,6 +2859,9 @@ it.effect(
         ordinary.revisions.some((r) => resolution.inputRevisionIds.includes(r.revision.revisionId)),
       );
       // Unrelated historical bodies/metadata must not be decoded by this bounded selection.
+      const [original] = yield* sql<{
+        provenance_json: string;
+      }>`SELECT provenance_json FROM memory_revisions WHERE space=${space} AND revision_id=${revisions[5]!}`;
       yield* sql`UPDATE memory_revisions SET provenance_json='invalid fixture metadata' WHERE space=${space} AND revision_id=${revisions[5]!}`;
       const request = {
         memorySpaceId: space,
@@ -2881,6 +2884,8 @@ it.effect(
       assert.isTrue(second.revisions.every((p) => p.payload !== null));
       assert.isNull(second.nextCursor);
       assert.deepStrictEqual(first.resolutions, []);
+      // Later writes scan every revision's provenance, so restore the corrupted fixture row.
+      yield* sql`UPDATE memory_revisions SET provenance_json=${original!.provenance_json} WHERE space=${space} AND revision_id=${revisions[5]!}`;
       assert.strictEqual(
         (yield* service.history(request, denied).pipe(Effect.flip))._tag,
         "MemoryAccessError",
