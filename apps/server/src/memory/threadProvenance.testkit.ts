@@ -262,6 +262,30 @@ export function threadProvenanceCases(threadId: M.ThreadId) {
       "OpenCode v2",
       "Muse",
     ].map((adapter) => row(`${adapter} pointer-free native projection`, "unknown", nativeChild)),
+    ...["OpenCode v1", "OpenCode v2"].map((adapter) =>
+      row(
+        `${adapter} native projection with attached provider session`,
+        "unknown",
+        { ...nativeChild, activeProviderThreadId: providerThread.id },
+        [
+          {
+            type: "provider-thread.updated",
+            payload: {
+              ...providerThread,
+              driver: M.ProviderDriverKind.make("opencode"),
+              ownerNodeId: M.NodeId.make("task"),
+              status: "active",
+              providerSessionId: M.ProviderSessionId.make("synthetic-session"),
+              nativeThreadRef: {
+                driver: M.ProviderDriverKind.make("opencode"),
+                nativeId: "synthetic-child",
+                strength: "strong",
+              },
+            },
+          },
+        ],
+      ),
+    ),
     row("provider fork alone fences otherwise fresh app thread", "unknown", fresh, [
       { type: "provider-thread.updated", payload: nativeProvider },
     ]),
