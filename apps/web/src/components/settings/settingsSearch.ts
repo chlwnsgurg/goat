@@ -14,6 +14,7 @@ import {
 } from "./settingsScope";
 
 export type SettingsPath =
+  | "/settings/memory"
   | "/settings/projects"
   | "/settings/general"
   | "/settings/diagnostics"
@@ -73,6 +74,7 @@ export interface SettingsSearchItem {
    * surfaces, so "model" must still lead with Default model, not Model Picker.
    */
   readonly secondary?: boolean;
+  readonly requiresMemory?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
 }
 
@@ -85,6 +87,7 @@ export interface SettingsSearchAvailability {
   readonly canManageLocalBackend: boolean;
   readonly isWslSettingsRowVisible: boolean;
   readonly hasThreadAutoSettlement: boolean;
+  readonly hasMemory?: boolean;
   readonly managedTunnelActive?: boolean;
 }
 
@@ -93,6 +96,7 @@ export interface SettingsSearchAvailability {
  * subtitles both render from this record, so each label exists once.
  */
 export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
+  "/settings/memory": "Memory",
   "/settings/diagnostics": "Diagnostics",
   "/settings/projects": "Project",
   "/settings/general": "General",
@@ -164,6 +168,23 @@ const SOURCE_CONTROL_HOST_SEARCH_ITEMS = sourceControlClients.definitions.flatMa
  * that may not be mounted point at their nearest stable section instead.
  */
 export const SETTINGS_SEARCH_ITEMS = [
+  {
+    id: "memory-records",
+    title: "Memory",
+    to: "/settings/memory",
+    requiresMemory: true,
+    searchTerms: [
+      "forget",
+      "conflict",
+      "quarantine",
+      "revert",
+      "sync",
+      "sharing",
+      "import",
+      "source access",
+      "owner",
+    ],
+  },
   {
     id: "storage-worktree-keep-when",
     targetId: "storage-worktrees",
@@ -1060,6 +1081,7 @@ export type SettingsSearchItemId = (typeof SETTINGS_SEARCH_ITEMS)[number]["id"];
 const SEARCH_ITEMS_BY_ID = new Map(SETTINGS_SEARCH_ITEMS.map((item) => [item.id, item] as const));
 
 const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScope | null>> = {
+  "/settings/memory": null,
   "/settings/diagnostics": "environment",
   "/settings/projects": "project",
   "/settings/general": null,
@@ -1186,6 +1208,7 @@ export function filterAvailableSettingsSearchItems(
   const items: ReadonlyArray<SettingsSearchItem> = SETTINGS_SEARCH_ITEMS;
   return items.filter(
     (item) =>
+      (!item.requiresMemory || availability.hasMemory === true) &&
       (!item.cloudOnly || availability.hasCloudPublicConfig) &&
       (!item.environmentOnly || availability.hasEnvironment) &&
       (!item.providerSettingsOnly || availability.hasProviderSettingsEnvironment) &&

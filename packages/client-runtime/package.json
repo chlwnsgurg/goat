@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./memory-presentation": {
+      "types": "./src/memoryPresentation.ts",
+      "default": "./src/memoryPresentation.ts"
+    },
     "./state/memory": {
       "types": "./src/state/memory.ts",
       "default": "./src/state/memory.ts"

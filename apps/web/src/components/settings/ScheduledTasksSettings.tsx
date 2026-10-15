@@ -23,6 +23,8 @@ import type {
   ScheduledTaskWebhookDeliverySummary,
   ThreadId,
 } from "@goat/contracts";
+import { MemorySettingsEntry } from "./MemorySettings";
+import { presentMemoryRunAccess } from "@goat/client-runtime/memory-presentation";
 import { DEFAULT_WEBHOOK_PROMPT } from "@goat/client-runtime/scheduled-task-webhook";
 import {
   MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
@@ -463,6 +465,11 @@ function ScheduledTaskRow({
           {task.lastRunStatus !== "never" ? (
             <Badge variant={statusVariant(task.lastRunStatus)}>{task.lastRunStatus}</Badge>
           ) : null}
+          <span>
+            Saved memory access: {presentMemoryRunAccess(task).savedCeiling} · Current effective
+            access: unknown
+          </span>
+          <MemorySettingsEntry environmentId={environmentId} label="Memory settings" />
           {task.lastRunError ? <span className="text-destructive">{task.lastRunError}</span> : null}
         </div>
       }
