@@ -1,7 +1,4 @@
-const decodeSpace = Schema.decodeUnknownSync(MemorySpaceId);
-const decodeEnvironmentId = Schema.decodeUnknownSync(EnvironmentId);
-const decodeHubConfiguration = Schema.decodeUnknownSync(memoryHubConfigureSchema);
-
+import { MemoryAdministration } from "./MemorySharingSettings";
 import { randomUUID } from "../../lib/utils";
 import { RegistryContext, useAtom, useAtomValue } from "@effect/atom-react";
 import { LegendList } from "@legendapp/list/react";
@@ -19,11 +16,8 @@ import {
   type ScopedThreadRef,
   type MessageId,
   type MemoryItem,
-  type MemoryHubSettingsView,
-  type MemoryOwnerSourceReadPolicyView,
   type MemorySyncStatus,
   type MemoryReportDelivery,
-  type MemoryHubSettingsUpdateInput,
 } from "@goat/contracts";
 import {
   presentMemoryItem,
@@ -31,13 +25,11 @@ import {
   presentMemoryRevert,
   presentMemoryRevertResult,
   presentMemoryForget,
-  presentMemoryOwnerPolicy,
   presentMemoryReport,
   presentMemorySync,
 } from "@goat/client-runtime/memory-presentation";
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useEnvironment, useEnvironments } from "../../state/environments";
 import {
@@ -51,12 +43,11 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { memoryEnvironment } from "../../state/memory";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
+import { SettingsPageContainer, SettingsSection, SettingsRow } from "./settingsLayout";
 import {
   isMemoryEnvironmentAvailable,
   memorySettingsDestination,
   memoryForgetIntent,
-  memoryOwnerDesiredIds,
   validateMemorySettingsSearch,
   type MemorySettingsSearch,
 } from "./MemorySettings.logic";
@@ -104,7 +95,10 @@ export function MemorySettings({ target }: { target: MemorySettingsSearch }) {
     return (
       <SettingsPageContainer>
         <SettingsSection title="Memory">
-          <p>Choose an environment to manage its memory.</p>
+          <SettingsRow
+            title="Choose a device"
+            description="Select the device whose memory you want to manage."
+          />
           {environments
             .filter((item) =>
               isMemoryEnvironmentAvailable(item.serverConfig?.environment.capabilities),
@@ -132,7 +126,6 @@ export function MemorySettings({ target }: { target: MemorySettingsSearch }) {
     return (
       <SettingsPageContainer>
         <p role="status">Update or reconnect the selected environment to use Memory.</p>
-        <p>{target.environmentId}</p>
       </SettingsPageContainer>
     );
   return (
@@ -159,9 +152,6 @@ function MemoryDestination({
   if (identity.value !== connection) setIdentity({ value: connection, key: identity.key + 1 });
   return (
     <SettingsPageContainer>
-      <p className="text-xs text-muted-foreground">
-        {environmentId} · {target.memorySpaceId ?? "Choose a memory space"}
-      </p>
       {connection === null ? (
         <p role="status">Reconnect this environment to continue.</p>
       ) : (
@@ -187,9 +177,6 @@ function MemoryDestinationContent({
   canRead: boolean;
 }) {
   const canAdmin = useAtomValue(memoryEnvironment.hubSettingsGet.permissionAtom(environmentId));
-  const canOwner = useAtomValue(
-    memoryEnvironment.ownerSourceReadPolicyGet.permissionAtom(environmentId),
-  );
   const canSync = useAtomValue(memoryEnvironment.syncStatus.permissionAtom(environmentId));
   const getSync = useAtomCommand(memoryEnvironment.syncStatus, { reportFailure: false });
   const [sync, setSync] = useState<MemorySyncStatus | null>(null);
@@ -200,8 +187,7 @@ function MemoryDestinationContent({
     setSyncError(null);
     setSyncReload((value) => value + 1);
   }, []);
-  const navigate = useNavigate();
-  const [space, setSpace] = useState("");
+
   useEffect(() => {
     let current = true;
     setSync(null);
@@ -216,69 +202,57 @@ function MemoryDestinationContent({
       current = false;
     };
   }, [canSync, environmentId, getSync, syncReload]);
-  const chooseSpace = (value: string) => {
-    try {
-      const memorySpaceId = decodeSpace(value);
-      void navigate({
-        to: "/settings/memory",
-        search: validateMemorySettingsSearch({ environmentId, memorySpaceId }),
-        hash: "",
-      });
-    } catch {
-      setSyncError("Enter a valid memory space ID.");
-    }
-  };
+  const memorySpaceId =
+    target.memorySpaceId ?? (sync?.state === "online" ? sync.memorySpaceId : null);
+
   return (
     <>
-      <SettingsSection title="Sharing" id="memory-sharing">
-        {canSync && sync ? <p>{presentMemorySync(sync).label}</p> : null}
-        {syncError ? <p role="alert">{syncError}</p> : null}
-        {canAdmin ? (
-          <MemoryAdministration
-            key={`${environmentId}:${canAdmin}:${canOwner}`}
-            environmentId={environmentId}
-            onSharingRefresh={refreshSync}
+      {canAdmin ? (
+        <MemoryAdministration
+          environmentId={environmentId}
+          onSharingRefresh={refreshSync}
+          sync={sync}
+        />
+      ) : (
+        <SettingsSection title="Sharing">
+          <SettingsRow
+            title="Sharing unavailable"
+            description="Settings write permission is required to manage sharing."
           />
-        ) : (
-          <p>Settings write permission is required to manage sharing and source access.</p>
-        )}
-        <details>
-          <summary>Operational details</summary>
-          <p>
-            Detailed diagnostics and manual reconciliation are not available in this environment
-            version.
-          </p>
-        </details>
-      </SettingsSection>
-      {!target.memorySpaceId ? (
-        <SettingsSection title="Memory space">
-          {canSync && sync?.memorySpaceId ? (
-            <Button variant="outline" size="sm" onClick={() => chooseSpace(sync.memorySpaceId!)}>
-              Open connected memory space
-            </Button>
-          ) : null}
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              chooseSpace(space);
-            }}
-          >
-            <Input
-              aria-label="Memory space ID"
-              value={space}
-              onChange={(event) => setSpace(event.currentTarget.value)}
-            />
-            <Button type="submit" size="sm">
-              Open memory space
-            </Button>
-          </form>
+        </SettingsSection>
+      )}
+      {syncError ? (
+        <SettingsSection title="Memory status">
+          <SettingsRow
+            title="Could not load memory status"
+            description={<span role="alert">{syncError}</span>}
+            control={
+              <Button size="sm" variant="outline" onClick={refreshSync}>
+                Retry
+              </Button>
+            }
+          />
+        </SettingsSection>
+      ) : null}
+      {!memorySpaceId ? (
+        <SettingsSection title="Memories" id="memory-records">
+          <SettingsRow
+            title={
+              sync?.state === "disabled"
+                ? "Turn on memory to start saving memories."
+                : "Memory is getting ready."
+            }
+            description={
+              sync && sync.state !== "disabled" ? presentMemorySync(sync).label : undefined
+            }
+          />
         </SettingsSection>
       ) : canRead ? (
         <MemoryRecords
-          key={target.memorySpaceId}
+          key={memorySpaceId}
           target={target}
           environmentId={environmentId}
-          memorySpaceId={target.memorySpaceId}
+          memorySpaceId={memorySpaceId}
         />
       ) : (
         <p role="status">
@@ -290,364 +264,7 @@ function MemoryDestinationContent({
   );
 }
 
-export function MemoryAdministration({
-  environmentId,
-  onSharingRefresh,
-}: {
-  environmentId: EnvironmentId;
-  onSharingRefresh?: () => void;
-}) {
-  const registry = useContext(RegistryContext);
-  const getHub = useAtomCommand(memoryEnvironment.hubSettingsGet, { reportFailure: false });
-  const getOwner = useAtomCommand(memoryEnvironment.ownerSourceReadPolicyGet, {
-    reportFailure: false,
-  });
-  const updateHub = useAtomCommand(memoryEnvironment.hubSettingsUpdate, { reportFailure: false });
-  const updateOwner = useAtomCommand(memoryEnvironment.ownerSourceReadPolicyUpdate, {
-    reportFailure: false,
-  });
-  const canHub = useAtomValue(memoryEnvironment.hubSettingsUpdate.permissionAtom(environmentId));
-  const canOwner = useAtomValue(
-    memoryEnvironment.ownerSourceReadPolicyUpdate.permissionAtom(environmentId),
-  );
-  const [hub, setHub] = useState<MemoryHubSettingsView | null>(null);
-  const [owner, setOwner] = useState<MemoryOwnerSourceReadPolicyView | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [requester, setRequester] = useState("");
-  const [confirmDisable, setConfirmDisable] = useState(false);
-  const [configure, setConfigure] = useState(false);
-  const [hubIntent, setHubIntent] = useState<MemoryHubSettingsUpdateInput | null>(null);
-  const [ownerIntent, setOwnerIntent] = useState<Parameters<typeof updateOwner>[0]["input"] | null>(
-    null,
-  );
-  const [reload, setReload] = useState(0);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-  useEffect(() => {
-    let current = true;
-    void getHub({ environmentId, input: {} }).then((result) => {
-      if (!current) return;
-      if (result._tag === "Success") setHub(result.value);
-      else setError("Could not load sharing settings.");
-    });
-    if (registry.get(memoryEnvironment.ownerSourceReadPolicyGet.permissionAtom(environmentId)))
-      void getOwner({ environmentId, input: {} }).then((result) => {
-        if (!current) return;
-        if (result._tag === "Success") setOwner(result.value);
-        else setError("Could not load source access policy.");
-      });
-    return () => {
-      current = false;
-    };
-  }, [environmentId, getHub, getOwner, registry, reload]);
-  async function saveHub(input: MemoryHubSettingsUpdateInput) {
-    if (busy || !registry.get(memoryEnvironment.hubSettingsUpdate.permissionAtom(environmentId)))
-      return;
-    setBusy(true);
-    setHubIntent(input);
-    const result = await updateHub({ environmentId, input });
-    if (
-      !mounted.current ||
-      !registry.get(memoryEnvironment.hubSettingsUpdate.permissionAtom(environmentId))
-    )
-      return;
-    setBusy(false);
-    if (result._tag === "Success") {
-      setHub(result.value.view);
-      onSharingRefresh?.();
-      setHubIntent(null);
-      setConfigure(false);
-      setConfirmDisable(false);
-      setError(null);
-    } else
-      setError(
-        "Sharing update failed. Retry the same request or reload settings before making a new change.",
-      );
-  }
-  async function saveOwner(id: EnvironmentId, allowed: boolean) {
-    if (
-      !owner ||
-      busy ||
-      !registry.get(memoryEnvironment.ownerSourceReadPolicyUpdate.permissionAtom(environmentId))
-    )
-      return;
-    const input = ownerIntent ?? {
-      requestId: MemoryOperationId.make(randomUUID()),
-      expectedVersion: owner.version,
-      allowedRequesterEnvironmentIds: memoryOwnerDesiredIds(owner, id, allowed),
-    };
-    setBusy(true);
-    setOwnerIntent(input);
-    const result = await updateOwner({ environmentId, input });
-    if (
-      !mounted.current ||
-      !registry.get(memoryEnvironment.ownerSourceReadPolicyUpdate.permissionAtom(environmentId))
-    )
-      return;
-    setBusy(false);
-    if (result._tag === "Success") {
-      setOwner(result.value);
-      setOwnerIntent(null);
-      setError(null);
-      setRequester("");
-    } else setError("Source access update failed. Retry the same request or reload settings.");
-  }
-  const policy = owner ? presentMemoryOwnerPolicy(owner) : null;
-  return (
-    <div className="space-y-3">
-      <Button
-        size="sm"
-        variant="ghost"
-        disabled={busy}
-        onClick={() => {
-          setHub(null);
-          setOwner(null);
-          setHubIntent(null);
-          setOwnerIntent(null);
-          setConfirmDisable(false);
-          setConfigure(false);
-          setError(null);
-          setReload((value) => value + 1);
-          onSharingRefresh?.();
-        }}
-      >
-        Reload sharing settings
-      </Button>
-      {error ? <p role="alert">{error}</p> : null}
-      {hub ? (
-        <>
-          <p>Sharing: {hub.settings.mode}</p>
-          {hubIntent ? (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy || !canHub}
-              onClick={() => void saveHub(hubIntent)}
-            >
-              Retry sharing request
-            </Button>
-          ) : hub.settings.mode !== "disabled" ? (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy || !canHub}
-              onClick={() => setConfirmDisable(true)}
-            >
-              Turn sharing off
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy || !canHub}
-              onClick={() => setConfigure(true)}
-            >
-              Turn sharing on
-            </Button>
-          )}
-          {confirmDisable && !hubIntent ? (
-            <div role="group" aria-label="Turn sharing off confirmation">
-              <p>Stop sharing on this environment? Stored memories remain.</p>
-              <Button
-                size="sm"
-                disabled={busy || !canHub}
-                onClick={() =>
-                  void saveHub({
-                    action: "configure",
-                    requestId: MemoryOperationId.make(randomUUID()),
-                    expectedVersion: hub.version,
-                    settings: { mode: "disabled" },
-                  })
-                }
-              >
-                Confirm sharing off
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirmDisable(false)}>
-                Cancel
-              </Button>
-            </div>
-          ) : null}
-          {configure && !hubIntent ? (
-            <HubConfiguration
-              view={hub}
-              disabled={busy || !canHub}
-              onSave={(input) => void saveHub(input)}
-              onCancel={() => setConfigure(false)}
-            />
-          ) : null}
-        </>
-      ) : (
-        <p>Sharing settings unavailable.</p>
-      )}
-      {policy && owner ? (
-        <div id="memory-owner-policy">
-          <h3>Original source access</h3>
-          <p>{policy.revocationLabel}</p>
-          <p>{policy.notice}</p>
-          <ul>
-            {policy.desiredRequesterEnvironmentIds.map((id) => (
-              <li key={id}>
-                {id} ·{" "}
-                {policy.pendingEnrollments.find((entry) => entry.requesterEnvironmentId === id)
-                  ?.label ?? "Effective"}
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  disabled={busy || !canOwner || ownerIntent !== null}
-                  onClick={() => void saveOwner(id, false)}
-                >
-                  Remove access
-                </Button>
-              </li>
-            ))}
-          </ul>
-          {ownerIntent ? (
-            <Button
-              size="sm"
-              disabled={busy || !canOwner}
-              onClick={() =>
-                void saveOwner(ownerIntent.allowedRequesterEnvironmentIds[0] ?? environmentId, true)
-              }
-            >
-              Retry source access request
-            </Button>
-          ) : (
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                try {
-                  void saveOwner(decodeEnvironmentId(requester), true);
-                } catch {
-                  setError("Enter a valid requester environment ID.");
-                }
-              }}
-            >
-              <Input
-                aria-label="Requester environment ID"
-                value={requester}
-                onChange={(event) => setRequester(event.currentTarget.value)}
-              />
-              <Button type="submit" size="sm" disabled={busy || !canOwner}>
-                Allow source access
-              </Button>
-            </form>
-          )}
-        </div>
-      ) : (
-        <p>Source access policy unavailable.</p>
-      )}
-    </div>
-  );
-}
-
-function HubConfiguration({
-  view,
-  disabled,
-  onSave,
-  onCancel,
-}: {
-  view: MemoryHubSettingsView;
-  disabled: boolean;
-  onSave: (input: MemoryHubSettingsUpdateInput) => void;
-  onCancel: () => void;
-}) {
-  const [mode, setMode] = useState<"hub" | "member" | null>(null);
-  const [space, setSpace] = useState("");
-  const [hubId, setHubId] = useState("");
-  const [endpoint, setEndpoint] = useState("");
-  const [secretName, setSecretName] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  return (
-    <form
-      onSubmit={(event) => {
-        event.preventDefault();
-        try {
-          if (!mode) throw new Error("Choose this environment's sharing role.");
-          const input = decodeHubConfiguration({
-            action: "configure",
-            requestId: randomUUID(),
-            expectedVersion: view.version,
-            settings:
-              mode === "hub"
-                ? { mode, memorySpaceId: space || null }
-                : {
-                    mode,
-                    memorySpaceId: space || null,
-                    hubEnvironmentId: hubId,
-                    endpoint,
-                    secretName,
-                  },
-          });
-          onSave(input);
-        } catch {
-          setError(
-            "Choose a role and enter valid sharing settings. Member mode requires an installed credential reference.",
-          );
-        }
-      }}
-    >
-      <p>
-        Select the configured hub or connect as a member. Credentials must already be installed.
-      </p>
-      <div className="flex gap-2">
-        <Button
-          type="button"
-          size="sm"
-          variant={mode === "hub" ? "default" : "outline"}
-          onClick={() => setMode("hub")}
-        >
-          This environment is the hub
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant={mode === "member" ? "default" : "outline"}
-          onClick={() => setMode("member")}
-        >
-          Connect to the hub
-        </Button>
-      </div>
-      <Input
-        aria-label="Sharing memory space ID (optional)"
-        value={space}
-        onChange={(event) => setSpace(event.currentTarget.value)}
-      />
-      {mode === "member" ? (
-        <>
-          <Input
-            aria-label="Hub environment ID"
-            value={hubId}
-            onChange={(event) => setHubId(event.currentTarget.value)}
-          />
-          <Input
-            aria-label="Hub endpoint"
-            value={endpoint}
-            onChange={(event) => setEndpoint(event.currentTarget.value)}
-          />
-          <Input
-            aria-label="Installed credential reference"
-            value={secretName}
-            onChange={(event) => setSecretName(event.currentTarget.value)}
-          />
-        </>
-      ) : null}
-      {error ? <p role="alert">{error}</p> : null}
-      <Button type="submit" size="sm" disabled={disabled}>
-        Enable sharing
-      </Button>
-      <Button type="button" size="sm" variant="ghost" onClick={onCancel}>
-        Cancel
-      </Button>
-    </form>
-  );
-}
-import { MemoryHubSettingsUpdateInput as memoryHubConfigureSchema } from "@goat/contracts";
+export { MemoryAdministration } from "./MemorySharingSettings";
 
 function MemoryRecords({
   target,
@@ -691,9 +308,20 @@ function MemoryRecords({
   return (
     <>
       <SettingsSection title="Memories" id="memory-records">
-        <Button size="sm" variant="outline" disabled={!canWrite} onClick={() => setAdding(true)}>
-          Remember something
-        </Button>
+        <SettingsRow
+          title="Save a memory"
+          description="Add something you want this device to remember."
+          control={
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!canWrite}
+              onClick={() => setAdding(true)}
+            >
+              Remember something
+            </Button>
+          }
+        />
         {adding && canWrite ? (
           <MemoryEditor
             environmentId={environmentId}
@@ -704,52 +332,78 @@ function MemoryRecords({
             }}
           />
         ) : null}
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            setCursor(undefined);
-            setQuery(queryInput.trim());
-          }}
-        >
-          <Input
-            aria-label="Search memories"
-            value={queryInput}
-            onChange={(event) => setQueryInput(event.currentTarget.value)}
+        <SettingsRow
+          title="Search memories"
+          control={
+            <form
+              className="flex flex-wrap gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                setCursor(undefined);
+                setQuery(queryInput.trim());
+              }}
+            >
+              <Input
+                aria-label="Search memories"
+                value={queryInput}
+                onChange={(event) => setQueryInput(event.currentTarget.value)}
+              />
+              <Button type="submit" size="sm">
+                Search
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setQueryInput("");
+                  setQuery("");
+                  setCursor(undefined);
+                }}
+              >
+                Clear search
+              </Button>
+            </form>
+          }
+        />
+        <SettingsRow
+          title="Quarantined memories"
+          description="Review memories that need attention."
+          control={
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setQuarantine(!quarantine);
+                setCursor(undefined);
+              }}
+            >
+              {" "}
+              {quarantine ? "Hide quarantined memories" : "Include quarantined memories"}
+            </Button>
+          }
+        />
+        {page.error ? (
+          <SettingsRow
+            title="Could not load memories"
+            description={<span role="alert">{page.error}</span>}
+            control={
+              <Button size="sm" variant="outline" onClick={page.refresh}>
+                Retry
+              </Button>
+            }
           />
-          <Button type="submit" size="sm">
-            Search
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={() => {
-              setQueryInput("");
-              setQuery("");
-              setCursor(undefined);
-            }}
-          >
-            Clear search
-          </Button>
-        </form>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => {
-            setQuarantine(!quarantine);
-            setCursor(undefined);
-          }}
-        >
-          {" "}
-          {quarantine ? "Hide quarantined memories" : "Include quarantined memories"}
-        </Button>
-        {page.error ? <p role="alert">{page.error}</p> : null}
+        ) : null}
         {!value ? (
-          <p role="status">
-            Memory records unavailable. Refresh after reconnecting or checking access.
-          </p>
+          <SettingsRow
+            title="Loading memories"
+            description="Reconnect this device if records do not appear."
+          />
         ) : items.length === 0 ? (
-          <p>No memories on this page.</p>
+          <SettingsRow
+            title="No memories yet"
+            description="Memories saved on this device will appear here."
+          />
         ) : (
           <LegendList
             data={items}
@@ -757,40 +411,50 @@ function MemoryRecords({
             estimatedItemSize={72}
             style={{ height: 320 }}
             renderItem={({ item }) => (
-              <div className="border-b p-2">
-                <Button size="sm" variant="ghost" onClick={() => select(item)}>
-                  {item.status === "active" ? item.payload.text.slice(0, 120) : item.memoryId}
-                </Button>
-                <p className="text-xs text-muted-foreground">
-                  {presentMemoryItem(item).label} {presentMemoryItem(item).syncLabel}
-                </p>
-              </div>
+              <SettingsRow
+                title={
+                  item.status === "active"
+                    ? item.payload.text.slice(0, 120)
+                    : presentMemoryItem(item).label
+                }
+                description={presentMemoryItem(item).syncLabel}
+                control={
+                  <Button size="sm" variant="ghost" onClick={() => select(item)}>
+                    Open
+                  </Button>
+                }
+              />
             )}
           />
         )}
-        <div className="flex gap-2">
-          <Button size="sm" variant="ghost" onClick={page.refresh}>
-            Refresh records
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={cursor === undefined}
-            onClick={() => setCursor(undefined)}
-          >
-            First page
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={!value?.nextCursor}
-            onClick={() => {
-              if (value?.nextCursor) setCursor(value.nextCursor);
-            }}
-          >
-            Next page
-          </Button>
-        </div>
+        <SettingsRow
+          title="Browse memories"
+          control={
+            <div className="flex gap-2">
+              <Button size="sm" variant="ghost" onClick={page.refresh}>
+                Refresh records
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={cursor === undefined}
+                onClick={() => setCursor(undefined)}
+              >
+                First page
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!value?.nextCursor}
+                onClick={() => {
+                  if (value?.nextCursor) setCursor(value.nextCursor);
+                }}
+              >
+                Next page
+              </Button>
+            </div>
+          }
+        />
       </SettingsSection>
       {target.memoryId ? (
         <MemoryDetails
@@ -1382,9 +1046,7 @@ function MemorySourceControl({
   const canRead = useEnvironmentScope(environmentId, AuthOrchestrationReadScope);
   return (
     <div>
-      <p>
-        Original: {sourceThread.environmentId} · {sourceThread.threadId}
-      </p>
+      <p>Original conversation</p>
       <Button size="sm" variant="ghost" disabled={!canRead} onClick={() => setOpen(!open)}>
         {open ? "Close original" : "Read original"}
       </Button>

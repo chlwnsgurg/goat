@@ -22,6 +22,12 @@ const state = vi.hoisted(() => ({
   refresh: vi.fn(),
   calls: vi.fn(),
   environment: null as unknown,
+  environments: [] as {
+    environmentId: string;
+    label: string;
+    connection: { phase: string };
+    serverConfig: { environment: { capabilities: { memory: { protocolVersion: number } } } };
+  }[],
   result: null as unknown,
   navigate: vi.fn(),
   responses: new Map<string, unknown>(),
@@ -101,7 +107,7 @@ vi.mock("../../state/use-atom-command", () => ({
 }));
 vi.mock("../../state/environments", () => ({
   useEnvironment: () => state.environment,
-  useEnvironments: () => ({ environments: [] }),
+  useEnvironments: () => ({ environments: state.environments }),
 }));
 vi.mock("../../state/session", async (original) => ({
   ...(await original<typeof import("../../state/session")>()),
@@ -116,7 +122,57 @@ vi.mock("../../state/session", async (original) => ({
     return state.allowed;
   },
 }));
+vi.mock("../ui/select", () => ({
+  Select: ({
+    children,
+    value,
+    onValueChange,
+    disabled,
+  }: {
+    children: ReactNode;
+    value: string | null;
+    onValueChange: (id: string) => void;
+    disabled: boolean;
+  }) => (
+    <select
+      aria-label="Fixture device picker"
+      value={value ?? ""}
+      disabled={disabled}
+      onChange={(e) => onValueChange(e.currentTarget.value)}
+    >
+      <option value="">Choose a device</option>
+      {children}
+    </select>
+  ),
+  SelectTrigger: () => null,
+  SelectValue: () => null,
+  SelectPopup: ({ children }: { children: ReactNode }) => <>{children}</>,
+  SelectItem: ({ children, value }: { children: ReactNode; value: string }) => (
+    <option value={value}>{children}</option>
+  ),
+}));
 vi.mock("./settingsLayout", () => ({
+  SettingsRow: ({
+    title,
+    description,
+    status,
+    control,
+    children,
+  }: {
+    title?: ReactNode;
+    description?: ReactNode;
+    status?: ReactNode;
+    control?: ReactNode;
+    children?: ReactNode;
+  }) => (
+    <div data-test-row>
+      {title}
+      {description}
+      {status}
+      {control}
+      {children}
+    </div>
+  ),
   SettingsPageContainer: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   SettingsSection: ({ children }: { children: ReactNode }) => <section>{children}</section>,
 }));
@@ -159,6 +215,18 @@ beforeEach(() => {
   state.refresh.mockClear();
   state.calls.mockClear();
   state.environment = null;
+  state.environments = [
+    "active-device",
+    "pending-device",
+    "device-a",
+    "latest-device",
+    "old-device",
+  ].map((environmentId) => ({
+    environmentId,
+    label: environmentId.replace("-device", " device"),
+    connection: { phase: "connected" },
+    serverConfig: { environment: { capabilities: { memory: { protocolVersion: 1 } } } },
+  }));
   state.result = { _tag: "Failure" };
   state.responses.clear();
   state.connection = {};
@@ -514,10 +582,10 @@ it("keeps pending reenrollment when removing another owner permission and render
       </RegistryContext>,
     );
   });
-  expect(container.textContent).toContain("pending-device");
-  expect(container.textContent).toContain("active-device");
-  const remove = [...container.querySelectorAll("li")]
-    .find((entry) => entry.textContent?.includes("active-device"))!
+  expect(container.textContent).toContain("pending device");
+  expect(container.textContent).toContain("active device");
+  const remove = [...container.querySelectorAll("[data-test-row]")]
+    .find((entry) => entry.textContent?.startsWith("active device"))!
     .querySelector("button")!;
   await act(async () => remove.click());
   const request = state.calls.mock.calls.at(-1)![0] as {
@@ -527,8 +595,8 @@ it("keeps pending reenrollment when removing another owner permission and render
   expect(request.input.allowedRequesterEnvironmentIds).toEqual(["pending-device"]);
   expect(request.input.expectedVersion).toBe(3);
   expect(request.environmentId).toBe("remote-owner");
-  expect(container.textContent).not.toContain("active-device");
-  expect(container.textContent).toContain("pending-device");
+  expect(container.textContent).not.toContain("active device");
+  expect(container.textContent).toContain("pending device");
   const calls = state.calls.mock.calls.length;
   await click("Turn sharing off");
   await click("Cancel");
@@ -538,9 +606,9 @@ it("keeps pending reenrollment when removing another owner permission and render
     value: { view: { version: 3, settings: { mode: "disabled" } }, credential: null },
   });
   await click("Turn sharing off");
-  await click("Confirm sharing off");
-  expect(container.textContent).toContain("Sharing: disabled");
-  expect(container.textContent).toContain("Turn sharing on");
+  await click("Stop sharing");
+  expect(container.textContent).toContain("Memory off");
+  expect(container.textContent).toContain("Make this device the hub");
 });
 
 // A manually settled Deferred keeps response ordering deterministic without timers.
@@ -663,40 +731,11 @@ it("discards the editor and its draft on write-only revoke and requires Edit aft
   );
 });
 
-it("keeps the latest hub and owner versions when pre-Reload loads finish last", async () => {
-  const oldHub = await deferredResult();
-  const newHub = await deferredResult();
-  const oldOwner = await deferredResult();
-  const newOwner = await deferredResult();
-  let hubCalls = 0;
-  let ownerCalls = 0;
-  state.executors.set("hubSettingsGet", () => (++hubCalls === 1 ? oldHub : newHub).promise);
-  state.executors.set(
-    "ownerSourceReadPolicyGet",
-    () => (++ownerCalls === 1 ? oldOwner : newOwner).promise,
-  );
-  await supportedScreen();
-  await click("Reload sharing settings");
-  await act(async () => {
-    await newHub.resolve(success(hubView(9)));
-    await newOwner.resolve(success(ownerView(9, "latest-device")));
-    await Promise.all([newHub.promise, newOwner.promise]);
-  });
-  await act(async () => {
-    await oldHub.resolve(success({ version: 2, settings: { mode: "disabled" } }));
-    await oldOwner.resolve(success(ownerView(2, "old-device")));
-    await Promise.all([oldHub.promise, oldOwner.promise]);
-  });
-  expect(container.textContent).toContain("Sharing: hub");
-  expect(container.textContent).toContain("latest-device");
-  expect(container.textContent).not.toContain("old-device");
-  await click("Turn sharing off");
-  await click("Confirm sharing off");
-  expect(state.calls.mock.calls.at(-1)![0]).toMatchObject({ input: { expectedVersion: 9 } });
-  await click("Remove access");
-  expect(state.calls.mock.calls.at(-1)![0]).toMatchObject({
-    input: { expectedVersion: 9, allowedRequesterEnvironmentIds: [] },
-  });
+it("retries a failed load inline without a reload control", async () => {
+  await supportedScreen(false);
+  expect(container.textContent).not.toContain("Reload sharing settings");
+  expect(container.textContent).not.toContain("Operational details");
+  expect(container.textContent).not.toContain("Device removal applied");
 });
 
 async function enterInput(label: string, text: string) {
@@ -706,58 +745,32 @@ async function enterInput(label: string, text: string) {
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }
-it("refreshes sharing status and connected-space destination after off/on and explicit Reload", async () => {
-  let syncReply = Promise.resolve<unknown>(success({ state: "online", memorySpaceId: id(1) }));
-  const getSync = vi.fn(() => syncReply);
-  state.executors.set("syncStatus", getSync);
+it("automatically opens the ready space and shows the off empty state after confirmation", async () => {
+  state.responses.set("syncStatus", success({ state: "online", memorySpaceId: id(1) }));
+  state.queries.set("list", Option.some({ items: [activeItem], nextCursor: null }));
   await supportedScreen(false);
-  expect(getSync).toHaveBeenCalledTimes(1);
-  expect(container.textContent).toContain("Hub connected");
-  await click("Open connected memory space");
-  expect(state.navigate.mock.calls.at(-1)![0]).toMatchObject({
-    search: { environmentId: "remote-owner", memorySpaceId: id(1) },
-  });
-  const offSync = await deferredResult();
-  syncReply = offSync.promise;
+  expect(container.textContent).toContain("Synthetic original");
+  expect(container.querySelector('[aria-label="Memory space ID"]')).toBeNull();
+  expect(container.textContent).not.toContain("remote-owner ·");
+  state.responses.set("syncStatus", success({ state: "disabled", memorySpaceId: null }));
   state.responses.set(
     "hubSettingsUpdate",
-    success({ view: { version: 3, settings: { mode: "disabled" } } }),
+    success({ view: { version: 3, settings: { mode: "disabled" } }, credential: null }),
   );
   await click("Turn sharing off");
-  await click("Confirm sharing off");
-  expect(getSync).toHaveBeenCalledTimes(2);
-  expect(container.textContent).not.toContain("Hub connected");
-  expect(container.textContent).not.toContain("Open connected memory space");
-  await act(async () => {
-    await offSync.resolve(success({ state: "disabled", memorySpaceId: null }));
-    await offSync.promise;
-  });
-  expect(container.textContent).toContain("Memory sharing off");
-  syncReply = Promise.resolve(success({ state: "online", memorySpaceId: id(8) }));
-  state.responses.set("hubSettingsUpdate", success({ view: hubView(4, id(8)) }));
-  await click("Turn sharing on");
-  await click("This environment is the hub");
-  await enterInput("Sharing memory space ID (optional)", id(8));
-  await click("Enable sharing");
-  expect(getSync).toHaveBeenCalledTimes(3);
-  expect(container.textContent).toContain("Hub connected");
+  expect(container.textContent).toContain("Saved memories stay.");
+  await click("Stop sharing");
+  expect(container.textContent).toContain("Turn on memory to start saving memories.");
+  expect(container.textContent).not.toContain("Synthetic original");
+  state.responses.set("syncStatus", success({ state: "online", memorySpaceId: id(8) }));
+  state.responses.set("hubSettingsUpdate", success({ view: hubView(4, id(8)), credential: null }));
+  await click("Make this device the hub");
   expect(
     state.calls.mock.calls.findLast(
       ([input]) => (input as { input?: { action?: string } }).input?.action === "configure",
     )?.[0],
-  ).toMatchObject({ input: { settings: { mode: "hub", memorySpaceId: id(8) } } });
-  await click("Open connected memory space");
-  expect(state.navigate.mock.calls.at(-1)![0]).toMatchObject({
-    search: { environmentId: "remote-owner", memorySpaceId: id(8) },
-  });
-  syncReply = Promise.resolve(success({ state: "offline", memorySpaceId: id(7) }));
-  await click("Reload sharing settings");
-  expect(getSync).toHaveBeenCalledTimes(4);
-  expect(container.textContent).toContain("Hub disconnected");
-  await click("Open connected memory space");
-  expect(state.navigate.mock.calls.at(-1)![0]).toMatchObject({
-    search: { environmentId: "remote-owner", memorySpaceId: id(7) },
-  });
+  ).toMatchObject({ input: { settings: { mode: "hub", memorySpaceId: null } } });
+  expect(container.textContent).toContain("Synthetic original");
 });
 
 it("unmounts retained bodies and an open source when read is None, without reopening source on recovery", async () => {
@@ -950,3 +963,61 @@ it.each(["write", "read", "reconnect"])(
     expect(forgetCalls.mock.calls.at(-1)![0]).not.toEqual(original);
   },
 );
+
+it("adds a named device, retries install without exposing its key, and confirms removal", async () => {
+  const { render } = await supportedScreen(false);
+  const select = container.querySelector<HTMLSelectElement>("select")!;
+  await act(async () => {
+    select.value = "active-device";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await click("Add");
+  expect(container.textContent).toContain("Add active device?");
+  const credential = "ephemeral-key-that-must-not-be-rendered";
+  const mutations: { environmentId: string; input: Record<string, unknown> }[] = [];
+  let failInstall = true;
+  const log = vi.spyOn(console, "log");
+  const warn = vi.spyOn(console, "warn");
+  const error = vi.spyOn(console, "error");
+  state.executors.set("hubSettingsUpdate", async (raw) => {
+    const request = raw as { environmentId: string; input: Record<string, unknown> };
+    mutations.push(request);
+    if (request.input.action === "installCredential" && failInstall) {
+      failInstall = false;
+      return { _tag: "Failure" };
+    }
+    return success({
+      view: hubView(request.input.action === "provisionMember" ? 3 : 4),
+      credential:
+        request.input.action === "provisionMember"
+          ? { requestId: request.input.requestId, memorySpaceId: id(1), credential }
+          : null,
+    });
+  });
+  await render();
+  await click("Confirm");
+  expect(mutations.map((r) => r.input.action)).toEqual(["provisionMember", "installCredential"]);
+  expect(container.innerHTML).not.toContain(credential);
+  expect(container.textContent).toContain("Retry to continue");
+  await click("Retry");
+  expect(mutations.map((r) => r.input.action)).toEqual([
+    "provisionMember",
+    "installCredential",
+    "installCredential",
+    "acknowledgeCredential",
+  ]);
+  expect(mutations[1]).toEqual(mutations[2]);
+  expect(container.innerHTML).not.toContain(credential);
+  expect(JSON.stringify([log.mock.calls, warn.mock.calls, error.mock.calls])).not.toContain(
+    credential,
+  );
+  const row = [...container.querySelectorAll("[data-test-row]")].find((e) =>
+    e.textContent?.startsWith("active device"),
+  )!;
+  const remove = [...row.querySelectorAll("button")].find((b) => b.textContent === "Remove")!;
+  await act(async () => remove.click());
+  expect(mutations).toHaveLength(4);
+  expect(container.textContent).toContain("Remove active device?");
+  await click("Remove device");
+  expect(mutations.at(-1)?.input.action).toBe("revokeMember");
+});

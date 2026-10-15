@@ -1,5 +1,7 @@
+"use client";
+
+import { BrainIcon } from "~/components/solar";
 import { validateMemorySettingsSearch } from "./settings/MemorySettings.logic";
-("use client");
 
 import { threadPullRequestLinkMode } from "@goat/client-runtime/thread-pull-request-compatibility";
 import { visibleThreadPullRequests } from "@goat/shared/threadPullRequests";
@@ -2357,7 +2359,7 @@ function OpenCommandPaletteDialog(props: {
       value: "action:memory",
       searchTerms: ["memory", "forget", "conflict", "revert", "sync", "import"],
       title: "Open memory",
-      icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
+      icon: <BrainIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
         setOpen(false);
         await navigate({

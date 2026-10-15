@@ -59,7 +59,7 @@ afterEach(async () => {
   state.destination = "";
   vi.unstubAllGlobals();
 });
-it("opens Memory for the active remote thread, and removes the action when its environment lacks support", async () => {
+it("keeps memory management out of the thread header", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const container = document.createElement("div");
   document.body.append(container);
@@ -86,31 +86,6 @@ it("opens Memory for the active remote thread, and removes the action when its e
   const button = [...container.querySelectorAll("button")].find(
     (item) => item.textContent === "Memory",
   );
-  expect(button).toBeDefined();
-  await act(async () => button!.click());
-  const target = new URL(state.destination, "https://synthetic.invalid");
-  expect(target.pathname).toBe("/settings/memory");
-  expect(target.searchParams.get("environmentId")).toBe("remote-owner");
-  expect(target.searchParams.has("project")).toBe(false);
-  await act(async () => {
-    state.allowed = false;
-    state.listeners.forEach((listener) => listener());
-  });
-  expect(
-    [...container.querySelectorAll("button")].some((item) => item.textContent === "Memory"),
-  ).toBe(false);
-  await act(async () => {
-    state.allowed = true;
-    state.listeners.forEach((listener) => listener());
-  });
-  expect(
-    [...container.querySelectorAll("button")].some((item) => item.textContent === "Memory"),
-  ).toBe(true);
-  await act(async () => {
-    state.supported = false;
-    state.listeners.forEach((listener) => listener());
-  });
-  expect(
-    [...container.querySelectorAll("button")].some((item) => item.textContent === "Memory"),
-  ).toBe(false);
+  expect(button).toBeUndefined();
+  expect(state.destination).toBe("");
 });
