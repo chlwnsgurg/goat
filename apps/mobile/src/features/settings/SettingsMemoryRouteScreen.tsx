@@ -18,6 +18,10 @@ import {
   type MemoryHubSettings,
   type MemoryReportReference,
   type MemoryReadSourceInput,
+  type MemoryHistoryPage,
+  type MemoryRevisionId,
+  type MemoryRevertResolutionInput,
+  type MemoryRevertResult,
 } from "@goat/contracts";
 import {
   presentMemoryItem,
@@ -26,6 +30,7 @@ import {
   presentMemoryOwnerPolicy,
   presentMemoryResolution,
   presentMemoryRevertResult,
+  presentMemoryRevert,
   presentMemoryReport,
   memoryReportTarget,
   MEMORY_FORGET_NOTICE,
@@ -34,7 +39,7 @@ import { squashAtomCommandFailure } from "@goat/client-runtime/state/runtime";
 import { AsyncResult } from "effect/reactivity";
 import * as Option from "effect/Option";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, FlatList, Pressable, TextInput, View } from "react-native";
+import { Modal, FlatList, Pressable, TextInput, View } from "react-native";
 import * as Crypto from "expo-crypto";
 import { AppText as Text } from "../../components/AppText";
 import { ScreenScrollView } from "../../components/ScreenScrollView";
@@ -99,6 +104,53 @@ function Field(props: {
   );
 }
 
+/** A dialog and its callbacks belong to one connected screen lifetime. */
+function useMemoryLifetime(environmentId: EnvironmentId) {
+  const registry = useContext(RegistryContext);
+  const connection = useAtomValue(environmentSession.preparedConnectionValueAtom(environmentId));
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  return () => {
+    const config = registry.get(serverEnvironment.configValueAtom(environmentId));
+    return (
+      mounted.current &&
+      Option.isSome(connection) &&
+      registry.get(environmentSession.preparedConnectionValueAtom(environmentId)) === connection &&
+      config !== null &&
+      supportsMemoryProtocol(config.environment.capabilities)
+    );
+  };
+}
+function MemoryConfirmation({
+  title,
+  message,
+  label,
+  onConfirm,
+  onClose,
+}: {
+  title: string;
+  message: string;
+  label: string;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal visible transparent animationType="none" onRequestClose={onClose}>
+      <View className="flex-1 justify-center bg-background p-6" accessibilityViewIsModal>
+        <Copy>{title}</Copy>
+        <Copy>{message}</Copy>
+        <Action label="Cancel" onPress={onClose} />
+        <Action label={label} onPress={onConfirm} />
+      </View>
+    </Modal>
+  );
+}
+
 /** Same explicit destination in Settings, native headers, palette and Bot reports. */
 export function useMemoryNavigation(
   environmentId: EnvironmentId | null,
@@ -145,12 +197,11 @@ export function MemoryReportLink({ reference }: { readonly reference: MemoryRepo
   const target = memoryReportTarget(reference);
   const { visible, open } = useMemoryNavigation(target.environmentId, target);
   const allowed = useAtomValue(memory.syncStatus.permissionAtom(target.environmentId));
+  if (!visible) return null;
   return (
     <Action
       label={
-        visible && allowed
-          ? "View memory details"
-          : "Connect or update the report's environment to view memory"
+        allowed ? "View memory details" : "Memory read permission is required to view this report"
       }
       onPress={open}
     />
@@ -622,6 +673,8 @@ function MemoryDetails({
   const canForget = useAtomValue(memory.forget.permissionAtom(params.environmentId));
   const canReadOriginal = useEnvironmentScope(params.environmentId, AuthOrchestrationReadScope);
   const forget = useAtomCommand(memory.forget);
+  const liveDestination = useMemoryLifetime(params.environmentId);
+  const [confirmForget, setConfirmForget] = useState(false);
   const intent = useRef<{
     operationId: MemoryOperationId;
     expectedHeads: ReturnType<typeof memoryExpectedHeads>;
@@ -640,9 +693,16 @@ function MemoryDetails({
   async function performForget() {
     const current = registry.get(readAtom);
     const live = AsyncResult.isSuccess(current) ? Option.getOrNull(current.value) : null;
-    if (busy.current || !live || !registry.get(memory.forget.permissionAtom(params.environmentId)))
+    if (
+      !liveDestination() ||
+      busy.current ||
+      !registry.get(memory.forget.permissionAtom(params.environmentId))
+    )
       return;
-    intent.current ??= { operationId: operationId(), expectedHeads: memoryExpectedHeads(live) };
+    if (!intent.current) {
+      if (!live) return;
+      intent.current = { operationId: operationId(), expectedHeads: memoryExpectedHeads(live) };
+    }
     busy.current = true;
     setPending(true);
     try {
@@ -729,16 +789,13 @@ function MemoryDetails({
               )}
             </>
           ) : null}
-          <Action
-            label={retry ? "Retry forget request" : "Forget memory"}
-            disabled={!canForget || !presentMemoryItem(item).canForget || pending}
-            onPress={() =>
-              Alert.alert("Forget this memory?", MEMORY_FORGET_NOTICE, [
-                { text: "Cancel", style: "cancel" },
-                { text: "Forget", style: "destructive", onPress: () => void performForget() },
-              ])
-            }
-          />
+          {!retry ? (
+            <Action
+              label="Forget memory"
+              disabled={!canForget || !presentMemoryItem(item).canForget || pending}
+              onPress={() => setConfirmForget(true)}
+            />
+          ) : null}
         </>
       ) : (
         <Copy>
@@ -747,6 +804,26 @@ function MemoryDetails({
             : "Memory unavailable or awaiting fresh access."}
         </Copy>
       )}
+      {pending ? <Copy>Forget request pending.</Copy> : null}
+      {retry ? (
+        <Action
+          label="Retry forget request"
+          disabled={!canForget || pending}
+          onPress={() => void performForget()}
+        />
+      ) : null}
+      {confirmForget ? (
+        <MemoryConfirmation
+          title="Forget this memory?"
+          message={MEMORY_FORGET_NOTICE}
+          label="Forget"
+          onClose={() => setConfirmForget(false)}
+          onConfirm={() => {
+            setConfirmForget(false);
+            void performForget();
+          }}
+        />
+      ) : null}
       <Action
         label="Refresh details"
         onPress={() => {
@@ -786,11 +863,26 @@ function MemoryDetails({
                 Applied: {view.appliedAtUtc} · Revert deadline: {view.revertDeadlineUtc}
               </Copy>
               <Copy>{entry.payload?.judgment ?? "Judgment unavailable"}</Copy>
-              <Action label="Revert resolution" disabled onPress={() => {}} />
-              <Copy>
-                Revert is unavailable until the server can confirm the current result and retained
-                original.
-              </Copy>
+              {item && history ? (
+                <MemoryRevertControl
+                  environmentId={params.environmentId}
+                  item={item}
+                  entry={entry}
+                  history={history}
+                  readCurrent={() => {
+                    const value = registry.get(readAtom);
+                    return AsyncResult.isSuccess(value) ? Option.getOrNull(value.value) : null;
+                  }}
+                  readHistory={() => {
+                    const value = registry.get(historyAtom);
+                    return AsyncResult.isSuccess(value) ? Option.getOrNull(value.value) : null;
+                  }}
+                  onSettled={() => {
+                    registry.refresh(readAtom);
+                    registry.refresh(historyAtom);
+                  }}
+                />
+              ) : null}
             </View>
           );
         })}
@@ -812,6 +904,149 @@ function MemoryDetails({
         />
       </SettingsSection>
     </ScreenScrollView>
+  );
+}
+
+function MemoryRevertControl({
+  environmentId,
+  item,
+  entry,
+  history,
+  readCurrent,
+  readHistory,
+  onSettled,
+}: {
+  environmentId: EnvironmentId;
+  item: MemoryItem;
+  entry: MemoryHistoryPage["resolutions"][number];
+  history: MemoryHistoryPage;
+  readCurrent: () => MemoryItem | null;
+  readHistory: () => MemoryHistoryPage | null;
+  onSettled: () => void;
+}) {
+  const registry = useContext(RegistryContext);
+  const liveDestination = useMemoryLifetime(environmentId);
+  const allowed = useAtomValue(memory.revertResolution.permissionAtom(environmentId));
+  const revert = useAtomCommand(memory.revertResolution);
+  const [selected, setSelected] = useState<MemoryRevisionId | null>(null);
+  const [intent, setIntent] = useState<MemoryRevertResolutionInput | null>(null);
+  const [result, setResult] = useState<MemoryRevertResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const busy = useRef(false);
+  const [openedAt] = useState(Date.now);
+  const display = presentMemoryRevert({
+    item,
+    entry,
+    history,
+    now: openedAt,
+    ...(selected ? { restoredRevisionId: selected } : {}),
+  });
+  const available = allowed && display.canRevert;
+  if (
+    (!available ||
+      (intent &&
+        (item.status !== "active" || intent.expectedHeads[0] !== item.revision.revisionId))) &&
+    selected !== null
+  ) {
+    setSelected(null);
+    setIntent(null);
+    setError(null);
+  }
+  function active() {
+    return liveDestination() && registry.get(memory.revertResolution.permissionAtom(environmentId));
+  }
+  async function submit() {
+    if (!selected || busy.current || result || !active()) return;
+    const current = readCurrent();
+    const page = readHistory();
+    const resolution = page?.resolutions.find(
+      (value) => value.resolution.resolutionId === entry.resolution.resolutionId,
+    );
+    if (
+      !current ||
+      !page ||
+      !resolution ||
+      current.memoryId !== item.memoryId ||
+      current.memorySpaceId !== item.memorySpaceId ||
+      current.status !== "active"
+    )
+      return;
+    if (
+      !presentMemoryRevert({
+        item: current,
+        entry: resolution,
+        history: page,
+        now: Date.now(),
+        restoredRevisionId: selected,
+      }).canRevert
+    )
+      return;
+    if (intent && intent.expectedHeads[0] !== current.revision.revisionId) return;
+    const input = intent ?? {
+      memorySpaceId: current.memorySpaceId,
+      memoryId: current.memoryId,
+      resolutionId: resolution.resolution.resolutionId,
+      restoredRevisionId: selected,
+      expectedHeads: [current.revision.revisionId],
+      operationId: operationId(),
+    };
+    setIntent(input);
+    busy.current = true;
+    setPending(true);
+    setError(null);
+    try {
+      const response = await revert({ environmentId, input });
+      if (!active()) return;
+      if (AsyncResult.isFailure(response)) {
+        setError("Revert request failed. Retry uses the same request.");
+      } else if (AsyncResult.isSuccess(response)) {
+        setResult(response.value);
+        setIntent(null);
+        setSelected(null);
+        onSettled();
+      }
+    } finally {
+      busy.current = false;
+      if (active()) setPending(false);
+    }
+  }
+  return (
+    <View>
+      <Copy>{display.windowLabel}</Copy>
+      {display.timeNotice ? <Copy>{display.timeNotice}</Copy> : null}
+      {display.reason ? <Copy>{display.reason}</Copy> : null}
+      {!allowed ? <Copy>Memory write permission is required to revert.</Copy> : null}
+      {error ? <Copy>{error}</Copy> : null}
+      {result ? <Copy>{presentMemoryRevertResult(result).label}</Copy> : null}
+      {!result && available ? (
+        <>
+          <Copy>Choose the retained original to restore.</Copy>
+          {display.restorableRevisionIds.map((id) => (
+            <Action
+              key={id}
+              label={`${selected === id ? "Selected original" : "Restore original"} ${id}`}
+              disabled={pending || intent !== null}
+              onPress={() => setSelected(id)}
+            />
+          ))}
+          <Action
+            label={intent ? "Retry revert request" : "Revert resolution"}
+            disabled={!selected || pending}
+            onPress={() => void submit()}
+          />
+          <Action
+            label="Cancel revert"
+            disabled={pending}
+            onPress={() => {
+              setSelected(null);
+              setIntent(null);
+              setError(null);
+            }}
+          />
+        </>
+      ) : null}
+    </View>
   );
 }
 
@@ -1021,6 +1256,13 @@ function MemoryAdministration({
   const getBinding = useAtomCommand(memory.projectBindingGet);
   const updateBinding = useAtomCommand(memory.projectBindingUpdate);
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings);
+  const liveDestination = useMemoryLifetime(environmentId);
+  const [confirmation, setConfirmation] = useState<{
+    title: string;
+    message: string;
+    label: string;
+    settings: MemoryHubSettings;
+  } | null>(null);
   const [hub, setHub] = useState<MemoryHubSettingsView | null>(null);
   const [owner, setOwner] = useState<MemoryOwnerSourceReadPolicyView | null>(null);
   const [binding, setBinding] = useState<MemoryProjectBinding | null>(null);
@@ -1046,10 +1288,10 @@ function MemoryAdministration({
     [],
   );
   function active() {
-    return mounted.current && registry.get(memory.hubSettingsGet.permissionAtom(environmentId));
+    return liveDestination() && registry.get(memory.hubSettingsGet.permissionAtom(environmentId));
   }
   async function run(action: () => Promise<void>) {
-    if (busy.current) return;
+    if (!liveDestination() || busy.current) return;
     busy.current = true;
     setPending(true);
     setNotice(null);
@@ -1121,6 +1363,16 @@ function MemoryAdministration({
     (hub?.settings.mode !== "disabled" && hub?.settings.memorySpaceId === memorySpaceId);
   return (
     <View className="gap-4">
+      {confirmation ? (
+        <MemoryConfirmation
+          {...confirmation}
+          onClose={() => setConfirmation(null)}
+          onConfirm={() => {
+            setConfirmation(null);
+            void run(() => configure(confirmation.settings));
+          }}
+        />
+      ) : null}
       <SettingsSection title="Environment access">
         <Copy>
           Saved task access is a ceiling. This setting does not confirm effective run access.
@@ -1133,23 +1385,23 @@ function MemoryAdministration({
               : "Disable agent memory access"
           }
           disabled={pending || !settingsAllowed}
-          onPress={() =>
+          onPress={() => {
+            const current = registry.get(serverEnvironment.configValueAtom(environmentId));
+            if (!current) return;
+            const desired = current.settings.enableAgentMemoryAccess === false;
             void run(async () => {
-              if (!registry.get(serverEnvironment.updateSettings.permissionAtom(environmentId)))
+              if (
+                !liveDestination() ||
+                !registry.get(serverEnvironment.updateSettings.permissionAtom(environmentId))
+              )
                 return;
-              const current = registry.get(serverEnvironment.configValueAtom(environmentId));
-              if (!current) return;
               const result = await updateSettings({
                 environmentId,
-                input: {
-                  patch: {
-                    enableAgentMemoryAccess: current.settings.enableAgentMemoryAccess === false,
-                  },
-                },
+                input: { patch: { enableAgentMemoryAccess: desired } },
               });
               if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
-            })
-          }
+            });
+          }}
         />
       </SettingsSection>
       <SettingsSection title="Memory sharing">
@@ -1168,17 +1420,12 @@ function MemoryAdministration({
                 label="Turn off memory sharing"
                 disabled={pending}
                 onPress={() =>
-                  Alert.alert(
-                    "Turn off memory sharing?",
-                    "Existing memories remain. Future sharing stops on this environment.",
-                    [
-                      { text: "Cancel", style: "cancel" },
-                      {
-                        text: "Turn off",
-                        onPress: () => void run(() => configure({ mode: "disabled" })),
-                      },
-                    ],
-                  )
+                  setConfirmation({
+                    title: "Turn off memory sharing?",
+                    message: "Existing memories remain. Future sharing stops on this environment.",
+                    label: "Turn off",
+                    settings: { mode: "disabled" },
+                  })
                 }
               />
             ) : null}
@@ -1186,17 +1433,12 @@ function MemoryAdministration({
               label="Use this environment as the hub"
               disabled={pending}
               onPress={() =>
-                Alert.alert(
-                  "Use this environment as the hub?",
-                  "Choose this only for the environment you want to own the memory space.",
-                  [
-                    { text: "Cancel", style: "cancel" },
-                    {
-                      text: "Configure hub",
-                      onPress: () => void run(() => configure({ mode: "hub", memorySpaceId })),
-                    },
-                  ],
-                )
+                setConfirmation({
+                  title: "Use this environment as the hub?",
+                  message: "Choose this only for the environment you want to own the memory space.",
+                  label: "Configure hub",
+                  settings: { mode: "hub", memorySpaceId },
+                })
               }
             />
             <Field

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { act } from "react";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import type { GoatBotRow } from "@goat/client-runtime/goatBot";
 import {
@@ -50,6 +51,20 @@ it("opens a report's exact memory target and leaves legacy text without an actio
       },
     ],
   ]);
+  await act(async () => h.revoke());
+  expect(view.container.textContent).toContain("Memory read permission is required");
+  await act(async () => {
+    const current = h.registry.get(h.configs(nativeEnv))!;
+    h.registry.set(h.configs(nativeEnv), {
+      ...current,
+      environment: {
+        ...current.environment,
+        capabilities: { ...current.environment.capabilities, memory: undefined },
+      },
+    });
+  });
+  expect(view.container.textContent).toContain("Synthetic resolution report");
+  expect(view.container.querySelector("button")).toBeNull();
   await view.rerender(
     <GoatBotTimelineRow {...props} row={{ ...row, memory: undefined } as GoatBotRow} />,
   );

@@ -16,6 +16,7 @@ import {
   type ServerConfig,
   type MemoryChangeSignal,
 } from "@goat/contracts";
+import { createEnvironmentRpcCommand } from "@goat/client-runtime/state/runtime";
 import { createMemoryEnvironmentAtoms } from "@goat/client-runtime/state/memory";
 import {
   EnvironmentRegistry,
@@ -88,6 +89,8 @@ vi.mock("react-native", async () => {
     );
   return {
     View,
+    Modal: (props: { visible: boolean; children?: ReactNode }) =>
+      props.visible ? createElement("div", { role: "dialog" }, props.children) : null,
     Text,
     Pressable,
     TextInput,
@@ -133,7 +136,9 @@ vi.mock("../state/memory", () => ({
 vi.mock("../state/server", () => ({
   serverEnvironment: {
     configValueAtom: (id: EnvironmentId) => (bridge.current as NativeMemoryHarness).configs(id),
-    updateSettings: { permissionAtom: () => Atom.make(false) },
+    get updateSettings() {
+      return (bridge.current as NativeMemoryHarness).updateSettings;
+    },
   },
 }));
 vi.mock("../state/session", () => ({
@@ -185,11 +190,15 @@ vi.mock("../features/settings/components/SettingsSection", () => ({
   ),
 }));
 vi.mock("../features/settings/components/SettingsActionRow", () => ({
-  SettingsActionRow: (props: { label: string; disabled?: boolean; onPress: () => void }) => (
-    <button disabled={props.disabled} onClick={props.onPress}>
-      {props.label}
-    </button>
-  ),
+  SettingsActionRow: (props: { label: string; disabled?: boolean; onPress: () => void }) => {
+    if (["Forget", "Turn off", "Configure hub"].includes(props.label))
+      bridge.confirmations.push(props.onPress);
+    return (
+      <button disabled={props.disabled} onClick={props.onPress}>
+        {props.label}
+      </button>
+    );
+  },
 }));
 vi.mock("../features/settings/components/SettingsRow", () => ({
   SettingsRow: (props: { label: string; disabled?: boolean; onPress: () => void }) => (
@@ -448,6 +457,10 @@ export function createNativeMemoryHarness() {
     } as EnvironmentRegistry.EnvironmentRegistry["Service"]),
   );
   const memory = createMemoryEnvironmentAtoms(runtime);
+  const updateSettings = createEnvironmentRpcCommand(runtime, {
+    label: "synthetic:update-settings",
+    tag: WS_METHODS.serverUpdateSettings,
+  });
   const harness = {
     registry,
     configs,
@@ -456,11 +469,13 @@ export function createNativeMemoryHarness() {
     calls,
     responses,
     memory,
+    updateSettings,
     navigations: bridge.navigations,
     setPlatform: (platform: string) => {
       bridge.platform = platform;
     },
-    confirm: () => bridge.confirmations.shift()?.(),
+    confirm: () => bridge.confirmations.pop()?.(),
+    takeConfirmation: () => bridge.confirmations.pop(),
     waitForCall: (method: string, count = 1) =>
       calls.filter((call) => call.method === method).length >= count
         ? Promise.resolve()
