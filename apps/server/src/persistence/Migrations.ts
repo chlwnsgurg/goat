@@ -88,6 +88,7 @@ import Migration0070 from "./Migrations/070_Memory.ts";
 import Migration0071 from "./Migrations/071_MemoryHubSync.ts";
 import Migration0072 from "./Migrations/072_MemorySearchCounters.ts";
 import Migration0074 from "./Migrations/074_MemoryImportLineage.ts";
+import Migration0075 from "./Migrations/075_MemoryCheckpointAccounting.ts";
 import Migration0073 from "./Migrations/073_MemoryTaskGrantCeiling.ts";
 
 /**
@@ -179,6 +180,7 @@ export const migrationEntries = [
   [72, "MemorySearchCounters", Migration0072],
   [73, "MemoryTaskGrantCeiling", Migration0073],
   [74, "MemoryImportLineage", Migration0074],
+  [75, "MemoryCheckpointAccounting", Migration0075],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

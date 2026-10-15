@@ -1,9 +1,11 @@
+import { checkpointBound, CHECKPOINT_PAGE_OVERHEAD } from "./MemoryCheckpointBound.ts";
+import { refreshCheckpointAccounting } from "./MemoryCheckpointAccounting.ts";
 import {
-  checkpointBound,
-  CHECKPOINT_BYTE_EXPANSION,
-  CHECKPOINT_RECORD_OVERHEAD,
-  CHECKPOINT_PAGE_OVERHEAD,
-} from "./MemoryCheckpointBound.ts";
+  checkpointKeys,
+  emptyCheckpointInventory,
+  selectCheckpointMemory,
+  encodeCheckpointPage,
+} from "./MemoryCheckpointInventory.ts";
 import * as NodeUtil from "node:util";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- stable server-owned hashes.
 import * as NodeCrypto from "node:crypto";
@@ -1674,7 +1676,11 @@ const decodeTicket = Schema.decodeUnknownEffect(M.MemoryResolutionLease);
 const decodeReport = Schema.decodeUnknownEffect(M.MemoryReportDelivery);
 const threadCodec = codec(M.ScopedThreadRef);
 const decodeCheckpoint = Schema.decodeUnknownEffect(M.MemoryHubCheckpointPage);
-const checkpointCodec = codec(M.MemoryHubCheckpointPage);
+const checkpointCodec = {
+  ...codec(M.MemoryHubCheckpointPage),
+  encode: (page: M.MemoryHubCheckpointPage) =>
+    stored("checkpoint-encode", encodeCheckpointPage(page)),
+};
 const importId = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 const importKey = Schema.String.check(
   Schema.makeFilter(
@@ -1783,6 +1789,20 @@ const ImportBatchCodec = Schema.Struct({
       ),
   ),
 );
+// Installed by the additive migration; M3e-b will enable reference replay/conversion.
+// Until that implementation is present the detailed/retired reader fails closed.
+export const ImportCompletedNoopCodec = Schema.Struct({
+  ...importSourceAddress,
+  kind: Schema.Literal("completed-noop-ref"),
+  codecVersion: Schema.Literal(1),
+  operationId: M.MemoryOperationId,
+  selectionDigest: digest,
+  sessionId: importLabel,
+  resultRef: digest,
+  sessionNewItems: importCount,
+  sessionBodyBytes: importCount,
+  createdAtUtc: M.MemoryUtcTimestamp,
+}).check(Schema.makeFilter((b) => b.sessionNewItems <= M.MEMORY_IMPORT_MAX_LIVE_ITEMS));
 const ImportRetiredCodec = Schema.Struct({
   kind: Schema.Literal("retired"),
   codecVersion: Schema.Literal(1),
@@ -1964,7 +1984,16 @@ const make = Effect.gen(function* () {
                 Effect.gen(function* () {
                   // SQLite's write lock must precede membership reads and the authoritative clock.
                   yield* sql`UPDATE memory_quota_counters SET value=value WHERE 0`;
-                  return yield* restore(effect).pipe(Effect.provideService(Transaction, journal));
+                  const result = yield* restore(effect).pipe(
+                    Effect.provideService(Transaction, journal),
+                  );
+                  yield* stored(
+                    "checkpoint-accounting",
+                    refreshCheckpointAccounting().pipe(
+                      Effect.provideService(SqlClient.SqlClient, sql),
+                    ),
+                  );
+                  return result;
                 }),
               )
               .pipe(
@@ -1994,15 +2023,18 @@ const make = Effect.gen(function* () {
     );
   });
   const globalCheckpointReservation = Effect.fnUntraced(function* () {
+    yield* stored(
+      "checkpoint-accounting",
+      refreshCheckpointAccounting().pipe(Effect.provideService(SqlClient.SqlClient, sql)),
+    );
     const rows = yield* stored(
       "hub-checkpoint-bound-global",
       sql<{ bytes: number; bound: number }>`
       SELECT coalesce(sum(max(coalesce(r.checkpoint_bytes,0),
-        ${CHECKPOINT_PAGE_OVERHEAD}+coalesce(b.value,0)*${CHECKPOINT_BYTE_EXPANSION}+
-        coalesce(n.value,0)*${CHECKPOINT_RECORD_OVERHEAD + CHECKPOINT_PAGE_OVERHEAD})+
+        coalesce(b.value,0)+max(1,coalesce(n.value,0))*${CHECKPOINT_PAGE_OVERHEAD})+
         coalesce(r.published_pinned_bytes,0)-CASE WHEN r.checkpoint_id IS NOT r.reserved_snapshot_id AND NOT EXISTS(SELECT 1 FROM json_each(r.handles_json) h WHERE json_extract(h.value,'$.checkpointId')=r.reserved_snapshot_id) AND r.snapshot_generation=coalesce(g.value,0) AND EXISTS(SELECT 1 FROM memory_inbox_pending p WHERE p.space=r.space AND p.reason='hub_snapshot' AND p.checkpoint_id='hub:'||r.reserved_snapshot_id) THEN min(r.last_snapshot_bytes,r.published_pinned_bytes) ELSE 0 END),0) AS bytes,
-      coalesce(sum(${CHECKPOINT_PAGE_OVERHEAD}+coalesce(b.value,0)*${CHECKPOINT_BYTE_EXPANSION}+coalesce(n.value,0)*${CHECKPOINT_RECORD_OVERHEAD + CHECKPOINT_PAGE_OVERHEAD}),0) AS bound
-      FROM (SELECT space FROM memory_hub_retention UNION SELECT space FROM memory_quota_counters WHERE dimension='hub_snapshot_rows') s
+      coalesce(sum(coalesce(b.value,0)+max(1,coalesce(n.value,0))*${CHECKPOINT_PAGE_OVERHEAD}),0) AS bound
+      FROM (SELECT space FROM memory_hub_retention UNION SELECT space FROM memory_quota_counters WHERE dimension='hub_snapshot_rows' AND scope_key='') s
       LEFT JOIN memory_hub_retention r ON r.space=s.space
       LEFT JOIN memory_quota_counters b ON b.space=s.space AND b.dimension='hub_snapshot_bytes' AND b.scope_key=''
       LEFT JOIN memory_quota_counters n ON n.space=s.space AND n.dimension='hub_snapshot_rows' AND n.scope_key=''
@@ -9002,8 +9034,7 @@ const make = Effect.gen(function* () {
       nextCursor: cursorFor(id, ordinal + 1),
       bootstrapComplete: false,
     });
-    const all: { -readonly [K in keyof M.MemoryHubCheckpointPage]: M.MemoryHubCheckpointPage[K] } =
-      blank(0);
+    const all = emptyCheckpointInventory();
     const ledger = yield* stored(
       "hub-snapshot-ledger",
       sql<{
@@ -9023,118 +9054,66 @@ const make = Effect.gen(function* () {
       }>`SELECT memory_id FROM memory_identity_ledger WHERE space=${space} ORDER BY memory_id`,
     );
     for (const row of identities) {
-      const current = yield* loadAggregate(space, M.MemoryId.make(row.memory_id));
+      const current = yield* stored(
+        "hub-snapshot-inventory",
+        selectCheckpointMemory(space, M.MemoryId.make(row.memory_id), now).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+        ),
+      );
+      const identity = current.identities[0];
       if (
-        !current.identity ||
-        !current.fence ||
+        !identity ||
+        !current.fences[0] ||
         !receipts.some(
           (r) =>
-            r.receipt.operationId === current.identity!.createOperationId &&
-            r.receipt.memoryId === current.identity!.memoryId &&
+            r.receipt.operationId === identity.createOperationId &&
+            r.receipt.memoryId === identity.memoryId &&
             (r.receipt.outcome === "accepted" ||
               r.receipt.outcome === "conflicted" ||
               (r.operationKind === "forget" &&
                 r.receipt.outcome === "deleted" &&
-                current.tombstone?.deleteOperationId === r.receipt.operationId)),
+                current.tombstones[0]?.deleteOperationId === r.receipt.operationId)),
         )
       )
         return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
-      all.importLineage = [
-        ...all.importLineage,
-        ...(yield* readImportLineage(space, current.identity.memoryId)),
-      ];
-      all.identities = [...all.identities, current.identity];
-      all.fences = [...all.fences, current.fence];
-      if (current.item)
-        all.items = [
-          ...all.items,
-          current.item.status === "forgotten"
-            ? {
-                ...current.item,
-                tombstone: {
-                  ...current.item.tombstone,
-                  suppressedSourceKeys: [],
-                  suppressedContent: [],
-                  sourceExclusions: [],
-                },
-              }
-            : current.item,
-        ];
-      if (current.tombstone) {
-        if (!approved.has(current.tombstone.deleteOperationId))
-          return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
-        all.tombstones = [
-          ...all.tombstones,
-          {
-            ...current.tombstone,
-            suppressedSourceKeys: [],
-            suppressedContent: [],
-            sourceExclusions: [],
-          },
-        ];
-        all.suppressions = [
-          ...all.suppressions,
-          ...(yield* readSuppressions(space, current.identity.memoryId)),
-        ];
-        continue;
-      }
-      const retained = current.resolutions.filter((r) => Date.parse(r.revertDeadlineUtc) > now);
-      const needed = new Set([
-        ...current.heads,
-        ...retained.flatMap((r) => [...r.inputRevisionIds, r.resultRevisionId]),
-      ]);
-      for (const pair of current.revisions.filter((pair) => needed.has(pair.revision.revisionId))) {
-        if (!approved.has(pair.revision.operationId))
-          return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
-        all.revisions = [...all.revisions, pair];
-      }
-      for (const resolution of retained) {
-        const receipt = receipts.find(
-          (r) => r.operationKind === "resolve" && r.resolutionId === resolution.resolutionId,
-        );
-        if (!receipt?.receipt.resolutionApproval)
-          return yield* new MemoryStoreConflict({ code: "unsupported_protocol" });
-        const rows = yield* stored(
-          "hub-snapshot-judgment",
-          sql<{
-            body_json: string;
-          }>`SELECT body_json FROM memory_payloads WHERE space=${space} AND payload_ref=${resolution.judgmentRef}`,
-        );
-        all.resolutions = [
-          ...all.resolutions,
-          {
-            resolution,
-            payload: rows[0]
-              ? yield* resolutionPayloadCodec.decode(rows[0].body_json, strict)
-              : null,
-          },
-        ];
-      }
-      all.conflicts = [
-        ...all.conflicts,
-        ...current.conflicts.filter((c) => c.status !== "resolved"),
-      ];
+      if (
+        current.tombstones.some((t) => !approved.has(t.deleteOperationId)) ||
+        current.revisions.some((p) => !approved.has(p.revision.operationId))
+      )
+        return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
+      if (
+        current.resolutions.some(
+          ({ resolution }) =>
+            !receipts.some(
+              (r) =>
+                r.operationKind === "resolve" &&
+                r.resolutionId === resolution.resolutionId &&
+                r.receipt.resolutionApproval,
+            ),
+        )
+      )
+        return yield* new MemoryStoreConflict({ code: "unsupported_protocol" });
+      // Arrays share the selector and literal-record encoder with admission accounting.
+      all.items.push(...current.items);
+      all.revisions.push(...current.revisions);
+      all.tombstones.push(...current.tombstones);
+      all.conflicts.push(...current.conflicts);
+      all.resolutions.push(...current.resolutions);
+      all.identities.push(...current.identities);
+      all.fences.push(...current.fences);
+      all.suppressions.push(...current.suppressions);
+      all.importLineage.push(...current.importLineage);
     }
     const lineageCount = yield* stored(
       "hub-snapshot-lineage-complete",
-      sql<{ count: number }>`
-      SELECT count(*) AS count FROM memory_import_lineage WHERE space=${space}`,
+      sql<{
+        count: number;
+      }>`SELECT count(*) AS count FROM memory_import_lineage WHERE space=${space}`,
     );
     if (all.importLineage.length !== lineageCount[0]!.count)
       return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
     all.compactReceipts = receipts;
-    const keys = [
-      "items",
-      "revisions",
-      "tombstones",
-      "conflicts",
-      "resolutions",
-      "compactReceipts",
-      "identities",
-      "fences",
-      "suppressions",
-      "importLineage",
-    ] as const;
+    const keys = checkpointKeys;
     const pages: M.MemoryHubCheckpointPage[] = [];
     let page = blank(0);
     let count = 0;
@@ -9556,6 +9535,10 @@ const make = Effect.gen(function* () {
     "MemoryStore.readHubUsageTx",
   )(function* (space) {
     yield* Transaction;
+    yield* stored(
+      "checkpoint-accounting",
+      refreshCheckpointAccounting().pipe(Effect.provideService(SqlClient.SqlClient, sql)),
+    );
     const rows = yield* stored(
       "hub-usage",
       sql<{
