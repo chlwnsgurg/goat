@@ -1100,6 +1100,11 @@ it("reloads persisted members, excludes them from Add, and removes an offline un
   await act(async () => window.dispatchEvent(new Event("focus")));
   await render();
   expect(container.textContent).not.toContain("Device list unavailable");
+  expect(
+    [...container.querySelectorAll("[data-test-row]")].some((row) =>
+      row.textContent?.startsWith("active device"),
+    ),
+  ).toBe(true);
   expect(container.textContent).not.toContain("unregistered-private-id");
   expect(container.textContent).toContain("Waiting for the device to confirm");
   const picker =
@@ -1133,5 +1138,5 @@ it("reloads persisted members, excludes them from Add, and removes an offline un
     environmentId: "remote-owner",
     input: { action: "revokeMember", environmentId: "unregistered-private-id", expectedVersion: 4 },
   });
-  expect(container.textContent).not.toContain("Unknown device");
+  expect(container.textContent).not.toContain("Waiting for the device to confirm");
 });
