@@ -480,6 +480,16 @@ describe("memory sync and views", () => {
   });
   it("preserves original digest outcome and report retry identities", () => {
     expect(round(M.MemoryCompactReceipt, compact).receipt).toEqual(receipt);
+    const replay = { ...compact, upsertRequestDigest: "a".repeat(64) };
+    expect(round(M.MemoryCompactReceipt, replay).upsertRequestDigest).toBe("a".repeat(64));
+    rejects(M.MemoryCompactReceipt, { ...replay, upsertRequestDigest: "body" });
+    rejects(M.MemoryCompactReceipt, {
+      ...replay,
+      operationKind: "forget",
+      revisionId: null,
+      receipt: { ...receipt, outcome: "deleted" },
+    });
+
     rejects(M.MemoryCompactReceipt, {
       ...compact,
       reportGuard: {
@@ -1831,4 +1841,29 @@ describe("task memory grant ceiling JSON", () => {
       expect(Schema.decodeUnknownSync(json)(encoded)).toEqual({ memoryGrantCeiling });
     }
   });
+});
+
+it("r5 bounds upsert request identity and exposes incomplete provenance guidance", () => {
+  expect(() =>
+    decode(M.MemoryProvenance, { environmentId: "env", upsertRequestDigest: "x" }),
+  ).toThrow();
+  expect(
+    decode(M.MemoryProvenance, { environmentId: "env", upsertRequestDigest: "a".repeat(64) })
+      .upsertRequestDigest,
+  ).toBe("a".repeat(64));
+  const guidance =
+    "This conversation has incomplete memory provenance and cannot save new memories. Start a new conversation to save this memory.";
+  const error = new M.MemoryRpcError({ code: "thread_lineage_incomplete", guidance });
+  expect(Schema.encodeSync(M.MemoryRpcError)(error)).toMatchObject({
+    code: "thread_lineage_incomplete",
+    guidance,
+  });
+  expect(error.message).toBe(guidance);
+  expect(() =>
+    decode(M.MemoryRpcError, {
+      _tag: "MemoryRpcError",
+      code: "thread_lineage_incomplete",
+      guidance: "arbitrary",
+    }),
+  ).toThrow();
 });

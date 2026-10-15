@@ -60,6 +60,7 @@ const decodeMessage = Schema.decodeUnknownEffect(
 const decodeRun = Schema.decodeUnknownEffect(Schema.fromJsonString(M.OrchestrationV2RunJson));
 const decodeSelection = Schema.decodeUnknownEffect(M.MemoryModelSelection);
 const decodeInput = Schema.decodeUnknownEffect(M.GenerateMemorySummaryInput);
+const decodePayload = Schema.decodeEffect(M.MemoryPayload);
 const encodeIds = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(M.MessageId)));
 const encodeGenerationMessage = Schema.encodeEffect(
   Schema.fromJsonString(
@@ -296,6 +297,7 @@ const make = Effect.gen(function* () {
           for (const row of [...rows, ...continuations]) {
             const thread = { environmentId, threadId: M.ThreadId.make(row.stream_id) };
             if (row.event_type === "thread.deleted") {
+              yield* store.deleteThreadLineage(thread);
               yield* store.cancelThreadWork(thread);
               yield* store
                 .forgetLocalIntent(environmentId, `${environmentId}:${row.stream_id}:summary`)
@@ -519,8 +521,41 @@ const make = Effect.gen(function* () {
         sourceWork = { ...work, metadata: { ...meta, fromSequence: 0 } };
         source = yield* readSource(sourceWork);
       }
+      const readDependencies = Effect.gen(function* () {
+        const lineage = yield* store.readThreadLineage(meta.sourceThread, dependencySpace);
+        if (lineage.state !== "tracked")
+          return yield* new MemoryWorkerError({ code: "source_invalidated" });
+        const deps = [
+          ...new Set([
+            ...lineage.revisions,
+            ...(previousSummary?.derivedFromMemoryRevisions ?? []),
+          ]),
+        ];
+        // Use the existing payload contract: no truncation and no unbounded generation.
+        const payload = yield* query(
+          decodePayload(
+            {
+              text: "lineage admission",
+              evidence: [],
+              derivedFromMemoryRevisions: deps,
+            },
+            strict,
+          ),
+        );
+        yield* Service.validateSummaryDependencies(dependencySpace, payload).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+        );
+        return deps;
+      });
+      const dependencies = yield* readDependencies;
       const recheckSource = Effect.gen(function* () {
         yield* readSource(work);
+        const latest = yield* readDependencies;
+        if (
+          latest.length !== dependencies.length ||
+          latest.some((id) => !dependencies.includes(id))
+        )
+          return yield* new MemoryWorkerError({ code: "source_invalidated" });
         if (previousSummary)
           yield* Service.validateSummaryDependencies(dependencySpace, previousSummary).pipe(
             Effect.provideService(SqlClient.SqlClient, sql),
@@ -582,7 +617,7 @@ const make = Effect.gen(function* () {
             previousSummary = {
               text: output.result.text,
               evidence: output.result.evidence,
-              derivedFromMemoryRevisions: previousSummary?.derivedFromMemoryRevisions ?? [],
+              derivedFromMemoryRevisions: dependencies,
             };
             sourceWork = {
               ...work,
@@ -633,8 +668,7 @@ const make = Effect.gen(function* () {
               payload: {
                 text: generated.output.result.text,
                 evidence: generated.output.result.evidence,
-                derivedFromMemoryRevisions:
-                  generated.input.previousSummary?.derivedFromMemoryRevisions ?? [],
+                derivedFromMemoryRevisions: dependencies,
               },
               provenance: {
                 environmentId,
