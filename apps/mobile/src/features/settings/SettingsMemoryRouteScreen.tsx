@@ -475,7 +475,14 @@ function MemoryBrowser({
     (project) => project.environmentId === params.environmentId,
   );
   const [projectRef, setProjectRef] = useState(params.project);
-  const effectiveParams = useMemo(() => ({ ...params, project: projectRef }), [params, projectRef]);
+  const effectiveParams = useMemo(
+    () => ({
+      ...params,
+      project: projectRef,
+      thread: projectRef?.projectId === params.project?.projectId ? params.thread : undefined,
+    }),
+    [params, projectRef],
+  );
   const [binding, setBinding] = useState<MemoryProjectBinding | null>(null);
   const acceptBinding = useCallback((value: MemoryProjectBinding | null) => setBinding(value), []);
   const [scopeKind, setScopeKind] = useState<MemoryScope["kind"] | null>("user");
@@ -488,13 +495,15 @@ function MemoryBrowser({
   );
   const retireImport = useRef<() => Promise<void>>(async () => {});
   const bindingToken = JSON.stringify([projectRef, binding?.version, binding?.projectKey]);
-  const seenProjects = useRef(new Set<string>());
-  for (const project of projects) seenProjects.current.add(project.id);
+  const [seenProjects, setSeenProjects] = useState<ReadonlySet<string>>(
+    () => new Set(projects.map((project) => project.id)),
+  );
+  if (projects.some((project) => !seenProjects.has(project.id)))
+    setSeenProjects(new Set([...seenProjects, ...projects.map((project) => project.id)]));
   const projectExists =
     !projectRef ||
     projects.some((project) => project.id === projectRef.projectId) ||
-    (!seenProjects.current.has(projectRef.projectId) &&
-      params.project?.projectId === projectRef.projectId);
+    (!seenProjects.has(projectRef.projectId) && params.project?.projectId === projectRef.projectId);
 
   const [quarantine, setQuarantine] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -614,7 +623,7 @@ function MemoryBrowser({
                   kind === "project"
                     ? !binding?.projectKey || !projectExists
                     : kind === "thread"
-                      ? !params.thread
+                      ? !effectiveParams.thread
                       : false
                 }
                 onValueChange={(value) => {
@@ -623,6 +632,16 @@ function MemoryBrowser({
                 }}
               />
             ))}
+            {projectRef ? (
+              <Copy>
+                {projects.find((project) => project.id === projectRef.projectId)?.title ??
+                  "Selected project"}
+              </Copy>
+            ) : (
+              <Copy>
+                No project selected. User scope is available; select a project for project scope.
+              </Copy>
+            )}
             {projects.map((project) => (
               <Action
                 key={project.id}
@@ -1527,6 +1546,12 @@ function MemoryReportRetry({
   );
   return (
     <>
+      {candidates.length ? (
+        <Copy>
+          Select up to 32 exhausted failed reports. Resetting attempts lets the delivery worker try
+          again; it does not generate a new report.
+        </Copy>
+      ) : null}
       {candidates.map((report, index) => (
         <SettingsSwitchRow
           key={report.reportId}

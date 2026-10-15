@@ -1493,4 +1493,181 @@ describe("native WP6 Settings commands", () => {
     expect(view.container.textContent).not.toContain("reports ready to retry");
     expect(view.container.querySelector('[role="switch"][aria-checked="true"]')).not.toBeNull();
   });
+  it("bounds selected report resets to 32 and blocks reset after settings access is revoked", async () => {
+    setupImport();
+    const reports = Array.from({ length: 34 }, (_, index) => ({
+      reportId: String(index).padStart(64, "0"),
+      operationId: "00000000-0000-4000-8000-000000000008",
+      outcome: "failed",
+      state: "failed",
+      failureCode: "generation_failed",
+      resolvingEnvironmentId: nativeEnv,
+      resolutionId: null,
+      reportThread: null,
+      sequence: null,
+      automaticAttempts: 10,
+    }));
+    h.responses.set(WS_METHODS.memoryHistory, () => ({ ...revertHistory(), reports }));
+    h.responses.set(WS_METHODS.memoryResetReportAttempts, () => ({
+      resetCount: 31,
+      unchangedCount: 1,
+    }));
+    await show();
+    await view.click("Open memory: Synthetic memory body");
+    for (let i = 1; i <= 34; i++) await view.click(`Select exhausted report ${i}`);
+    await view.click("Retry selected reports");
+    expect(
+      h.calls.findLast((call) => call.method === WS_METHODS.memoryResetReportAttempts)?.input,
+    ).toMatchObject({ reportIds: reports.slice(0, 32).map((report) => report.reportId) });
+    expect(view.container.textContent).toContain("31 reports ready to retry; 1 unchanged");
+    await view.click("Select exhausted report 1");
+    await act(async () => h.grant(["memory:read", "memory:write", "filesystem:read"]));
+    await view.click("Retry selected reports");
+    expect(
+      h.calls.filter((call) => call.method === WS_METHODS.memoryResetReportAttempts),
+    ).toHaveLength(1);
+  });
+  it("initial binding hydration preserves restart recovery and does status only", async () => {
+    setupImport();
+    const project = { environmentId: nativeEnv, projectId: "synthetic-project" as never };
+    const binding = {
+      memorySpaceId: nativeSpace,
+      project,
+      version: 2,
+      projectKey: { kind: "explicit", sharedProjectId: "shared-project" },
+      repositoryKey: null,
+    };
+    h.responses.set(WS_METHODS.memoryProjectBindingGet, () => binding);
+    await show({ environmentId: nativeEnv, project });
+    await select();
+    h.responses.set(WS_METHODS.memoryImportProvider, () =>
+      Effect.fail(new Error("synthetic lost")),
+    );
+    await view.click("Apply selected memories");
+    await view.unmount();
+    const handle = [...h.secureValues.values()][0]!;
+    const hydrated = h.deferred<unknown>();
+    h.responses.set(WS_METHODS.memoryProjectBindingGet, () => hydrated.response);
+    const before = importCalls().length;
+    await show({ environmentId: nativeEnv, project });
+    expect(importCalls()).toHaveLength(before);
+    expect([...h.secureValues.values()]).toEqual([handle]);
+    await act(async () => {
+      await hydrated.succeed(binding);
+    });
+    expect(
+      importCalls()
+        .slice(before)
+        .map((call) => (call.input as { action: string }).action),
+    ).toEqual(["status"]);
+    expect([...h.secureValues.values()]).toEqual([handle]);
+  });
+  it("clears an admitted import before binding CAS and rejects its late reply", async () => {
+    setupImport();
+    const project = { environmentId: nativeEnv, projectId: "synthetic-project" as never };
+    h.responses.set(WS_METHODS.memoryProjectBindingGet, () => ({
+      memorySpaceId: nativeSpace,
+      project,
+      version: 2,
+      projectKey: { kind: "explicit", sharedProjectId: "shared-project" },
+      repositoryKey: null,
+    }));
+    await show({ environmentId: nativeEnv, project });
+    await select();
+    const late = h.deferred<unknown>();
+    h.responses.set(WS_METHODS.memoryImportProvider, () => late.response);
+    await view.click("Apply selected memories");
+    const operationId = JSON.parse([...h.secureValues.values()][0]!).handle.operationId;
+    h.responses.set(WS_METHODS.memoryProjectBindingUpdate, (value) => {
+      expect(h.secureValues.size).toBe(0);
+      return {
+        requestId: (value as { requestId: string }).requestId,
+        binding: {
+          memorySpaceId: nativeSpace,
+          project,
+          version: 3,
+          projectKey: null,
+          repositoryKey: null,
+        },
+      };
+    });
+    await view.click("Use repository binding");
+    await act(async () => {
+      await late.succeed({
+        action: "apply",
+        receipt: {
+          operationId,
+          sourceId,
+          sessionId: "synthetic-session",
+          state: "completed",
+          sessionNewItems: 1,
+          sessionBodyBytes: 10,
+          items: [],
+          remaining: 0,
+        },
+        syncStatus: nativeSyncStatus,
+      });
+    });
+    expect(view.container.textContent).not.toContain("Import completed");
+    expect(h.secureValues.size).toBe(0);
+  });
+  it("removes recovery when the selected project is removed", async () => {
+    setupImport();
+    const project = { environmentId: nativeEnv, projectId: "synthetic-project" as never };
+    h.projects.push({
+      id: project.projectId,
+      title: "Synthetic project",
+      environmentId: nativeEnv,
+    });
+    h.responses.set(WS_METHODS.memoryProjectBindingGet, () => ({
+      memorySpaceId: nativeSpace,
+      project,
+      version: 1,
+      projectKey: { kind: "explicit", sharedProjectId: "shared-project" },
+      repositoryKey: null,
+    }));
+    const params = { environmentId: nativeEnv, project };
+    await show(params);
+    await select();
+    h.responses.set(WS_METHODS.memoryImportProvider, () =>
+      Effect.fail(new Error("synthetic lost")),
+    );
+    await view.click("Apply selected memories");
+    expect(h.secureValues.size).toBe(1);
+    h.projects.length = 0;
+    await view.rerender(<SettingsMemoryRouteScreen route={{ params }} />);
+    expect(h.secureValues.size).toBe(0);
+  });
+  it("selects a shared binding by project title without rendering its internal key", async () => {
+    setupImport();
+    const project = { environmentId: nativeEnv, projectId: "synthetic-project" as never };
+    h.projects.push({ id: "other-project", title: "Other project", environmentId: nativeEnv });
+    h.responses.set(WS_METHODS.memoryProjectBindingGet, (value) => ({
+      memorySpaceId: nativeSpace,
+      project: (value as { project: unknown }).project,
+      version: 1,
+      projectKey: { kind: "explicit", sharedProjectId: "private-shared-key" },
+      repositoryKey: null,
+    }));
+    h.responses.set(WS_METHODS.memoryProjectBindingUpdate, (value) => ({
+      requestId: (value as { requestId: string }).requestId,
+      binding: {
+        memorySpaceId: nativeSpace,
+        project,
+        version: 2,
+        projectKey: { kind: "explicit", sharedProjectId: "private-shared-key" },
+        repositoryKey: null,
+      },
+    }));
+    await show({ environmentId: nativeEnv, project });
+    await view.click("Use shared binding from Other project");
+    expect(
+      h.calls.findLast((call) => call.method === WS_METHODS.memoryProjectBindingUpdate)?.input,
+    ).toMatchObject({
+      action: "setExplicit",
+      sharedProjectId: "private-shared-key",
+      expectedVersion: 1,
+    });
+    expect(view.container.textContent).not.toContain("private-shared-key");
+  });
 });

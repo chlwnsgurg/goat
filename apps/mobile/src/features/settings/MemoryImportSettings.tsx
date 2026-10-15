@@ -13,6 +13,7 @@ import { AppState } from "react-native";
 import * as Crypto from "expo-crypto";
 import * as Option from "effect/Option";
 import { mobileMemoryImportRecovery } from "../../persistence/memory-import-recovery";
+import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { memoryEnvironment as memory } from "../../state/memory";
 import { environmentSession, readEnvironmentScope } from "../../state/session";
 import { AppText as Text } from "../../components/AppText";
@@ -48,6 +49,7 @@ export function MemoryImportSettings({
   retireRef: React.RefObject<() => Promise<void>>;
 }) {
   const registry = useContext(RegistryContext);
+  const { savedConnectionsById } = useSavedRemoteConnections();
   const allowed = useAtomValue(memory.importProvider.permissionAtom(params.environmentId));
   const connection = useAtomValue(
     environmentSession.preparedConnectionValueAtom(params.environmentId),
@@ -215,6 +217,17 @@ export function MemoryImportSettings({
       <Copy>
         Import from Codex, Claude or OMO. Other provider profiles are not supported. Choose a
         profile, preview its memories and confirm a destination before applying.
+      </Copy>
+      <Copy>
+        Destination:{" "}
+        {savedConnectionsById[params.environmentId]?.environmentLabel ?? "Selected environment"} ·{" "}
+        {scope?.kind === "user"
+          ? "User memories"
+          : scope?.kind === "project"
+            ? "Selected project"
+            : scope?.kind === "thread"
+              ? "Selected thread"
+              : "Choose a scope"}
       </Copy>
       {!allowed ? <Copy>Memory write and file read permissions are required.</Copy> : null}
       {(["codex", "claude", "omo"] as const).map((value) => (
