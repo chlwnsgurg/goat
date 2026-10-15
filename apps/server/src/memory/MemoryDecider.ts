@@ -131,7 +131,7 @@ export function decideMemoryOperation(
   const missing = r.parents.filter((id) => !revisions.has(id) && !compacted.has(id));
   if (
     admission.kind === "localIntent" &&
-    !sameSet(current.heads, operation.expectedHeads) &&
+    !sameSet(current.heads, admission.localExpectedHeads ?? operation.expectedHeads) &&
     missing.length === 0
   )
     fail("revision_changed");

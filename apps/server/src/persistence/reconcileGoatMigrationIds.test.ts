@@ -92,6 +92,20 @@ describe("GOAT migration ids", () => {
       yield* runMigrations();
       const sql = yield* SqlClient.SqlClient;
       yield* sql`INSERT INTO memory_quota_counters VALUES ('fixture','live','user',7)`;
+      yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys)
+        VALUES ('synthetic-lineage','synthetic-memory','{"identity":"preserve"}','{}',20000,0)`;
+      yield* sql`INSERT INTO memory_import_lineage VALUES ('synthetic-lineage','synthetic-memory','sourceKey','synthetic-key','{"kind":"sourceKey","fixture":"preserve"}')`;
+      const lineageState = Effect.gen(function* () {
+        return {
+          lineage:
+            yield* sql`SELECT rowid,* FROM memory_import_lineage ORDER BY space,memory_id,kind,key`,
+          identities:
+            yield* sql`SELECT rowid,* FROM memory_identity_ledger ORDER BY space,memory_id`,
+          counters:
+            yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`,
+        };
+      });
+      const beforeLineage = yield* lineageState;
       const future = migrationEntries.map(
         ([n, name, migration]) => [n >= 70 ? n + 1 : n, name, migration] as const,
       );
@@ -113,6 +127,7 @@ describe("GOAT migration ids", () => {
           ?.value,
         7,
       );
+      assert.deepStrictEqual(yield* lineageState, beforeLineage);
       assert.strictEqual(
         (yield* sql`SELECT name FROM sqlite_master WHERE name='future_fixture'`).length,
         1,

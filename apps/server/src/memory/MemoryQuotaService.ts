@@ -534,7 +534,12 @@ const make = Effect.gen(function* () {
                   ...result.receipt,
                   forgetExpansion: {
                     ...expansion,
-                    status: extraResult.receipt.outcome === "rejected" ? "rejected" : "accepted",
+                    status:
+                      extraResult.receipt.outcome === "rejected"
+                        ? "rejected"
+                        : "pendingSync" in extraResult.receipt && extraResult.receipt.pendingSync
+                          ? "pending"
+                          : "accepted",
                   },
                 },
               });
