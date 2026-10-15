@@ -203,6 +203,11 @@ function MemoryEnvironment({
 }) {
   const { environmentId } = params;
   const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
+  const [fixedSpace, setFixedSpace] = useState(params.memorySpaceId ?? null);
+  const fixSpace = useCallback(
+    (value: MemorySpaceId) => setFixedSpace((current) => current ?? value),
+    [],
+  );
   const session = useAtomValue(environmentSession.preparedConnectionValueAtom(environmentId));
   const [connectionVersion, setConnectionVersion] = useState({ connection: session, version: 0 });
   if (connectionVersion.connection !== session)
@@ -231,7 +236,8 @@ function MemoryEnvironment({
   return (
     <MemoryConnected
       key={`${connectionVersion.version}:${readAllowed}:${adminAllowed}:${writeAllowed}`}
-      params={params}
+      params={fixedSpace ? { ...params, memorySpaceId: fixedSpace } : params}
+      onSpace={fixSpace}
       readAllowed={readAllowed}
     />
   );
@@ -269,10 +275,12 @@ function MemoryConnectionHelp({
 
 function MemoryConnected({
   params,
+  onSpace,
   readAllowed,
 }: {
   readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
   readonly readAllowed: boolean;
+  readonly onSpace: (space: MemorySpaceId) => void;
 }) {
   const registry = useContext(RegistryContext);
   const { environmentId } = params;
@@ -298,9 +306,10 @@ function MemoryConnected({
       return;
     if (AsyncResult.isSuccess(result)) {
       setStatus(result.value);
+      if (result.value.memorySpaceId) onSpace(result.value.memorySpaceId);
       setError(null);
     } else if (AsyncResult.isFailure(result)) setError(failureMessage(result));
-  }, [registry, environmentId, sync]);
+  }, [registry, environmentId, sync, onSpace]);
   useEffect(() => {
     // The command synchronizes the selected environment, not derived render state.
     // oxlint-disable-next-line react/set-state-in-effect
@@ -359,10 +368,10 @@ function MemoryConnected({
           ) : null}
         </>
       ) : null}
-      {params.memorySpaceId &&
-      status?.memorySpaceId &&
-      status.memorySpaceId !== params.memorySpaceId ? (
-        <Copy>This link names a different memory space. Its destination has been preserved.</Copy>
+      {params.memorySpaceId && status && status.memorySpaceId !== params.memorySpaceId ? (
+        <Copy>
+          The selected memory space is not currently bound. Its destination has been preserved.
+        </Copy>
       ) : null}
       {space && readAllowed ? (
         <MemoryBrowser key={space} params={params} memorySpaceId={space} />

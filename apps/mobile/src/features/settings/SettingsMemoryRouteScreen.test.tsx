@@ -9,6 +9,7 @@ import {
   nativeSpace,
   nativeId,
   nativeOwnerPolicy,
+  nativeSyncStatus,
   type NativeMemoryHarness,
 } from "../../testing/memoryNativeHarness";
 import { SettingsMemoryRouteScreen } from "./SettingsMemoryRouteScreen";
@@ -180,5 +181,24 @@ describe("native Memory with shared factory", () => {
       input: { expectedVersion: 3, allowedRequesterEnvironmentIds: ["pending-requester"] },
     });
     expect(view.container.textContent).toContain("pending-requester");
+  });
+  it("pins the first selected space across later environment binding changes", async () => {
+    h = createNativeMemoryHarness();
+    await h.waitForAtom(h.memory.syncStatus.permissionAtom(nativeEnv), Boolean);
+    view = renderNative(
+      h,
+      <SettingsMemoryRouteScreen route={{ params: { environmentId: nativeEnv } }} />,
+    );
+    await view.render();
+    expect(view.container.textContent).toContain("Synthetic memory body");
+    h.responses.set(WS_METHODS.memorySyncStatus, () => ({
+      ...nativeSyncStatus,
+      memorySpaceId: "00000000-0000-4000-8000-000000000003",
+    }));
+    await view.click("Refresh sharing status");
+    expect(view.container.textContent).toContain("Its destination has been preserved");
+    const lists = h.calls.filter((call) => call.method === WS_METHODS.memoryList);
+    expect(lists.length).toBeGreaterThan(0);
+    for (const call of lists) expect(call.input).toMatchObject({ memorySpaceId: nativeSpace });
   });
 });
