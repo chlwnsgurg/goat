@@ -1,3 +1,4 @@
+import { ProviderMemoryImportRuntime } from "../memory/imports/MemoryImportTypes.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   MemoryOperationId,
@@ -146,6 +147,27 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         expect(descriptor.capabilities.memory?.hub).toBeUndefined();
         expect(descriptor.capabilities.memoryHubProtocolVersion).toBeUndefined();
       }
+    }),
+  );
+  it.effect("advertises provider import only when the acquired runtime is installed", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped();
+      const descriptor = yield* ServerEnvironment.ServerEnvironment.use(
+        (s) => s.getDescriptor,
+      ).pipe(
+        Effect.provide(
+          layerServerEnvironment(baseDir).pipe(
+            Layer.provide(
+              Layer.succeed(ProviderMemoryImportRuntime, {
+                run: () => Effect.die("descriptor must not invoke provider import"),
+              }),
+            ),
+          ),
+        ),
+      );
+      expect(descriptor.capabilities.memory).toEqual({ protocolVersion: 1, importProvider: true });
+      expect(descriptor.capabilities.memoryHubProtocolVersion).toBeUndefined();
     }),
   );
   it.effect("advertises the Slack channel in the assembled server descriptor", () =>
