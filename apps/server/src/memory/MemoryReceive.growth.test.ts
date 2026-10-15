@@ -96,43 +96,41 @@ const check = Effect.gen(function* () {
 });
 
 describe.runIf(process.env.GOAT_MEMORY_GROWTH === "1")("service receive scaling", () => {
-  for (const fixture of [
-    { chain: false, counts: [1000, 2000], label: "1k / 2k independent memories", timeout: 1500000 },
-    { chain: true, counts: [250, 500], label: "long chain 250 / 500 revisions", timeout: 300000 },
-  ]) {
-    it.effect(
-      fixture.label,
-      () =>
-        Effect.gen(function* () {
-          const samples: number[] = [];
-          for (const count of fixture.counts) {
-            const ms = yield* Effect.gen(function* () {
-              const storage = yield* Store.MemoryStore;
-              assert.strictEqual((yield* storage.usage(space, { kind: "user" })).spaceItems, 0);
-              const start = performance.now();
-              for (let n = 0; n < count; n++) yield* receive(operation(n, fixture.chain), n);
-              const elapsed = performance.now() - start;
-              yield* check;
-              const usage = yield* storage.usage(space, { kind: "user" });
-              assert.strictEqual(usage.spaceItems, fixture.chain ? 1 : count);
-              assert.strictEqual(usage.logRows, count);
-              return elapsed;
-            }).pipe(Effect.provide(live));
-            samples.push(ms);
-            yield* Console.log(
-              "RECEIVE_SAMPLE " + JSON.stringify({ chain: fixture.chain, count, ms }),
-            );
-          }
-          const ratio = samples[1]! / samples[0]!;
+  it.effect.each([
+    { chain: false, counts: [1000, 2000], label: "1k / 2k independent memories" },
+    { chain: true, counts: [250, 500], label: "long chain 250 / 500 revisions" },
+  ])(
+    "$label",
+    (fixture) =>
+      Effect.gen(function* () {
+        const samples: number[] = [];
+        for (const count of fixture.counts) {
+          const ms = yield* Effect.gen(function* () {
+            const storage = yield* Store.MemoryStore;
+            assert.strictEqual((yield* storage.usage(space, { kind: "user" })).spaceItems, 0);
+            const start = performance.now();
+            for (let n = 0; n < count; n++) yield* receive(operation(n, fixture.chain), n);
+            const elapsed = performance.now() - start;
+            yield* check;
+            const usage = yield* storage.usage(space, { kind: "user" });
+            assert.strictEqual(usage.spaceItems, fixture.chain ? 1 : count);
+            assert.strictEqual(usage.logRows, count);
+            return elapsed;
+          }).pipe(Effect.provide(live));
+          samples.push(ms);
           yield* Console.log(
-            "RECEIVE_RATIO " +
-              JSON.stringify(fixture.chain ? { chain: ratio } : { independent: ratio }),
+            "RECEIVE_SAMPLE " + JSON.stringify({ chain: fixture.chain, count, ms }),
           );
-          // Large samples absorb startup/JIT noise; optional scheduled benchmark, no millisecond deadline.
-          if (!fixture.chain && process.env.GOAT_RECEIVE_BASELINE !== "1")
-            assert.isBelow(ratio, 3.25);
-        }).pipe(Effect.provideService(Console.Console, console)),
-      { timeout: fixture.timeout },
-    );
-  }
+        }
+        const ratio = samples[1]! / samples[0]!;
+        yield* Console.log(
+          "RECEIVE_RATIO " +
+            JSON.stringify(fixture.chain ? { chain: ratio } : { independent: ratio }),
+        );
+        // Large samples absorb startup/JIT noise; optional scheduled benchmark, no millisecond deadline.
+        if (!fixture.chain && process.env.GOAT_RECEIVE_BASELINE !== "1")
+          assert.isBelow(ratio, 3.25);
+      }).pipe(Effect.provideService(Console.Console, console)),
+    { timeout: 1500000 },
+  );
 });
