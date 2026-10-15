@@ -52,7 +52,7 @@ export type MemoryImportReaderConfig = {
 // Python is invoked isolated (-I -S), with a complete static env and no shell. It never imports
 // source modules/configuration. Only private snapshot paths can be opened for writes/removal.
 const DESCRIPTORS = String.raw`
-import os, sys, stat, json, errno
+import os, sys, stat, json, errno, re
 class Refusal(Exception):
     def __init__(self, issue): self.issue = issue
 
@@ -62,9 +62,13 @@ def valid(s):
 def identity(s): return (s.st_dev, s.st_ino, s.st_mode)
 def stamp(s): return identity(s) + (s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 held=[]; checks=[]
-def open_child(parent, name, directory=False, stable=True):
+def open_child(parent, name, directory=False, stable=True, expected=None):
     valid(name)
-    before=os.stat(name, dir_fd=parent, follow_symlinks=False)
+    try: before=os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        if expected is not None: refuse('source_changed')
+        raise
+    if expected is not None and stamp(before)!=stamp(expected): refuse('source_changed')
     if stat.S_ISLNK(before.st_mode) or not (stat.S_ISDIR(before.st_mode) if directory else stat.S_ISREG(before.st_mode)): refuse('path_rejected')
     fd=os.open(name, os.O_RDONLY | os.O_NOFOLLOW | (os.O_DIRECTORY if directory else os.O_NONBLOCK), dir_fd=parent)
     after=os.fstat(fd)
@@ -89,7 +93,7 @@ def verify():
         cmp=stamp if stable else identity
         if cmp(now)!=cmp(before) or cmp(os.fstat(fd))!=cmp(before): refuse('source_changed')
 
-def names(fd):
+def names(fd,maximum=4096):
     result=[]
     with os.scandir(fd) as entries:
         for entry in entries:
@@ -97,7 +101,7 @@ def names(fd):
             try: valid(name)
             except UnicodeError: refuse('invalid_utf8')
             result.append(name)
-            if len(result)>4096: refuse('limit_exceeded')
+            if len(result)>maximum: refuse('limit_exceeded')
     return sorted(result)
 
 def read(fd, maximum):
@@ -108,7 +112,9 @@ def read(fd, maximum):
         chunk=os.read(fd,min(65536,maximum-len(data)+1))
         if not chunk: break
         data.extend(chunk)
-        if len(data)>maximum: refuse('limit_exceeded')
+        if len(data)>maximum:
+            if stamp(before)!=stamp(os.fstat(fd)): refuse('source_changed')
+            refuse('limit_exceeded')
     if stamp(before)!=stamp(os.fstat(fd)) or len(data)!=before.st_size: refuse('source_changed')
     return bytes(data)
 
@@ -142,7 +148,9 @@ c=json.loads(sys.argv[1]); action=c['action']; result={}
 try:
     if not all(f in os.supports_dir_fd for f in (os.open,os.stat,os.mkdir,os.unlink,os.rmdir)) or os.scandir not in os.supports_fd or not hasattr(os,'O_NOFOLLOW'): refuse('path_rejected')
     if action in ('init','allocate','remove','cleanup'):
-        state=absolute(c['stateDir']); own(state)
+        state=absolute(c['stateDir'])
+        state_stat=os.fstat(state)
+        if state_stat.st_uid!=os.getuid() or stat.S_IMODE(state_stat.st_mode)&0o022: refuse('path_rejected')
         if action=='init':
             for part in ('memory-import','snapshots'):
                 try: os.mkdir(part,0o700,dir_fd=state)
@@ -155,7 +163,7 @@ try:
             dest=destination(state,c['id'],True)
             destination(dest,'repo',True); destination(dest,'cwd',True)
         if action in ('cleanup','remove'):
-            entries=names(state)
+            entries=names(state,2)
             if len(entries)>2: refuse('limit_exceeded')
             if action=='remove': entries=[c['id']] if c['id'] in entries else []
             count=0; total=0; object_total=0; object_count=0
@@ -191,7 +199,7 @@ try:
             for tree in trees:
                 if action=='cleanup' or tree[0]==c['id']: remove(state,tree)
     elif action=='discover':
-        root=absolute(c['root']); entries=names(root)
+        root=absolute(c['root']); entries=names(root,512)
         if len(entries)>512: refuse('limit_exceeded')
         result={'selections':[]}
         for name in entries:
@@ -209,25 +217,26 @@ try:
         count=4 if c['format']=='omo' else 0; objects_count=0; total=len(c['config'].encode()); object_bytes=0; source_bytes=0; files=[]
         def walk(parent,out,rel,depth,git=False):
             global count,objects_count,total,object_bytes,source_bytes
-            for name in names(parent):
+            for name in names(parent,(4096 if git else 512)-count):
                 selector=rel+'/'+name if rel else name
                 valid(selector); count+=1
                 obj=selector=='objects' or selector.startswith('objects/')
                 if obj: objects_count+=1
                 if count>(4096 if git else 512) or objects_count>3584 or depth>8: refuse('limit_exceeded')
-                s=os.stat(name,dir_fd=parent,follow_symlinks=False)
+                try: s=os.stat(name,dir_fd=parent,follow_symlinks=False)
+                except FileNotFoundError: refuse('source_changed')
                 if stat.S_ISLNK(s.st_mode) or not (stat.S_ISREG(s.st_mode) or stat.S_ISDIR(s.st_mode)): refuse('path_rejected')
                 if git and selector in ('commondir','objects/info/alternates','objects/info/http-alternates'): refuse('path_rejected')
                 selected = (selector in ('HEAD','packed-refs') or selector.startswith('refs/') and not selector.startswith('refs/replace') or obj and not selector.startswith('objects/info')) if git else (selector=='MEMORY.md' or selector.startswith('extensions/ad_hoc/notes/') and selector.count('/')==3 and selector.endswith('.md')) if c['format']=='codex' else ('/' not in selector and selector.endswith('.md') and selector not in ('MEMORY.md','CLAUDE.md'))
                 if stat.S_ISDIR(s.st_mode):
-                    fd=open_child(parent,name,True)
+                    fd=open_child(parent,name,True,True,s)
                     child=destination(out,name,True) if git and (selector in ('refs','objects') or selector.startswith('refs/') and not selector.startswith('refs/replace') or obj and not selector.startswith('objects/info')) else out
                     walk(fd,child,selector,depth+1,git)
                 elif git and selector=='config':
-                    fd=open_child(parent,name)
+                    fd=open_child(parent,name,False,True,s)
                     config_text=text(read(fd,262144)).lower()
-                    if '[include' in config_text: refuse('path_rejected')
-                    if '[extensions' in config_text: refuse('unsupported_format')
+                    if re.search(r'^\s*\[\s*include(?:if)?\b',config_text,re.M): refuse('path_rejected')
+                    if re.search(r'^\s*\[\s*extensions\b',config_text,re.M): refuse('unsupported_format')
                 elif selected:
                     if git:
                         total+=s.st_size
@@ -236,7 +245,7 @@ try:
                     else:
                         source_bytes+=s.st_size
                         if source_bytes>8388608: refuse('limit_exceeded')
-                    fd=open_child(parent,name)
+                    fd=open_child(parent,name,False,True,s)
                     data=read(fd,s.st_size if git else 262144)
                     # File descriptors need not stay open; parent-relative restat remains in checks.
                     checks[-1]=(parent,name,None,s,True); held.remove(fd); os.close(fd)
@@ -470,6 +479,8 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
         for (const root of config.roots) {
           absolute(root.path);
           safe(root.rootSlot);
+          if (root.rootSlot.includes("/") || [...root.rootSlot].length > 256)
+            throw error("path_rejected");
           const key = `${root.format}/${root.rootSlot}`;
           if (keys.has(key)) throw error("path_rejected");
           keys.add(key);
@@ -593,13 +604,11 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
       }
       return root;
     };
-    const metadata = (slot: ImportSlot, profile: string): ImportDiscoveredSlot => ({
-      slot,
-      profile,
-      parserVersion: profile,
-      sourceLocator: `${slot.format}/${slot.rootSlot}${slot.selection ? `/${slot.selection}` : ""}`,
-      label: slot.rootSlot,
-    });
+    const metadata = (slot: ImportSlot, profile: string): ImportDiscoveredSlot => {
+      const sourceLocator = `${slot.format}/${slot.rootSlot}${slot.selection ? `/${slot.selection}` : ""}`;
+      safe(sourceLocator);
+      return { slot, profile, parserVersion: profile, sourceLocator, label: slot.rootSlot };
+    };
     const read: MemoryImportReaderShape["read"] = ({ slot }) =>
       Effect.gen(function* () {
         const root = yield* Effect.try({ try: () => locate(slot), catch: normalize });
@@ -646,7 +655,7 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
                   ),
                 );
               const version = (yield* git(["--version"], 256)).toString("utf8");
-              // Git 2.48 introduced --no-lazy-fetch; older/unknown versions have no fallback.
+              // Support policy: Git 2.48–2.99 only, with --no-lazy-fetch on every repository call. Unknown versions refuse.
               if (!/^git version 2\.(?:4[8-9]|[5-9][0-9])\.[0-9]+(?:\s|$)/.test(version))
                 return yield* Effect.fail(error("source_unreadable"));
               const run = (args: readonly string[], cap?: number) =>
@@ -717,7 +726,10 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
               catch: normalize,
             });
             files.sort((a, b) => a.selector.localeCompare(b.selector, "en"));
-            const info = metadata(slot, profile);
+            const info = yield* Effect.try({
+              try: () => metadata(slot, profile),
+              catch: normalize,
+            });
             return {
               ...info,
               format: slot.format,
@@ -743,7 +755,9 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
             if (result.length >= 128) return yield* Effect.fail(error("limit_exceeded"));
             const slot: ImportSlot = { format, rootSlot: root.rootSlot, selection };
             const value = yield* read({ slot });
-            result.push(metadata(slot, value.profile));
+            result.push(
+              yield* Effect.try({ try: () => metadata(slot, value.profile), catch: normalize }),
+            );
           }
         }
         return result;

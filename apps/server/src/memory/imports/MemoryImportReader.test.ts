@@ -679,4 +679,330 @@ exec /usr/bin/git "$@"
       }),
     ),
   );
+  it.effect.each(MEMORY_IMPORT_FIXTURE_PROFILES)(
+    "descriptor write spy stays zero for %s",
+    (profile) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* buildMemoryImportFixture(profile);
+          const wrapper = NodePath.join(fixture.sandbox, "descriptor-spy");
+          const log = NodePath.join(fixture.sandbox, "descriptor-spy.log");
+          NodeFS.writeFileSync(
+            wrapper,
+            `#!/usr/bin/python3 -I
+import os,sys,fcntl,json
+root=r"${fixture.sourceRoot}"
+log=r"${log}"
+original_open=os.open; original_write=os.write; original_read=os.read
+writes=0; reads=0
+def path_of(fd):
+    if sys.platform=='darwin': return fcntl.fcntl(fd,50,b'\\0'*1024).split(b'\\0')[0].decode()
+    return os.readlink('/proc/self/fd/'+str(fd))
+def target(path,fd):
+    return os.path.join(path_of(fd),path) if fd is not None else path
+def check(path):
+    global writes
+    if path==root or path.startswith(root+'/'):
+        writes+=1; raise RuntimeError('source write forbidden')
+def opened(path,flags,mode=0o777,*,dir_fd=None):
+    if flags & (os.O_WRONLY|os.O_RDWR|os.O_CREAT|os.O_TRUNC): check(target(path,dir_fd))
+    return original_open(path,flags,mode,dir_fd=dir_fd)
+def written(fd,data):
+    check(path_of(fd)); return original_write(fd,data)
+def read(fd,n):
+    global reads
+    if path_of(fd).startswith(root+'/'): reads+=1
+    return original_read(fd,n)
+def guard(fn):
+    def call(path,*args,**kwargs):
+        check(target(path,kwargs.get('dir_fd'))); return fn(path,*args,**kwargs)
+    return call
+# Preserve Python's advertised dir_fd capability set when wrapping its functions.
+os.supports_dir_fd.add(opened)
+os.open=opened; os.write=written; os.read=read
+for name in ('mkdir','unlink','rmdir'):
+    wrapped=guard(getattr(os,name)); os.supports_dir_fd.add(wrapped); setattr(os,name,wrapped)
+code=sys.argv[-2]; config=sys.argv[-1]; sys.argv=['-c',config]
+try: exec(compile(code,'<descriptor-broker>','exec'))
+finally:
+    fd=original_open(log,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
+    original_write(fd,(json.dumps({'writes':writes,'reads':reads})+'\\n').encode()); os.close(fd)
+`,
+            { mode: 0o700 },
+          );
+          const reader = yield* Reader.acquireMemoryImportReader({
+            ...readerConfig(fixture),
+            descriptorExecutable: wrapper,
+          });
+          const before = captureMemoryImportInventory(fixture.sourceRoot);
+          yield* reader.read({ slot: fixture.snapshot.slot });
+          const records = NodeFS.readFileSync(log, "utf8");
+          assert.equal(
+            (records.match(/"writes": 0/g) ?? []).length,
+            records.trim().split("\n").length,
+          );
+          assert.match(records, /"reads": [1-9]/);
+          assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+          assert.deepEqual(residue(fixture), []);
+        }),
+      ),
+  );
+
+  it.effect("descriptor restat rejects a transient source rewrite without returning bytes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
+        const wrapper = NodePath.join(fixture.sandbox, "descriptor-race");
+        NodeFS.writeFileSync(
+          wrapper,
+          `#!/usr/bin/python3 -I
+import os,sys
+file=r"${NodePath.join(fixture.sourceRoot, "MEMORY.md")}"
+original_read=os.read; mutated=False
+def read(fd,n):
+    global mutated
+    data=original_read(fd,n)
+    if not mutated and data.startswith(b'# Task Group:'):
+        mutated=True
+        with open(file,'rb') as f: original=f.read()
+        with open(file,'wb') as f: f.write(original+b'changed')
+        with open(file,'wb') as f: f.write(original)
+    return data
+os.read=read
+code=sys.argv[-2]; config=sys.argv[-1]; sys.argv=['-c',config]
+exec(compile(code,'<descriptor-broker>','exec'))
+`,
+          { mode: 0o700 },
+        );
+        const reader = yield* Reader.acquireMemoryImportReader({
+          ...readerConfig(fixture),
+          descriptorExecutable: wrapper,
+        });
+        const before = captureMemoryImportInventory(fixture.sourceRoot);
+        assert.equal(
+          (yield* Effect.flip(reader.read({ slot: fixture.snapshot.slot }))).issue,
+          "source_changed",
+        );
+        assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
+
+  it.effect("sealed snapshot keeps one commit when source HEAD moves", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("omo-memory-core-beta63");
+        const head = NodePath.join(fixture.sourceRoot, ".git", "HEAD");
+        const original = NodeFS.readFileSync(head);
+        let moved = false;
+        const reader = yield* Reader.acquireMemoryImportReader({
+          ...readerConfig(fixture),
+          onProcessSpawn: (event) => {
+            if (event.operation === "git" && !moved) {
+              moved = true;
+              NodeFS.writeFileSync(head, "ref: refs/heads/absent\n");
+            }
+          },
+        });
+        const before = captureMemoryImportInventory(fixture.sourceRoot);
+        const value = yield* reader
+          .read({ slot: fixture.snapshot.slot })
+          .pipe(Effect.ensuring(Effect.sync(() => NodeFS.writeFileSync(head, original))));
+        assert.equal(moved, true);
+        assert.equal(value.commitOid, fixture.snapshot.commitOid);
+        assert.deepEqual(value.files, fixture.snapshot.files);
+        assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
+
+  it.effect("missing descriptor capability refuses without source writes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
+        const before = captureMemoryImportInventory(fixture.sourceRoot);
+        assert.equal(
+          (yield* Effect.flip(
+            Reader.acquireMemoryImportReader({
+              ...readerConfig(fixture),
+              descriptorExecutable: "/bin/false",
+            }),
+          )).issue,
+          "source_unreadable",
+        );
+        assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+      }),
+    ),
+  );
+
+  it.effect("64 MiB startup residue equality is removed and +1 is left untouched", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
+        const config = readerConfig(fixture);
+        yield* Reader.cleanupMemoryImportSnapshots(config);
+        const base = NodePath.join(fixture.stateDir, "memory-import", "snapshots");
+        const old = NodePath.join(base, "snapshot-00000000-0000-0000-0000-000000000000");
+        NodeFS.mkdirSync(old, { mode: 0o700 });
+        NodeFS.writeFileSync(NodePath.join(old, "raw"), "", { mode: 0o600 });
+        NodeFS.truncateSync(NodePath.join(old, "raw"), 67108864);
+        yield* Reader.cleanupMemoryImportSnapshots(config);
+        assert.deepEqual(residue(fixture), []);
+        NodeFS.mkdirSync(old, { mode: 0o700 });
+        NodeFS.writeFileSync(NodePath.join(old, "raw"), "", { mode: 0o600 });
+        NodeFS.truncateSync(NodePath.join(old, "raw"), 67108865);
+        assert.equal(
+          (yield* Effect.flip(Reader.cleanupMemoryImportSnapshots(config))).issue,
+          "limit_exceeded",
+        );
+        assert.equal(NodeFS.statSync(NodePath.join(old, "raw")).size, 67108865);
+      }),
+    ),
+  );
+
+  it.effect("source aggregate accepts 8 MiB and refuses +1 before retaining text", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const files = Object.fromEntries(
+          Array.from({ length: 32 }, (_, i) => [
+            `extensions/ad_hoc/notes/n${i}.md`,
+            "a".repeat(262144),
+          ]),
+        );
+        const fixture = yield* buildMemoryImportFixture("codex-ad-hoc-v1", { files });
+        const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+        const value = yield* reader.read({ slot: fixture.snapshot.slot });
+        assert.equal(
+          value.files.reduce((n, f) => n + f.byteCount, 0),
+          8388608,
+        );
+        NodeFS.writeFileSync(
+          NodePath.join(fixture.sourceRoot, "extensions", "ad_hoc", "notes", "extra.md"),
+          "a",
+        );
+        const before = captureMemoryImportInventory(fixture.sourceRoot);
+        assert.equal(
+          (yield* Effect.flip(reader.read({ slot: fixture.snapshot.slot }))).issue,
+          "limit_exceeded",
+        );
+        assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
+
+  it.effect(
+    "Git timeout kills and waits for the owned process before cleanup",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* buildMemoryImportFixture("omo-memory-core-beta63");
+          const wrapper = NodePath.join(fixture.sandbox, "blocked-git");
+          NodeFS.writeFileSync(
+            wrapper,
+            "#!/bin/sh\nexec /usr/bin/python3 -I -S -c 'import signal; signal.pause()'\n",
+            { mode: 0o700 },
+          );
+          let pid = 0;
+          const reader = yield* Reader.acquireMemoryImportReader({
+            ...readerConfig(fixture),
+            gitExecutable: wrapper,
+            onProcessSpawn: (event) => {
+              if (event.operation === "git") pid = event.pid;
+            },
+          });
+          const before = captureMemoryImportInventory(fixture.sourceRoot);
+          assert.equal(
+            (yield* Effect.flip(reader.read({ slot: fixture.snapshot.slot }))).issue,
+            "source_unreadable",
+          );
+          assert.isAbove(pid, 0);
+          assert.throws(() => process.kill(pid, 0));
+          assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+          assert.deepEqual(residue(fixture), []);
+        }),
+      ),
+    20000,
+  );
+  it.effect("64 MiB copied/generated slot equality includes the minimal config", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("omo-memory-core-beta63");
+        const metadata = NodePath.join(fixture.sourceRoot, ".git");
+        const inventory = captureMemoryImportInventory(metadata).entries;
+        const objectBytes = inventory
+          .filter((e) => e.path.startsWith("objects/"))
+          .reduce((n, e) => n + (e.bytes ?? 0), 0);
+        const configBytes = Buffer.byteLength(
+          "[core]\n\trepositoryformatversion = 0\n\tbare = true\n",
+        );
+        const referenceBytes = inventory
+          .filter(
+            (e) => e.path === "HEAD" || e.path === "packed-refs" || e.path.startsWith("refs/"),
+          )
+          .reduce((n, e) => n + (e.bytes ?? 0), 0);
+        const objects = NodePath.join(
+          metadata,
+          "objects",
+          "pack",
+          "pack-0000000000000000000000000000000000000000.pack",
+        );
+        const refs = NodePath.join(metadata, "refs", "padding");
+        NodeFS.writeFileSync(objects, Buffer.alloc(62914560 - objectBytes));
+        NodeFS.writeFileSync(refs, Buffer.alloc(4194304 - referenceBytes - configBytes));
+        const wrapper = NodePath.join(fixture.sandbox, "old-git");
+        NodeFS.writeFileSync(wrapper, "#!/bin/sh\nprintf 'git version 2.39.0\\n'\n", {
+          mode: 0o700,
+        });
+        let calls = 0;
+        const reader = yield* Reader.acquireMemoryImportReader({
+          ...readerConfig(fixture),
+          gitExecutable: wrapper,
+          onProcessSpawn: (e) => {
+            if (e.operation === "git") calls++;
+          },
+        });
+        const before = captureMemoryImportInventory(fixture.sourceRoot);
+        assert.equal(
+          (yield* Effect.flip(reader.read({ slot: fixture.snapshot.slot }))).issue,
+          "source_unreadable",
+        );
+        assert.equal(calls, 1);
+        assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+        NodeFS.appendFileSync(refs, "a");
+        assert.equal(
+          (yield* Effect.flip(reader.read({ slot: fixture.snapshot.slot }))).issue,
+          "limit_exceeded",
+        );
+        assert.equal(calls, 1);
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
+
+  it.effect("4096 metadata entry equality counts excluded logs, +1 refuses", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("omo-memory-core-beta63");
+        const metadata = NodePath.join(fixture.sourceRoot, ".git");
+        const logs = NodePath.join(metadata, "logs");
+        NodeFS.mkdirSync(logs, { recursive: true });
+        const initial = 4 + captureMemoryImportInventory(metadata).entries.length - 1;
+        for (let i = initial; i < 4096; i++)
+          NodeFS.writeFileSync(NodePath.join(logs, `excluded-${i}`), "");
+        const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+        yield* reader.read({ slot: fixture.snapshot.slot });
+        NodeFS.writeFileSync(NodePath.join(logs, "plus-one"), "");
+        const before = captureMemoryImportInventory(fixture.sourceRoot);
+        assert.equal(
+          (yield* Effect.flip(reader.read({ slot: fixture.snapshot.slot }))).issue,
+          "limit_exceeded",
+        );
+        assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
 });
