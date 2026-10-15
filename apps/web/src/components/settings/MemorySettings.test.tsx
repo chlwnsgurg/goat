@@ -686,6 +686,8 @@ async function supportedScreen(withDetails = true) {
     serverConfig: { environment: { capabilities: { memory: { protocolVersion: 1 } } } },
   };
   state.queries.set("read", Option.some(activeItem));
+  if (!state.responses.has("syncStatus"))
+    state.responses.set("syncStatus", success({ state: "online", memorySpaceId: id(1) }));
   state.responses.set("hubSettingsGet", success(hubView(2)));
   state.responses.set("ownerSourceReadPolicyGet", success(ownerView(2, "device-a")));
   const target = validateMemorySettingsSearch({
@@ -1410,7 +1412,7 @@ it("explains the device limit and starts a fresh add after removing a device", a
   const Cause = await import("effect/Cause");
   const { MemoryRpcError } = await import("@goat/contracts");
   const Schema = await import("effect/Schema");
-  const capacity = Schema.decodeUnknownSync(MemoryRpcError)({
+  const capacity = Schema.decodeSync(MemoryRpcError)({
     _tag: "MemoryRpcError",
     code: "capacity_exceeded",
     capacity: {
@@ -1440,10 +1442,10 @@ it("explains the device limit and starts a fresh add after removing a device", a
   await click("Remove");
   state.responses.set("hubSettingsUpdate", success({ view: hubView(6), credential: null }));
   await click("Remove device");
-  state.executors.set("hubSettingsUpdate", async () => ({
-    _tag: "Failure",
-    cause: Cause.fail(capacity),
-  }));
+  state.executors.set("hubSettingsUpdate", async (raw) => {
+    state.calls(raw);
+    return { _tag: "Failure", cause: Cause.fail(capacity) };
+  });
   await selectAddDevice();
   await click("Confirm");
   const fresh = state.calls.mock.calls

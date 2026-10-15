@@ -98,6 +98,7 @@ function sessionScopes(scopes: ReadonlyArray<AuthEnvironmentScope>): AuthSession
     },
   };
 }
+const decodeMemoryPage = Schema.decodeUnknownEffect(MemoryPage);
 const decodeSignal = Schema.decodeUnknownSync(MemoryChangeSignal);
 const decodeImport = Schema.decodeUnknownSync(MemoryImportProviderResult);
 const signal = (kind: MemoryChangeSignal["kind"], memoryId = id) =>
@@ -175,7 +176,11 @@ function waitFor<A>(
     Stream.runHead,
   );
 }
-const harness = Effect.fn(function* (ledger = createMemoryTombstoneLedger(), pageValue = page) {
+const harness = Effect.fn(function* (
+  ledger = createMemoryTombstoneLedger(),
+  pageValue = page,
+  repeatPages = false,
+) {
   const registry = AtomRegistry.make();
   yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
   const queue = yield* Queue.unbounded<
@@ -195,7 +200,7 @@ const harness = Effect.fn(function* (ledger = createMemoryTombstoneLedger(), pag
   const responded = new Set<string>();
   const respondOnce = <A>(method: string, value: A) =>
     Effect.suspend(() => {
-      if (responded.has(method)) return Effect.never;
+      if (responded.has(method) && !repeatPages) return Effect.never;
       responded.add(method);
       return Deferred.await(reply).pipe(Effect.as(value));
     });
@@ -1217,7 +1222,7 @@ it.effect.each([
             derivedFromMemoryRevisions: [item.revision.revisionId],
           },
         };
-        const stalePage = yield* Schema.decodeUnknownEffect(MemoryPage)(
+        const stalePage = yield* decodeMemoryPage(
           {
             ...page,
             nextCursor: "next-page",
@@ -1225,7 +1230,7 @@ it.effect.each([
           },
           { onExcessProperty: "error" },
         );
-        const h = yield* harness(createMemoryTombstoneLedger(), stalePage);
+        const h = yield* harness(createMemoryTombstoneLedger(), stalePage, true);
         const exposure = h.memory.exposureAtom(target);
         h.registry.mount(exposure);
         yield* Queue.offer(h.queue, signal("reset"));
@@ -1283,7 +1288,7 @@ it.effect("keeps schema-decoded forgotten rows visible after observing the same 
         suppressedContent: [],
         sourceExclusions: [],
       };
-      const forgottenPage = yield* Schema.decodeUnknownEffect(MemoryPage)(
+      const forgottenPage = yield* decodeMemoryPage(
         {
           ...page,
           items: [
@@ -1326,7 +1331,8 @@ it.effect("keeps schema-decoded forgotten rows visible after observing the same 
         "forgotten",
         "active",
       ]);
-      expect(JSON.stringify(result.value.value)).not.toContain("Synthetic memory");
+      expect(result.value.value.items[0]).toEqual(forgottenPage.items[0]);
+      expect(result.value.value.items[0]).not.toHaveProperty("payload");
     }),
   ),
 );

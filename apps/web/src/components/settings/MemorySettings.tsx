@@ -1,4 +1,4 @@
-import { XIcon } from "lucide-react";
+import { XIcon } from "../solar";
 import { MemoryAdministration } from "./MemorySharingSettings";
 import { randomUUID } from "../../lib/utils";
 import { RegistryContext, useAtom, useAtomValue } from "@effect/atom-react";
@@ -222,7 +222,8 @@ function MemoryDestinationContent({
     };
   }, [canSync, environmentId, getSync, syncReload]);
   const refreshBootstrap = useCallback(() => setSyncReload((value) => value + 1), []);
-  const readySpace = sync && sync.state !== "disabled" ? sync.memorySpaceId : null;
+  const readySpace =
+    sync && sync.state !== "disabled" && sync.state !== "bootstrapping" ? sync.memorySpaceId : null;
   const [savedSpace, setSavedSpace] = useState<MemorySpaceId | null>(null);
   if (readySpace && readySpace !== savedSpace) setSavedSpace(readySpace);
   const memorySpaceId = target.memorySpaceId ?? readySpace ?? savedSpace;
@@ -608,8 +609,9 @@ function MemoryDetails({
   }, []);
   return (
     <SettingsSection title="Memory details" id="memory-details">
-      <SettingsRow title={item?.status === "forgotten" ? "Forgotten memory" : "Memory"}>
-        <div ref={detailsRef} tabIndex={-1} aria-label="Memory details" className="space-y-3">
+      <SettingsRow
+        title={item?.status === "forgotten" ? "Forgotten memory" : "Memory"}
+        control={
           <div className="flex items-center justify-end gap-2">
             {item?.status === "active" && canWrite ? (
               <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
@@ -644,6 +646,9 @@ function MemoryDetails({
               <XIcon />
             </Button>
           </div>
+        }
+      >
+        <div ref={detailsRef} tabIndex={-1} aria-label="Memory details" className="space-y-3">
           {read.error || history.error ? <p role="alert">{read.error ?? history.error}</p> : null}
           {item ? (
             <>
@@ -714,15 +719,11 @@ function MemoryDetails({
                   </MemoryHistoryDisclosure>
                 );
               })}
-              {value.revisions.length > 0 ? (
-                <h3 className="text-sm font-medium">
-                  {value.resolutions.length ? "Retained originals" : "History"}
-                </h3>
-              ) : null}
+              {value.revisions.length > 0 ? <h3 className="text-sm font-medium">History</h3> : null}
               {value.revisions.map((entry, index) => (
                 <MemoryHistoryDisclosure
                   key={entry.revision.revisionId}
-                  title={`${value.resolutions.length ? "Original" : "Version"} ${index + 1}`}
+                  title={`${value.resolutions.some(({ resolution }) => resolution.inputRevisionIds.includes(entry.revision.revisionId)) ? "Original" : "Version"} ${index + 1}`}
                   description={formatTimestamp(entry.revision.createdAtUtc, "locale")}
                 >
                   <p className="whitespace-pre-wrap break-words">
