@@ -169,9 +169,16 @@ const make = Effect.gen(function* () {
             ? 0
             : utf8(yield* payloadJson(op.payload).pipe(Effect.mapError(storageError)));
         const oldPayloadBytes = yield* Effect.reduce(
-          current.revisions.filter(
-            (pair) => current.heads.includes(pair.revision.revisionId) && pair.payload !== null,
-          ),
+          [
+            ...new Map(
+              current.revisions
+                .filter(
+                  (pair) =>
+                    current.heads.includes(pair.revision.revisionId) && pair.payload !== null,
+                )
+                .map((pair) => [pair.revision.payloadRef, pair]),
+            ).values(),
+          ],
           () => 0,
           (sum, pair) => Effect.map(payloadJson(pair.payload!), (json) => sum + utf8(json)),
         ).pipe(Effect.mapError(storageError));
@@ -298,7 +305,9 @@ const make = Effect.gen(function* () {
           charge(
             "history",
             usage.historyBytes,
-            oldPayloadBytes +
+            (op.kind === "upsert" && op.revision.payloadRef !== op.revision.revisionId
+              ? 0
+              : oldPayloadBytes) +
               (op.kind === "resolve"
                 ? utf8(
                     yield* resolutionPayloadJson(op.resolutionPayload).pipe(

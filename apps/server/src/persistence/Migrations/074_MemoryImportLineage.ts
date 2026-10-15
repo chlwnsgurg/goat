@@ -149,7 +149,7 @@ export default Effect.gen(function* () {
     `EXISTS(SELECT 1 FROM memory_import_receipts r WHERE r.space=${space} AND r.memory_id=${id} AND r.record_kind='item')`;
   const liveCount = (p: string) => `CASE WHEN ${p}.status!='forgotten' THEN 1 ELSE 0 END`;
   const liveBytes = (p: string) =>
-    `CASE WHEN ${p}.status='forgotten' THEN 0 ELSE (SELECT coalesce(sum(length(CAST(json_extract(b.body_json,'$.text') AS BLOB))),0) FROM json_each(${p}.heads_json) h JOIN memory_payloads b ON b.space=${p}.space AND b.payload_ref=h.value) END`;
+    `CASE WHEN ${p}.status='forgotten' THEN 0 ELSE (SELECT coalesce(sum(length(CAST(json_extract(b.body_json,'$.text') AS BLOB))),0) FROM memory_payloads b WHERE b.space=${p}.space AND b.payload_ref IN (SELECT v.payload_ref FROM json_each(${p}.heads_json) h JOIN memory_revisions v ON v.space=${p}.space AND v.revision_id=h.value)) END`;
   const liveDelta = (count: string, bytes: string, sign: number) =>
     counter("'_hub_global'", "import_live_items", `${sign}*(${count})`) +
     counter("'_hub_global'", "import_live_bytes", `${sign}*(${bytes})`);
@@ -173,6 +173,12 @@ export default Effect.gen(function* () {
       `CREATE TRIGGER memory_items_import_${action.toLowerCase()} AFTER ${action} ON memory_items WHEN ${owned(p + ".space", p + ".memory_id")} BEGIN ${body} END`,
     );
   }
+  // Purge deletes dependent bodies before publishing their blocked projection.
+  // Release the still-live head charge while OLD body bytes remain available;
+  // the later item update sees no payload and therefore cannot release it twice.
+  yield* sql.unsafe(`CREATE TRIGGER memory_payloads_import_live_delete BEFORE DELETE ON memory_payloads
+    WHEN ${owned("OLD.space", "OLD.memory_id")}
+    BEGIN ${counter("'_hub_global'", "import_live_bytes", `-coalesce(length(CAST(json_extract(OLD.body_json,'$.text') AS BLOB)),0) * (SELECT count(*) FROM memory_items i WHERE i.space=OLD.space AND i.memory_id=OLD.memory_id AND i.status!='forgotten' AND EXISTS(SELECT 1 FROM json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE v.payload_ref=OLD.payload_ref))`)} END`);
   const mappedDelta = (p: string, sign: number) =>
     liveDelta(
       `(SELECT coalesce(sum(${liveCount("i")}),0) FROM memory_items i WHERE i.space=${p}.space AND i.memory_id=${p}.memory_id)`,

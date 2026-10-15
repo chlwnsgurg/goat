@@ -1,3 +1,17 @@
+import * as Config from "effect/Config";
+import * as DateTime from "effect/DateTime";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Console from "effect/Console";
+import * as FileSystem from "effect/FileSystem";
+import * as Stream from "effect/Stream";
+import * as Worker from "./MemoryWorker.ts";
+import * as Maintenance from "./MemoryFtsMaintenance.ts";
+import * as Hub from "./MemoryHubService.ts";
+import * as Compactor from "./MemoryCompactor.ts";
+import * as Settings from "../serverSettings.ts";
+import * as Generation from "../textGeneration/TextGeneration.ts";
+import * as RuntimeIdentity from "../runtimeIdentity.ts";
+import * as Events from "../orchestration-v2/EventSink.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
@@ -280,7 +294,11 @@ const seedMember = Effect.gen(function* () {
     VALUES (${space},${environmentId},${"a".repeat(64)},1,'active',0)`;
 });
 // A fresh database models the hub; its approval cannot mutate the origin item fixture.
-const remoteApproval = (operation: M.MemoryOperation, forgotten = false) =>
+const remoteApproval = (
+  operation: M.MemoryOperation,
+  forgotten = false,
+  predecessors: readonly M.MemoryOperation[] = [],
+) =>
   Effect.gen(function* () {
     yield* seedMember;
     const service = yield* Service.MemoryService;
@@ -311,10 +329,17 @@ const remoteApproval = (operation: M.MemoryOperation, forgotten = false) =>
         }),
       );
     }
+    for (const predecessor of predecessors)
+      yield* (yield* Store.MemoryStore).transact(
+        service.admitHubOperationTx({ authority, operation: predecessor }),
+      );
     return yield* (yield* Store.MemoryStore).transact(
       service.admitHubOperationTx({ authority, operation }),
     );
   }).pipe(Effect.provide(Layer.fresh(importLive)));
+const decodeReceiptEnvelope = Schema.decodeEffect(
+  Schema.fromJsonString(Schema.Struct({ receipt: M.MemoryImportReceipt })),
+);
 const encodeUnknown = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const retired = Effect.fnUntraced(function* (p: PreparedImportCommit) {
   const sql = yield* SqlClient.SqlClient;
@@ -1002,14 +1027,54 @@ describe("MemoryImport M3c final fences", () => {
         .pipe(Effect.flip);
       assert.strictEqual(stale._tag, "MemoryStoreConflict");
       assert.deepStrictEqual(yield* durableInventory, before);
+      const sql = yield* SqlClient.SqlClient;
+      const bodies = yield* sql`SELECT * FROM memory_payloads ORDER BY space,payload_ref`;
       assert.strictEqual((yield* service.importPorts.commit(p, Effect.void)).outcome, "aliased");
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_payloads ORDER BY space,payload_ref`,
+        bodies,
+      );
+      assert.strictEqual(
+        (yield* sql<{ value: number }>`SELECT value FROM memory_quota_counters
+        WHERE space='_hub_global' AND dimension='import_live_bytes'`)[0]?.value,
+        new TextEncoder().encode(rejected.candidate.payload.text).length,
+      );
       const op = yield* store.readOperation(space, p.selection.operationId);
       if (op?.kind !== "upsert") return assert.fail("expected alias intent");
       assert.deepStrictEqual(op.revision.parents, [targetRev]);
+      assert.strictEqual(op.revision.payloadRef, operation.revision.payloadRef);
+      const aliasUsage = yield* store.usage(space, { kind: "user" });
+      assert.isAbove(aliasUsage.liveBytes, 0);
+      assert.strictEqual(aliasUsage.historyBytes, 0);
+      assert.strictEqual(
+        (yield* store.loadAggregate(space, memoryId)).revisions.find(
+          (r) => r.revision.revisionId === op.revision.revisionId,
+        )?.revision.payloadRef,
+        operation.revision.payloadRef,
+      );
+      assert.strictEqual(
+        (yield* service.importPorts.readReceipt(p.batch, Effect.void)).sessionBodyBytes,
+        0,
+      );
       assert.deepStrictEqual(
         (yield* service.importPorts.readItem(item, Effect.void))?.pending,
         p.next.pending,
       );
+      const aliasApproval = yield* remoteApproval(op, false, [operation]);
+      assert.strictEqual(aliasApproval.outcome, "accepted");
+      yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, aliasApproval);
+      assert.deepStrictEqual(
+        (yield* service.importPorts.readItem(item, Effect.void))?.accepted,
+        p.next.pending,
+      );
+      assert.strictEqual((yield* store.readImportLineage(space, memoryId)).length, 2);
+      // Expired scheduling on a shared historical ref must not purge a live alias head.
+      yield* sql`UPDATE memory_payloads SET purge_eligible_after=0,replaced_at=0 WHERE payload_ref=${op.revision.payloadRef}`;
+      yield* store.prunePayloads(
+        Date.parse(stamp) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS + 1,
+        32,
+      );
+      assert.strictEqual((yield* sql`SELECT * FROM memory_payloads`).length, 1);
     }).pipe(Effect.provide(importLive)),
   );
 });
@@ -1727,5 +1792,1137 @@ describe("MemoryImport origin admission", () => {
       const receipt = yield* service.importPorts.readReceipt(first.batch, Effect.void);
       assert.strictEqual(receipt.sessionBodyBytes, 0);
     }).pipe(Effect.provide(importLive)),
+  );
+});
+
+const allMemoryInventory = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql<{
+    name: string;
+  }>`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'memory_%' ORDER BY name`;
+  const result: Record<string, readonly string[]> = {};
+  for (const table of tables) {
+    const rows = yield* sql.unsafe(`SELECT * FROM "${table.name.replaceAll('"', '""')}"`);
+    result[table.name] = rows.map((row) => encodeUnknown(row)).sort();
+  }
+  return result;
+});
+const repository = {
+  canonicalKey: "github.com/synthetic/import",
+  rootPath: "/synthetic",
+  locator: {
+    source: "git-remote" as const,
+    remoteName: "origin",
+    remoteUrl: "https://github.com/synthetic/import.git",
+  },
+};
+const repositoryImportLive = Service.layer.pipe(
+  Layer.provide(identity),
+  Layer.provide(
+    Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+      resolve: () => Effect.succeed(repository),
+    }),
+  ),
+  Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(live))),
+);
+describe("MemoryImport M3d", () => {
+  it.effect(
+    "preparation binding resolves without writes and materializes only inside successful commit",
+    () =>
+      Effect.gen(function* () {
+        yield* setupImport;
+        const sql = yield* SqlClient.SqlClient;
+        const ports = (yield* Service.MemoryService).importPorts;
+        yield* sql`CREATE TABLE projection_projects(project_id TEXT PRIMARY KEY,workspace_root TEXT,deleted_at TEXT)`;
+        yield* sql`INSERT INTO projection_projects VALUES ('synthetic-project','/synthetic',NULL)`;
+        const project = { environmentId, projectId: M.ProjectId.make("synthetic-project") };
+        const before = yield* allMemoryInventory;
+        const binding = yield* ports.binding({ memorySpaceId: space, project }, Effect.void);
+        assert.isNotNull(binding.repositoryKey);
+        assert.deepStrictEqual(yield* ports.resolveProjectKey(space, project), binding.projectKey);
+        assert.deepStrictEqual(yield* allMemoryInventory, before);
+        if (!binding.projectKey) return assert.fail("expected derived binding");
+        const p = prepared();
+        const scope: M.MemoryScope = { kind: "project", projectKey: binding.projectKey };
+        const selection = { ...p.selection, selector: { ...p.selection.selector, scope, project } };
+        const mapped = {
+          ...p,
+          selection,
+          batch: { ...p.batch, selections: [selection] },
+          next: { ...p.next, scope },
+          projectBinding: binding,
+        };
+        const denied = yield* ports
+          .commit({ ...mapped, expectedHeads: [M.MemoryRevisionId.make(uuid(999))] }, Effect.void)
+          .pipe(Effect.flip);
+        assert.strictEqual(denied._tag, "MemoryStoreConflict");
+        assert.deepStrictEqual(yield* allMemoryInventory, before);
+        yield* ports.commit(mapped, Effect.void);
+        assert.strictEqual((yield* sql`SELECT * FROM memory_project_bindings`).length, 1);
+      }).pipe(Effect.provide(repositoryImportLive)),
+  );
+  it.effect("hubReceipt-only approval refuses incomplete lineage without backfill", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const sql = yield* SqlClient.SqlClient;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const p = prepared();
+      yield* service.importPorts.commit(p, Effect.void);
+      const op = (yield* store.readOperation(space, p.selection.operationId))!;
+      const receipt = yield* remoteApproval(op);
+      yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, receipt);
+      yield* sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${space},'hubReceipt',${op.operationId},${memoryId},${encodeUnknown({ receipt, memoryId })})`;
+      yield* sql`DELETE FROM memory_events WHERE memory_space_id=${space}`;
+      yield* sql`DELETE FROM memory_compact_receipts WHERE space=${space}`;
+      yield* sql`DELETE FROM memory_import_lineage WHERE space=${space}`;
+      const before = yield* allMemoryInventory;
+      const guard = yield* store
+        .transact(store.requireImportLineageCompleteTx(space))
+        .pipe(Effect.flip);
+      assert.strictEqual(guard._tag, "MemoryStoreConflict");
+      if (guard._tag === "MemoryStoreConflict")
+        assert.strictEqual(guard.code, "bootstrap_required");
+      const callback = yield* service.importPorts.readItem(p.next, Effect.void).pipe(Effect.flip);
+      assert.strictEqual(callback._tag, "MemoryStoreConflict");
+      if (callback._tag === "MemoryStoreConflict")
+        assert.strictEqual(callback.code, "bootstrap_required");
+      assert.deepStrictEqual(yield* allMemoryInventory, before);
+    }).pipe(Effect.provide(importLive)),
+  );
+  it.effect("public receipt not_found commits lazy retirement", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const p = prepared();
+      yield* service.importPorts.commit(p, Effect.void);
+      const op = (yield* store.readOperation(space, p.selection.operationId))!;
+      yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, yield* remoteApproval(op));
+      yield* TestClock.setTime(Date.parse(stamp) + M.MEMORY_IMPORT_BATCH_RETENTION_MS + 1);
+      const failure = yield* service.importPorts
+        .readReceipt(p.batch, Effect.void)
+        .pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryRpcError");
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql<{
+        kind: string;
+      }>`SELECT json_extract(completed_items_json,'$.kind') AS kind FROM memory_import_receipts WHERE batch_operation_id=${p.batch.operationId}`;
+      assert.strictEqual(rows[0]?.kind, "retired");
+    }).pipe(Effect.provide(importLive)),
+  );
+  it.effect.each([
+    "B accepted C rejected",
+    "C accepted B accepted",
+    "B rejected C accepted",
+  ] as const)("settles delayed observations: %s", (order) =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const ports = service.importPorts;
+      const a = prepared();
+      yield* ports.commit(a, Effect.void);
+      const aOp = (yield* store.readOperation(space, a.selection.operationId))!;
+      yield* store.acknowledgeOutbox(
+        `sync:${space}:${aOp.operationId}`,
+        yield* remoteApproval(aOp),
+      );
+      const acceptedA = (yield* ports.readItem(a.next, Effect.void))!;
+      const regB = (yield* ports.readRegistration(
+        { ...address, sourceId, by: "source" },
+        Effect.void,
+      ))!;
+      const b = prepared(regB, 30, acceptedA);
+      yield* ports.commit(b, Effect.void);
+      const pendingB = (yield* ports.readItem(a.next, Effect.void))!;
+      const regC = (yield* ports.readRegistration(
+        { ...address, sourceId, by: "source" },
+        Effect.void,
+      ))!;
+      const cBase = prepared(regC, 50, pendingB);
+      const cFingerprint = "f".repeat(64);
+      const rawC = {
+        ...cBase,
+        candidate: { ...cBase.candidate, sourceFingerprint: cFingerprint },
+        selection: {
+          ...cBase.selection,
+          selector: { ...cBase.selection.selector, sourceFingerprint: cFingerprint },
+        },
+        next: {
+          ...cBase.next,
+          pending: { ...cBase.next.pending!, sourceFingerprint: cFingerprint },
+        },
+      };
+      const cSelection = {
+        ...rawC.selection,
+        result: { ...rawC.selection.result!, outcome: "conflicted" as const },
+      };
+      const c = {
+        ...rawC,
+        selection: cSelection,
+        batch: { ...rawC.batch, selections: [cSelection] },
+        next: { ...rawC.next, outcome: "conflicted" as const },
+        expectedHeads: [b.selection.revisionId],
+      };
+      yield* ports.commit(c, Effect.void);
+      const ack = (p: PreparedImportCommit, outcome: "accepted" | "rejected", sequence: number) =>
+        Effect.gen(function* () {
+          const saved = (yield* store.receipt(space, p.selection.operationId))!;
+          const receipt: M.MemoryHubReceipt = {
+            operationId: p.selection.operationId,
+            memoryId,
+            operationDigest: saved.operationDigest,
+            outcome,
+            hubSequence: outcome === "accepted" ? sequence : null,
+            ...(outcome === "rejected" ? { failureCode: "forgotten" as const } : {}),
+          };
+          yield* store.acknowledgeOutbox(`sync:${space}:${p.selection.operationId}`, receipt);
+          return receipt;
+        });
+      let bReceipt: M.MemoryHubReceipt;
+      let cReceipt: M.MemoryHubReceipt;
+      if (order === "C accepted B accepted") {
+        cReceipt = yield* ack(c, "accepted", 3);
+        bReceipt = yield* ack(b, "accepted", 2);
+      } else {
+        bReceipt = yield* ack(b, order === "B rejected C accepted" ? "rejected" : "accepted", 2);
+        const intermediate = (yield* ports.readItem(a.next, Effect.void))!;
+        assert.deepStrictEqual(intermediate.pending, c.next.pending);
+        if (order === "B accepted C rejected")
+          assert.deepStrictEqual(intermediate.accepted, b.next.pending);
+        cReceipt = yield* ack(c, order === "B accepted C rejected" ? "rejected" : "accepted", 3);
+      }
+      const item = (yield* ports.readItem(a.next, Effect.void))!;
+      assert.deepStrictEqual(
+        item.accepted,
+        order === "B accepted C rejected" ? b.next.pending : c.next.pending,
+      );
+      assert.strictEqual(item.pending, null);
+      assert.strictEqual(
+        (yield* ports.readReceipt(b.batch, Effect.void)).items[0]!.outcome,
+        bReceipt.outcome === "rejected" ? "rejected" : "revised",
+      );
+      assert.strictEqual((yield* ports.readReceipt(c.batch, Effect.void)).sessionBodyBytes, 50);
+      const before = yield* allMemoryInventory;
+      yield* store.acknowledgeOutbox(`sync:${space}:${b.selection.operationId}`, bReceipt);
+      yield* store.acknowledgeOutbox(`sync:${space}:${c.selection.operationId}`, cReceipt);
+      assert.deepStrictEqual(yield* allMemoryInventory, before);
+    }).pipe(Effect.provide(importLive)),
+  );
+  it.effect("noop follows reused pending refusal and retains details through 30-day boundary", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const ports = service.importPorts;
+      const a = prepared();
+      yield* ports.commit(a, Effect.void);
+      const reg = (yield* ports.readRegistration(
+        { ...address, sourceId, by: "source" },
+        Effect.void,
+      ))!;
+      const raw = prepared(reg, 30, a.next);
+      const selection = { ...raw.selection, selector: a.selection.selector, result: null };
+      const noop = {
+        ...raw,
+        selection,
+        batch: { ...raw.batch, selections: [selection] },
+        candidate: a.candidate,
+        next: { ...a.next, outcome: "noop" as const },
+        expectedHeads: [a.selection.revisionId],
+      };
+      yield* ports.commit(noop, Effect.void);
+      // Cancellation of transport work is not a canonical settlement.
+      yield* store.finishWork(`sync:${space}:${a.selection.operationId}`, "cancelled");
+      yield* TestClock.setTime(Date.parse(stamp) + M.MEMORY_IMPORT_BATCH_RETENTION_MS + 1);
+      assert.strictEqual(
+        (yield* ports.preflightBatch(
+          { ...noop.batch, selectionDigest: noop.batch.selectionDigest },
+          Effect.void,
+        )).kind,
+        "completed",
+      );
+      const op = (yield* store.readOperation(space, a.selection.operationId))!;
+      const saved = (yield* store.receipt(space, op.operationId))!;
+      const capacity: M.MemoryCapacityExceeded = {
+        code: "capacity_exceeded",
+        dimension: "import_lineage_records",
+        current: 1001,
+        limit: 1000,
+        reclaimable: 0,
+      };
+      yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, {
+        operationId: op.operationId,
+        memoryId,
+        operationDigest: saved.operationDigest,
+        outcome: "rejected",
+        hubSequence: null,
+        failureCode: "capacity_exceeded",
+        capacity,
+      });
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql<{
+        completed_items_json: string;
+      }>`SELECT completed_items_json FROM memory_import_receipts WHERE batch_operation_id=${noop.batch.operationId}`;
+      const decoded = yield* decodeReceiptEnvelope(rows[0]!.completed_items_json);
+      const receipt = decoded.receipt;
+      assert.strictEqual(receipt.items[0]!.issue, "capacity_exceeded");
+      assert.deepStrictEqual(receipt.items[0]!.capacity, capacity);
+      const failure = yield* ports.readReceipt(noop.batch, Effect.void).pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryRpcError");
+    }).pipe(Effect.provide(importLive)),
+  );
+});
+
+describe("MemoryImport dependent purge accounting", () => {
+  it.effect("returns dependent head bytes on forget, rollback, replay and quota reuse", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const a = M.MemoryId.make(uuid(970));
+      yield* service.upsert(
+        {
+          memorySpaceId: space,
+          memoryId: a,
+          operationId: M.MemoryOperationId.make(uuid(971)),
+          baseBoundary: null,
+          expectedHeads: [],
+          scope: { kind: "user" },
+          assertionKind: "inference",
+          payload: { text: "synthetic dependency", evidence: [], derivedFromMemoryRevisions: [] },
+        },
+        Effect.void,
+      );
+      const source = yield* store.loadAggregate(space, a);
+      const first = prepared();
+      yield* service.importPorts.commit(first, Effect.void);
+      yield* service.upsert(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(uuid(972)),
+          baseBoundary: null,
+          expectedHeads: (yield* store.loadAggregate(space, memoryId)).heads,
+          scope: { kind: "user" },
+          assertionKind: "inference",
+          payload: {
+            text: "dependent head bytes",
+            evidence: [],
+            derivedFromMemoryRevisions: source.heads,
+          },
+        },
+        Effect.void,
+      );
+      const bytes = Effect.gen(function* () {
+        return (yield* sql<{ value: number }>`SELECT value FROM memory_quota_counters
+          WHERE space='_hub_global' AND dimension='import_live_bytes'`)[0]!.value;
+      });
+      // Resolution judgments share this table but carry no text/live-head charge.
+      yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json)
+        VALUES (${space},${uuid(995)},${memoryId},${encodeUnknown({ resolutionId: uuid(995), judgment: "synthetic judgment" })},'[]')`;
+      assert.strictEqual(yield* bytes, 20);
+      const forget = {
+        memorySpaceId: space,
+        memoryId: a,
+        operationId: M.MemoryOperationId.make(uuid(973)),
+        expectedHeads: source.heads,
+      };
+      const before = yield* allMemoryInventory;
+      yield* store
+        .transact(
+          Effect.gen(function* () {
+            yield* service.forget(forget, Effect.void);
+            assert.strictEqual(yield* bytes, 0);
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.deepStrictEqual(yield* allMemoryInventory, before);
+      yield* service.forget(forget, Effect.void);
+      assert.strictEqual((yield* store.loadAggregate(space, memoryId)).item?.status, "blocked");
+      assert.strictEqual(
+        (yield* sql`SELECT * FROM memory_payloads WHERE memory_id=${memoryId}`).length,
+        0,
+      );
+      assert.strictEqual(yield* bytes, 0);
+      yield* service.forget(forget, Effect.void);
+      assert.strictEqual(yield* bytes, 0);
+      yield* service.forget(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(uuid(974)),
+          expectedHeads: (yield* store.loadAggregate(space, memoryId)).heads,
+        },
+        Effect.void,
+      );
+      assert.strictEqual(yield* bytes, 0);
+      const reg = (yield* service.importPorts.readRegistration(
+        { ...address, sourceId, by: "source" },
+        Effect.void,
+      ))!;
+      const next = prepared(reg, 980);
+      const freshId = M.MemoryId.make(uuid(990));
+      const selection = {
+        ...next.selection,
+        memoryId: freshId,
+        result: null,
+        selector: { ...next.selection.selector, sourceItemKey: "quota-reuse" },
+      };
+      yield* sql`UPDATE memory_quota_counters SET value=${M.MEMORY_IMPORT_MAX_LIVE_BODY_BYTES - 16}
+        WHERE space='_hub_global' AND dimension='import_live_bytes'`;
+      yield* service.importPorts.commit(
+        {
+          ...next,
+          selection,
+          batch: { ...next.batch, selections: [selection] },
+          candidate: {
+            ...next.candidate,
+            sourceItemKey: "quota-reuse",
+            contentFingerprint: "f".repeat(64),
+            payload: { ...next.candidate.payload, text: "quota reused new" },
+          },
+          next: {
+            ...next.next,
+            memoryId: freshId,
+            sourceItemKey: "quota-reuse",
+            pending: { ...next.next.pending!, contentFingerprint: "f".repeat(64) },
+          },
+        },
+        Effect.void,
+      );
+      assert.strictEqual(yield* bytes, M.MEMORY_IMPORT_MAX_LIVE_BODY_BYTES);
+    }).pipe(Effect.provide(importLive)),
+  );
+});
+
+describe("MemoryImport M3d alias ownership", () => {
+  it.effect("rejects forged shared payloads atomically at the canonical Store boundary", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      yield* seedMember;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const p = prepared();
+      yield* service.importPorts.commit(p, Effect.void);
+      const op = (yield* store.readOperation(space, p.selection.operationId))!;
+      if (op.kind !== "upsert") return assert.fail("expected upsert");
+      yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, yield* remoteApproval(op));
+      const operationId = M.MemoryOperationId.make(uuid(930));
+      const forged = {
+        ...op,
+        operationId,
+        expectedHeads: [op.revision.revisionId],
+        revision: {
+          ...op.revision,
+          operationId,
+          revisionId: M.MemoryRevisionId.make(uuid(931)),
+          parents: [op.revision.revisionId],
+        },
+        payload: { ...op.payload, text: "forged shared body" },
+      };
+      const before = yield* allMemoryInventory;
+      const failure = yield* store
+        .transact(service.admitHubOperationTx({ authority, operation: forged }))
+        .pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryStoreConflict");
+      if (failure._tag === "MemoryStoreConflict")
+        assert.strictEqual(failure.code, "identity_mismatch");
+      assert.deepStrictEqual(yield* allMemoryInventory, before);
+    }).pipe(Effect.provide(importLive)),
+  );
+});
+
+// Service-level source workload. Factory integration remains a separate L4 gate.
+const growthLayer = (filename: string) => {
+  const db = Layer.effectDiscard(
+    Effect.gen(function* () {
+      yield* migration;
+      yield* hubMigration;
+      yield* searchMigration;
+      yield* lineageMigration;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql.unsafe("PRAGMA journal_mode=WAL");
+      yield* sql`CREATE TABLE orchestration_events(sequence INTEGER PRIMARY KEY,event_id TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT,occurred_at TEXT,application_event_version INTEGER,aggregate_kind TEXT)`;
+      yield* sql`CREATE TABLE orchestration_v2_projection_threads(thread_id TEXT PRIMARY KEY,deleted_at TEXT)`;
+    }),
+  ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename })));
+  const quota = Quota.layer.pipe(Layer.provideMerge(Store.layer.pipe(Layer.provideMerge(db))));
+  const service = Service.layer.pipe(
+    Layer.provideMerge(quota),
+    Layer.provide(identity),
+    Layer.provide(resolver),
+  );
+  return Layer.mergeAll(Worker.layer, Hub.layer, Compactor.layer).pipe(
+    Layer.provideMerge(service),
+    Layer.provideMerge(Maintenance.layer.pipe(Layer.provideMerge(quota))),
+    Layer.provideMerge(Hub.activityLayer),
+    Layer.provide(
+      Layer.succeed(Hub.MemoryHubConfiguration, {
+        read: Effect.succeed({ memorySpaceId: space, hubEnvironmentId: environmentId }),
+      }),
+    ),
+    Layer.provide(identity),
+    Layer.provide(NodeServices.layer),
+    Layer.provide(Settings.layerTest({ memoryHub: { mode: "hub", memorySpaceId: space } })),
+    Layer.provide(
+      Layer.succeed(RuntimeIdentity.RuntimeIdentity, { instanceId: "synthetic-growth" }),
+    ),
+    Layer.provide(Layer.mock(Events.EventSinkV2)({ stream: () => Stream.empty })),
+    Layer.provide(
+      Layer.mock(Generation.TextGeneration)({
+        generateMemorySummary: () => Effect.die("growth fixture must never execute a provider"),
+      }),
+    ),
+  );
+};
+describe("MemoryImport physical-growth source harness", () => {
+  it.effect(
+    "records deterministic 64 noop / 16 change / 32 forget-rebuild workload",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          // Preserve synthetic DB and metrics until the remote evidence collector retrieves them.
+          const directory = yield* fs.makeTempDirectory({
+            directory: yield* Config.String("WP5_GROWTH_ROOT").pipe(
+              Config.orElse(() => Config.String("TMPDIR")),
+            ),
+            prefix: "wp5-growth-",
+          });
+          yield* Effect.logInfo(`WP5_GROWTH_ARTIFACTS ${directory}`);
+          const filename = `${directory}/synthetic.sqlite`;
+          yield* Effect.gen(function* () {
+            yield* TestClock.setTime(Date.parse(stamp));
+            yield* setupImport;
+            yield* seedMember;
+            const service = yield* Service.MemoryService;
+            const ports = service.importPorts;
+            const store = yield* Store.MemoryStore;
+            const worker = yield* Worker.MemoryWorker;
+            const compactor = yield* Compactor.MemoryCompactor;
+            const quota = yield* Quota.MemoryQuotaService;
+            const hub = yield* Hub.MemoryHubService;
+            const sql = yield* SqlClient.SqlClient;
+            const items = Array.from({ length: 64 }, (_, i) => ({
+              sourceItemKey: `growth-${i}`,
+              memoryId: M.MemoryId.make(uuid(10000 + Math.floor(i / 4))),
+            }));
+            const text = (identity: number, round: number) => {
+              const prefix = `Synthetic growth ${identity} round ${round} `;
+              return (
+                prefix +
+                "가".repeat(1300) +
+                "x".repeat(4096 - new TextEncoder().encode(prefix).length - 3900)
+              );
+            };
+            const digest = (value: string) =>
+              Service.memoryStableUuid(value).replaceAll("-", "").repeat(2);
+            let allocation = 20000;
+            const footprint = Effect.gen(function* () {
+              return {
+                counters:
+                  yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`,
+                registrations:
+                  yield* sql`SELECT receipt_id,registration_json,completed_items_json FROM memory_import_receipts ORDER BY receipt_id`,
+                counts:
+                  yield* sql`SELECT (SELECT count(*) FROM memory_revisions) AS revisions,(SELECT count(*) FROM memory_payloads) AS bodies,
+                  (SELECT count(*) FROM memory_events) AS events,(SELECT count(*) FROM memory_outbox) AS work`,
+              };
+            });
+            const refusals: {
+              phase: string;
+              round: number;
+              dimension: string;
+              current: number | undefined;
+              limit: number;
+            }[] = [];
+            const resolutionRefusals: {
+              round: number;
+              index: number;
+              receipt: M.MemoryHubReceipt;
+            }[] = [];
+            // Replace only model output; use the same lease and canonical Service commit
+            // as MemorySyncService.runResolution, without a provider or background timers.
+            const resolveChanged = (round: number) =>
+              Effect.gen(function* () {
+                for (let index = 0; index < 16; index++) {
+                  const id = M.MemoryId.make(uuid(10000 + index));
+                  const aggregate = yield* store.loadAggregate(space, id);
+                  if (aggregate.heads.length <= 1) continue;
+                  const conflict = aggregate.conflicts.find((c) => c.status === "quarantined")!;
+                  assert.isDefined(conflict);
+                  allocation += 4;
+                  const operationId = M.MemoryOperationId.make(uuid(allocation));
+                  const revisionId = M.MemoryRevisionId.make(uuid(allocation + 1));
+                  const resolutionId = M.MemoryResolutionId.make(uuid(allocation + 2));
+                  const beforeClaim = yield* footprint;
+                  const lease = yield* hub
+                    .claim(
+                      {
+                        protocolVersion: 1,
+                        memorySpaceId: space,
+                        memoryId: id,
+                        holderEnvironmentId: environmentId,
+                        conflictId: conflict.conflictId,
+                        conflictHeadSet: aggregate.heads,
+                        attemptId: M.MemoryOperationId.make(uuid(allocation + 3)),
+                        frozenDefaultModelSelection: {
+                          instanceId: M.ProviderInstanceId.make("synthetic-growth"),
+                          model: "synthetic-model",
+                        },
+                      },
+                      authority.principal,
+                    )
+                    .pipe(
+                      Effect.catchTags({
+                        MemoryCapacityError: (error) =>
+                          Effect.gen(function* () {
+                            refusals.push({
+                              phase: "resolve-claim",
+                              round,
+                              dimension: error.dimension,
+                              current: error.current,
+                              limit: error.limit,
+                            });
+                            assert.deepStrictEqual(yield* footprint, beforeClaim);
+                            yield* fs.writeFileString(
+                              `${directory}/claim-refusals.json`,
+                              encodeUnknown(refusals),
+                            );
+                            return null;
+                          }),
+                      }),
+                    );
+                  if (lease === null) continue;
+                  const head = aggregate.revisions.find(
+                    (r) => r.revision.revisionId === aggregate.heads[0],
+                  )!;
+                  const op: Extract<M.MemoryOperation, { kind: "resolve" }> = {
+                    protocolVersion: 1,
+                    kind: "resolve",
+                    memorySpaceId: space,
+                    memoryId: id,
+                    originEnvironmentId: environmentId,
+                    operationId,
+                    expectedHeads: aggregate.heads,
+                    conflictId: conflict.conflictId,
+                    fencingToken: lease.fencingToken,
+                    revision: {
+                      ...head.revision,
+                      operationId,
+                      revisionId,
+                      payloadRef: revisionId,
+                      parents: aggregate.heads,
+                      createdAtUtc: stamp,
+                    },
+                    payload: {
+                      text: text(index, round),
+                      evidence: head.payload!.evidence,
+                      derivedFromMemoryRevisions: aggregate.heads,
+                    },
+                    resolution: {
+                      resolutionId,
+                      memorySpaceId: space,
+                      memoryId: id,
+                      inputRevisionIds: aggregate.heads,
+                      inputPayloadRefs: aggregate.heads.map(
+                        (h) =>
+                          aggregate.revisions.find((r) => r.revision.revisionId === h)!.revision
+                            .payloadRef,
+                      ),
+                      judgmentRef: resolutionId,
+                      requestedModelSelection: lease.frozenDefaultModelSelection,
+                      effectiveProvider: M.ProviderDriverKind.make("codex"),
+                      effectiveModel: "synthetic-model",
+                      resolvingEnvironmentId: environmentId,
+                      fencingToken: lease.fencingToken,
+                      resultRevisionId: revisionId,
+                      appliedAtUtc: stamp,
+                      revertDeadlineUtc: M.MemoryUtcTimestamp.make(
+                        DateTime.formatIso(
+                          DateTime.makeUnsafe(Date.parse(stamp) + M.MEMORY_REVERT_WINDOW_MS),
+                        ),
+                      ),
+                    },
+                    resolutionPayload: {
+                      resolutionId,
+                      judgment: "Synthetic: keep the current source round.",
+                    },
+                  };
+                  const receipt = yield* hub.applyResolution(
+                    {
+                      protocolVersion: 1,
+                      memorySpaceId: space,
+                      holderEnvironmentId: environmentId,
+                      attemptId: lease.attemptId,
+                      operation: op,
+                    },
+                    authority.principal,
+                  );
+                  if (receipt.outcome === "rejected") {
+                    resolutionRefusals.push({ round, index, receipt });
+                    yield* fs.writeFileString(
+                      `${directory}/resolution-refusals.json`,
+                      encodeUnknown(resolutionRefusals),
+                    );
+                    // Match Sync's terminal cleanup: a refused attempt must release its lease.
+                    yield* hub.release(
+                      {
+                        protocolVersion: 1,
+                        memorySpaceId: space,
+                        memoryId: id,
+                        conflictId: lease.conflictId,
+                        holderEnvironmentId: environmentId,
+                        attemptId: lease.attemptId,
+                        fencingToken: lease.fencingToken,
+                      },
+                      authority.principal,
+                    );
+                    continue;
+                  }
+                  assert.strictEqual(receipt.outcome, "accepted");
+                  assert.strictEqual((yield* store.loadAggregate(space, id)).heads.length, 1);
+                }
+              });
+            const runRound = (phase: "seed" | "noop" | "change", round: number) =>
+              Effect.gen(function* () {
+                if (phase === "change") {
+                  const previousRegistration = (yield* ports.readRegistration(
+                    { ...address, sourceId, by: "source" },
+                    Effect.void,
+                  ))!;
+                  yield* ports.saveRegistration(
+                    {
+                      ...address,
+                      expectedVersion: previousRegistration.version,
+                      next: {
+                        ...previousRegistration,
+                        version: previousRegistration.version + 1,
+                        session: {
+                          ...previousRegistration.session!,
+                          sessionId: `growth-change-${round}`,
+                          newItems: 0,
+                          bodyBytes: 0,
+                          applied: [],
+                        },
+                      },
+                    },
+                    Effect.void,
+                  );
+                }
+                for (let chunk = 0; chunk < 2; chunk++) {
+                  const reg = (yield* ports.readRegistration(
+                    { ...address, sourceId, by: "source" },
+                    Effect.void,
+                  ))!;
+                  const frozen = items.slice(chunk * 32, (chunk + 1) * 32).map((item, offset) => {
+                    allocation += 3;
+                    const body = text(
+                      Math.floor((chunk * 32 + offset) / 4),
+                      phase === "change" ? round : 0,
+                    );
+                    return {
+                      selector: {
+                        sourceItemKey: item.sourceItemKey,
+                        sourceFingerprint: digest(body),
+                        scope: { kind: "user" as const },
+                      },
+                      memoryId: item.memoryId,
+                      operationId: M.MemoryOperationId.make(uuid(allocation)),
+                      revisionId: M.MemoryRevisionId.make(uuid(allocation + 1)),
+                      result: null,
+                    };
+                  });
+                  allocation += 3;
+                  const batchId = M.MemoryOperationId.make(uuid(allocation));
+                  let batch: PreparedImportCommit["batch"] = {
+                    ...address,
+                    kind: "detailed",
+                    codecVersion: 1,
+                    sourceId,
+                    sessionId: reg.session!.sessionId,
+                    operationId: batchId,
+                    selectionDigest: digest(`${phase}/${round}/${chunk}`),
+                    selections: frozen,
+                    createdAtUtc: stamp,
+                    receipt: {
+                      operationId: batchId,
+                      sourceId,
+                      sessionId: reg.session!.sessionId,
+                      state: "partial",
+                      remaining: 32,
+                      items: [],
+                      sessionNewItems: 0,
+                      sessionBodyBytes: 0,
+                    },
+                  };
+                  for (const selection of frozen) {
+                    const index = items.findIndex(
+                      (i) => i.sourceItemKey === selection.selector.sourceItemKey,
+                    );
+                    const body = text(Math.floor(index / 4), phase === "change" ? round : 0);
+                    const previous =
+                      (yield* ports.readItem(
+                        { ...address, sourceId, sourceItemKey: selection.selector.sourceItemKey },
+                        Effect.void,
+                      )) ?? null;
+                    const target = yield* ports.prepareTarget(
+                      {
+                        ...address,
+                        memoryId: selection.memoryId,
+                        scope: { kind: "user" },
+                        acceptedRevisionId: previous?.accepted?.revisionId ?? null,
+                      },
+                      Effect.void,
+                    );
+                    const outcome: M.MemoryImportOutcome =
+                      phase === "noop"
+                        ? "noop"
+                        : previous
+                          ? target.heads.length === 1 &&
+                            target.heads[0] === previous.accepted?.revisionId
+                            ? "revised"
+                            : "conflicted"
+                          : target.alias
+                            ? "aliased"
+                            : "created";
+                    const candidate = {
+                      sourceItemKey: selection.selector.sourceItemKey,
+                      sourceFingerprint: selection.selector.sourceFingerprint,
+                      contentFingerprint: digest(body),
+                      byteCount: 4096,
+                      payload: {
+                        text: body,
+                        evidence: [
+                          { origin: "import" as const, importSourceId: sourceId, messageIds: [] },
+                        ],
+                        derivedFromMemoryRevisions: [],
+                      },
+                    };
+                    const next: ImportItem = {
+                      ...address,
+                      sourceId,
+                      codecVersion: 1,
+                      sourceItemKey: candidate.sourceItemKey,
+                      memoryId: selection.memoryId,
+                      scope: { kind: "user" },
+                      accepted: previous?.accepted ?? null,
+                      pending:
+                        outcome === "noop"
+                          ? (previous?.pending ?? null)
+                          : {
+                              sourceFingerprint: candidate.sourceFingerprint,
+                              contentFingerprint: candidate.contentFingerprint,
+                              revisionId: selection.revisionId,
+                              operationId: selection.operationId,
+                            },
+                      rejected: null,
+                      outcome,
+                    };
+                    const currentReg = (yield* ports.readRegistration(
+                      { ...address, sourceId, by: "source" },
+                      Effect.void,
+                    ))!;
+                    const beforeCommit = phase === "change" ? yield* footprint : null;
+                    const committed = yield* ports
+                      .commit(
+                        {
+                          registration: currentReg,
+                          registrationVersion: currentReg.version,
+                          batch,
+                          selection: batch.selections.find(
+                            (s) => s.operationId === selection.operationId,
+                          )!,
+                          candidate,
+                          previous,
+                          next,
+                          expectedHeads: target.heads,
+                          parents: previous?.accepted
+                            ? [previous.accepted.revisionId]
+                            : target.alias
+                              ? [target.alias.revision.revisionId]
+                              : [],
+                          projectBinding: null,
+                        },
+                        Effect.void,
+                      )
+                      .pipe(
+                        Effect.catchTags({
+                          MemoryCapacityError: (error) =>
+                            Effect.gen(function* () {
+                              const refusal = {
+                                phase,
+                                round,
+                                dimension: error.dimension,
+                                current: error.current,
+                                limit: error.limit,
+                              };
+                              refusals.push(refusal);
+                              yield* Console.log(`WP5_GROWTH_REFUSAL ${encodeUnknown(refusal)}`);
+                              if (beforeCommit)
+                                assert.deepStrictEqual(yield* footprint, beforeCommit);
+                              return null;
+                            }),
+                        }),
+                      );
+                    if (committed === null) continue;
+                    if (outcome !== "noop") {
+                      const operation = (yield* store.readWorkOperation(
+                        `sync:${space}:${selection.operationId}`,
+                      ))!;
+                      const receipt = yield* service.admitHubOperation({ authority, operation });
+                      if (receipt.outcome === "rejected") {
+                        assert.strictEqual(
+                          receipt.failureCode,
+                          "capacity_exceeded",
+                          encodeUnknown({ phase, round, index, receipt }),
+                        );
+                        assert.isDefined(receipt.capacity);
+                        yield* Console.log(
+                          `WP5_GROWTH_HUB_REFUSAL ${encodeUnknown({ phase, round, index, capacity: receipt.capacity })}`,
+                        );
+                      }
+                      yield* store.acknowledgeOutbox(
+                        `sync:${space}:${selection.operationId}`,
+                        receipt,
+                      );
+                    }
+                    const preflight = yield* ports.preflightBatch(
+                      { ...batch, selectionDigest: batch.selectionDigest },
+                      Effect.void,
+                    );
+                    if (preflight.kind === "partial") batch = preflight.batch;
+                  }
+                }
+                if (phase === "change") yield* resolveChanged(round);
+                yield* worker.drain;
+              }).pipe(
+                Effect.tapError((error) =>
+                  Console.log(
+                    `WP5_GROWTH_REFUSAL ${encodeUnknown({
+                      phase,
+                      round,
+                      tag: error._tag,
+                      ...(error._tag === "MemoryCapacityError"
+                        ? { dimension: error.dimension, current: error.current, limit: error.limit }
+                        : {}),
+                    })}`,
+                  ),
+                ),
+              );
+            const samples: unknown[] = [];
+            const csv = [
+              "phase,iteration,clock,page_size,page_count,freelist_count,used_bytes,allocated_bytes,wal_bytes,identities,bodies,body_bytes,revisions,lineage,fts_rows,active,receipts,suppression",
+            ];
+            const sample = (phase: string, iteration: number) =>
+              Effect.gen(function* () {
+                yield* worker.drain;
+                const checkpoint = yield* sql.unsafe<{
+                  busy: number;
+                  log: number;
+                  checkpointed: number;
+                }>("PRAGMA wal_checkpoint(PASSIVE)");
+                const pages = (yield* sql.unsafe<{ page_count: number }>("PRAGMA page_count"))[0]!
+                  .page_count;
+                const pageSize = (yield* sql.unsafe<{ page_size: number }>("PRAGMA page_size"))[0]!
+                  .page_size;
+                const free = (yield* sql.unsafe<{ freelist_count: number }>(
+                  "PRAGMA freelist_count",
+                ))[0]!.freelist_count;
+                const walBytes = yield* fs.stat(`${filename}-wal`).pipe(
+                  Effect.map((s) => Number(s.size)),
+                  Effect.orElseSucceed(() => null),
+                );
+                const growth = yield* quota.recordStorageSample(environmentId, { walBytes });
+                const counts = (yield* sql<{
+                  identities: number;
+                  bodies: number;
+                  bodyBytes: number;
+                  revisions: number;
+                  lineage: number;
+                  fts: number;
+                  active: number;
+                  receipts: number;
+                  suppression: number;
+                }>`SELECT
+            (SELECT count(*) FROM memory_identity_ledger WHERE space=${space}) AS identities,
+            (SELECT count(*) FROM memory_payloads WHERE space=${space}) AS bodies,
+            (SELECT coalesce(sum(length(CAST(body_json AS BLOB))),0) FROM memory_payloads WHERE space=${space}) AS bodyBytes,
+            (SELECT count(*) FROM memory_revisions WHERE space=${space}) AS revisions,
+            (SELECT count(*) FROM memory_import_lineage WHERE space=${space}) AS lineage,
+            (SELECT count(*) FROM memory_items_fts) AS fts,
+            (SELECT count(*) FROM memory_items WHERE space=${space} AND status='active') AS active,
+            (SELECT count(*) FROM memory_import_receipts WHERE space=${space}) AS receipts,
+            (SELECT count(*) FROM memory_import_keys WHERE space=${space} AND key_kind IN ('sourceKey','content','sourceExclusion')) AS suppression`)[0]!;
+                const metrics = {
+                  phase,
+                  iteration,
+                  clock: yield* Clock.currentTimeMillis,
+                  seed: "wp5-growth-v1",
+                  allowanceBytes: 1048576,
+                  drain: "MemoryWorker.drain",
+                  pageSize,
+                  pages,
+                  free,
+                  usedBytes: (pages - free) * pageSize,
+                  allocatedBytes: pages * pageSize,
+                  walBytes,
+                  checkpoint: checkpoint[0] ?? null,
+                  sample: growth.current,
+                  freshAllocation: yield* store.measureAllocation(),
+                  freshLogicalBytes: yield* store.logicalBytes,
+                  counts,
+                };
+                samples.push(metrics);
+                csv.push(
+                  [
+                    phase,
+                    iteration,
+                    metrics.clock,
+                    pageSize,
+                    pages,
+                    free,
+                    metrics.usedBytes,
+                    metrics.allocatedBytes,
+                    walBytes ?? "unavailable",
+                    counts.identities,
+                    counts.bodies,
+                    counts.bodyBytes,
+                    counts.revisions,
+                    counts.lineage,
+                    counts.fts,
+                    counts.active,
+                    counts.receipts,
+                    counts.suppression,
+                  ].join(","),
+                );
+                yield* fs.writeFileString(`${directory}/samples.json`, encodeUnknown(samples));
+                yield* fs.writeFileString(`${directory}/samples.csv`, csv.join("\n") + "\n");
+                yield* Console.log(`WP5_GROWTH_SAMPLE ${encodeUnknown(metrics)}`);
+                return metrics;
+              });
+            yield* runRound("seed", 0);
+            const baseline = yield* sample("seed", 0);
+            assert.strictEqual(baseline.counts.identities, 16);
+            assert.strictEqual(baseline.counts.bodies, 16);
+            const noopSamples: (typeof baseline)[] = [];
+            for (let round = 1; round <= 64; round++) {
+              yield* runRound("noop", round);
+              if (round % 16 === 0) {
+                const measured = yield* sample("noop", round);
+                assert.deepStrictEqual(
+                  [
+                    measured.counts.identities,
+                    measured.counts.bodies,
+                    measured.counts.bodyBytes,
+                    measured.counts.revisions,
+                    measured.counts.lineage,
+                    measured.counts.fts,
+                  ],
+                  [
+                    baseline.counts.identities,
+                    baseline.counts.bodies,
+                    baseline.counts.bodyBytes,
+                    baseline.counts.revisions,
+                    baseline.counts.lineage,
+                    baseline.counts.fts,
+                  ],
+                );
+                noopSamples.push(measured);
+              }
+            }
+            for (let round = 1; round <= 16; round++) {
+              yield* runRound("change", round);
+              if (round % 4 === 0) yield* sample("change", round);
+            }
+            const changed = yield* sample("change", 16);
+            const oldHeads = new Map<M.MemoryId, M.MemoryRevisionId>();
+            for (let index = 0; index < 16; index++) {
+              const id = M.MemoryId.make(uuid(10000 + index));
+              const target = yield* store.loadAggregate(space, id);
+              oldHeads.set(id, target.heads[0]!);
+              const operationId = M.MemoryOperationId.make(uuid(90000 + index));
+              yield* service.forget(
+                { memorySpaceId: space, memoryId: id, operationId, expectedHeads: target.heads },
+                Effect.void,
+              );
+              const operation = (yield* store.readWorkOperation(`sync:${space}:${operationId}`))!;
+              const receipt = yield* store.transact(
+                service.admitHubOperationTx({ authority, operation }),
+              );
+              yield* store.acknowledgeOutbox(`sync:${space}:${operationId}`, receipt);
+            }
+            yield* worker.drain;
+            const horizon = Math.max(
+              M.MEMORY_IMPORT_BATCH_RETENTION_MS,
+              M.MEMORY_LOG_RETENTION_MS,
+              M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS,
+            );
+            const rebuildSamples: (typeof baseline)[] = [];
+            for (let cycle = 1; cycle <= 32; cycle++) {
+              yield* TestClock.setTime(Date.parse(stamp) + cycle * (horizon - 1));
+              yield* compactor.compact(authority.principal);
+              yield* worker.drain;
+              for (const [id, revisionId] of oldHeads) {
+                const current = yield* store.loadAggregate(space, id);
+                yield* store.enqueueWork({
+                  id: `growth-rebuild:${cycle}:${id}`,
+                  space,
+                  memoryId: id,
+                  kind: "rebuild",
+                  status: "pending",
+                  metadata: { kind: "rebuild", revisionId, generation: current.generation },
+                  payloadRef: null,
+                  attempt: 0,
+                  nextAttemptAt: 0,
+                  claimedBy: null,
+                  claimedUntil: null,
+                });
+              }
+              yield* worker.drain;
+              const measured = yield* sample("rebuild", cycle);
+              assert.strictEqual(measured.counts.bodies, 0);
+              assert.strictEqual(measured.counts.fts, 0);
+              rebuildSamples.push(measured);
+            }
+            // Keep unsupported metrics explicit. Source measurements do not certify packaging.
+            const spread = (samples: readonly (typeof baseline)[]) =>
+              Math.max(...samples.map((s) => s.usedBytes)) -
+              Math.min(...samples.map((s) => s.usedBytes));
+            const gates = {
+              noopSpreadBytes: spread(noopSamples),
+              rebuildSpreadBytes: spread(rebuildSamples.slice(8)),
+              activeAfterChange: changed.counts.active,
+              resolutionRefusals,
+              refusals,
+              allowanceBytes: 1048576,
+              packaged: "NOT_RUN",
+            };
+            yield* fs.writeFileString(`${directory}/gates.json`, encodeUnknown(gates));
+            yield* Console.log(`WP5_GROWTH_GATES ${encodeUnknown(gates)}`);
+            assert.isEmpty(resolutionRefusals, "synthetic resolutions must all be admitted");
+            assert.strictEqual(
+              changed.counts.active,
+              16,
+              "all changed aliases must converge to 16 live identities",
+            );
+            assert.isAtMost(
+              spread(noopSamples),
+              1048576,
+              "noop physical growth must plateau after warmup",
+            );
+            assert.isAtMost(
+              spread(rebuildSamples.slice(8)),
+              1048576,
+              "forget-rebuild physical growth must plateau after warmup",
+            );
+          }).pipe(Effect.provide(growthLayer(filename)));
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+    { timeout: 1800000 },
   );
 });
