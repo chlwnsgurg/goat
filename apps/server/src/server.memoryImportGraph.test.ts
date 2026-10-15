@@ -352,7 +352,10 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const home = yield* fs.makeTempDirectoryScoped({ prefix: "wp5-default-import-" });
+      const temporaryHome = yield* fs.makeTempDirectoryScoped({ prefix: "wp5-default-import-" });
+      // macOS /tmp is a symlink; register the canonical synthetic root so the
+      // production reader can retain its no-follow ancestor checks.
+      const home = NodeFS.realpathSync(temporaryHome);
       const source = `${home}/.codex/memories`;
       yield* fs.makeDirectory(source, { recursive: true, mode: 0o700 });
       yield* fs.writeFileString(
