@@ -132,17 +132,14 @@ describe("unreleased memory DB", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  it.effect("rejects old memory before the same-id early return", () =>
+  it.effect("rejects old memory when other GOAT ids already match", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 70 });
       const sql = yield* SqlClient.SqlClient;
       yield* sql`DELETE FROM effect_sql_migrations WHERE name = 'ProjectionTurnItemRequestIndex'`;
       yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (70, 'Memory')`;
       const before = yield* history;
-      const oldEntries = migrationEntries.map(
-        ([id, name, migration]) => [name === "Memory" ? 70 : id, name, migration] as const,
-      );
-      const result = yield* Effect.flip(reconcileGoatMigrationIds(oldEntries));
+      const result = yield* Effect.flip(reconcileGoatMigrationIds(migrationEntries));
       if (result._tag !== "MigrationError") return yield* result;
       assert.strictEqual(result.kind, "BadState");
       assert.deepStrictEqual(yield* history, before);
@@ -195,3 +192,22 @@ describe("unreleased memory DB", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });
+
+it.effect("validates later Memory migrations against the registry without a fixed id list", () =>
+  Effect.gen(function* () {
+    yield* runMigrations();
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO effect_sql_migrations (migration_id,name) VALUES (999,'MemoryFutureFixture')`;
+    const unknown = yield* Effect.flip(reconcileGoatMigrationIds(migrationEntries));
+    if (unknown._tag !== "MigrationError") return yield* unknown;
+    assert.strictEqual(unknown.kind, "BadState");
+    const incoming = [...migrationEntries, [999, "MemoryFutureFixture", Effect.void] as const];
+    assert.deepStrictEqual(yield* reconcileGoatMigrationIds(incoming), []);
+    yield* sql`UPDATE effect_sql_migrations SET migration_id=998 WHERE name='MemoryFutureFixture'`;
+    const before = yield* history;
+    const stale = yield* Effect.flip(reconcileGoatMigrationIds(incoming));
+    if (stale._tag !== "MigrationError") return yield* stale;
+    assert.strictEqual(stale.kind, "BadState");
+    assert.deepStrictEqual(yield* history, before);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
