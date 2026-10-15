@@ -12,6 +12,7 @@ import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
+import usageMigration from "../persistence/Migrations/078_MemoryUsageCounters.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
@@ -48,6 +49,7 @@ const makeEnvironment = Effect.fnUntraced(function* (environmentId: M.Environmen
       Effect.andThen(lineageMigration),
       Effect.andThen(checkpointMigration),
       Effect.andThen(reportMigration),
+      Effect.andThen(usageMigration),
     ),
   ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
   const core = Layer.merge(Service.layer, Maintenance.layer).pipe(

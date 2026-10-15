@@ -419,7 +419,14 @@ it.layer(layerTest)("ProjectService", (it) => {
       });
       const input = { commandId: CommandId.make("command:delete-retry:delete"), projectId };
       const deleted = yield* service.delete(input);
-      assert.deepEqual(yield* service.delete(input), deleted);
+      // Enrichment is an ephemeral cache, not part of the command receipt. Work
+      // already queued by create may finish between deletion and its replay.
+      const withoutEnrichment = (project: Project) => ({
+        ...project,
+        repositoryIdentity: null,
+        faviconPath: null,
+      });
+      assert.deepEqual(withoutEnrichment(yield* service.delete(input)), withoutEnrichment(deleted));
       const events = yield* sql<{ readonly command_id: string }>`
         SELECT command_id FROM orchestration_events
         WHERE stream_id = ${projectId} AND event_type = 'project.deleted'

@@ -1,3 +1,4 @@
+import { checkUsage } from "./MemoryUsageScan.testkit.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
@@ -20,6 +21,7 @@ import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
+import usageMigration from "../persistence/Migrations/078_MemoryUsageCounters.ts";
 import * as Store from "./MemoryStore.ts";
 import { CheckpointAccountingError } from "./MemoryCheckpointAccounting.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
@@ -119,6 +121,7 @@ const setup = Layer.effectDiscard(
     Effect.andThen(lineageMigration),
     Effect.andThen(checkpointMigration),
     Effect.andThen(reportMigration),
+    Effect.andThen(usageMigration),
     Effect.andThen(searchMigration),
   ),
 ).pipe(Layer.provideMerge(database));
@@ -309,7 +312,7 @@ describe("MemoryStore", () => {
           assert.strictEqual((yield* sql.unsafe(`SELECT * FROM ${name}`)).length, 0);
         yield* sql`DROP TRIGGER fail_write`;
       }
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("preserves committed intent after a lost wakeup", () =>
     Effect.gen(function* () {
@@ -318,7 +321,7 @@ describe("MemoryStore", () => {
       const second = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
       assert.isDefined(yield* second.receipt(space, operation().operationId));
       assert.strictEqual((yield* second.readEligibleOutbox(space, 0, 100)).length, 1);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("serializes concurrent identical operation reservations", () =>
     Effect.gen(function* () {
@@ -328,7 +331,7 @@ describe("MemoryStore", () => {
       });
       assert.deepStrictEqual(results[0], results[1]);
       assert.strictEqual((yield* store.loadAggregate(space, memory)).revisions.length, 1);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rejects changed payload under an operation ID", () =>
     Effect.gen(function* () {
@@ -343,7 +346,7 @@ describe("MemoryStore", () => {
       );
       assert.isTrue(result._tag === "Failure");
       assert.deepStrictEqual(yield* store.receipt(space, operation().operationId), original);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("received cursor commits with parked receipt or not at all", () =>
     Effect.gen(function* () {
@@ -361,7 +364,7 @@ describe("MemoryStore", () => {
       assert.isUndefined(yield* store.receipt(space, operation().operationId));
       yield* store.withReceivedCursor(input, store.apply(decision()));
       assert.strictEqual(yield* store.readCursor(space, env), 1);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("removes forgotten text from FTS and payload tables", () =>
     Effect.gen(function* () {
@@ -409,7 +412,7 @@ describe("MemoryStore", () => {
           })),
       );
       assert.isNull((yield* store.loadAggregate(space, memory)).revisions[0]?.payload);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("scope filter precedes paging", () =>
     Effect.gen(function* () {
@@ -427,7 +430,7 @@ describe("MemoryStore", () => {
         (yield* store.list({ memorySpaceId: space, scope: { kind: "user" }, limit: 1 })).length,
         1,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("examines an empty 1000-row window and reaches a later match in both modes", () =>
     Effect.gen(function* () {
@@ -492,7 +495,7 @@ describe("MemoryStore", () => {
       assert.isTrue(
         plan.some((row) => row.detail.includes("VIRTUAL TABLE INDEX") && row.detail.includes("=")),
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("keeps the first unreturned match after the byte cap", () =>
     Effect.gen(function* () {
@@ -536,7 +539,7 @@ describe("MemoryStore", () => {
         [memory, ...[100, 101, 102, 103].map((n) => M.MemoryId.make(id(n)))],
       );
       assert.isTrue(next.exhausted);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "maintains scoped counters through index/hold/scope/delete and transaction rollback",
@@ -580,7 +583,7 @@ describe("MemoryStore", () => {
         assert.strictEqual((yield* store.searchCoverage(filter)).indexed, 0);
         yield* sql`DELETE FROM memory_items WHERE space=${space}`;
         assert.strictEqual((yield* store.searchCoverage(filter)).eligible, 0);
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("escapes FTS input and caps pages", () =>
     Effect.gen(function* () {
@@ -599,7 +602,7 @@ describe("MemoryStore", () => {
         )).items.length,
         0,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rejected unknown forget survives restart and late upsert", () =>
     Effect.gen(function* () {
@@ -632,7 +635,7 @@ describe("MemoryStore", () => {
       assert.isDefined((yield* second.loadAggregate(space, memory)).revisions[0]?.payload);
       assert.isFalse(item !== undefined && "payload" in item);
       assert.strictEqual((yield* second.pendingForgetIntents(10)).length, 1);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("materializes an unbound intent once after checkpoint install", () =>
     Effect.gen(function* () {
@@ -675,7 +678,7 @@ describe("MemoryStore", () => {
       });
       assert.deepStrictEqual(first, second);
       assert.strictEqual((yield* store.loadAggregate(space, draft.memoryId)).revisions.length, 0);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "reserves source exclusions when an identity arrives through checkpoint bootstrap",
@@ -723,7 +726,7 @@ describe("MemoryStore", () => {
         });
         assert.strictEqual((yield* store.readForgetReservation(space, memory)).keys, 2);
         assert.strictEqual((yield* store.usage(space, { kind: "user" })).keys, 3);
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("partial checkpoint stays invisible and forget purges staged bodies", () =>
     Effect.gen(function* () {
@@ -761,7 +764,7 @@ describe("MemoryStore", () => {
         pageCount: 1,
       });
       assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "forgotten");
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("unions 101 suppressed source keys across bounded forget fragments", () =>
     Effect.gen(function* () {
@@ -798,7 +801,7 @@ describe("MemoryStore", () => {
         yield* store.apply(decision(op));
       }
       assert.strictEqual((yield* store.readSuppressions(space, memory)).length, 101);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("search excludes only quarantined memory", () =>
     Effect.gen(function* () {
@@ -825,7 +828,7 @@ describe("MemoryStore", () => {
         results.items.map((item) => item.memoryId),
         [memory],
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("encodes worst-case compact receipts and guards within the binary budget", () =>
     Effect.gen(function* () {
@@ -858,7 +861,7 @@ describe("MemoryStore", () => {
       yield* store.persistCompactReceipt(record);
       const restored = yield* store.receipt(space, record.receipt.operationId);
       assert.deepStrictEqual(restored?.receipt, record.receipt);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("pending forget holds scanner and conflicting claim candidates after restart", () =>
     Effect.gen(function* () {
@@ -892,7 +895,7 @@ describe("MemoryStore", () => {
       assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "blocked");
       yield* store.recoverClaimCandidates(0);
       assert.deepStrictEqual(yield* store.readDueClaimCandidates(256, 0, space), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("derived purge failure remains fenced and recovers after restart", () =>
     Effect.gen(function* () {
@@ -942,7 +945,7 @@ describe("MemoryStore", () => {
         (yield* restored.loadAggregate(space, memory)).item?.localAvailability.cleanupPending,
         false,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "reconnects after restart without changing receipt, event, cursor or canonical payload",
@@ -978,7 +981,7 @@ describe("MemoryStore", () => {
         assert.strictEqual(yield* fresh.readCursor(space, env), 2);
         assert.deepStrictEqual(yield* fresh.reconnectParked(reconnected(), generation), original);
         assert.strictEqual((yield* fresh.loadAggregate(space, memory)).generation, generation + 1);
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rolls back reconnect projection and marker at each SQL failure", () =>
     Effect.gen(function* () {
@@ -1004,7 +1007,7 @@ describe("MemoryStore", () => {
       }
       yield* store.reconnectParked(reconnected(), before.generation);
       assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 0);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("fences stale reconnect decisions and missing parents", () =>
     Effect.gen(function* () {
@@ -1021,7 +1024,7 @@ describe("MemoryStore", () => {
         "Failure",
       );
       assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 1);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rejects reconnect with changed operation, digest, receipt or admission", () =>
     Effect.gen(function* () {
@@ -1043,7 +1046,7 @@ describe("MemoryStore", () => {
           "Failure",
         );
       assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 1);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("updates remaining missing parents atomically without rewriting receipt", () =>
     Effect.gen(function* () {
@@ -1053,7 +1056,7 @@ describe("MemoryStore", () => {
       assert.deepStrictEqual(yield* store.reconnectParked(parked(), generation), original);
       assert.strictEqual((yield* store.loadAggregate(space, memory)).generation, generation + 1);
       assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 1);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("reconstructs parked operations from pending metadata after event compaction", () =>
     Effect.gen(function* () {
@@ -1062,7 +1065,7 @@ describe("MemoryStore", () => {
       yield* store.apply(parked());
       yield* sql`DELETE FROM memory_events`;
       assert.deepStrictEqual(yield* store.pendingReceived(space, 10), [childOperation()]);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("returns retained ancestry and real missing parents without a boundary", () =>
     Effect.gen(function* () {
@@ -1078,7 +1081,7 @@ describe("MemoryStore", () => {
           { revisionId: absent, status: "missing" },
         ],
       });
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "distinguishes checkpoint-covered compacted ancestry from arbitrary unknown UUIDs",
@@ -1109,7 +1112,7 @@ describe("MemoryStore", () => {
         assert.deepStrictEqual(other.parents, [
           { revisionId: parent, status: "crossMemory", memoryId: memory },
         ]);
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("never treats a staged boundary or a newer compact receipt as covered ancestry", () =>
     Effect.gen(function* () {
@@ -1129,7 +1132,7 @@ describe("MemoryStore", () => {
           .parents[0]?.status,
         "missing",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rejects a retained cross-memory parent before reconnect", () =>
     Effect.gen(function* () {
@@ -1149,7 +1152,7 @@ describe("MemoryStore", () => {
         (yield* Effect.exit(store.reconnectParked(reconnected(), generation)))._tag,
         "Failure",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("serializes concurrent reconnects into one projection update", () =>
     Effect.gen(function* () {
@@ -1166,7 +1169,7 @@ describe("MemoryStore", () => {
       );
       assert.deepStrictEqual(results[0], results[1]);
       assert.strictEqual((yield* store.loadAggregate(space, memory)).generation, generation + 1);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("reconnect preserves a pending forget exposure fence", () =>
     Effect.gen(function* () {
@@ -1191,7 +1194,7 @@ describe("MemoryStore", () => {
       assert.strictEqual(item?.status, "blocked");
       assert.isTrue(item?.status === "blocked" && item.failureCode === "forget_pending");
       assert.isFalse(item !== undefined && "payload" in item);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("forget wins over late reconnect without restoring a body", () =>
     Effect.gen(function* () {
@@ -1224,7 +1227,7 @@ describe("MemoryStore", () => {
       assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "forgotten");
       assert.strictEqual((yield* sql`SELECT * FROM memory_payloads`).length, 0);
       assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 0);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("reports an unlinked parked parent separately from a retained DAG ancestor", () =>
     Effect.gen(function* () {
@@ -1234,7 +1237,7 @@ describe("MemoryStore", () => {
       assert.deepStrictEqual((yield* store.readAncestry(space, memory, [revisionId])).parents, [
         { revisionId, status: "parked", missingParents: [M.MemoryRevisionId.make(id(13))] },
       ]);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("reads work and persists a claimed retry across restart", () =>
     Effect.gen(function* () {
@@ -1252,7 +1255,7 @@ describe("MemoryStore", () => {
       assert.strictEqual(due[0]?.status, "retry");
       assert.strictEqual(due[0]?.attempt, 1);
       assert.isNull(due[0]?.claimedBy);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("stale worker cannot postpone a reclaimed or terminal row", () =>
     Effect.gen(function* () {
@@ -1267,7 +1270,7 @@ describe("MemoryStore", () => {
       yield* store.finishWork(work.id, "completed");
       assert.isFalse(yield* store.retryWork(current, 5000));
       assert.strictEqual((yield* store.readWork(work.id))?.status, "completed");
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("commits thread hook watermark and work atomically and recovers after restart", () =>
     Effect.gen(function* () {
@@ -1293,7 +1296,7 @@ describe("MemoryStore", () => {
         "Failure",
       );
       assert.isUndefined(yield* fresh.readWork("stale"));
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rolls back enqueued hook work if watermark storage fails", () =>
     Effect.gen(function* () {
@@ -1312,7 +1315,7 @@ describe("MemoryStore", () => {
       );
       assert.isUndefined(yield* store.readWork(backgroundWork().id));
       assert.strictEqual(yield* store.readThreadHookWatermark(), 0);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "fences concurrent hook sweeps and rejects watermark rollback or marker overwrite",
@@ -1356,7 +1359,7 @@ describe("MemoryStore", () => {
           ))._tag,
           "Failure",
         );
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("caps generic worker sweeps at 100 rows", () =>
     Effect.gen(function* () {
@@ -1364,7 +1367,7 @@ describe("MemoryStore", () => {
       for (let n = 0; n < 101; n++) yield* store.enqueueWork(backgroundWork(`fixture:${n}`));
       assert.strictEqual((yield* store.dueWork(0, 256)).length, 100);
       assert.strictEqual((yield* store.dueWork(0, -1)).length, 0);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("limits runnable deferred rows after excluding held, future and claimed work", () =>
     Effect.gen(function* () {
@@ -1380,7 +1383,7 @@ describe("MemoryStore", () => {
         [M.MemoryId.make(id(81))],
       );
       assert.strictEqual((yield* store.readDeferred(0, -1)).length, 0);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "orders deferred rows by due, null-first last attempt, memory and kind across restart",
@@ -1398,7 +1401,7 @@ describe("MemoryStore", () => {
             [M.MemoryId.make(id(80)), "index"],
           ],
         );
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("charges index payloads independently of unrelated history", () =>
     Effect.gen(function* () {
@@ -1418,7 +1421,7 @@ describe("MemoryStore", () => {
           M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS * M.MEMORY_PAYLOAD_MAX_UTF8_BYTES,
         ),
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("advances an approved scanner with over 8 MiB history across restart", () =>
     Effect.gen(function* () {
@@ -1484,7 +1487,7 @@ describe("MemoryStore", () => {
         (yield* fresh.loadAggregate(space, memory)).item!.localAvailability.reasons,
         "scanner_pending",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "recovers only eligible held rows in bounded batches and leaves idle items untouched",
@@ -1536,7 +1539,7 @@ describe("MemoryStore", () => {
           (yield* sql`SELECT * FROM recovery_updates`).length,
           M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS + 2,
         );
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("recovers global parked work with bounded pages after event compaction", () =>
     Effect.gen(function* () {
@@ -1548,7 +1551,7 @@ describe("MemoryStore", () => {
       assert.deepStrictEqual(yield* fresh.readParked(1), [childOperation()]);
       assert.deepStrictEqual(yield* fresh.readParked(0), []);
       assert.deepStrictEqual(yield* fresh.readParked(-1), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "cancels future and running thread jobs without crossing environment or terminal boundaries",
@@ -1568,7 +1571,7 @@ describe("MemoryStore", () => {
         assert.isNull((yield* store.readWork(summaryWork(3).id))?.claimedBy);
         assert.strictEqual((yield* store.readWork(summaryWork(4).id))?.status, "completed");
         assert.strictEqual((yield* store.readWork(summaryWork(5).id))?.status, "pending");
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "commits a hook summary intent and watermark with rollback on summary insertion failure",
@@ -1584,7 +1587,7 @@ describe("MemoryStore", () => {
         yield* store.commitThreadHook(input);
         assert.deepStrictEqual(yield* store.readWork(summaryWork(7).id), summaryWork(7));
         assert.strictEqual(yield* store.readThreadHookWatermark(), 7);
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 
@@ -1613,7 +1616,7 @@ describe("generation failure ownership", () => {
       assert.strictEqual(reports[0]!.outcome, "failed");
       assert.strictEqual(reports[0]!.failureCode, "generation_failed");
       assert.strictEqual((yield* store.readWork(work.id))!.status, "failed");
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("persists retry due time with the safe report", () =>
     Effect.gen(function* () {
@@ -1622,7 +1625,7 @@ describe("generation failure ownership", () => {
       assert.isTrue(yield* store.failGenerationAttempt(failure(work, 5001)));
       assert.strictEqual((yield* store.readWork(work.id))!.nextAttemptAt, 5001);
       assert.strictEqual((yield* store.pendingReports(100)).length, 1);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rejects stale owners and expired claims without reports", () =>
     Effect.gen(function* () {
@@ -1631,7 +1634,7 @@ describe("generation failure ownership", () => {
       assert.isFalse(yield* store.failGenerationAttempt(failure({ ...work, claimedBy: "other" })));
       assert.isFalse(yield* store.failGenerationAttempt({ ...failure(work), now: 100 }));
       assert.deepStrictEqual(yield* store.pendingReports(100), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rejects foreign environment authority", () =>
     Effect.gen(function* () {
@@ -1642,7 +1645,7 @@ describe("generation failure ownership", () => {
         .pipe(Effect.flip);
       assert.strictEqual(result._tag, "MemoryStoreConflict");
       assert.deepStrictEqual(yield* store.pendingReports(100), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rolls back report and retry together", () =>
     Effect.gen(function* () {
@@ -1658,7 +1661,7 @@ describe("generation failure ownership", () => {
         .pipe(Effect.flip);
       assert.deepStrictEqual(yield* store.pendingReports(100), []);
       assert.strictEqual((yield* store.readWork(work.id))!.status, "running");
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 
@@ -1695,7 +1698,7 @@ describe("unbound summary replacement", () => {
       assert.strictEqual(work?.metadata.kind, "localIntent");
       if (work?.metadata.kind === "localIntent")
         assert.strictEqual(work.metadata.provenance.sourceWatermark?.throughSequence, 2);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("cannot resurrect a forgotten local draft", () =>
     Effect.gen(function* () {
@@ -1705,7 +1708,7 @@ describe("unbound summary replacement", () => {
       const result = yield* store.refreshLocalSummaryIntent(draft(2)).pipe(Effect.flip);
       assert.strictEqual(result._tag, "MemoryStoreConflict");
       if (result._tag === "MemoryStoreConflict") assert.strictEqual(result.code, "forgotten");
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 
@@ -1718,7 +1721,7 @@ describe("derived work integration", () => {
       assert.isTrue(
         rows.some((r) => r.kind === "index" && r.memoryId === memory && r.generation === 1),
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("local draft admin rows cannot starve generic work", () =>
     Effect.gen(function* () {
@@ -1729,7 +1732,7 @@ describe("derived work integration", () => {
         (yield* store.dueWork(0, 1)).map((w) => w.id),
         ["z-index"],
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("pending sync clears after durable acknowledgement", () =>
     Effect.gen(function* () {
@@ -1745,7 +1748,7 @@ describe("derived work integration", () => {
         outcome: "accepted",
       });
       assert.isFalse((yield* store.loadAggregate(space, memory)).item!.pendingSync);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 
@@ -1760,7 +1763,7 @@ describe("worker completion fencing", () => {
         yield* store.finishOwnedDeferred(target, "old-owner", Number.MAX_SAFE_INTEGER, { now: 1 }),
       );
       assert.strictEqual((yield* store.readDeferred(0, 100)).length, 0);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("compacts older completed summary rows without dropping the latest receipt", () =>
     Effect.gen(function* () {
@@ -1773,7 +1776,7 @@ describe("worker completion fencing", () => {
       assert.isUndefined(yield* store.readWork("summary:9"));
       assert.strictEqual((yield* store.readWork("summary:10"))!.status, "completed");
       assert.isFalse(yield* store.completeSummaryWork(work));
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rolls back summary completion and receipt compaction together", () =>
     Effect.gen(function* () {
@@ -1795,7 +1798,7 @@ describe("worker completion fencing", () => {
         .pipe(Effect.flip);
       assert.isDefined(yield* store.readWork("summary:9"));
       assert.strictEqual((yield* store.readWork("summary:10"))!.status, "running");
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 
@@ -2022,7 +2025,7 @@ it.effect(
       assert.strictEqual(recovered[0]?.operationDigest, digest);
       assert.strictEqual(recovered[0]?.work.id, base.workId);
       assert.strictEqual(recovered[0]?.version, 2);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -2064,7 +2067,7 @@ it.effect(
         (yield* store.transact(store.readHubUsageTx(space))).stagingBytes,
         M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -2220,7 +2223,7 @@ it.effect(
           }),
         ),
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 describe("MemoryStore hub administration", () => {
@@ -2300,7 +2303,7 @@ describe("MemoryStore hub administration", () => {
         "activated",
       );
       assert.strictEqual((yield* store.readPendingHubAdmins(100)).length, 3);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rolls activation back with the admin stage and rejects changed request reuse", () =>
     Effect.gen(function* () {
@@ -2339,7 +2342,7 @@ describe("MemoryStore hub administration", () => {
           .pipe(Effect.flip))._tag,
         "MemoryStoreConflict",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "configure publishes the initial empty checkpoint and internal membership atomically",
@@ -2404,7 +2407,7 @@ describe("MemoryStore hub administration", () => {
           (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE reason='hub_snapshot'`).length,
           1,
         );
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "bootstrap cannot become ready before the matching canonical checkpoint is published",
@@ -2430,7 +2433,7 @@ describe("MemoryStore hub administration", () => {
         assert.strictEqual(error._tag, "MemoryStoreConflict");
         if (error._tag === "MemoryStoreConflict")
           assert.strictEqual(error.code, "bootstrap_required");
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 
@@ -2635,7 +2638,7 @@ describe("MemoryStore transient source relay", () => {
           )).state,
           "expired",
         );
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("preserves post-lock 401 and 403 errors for relay and checkpoint ports", () =>
     Effect.gen(function* () {
@@ -2686,7 +2689,7 @@ describe("MemoryStore transient source relay", () => {
         "MemoryHubUnauthorizedError",
       );
       assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_source_reads`).length, 0);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("expires at exactly 75 seconds and a bounded sweep removes the locator", () =>
     Effect.gen(function* () {
@@ -2714,7 +2717,7 @@ describe("MemoryStore transient source relay", () => {
       );
       assert.strictEqual(cleanup.removedRows, 1);
       assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_source_reads`).length, 0);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect.each(["pending", "completed"] as const)(
     `revoke terminal-denies %s, survives a new Store, and old revoke cannot touch reenrollment`,
@@ -2821,7 +2824,7 @@ describe("MemoryStore transient source relay", () => {
           record_json: string;
         }>`SELECT record_json FROM memory_import_keys WHERE key_kind='hub_source_fences'`;
         assert.strictEqual(fences.length, 1);
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
 
   it.effect("refuses absent requester revoke without a durable membership high-water", () =>
@@ -2841,7 +2844,7 @@ describe("MemoryStore transient source relay", () => {
         .pipe(Effect.flip);
       assert.strictEqual(result._tag, "MemoryHubError");
       if (result._tag === "MemoryHubError") assert.strictEqual(result.code, "identity_mismatch");
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
 
   it.effect.each(["legacy", "digest", "deadline", "credential"] as const)(
@@ -2871,7 +2874,7 @@ describe("MemoryStore transient source relay", () => {
           state: "completed",
           outcome: { kind: "denied", requiredPermission: "orchestration:read" },
         });
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("bounds source admission to 32 per requester and 128 per hub", () =>
     Effect.gen(function* () {
@@ -2927,7 +2930,7 @@ describe("MemoryStore transient source relay", () => {
       assert.strictEqual(collected.requests.length, 32);
       const encoded = yield* encodeSourceCollect(collected);
       assert.isAtMost(new TextEncoder().encode(encoded).length, 65536);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
 
   it.effect("rejects an oversized source outcome without retaining its body", () =>
@@ -2970,7 +2973,7 @@ describe("MemoryStore transient source relay", () => {
         )).state,
         "pending",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "reopens SQLite with the original relay deadline, unconsumed body and durable pair fence",
@@ -2988,6 +2991,7 @@ describe("MemoryStore transient source relay", () => {
                 Effect.andThen(lineageMigration),
                 Effect.andThen(checkpointMigration),
                 Effect.andThen(reportMigration),
+                Effect.andThen(usageMigration),
                 Effect.andThen(searchMigration),
               ),
             ).pipe(Layer.provideMerge(db)),
@@ -3270,7 +3274,7 @@ describe("MemoryStore durable hub checkpoints", () => {
           }),
         );
         assert.strictEqual(advanced.retentionFloor, 2);
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "producer reauthenticates the real hub and rolls back capacity and outer publication failure",
@@ -3394,7 +3398,7 @@ describe("MemoryStore durable hub checkpoints", () => {
           )).checkpointSequence,
           1,
         );
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "pins complete pages with immutable expiry and publishes recovery independently of token lifetime",
@@ -3472,7 +3476,7 @@ describe("MemoryStore durable hub checkpoints", () => {
           (yield* store.transact(store.readHubUsageTx(space))).publishedPinnedBytes > 0,
           true,
         );
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("never revives a replaced token even while its published pages survive", () =>
     Effect.gen(function* () {
@@ -3525,7 +3529,7 @@ describe("MemoryStore durable hub checkpoints", () => {
         )).checkpointSequence,
         1,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("forget scrubs a pinned snapshot immediately without changing its continuation", () =>
     Effect.gen(function* () {
@@ -3594,7 +3598,7 @@ describe("MemoryStore durable hub checkpoints", () => {
       assert.strictEqual(after.revisions[0]?.payload, null);
       assert.strictEqual(after.items[0]?.status, "blocked");
       assert.strictEqual(M.validateMemoryCheckpointRecords([after]), true);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "floor publication rolls back and covered tail compaction preserves replay metadata",
@@ -3652,7 +3656,7 @@ describe("MemoryStore durable hub checkpoints", () => {
           "accepted",
         );
         assert.strictEqual((yield* store.transact(store.readHubUsageTx(space))).tailRows, 0);
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 
@@ -3797,7 +3801,7 @@ it.effect("never reissues released invalidated or replaced attempts across resta
     assert.strictEqual(guards.length, 3);
     assert.strictEqual(JSON.parse(guards[0]!.record_json).deadline, 600000);
     assert.strictEqual(JSON.parse(guards[0]!.record_json).fencingToken, first.fencingToken);
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 it.effect("purges submission bodies in every ticket state and fences cancelled ownership", () =>
   Effect.gen(function* () {
@@ -3953,7 +3957,7 @@ it.effect("purges submission bodies in every ticket state and fences cancelled o
       (yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${memory}`).length,
       0,
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 const seedSubmission = Effect.gen(function* () {
@@ -4063,7 +4067,7 @@ it.effect("rejects mismatched ticket identities before saving a submission and o
       .readRecoverableResolutionTickets({ memorySpaceId: space, now: 101, limit: 10 })
       .pipe(Effect.flip);
     assert.strictEqual(failure.stage, "ticket-payload-identity");
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect.each(["completed", "failed", "cancelled", "transition"] as const)(
@@ -4152,7 +4156,7 @@ it.effect.each(["completed", "failed", "cancelled", "transition"] as const)(
         }),
         [],
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect.each([0, 1])(
@@ -4214,7 +4218,7 @@ it.effect.each([0, 1])(
         counters[0]!.value,
         M.MEMORY_PERMANENT_METADATA_MAX_BYTES + extra - (extra ? delta : 0),
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect.each(["current", "replaced-compactor", "replaced-prune"] as const)(
@@ -4485,7 +4489,7 @@ it.effect.each(["current", "replaced-compactor", "replaced-prune"] as const)(
       );
       assert.strictEqual((yield* store.pendingReports(100)).length, 0);
       assert.strictEqual(ticket.fencingToken, 1);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -4538,7 +4542,7 @@ it.effect(
           publishedPinnedDeltaBytes: 0,
         }),
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("reserves snapshot growth atomically at pinned equality and rejects one extra byte", () =>
@@ -4596,7 +4600,7 @@ it.effect("reserves snapshot growth atomically at pinned equality and rejects on
     );
     const replay = yield* store.transact(append);
     assert.strictEqual(replay.entry.kind, "metadata");
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect.each(["refusal", "forget", "escaped", "pages"] as const)(
@@ -4740,7 +4744,7 @@ it.effect.each(["refusal", "forget", "escaped", "pages"] as const)(
             ? "deleted"
             : "accepted",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -4844,7 +4848,7 @@ it.effect(
         )
         .pipe(Effect.flip);
       assert.strictEqual(mismatch._tag, "MemoryStoreConflict");
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("keeps the successor frontier and exposure on body-free canonical metadata replay", () =>
@@ -4906,7 +4910,7 @@ it.effect("keeps the successor frontier and exposure on body-free canonical meta
     const after = yield* store.loadAggregate(space, memory);
     assert.deepStrictEqual(after.heads, [second.revision.revisionId]);
     assert.deepStrictEqual(after.item, before.item);
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -4976,7 +4980,7 @@ it.effect(
           .length,
         1,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("recovery preserves stale submissions while discovering unrelated claims", () =>
@@ -5046,7 +5050,7 @@ it.effect("recovery preserves stale submissions while discovering unrelated clai
         .length,
       1,
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -5141,7 +5145,7 @@ it.effect(
       );
       assert.isFalse(yield* store.transact(store.discardBootstrapTx(discard)));
       assert.strictEqual((yield* store.readBootstrap(input)).snapshotToken, "synthetic-new");
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -5228,7 +5232,7 @@ it.effect(
           }),
         ),
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -5310,7 +5314,7 @@ it.effect(
       assert.isFalse(
         plan.some((r) => r.detail.includes("SCAN") || r.detail.includes("TEMP B-TREE")),
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -5347,7 +5351,7 @@ it.effect(
           .status,
         "cancelled",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("discarding expired bootstrap preserves staged bodies adopted by canonical receive", () =>
@@ -5394,7 +5398,7 @@ it.effect("discarding expired bootstrap preserves staged bodies adopted by canon
     assert.strictEqual(canonical.item?.status, "blocked");
     assert.include(canonical.item!.localAvailability.reasons, "scanner_pending");
     assert.include(canonical.heads, M.MemoryRevisionId.make(id(13)));
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect.each(["recoverable", "running", "submitting", "approved", "finalizing"] as const)(
@@ -5440,7 +5444,7 @@ it.effect.each(["recoverable", "running", "submitting", "approved", "finalizing"
       assert.strictEqual(rows[0]!.status, "pending");
       assert.deepStrictEqual(JSON.parse(rows[0]!.ticket_json), saved);
       assert.strictEqual(rows[0]!.sync_version, saved.version);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -5466,7 +5470,7 @@ it.effect(
       assert.strictEqual(after[0]!.status, "cancelled");
       assert.strictEqual(JSON.parse(after[0]!.ticket_json).state, "terminal");
       assert.isNull(JSON.parse(after[0]!.ticket_json).owner);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("space selectors reach B behind 100 earlier A candidates and tickets", () =>
@@ -5522,7 +5526,7 @@ it.effect("space selectors reach B behind 100 earlier A candidates and tickets",
       detail: string;
     }>`EXPLAIN QUERY PLAN SELECT id FROM memory_outbox WHERE space=${b} AND kind='claim' AND status IN ('pending','retry') AND next_attempt_at<=1`;
     assert.isTrue(plan.some((r) => r.detail.includes("memory_outbox_sync_due")));
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("resolution snapshot SQL rows and bytes stay constant as history grows", () =>
@@ -5679,7 +5683,7 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
         .pipe(Effect.flip))._tag,
       "MemoryStoreConflict",
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("rearms only the persisted sync hold class and fences the old owner", () =>
@@ -5770,7 +5774,7 @@ it.effect("rearms only the persisted sync hold class and fences the old owner", 
       ),
     );
     assert.strictEqual((yield* fresh.readEligibleOutbox(space, 2, 100)).length, 1);
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("pull bootstrap retry survives restart with version CAS and untouched cursor", () =>
@@ -5845,7 +5849,7 @@ it.effect("pull bootstrap retry survives restart with version CAS and untouched 
       }),
     );
     assert.strictEqual((yield* fresh.readPullRetry(key)).version, 3);
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("resolution failure reports and permanent holds are owner fenced and targeted", () =>
@@ -5982,7 +5986,7 @@ it.effect("resolution failure reports and permanent holds are owner fenced and t
       )).changedIds,
       [candidate.id],
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("renewed ticket expiry persists only for the same owned lease and CAS version", () =>
@@ -6055,7 +6059,7 @@ it.effect("renewed ticket expiry persists only for the same owned lease and CAS 
       ),
     );
     assert.strictEqual(key.attemptId, recovery.ticket.attemptId);
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -6227,7 +6231,7 @@ it.effect(
           .pipe(Effect.flip))._tag,
         "MemoryStoreConflict",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("late final checkpoint page cannot replace a newer bootstrap join", () =>
@@ -6304,7 +6308,7 @@ it.effect("late final checkpoint page cannot replace a newer bootstrap join", ()
         .length,
       0,
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("checkpoint ports reject mismatched stage identity before creating bodies", () =>
@@ -6363,7 +6367,7 @@ it.effect("checkpoint ports reject mismatched stage identity before creating bod
       "MemoryStoreConflict",
     );
     assert.deepStrictEqual(yield* store.readBootstrap(fixtureCheckpointIdentity), completed);
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("checkpoint completion CAS failure rolls back final page and canonical publication", () =>
@@ -6403,7 +6407,7 @@ it.effect("checkpoint completion CAS failure rolls back final page and canonical
     );
     assert.strictEqual((yield* store.readBootstrap(fixtureCheckpointIdentity)).state, "ready");
     assert.isDefined((yield* store.loadAggregate(space, memory)).item);
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("recovery closes a frozen cycle despite continuous frontier and orphan tails", () =>
@@ -6443,7 +6447,7 @@ it.effect("recovery closes a frozen cycle despite continuous frontier and orphan
         .status,
       "cancelled",
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("new checkpoint judgment bodies receive stage ownership at insertion", () =>
@@ -6478,7 +6482,7 @@ it.effect("new checkpoint judgment bodies receive stage ownership at insertion",
       0,
     );
     assert.isAbove((yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space}`).length, 0);
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("review-r11 stale claim hold can overwrite a reacquired owner in same epoch", () =>
@@ -6525,7 +6529,7 @@ it.effect("review-r11 stale claim hold can overwrite a reacquired owner in same 
         store.holdClaimCandidateTx({ ...stale, now: 3, expectedAttempt: c.attempt + 2 }),
       ),
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("review-r11 failure report ignores durable delivered guard after report compaction", () =>
@@ -6578,7 +6582,7 @@ it.effect("review-r11 failure report ignores durable delivered guard after repor
     assert.deepStrictEqual(yield* store.pendingReports(100), []);
     assert.isFalse(yield* store.claimReport(report.reportId, "delivery", 4, 100));
     assert.deepStrictEqual(yield* store.pendingReports(100), []);
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("review-r11 held resolution sweep cannot advance past 100 live owners", () =>
@@ -6642,7 +6646,7 @@ it.effect("review-r11 held resolution sweep cannot advance past 100 live owners"
     assert.isTrue(
       plan.every((r) => !r.detail.includes("SCAN") && !r.detail.includes("TEMP B-TREE")),
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("private retry charges its own input meter without invalidating producer staging", () =>
@@ -6706,7 +6710,7 @@ it.effect("private retry charges its own input meter without invalidating produc
         .value,
       charged,
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("sync hold rearm advances across unrelated history within the inspected budget", () =>
@@ -6757,7 +6761,7 @@ it.effect("sync hold rearm advances across unrelated history within the inspecte
     assert.isTrue(
       plan.every((r) => !r.detail.includes("SCAN") && !r.detail.includes("TEMP B-TREE")),
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("held uncertain submission rearms without loading its body", () =>
@@ -6821,7 +6825,7 @@ it.effect("held uncertain submission rearms without loading its body", () =>
       }))[0]!.submission,
       submission,
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect.each([
@@ -6974,7 +6978,7 @@ it.effect.each([
         .length,
       1,
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect.each(["uncertain", "rejected"] as const)(
@@ -7082,7 +7086,7 @@ it.effect.each(["uncertain", "rejected"] as const)(
       assert.isFalse(
         plan.some((r) => r.detail.includes("SCAN") || r.detail.includes("TEMP B-TREE")),
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -7150,7 +7154,7 @@ it.effect(
       assert.deepStrictEqual(result.receipt, receipt);
       assert.deepStrictEqual(result.row.submission, submission);
       assert.strictEqual(result.row.state, "approved");
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 const seedHeldResolutionAttempt = Effect.gen(function* () {
@@ -7329,7 +7333,7 @@ it.effect.each([
         ),
       );
       assert.deepStrictEqual(yield* fresh.pendingReports(100), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("r15 stale ticket and candidate fences leave both rows unchanged", () =>
@@ -7382,7 +7386,7 @@ it.effect("r15 stale ticket and candidate fences leave both rows unchanged", () 
         .sync_version,
       input.ownership.version,
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect.each(["submitting", "approved", "approval-only"] as const)(
@@ -7444,7 +7448,7 @@ it.effect.each(["submitting", "approved", "approval-only"] as const)(
         bodies,
       );
       assert.deepStrictEqual(yield* store.pendingReports(100), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("r16 nullable processing reads the actual local item counters and PK plans", () =>
@@ -7500,7 +7504,7 @@ it.effect("r16 nullable processing reads the actual local item counters and PK p
     yield* Effect.log("R16_PROCESSING_EXPLAIN", JSON.stringify(plans)).pipe(
       Effect.provide(Logger.layer([Logger.consolePretty({ colors: false })])),
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("recovery skips completed installCredential admin before work decoding", () =>
@@ -7599,7 +7603,7 @@ it.effect("recovery skips completed installCredential admin before work decoding
       Effect.provideService(Console.Console, console),
       Effect.provideService(References.MinimumLogLevel, "Info"),
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -7655,7 +7659,7 @@ it.effect(
         }),
       );
       assert.deepStrictEqual(yield* fresh.readPersistedHoldClasses(key), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect.each(["authorization", "protocol", "identity", "availability"] as const)(
@@ -7704,7 +7708,7 @@ it.effect.each(["authorization", "protocol", "identity", "availability"] as cons
         }),
       );
       assert.deepStrictEqual(yield* fresh.readPersistedHoldClasses(key), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -7736,7 +7740,7 @@ it.effect(
         }),
       );
       assert.deepStrictEqual(yield* fresh.readPersistedHoldClasses(key), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -7798,7 +7802,7 @@ it.effect(
       );
       yield* sql`UPDATE memory_outbox SET hold_class=NULL WHERE id IN ('r18-revert','r18-claim','r18-resolve','r18-sync','r18-duplicate')`;
       assert.deepStrictEqual(yield* store.readPersistedHoldClasses(key), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("r18 discovery surfaces storage failure instead of reporting no holds", () =>
@@ -7812,7 +7816,7 @@ it.effect("r18 discovery surfaces storage failure instead of reporting no holds"
       .pipe(Effect.flip);
     assert.strictEqual(failure._tag, "MemoryStorageError");
     assert.strictEqual(failure.stage, "persisted-hold-discovery");
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -7879,7 +7883,7 @@ it.effect(
       yield* sql`UPDATE memory_items SET payload_ref=${shortRef} WHERE space=${space} AND memory_id=${id(2001)}`;
       assert.strictEqual((yield* store.searchCoverage(filter)).textBytes, 1999 * sharedLength + 10);
       assert.strictEqual((yield* store.search(filter, "synthetic", "substring")).items.length, 1);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 it.effect.each(["fts", "substring"] as const)(
   "%s continues across more than 100 matches at the item and byte ceilings",
@@ -7918,7 +7922,7 @@ it.effect.each(["fts", "substring"] as const)(
         [...first.items, ...next.items].map((i) => i.memoryId),
         Array.from({ length: 105 }, (_, n) => id(n + 2)),
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -8062,7 +8066,7 @@ it.effect(
           .length,
         0,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("r3 thread lineage pins identity without retaining revision bodies", () =>
@@ -8216,7 +8220,7 @@ it.effect("r3 thread lineage pins identity without retaining revision bodies", (
         .length,
       0,
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 const missingCheckpointCases = [
@@ -8308,7 +8312,7 @@ it.effect.each(missingCheckpointCases)(
       assert.instanceOf(failed.cause, CheckpointAccountingError);
       assert.strictEqual((failed.cause as CheckpointAccountingError).stage, "missing-total");
       assert.deepStrictEqual(yield* inventory, before);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect(
@@ -8343,5 +8347,5 @@ it.effect(
       const failed = yield* store.transact(store.readHubUsageTx(space)).pipe(Effect.flip);
       assert.instanceOf(failed, Store.MemoryStorageError);
       assert.instanceOf(failed.cause, CheckpointAccountingError);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
