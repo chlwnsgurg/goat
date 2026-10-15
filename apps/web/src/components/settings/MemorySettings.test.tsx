@@ -1393,7 +1393,12 @@ it("labels ordinary history as versions and closes details with the accessible i
   const { render } = await supportedScreen();
   state.queries.set(
     "history",
-    Option.some({ ...retained, resolutions: [], revisions: [{ revision: revision(3), payload }] }),
+    Option.some({
+      ...retained,
+      resolutions: [],
+      reports: [],
+      revisions: [{ revision: revision(3), payload }],
+    }),
   );
   await render();
   expect(container.textContent).toContain("Open Version 1");
