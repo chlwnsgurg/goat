@@ -1220,17 +1220,15 @@ export default function DiffPanel({
                     }}
                   />
                 </div>
-                {fileTreeOpen ? (
-                  <aside className="flex w-[min(16rem,40%)] min-w-40 shrink-0 border-l border-border/60">
-                    <DiffFileTree
-                      ariaLabel={`${reviewSectionTitle} files`}
-                      entries={fileTreeEntries}
-                      selectedPath={selectedFilePath}
-                      revealRequestId={selectedFileRevealRequestId}
-                      onSelectFile={revealDiffFile}
-                    />
-                  </aside>
-                ) : null}
+                <DiffFileTree
+                  open={fileTreeOpen}
+                  className="w-[min(16rem,40%)] min-w-40 shrink-0 border-l border-border/60"
+                  ariaLabel={`${reviewSectionTitle} files`}
+                  entries={fileTreeEntries}
+                  selectedPath={selectedFilePath}
+                  revealRequestId={selectedFileRevealRequestId}
+                  onSelectFile={revealDiffFile}
+                />
               </div>
             ) : (
               <div className="min-h-0 flex-1 overflow-auto p-2">
