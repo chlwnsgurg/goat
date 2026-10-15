@@ -538,3 +538,56 @@ it.effect(
       assert.isTrue(plan.every((r) => r.detail.includes("SEARCH")));
     }).pipe(Effect.provide(old)),
 );
+
+it.effect("keeps aggregate counter cardinality and lookup plans independent of 101 receipts", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* seed;
+    yield* checkpoint;
+    const aggregateRows = sql<{
+      n: number;
+    }>`SELECT count(*) AS n FROM memory_quota_counters WHERE dimension IN ('hub_snapshot_bytes','hub_snapshot_rows')`;
+    const before = yield* aggregateRows;
+    for (let n = 0; n < 101; n++) {
+      const record: M.MemoryCompactReceipt = {
+        memorySpaceId: space,
+        originEnvironmentId: environmentId,
+        operationKind: "upsert",
+        receipt: {
+          operationId: M.MemoryOperationId.make(id(1000 + n)),
+          memoryId,
+          operationDigest: "a".repeat(64),
+          outcome: "accepted",
+          hubSequence: n + 1,
+        },
+        revisionId: M.MemoryRevisionId.make(id(2000 + n)),
+        resolutionId: null,
+        revertsResolutionId: null,
+        attemptId: null,
+        fencingToken: null,
+        reportGuard: null,
+      };
+      yield* sql`INSERT INTO memory_compact_receipts(space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json,compact_blob) VALUES (${space},${record.receipt.operationId},${record.receipt.operationDigest},${n + 1},${JSON.stringify(record.receipt)},${JSON.stringify(record)},${encodeCompactReceipt(record, () => 1)})`;
+    }
+    yield* refreshCheckpointAccounting();
+    assert.deepStrictEqual(yield* aggregateRows, before);
+    assert.deepStrictEqual(
+      yield* sql`SELECT 1 FROM memory_quota_counters WHERE dimension IN ('hub_snapshot_bytes','hub_snapshot_rows') AND scope_key!=''`,
+      [],
+    );
+    const encoded = yield* sql<{
+      n: number;
+      bytes: number;
+    }>`SELECT count(*) AS n,sum(checkpoint_bytes) AS bytes FROM memory_compact_receipts WHERE checkpoint_rows=1`;
+    assert.strictEqual(encoded[0]!.n, 101);
+    assert.isAbove(encoded[0]!.bytes, 101 * M.MEMORY_COMPACT_RECEIPT_MAX_BYTES);
+    const spaces = yield* sql<{
+      detail: string;
+    }>`EXPLAIN QUERY PLAN SELECT space FROM memory_quota_counters WHERE dimension='hub_snapshot_rows' AND scope_key=''`;
+    assert.isTrue(spaces.every((r) => r.detail.includes("memory_checkpoint_spaces")));
+    const owners = yield* sql<{
+      detail: string;
+    }>`EXPLAIN QUERY PLAN SELECT rowid FROM memory_import_keys WHERE space=${space} AND memory_id=${memoryId} AND key_kind IN ('sourceKey','content','sourceExclusion')`;
+    assert.isTrue(owners.every((r) => r.detail.includes("memory_suppression_owner")));
+  }).pipe(Effect.provide(old)),
+);

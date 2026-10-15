@@ -151,10 +151,15 @@ export default Effect.gen(function* () {
     for (const action of ["insert", "update", "delete"])
       yield* sql.unsafe(`DROP TRIGGER IF EXISTS ${table}_snapshot_generation_${action}`);
 
-  // Independent records keep two numeric sizes on their existing row. Do not
+  // All canonical record caches keep two numeric sizes on their existing row. Do not
   // duplicate source keys into an index/cache table. Rowid invalidations are
   // transaction-local and are always drained before commit.
-  for (const table of ["memory_import_lineage", "memory_import_keys"]) {
+  for (const table of [
+    "memory_identity_ledger",
+    "memory_compact_receipts",
+    "memory_import_lineage",
+    "memory_import_keys",
+  ]) {
     yield* sql.unsafe(
       `ALTER TABLE ${table} ADD COLUMN checkpoint_bytes INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_bytes>=0)`,
     );
@@ -177,6 +182,9 @@ export default Effect.gen(function* () {
       UPDATE ${table} SET checkpoint_bytes=0,checkpoint_rows=0 WHERE rowid=NEW.rowid;
     END`);
   }
+  // These indexes contain bounded aggregate/owner addresses, never corpus text.
+  yield* sql`CREATE INDEX memory_checkpoint_spaces ON memory_quota_counters(space) WHERE dimension='hub_snapshot_rows' AND scope_key=''`;
+  yield* sql`CREATE INDEX memory_suppression_owner ON memory_import_keys(space,memory_id) WHERE key_kind IN ('sourceKey','content','sourceExclusion')`;
   // Invalidation keys use only the existing quota counter PK, and are drained
   // synchronously inside the writer transaction before admission/publication/commit.
   const mark = (space: string, key: string) =>
