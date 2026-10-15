@@ -169,15 +169,24 @@ const classifyError = (cause: unknown, message: string, operation: string) => {
 // change data, so retry only this code, never BUSY_SNAPSHOT or a whole transaction.
 // Yield between attempts so recovery on another connection can finish without
 // blocking the main thread. Cap the wait at 500 delays of 10 ms.
+const isWalRecovery = (error: SqlError) => {
+  const cause = error.reason.cause;
+  return Predicate.hasProperty(cause, "errcode") && cause.errcode === 261;
+};
+
 const waitForWalRecovery = <A, R>(effect: Effect.Effect<A, SqlError, R>) =>
-  Effect.retry(effect, {
-    times: 500,
-    schedule: Schedule.spaced("10 millis"),
-    while: (error) => {
-      const cause = error.reason.cause;
-      return Predicate.hasProperty(cause, "errcode") && cause.errcode === 261;
-    },
-  });
+  Effect.catchIf(effect, isWalRecovery, () =>
+    // Keep retry machinery off the successful first attempt. The first failure
+    // already consumed one attempt, leaving 500 delayed attempts in total.
+    Effect.delay(
+      Effect.retry(effect, {
+        times: 499,
+        schedule: Schedule.spaced("10 millis"),
+        while: isWalRecovery,
+      }),
+      "10 millis",
+    ),
+  );
 
 /**
  * SQLite keeps its copy of a statement's text and blob parameters until the

@@ -376,11 +376,13 @@ it.effect("bounds WAL recovery retries and preserves the lock failure", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const attempted = yield* Deferred.make<void>();
+    let lastFailure = recoveryBusy();
     yield* Effect.acquireUseRelease(
       Effect.sync(() =>
         vi.spyOn(NodeSqlite.StatementSync.prototype, "all").mockImplementation(() => {
           Deferred.doneUnsafe(attempted, Effect.void);
-          throw recoveryBusy();
+          lastFailure = recoveryBusy();
+          throw lastFailure;
         }),
       ),
       (spy) =>
@@ -391,6 +393,38 @@ it.effect("bounds WAL recovery retries and preserves the lock failure", () =>
           const error = yield* Fiber.join(fiber);
           assert.equal(error.reason._tag, "LockTimeoutError");
           assert.equal(spy.mock.calls.length, 501);
+          assert.strictEqual(error.reason.cause, lastFailure);
+        }),
+      (spy) => Effect.sync(() => spy.mockRestore()),
+    );
+  }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("stops WAL recovery retries when the SQLite error changes", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const attempted = yield* Deferred.make<void>();
+    const snapshotFailure = Object.assign(new Error("stale snapshot"), { errcode: 517 });
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        vi
+          .spyOn(NodeSqlite.StatementSync.prototype, "all")
+          .mockImplementationOnce(() => {
+            Deferred.doneUnsafe(attempted, Effect.void);
+            throw recoveryBusy();
+          })
+          .mockImplementation(() => {
+            throw snapshotFailure;
+          }),
+      ),
+      (spy) =>
+        Effect.gen(function* () {
+          const fiber = yield* sql`SELECT 1`.pipe(Effect.flip, Effect.forkChild);
+          yield* Deferred.await(attempted);
+          yield* TestClock.adjust("10 millis");
+          const error = yield* Fiber.join(fiber);
+          assert.equal(spy.mock.calls.length, 2);
+          assert.strictEqual(error.reason.cause, snapshotFailure);
         }),
       (spy) => Effect.sync(() => spy.mockRestore()),
     );
