@@ -1354,6 +1354,11 @@ it.effect.each(["read", "history", "draft"] as const)(
         const derived = yield* decodeMemoryItem(
           {
             ...unrelatedItem,
+            revision: {
+              ...unrelatedItem.revision,
+              revisionId: "00000000-0000-4000-8000-000000000009",
+              payloadRef: "00000000-0000-4000-8000-000000000009",
+            },
             payload: {
               ...unrelatedItem.payload,
               text: "Already open derivative",
@@ -1397,9 +1402,9 @@ it.effect.each(["read", "history", "draft"] as const)(
         yield* waitFor(h.registry, exposure, (state) => state.forgotten.has(id));
         // No D signal, refetch, TTL advance, or new mount is needed to purge the body.
         if (consumer === "read")
-          expect(h.registry.get(read)).toEqual(AsyncResult.success(Option.none()));
+          expect(h.registry.get(read)).toMatchObject({ _tag: "Success", value: Option.none() });
         if (consumer === "history")
-          expect(h.registry.get(past)).toEqual(AsyncResult.success(Option.none()));
+          expect(h.registry.get(past)).toMatchObject({ _tag: "Success", value: Option.none() });
         if (consumer === "draft") expect(h.registry.get(edit)).toBeNull();
         expect(h.readCount()).toBe(1);
       }),
