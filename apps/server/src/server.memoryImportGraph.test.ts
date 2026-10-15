@@ -355,7 +355,10 @@ it.effect(
       const home = yield* fs.makeTempDirectoryScoped({ prefix: "wp5-default-import-" });
       const source = `${home}/.codex/memories`;
       yield* fs.makeDirectory(source, { recursive: true, mode: 0o700 });
-      yield* fs.writeFileString(`${source}/AGENTS.md`, "Synthetic default assembly guidance.\n");
+      yield* fs.writeFileString(
+        `${source}/MEMORY.md`,
+        "# Task Group: Default assembly\nscope: synthetic fixture\n\n## Task 1: Import\n\n### learnings\n- Synthetic default assembly guidance.\n",
+      );
       const before = stamp(source);
       // Only provider input exists here. Config prepares server state; the production
       // reader must create its own private snapshot directories without an override.
