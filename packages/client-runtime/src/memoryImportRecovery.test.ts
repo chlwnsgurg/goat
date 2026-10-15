@@ -740,11 +740,24 @@ describe("observable import progress and retry", () => {
 });
 
 describe("import subscription isolation and admission", () => {
-  it("isolates a throwing listener while publishing successful completion to the next", async () => {
+  it.each([
+    {
+      kind: "Error",
+      error: Object.assign(
+        new Error("synthetic-id private-body-marker", {
+          cause: { id: "synthetic-id", body: "private-body-marker" },
+        }),
+        { id: "synthetic-id", body: "private-body-marker" },
+      ),
+    },
+    {
+      kind: "object",
+      error: { id: "synthetic-id", body: "private-body-marker" },
+    },
+  ])("isolates a throwing $kind listener and reports only safe text", async ({ error }) => {
     const f = workflowFixture(33);
     await f.ready();
     await Promise.resolve();
-    const error = new Error("broken subscriber");
     const report = vi.spyOn(console, "error").mockImplementation(() => {});
     const snapshots: ReturnType<typeof f.workflow.getSnapshot>[] = [];
     const unsubscribe = f.workflow.subscribe(() => {
@@ -756,7 +769,10 @@ describe("import subscription isolation and admission", () => {
       expect(f.calls.filter((input) => input.action === "apply")).toHaveLength(2);
       expect(f.workflow.getSnapshot()).toMatchObject({ phase: "completed", settledChunks: 2 });
       expect(snapshots.at(-1)).toBe(f.workflow.getSnapshot());
-      expect(report).toHaveBeenCalledWith("Memory import listener failed", error);
+      expect(report).toHaveBeenCalled();
+      for (const args of report.mock.calls) {
+        expect(args).toEqual(["Memory import listener failed"]);
+      }
     } finally {
       unsubscribe();
       report.mockRestore();

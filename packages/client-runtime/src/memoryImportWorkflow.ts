@@ -219,10 +219,10 @@ export function createMemoryImportWorkflow(options: {
         if (!listeners.has(listener)) continue;
         try {
           listener();
-        } catch (error) {
+        } catch {
           // This Promise-based client store reports subscriber failures outside workflow control flow.
           // @effect-diagnostics-next-line globalConsole:off
-          console.error("Memory import listener failed", error);
+          console.error("Memory import listener failed");
         }
       }
     });
