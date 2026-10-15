@@ -1096,13 +1096,11 @@ describe("ProviderMemoryImport actual Service/Store ports", () => {
             sourceId,
             sessionId: p.sessionId,
             operationId: M.MemoryOperationId.make(uuid(60)),
-            items: p.items
-              .filter((r) => partial || !r.sourceItemKey.endsWith("/b.md"))
-              .map((r) => ({
-                sourceItemKey: r.sourceItemKey,
-                sourceFingerprint: r.sourceFingerprint!,
-                scope: { kind: "user" },
-              })),
+            items: p.items.map((r) => ({
+              sourceItemKey: r.sourceItemKey,
+              sourceFingerprint: r.sourceFingerprint!,
+              scope: { kind: "user" },
+            })),
           };
           if (deny) {
             const before = yield* sql`SELECT * FROM memory_import_receipts ORDER BY receipt_id`;
