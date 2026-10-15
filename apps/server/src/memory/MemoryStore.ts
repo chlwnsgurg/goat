@@ -3460,7 +3460,8 @@ const make = Effect.gen(function* () {
     limit: number,
   ) {
     // Filter before LIMIT: a page of derived work must not hide its unsent inputs.
-    // Payload deps are bounded to 100; each edge probes existing revision/outbox PKs.
+    // Payload deps are bounded to 100; CROSS JOIN keeps edge iteration ahead of
+    // revision/outbox PK probes instead of letting SQLite scan all revisions in a space.
     // Only live local submissions wait. Missing/GC/terminal inputs still reach the hub's
     // authoritative typed rejection, without inventing a receipt or retry attempt here.
     const rows = yield* stored(
@@ -3470,9 +3471,9 @@ const make = Effect.gen(function* () {
       WHERE o.space=${space} AND o.kind IN ('sync','revert_intent')
       AND (o.status IN ('pending','retry') OR (o.status='running' AND o.claimed_until<=${now})) AND o.next_attempt_at<=${now}
       AND NOT EXISTS (
-        SELECT 1 FROM memory_payloads p, json_each(p.dependencies_json) dep
-        JOIN memory_revisions r ON r.space=o.space AND r.revision_id=dep.value
-        JOIN memory_outbox prerequisite ON prerequisite.id='sync:'||r.space||':'||r.operation_id
+        SELECT 1 FROM memory_payloads p CROSS JOIN json_each(p.dependencies_json) dep
+        CROSS JOIN memory_revisions r ON r.space=o.space AND r.revision_id=dep.value
+        CROSS JOIN memory_outbox prerequisite ON prerequisite.id='sync:'||r.space||':'||r.operation_id
         WHERE p.space=o.space AND p.payload_ref=o.payload_ref
           AND prerequisite.status IN ('pending','retry','running')
       )
