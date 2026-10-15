@@ -74,11 +74,11 @@ keyboard. The button only offers Steer when the running agent supports it.
 
 ## Cloud tasks
 
-When a configured provider runs in the cloud, its task uses the published remote
-branch. Local edits and commits that have not been pushed are not included; push
-first if you want the task to use them. A branch that has never been published
-cannot start a cloud task. Some providers also require a clean checkout of that
-pushed revision; resolve the displayed source restriction before sending.
+Most cloud providers use the published remote branch and exclude local edits and
+unpushed commits; push first if you want those tasks to use them. Some also require
+a clean checkout of that pushed revision. Claude Cloud starts from the project
+folder and its current branch instead, and local changes may be included without
+publishing the branch. Check the provider's source notice before sending.
 
 Open the task or its returned pull request from the conversation. Cloud changes
 stay in the remote repository, so this thread has no local checkpoint or worktree
@@ -102,6 +102,21 @@ device until you sign back into the same account.
 On web and desktop, use Settings → Providers → **Models** to add an unlisted model with a custom
 name and options. Only options supported by the provider integration affect turns. Antigravity
 uses its account catalog and does not support custom models.
+
+To rename a built-in model on every client, edit the server's `settings.json` in its `userdata`
+directory. Add a custom model entry with the built-in model ID and a new name under that provider
+instance:
+
+```json
+{
+  "providerInstances": {
+    "codex": {
+      "driver": "codex",
+      "config": { "customModels": [{ "slug": "gpt-5.5", "name": "Team GPT" }] }
+    }
+  }
+}
+```
 
 ## Model defaults
 
@@ -273,7 +288,8 @@ excerpt, Terminal 1 lines 3-4" and similar to screen readers.
 A pull request appears as its icon and number. Its color reflects whether it was open, draft,
 merged, or closed when it was attached. Select it to inspect the captured title and branches,
 then choose **Open pull request** to visit the pull request. On web and desktop, type `#` to browse the newest
-pull requests in the current project's repository. Continue typing digits to filter the recent list
+pull requests in the current project's repository. Pull requests linked to the thread are included
+from any repository and listed first, after any exact number match. Continue typing digits to filter the recent list
 by any part of its pull request numbers. A complete number is also resolved directly, even when that
 pull request is older than the recent list. Type a single word after `#` to search pull requests in
 the repository by text. Choose a result to insert it as a chip.

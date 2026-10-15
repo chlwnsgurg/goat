@@ -9,7 +9,7 @@ import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
-import migration from "../persistence/Migrations/070_Memory.ts";
+import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";

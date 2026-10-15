@@ -1,17 +1,24 @@
 import type { PullRequestLabel } from "@goat/contracts";
+import { markdownTextLines } from "@goat/shared/markdownTextLines";
 
 /** Label names that put a pull request on hold, compared after `normalizeLabel`. */
 const HOLD_LABELS = new Set(["hold", "on-hold", "do-not-merge", "dont-merge"]);
 
-/** A description line that starts with HOLD, such as `HOLD: do not merge until review`. */
-const HOLD_LINE = /^[\s>*_#-]*HOLD\b/m;
+/**
+ * A rendered line of prose that starts with HOLD, such as `HOLD: do not merge until review`.
+ * Markdown is parsed first, so quotes, list markers, emphasis, and inline code around it are
+ * already gone, and code blocks and HTML comments are never read.
+ */
+const HOLD_LINE = /^HOLD\b/;
 
+/** Separators collapse, so `On Hold`, `do_not_merge` and `do - not - merge` all match. */
 const normalizeLabel = (name: string) =>
   name
     .trim()
     .toLowerCase()
     .replaceAll(/['’]/g, "")
-    .replaceAll(/[\s_]+/g, "-");
+    .replaceAll(/[^a-z0-9]+/g, "-")
+    .replaceAll(/^-|-$/g, "");
 
 /**
  * Why a pull request must not be merged yet, or null when nothing holds it. A merge,
@@ -28,6 +35,7 @@ export function pullRequestHoldReason(pullRequest: {
     HOLD_LABELS.has(normalizeLabel(candidate.name)),
   );
   if (label !== undefined) return `it has the "${label.name}" label`;
-  if (HOLD_LINE.test(pullRequest.body)) return "its description has a HOLD line";
+  if (markdownTextLines(pullRequest.body).some((line) => HOLD_LINE.test(line)))
+    return "its description has a HOLD line";
   return null;
 }

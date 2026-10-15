@@ -1,9 +1,12 @@
-import type { UserInputQuestion } from "@goat/contracts";
+import type { ScopedThreadRef, UserInputQuestion } from "@goat/contracts";
+import ChatMarkdown from "../ChatMarkdown";
 import { CheckIcon } from "../solar";
 import { cn } from "../../lib/utils";
 
 export function PendingUserInputQuestionBody({
   question,
+  cwd,
+  threadRef,
   selectedOptionValues,
   customAnswerActive,
   optimisticOptionValue,
@@ -12,6 +15,9 @@ export function PendingUserInputQuestionBody({
   onSelect,
 }: {
   question: UserInputQuestion;
+  /** Resolves file links in the question text. */
+  cwd: string | undefined;
+  threadRef: ScopedThreadRef;
   selectedOptionValues: readonly string[];
   customAnswerActive: boolean;
   optimisticOptionValue?: string | undefined;
@@ -21,7 +27,12 @@ export function PendingUserInputQuestionBody({
 }) {
   return (
     <>
-      <p className="text-sm text-foreground/85">{question.question}</p>
+      <ChatMarkdown
+        text={question.question}
+        cwd={cwd}
+        threadRef={threadRef}
+        className="text-foreground/85"
+      />
       {question.multiSelect ? (
         <p className="mt-1 text-secondary-label text-xs">Select one or more options.</p>
       ) : null}

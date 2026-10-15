@@ -187,3 +187,70 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     );
   },
 );
+
+// Upstream reconnect regressions, exercised through GOAT's protocol-aware launcher.
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "SSH reconnect preserves remote work",
+  () => {
+    it.live.each(["ready", "stalled"] as const)(
+      "gives an existing managed server the full readiness budget: %s",
+      (mode) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ...current,
+          });
+          // Keep protocol discovery real. Only readiness is controlled, so the test
+          // proves the launcher's budget and failure behavior without timed sleeps.
+          const executable = `${f.old}/goat`;
+          const source = yield* f.fs.readFileString(executable);
+          yield* f.fs.writeFileString(
+            executable,
+            source.replace(
+              "// Fixture readiness uses an event, not polling or a delay.",
+              `fs.writeFileSync(path.join(test, "reuse-budget"), args[3]);
+if (args[3] !== "60000") process.exit(9);
+${mode === "stalled" ? "process.exit(1);" : ""}`,
+            ),
+          );
+          const before = yield* f.snapshot;
+          const result = yield* f.run("launch");
+          assert.equal(yield* f.fs.readFileString(`${f.test}/reuse-budget`), "60000");
+          if (mode === "ready") {
+            assert.isTrue(Result.isSuccess(result));
+            if (Result.isSuccess(result)) assert.equal(result.success.port, f.port);
+          } else {
+            assert.isTrue(Result.isFailure(result));
+            if (Result.isFailure(result)) assert.include(String(result.failure), "left running");
+          }
+          assert.deepEqual(yield* f.snapshot, before);
+          yield* Effect.sync(() => process.kill(f.pid, 0));
+          assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("adopts a live server without a managed record instead of restarting it", () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          ...current,
+        });
+        yield* f.fs.remove(`${f.state}/managed`);
+        const result = yield* SshTunnel.launchOrReuseRemoteServer(secondClient, {}, f.runner).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+        );
+        assert.equal(result.status, "ready");
+        if (result.status === "ready") {
+          assert.equal(result.remotePort, f.port);
+          assert.equal(result.remoteServerKind, "external");
+        }
+        yield* Effect.sync(() => process.kill(f.pid, 0));
+        assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+  },
+);
