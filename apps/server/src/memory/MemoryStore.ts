@@ -5972,6 +5972,21 @@ const make = Effect.gen(function* () {
       }),
     };
   });
+  const readImportNoopResultTx = Effect.fnUntraced(function* (
+    b: typeof ImportCompletedNoopCodec.Type,
+  ) {
+    const results = yield* stored(
+      "import-noop-read",
+      sql<{ result_json: string; codec_version: number }>`
+          SELECT result_json,codec_version FROM memory_import_noop_results WHERE space=${b.memorySpaceId}
+          AND environment_id=${b.environmentId} AND source_id=${b.sourceId} AND result_ref=${b.resultRef}`,
+    );
+    const row = results[0];
+    if (!row || row.codec_version !== 1 || noopResultRef(b, row.result_json) !== b.resultRef)
+      return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    const result = yield* importNoopResultCodec.decode(row.result_json, strict);
+    return result;
+  });
   const gcImportNoopTx = Effect.fnUntraced(function* (b: typeof ImportCompletedNoopCodec.Type) {
     yield* stored(
       "import-noop-gc",
@@ -6015,16 +6030,7 @@ const make = Effect.gen(function* () {
       )
         return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
       if (b.kind === "completed-noop-ref") {
-        const results = yield* stored(
-          "import-noop-read",
-          sql<{ result_json: string; codec_version: number }>`
-          SELECT result_json,codec_version FROM memory_import_noop_results WHERE space=${b.memorySpaceId}
-          AND environment_id=${b.environmentId} AND source_id=${b.sourceId} AND result_ref=${b.resultRef}`,
-        );
-        const row = results[0];
-        if (!row || row.codec_version !== 1 || noopResultRef(b, row.result_json) !== b.resultRef)
-          return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
-        const result = yield* importNoopResultCodec.decode(row.result_json, strict);
+        const result = yield* readImportNoopResultTx(b);
         return {
           ...b,
           receipt: {
@@ -6488,8 +6494,17 @@ const make = Effect.gen(function* () {
     yield* Transaction;
     const rows = yield* stored(
       "import-batch-expired",
-      sql<{ receipt_id: string; completed_items_json: string }>`
-      SELECT receipt_id,completed_items_json FROM memory_import_receipts b WHERE space=${space} AND record_kind='batch'
+      sql<{
+        receipt_id: string;
+        completed_items_json: string;
+        environment_id: string;
+        source_id: string;
+        batch_operation_id: string;
+        request_digest: string;
+        result_ref: string | null;
+        observed_at_utc: string;
+      }>`
+      SELECT receipt_id,completed_items_json,environment_id,source_id,batch_operation_id,request_digest,result_ref,observed_at_utc FROM memory_import_receipts b WHERE space=${space} AND record_kind='batch'
       AND json_extract(completed_items_json,'$.kind') IN ('detailed','completed-noop-ref')
       AND (${operationId} IS NULL OR batch_operation_id=${operationId})
       AND observed_at_utc<=${DateTime.formatIso(DateTime.makeUnsafe(now - M.MEMORY_IMPORT_BATCH_RETENTION_MS))}
@@ -6506,6 +6521,18 @@ const make = Effect.gen(function* () {
     );
     for (const row of rows) {
       const batch = yield* importBatchCodec.decode(row.completed_items_json, strict);
+      if (
+        batch.kind === "retired" ||
+        batch.memorySpaceId !== space ||
+        batch.environmentId !== row.environment_id ||
+        batch.sourceId !== row.source_id ||
+        batch.operationId !== row.batch_operation_id ||
+        batch.createdAtUtc !== row.observed_at_utc ||
+        batch.selectionDigest !== row.request_digest ||
+        row.result_ref !== (batch.kind === "completed-noop-ref" ? batch.resultRef : null)
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      if (batch.kind === "completed-noop-ref") yield* readImportNoopResultTx(batch);
       yield* stored(
         "import-batch-retire",
         sql`UPDATE memory_import_receipts SET completed_items_json=${yield* importBatchCodec.encode({ kind: "retired", codecVersion: 1, selectionDigest: batch.selectionDigest })},result_ref=NULL WHERE receipt_id=${row.receipt_id}`,

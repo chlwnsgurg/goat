@@ -2412,6 +2412,42 @@ describe("MemoryImport shared settled noop", () => {
       assert.strictEqual((yield* ports.preflightBatch(a.batch, Effect.void)).kind, "retired");
     }).pipe(Effect.provide(importLive)),
   );
+  it.effect.each(["hub_receipts", "hub_metadata", "import_staging"] as const)(
+    "charges shared guards at exact capacity and refuses +1 atomically: %s",
+    (dimension) =>
+      Effect.gen(function* () {
+        yield* approvedImport;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        yield* committedNoop(400);
+        const counter = Effect.gen(function* () {
+          return (yield* sql<{
+            value: number;
+          }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension=${dimension} AND scope_key=''`)[0]!
+            .value;
+        });
+        const before = yield* counter;
+        yield* committedNoop(410);
+        const delta = (yield* counter) - before;
+        assert.isAbove(delta, 0);
+        const usage = yield* store.transact(store.readHubUsageTx(space));
+        const limit =
+          dimension === "hub_receipts"
+            ? M.MEMORY_DEDUP_MAX_RECEIPTS
+            : dimension === "hub_metadata"
+              ? M.MEMORY_PERMANENT_METADATA_MAX_BYTES
+              : M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - usage.requiredCheckpointBoundBytes;
+        yield* sql`UPDATE memory_quota_counters SET value=${limit - delta} WHERE space='_hub_global' AND dimension=${dimension} AND scope_key=''`;
+        yield* committedNoop(420);
+        assert.strictEqual(yield* counter, limit);
+        yield* sql`UPDATE memory_quota_counters SET value=${limit - delta + 1} WHERE space='_hub_global' AND dimension=${dimension} AND scope_key=''`;
+        const inventory = yield* durableInventory;
+        const failure = yield* committedNoop(430).pipe(Effect.flip);
+        assert.strictEqual(failure._tag, "MemoryCapacityError");
+        assert.deepStrictEqual(yield* durableInventory, inventory);
+        assert.strictEqual((yield* sql`SELECT * FROM memory_import_noop_results`).length, 1);
+      }).pipe(Effect.provide(importLive)),
+  );
   it.effect("fails closed on collision, broken reference and forged cross-origin result", () =>
     Effect.gen(function* () {
       yield* approvedImport;
@@ -2419,6 +2455,13 @@ describe("MemoryImport shared settled noop", () => {
       const store = yield* Store.MemoryStore;
       const sql = yield* SqlClient.SqlClient;
       const a = yield* committedNoop(400);
+      for (const mutation of [
+        sql`UPDATE memory_import_receipts SET result_ref=NULL WHERE batch_operation_id=${a.batch.operationId}`,
+        sql`UPDATE memory_import_receipts SET source_id=${uuid(999)} WHERE batch_operation_id=${a.batch.operationId}`,
+        sql`UPDATE memory_import_receipts SET space=${uuid(999)} WHERE batch_operation_id=${a.batch.operationId}`,
+        sql`UPDATE memory_import_receipts SET environment_id='other' WHERE batch_operation_id=${a.batch.operationId}`,
+      ])
+        assert.strictEqual((yield* mutation.pipe(Effect.exit))._tag, "Failure");
       yield* sql`DROP TRIGGER memory_import_result_immutable`;
       const rows = yield* sql<{
         result_json: string;
@@ -2439,6 +2482,15 @@ describe("MemoryImport shared settled noop", () => {
         (yield* ports.preflightBatch(a.batch, Effect.void).pipe(Effect.exit))._tag,
         "Failure",
       );
+      yield* TestClock.setTime(Date.parse(stamp) + M.MEMORY_IMPORT_BATCH_RETENTION_MS + 1);
+      assert.strictEqual(
+        (yield* ports.preflightBatch(a.batch, Effect.void).pipe(Effect.exit))._tag,
+        "Failure",
+      );
+      const broken = yield* sql<{
+        kind: string;
+      }>`SELECT json_extract(completed_items_json,'$.kind') AS kind FROM memory_import_receipts WHERE batch_operation_id=${a.batch.operationId}`;
+      assert.strictEqual(broken[0]!.kind, "completed-noop-ref");
       assert.strictEqual(
         yield* store.transact(
           store.readImportBatchTx({ ...a.batch, memorySpaceId: M.MemorySpaceId.make(uuid(99)) }),
@@ -2999,6 +3051,8 @@ describe("MemoryImport physical-growth source harness", () => {
                   Effect.map((s) => Number(s.size)),
                   Effect.orElseSucceed(() => null),
                 );
+                // Read both total pages and harness allocation before writing this sample.
+                const allocation = yield* store.measureAllocation();
                 const growth = yield* quota.recordStorageSample(environmentId, { walBytes });
                 const counts = (yield* sql<{
                   identities: number;
@@ -3020,7 +3074,6 @@ describe("MemoryImport physical-growth source harness", () => {
             (SELECT count(*) FROM memory_items WHERE space=${space} AND status='active') AS active,
             (SELECT count(*) FROM memory_import_receipts WHERE space=${space}) AS receipts,
             (SELECT count(*) FROM memory_import_keys WHERE space=${space} AND key_kind IN ('sourceKey','content','sourceExclusion')) AS suppression`)[0]!;
-                const allocation = yield* store.measureAllocation();
                 const sampleTable = allocation.tables.find(
                   (t) => t.table === "memory_storage_samples",
                 );
@@ -3205,6 +3258,7 @@ describe("MemoryImport physical-growth source harness", () => {
             yield* fs.writeFileString(`${directory}/gates.json`, encodeUnknown(gates));
             yield* Console.log(`WP5_GROWTH_GATES ${encodeUnknown(gates)}`);
             assert.isEmpty(resolutionRefusals, "synthetic resolutions must all be admitted");
+            assert.isEmpty(refusals, "all local imports and claims must be admitted");
             assert.strictEqual(
               changed.counts.active,
               16,
