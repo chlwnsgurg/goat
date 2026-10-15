@@ -587,6 +587,71 @@ it.live(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live("interrupts an active wait on takeover and frees the queue for human input", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker, tabId } = yield* ready;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      const started = Promise.withResolvers<void>();
+      const finish = Promise.withResolvers<void>();
+      const page = contexts[0]!.page;
+      page.waitForLoadState.mockImplementationOnce(async () => {
+        started.resolve();
+        await finish.promise;
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(() => finish.resolve()));
+      const waiting = yield* broker
+        .invoke<void>({
+          scope,
+          tabId,
+          operation: "waitFor",
+          input: { loadState: "load" },
+        })
+        .pipe(Effect.flip, Effect.forkScoped);
+      yield* Effect.promise(() => started.promise);
+      yield* viewer.input({ type: "takeControl" });
+      expect(yield* Fiber.join(waiting)).toMatchObject({
+        _tag: "PreviewAutomationControlInterruptedError",
+        reason: "humanControl",
+      });
+      // The native read is still pending, but no longer holds the control queue.
+      yield* viewer.input({ type: "text", text: "human input" });
+      expect(contexts[0]!.sessions.at(-1)!.send).toHaveBeenCalledWith("Input.insertText", {
+        text: "human input",
+      });
+      yield* viewer.input({ type: "releaseControl" });
+      expect(
+        yield* broker.invoke({
+          scope,
+          tabId,
+          operation: "evaluate",
+          input: { expression: "1 + 1" },
+        }),
+      ).toBe("evaluated");
+      finish.resolve();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("allows a wait to observe a human-driven tab without taking control", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker, tabId } = yield* ready;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      yield* viewer.input({ type: "takeControl" });
+      const page = contexts[0]!.page;
+      yield* broker.invoke({
+        scope: asSession("observing-agent"),
+        tabId,
+        operation: "waitFor",
+        input: { loadState: "load" },
+      });
+      expect(page.waitForLoadState).toHaveBeenCalledWith("load", { timeout: expect.any(Number) });
+      yield* viewer.input({ type: "releaseControl" });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("reports a pending dialog without evaluating the page and resolves it explicitly", () =>
   Effect.scoped(
     Effect.gen(function* () {

@@ -200,6 +200,7 @@ import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
 import { useDiffPanelStore } from "../diffPanelStore";
 import { useActiveThreadRef } from "../hooks/useActiveThreadRef";
+import { useBrowserHistoryProject } from "../hooks/useBrowserHistoryProject";
 import {
   type ComposerSubmissionIntent,
   collapseExpandedComposerCursor,
@@ -2772,6 +2773,14 @@ export default function ChatView(props: ChatViewProps) {
   // drive the environment picker in BranchToolbar.
   const allProjects = useProjects();
   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
+  useBrowserHistoryProject({
+    threadRef: activeThreadRef,
+    project: activeProject,
+    projects: allProjects,
+    settings: projectGroupingSettings,
+    primaryEnvironmentId,
+    clientSettingsHydrated,
+  });
   useEffect(() => {
     if (!activeThreadRef || !activeProjectRef) return;
     registerFaviconProjectForThread(activeThreadRef, activeProjectRef);
