@@ -4283,6 +4283,13 @@ it.effect.each(["current", "replaced-compactor", "replaced-prune"] as const)(
         status: string;
       }>`SELECT status FROM memory_conflicts WHERE conflict_id=${op.conflictId}`;
       assert.strictEqual(resolvedConflict[0]!.status, "resolved");
+      yield* store.transact(
+        store.reconcileOperationReportTx({
+          operation: op,
+          receipt: ledger.entry.receipt,
+          localEnvironmentId: env,
+        }),
+      );
       const report = (yield* store.pendingReports(100))[0]!;
       yield* store.acknowledgeReport({
         ...report,
