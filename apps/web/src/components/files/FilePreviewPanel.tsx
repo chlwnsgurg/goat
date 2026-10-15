@@ -668,12 +668,15 @@ function FileSaveStatus({
 }) {
   const { status, canWriteFiles } = coordinator;
   const conflict = status === "changed" || status === "deleted" || status === "reloadFailed";
+  // Routine autosave states stay quiet (the file tab already marks unsaved
+  // edits); only states the user must act on, or is waiting on, take a row.
+  if (!conflict && status !== "failed" && status !== "reloading") return null;
   return (
     <div
       role={conflict || status === "failed" ? "alert" : "status"}
-      className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2 text-xs text-muted-foreground"
+      className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 border-b border-border/60 px-3 py-2 text-xs text-muted-foreground"
     >
-      <span className="flex-1">
+      <span className="min-w-48 flex-1">
         {status === "changed"
           ? "File changed on disk. Your unsaved edits are kept."
           : status === "deleted"
@@ -682,13 +685,7 @@ function FileSaveStatus({
               ? "Could not reload from disk. Your unsaved edits are kept."
               : status === "failed"
                 ? "Save failed. Your unsaved edits are kept."
-                : status === "reloading"
-                  ? "Reloading from disk…"
-                  : status === "saving"
-                    ? "Saving…"
-                    : status === "unsaved"
-                      ? "Unsaved changes"
-                      : "Saved"}
+                : "Reloading from disk…"}
       </span>
       {conflict ? (
         <>
