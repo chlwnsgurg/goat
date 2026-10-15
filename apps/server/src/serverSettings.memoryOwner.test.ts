@@ -512,3 +512,19 @@ it.effect(
       expect(yield* fs.readFileString(config.settingsPath)).toBe(saved);
     }).pipe(Effect.provide(fixture())),
 );
+
+it.effect("invalid startup settings do not advertise a last-valid publication", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const config = yield* Config.ServerConfig;
+    yield* fs.writeFileString(config.settingsPath, '{"memoryHub":');
+    const settings = yield* Settings.ServerSettingsService;
+    yield* settings.getSettings;
+    const committed = yield* Settings.MemoryHubCommittedSettings;
+    expect(yield* committed.readPublication!).toEqual({
+      state: "unavailable",
+      code: "invalid_settings",
+    });
+    expect((yield* committed.read).settings.mode).toBe("disabled");
+  }).pipe(Effect.provide(fixture())),
+);

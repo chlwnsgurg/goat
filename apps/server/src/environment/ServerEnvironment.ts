@@ -237,6 +237,7 @@ export const make = Effect.gen(function* () {
       memory: {
         protocolVersion: 1,
         refusedReverts: true,
+        hubDiagnostics: true,
         ...(importRuntime._tag === "Some" ? { importProvider: true } : {}),
       },
       repositoryIdentity: true,

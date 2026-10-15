@@ -142,6 +142,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         );
         expect(descriptor.capabilities.memory?.protocolVersion).toBe(1);
         expect(descriptor.capabilities.memory?.refusedReverts).toBe(true);
+        expect(descriptor.capabilities.memory?.hubDiagnostics).toBe(true);
         expect(supportsMemoryProtocol(descriptor.capabilities)).toBe(true);
         expect(descriptor.capabilities.memory?.importProvider).toBeUndefined();
         expect(descriptor.capabilities.memory?.importProvider === true).toBe(false);
@@ -171,6 +172,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         protocolVersion: 1,
         importProvider: true,
         refusedReverts: true,
+        hubDiagnostics: true,
       });
       expect(descriptor.capabilities.memoryHubProtocolVersion).toBeUndefined();
     }),

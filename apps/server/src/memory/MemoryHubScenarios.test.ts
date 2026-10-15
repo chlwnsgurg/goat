@@ -847,6 +847,7 @@ describe("Memory hub assembled HTTP scenarios", () => {
       assert.deepStrictEqual(enabled.capabilities.memory, {
         protocolVersion: 1,
         refusedReverts: true,
+        hubDiagnostics: true,
       });
       yield* s.configure("disabled");
       const disabled = yield* descriptor;
