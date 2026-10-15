@@ -43,7 +43,7 @@ layer("055_OrchestrationV2", (it) => {
         [69, "RemoteReportRelay"],
         [70, "ProjectionTurnItemRequestIndex"],
         [71, "Memory"],
-        [71, "MemoryHubSync"],
+        [72, "MemoryHubSync"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -81,7 +81,7 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 69, name: "RemoteReportRelay" },
         { migration_id: 70, name: "ProjectionTurnItemRequestIndex" },
         { migration_id: 71, name: "Memory" },
-        { migration_id: 71, name: "MemoryHubSync" },
+        { migration_id: 72, name: "MemoryHubSync" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`

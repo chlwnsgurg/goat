@@ -13,8 +13,8 @@ import * as Store from "./MemoryStore.ts";
 import * as Auth from "./MemoryHubAuth.ts";
 import * as Hub from "./MemoryHubHttp.ts";
 import * as Settings from "../serverSettings.ts";
-import migration from "../persistence/Migrations/070_Memory.ts";
-import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
+import migration from "../persistence/Migrations/071_Memory.ts";
+import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 
 const space = M.MemorySpaceId.make("00000000-0000-4000-8000-000000000001");
 const member = M.EnvironmentId.make("synthetic-member");

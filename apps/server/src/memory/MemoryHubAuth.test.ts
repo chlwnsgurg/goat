@@ -7,8 +7,8 @@ import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
-import migration from "../persistence/Migrations/070_Memory.ts";
-import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
+import migration from "../persistence/Migrations/071_Memory.ts";
+import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Auth from "./MemoryHubAuth.ts";
 

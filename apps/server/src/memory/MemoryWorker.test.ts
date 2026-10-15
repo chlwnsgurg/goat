@@ -16,7 +16,7 @@ import * as Settings from "../serverSettings.ts";
 import * as Generation from "../textGeneration/TextGeneration.ts";
 import * as Events from "../orchestration-v2/EventSink.ts";
 import migration from "../persistence/Migrations/071_Memory.ts";
-import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
+import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import { decideMemoryOperation } from "./MemoryDecider.ts";

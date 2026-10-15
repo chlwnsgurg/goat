@@ -12,7 +12,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/071_Memory.ts";
-import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
+import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import * as Store from "./MemoryStore.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
