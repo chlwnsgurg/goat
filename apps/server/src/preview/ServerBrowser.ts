@@ -1863,7 +1863,7 @@ const make = Effect.gen(function* () {
         return executeTabOperation(tab, request);
       });
     }
-    return tab.control.agent(agentSessionId, async () => {
+    return tab.control.agent(agentSessionId, async (signal) => {
       if (tab.dialog)
         throw new BrowserControlInterrupted(
           "A browser dialog is pending. Read preview_status and use preview_dialog first.",
@@ -1871,14 +1871,18 @@ const make = Effect.gen(function* () {
         );
       const generation = tab.control.generation;
       try {
-        return await executeTabOperation(tab, request);
+        return await executeTabOperation(tab, request, signal);
       } finally {
         if (generation !== tab.control.generation) ServerBrowserPage.invalidateRefs(tab.page);
       }
     });
   };
 
-  const executeTabOperation = async (tab: ServerTab, request: PreviewAutomationRequest) => {
+  const executeTabOperation = async (
+    tab: ServerTab,
+    request: PreviewAutomationRequest,
+    signal?: AbortSignal,
+  ) => {
     const input = request.input;
     switch (request.operation) {
       case "back":
@@ -1994,7 +1998,11 @@ const make = Effect.gen(function* () {
           request.timeoutMs,
         );
       case "waitFor":
-        return ServerBrowserPage.waitFor(tab.page, input as PreviewAutomationWaitForInput);
+        return ServerBrowserPage.waitFor(
+          tab.page,
+          { ...(input as PreviewAutomationWaitForInput), timeoutMs: request.timeoutMs },
+          signal,
+        );
       case "recordingStart": {
         const recording = await startRecording(tab);
         return { tabId: tab.tabId, recording: true, startedAt: recording.startedAt };

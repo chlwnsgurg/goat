@@ -85,6 +85,7 @@ export class VcsDriver extends Context.Service<
       relativePaths: ReadonlyArray<string>,
     ) => Effect.Effect<ReadonlyArray<string>, VcsError>;
     readonly initRepository: (input: VcsInitInput) => Effect.Effect<void, VcsError>;
+    /** Index scopes (staged/unstaged) are Git-only and rejected before non-Git dispatch. */
     readonly getDiffPreview?: (
       input: ReviewDiffPreviewInput,
     ) => Effect.Effect<ReviewDiffPreviewResult, VcsError>;

@@ -396,9 +396,15 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
           </Sidebar>
           {children}
         </DestinationRailVisibleContext>
-        {dividerVisible ? (
-          // One titlebar hairline across the whole window. It sits on the headers' own bottom
-          // border pixel, so pages that already draw one still show a single line.
+        {/* Both sit on the headers' own bottom border pixel, so pages that already draw one still
+            show a single line. Beside the rail, the line becomes the content frame's top edge and
+            curves into its left edge, leaving the titlebar strip and the rail as one surface. */}
+        {dividerVisible && railVisible ? (
+          <div
+            aria-hidden
+            className="workspace-content-frame pointer-events-none fixed top-[calc(var(--workspace-topbar-height)-1px)] right-0 bottom-0 left-(--destination-rail-width) z-30"
+          />
+        ) : dividerVisible ? (
           <div
             aria-hidden
             className="pointer-events-none fixed inset-x-0 top-[calc(var(--workspace-topbar-height)-1px)] z-30 h-px bg-sidebar-border"

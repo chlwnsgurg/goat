@@ -1111,6 +1111,32 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   background-size: var(--surface-grain-size);
 }
 
+/* The content area's outline beside the destination rail. Its top edge is the titlebar hairline
+   and its left edge meets the rail; one rounded corner joins them, so the titlebar strip and the
+   rail read as a single window frame. The corner cover paints the frame colour outside the curve
+   (from the stroke's outer edge outward), so a square page background or header border beneath
+   never shows past it. Decorative only: the parent positions it and keeps pointer events off. */
+@utility workspace-content-frame {
+  border-top-width: 1px;
+  border-left-width: 1px;
+  border-color: var(--contrast-sidebar-border);
+  border-top-left-radius: var(--radius-xl);
+
+  &::before {
+    content: "";
+    position: absolute;
+    top: -1px;
+    left: -1px;
+    width: var(--radius-xl);
+    height: var(--radius-xl);
+    background: radial-gradient(
+      circle at 100% 100%,
+      transparent var(--radius-xl),
+      var(--background) calc(var(--radius-xl) + 1px)
+    );
+  }
+}
+
 /* Suppress all transitions during theme changes */
 .no-transitions,
 .no-transitions *,
