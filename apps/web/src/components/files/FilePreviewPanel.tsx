@@ -1,3 +1,4 @@
+import { Button } from "~/components/ui/button";
 import { Spinner } from "~/components/ui/spinner";
 import {
   AuthPreviewOperateScope,
@@ -667,6 +668,55 @@ function useEditableAfterHighlight(file: FileContents) {
   return { ready, onPostRender };
 }
 
+function FileSaveStatus({
+  coordinator,
+}: {
+  coordinator: ReturnType<typeof useFileSaveCoordinator>;
+}) {
+  const { status, canWriteFiles } = coordinator;
+  const conflict = status === "changed" || status === "deleted" || status === "reloadFailed";
+  // Routine autosave states stay quiet (the file tab already marks unsaved
+  // edits); only states the user must act on, or is waiting on, take a row.
+  if (!conflict && status !== "failed" && status !== "reloading") return null;
+  return (
+    <div
+      role={conflict || status === "failed" ? "alert" : "status"}
+      className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 border-b border-border/60 px-3 py-2 text-xs text-muted-foreground"
+    >
+      <span className="min-w-48 flex-1">
+        {status === "changed"
+          ? "File changed on disk. Your unsaved edits are kept."
+          : status === "deleted"
+            ? "File was deleted on disk. Your unsaved edits are kept; Overwrite will recreate it."
+            : status === "reloadFailed"
+              ? "Could not reload from disk. Your unsaved edits are kept."
+              : status === "failed"
+                ? "Save failed. Your unsaved edits are kept."
+                : "Reloading from disk…"}
+      </span>
+      {conflict ? (
+        <>
+          <Button size="xs" variant="outline" onClick={() => void coordinator.reload()}>
+            Reload from disk
+          </Button>
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={!canWriteFiles}
+            onClick={coordinator.overwrite}
+          >
+            Overwrite
+          </Button>
+        </>
+      ) : status === "failed" ? (
+        <Button size="xs" variant="outline" disabled={!canWriteFiles} onClick={coordinator.retry}>
+          Retry
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
 interface EditableFileSurfaceProps {
   environmentId: EnvironmentId;
   cwd: string;
@@ -917,53 +967,56 @@ function EditableFileSurface({
 
   return (
     <EditProvider createEditor={createFileEditor}>
-      <div ref={surfaceRef} className="flex min-h-0 flex-1">
-        <Virtualizer
-          className="file-preview-virtualizer min-h-0 flex-1 overflow-auto"
-          config={{
-            overscrollSize: 600,
-            intersectionObserverMargin: 1200,
-          }}
-        >
-          <File<FileCommentAnnotationGroup>
-            file={externalFile}
-            edit={editable}
-            editorOptions={editorOptions}
-            onEditChange={handleEditChange}
-            options={{
-              disableFileHeader: true,
-              enableGutterUtility: !hasOpenCommentForm,
-              enableLineSelection: !hasOpenCommentForm,
-              onGutterUtilityClick: setSelectedRange,
-              onLineSelectionChange: setSelectedRange,
-              onLineSelectionEnd: handleLineSelectionEnd,
-              overflow: wordWrap ? "wrap" : "scroll",
-              theme: resolveDiffThemeName(resolvedTheme),
-              preferredHighlighter: PREFERRED_HIGHLIGHTER,
-              themeType: resolvedTheme,
-              unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
-              onPostRender: handlePostRender,
+      <div className="flex min-h-0 flex-1 flex-col">
+        <FileSaveStatus coordinator={saveCoordinator} />
+        <div ref={surfaceRef} className="flex min-h-0 flex-1">
+          <Virtualizer
+            className="file-preview-virtualizer min-h-0 flex-1 overflow-auto"
+            config={{
+              overscrollSize: 600,
+              intersectionObserverMargin: 1200,
             }}
-            selectedLines={selectedRange}
-            lineAnnotations={lineAnnotations}
-            renderAnnotation={(annotation) => (
-              <div className="py-1">
-                {annotation.metadata.entries.map((entry) => (
-                  <DiffCommentAnnotation
-                    key={entry.id}
-                    kind={entry.kind}
-                    rangeLabel={formatFileCommentRange(entry.startLine, entry.endLine)}
-                    text={entry.text}
-                    onCancel={() => removeAnnotationEntry(entry.id)}
-                    onComment={(text) => submitAnnotationEntry(entry.id, text)}
-                    onDelete={() => removeAnnotationEntry(entry.id)}
-                  />
-                ))}
-              </div>
-            )}
-            className="min-h-full"
-          />
-        </Virtualizer>
+          >
+            <File<FileCommentAnnotationGroup>
+              file={externalFile}
+              edit={editable && saveCoordinator.status !== "reloading"}
+              editorOptions={editorOptions}
+              onEditChange={handleEditChange}
+              options={{
+                disableFileHeader: true,
+                enableGutterUtility: !hasOpenCommentForm,
+                enableLineSelection: !hasOpenCommentForm,
+                onGutterUtilityClick: setSelectedRange,
+                onLineSelectionChange: setSelectedRange,
+                onLineSelectionEnd: handleLineSelectionEnd,
+                overflow: wordWrap ? "wrap" : "scroll",
+                theme: resolveDiffThemeName(resolvedTheme),
+                preferredHighlighter: PREFERRED_HIGHLIGHTER,
+                themeType: resolvedTheme,
+                unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
+                onPostRender: handlePostRender,
+              }}
+              selectedLines={selectedRange}
+              lineAnnotations={lineAnnotations}
+              renderAnnotation={(annotation) => (
+                <div className="py-1">
+                  {annotation.metadata.entries.map((entry) => (
+                    <DiffCommentAnnotation
+                      key={entry.id}
+                      kind={entry.kind}
+                      rangeLabel={formatFileCommentRange(entry.startLine, entry.endLine)}
+                      text={entry.text}
+                      onCancel={() => removeAnnotationEntry(entry.id)}
+                      onComment={(text) => submitAnnotationEntry(entry.id, text)}
+                      onDelete={() => removeAnnotationEntry(entry.id)}
+                    />
+                  ))}
+                </div>
+              )}
+              className="min-h-full"
+            />
+          </Virtualizer>
+        </div>
       </div>
     </EditProvider>
   );
@@ -993,28 +1046,35 @@ function RenderedMarkdownSurface({
   });
 
   return (
-    <ScrollArea className="min-h-0 flex-1">
-      <FileMarkdownPreview
-        text={contents}
-        cwd={cwd}
-        relativePath={relativePath}
-        threadRef={threadRef}
-        composerDraftTarget={composerDraftTarget}
-        onTaskListChange={
-          readOnly
-            ? undefined
-            : ({ markerOffset, checked }) => {
-                const currentContents =
-                  getOptimisticProjectFileQueryData(environmentId, cwd, relativePath)?.contents ??
-                  contents;
-                const nextContents = setMarkdownTaskChecked(currentContents, markerOffset, checked);
-                if (nextContents === currentContents) return;
-                setProjectFileQueryData(environmentId, cwd, relativePath, nextContents);
-                saveCoordinator.change(nextContents);
-              }
-        }
-      />
-    </ScrollArea>
+    <div className="flex min-h-0 flex-1 flex-col">
+      {!readOnly ? <FileSaveStatus coordinator={saveCoordinator} /> : null}
+      <ScrollArea className="min-h-0 flex-1">
+        <FileMarkdownPreview
+          text={contents}
+          cwd={cwd}
+          relativePath={relativePath}
+          threadRef={threadRef}
+          composerDraftTarget={composerDraftTarget}
+          onTaskListChange={
+            readOnly || saveCoordinator.status === "reloading"
+              ? undefined
+              : ({ markerOffset, checked }) => {
+                  const currentContents =
+                    getOptimisticProjectFileQueryData(environmentId, cwd, relativePath)?.contents ??
+                    contents;
+                  const nextContents = setMarkdownTaskChecked(
+                    currentContents,
+                    markerOffset,
+                    checked,
+                  );
+                  if (nextContents === currentContents) return;
+                  setProjectFileQueryData(environmentId, cwd, relativePath, nextContents);
+                  saveCoordinator.change(nextContents);
+                }
+          }
+        />
+      </ScrollArea>
+    </div>
   );
 }
 
@@ -1461,7 +1521,13 @@ export default function FilePreviewPanel({
                 threadRef={threadRef}
                 composerDraftTarget={composerDraftTarget}
                 contents={file.data.contents}
-                readOnly={isHostFile || !canWriteFiles}
+                readOnly={
+                  isHostFile ||
+                  !canWriteFiles ||
+                  file.data.truncated ||
+                  file.data.textFormat?.encoding === "unsupported" ||
+                  file.data.textFormat?.lineEnding === "mixed"
+                }
                 onPendingChange={onPendingChange}
               />
             ) : tableDelimiter && renderTable ? (
@@ -1471,7 +1537,11 @@ export default function FilePreviewPanel({
                 text={file.data.contents}
                 delimiter={tableDelimiter}
               />
-            ) : file.data.truncated || isHostFile || !canWriteFiles ? (
+            ) : file.data.truncated ||
+              isHostFile ||
+              !canWriteFiles ||
+              file.data.textFormat?.encoding === "unsupported" ||
+              file.data.textFormat?.lineEnding === "mixed" ? (
               <SourceFilePreview
                 name={relativePath}
                 text={file.data.contents}

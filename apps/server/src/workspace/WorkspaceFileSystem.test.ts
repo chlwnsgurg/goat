@@ -60,6 +60,155 @@ const writeTextFile = Effect.fn("writeTextFile")(function* (
 afterEach(() => vi.restoreAllMocks());
 
 it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (it) => {
+  describe("guarded saves", () => {
+    it.effect("rejects a stale save and leaves external bytes intact", () =>
+      Effect.gen(function* () {
+        const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "file.txt", "loaded");
+        const loaded = yield* service.readFile({ cwd, relativePath: "file.txt" });
+        yield* writeTextFile(cwd, "file.txt", "external");
+        const result = yield* service
+          .writeFile({
+            cwd,
+            relativePath: "file.txt",
+            contents: "draft",
+            expectedVersion: loaded.version!,
+          })
+          .pipe(Effect.flip);
+        expect(result._tag).toBe("WorkspaceFileChangedOnDiskError");
+        expect(yield* fs.readFileString(path.join(cwd, "file.txt"))).toBe("external");
+        expect(yield* fs.readDirectory(cwd)).toEqual(["file.txt"]);
+      }),
+    );
+
+    it.effect("does not recreate a deleted file or its parents until explicitly overwritten", () =>
+      Effect.gen(function* () {
+        const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "dir/file.txt", "loaded");
+        const loaded = yield* service.readFile({ cwd, relativePath: "dir/file.txt" });
+        yield* fs.remove(path.join(cwd, "dir"), { recursive: true });
+        const result = yield* service
+          .writeFile({
+            cwd,
+            relativePath: "dir/file.txt",
+            contents: "draft",
+            expectedVersion: loaded.version!,
+          })
+          .pipe(Effect.flip);
+        expect(result._tag).toBe("WorkspaceFileDeletedOnDiskError");
+        expect(yield* fs.readDirectory(cwd)).toEqual([]);
+        yield* service.writeFile({ cwd, relativePath: "dir/file.txt", contents: "draft" });
+        expect(yield* fs.readFileString(path.join(cwd, "dir/file.txt"))).toBe("draft");
+      }),
+    );
+
+    it.effect.each([
+      { ending: "\n", bom: "" },
+      { ending: "\n", bom: "\ufeff" },
+      { ending: "\r\n", bom: "" },
+      { ending: "\r\n", bom: "\ufeff" },
+      { ending: "\r", bom: "" },
+      { ending: "\r", bom: "\ufeff" },
+    ])("round-trips format %j and advances the raw-byte version", ({ ending, bom }) =>
+      Effect.gen(function* () {
+        const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "file.txt", `${bom}one${ending}two${ending}`);
+        const loaded = yield* service.readFile({ cwd, relativePath: "file.txt" });
+        expect(loaded.contents).toBe(`one${ending}two${ending}`);
+        expect(loaded.version).toMatch(/^sha256:[a-f0-9]{64}$/);
+        const written = yield* service.writeFile({
+          cwd,
+          relativePath: "file.txt",
+          contents: "new\ntext\n",
+          expectedVersion: loaded.version!,
+          textFormat: loaded.textFormat!,
+        });
+        expect(Buffer.from(yield* fs.readFile(path.join(cwd, "file.txt"))).toString("utf8")).toBe(
+          `${bom}new${ending}text${ending}`,
+        );
+        const reread = yield* service.readFile({ cwd, relativePath: "file.txt" });
+        expect(written.version).toBe(reread.version);
+        expect(written.version).not.toBe(loaded.version);
+        yield* service.writeFile({
+          cwd,
+          relativePath: "file.txt",
+          contents: "again",
+          expectedVersion: written.version!,
+        });
+      }),
+    );
+
+    it.effect("marks mixed and invalid UTF-8 text unsupported for editing", () =>
+      Effect.gen(function* () {
+        const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "mixed", "one\r\ntwo\n");
+        yield* fs.writeFile(path.join(cwd, "invalid"), new Uint8Array([0xc3, 0x28]));
+        for (const relativePath of ["mixed", "invalid"]) {
+          const read = yield* service.readFile({ cwd, relativePath });
+          expect(read.textFormat).toMatchObject(
+            relativePath === "mixed" ? { lineEnding: "mixed" } : { encoding: "unsupported" },
+          );
+          const result = yield* service
+            .writeFile({
+              cwd,
+              relativePath,
+              contents: "draft",
+              expectedVersion: read.version!,
+              textFormat: read.textFormat!,
+            })
+            .pipe(Effect.flip);
+          expect(result._tag).toBe("WorkspaceUnsupportedTextFormatError");
+        }
+      }),
+    );
+
+    it.effect("checks again after staging, immediately before rename", () =>
+      Effect.gen(function* () {
+        const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "file.txt", "loaded");
+        const loaded = yield* service.readFile({ cwd, relativePath: "file.txt" });
+        const open = NodeFS.promises.open;
+        vi.spyOn(NodeFS.promises, "open").mockImplementation(async (...args) => {
+          const handle = await open(...args);
+          if (String(args[0]).endsWith(".tmp")) {
+            const sync = handle.sync.bind(handle);
+            vi.spyOn(handle, "sync").mockImplementation(async () => {
+              await sync();
+              await NodeFS.promises.writeFile(path.join(cwd, "file.txt"), "changed during stage");
+            });
+          }
+          return handle;
+        });
+        const result = yield* service
+          .writeFile({
+            cwd,
+            relativePath: "file.txt",
+            contents: "draft",
+            expectedVersion: loaded.version!,
+          })
+          .pipe(Effect.flip);
+        expect(result._tag).toBe("WorkspaceFileChangedOnDiskError");
+        expect(yield* fs.readFileString(path.join(cwd, "file.txt"))).toBe("changed during stage");
+        expect(yield* fs.readDirectory(cwd)).toEqual(["file.txt"]);
+      }),
+    );
+  });
+
   describe("getMetadata", () => {
     it.effect("expands home-relative paths on the server", () =>
       Effect.gen(function* () {
@@ -161,7 +310,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           relativePath: "src/index.ts",
         });
 
-        expect(result).toEqual({
+        expect(result).toMatchObject({
           relativePath: "src/index.ts",
           contents: "export const answer = 42;\n",
           byteLength: 26,
@@ -184,7 +333,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           relativePath: absolutePath,
         });
 
-        expect(result).toEqual({
+        expect(result).toMatchObject({
           relativePath: absolutePath,
           contents: "# Report\n",
           byteLength: 9,
@@ -372,6 +521,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           for (const contents of ["created\n", "replaced\n"]) {
             expect(yield* service.writeFile({ cwd, relativePath, contents })).toEqual({
               relativePath,
+              version: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
             });
             expect(yield* fs.readFileString(target)).toBe(contents);
             expect(yield* fs.readDirectory(cwd)).toEqual([relativePath]);
@@ -392,7 +542,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
             Effect.gen(function* () {
               expect(
                 yield* service.writeFile({ cwd, relativePath: "file.txt", contents: "after\n" }),
-              ).toEqual({ relativePath: "file.txt" });
+              ).toMatchObject({ relativePath: "file.txt" });
               expect(yield* Effect.promise(() => reader.readFile("utf8"))).toBe("before\n");
               expect(yield* Effect.promise(() => NodeFS.promises.readFile(target, "utf8"))).toBe(
                 "after\n",
@@ -525,7 +675,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
               relativePath: "alias/new/deep/file.txt",
               contents: "ok\n",
             }),
-          ).toEqual({ relativePath: "alias/new/deep/file.txt" });
+          ).toMatchObject({ relativePath: "alias/new/deep/file.txt" });
           expect(yield* fs.readFileString(path.join(cwd, "actual/new/deep/file.txt"))).toBe("ok\n");
         }),
     );
@@ -672,7 +822,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           .readFileString(path.join(cwd, "plans/effect-rpc.md"))
           .pipe(Effect.orDie);
 
-        expect(result).toEqual({ relativePath: "plans/effect-rpc.md" });
+        expect(result).toMatchObject({ relativePath: "plans/effect-rpc.md" });
         expect(saved).toBe("# Plan\n");
       }),
     );
