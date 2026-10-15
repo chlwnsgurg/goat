@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
+import { MemoryOperationId, MemorySpaceId, ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
 import { expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
@@ -24,6 +24,12 @@ import {
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
 import * as ServerConfig from "../config.ts";
+import * as Settings from "../serverSettings.ts";
+import * as Sqlite from "../persistence/Sqlite.ts";
+import * as Hub from "../memory/MemoryHubHttp.ts";
+import * as HubAuth from "../memory/MemoryHubAuth.ts";
+import * as Store from "../memory/MemoryStore.ts";
+import * as HttpRouter from "effect/http/HttpRouter";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
 
 const isServerEnvironmentIdPersistenceError = Schema.is(
@@ -105,6 +111,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
             ownRuntimeProtocolRanges(ORCHESTRATION_PROTOCOL_VERSION),
           );
           expect(descriptor.capabilities.drainRestart).toBe(true);
+          expect(descriptor.capabilities.memoryHubProtocolVersion).toBeUndefined();
           return identity.instanceId;
         }).pipe(Effect.provide(Layer.fresh(layerServerEnvironment(baseDir))));
         expect(yield* observe).not.toBe(yield* observe);
@@ -421,3 +428,87 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
     }),
   );
 });
+
+it.effect("hub advertisement follows registered routes and live disable/re-enable settings", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const baseDir = yield* fs.makeTempDirectoryScoped();
+    const dependencies = Settings.layer.pipe(
+      Layer.provideMerge(ServerSecretStore.layer),
+      Layer.provideMerge(Sqlite.layerMemory),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+    );
+    const space = MemorySpaceId.make("00000000-0000-4000-8000-000000000001");
+    const update = (mode: "disabled" | "hub", memorySpaceId: typeof space | null = space) =>
+      Settings.MemoryHubSettingsTransitions.use((transitions) =>
+        Settings.ServerSettingsService.use((settings) => settings.getSettings).pipe(
+          Effect.flatMap((current) =>
+            transitions.applyMemoryHubTransition(
+              {
+                requestId: MemoryOperationId.make(
+                  `00000000-0000-4000-8000-${String(current.memoryHubVersion + 1).padStart(12, "0")}`,
+                ),
+                expectedVersion: current.memoryHubVersion,
+                settings: mode === "disabled" ? { mode } : { mode, memorySpaceId },
+              },
+              Effect.void,
+            ),
+          ),
+        ),
+      );
+    // Only L2 domain calls are replaced. Auth, SQLite, settings and route registration are real.
+    const unused = () => Effect.die("descriptor fixture must not invoke a hub route");
+    const boundary = Layer.succeed(
+      Hub.MemoryHubService,
+      Hub.MemoryHubService.of({
+        join: unused,
+        push: unused,
+        pull: unused,
+        claim: unused,
+        renew: unused,
+        applyResolution: unused,
+        release: unused,
+        requestSourceRead: unused,
+        collectSourceReads: unused,
+        respondSourceRead: unused,
+        resultSourceRead: unused,
+      }),
+    );
+    yield* Effect.gen(function* () {
+      yield* update("hub");
+      const environment = yield* ServerEnvironment.ServerEnvironment;
+      expect(
+        (yield* environment.getDescriptor).capabilities.memoryHubProtocolVersion,
+      ).toBeUndefined();
+    }).pipe(Effect.provide(ServerEnvironment.layer.pipe(Layer.provideMerge(dependencies))));
+    const auth = HubAuth.layer.pipe(Layer.provide(Store.layer));
+    const routes = Hub.layer.pipe(
+      HttpRouter.provideRequest(
+        Layer.mergeAll(boundary, auth).pipe(Layer.provideMerge(dependencies)),
+      ),
+      Layer.provideMerge(boundary),
+      Layer.provideMerge(auth),
+      Layer.provideMerge(dependencies),
+      Layer.provide(HttpRouter.layer),
+    );
+    yield* Effect.gen(function* () {
+      const environment = yield* ServerEnvironment.ServerEnvironment;
+      yield* update("disabled");
+      expect(
+        (yield* environment.getDescriptor).capabilities.memoryHubProtocolVersion,
+      ).toBeUndefined();
+      yield* update("hub", null);
+      expect(
+        (yield* environment.getDescriptor).capabilities.memoryHubProtocolVersion,
+      ).toBeUndefined();
+      yield* update("hub");
+      expect((yield* environment.getDescriptor).capabilities.memoryHubProtocolVersion).toBe(1);
+      yield* update("disabled");
+      expect(
+        (yield* environment.getDescriptor).capabilities.memoryHubProtocolVersion,
+      ).toBeUndefined();
+      yield* update("hub");
+      expect((yield* environment.getDescriptor).capabilities.memoryHubProtocolVersion).toBe(1);
+    }).pipe(Effect.provide(ServerEnvironment.layer.pipe(Layer.provideMerge(routes))));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);

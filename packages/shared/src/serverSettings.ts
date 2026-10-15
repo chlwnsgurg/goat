@@ -415,10 +415,22 @@ function translateLegacyProjectOverridePatch(
   } as ServerSettingsPatch;
 }
 
+/** Generic patches cannot change the independently versioned memory hub configuration. */
+export function assertNoMemoryHubSettingsPatch(patch: unknown): void {
+  if (
+    patch !== null &&
+    typeof patch === "object" &&
+    (Object.hasOwn(patch, "memoryHub") || Object.hasOwn(patch, "memoryHubVersion"))
+  ) {
+    throw new Error("Memory hub settings require a dedicated transition.");
+  }
+}
+
 export function applyServerSettingsPatch(
   current: ServerSettings,
   rawPatch: ServerSettingsPatch,
 ): ServerSettings {
+  assertNoMemoryHubSettingsPatch(rawPatch);
   const patch = translateLegacyProjectOverridePatch(current, rawPatch);
   const selectionPatch = patch.textGenerationModelSelection;
   const {

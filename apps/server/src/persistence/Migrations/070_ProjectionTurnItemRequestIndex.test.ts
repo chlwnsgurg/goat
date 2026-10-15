@@ -33,6 +33,7 @@ it.effect(
       assert.deepStrictEqual(yield* runMigrations(), [
         [70, "ProjectionTurnItemRequestIndex"],
         [71, "Memory"],
+        [72, "MemoryHubSync"],
       ]);
       yield* ProjectionTurnItemRequestIndex;
       assert.deepStrictEqual(yield* runMigrations(), []);

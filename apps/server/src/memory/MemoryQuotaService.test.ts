@@ -1,11 +1,13 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as Logger from "effect/Logger";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/071_Memory.ts";
+import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import { memoryOperationDigest } from "./MemoryDecider.ts";
@@ -74,7 +76,9 @@ const decision = (op = operation()): Store.MemoryDecision => ({
     : {}),
 });
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
-const setup = Layer.effectDiscard(migration).pipe(Layer.provideMerge(database));
+const setup = Layer.effectDiscard(migration.pipe(Effect.andThen(hubMigration))).pipe(
+  Layer.provideMerge(database),
+);
 const live = Store.layer.pipe(Layer.provideMerge(setup));
 
 const services = Quota.layer.pipe(Layer.provideMerge(live));
@@ -413,9 +417,9 @@ describe("MemoryQuotaService", () => {
       assert.strictEqual((yield* store.readSuppressions(space, memory)).length, retained.length);
       const synced = yield* store.readEligibleOutbox(space, 0, 100);
       // The base forget keeps its own delivery even after the expansion purges the memory.
-      assert.isTrue(synced.some((w) => w.id === `sync:${space}:${op.operationId}`));
+      assert.isTrue(synced.some((w) => w.work.id === `sync:${space}:${op.operationId}`));
       assert.strictEqual(
-        synced.some((w) => w.id === `sync:${space}:${expansion.operationId}`),
+        synced.some((w) => w.work.id === `sync:${space}:${expansion.operationId}`),
         !extra,
       );
       // A different space stands in for the receiving store; only approved canonical operations cross the wire.
@@ -475,7 +479,7 @@ describe("MemoryQuotaService", () => {
         assert.strictEqual(retried.receipt.outcome, "deleted");
         assert.strictEqual((yield* store.readSuppressions(space, memory)).length, 300);
         assert.deepStrictEqual(yield* store.pendingForgetIntents(10), []);
-        const resynced = (yield* store.readEligibleOutbox(space, 0, 100)).map((w) => w.id);
+        const resynced = (yield* store.readEligibleOutbox(space, 0, 100)).map((w) => w.work.id);
         assert.includeMembers(resynced, [
           `sync:${space}:${op.operationId}`,
           `sync:${space}:${retryId}`,
@@ -564,6 +568,11 @@ describe("MemoryQuotaService", () => {
             outcome: "accepted",
             operationDigest: hash,
             hubSequence: 3,
+            resolutionApproval: {
+              resolutionId: op.resolution.resolutionId,
+              appliedAtUtc: op.resolution.appliedAtUtc,
+              revertDeadlineUtc: op.resolution.revertDeadlineUtc,
+            },
           },
         },
         env,
@@ -607,6 +616,11 @@ describe("MemoryQuotaService", () => {
           operationDigest: hash,
           outcome: "accepted",
           hubSequence: 3,
+          resolutionApproval: {
+            resolutionId: op.resolution.resolutionId,
+            appliedAtUtc: op.resolution.appliedAtUtc,
+            revertDeadlineUtc: op.resolution.revertDeadlineUtc,
+          },
         },
         revisionId: op.revision.revisionId,
         resolutionId: op.resolution.resolutionId,
@@ -799,3 +813,110 @@ describe("MemoryQuotaService", () => {
     }).pipe(Effect.provide(services)),
   );
 });
+
+describe("MemoryQuotaService hub storage status", () => {
+  it.effect("exposes hub logical usage and reservation without inventing a physical sample", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const quota = yield* Quota.MemoryQuotaService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${env},${"a".repeat(64)},1,'active',0)`;
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: space,
+          checkpointDeltaBytes: 100,
+          publishedPinnedDeltaBytes: 20,
+        }),
+      );
+      const status = yield* quota.readStorageStatus({ memorySpaceId: space, environmentId: env });
+      assert.strictEqual(
+        status.tables.filter((table) => table.table.startsWith("memory_hub_")).length,
+        5,
+      );
+      const members = status.tables.find((table) => table.table === "memory_hub_members")!;
+      assert.strictEqual(members.rowCount, 1);
+      assert.strictEqual(members.logicalBytes > 64, true);
+      assert.strictEqual(members.allocationStatus, "unavailable");
+      assert.strictEqual(members.allocatedBytes, null);
+      assert.strictEqual(status.dbFileBytes, null);
+      assert.strictEqual(status.measuredAtUtc, null);
+      const staging = status.quotas.find((quota) => quota.dimension === "checkpoint_staging")!;
+      assert.strictEqual(staging.current, status.requiredCheckpointBoundBytes! + 20);
+      assert.strictEqual(staging.reserved, status.requiredCheckpointBoundBytes);
+      assert.strictEqual(status.lastSnapshotBytes, 0);
+    }).pipe(Effect.provide(services)),
+  );
+});
+
+it.effect(
+  "storage inventory reserves first forget and reports expired transient bodies without reclaiming current heads",
+  () =>
+    Effect.gen(function* () {
+      const quota = yield* Quota.MemoryQuotaService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${space},${memory},'{}','{}',${M.MEMORY_IDENTITY_CORE_MAX_BYTES + 100},2)`;
+      yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},'relay:fixture',${memory},'한글','[]')`;
+      yield* sql`INSERT INTO memory_hub_source_reads(space,request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline,payload_ref) VALUES (${space},'fixture',${memory},${env},${env},1,'digest','{}','completed',0,'relay:fixture')`;
+      const status = yield* quota.readStorageStatus({ memorySpaceId: space, environmentId: env });
+      assert.strictEqual(status.quotas.find((q) => q.dimension === "receipts")?.reserved, 1);
+      assert.strictEqual(
+        status.quotas.find((q) => q.dimension === "permanent_metadata")?.reserved,
+        100 + M.MEMORY_COMPACT_RECEIPT_MAX_BYTES,
+      );
+      assert.strictEqual(status.quotas.find((q) => q.dimension === "work_bytes")?.reclaimable, 6);
+      assert.strictEqual(status.quotas.find((q) => q.dimension === "history")?.reclaimable, 0);
+      assert.isAbove(status.requiredCheckpointBoundBytes!, 0);
+    }).pipe(Effect.provide(services)),
+);
+
+it.effect("r16 unbound storage preserves environment samples and FTS using indexed reads", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const quota = yield* Quota.MemoryQuotaService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* store.recordSample(env, sample(0));
+    yield* store.putFtsState({
+      environment: env,
+      lastMergeAt: null,
+      state: "braked",
+      changedAt: 0,
+      allocatedBytes: 123,
+      measuredAt: 0,
+      measurementStatus: "available",
+      mergePending: false,
+      changedRows: 0,
+    });
+    const status = yield* quota.readUnboundStorageStatus({ environmentId: env });
+    assert.strictEqual(status.dbFileBytes, 100);
+    assert.strictEqual(status.growth.current?.memoryLogicalBytes, 0);
+    assert.strictEqual(status.ftsAdmission.state, "braked");
+    assert.strictEqual(status.ftsAdmission.allocatedBytes, 123);
+    assert.deepStrictEqual(status.warnings, ["fts_braked"]);
+    const other = yield* quota.readUnboundStorageStatus({
+      environmentId: M.EnvironmentId.make("other"),
+    });
+    assert.isNull(other.dbFileBytes);
+    assert.strictEqual(other.ftsAdmission.state, "open");
+    const plans = [
+      yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT dimension,scope_key,value FROM memory_quota_counters WHERE space=${`_local:${env}`}`,
+      yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT sample_json FROM memory_storage_samples WHERE environment=${env}`,
+      yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT current_sample_json FROM memory_compaction_state WHERE space=${`_environment:${env}`} AND current_sample_json IS NOT NULL`,
+      yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT state FROM memory_fts_maintenance_state WHERE environment=${env}`,
+    ];
+    for (const plan of plans) {
+      assert.isTrue(plan.every((row) => row.detail.includes("SEARCH")));
+      assert.isFalse(plan.some((row) => /SCAN|TEMP B-TREE/.test(row.detail)));
+    }
+    yield* Effect.log("R16_STORAGE_EXPLAIN", JSON.stringify(plans)).pipe(
+      Effect.provide(Logger.layer([Logger.consolePretty({ colors: false })])),
+    );
+  }).pipe(Effect.provide(services)),
+);
