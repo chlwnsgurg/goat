@@ -2179,3 +2179,32 @@ it("report retry reset accepts at most 32 distinct exact-owner IDs and rejects e
     }),
   ).toThrow();
 });
+
+it("refused revert results are body-free and history opt-in is explicit", () => {
+  const result = {
+    operationId: id(80),
+    memoryId: id(2),
+    resolutionId: id(7),
+    revertDeadlineUtc: resolution.revertDeadlineUtc,
+    status: "refused",
+    failureCode: "unavailable",
+  };
+  round(M.MemoryRevertResult, result);
+  round(M.MemoryHistoryPage, { ...history, revertResults: [result] });
+  rejects(M.MemoryRevertResult, { ...result, failureCode: "raw-private-error" });
+  rejects(M.MemoryRevertResult, { ...result, body: "private" });
+  rejects(M.MemoryRevertResult, { ...result, failureCode: undefined });
+  round(M.MemoryHistoryInput, { memorySpaceId: id(), memoryId: id(2), limit: 10 });
+  round(M.MemoryHistoryInput, {
+    memorySpaceId: id(),
+    memoryId: id(2),
+    limit: 10,
+    includeRefusedReverts: true,
+  });
+  rejects(M.MemoryHistoryInput, {
+    memorySpaceId: id(),
+    memoryId: id(2),
+    limit: 10,
+    includeRefusedReverts: false,
+  });
+});

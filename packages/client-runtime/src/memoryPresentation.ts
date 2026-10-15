@@ -62,6 +62,7 @@ export function presentMemoryItem(item: MemoryItem) {
 }
 
 const REVERT_LABELS = {
+  refused: "Revert attempt refused",
   pending: "Waiting for revert approval",
   accepted: "Revert approved",
   revision_changed: "Memory changed; cannot revert",
@@ -134,7 +135,7 @@ export function presentMemoryRevert(input: {
       ? "Memory does not match"
       : item.status === "forgotten"
         ? "Forgotten memory cannot be reverted"
-        : result !== undefined
+        : result !== undefined && result.status !== "refused"
           ? REVERT_LABELS[result.status]
           : resolution.revertsResolutionId !== undefined
             ? "A revert cannot be reverted"
@@ -151,6 +152,10 @@ export function presentMemoryRevert(input: {
                     : null;
   return {
     canRevert: reason === null,
+    notice:
+      result?.status === "refused"
+        ? `Last revert attempt was refused: ${result.failureCode.replaceAll("_", " ")}`
+        : null,
     reason,
     windowLabel: "Revert once within 30 days of resolution",
     revertDeadlineUtc: resolution.revertDeadlineUtc,

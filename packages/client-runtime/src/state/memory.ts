@@ -323,8 +323,22 @@ export function createMemoryEnvironmentAtoms<R, E>(
               value: Option.none<EnvironmentRpcSuccess<T>>(),
             });
           }
+          const config = get(sessions.initialConfigValueAtom(environmentId));
+          // Strip caller hints as well: legacy servers reject unknown strict input keys.
+          const { includeRefusedReverts: _hint, ...legacyInput } = input as typeof input & {
+            readonly includeRefusedReverts?: true;
+          };
+          const requestInput =
+            tag === WS_METHODS.memoryHistory
+              ? ({
+                  ...legacyInput,
+                  ...(config?.environment.capabilities.memory?.refusedReverts === true
+                    ? { includeRefusedReverts: true as const }
+                    : {}),
+                } as typeof input)
+              : input;
           return Stream.fromEffect(
-            requestMemoryQuery(runtime, get.registry, environmentId, tag, input).pipe(
+            requestMemoryQuery(runtime, get.registry, environmentId, tag, requestInput).pipe(
               Effect.timeoutOption(BODY_TTL),
             ),
           ).pipe(

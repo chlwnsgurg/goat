@@ -2761,9 +2761,8 @@ const make = Effect.gen(function* () {
               } else if (row.revert_result_json && row.revert_operation_id) {
                 const resolution = yield* resolutionCodec.decode(row.resolution_json, strict);
                 const slot = yield* revertSlotCodec.decode(row.revert_result_json, strict);
-                // The public union has no generic refusal arm. Preserve the exact
-                // authority code in the slot without inventing revision_changed.
-                if (slot.status !== "refused") {
+                // Older clients cannot decode the refused arm. Only expose it on opt-in.
+                if (slot.status !== "refused" || input.includeRefusedReverts === true) {
                   const common = {
                     operationId: row.revert_operation_id,
                     memoryId: id,
@@ -2786,7 +2785,9 @@ const make = Effect.gen(function* () {
                             },
                             localAvailability: item.localAvailability,
                           }
-                        : { ...common, status: slot.status },
+                        : slot.status === "refused"
+                          ? { ...common, ...slot }
+                          : { ...common, status: slot.status },
                       strict,
                     ),
                   );
@@ -6105,14 +6106,6 @@ const make = Effect.gen(function* () {
               "checkpoint-fence",
               sql`UPDATE memory_identity_ledger SET fence_json=${yield* fenceCodec.encode(fence)} WHERE space=${input.memorySpaceId} AND memory_id=${fence.memoryId}`,
             );
-          for (const compact of page.compactReceipts) {
-            yield* persistCompactReceipt(compact);
-            if (input.localEnvironmentId)
-              yield* reconcileResolutionReportTx({
-                record: compact,
-                localEnvironmentId: input.localEnvironmentId,
-              });
-          }
           for (const conflict of page.conflicts)
             yield* stored(
               "checkpoint-conflict",
@@ -6179,6 +6172,17 @@ const make = Effect.gen(function* () {
                 .flatMap((record) => record.heads)
                 .find((record) => record.memoryId === item.memoryId)?.heads ?? [];
             yield* putItem(item, heads, checkpointWatermark);
+          }
+        }
+        // Every resolution must exist before receipt settlement, independent of page boundaries.
+        for (const page of pages) {
+          for (const compact of page.compactReceipts) {
+            yield* persistCompactReceipt(compact);
+            if (input.localEnvironmentId)
+              yield* reconcileResolutionReportTx({
+                record: compact,
+                localEnvironmentId: input.localEnvironmentId,
+              });
           }
         }
         yield* persistImportLineageTx(pages.flatMap((page) => page.importLineage));

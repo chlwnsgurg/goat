@@ -236,6 +236,7 @@ export const make = Effect.gen(function* () {
       // The core and owner memory RPC groups are always installed by ws.ts.
       memory: {
         protocolVersion: 1,
+        refusedReverts: true,
         ...(importRuntime._tag === "Some" ? { importProvider: true } : {}),
       },
       repositoryIdentity: true,

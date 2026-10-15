@@ -216,6 +216,7 @@ const harness = Effect.fn(function* (
       responded.add(method);
       return Deferred.await(reply).pipe(Effect.as(value));
     });
+  const historyInputs: unknown[] = [];
   const rpc = {
     [WS_METHODS.memoryChanges]: () => {
       subscriptions++;
@@ -236,7 +237,10 @@ const harness = Effect.fn(function* (
       }),
     [WS_METHODS.memoryList]: () => respondOnce("list", pageValue),
     [WS_METHODS.memorySearch]: () => respondOnce("search", pageValue),
-    [WS_METHODS.memoryHistory]: () => respondOnce("history", historyValue),
+    [WS_METHODS.memoryHistory]: (input: unknown) => {
+      historyInputs.push(input);
+      return respondOnce("history", historyValue);
+    },
     [WS_METHODS.memoryReadSource]: () => respondOnce("source", sourcePage),
     [WS_METHODS.memoryImportProvider]: () =>
       Effect.succeed(decodeImport({ action: "discover", sources: [] })),
@@ -324,6 +328,7 @@ const harness = Effect.fn(function* (
     runtime,
     ledger,
     recreate: () => createMemoryEnvironmentAtoms(runtime, ledger),
+    historyInputs,
     readCount: () => readCount,
     reads,
     readFinalized,
@@ -1727,6 +1732,39 @@ it.effect(
         yield* Deferred.await(response.finalized);
         expect(h.registry.get(hasBody(query))).toBe(false);
         expect(h.readCount()).toBe(1);
+      }),
+    ),
+);
+
+it.effect.each([false, true])(
+  "history gates refused opt-in on advertised capability: %s",
+  (supported) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness();
+        h.registry.set(configs(env), {
+          ...config,
+          environment: {
+            ...config.environment,
+            capabilities: { memory: { protocolVersion: 1, refusedReverts: supported } },
+          },
+        } as ServerConfig);
+        const exposure = h.memory.exposureAtom(target);
+        h.registry.mount(exposure);
+        yield* Queue.offer(h.queue, signal("reset"));
+        yield* waitFor(h.registry, exposure, (state) => state.ready);
+        const body = hasBody(
+          h.memory.history({
+            ...readTarget,
+            input: { ...readTarget.input, limit: 10, includeRefusedReverts: true },
+          }),
+        );
+        h.registry.mount(body);
+        yield* Deferred.succeed(h.reply, item);
+        yield* waitFor(h.registry, body, Boolean);
+        expect(h.historyInputs).toEqual([
+          { ...readTarget.input, limit: 10, ...(supported ? { includeRefusedReverts: true } : {}) },
+        ]);
       }),
     ),
 );

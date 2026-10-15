@@ -8419,15 +8419,31 @@ it.effect(
       assert.notStrictEqual(next.page.nextCursor, empty.page.nextCursor);
       const selected = queries.find(([query]) => query.includes("AS key"))!;
       assert.lengthOf(yield* sql.unsafe(selected[0], selected[1]), 2);
-      for (const table of [
-        "memory_revisions",
-        "memory_resolutions",
-        "memory_report_outbox",
-        "memory_tombstones",
-      ]) {
+      yield* sql`DELETE FROM memory_resolutions WHERE resolution_json='invalid'`;
+      for (const [category, table] of [
+        [0, "memory_revisions"],
+        [1, "memory_resolutions"],
+        [2, "memory_report_outbox"],
+        [3, "memory_resolutions"],
+        [4, "memory_tombstones"],
+      ] as const) {
+        queries.length = 0;
+        yield* store
+          .historyPage(
+            { memorySpaceId: space, memoryId: memory, limit: 2, cursor: `h1:${category}:0` },
+            item,
+            env,
+          )
+          .pipe(Effect.provideService(Statement.CurrentTransformer, record));
+        const captured = queries.filter(([query]) => query.includes("AS key"));
+        assert.isNotEmpty(captured);
+        const [query, params] = captured[0]!;
+        assert.include(query, `FROM ${table} `);
+        assert.match(query, /LIMIT/);
+        assert.deepStrictEqual(params, [space, memory, 0, 2]);
         const details = (yield* sql.unsafe<{ detail: string }>(
-          `EXPLAIN QUERY PLAN SELECT rowid AS key FROM ${table} WHERE space=? AND memory_id=? AND rowid>? ORDER BY rowid LIMIT ?`,
-          [space, memory, 0, 2],
+          `EXPLAIN QUERY PLAN ${query}`,
+          params,
         ))
           .map((r) => r.detail)
           .join("\n");
@@ -8572,4 +8588,246 @@ it.effect.each(["pending", "revision_changed", "revert_expired", "forgotten", "a
         ),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+// Synthetic checkpoint has the same resolve R and accepted revert X on both devices.
+const acceptedRevertCheckpoint = () => {
+  const base = checkpoint();
+  const original = base.revisions[0]!;
+  const secondOp = operation(4);
+  const resolveOp = operation(5);
+  const revertOp = operation(6);
+  if (secondOp.kind === "forget" || resolveOp.kind === "forget" || revertOp.kind === "forget")
+    throw new Error("fixture");
+  const inputs = [original.revision.revisionId, secondOp.revision.revisionId];
+  const resolved = { ...resolveOp.revision, parents: inputs };
+  const reverted = { ...revertOp.revision, parents: [resolved.revisionId] };
+  const resolution = Schema.decodeUnknownSync(M.MemoryResolution)({
+    resolutionId: id(900),
+    memorySpaceId: space,
+    memoryId: memory,
+    inputRevisionIds: inputs,
+    inputPayloadRefs: inputs,
+    judgmentRef: id(900),
+    requestedModelSelection: { instanceId: "fixture", model: "synthetic" },
+    effectiveProvider: "codex",
+    effectiveModel: "synthetic",
+    resolvingEnvironmentId: env,
+    fencingToken: 1,
+    resultRevisionId: resolved.revisionId,
+    appliedAtUtc: now,
+    revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+  });
+  const compact = (revision: M.MemoryRevision, sequence: number): M.MemoryCompactReceipt => ({
+    ...base.compactReceipts[0]!,
+    revisionId: revision.revisionId,
+    receipt: {
+      ...base.compactReceipts[0]!.receipt,
+      operationId: revision.operationId,
+      hubSequence: sequence,
+    },
+  });
+  const resolveReceipt: M.MemoryCompactReceipt = {
+    ...compact(resolved, 3),
+    operationKind: "resolve",
+    resolutionId: resolution.resolutionId,
+    attemptId: M.MemoryOperationId.make(id(901)),
+    fencingToken: 1,
+    receipt: {
+      ...compact(resolved, 3).receipt,
+      resolutionApproval: {
+        resolutionId: resolution.resolutionId,
+        appliedAtUtc: resolution.appliedAtUtc,
+        revertDeadlineUtc: resolution.revertDeadlineUtc,
+      },
+    },
+    reportGuard: {
+      reportId: "b".repeat(64),
+      resolvingEnvironmentId: env,
+      resolutionId: resolution.resolutionId,
+      outcome: "resolved",
+    },
+  };
+  const revertReceipt: M.MemoryCompactReceipt = {
+    ...compact(reverted, 4),
+    operationKind: "revert",
+    resolutionId: resolution.resolutionId,
+    revertsResolutionId: resolution.resolutionId,
+    reportGuard: {
+      reportId: "c".repeat(64),
+      resolvingEnvironmentId: env,
+      resolutionId: resolution.resolutionId,
+      outcome: "reverted",
+    },
+  };
+  return {
+    ...base,
+    checkpointSequence: 4,
+    causalBoundary: { ...base.causalBoundary, checkpointSequence: 4 },
+    items: [{ ...base.items[0]!, revision: reverted } as M.MemoryItem],
+    revisions: [
+      original,
+      { revision: secondOp.revision, payload: secondOp.payload },
+      { revision: resolved, payload: resolveOp.payload },
+      { revision: reverted, payload: revertOp.payload },
+    ],
+    resolutions: [{ resolution, payload: null }],
+    compactReceipts: [
+      base.compactReceipts[0]!,
+      compact(secondOp.revision, 2),
+      resolveReceipt,
+      revertReceipt,
+    ],
+    fences: [{ ...base.fences[0]!, highestFencingToken: 1 }],
+  } satisfies M.MemoryHubCheckpointPage;
+};
+it.effect.each([false, true])(
+  "A2 bootstrap restores accepted correlation across split pages: %s",
+  (split) =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const full = acceptedRevertCheckpoint();
+      const identity = { ...fixtureCheckpointIdentity, expectedCheckpointSequence: 4 };
+      assert.isTrue(M.validateMemoryCheckpointRecords([full]));
+      // Original device's durable settlement, then a genuinely empty member store.
+      yield* store.transact(
+        store.advanceBootstrapTx({
+          ...identity,
+          expectedState: "unbound",
+          nextState: "staging",
+          snapshotToken: identity.expectedSnapshotToken,
+          checkpointSequence: 4,
+          nextCursor: null,
+        }),
+      );
+      yield* store.installCheckpointPage({ ...identity, page: full });
+      yield* store.completeCheckpoint({ ...identity, pageCount: 1 });
+      const source = (yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 100 },
+        (yield* store.readAccess(space, memory)).item!,
+        env,
+      )).page.revertResults;
+      assert.strictEqual(source[0]?.status, "accepted");
+      assert.strictEqual(source[0]?.operationId, full.compactReceipts[3]!.receipt.operationId);
+      assert.isTrue(
+        source[0]?.status === "accepted" &&
+          source[0].receipt.revisionId === full.revisions[3]!.revision.revisionId,
+      );
+      const replica = Effect.gen(function* () {
+        const fresh = yield* Store.MemoryStore;
+        assert.isUndefined((yield* fresh.readAccess(space, memory)).item);
+        yield* fresh.transact(
+          fresh.advanceBootstrapTx({
+            ...identity,
+            expectedState: "unbound",
+            nextState: "staging",
+            snapshotToken: identity.expectedSnapshotToken,
+            checkpointSequence: 4,
+            nextCursor: null,
+          }),
+        );
+        const pages: M.MemoryHubCheckpointPage[] = split
+          ? [
+              { ...full, resolutions: [], nextCursor: "next", bootstrapComplete: false },
+              {
+                ...full,
+                pageOrdinal: 1,
+                items: [],
+                revisions: [],
+                compactReceipts: [],
+                identities: [],
+                fences: [],
+                resolutions: full.resolutions,
+              },
+            ]
+          : [full];
+        for (const page of pages) yield* fresh.installCheckpointPage({ ...identity, page });
+        yield* fresh.completeCheckpoint({ ...identity, pageCount: pages.length });
+        const history = (yield* fresh.historyPage(
+          { memorySpaceId: space, memoryId: memory, limit: 100 },
+          (yield* fresh.readAccess(space, memory)).item!,
+          env,
+        )).page;
+        assert.isNull(history.nextCursor);
+        assert.deepStrictEqual(history.revertResults, source);
+      });
+      yield* replica.pipe(checkUsage, Effect.provide(live));
+    }).pipe(checkUsage, Effect.provide(live)),
+);
+
+it.effect(
+  "A2 live revision keyset survives deletion and sees only insertions ahead of cursor",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.apply(decision());
+      const item = (yield* store.readAccess(space, memory)).item!;
+      const insert = (row: number, n: number) =>
+        sql`INSERT INTO memory_revisions(rowid,space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at) SELECT ${row},space,${id(n)},memory_id,${id(n + 1)},parents_json,scope_json,assertion_kind,provenance_json,NULL,created_at FROM memory_revisions LIMIT 1`;
+      yield* insert(10, 70001);
+      const first = (yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 1 },
+        item,
+        env,
+      )).page;
+      yield* insert(11, 70003);
+      yield* sql`DELETE FROM memory_revisions WHERE rowid=1`;
+      // Reuse behind the cursor is visible only when restarting.
+      yield* insert(1, 70005);
+      const rest = (yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 100, cursor: first.nextCursor! },
+        item,
+        env,
+      )).page;
+      assert.deepStrictEqual(
+        rest.revisions.map((r) => r.revision.revisionId),
+        [id(70001), id(70003)],
+      );
+      const restart = (yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 100 },
+        item,
+        env,
+      )).page;
+      assert.deepStrictEqual(
+        restart.revisions.map((r) => r.revision.revisionId),
+        [id(70005), id(70001), id(70003)],
+      );
+    }).pipe(checkUsage, Effect.provide(live)),
+);
+
+it.effect(
+  "A2 UTF-8 page overflow retries the candidate and rejects a single oversized candidate",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.apply(decision());
+      const item = (yield* store.readAccess(space, memory)).item!;
+      const body = { text: "한".repeat(11000), evidence: [], derivedFromMemoryRevisions: [] };
+      yield* sql`UPDATE memory_payloads SET body_json=${JSON.stringify(body)}`;
+      yield* sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at) SELECT space,${id(71001)},memory_id,${id(71002)},parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at FROM memory_revisions LIMIT 1`;
+      const first = (yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 100 },
+        item,
+        env,
+      )).page;
+      assert.lengthOf(first.revisions, 1);
+      assert.isAtMost(new TextEncoder().encode(JSON.stringify(first)).length, 65536);
+      const next = (yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 100, cursor: first.nextCursor! },
+        item,
+        env,
+      )).page;
+      assert.strictEqual(next.revisions[0]?.revision.revisionId, id(71001));
+      assert.isAtMost(new TextEncoder().encode(JSON.stringify(next)).length, 65536);
+      // Large valid revision metadata makes the single pair exceed the page budget.
+      yield* sql`UPDATE memory_payloads SET body_json=${JSON.stringify({ ...body, text: "한".repeat(21000) })}`;
+      yield* sql`UPDATE memory_revisions SET provenance_json=${JSON.stringify({ environmentId: "e".repeat(3000) })}`;
+      const error = yield* store
+        .historyPage({ memorySpaceId: space, memoryId: memory, limit: 100 }, item, env)
+        .pipe(Effect.flip);
+      assert.instanceOf(error, Store.MemoryStoreConflict);
+      assert.strictEqual(error.code, "payload_too_large");
+    }).pipe(checkUsage, Effect.provide(live)),
 );

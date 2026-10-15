@@ -104,6 +104,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       protocolVersion: Schema.Int,
       hub: Schema.optionalKey(Schema.Boolean),
       importProvider: Schema.optionalKey(Schema.Boolean),
+      refusedReverts: Schema.optionalKey(Schema.Boolean),
     }),
   ),
   repositoryIdentity: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),

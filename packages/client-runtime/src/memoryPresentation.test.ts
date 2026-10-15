@@ -448,3 +448,38 @@ describe("memory presentation boundaries", () => {
     });
   });
 });
+
+it("refused is settled while retry still checks head, history and originals", () => {
+  const result = Schema.decodeUnknownSync(M.MemoryRevertResult)({
+    operationId: id(60),
+    memoryId: item.memoryId,
+    resolutionId: resolution.resolutionId,
+    revertDeadlineUtc: deadline,
+    status: "refused",
+    failureCode: "source_unavailable",
+  });
+  expect(presentMemoryRevertResult(result)).toMatchObject({
+    label: "Revert attempt refused",
+    settled: true,
+  });
+  const input = {
+    item,
+    entry,
+    history: { ...history, revertResults: [result] },
+    now: Date.parse(applied),
+  };
+  expect(presentMemoryRevert(input)).toMatchObject({
+    canRevert: true,
+    reason: null,
+    notice: "Last revert attempt was refused: source unavailable",
+  });
+  expect(
+    presentMemoryRevert({ ...input, history: { ...input.history, nextCursor: "more" } }).canRevert,
+  ).toBe(false);
+  expect(
+    presentMemoryRevert({ ...input, history: { ...input.history, revisions: [] } }).canRevert,
+  ).toBe(false);
+  expect(
+    presentMemoryRevert({ ...input, item: { ...item, revision: revision(7) } }).canRevert,
+  ).toBe(false);
+});

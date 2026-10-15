@@ -1,3 +1,8 @@
+import { MemoryHistoryPage as LegacyHistoryPage } from "./MemoryHistoryLegacy.testkit.ts";
+import {
+  presentMemoryRevert,
+  presentMemoryRevertResult,
+} from "../../../../packages/client-runtime/src/memoryPresentation.ts";
 import { refreshCheckpointAccounting } from "./MemoryCheckpointAccounting.ts";
 import { checkUsage } from "./MemoryUsageScan.testkit.ts";
 import * as Settings from "../serverSettings.ts";
@@ -3621,6 +3626,32 @@ it.effect("A2 keeps a generic authoritative refusal without inventing revision_c
       Effect.void,
     );
     assert.isEmpty(page.revertResults);
+    assert.deepStrictEqual(yield* Schema.decodeUnknownEffect(LegacyHistoryPage)(page), page);
+    const optedIn = yield* service.history(
+      { memorySpaceId: space, memoryId, limit: 100, includeRefusedReverts: true },
+      Effect.void,
+    );
+    assert.isNull(optedIn.nextCursor);
+    const result = optedIn.revertResults[0]!;
+    assert.deepStrictEqual(result, {
+      operationId: op.operationId,
+      memoryId,
+      resolutionId: op.revertsResolutionId,
+      revertDeadlineUtc: optedIn.resolutions[0]!.resolution.revertDeadlineUtc,
+      status: "refused",
+      failureCode: "unavailable",
+    });
+    assert.throws(() => Schema.decodeUnknownSync(LegacyHistoryPage)(optedIn));
+    assert.isTrue(presentMemoryRevertResult(result).settled);
+    const current = yield* service.read({ memorySpaceId: space, memoryId }, Effect.void);
+    const presentation = presentMemoryRevert({
+      item: current,
+      entry: optedIn.resolutions[0]!,
+      history: optedIn,
+      now: 0,
+    });
+    assert.isTrue(presentation.canRevert);
+    assert.strictEqual(presentation.notice, "Last revert attempt was refused: unavailable");
     assert.deepStrictEqual(
       yield* sql`SELECT revert_operation_id,revert_result_json FROM memory_resolutions`,
       [
@@ -3632,4 +3663,68 @@ it.effect("A2 keeps a generic authoritative refusal without inventing revision_c
     );
     assert.isEmpty(yield* sql`SELECT 1 FROM memory_revert_intents`);
   }).pipe(checkUsage, Effect.provide(live)),
+);
+
+it.effect(
+  "A2 live history observes slot updates ahead of cursor and report rowid reuse only on restart",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const sql = yield* SqlClient.SqlClient;
+      const { op } = yield* stageReportRevert;
+      const report = (row: number, key: string) =>
+        sql`INSERT INTO memory_report_outbox(rowid,report_id,space,memory_id,operation_id,resolution_id,resolving_environment_id,outcome,state,created_at) VALUES (${row},${key.repeat(64)},${space},${memoryId},${op.operationId},${op.revertsResolutionId},${environmentId},'reverted','pending',0)`;
+      yield* report(1, "a");
+      yield* report(10, "b");
+      const first = yield* service.history(
+        { memorySpaceId: space, memoryId, limit: 1, cursor: "h1:2:0" },
+        Effect.void,
+      );
+      assert.strictEqual(first.reports[0]?.reportId, "a".repeat(64));
+      yield* sql`DELETE FROM memory_report_outbox WHERE rowid=1`;
+      yield* report(1, "c");
+      yield* report(11, "d");
+      yield* sql`UPDATE memory_resolutions SET revert_result_json='{"status":"refused","failureCode":"unavailable"}'`;
+      const rest = yield* service.history(
+        {
+          memorySpaceId: space,
+          memoryId,
+          limit: 100,
+          cursor: first.nextCursor!,
+          includeRefusedReverts: true,
+        },
+        Effect.void,
+      );
+      assert.deepStrictEqual(
+        rest.reports.map((r) => r.reportId),
+        ["b".repeat(64), "d".repeat(64)],
+      );
+      assert.strictEqual(rest.revertResults[0]?.status, "refused");
+      const afterSlot = yield* service.history(
+        { memorySpaceId: space, memoryId, limit: 1, cursor: "h1:3:0", includeRefusedReverts: true },
+        Effect.void,
+      );
+      assert.strictEqual(afterSlot.revertResults[0]?.status, "refused");
+      yield* sql`UPDATE memory_resolutions SET revert_result_json='{"status":"pending"}'`;
+      const tail = yield* service.history(
+        {
+          memorySpaceId: space,
+          memoryId,
+          limit: 100,
+          cursor: afterSlot.nextCursor!,
+          includeRefusedReverts: true,
+        },
+        Effect.void,
+      );
+      assert.isEmpty(tail.revertResults);
+      const restart = yield* service.history(
+        { memorySpaceId: space, memoryId, limit: 100, includeRefusedReverts: true },
+        Effect.void,
+      );
+      assert.deepStrictEqual(
+        restart.reports.map((r) => r.reportId),
+        ["c".repeat(64), "b".repeat(64), "d".repeat(64)],
+      );
+      assert.strictEqual(restart.revertResults[0]?.status, "pending");
+    }).pipe(checkUsage, Effect.provide(live)),
 );
