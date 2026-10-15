@@ -1736,7 +1736,7 @@ it.effect(
     ),
 );
 
-it.effect.each([false, true])(
+it.effect.each([undefined, false, true])(
   "history gates refused opt-in on advertised capability: %s",
   (supported) =>
     Effect.scoped(
@@ -1746,7 +1746,12 @@ it.effect.each([false, true])(
           ...config,
           environment: {
             ...config.environment,
-            capabilities: { memory: { protocolVersion: 1, refusedReverts: supported } },
+            capabilities: {
+              memory: {
+                protocolVersion: 1,
+                ...(supported === undefined ? {} : { refusedReverts: supported }),
+              },
+            },
           },
         } as ServerConfig);
         const exposure = h.memory.exposureAtom(target);
