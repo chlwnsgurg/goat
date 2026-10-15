@@ -3267,8 +3267,8 @@ const make = Effect.gen(function* () {
           state: "tracked",
           revisions: [],
         };
-    // Only history-bearing origins fence writes. Parent/node/launcher links and
-    // subagent_spawn describe routing: app-owned delegation sends a new task, not history.
+    // App-owned delegation sends a task, not parent history; its node/spawn links
+    // alone do not fence writes. Provider-native children cannot prove non-inheritance.
     // An active provider pointer alone also says nothing about inherited context.
     // Same-thread handoffs/compaction keep the cumulative set; rollback cannot clear it.
     const unknown = yield* stored(
@@ -3278,7 +3278,12 @@ const make = Effect.gen(function* () {
       AND ((event_type='thread.created' AND (
         json_extract(payload_json,'$.forkedFrom.type') IN ('run','provider_thread')
         OR json_extract(payload_json,'$.lineage.relationshipToParent')='fork'
-        OR json_extract(payload_json,'$.historyOrigin')='v1_import'))
+        OR json_extract(payload_json,'$.historyOrigin')='v1_import'
+        OR (json_extract(payload_json,'$.creationSource')='provider' AND (
+          json_extract(payload_json,'$.lineage.relationshipToParent')='subagent'
+          OR json_extract(payload_json,'$.forkedFrom.type')='node'
+          OR json_extract(payload_json,'$.lineage.parentThreadId') IS NOT NULL))))
+        OR (event_type='provider-thread.updated' AND json_extract(payload_json,'$.forkedFrom.providerThreadId') IS NOT NULL)
         OR (event_type='provider-thread.updated' AND json_extract(payload_json,'$.status')='not_loaded' AND json_extract(payload_json,'$.nativeThreadRef') IS NOT NULL AND json_extract(payload_json,'$.providerSessionId') IS NULL)
         OR (event_type IN ('context-transfer.created','context-transfer.updated')
           AND json_extract(payload_json,'$.type') IS NOT 'subagent_spawn'

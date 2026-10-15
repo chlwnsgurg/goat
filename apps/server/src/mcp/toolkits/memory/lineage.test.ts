@@ -352,7 +352,28 @@ it.effect.each(threadProvenanceCases(ref().threadId))(
       const store = yield* Store.MemoryStore;
       yield* sql`INSERT INTO orchestration_events VALUES(2,'thread',${ref().threadId},'thread.created',${origin.createdJson})`;
       for (const event of origin.events)
-        yield* sql`INSERT INTO orchestration_events VALUES(2,'thread',${ref().threadId},${event.type},${event.payloadJson})`;
+        yield* sql`INSERT INTO orchestration_events VALUES(2,'thread',${event.streamId},${event.type},${event.payloadJson})`;
+      if (origin.events.some((event) => event.type === "subagent.updated")) {
+        const history = yield* sql<{
+          role: string;
+          text: string;
+        }>`SELECT json_extract(payload_json,'$.role') AS role,json_extract(payload_json,'$.text') AS text FROM orchestration_events WHERE stream_id=${ref().threadId} AND event_type='message.updated'`;
+        expect(history).toEqual([
+          { role: "user", text: "Initial delegated task" },
+          { role: "assistant", text: "Child previous answer" },
+          { role: "user", text: "Continue your previous answer" },
+        ]);
+        const spawn = yield* sql<{
+          event_type: string;
+        }>`SELECT event_type FROM orchestration_events WHERE stream_id=${ref().threadId} AND event_type IN ('context-transfer.created','context-transfer.updated')`;
+        expect(spawn).toEqual([{ event_type: "context-transfer.created" }]);
+        const tasks = yield* sql<{
+          prompt: string;
+          child: string;
+        }>`SELECT json_extract(payload_json,'$.prompt') AS prompt,json_extract(payload_json,'$.childThreadId') AS child FROM orchestration_events WHERE stream_id='parent' AND event_type='subagent.updated'`;
+        expect(tasks).toEqual([{ prompt: "Continue your previous answer", child: ref().threadId }]);
+        // Own previous answer is retained above; the parent's sentinel is absent.
+      }
       expect((yield* store.readThreadLineage(ref(), Fixture.space)).state).toBe(origin.state);
       const before = yield* counts;
       const saved = yield* Fixture.call("memory_upsert", Fixture.upsert(), caller());
