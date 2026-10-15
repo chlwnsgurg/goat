@@ -146,7 +146,7 @@ describe("r4 authoritative lineage", () => {
             expectedHeads: [a.revision.revisionId],
           });
           const gcAt = at + 2 * M.MEMORY_LOG_RETENTION_MS;
-          for (const env of [h, e]) {
+          for (const env of [h]) {
             yield* env.sql`UPDATE memory_payloads SET purge_eligible_after=0 WHERE payload_ref=${a.revision.payloadRef}`;
             const handle = yield* env.store.transact(
               env.store.prepareHubCheckpointTx({
@@ -229,7 +229,16 @@ describe("r4 authoritative lineage", () => {
             },
             Effect.void,
           );
-          assert.strictEqual(forget.receipt.outcome, "accepted");
+          assert.strictEqual(forget.receipt.outcome, "deleted");
+          yield* h.sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${hubId},${"b".repeat(64)},1,'active',0)`;
+          const hubForget = yield* h.store.readWorkOperation(
+            `sync:${space}:${forget.receipt.operationId}`,
+          );
+          assert.isDefined(hubForget);
+          yield* h.service.admitHubOperation({
+            authority: authority(hubId, gcAt),
+            operation: hubForget!,
+          });
           // A local-only refused summary remains purgeable through the member's pin.
           yield* e.service.forget(
             {

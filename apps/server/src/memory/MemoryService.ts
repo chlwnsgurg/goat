@@ -274,6 +274,9 @@ export const memoryStableUuid = (text: string) => {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 };
 const decodeSummaryPayload = Schema.decodeEffect(M.MemoryPayload);
+const decodeDependencyEdges = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Array(M.MemoryRevisionId)),
+);
 const decode = <A, E>(effect: Effect.Effect<A, E>) => effect.pipe(Effect.mapError(invalid));
 /** Expand direct edges at authoritative writes. Internally captured closed sets may
  * outlive their bodies; they still require canonical live owners and all available edges. */
@@ -308,12 +311,7 @@ const normalizeMemoryDependencies = Effect.fn("MemoryService.normalizeMemoryDepe
       if (!rows[0] || (rows[0].dependencies_json === null && !allowPruned))
         return yield* new Store.MemoryStoreConflict({ code: "source_invalidated" });
       if (rows[0].dependencies_json !== null) {
-        const edges = yield* decode(
-          Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(M.MemoryRevisionId)))(
-            rows[0].dependencies_json,
-            strict,
-          ),
-        );
+        const edges = yield* decode(decodeDependencyEdges(rows[0].dependencies_json, strict));
         for (const edge of edges) if (!revisions.includes(edge)) revisions.push(edge);
       }
     }
@@ -324,7 +322,10 @@ const normalizeMemoryDependencies = Effect.fn("MemoryService.normalizeMemoryDepe
 export const validateSummaryDependencies = Effect.fn("MemoryService.validateSummaryDependencies")(
   function* (space: M.MemorySpaceId, payload: M.MemoryPayload) {
     const normalized = yield* normalizeMemoryDependencies(space, payload, true);
-    if (normalized.derivedFromMemoryRevisions.length !== payload.derivedFromMemoryRevisions.length)
+    if (
+      normalized.derivedFromMemoryRevisions.length !==
+      new Set(payload.derivedFromMemoryRevisions).size
+    )
       return yield* new Store.MemoryStoreConflict({ code: "source_invalidated" });
   },
 );

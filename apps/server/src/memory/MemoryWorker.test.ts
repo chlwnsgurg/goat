@@ -31,6 +31,7 @@ const environmentId = M.EnvironmentId.make("fixture");
 const space = M.MemorySpaceId.make(id(1));
 const memoryId = M.MemoryId.make(id(2));
 const threadId = M.ThreadId.make("thread");
+const decodeCreatedThread = Schema.decodeUnknownEffect(M.OrchestrationV2AppThreadJson);
 const selection = { instanceId: M.ProviderInstanceId.make("fixture"), model: "fixture" };
 const now = "2026-10-14T00:00:00.000Z";
 const setup = Layer.effectDiscard(
@@ -1446,7 +1447,7 @@ it.effect.each([false, true])("r4 production side chat origin (fork=%s)", (fork)
     const snapshot = yield* Snapshot.MemorySnapshot;
     const worker = yield* Worker.MemoryWorker;
     // These provenance fields match Orchestrator.createThread / the actual fork event.
-    const created = yield* Schema.decodeUnknownEffect(M.OrchestrationV2AppThreadJson)({
+    const created = yield* decodeCreatedThread({
       createdBy: "user",
       creationSource: "web",
       providerInstanceId: selection.instanceId,
