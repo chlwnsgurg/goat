@@ -6030,9 +6030,11 @@ const make = Effect.gen(function* () {
       AND json_extract(completed_items_json,'$.kind')='detailed'
       AND (${operationId} IS NULL OR batch_operation_id=${operationId})
       AND observed_at_utc<=${DateTime.formatIso(DateTime.makeUnsafe(now - M.MEMORY_IMPORT_BATCH_RETENTION_MS))}
-      AND NOT EXISTS (SELECT 1 FROM json_each(completed_items_json,'$.selections') s JOIN memory_import_receipts i
+      AND NOT EXISTS (SELECT 1 FROM json_each(b.completed_items_json,'$.selections') s JOIN memory_import_receipts i
         ON i.space=b.space AND i.environment_id=b.environment_id AND i.record_kind='item'
         WHERE json_extract(i.registration_json,'$.pending.operationId')=json_extract(s.value,'$.operationId'))
+      AND NOT EXISTS (SELECT 1 FROM json_each(b.completed_items_json,'$.selections') s JOIN memory_outbox o ON o.space=b.space
+        WHERE o.status IN ('pending','running','retry') AND json_extract(o.metadata_json,'$.operationId')=json_extract(s.value,'$.operationId'))
       ORDER BY observed_at_utc,receipt_id LIMIT ${limit}`,
     );
     for (const row of rows) {
