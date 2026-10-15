@@ -33,17 +33,19 @@ it("keeps a connected environment's shell warning visible until its data is live
       </>,
     );
   try {
-    for (const state of ["stale", "error", "synchronizing", "cached"] as const) {
+    for (const state of ["stale", "error"] as const) {
       sync = state;
       await act(render);
       expect(container.querySelector("[aria-label]")).not.toBeNull();
       expect(container.textContent).not.toContain("Connected");
       expect(container.textContent).toMatch(/sync|out of date/i);
     }
-    sync = "live";
-    await act(render);
-    expect(container.textContent).toBe("");
-    expect(container.querySelector("[aria-label]")).toBeNull();
+    for (const state of ["live", "synchronizing", "cached"] as const) {
+      sync = state;
+      await act(render);
+      expect(container.textContent).toBe("");
+      expect(container.querySelector("[aria-label]")).toBeNull();
+    }
   } finally {
     await act(() => root.unmount());
     container.remove();

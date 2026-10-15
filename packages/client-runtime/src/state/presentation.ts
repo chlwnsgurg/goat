@@ -47,11 +47,8 @@ export function shellSyncMessage(sync: EnvironmentShellSync | null): string | nu
       return "Could not sync environment data. Try syncing again.";
     case "stale":
       return "Could not sync environment data. Displayed threads may be out of date.";
-    case "cached":
-      return "Showing saved threads. They may be out of date.";
-    case "empty":
-    case "synchronizing":
-      return "Syncing environment data. Displayed threads may be out of date.";
+    // Startup and routine resubscription pass through these states; only a
+    // failed sync is worth interrupting the user for.
     default:
       return null;
   }

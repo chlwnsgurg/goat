@@ -153,12 +153,10 @@ it("shows a retryable shell error instead of a blank route without a snapshot", 
   expect(navigate).not.toHaveBeenCalled();
 });
 
-it("explains synchronization while the route has no thread yet", async () => {
+it("stays quiet during a routine synchronization", async () => {
   sync = "synchronizing";
   await renderThread(ThreadId.make("unknown"));
-  expect(container.querySelector("[role=status]")?.textContent).toContain(
-    "Syncing environment data",
-  );
+  expect(container.querySelector("[role=status]")).toBeNull();
   expect(container.querySelector("button")).toBeNull();
   expect(navigate).not.toHaveBeenCalled();
 });

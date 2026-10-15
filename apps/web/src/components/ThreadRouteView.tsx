@@ -222,7 +222,7 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
           className="flex shrink-0 items-center justify-between gap-3 border-b border-warning/30 bg-warning-surface px-4 py-2 text-sm text-warning-foreground"
         >
           <span>{syncMessage}</span>
-          {(sync === "error" || sync === "stale" || sync === "cached") && (
+          {(sync === "error" || sync === "stale") && (
             <Button variant="outline" size="sm" onClick={shell.refresh}>
               Retry sync
             </Button>
