@@ -6811,9 +6811,14 @@ it.effect.each(turnStartMemoryCases)(
             threadId,
             modelSelection.instanceId,
           );
-          assert.isDefined(constraints);
-          assert.equal(constraints!.runId, startRunId);
-          assert.equal(constraints!.readOnly, "readOnly" in testCase);
+          // This getter supplies positive DTO evidence. A denied credential
+          // cannot supply it, even when its raw admission input is retained.
+          if (testCase.expected === "none") assert.isUndefined(constraints);
+          else {
+            assert.isDefined(constraints);
+            assert.equal(constraints!.runId, startRunId);
+            assert.equal(constraints!.readOnly, "readOnly" in testCase);
+          }
           assert.isUndefined(
             yield* manager.memoryAccessInputs!(threadId, ProviderInstanceId.make("other-provider")),
           );
