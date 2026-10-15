@@ -2620,6 +2620,7 @@ it.effect(
           runId: oldRunId,
           delegatedTaskId: oldTaskId,
           memoryGrantCeiling: "read_write",
+          dispatchScopes: ["memory:read"],
           threadId,
           providerSessionId,
           modelSelection,
@@ -2692,6 +2693,7 @@ it.effect(
           modelSelection,
           runtimePolicy,
           memoryGrantCeiling: "read_write",
+          dispatchScopes: ["memory:read"],
         });
         const ordinary = yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId);
         assert.isUndefined(ordinary?.runId);
@@ -2876,6 +2878,17 @@ it.effect(
           runId: RunId.make("scheduled-read-only-run"),
           memoryGrantCeiling: task.memoryGrantCeiling ?? "none",
         });
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const config = yield* configs.read(threadId);
+        assert.deepEqual(config?.grantedScopes, ["memory:read", "orchestration:read"]);
+        assert.isDefined(config);
+        // Resolve the provider's credential as the MCP handshake does. A raw
+        // policy read can race the post-open liveness touch's record fence.
+        const issued = yield* registry.resolve(
+          config!.authorizationHeader.replace(/^Bearer\s+/, ""),
+        );
+        assert.equal(issued?.memoryPolicy?.grant, "read");
         assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "read");
         assert.isTrue(
           (yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId))?.readOnly,
