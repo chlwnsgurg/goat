@@ -289,6 +289,7 @@ describe("CursorTextGeneration", () => {
         mcpServers: {},
         local: {
           cwd: "/isolated-text-generation",
+          store: { dispose: cursorSdkMock.storeDispose },
           autoReview: false,
           sandboxOptions: { enabled: true },
           settingSources: [],
