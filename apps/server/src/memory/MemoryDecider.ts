@@ -111,6 +111,13 @@ export function decideMemoryOperation(
       pending.push(...(revisions.get(id)?.parents ?? []));
     }
   }
+  if (operation.kind === "resolve") {
+    for (let i = 0; i < operation.resolution.inputRevisionIds.length; i++) {
+      const input = revisions.get(operation.resolution.inputRevisionIds[i]!);
+      if (input && input.payloadRef !== operation.resolution.inputPayloadRefs[i])
+        fail("identity_mismatch");
+    }
+  }
   const existing = revisions.get(r.revisionId);
   if (existing && JSON.stringify(existing) !== JSON.stringify(r)) fail("identity_mismatch");
   if (r.parents.includes(r.revisionId)) fail("identity_mismatch");

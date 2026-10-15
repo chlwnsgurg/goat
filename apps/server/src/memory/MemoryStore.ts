@@ -5681,7 +5681,7 @@ const make = Effect.gen(function* () {
         live: number;
         history: number;
         all_bytes: number;
-      }>`SELECT coalesce(sum(CASE WHEN EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h WHERE i.space=p.space AND i.memory_id=p.memory_id AND h.value=p.payload_ref) THEN length(CAST(p.body_json AS BLOB)) ELSE 0 END),0) AS live,coalesce(sum(CASE WHEN NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h WHERE i.space=p.space AND i.memory_id=p.memory_id AND h.value=p.payload_ref) THEN length(CAST(p.body_json AS BLOB)) ELSE 0 END),0) AS history,coalesce(sum(length(CAST(p.body_json AS BLOB))),0) AS all_bytes FROM memory_payloads p WHERE p.space=${space}`,
+      }>`SELECT coalesce(sum(CASE WHEN EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND i.memory_id=p.memory_id AND v.payload_ref=p.payload_ref) THEN length(CAST(p.body_json AS BLOB)) ELSE 0 END),0) AS live,coalesce(sum(CASE WHEN NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND i.memory_id=p.memory_id AND v.payload_ref=p.payload_ref) THEN length(CAST(p.body_json AS BLOB)) ELSE 0 END),0) AS history,coalesce(sum(length(CAST(p.body_json AS BLOB))),0) AS all_bytes FROM memory_payloads p WHERE p.space=${space}`,
     );
     const receipts = yield* stored(
       "usage-receipts",
@@ -5730,8 +5730,8 @@ const make = Effect.gen(function* () {
         permanent: number;
         receipt_bytes: number;
       }>`SELECT
-      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p WHERE EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h WHERE i.space=p.space AND i.memory_id=p.memory_id AND h.value=p.payload_ref)) AS live,
-      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p WHERE NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h WHERE i.space=p.space AND i.memory_id=p.memory_id AND h.value=p.payload_ref)) AS history,
+      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p WHERE EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND i.memory_id=p.memory_id AND v.payload_ref=p.payload_ref)) AS live,
+      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p WHERE NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND i.memory_id=p.memory_id AND v.payload_ref=p.payload_ref)) AS history,
       (SELECT count(*) FROM memory_identity_ledger) AS ids,
       (SELECT count(*) FROM (SELECT memory_space_id AS space,operation_id FROM memory_events UNION SELECT space,operation_id FROM memory_compact_receipts))+(SELECT count(*) FROM memory_identity_ledger l WHERE NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=l.space AND t.memory_id=l.memory_id)) AS receipts,
       (SELECT coalesce(sum(reserve_bytes),0) FROM memory_identity_ledger)+(SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_keys)+(SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_lineage) AS permanent,
@@ -9461,7 +9461,8 @@ const make = Effect.gen(function* () {
         operation_id: string;
         payload_ref: string;
         bytes: number;
-      }>`SELECT r.revision_id,r.operation_id,r.payload_ref,coalesce(length(CAST(p.body_json AS BLOB)),0)+length(CAST(r.parents_json AS BLOB))+length(CAST(r.provenance_json AS BLOB))+length(CAST(r.scope_json AS BLOB)) AS bytes FROM memory_revisions r JOIN memory_compact_receipts c ON c.space=r.space AND c.operation_id=r.operation_id LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${input.memorySpaceId} AND c.hub_sequence<=${input.expectedFloor} AND (p.purge_eligible_after<=${input.now} OR p.payload_ref IS NULL AND r.created_at<=${input.now - M.MEMORY_LOG_RETENTION_MS})
+        payload_bytes: number;
+      }>`SELECT r.revision_id,r.operation_id,r.payload_ref,coalesce(length(CAST(p.body_json AS BLOB)),0)+length(CAST(r.parents_json AS BLOB))+length(CAST(r.provenance_json AS BLOB))+length(CAST(r.scope_json AS BLOB)) AS bytes,coalesce(length(CAST(p.body_json AS BLOB)),0) AS payload_bytes FROM memory_revisions r JOIN memory_compact_receipts c ON c.space=r.space AND c.operation_id=r.operation_id LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${input.memorySpaceId} AND c.hub_sequence<=${input.expectedFloor} AND (p.purge_eligible_after<=${input.now} OR p.payload_ref IS NULL AND r.created_at<=${input.now - M.MEMORY_LOG_RETENTION_MS})
       AND NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h WHERE i.space=r.space AND h.value=r.revision_id)
       AND NOT EXISTS (SELECT 1 FROM memory_conflicts f JOIN json_each(f.heads_json) h WHERE f.space=r.space AND f.status!='resolved' AND h.value=r.revision_id)
       AND NOT EXISTS (SELECT 1 FROM memory_resolutions v JOIN json_each(v.input_revision_ids_json) h WHERE v.space=r.space AND v.revert_deadline>${input.now} AND h.value=r.revision_id)
@@ -9472,17 +9473,19 @@ const make = Effect.gen(function* () {
     );
     for (const revision of revisions) {
       if (!covered.has(M.MemoryOperationId.make(revision.operation_id))) continue;
-      yield* stored(
+      const deleted = yield* stored(
         "hub-compact-payload-delete",
-        sql`DELETE FROM memory_payloads WHERE space=${input.memorySpaceId} AND payload_ref=${revision.payload_ref}
-        AND NOT EXISTS (SELECT 1 FROM memory_revisions v WHERE v.space=${input.memorySpaceId} AND v.payload_ref=${revision.payload_ref} AND v.revision_id!=${revision.revision_id})`,
+        sql<{
+          bytes: number;
+        }>`DELETE FROM memory_payloads WHERE space=${input.memorySpaceId} AND payload_ref=${revision.payload_ref}
+        AND NOT EXISTS (SELECT 1 FROM memory_revisions v WHERE v.space=${input.memorySpaceId} AND v.payload_ref=${revision.payload_ref} AND v.revision_id!=${revision.revision_id}) RETURNING length(CAST(body_json AS BLOB)) AS bytes`,
       );
       yield* stored(
         "hub-compact-revision-delete",
         sql`DELETE FROM memory_revisions WHERE space=${input.memorySpaceId} AND revision_id=${revision.revision_id}`,
       );
       removedRows++;
-      reclaimedLogicalBytes += revision.bytes;
+      reclaimedLogicalBytes += revision.bytes - revision.payload_bytes + (deleted[0]?.bytes ?? 0);
     }
     const judgments = yield* stored(
       "hub-compact-judgments",

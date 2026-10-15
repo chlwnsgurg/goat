@@ -478,7 +478,7 @@ export const MemoryResolution = struct({
   memorySpaceId: MemorySpaceId,
   memoryId: MemoryId,
   inputRevisionIds: distinct(MemoryRevisionId, 100, 2),
-  inputPayloadRefs: distinct(MemoryRevisionId, 100, 2),
+  inputPayloadRefs: array(MemoryRevisionId, 100, 2),
   judgmentRef: MemoryResolutionId,
   requestedModelSelection: MemoryModelSelection,
   effectiveProvider: ProviderDriverKind,
@@ -492,7 +492,7 @@ export const MemoryResolution = struct({
 }).check(
   Schema.makeFilter(
     (v) =>
-      same(v.inputRevisionIds, v.inputPayloadRefs) &&
+      v.inputRevisionIds.length === v.inputPayloadRefs.length &&
       v.judgmentRef === v.resolutionId &&
       Date.parse(v.revertDeadlineUtc) >= Date.parse(v.appliedAtUtc),
   ),

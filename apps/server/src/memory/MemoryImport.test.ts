@@ -1041,6 +1041,9 @@ describe("MemoryImport M3c final fences", () => {
       if (op?.kind !== "upsert") return assert.fail("expected alias intent");
       assert.deepStrictEqual(op.revision.parents, [targetRev]);
       assert.strictEqual(op.revision.payloadRef, operation.revision.payloadRef);
+      const aliasUsage = yield* store.usage(space, { kind: "user" });
+      assert.isAbove(aliasUsage.liveBytes, 0);
+      assert.strictEqual(aliasUsage.historyBytes, 0);
       assert.strictEqual(
         (yield* store.loadAggregate(space, memoryId)).revisions.find(
           (r) => r.revision.revisionId === op.revision.revisionId,
