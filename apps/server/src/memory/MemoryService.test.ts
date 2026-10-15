@@ -3155,13 +3155,22 @@ it.effect(
             provenance: { environmentId: foreign },
           },
         };
-        yield* service.applyReceived(operation, {
+        const receipt: M.MemoryHubReceipt = {
           operationId,
           memoryId: foreignMemoryId,
           operationDigest: memoryOperationDigest(operation),
           outcome: "accepted",
           hubSequence: n + 1,
-        });
+        };
+        yield* storage.apply(
+          decideMemoryOperation(
+            yield* storage.loadAggregate(space, foreignMemoryId),
+            operation,
+            Store.approvedReplica,
+            undefined,
+            receipt,
+          ),
+        );
         if (n === 0)
           assert.deepStrictEqual(yield* sql`SELECT count(*) AS count FROM memory_report_outbox`, [
             { count: 0 },
