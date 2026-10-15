@@ -833,14 +833,18 @@ describe("ProviderMemoryImport closed coordinator", () => {
           yield* h.make().run(input, Effect.void);
           const first = h.commits[0]!;
           const accepted = first.next.pending!;
+          // A compacted accepted base can coexist with a newer retained pending noop head.
+          const base =
+            kind === "compacted-noop" ? M.MemoryRevisionId.make(uuid(983)) : accepted.revisionId;
           h.seedItem({
             ...first.next,
             accepted: {
               ...accepted,
+              revisionId: base,
               sourceFingerprint:
                 kind === "compacted-noop" ? accepted.sourceFingerprint : "e".repeat(64),
             },
-            pending: null,
+            pending: kind === "compacted-noop" ? accepted : null,
           });
           const heads =
             kind === "compacted-noop"
@@ -860,12 +864,12 @@ describe("ProviderMemoryImport closed coordinator", () => {
                       kind === "multi"
                         ? {
                             status: "retained" as const,
-                            revisionId: accepted.revisionId,
+                            revisionId: base,
                             parents: [],
                           }
                         : {
                             status: "compacted" as const,
-                            revisionId: accepted.revisionId,
+                            revisionId: base,
                             boundary: { checkpointSequence: 1, boundaryId: "synthetic-boundary" },
                           },
                   }),
@@ -881,7 +885,8 @@ describe("ProviderMemoryImport closed coordinator", () => {
             yield* run;
             const commit = h.commits[1]!;
             assert.equal(commit.next.outcome, kind === "multi" ? "conflicted" : "noop");
-            assert.deepEqual(commit.parents, [accepted.revisionId]);
+            assert.deepEqual(commit.parents, [base]);
+            if (kind === "compacted-noop") assert.deepEqual(commit.next.pending, accepted);
             assert.deepEqual(commit.expectedHeads, heads);
           }
         }),
