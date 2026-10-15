@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
@@ -88,17 +89,62 @@ it.effect("sweeps an empty database migrated through 073 with the default disabl
   }).pipe(Effect.scoped, Effect.provide(live())),
 );
 
-for (const hub of [false, true]) {
-  for (const configured of [false, true]) {
-    it.effect(`advances past a non-summary thread event (hub=${hub}, model=${configured})`, () =>
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        yield* sql`INSERT INTO orchestration_events (event_id,aggregate_kind,stream_id,stream_version,event_type,occurred_at,actor_kind,payload_json,metadata_json,application_event_version) VALUES ('fresh-event','thread','fresh-thread',0,'thread.created','2026-10-15T00:00:00.000Z','server','{}','{}',2)`;
-        const worker = yield* Worker.MemoryWorker;
-        yield* worker.sweepDue();
-        const store = yield* Store.MemoryStore;
-        assert.strictEqual(yield* store.readThreadHookWatermark(), 1);
-      }).pipe(Effect.provide(live(hub, configured))),
+it.effect.each([
+  { hub: false, configured: false },
+  { hub: false, configured: true },
+  { hub: true, configured: false },
+  { hub: true, configured: true },
+])(
+  "advances past a non-summary thread event (hub=$hub, model=$configured)",
+  ({ hub, configured }) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO orchestration_events (event_id,aggregate_kind,stream_id,stream_version,event_type,occurred_at,actor_kind,payload_json,metadata_json,application_event_version) VALUES ('fresh-event','thread','fresh-thread',0,'thread.created','2026-10-15T00:00:00.000Z','server','{}','{}',2)`;
+      const worker = yield* Worker.MemoryWorker;
+      yield* worker.sweepDue();
+      const store = yield* Store.MemoryStore;
+      assert.strictEqual(yield* store.readThreadHookWatermark(), 1);
+      yield* worker.start();
+      yield* worker.drain;
+      assert.isNotNull((yield* store.ftsState(environmentId)).measuredAt);
+    }).pipe(Effect.scoped, Effect.provide(live(hub, configured))),
+);
+
+it.effect.each(["catch-up", "maintenance"] as const)(
+  "keeps a real storage failure visible with a safe %s warning",
+  (stage) => {
+    const warnings: unknown[] = [];
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      if (stage === "catch-up") yield* sql`DROP TABLE orchestration_events`;
+      else
+        yield* sql`CREATE TRIGGER fail_sample BEFORE INSERT ON memory_compaction_state BEGIN SELECT RAISE(ABORT,'synthetic private diagnostic'); END`;
+      const worker = yield* Worker.MemoryWorker;
+      const error = yield* worker.sweepDue().pipe(Effect.flip);
+      assert.strictEqual(error.code, "storage_failed");
+      assert.strictEqual(error.stage, stage);
+      assert.isDefined(error.cause);
+      yield* worker.start();
+      yield* worker.drain;
+      assert.isAtLeast(warnings.length, 1);
+      for (const warning of warnings)
+        assert.deepStrictEqual(warning, [
+          "Memory sweep deferred",
+          { code: "storage_failed", stage },
+        ]);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          live(),
+          Logger.layer([
+            Logger.make(({ message }) => {
+              if (Array.isArray(message) && message[0] === "Memory sweep deferred")
+                warnings.push(message);
+            }),
+          ]),
+        ),
+      ),
     );
-  }
-}
+  },
+);

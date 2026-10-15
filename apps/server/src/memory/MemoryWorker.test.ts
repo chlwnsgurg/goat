@@ -296,6 +296,25 @@ describe("MemoryWorker", () => {
       assert.strictEqual(page[0]!.status, "active");
     }).pipe(Effect.provide(live(false, undefined, false, 0, true))),
   );
+  it.effect("still cancels deleted thread work when no default model is configured", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* Store.MemoryStore;
+      yield* store.enqueueWork({
+        ...work(),
+        status: "pending",
+        claimedBy: null,
+        claimedUntil: null,
+      });
+      yield* sql`INSERT INTO orchestration_events VALUES (3,${id(12)},${threadId},'thread.deleted','{}',${now},2,'thread')`;
+      const worker = yield* Worker.MemoryWorker;
+      yield* worker.sweepDue();
+      assert.strictEqual((yield* store.readWork("work"))?.status, "cancelled");
+      assert.strictEqual(yield* store.readThreadHookWatermark(), 3);
+      assert.isNotNull((yield* store.ftsState(environmentId)).measuredAt);
+    }).pipe(Effect.provide(live(false, undefined, false, 0, true))),
+  );
   it.effect("catches up committed termination and emits one stable summary", () =>
     Effect.gen(function* () {
       yield* seed;
