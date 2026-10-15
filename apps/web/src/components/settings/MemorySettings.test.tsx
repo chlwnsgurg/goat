@@ -849,12 +849,8 @@ it("unmounts retained bodies and an open source when read is None, without reope
     }),
   );
   await render();
-  const original = [...container.querySelectorAll("details")].find((el) =>
-    el.textContent?.includes("Retained body"),
-  )!;
-  await act(async () => {
-    original.open = true;
-  });
+  await click("Open Original 1");
+  await click("Open Resolution");
   await click("Read original");
   expect(container.textContent).toContain("Retained body");
   expect(container.textContent).toContain("Synthetic judgment");
@@ -869,13 +865,10 @@ it("unmounts retained bodies and an open source when read is None, without reope
   expect(container.textContent).not.toContain("Close original");
   state.queries.set("read", Option.some(activeItem));
   await render();
-  expect(container.textContent).toContain("Read original");
   expect(container.textContent).not.toContain("Source body");
   expect(container.textContent).not.toContain("Close original");
-  const recovered = [...container.querySelectorAll("details")].find((el) =>
-    el.textContent?.includes("Retained body"),
-  )!;
-  expect(recovered.open).toBe(false);
+  expect(container.textContent).not.toContain("Retained body");
+  expect(container.textContent).toContain("Open Original 1");
 });
 
 it.each([false, true])(

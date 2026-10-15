@@ -29,7 +29,7 @@ import {
 } from "@goat/client-runtime/memory-presentation";
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useEnvironment, useEnvironments } from "../../state/environments";
 import {
   readEnvironmentScope,
@@ -44,6 +44,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Switch } from "../ui/switch";
+import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import { formatTimestamp } from "../../timestampFormat";
 import { SettingsPageContainer, SettingsSection, SettingsRow } from "./settingsLayout";
 import {
@@ -656,14 +657,12 @@ function MemoryDetails({
               {value.resolutions.map((entry) => {
                 const display = presentMemoryResolution(entry);
                 return (
-                  <details
+                  <MemoryHistoryDisclosure
                     key={entry.resolution.resolutionId}
-                    open={target.resolutionId === entry.resolution.resolutionId}
+                    title="Resolution"
+                    description={`${display.label} · ${display.providerLabel} · ${formatTimestamp(display.appliedAtUtc, "locale")}`}
+                    defaultOpen={target.resolutionId === entry.resolution.resolutionId}
                   >
-                    <summary>
-                      {display.label} · {display.providerLabel} ·{" "}
-                      {formatTimestamp(display.appliedAtUtc, "locale")}
-                    </summary>
                     <p>Effective model: {display.effectiveModel}</p>
                     <p>Resolved on {deviceName(display.resolvingEnvironmentId)}</p>
                     <p>Revert deadline: {formatTimestamp(display.revertDeadlineUtc, "locale")}</p>
@@ -680,7 +679,7 @@ function MemoryDetails({
                         }}
                       />
                     ) : null}
-                  </details>
+                  </MemoryHistoryDisclosure>
                 );
               })}
               {value.revisions.length > 0 ? (
@@ -689,10 +688,11 @@ function MemoryDetails({
                 </h3>
               ) : null}
               {value.revisions.map((entry, index) => (
-                <details key={entry.revision.revisionId}>
-                  <summary>
-                    Original {index + 1} · {formatTimestamp(entry.revision.createdAtUtc, "locale")}
-                  </summary>
+                <MemoryHistoryDisclosure
+                  key={entry.revision.revisionId}
+                  title={`Original ${index + 1}`}
+                  description={formatTimestamp(entry.revision.createdAtUtc, "locale")}
+                >
                   <p className="whitespace-pre-wrap break-words">
                     {entry.payload?.text ?? "Original unavailable."}
                   </p>
@@ -712,7 +712,7 @@ function MemoryDetails({
                         messageIds={evidence.messageIds}
                       />
                     ))}
-                </details>
+                </MemoryHistoryDisclosure>
               ))}
               {value.revertResults.map((result) => (
                 <p key={result.operationId}>{presentMemoryRevertResult(result).label}</p>
@@ -747,6 +747,36 @@ function MemoryDetails({
         </div>
       </SettingsRow>
     </SettingsSection>
+  );
+}
+
+function MemoryHistoryDisclosure({
+  title,
+  description,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  description: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <SettingsRow
+        title={title}
+        description={description}
+        control={
+          <CollapsibleTrigger render={<Button size="sm" variant="outline" />}>
+            {open ? "Close" : "Open"} {title}
+          </CollapsibleTrigger>
+        }
+      />
+      <CollapsiblePanel animate={false}>
+        <div className="space-y-3 px-4 pb-4 text-sm">{children}</div>
+      </CollapsiblePanel>
+    </Collapsible>
   );
 }
 
