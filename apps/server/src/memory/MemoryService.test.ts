@@ -3504,3 +3504,67 @@ it.effect("A2 forget settles pending and records immediate refusal without a new
     assert.isEmpty(yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${memoryId}`);
   }).pipe(checkUsage, Effect.provide(live)),
 );
+
+it.effect(
+  "A2 service pages all categories with a shared budget and reads without materializing history",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const sql = yield* SqlClient.SqlClient;
+      const { request } = yield* stageReportRevert;
+      // 2 revisions + 1 resolution + 1 report + 1 slot, split across small pages.
+      yield* sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,resolving_environment_id,outcome,state,created_at) VALUES (${"e".repeat(64)},${space},${memoryId},${request.operationId},${request.resolutionId},${environmentId},'reverted','pending',0)`;
+      const pages: M.MemoryHistoryPage[] = [];
+      let cursor: string | undefined;
+      for (let n = 0; n < 10; n++) {
+        const page = yield* service.history(
+          { memorySpaceId: space, memoryId, limit: 2, ...(cursor ? { cursor } : {}) },
+          Effect.void,
+        );
+        assert.isAtMost(
+          page.revisions.length +
+            page.resolutions.length +
+            page.reports.length +
+            page.revertResults.length +
+            Number(page.tombstone !== null),
+          2,
+        );
+        pages.push(page);
+        if (page.nextCursor === null) break;
+        assert.notStrictEqual(page.nextCursor, cursor);
+        cursor = page.nextCursor;
+      }
+      assert.isNull(pages.at(-1)!.nextCursor);
+      assert.strictEqual(pages.flatMap((p) => p.revisions).length, 2);
+      assert.strictEqual(pages.flatMap((p) => p.resolutions).length, 1);
+      assert.strictEqual(pages.flatMap((p) => p.reports).length, 1);
+      assert.strictEqual(pages.flatMap((p) => p.revertResults).length, 1);
+      const ids = Array.from({ length: 2000 }, (_, n) => id(200000 + n));
+      yield* sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at)
+    SELECT ${space},value,${memoryId},value,'invalid','invalid','inference','invalid',NULL,0 FROM json_each(${JSON.stringify(ids)})`;
+      let permitCalls = 0;
+      const permit = Effect.sync(() => {
+        permitCalls++;
+      });
+      assert.strictEqual(
+        (yield* service.read({ memorySpaceId: space, memoryId }, permit)).status,
+        "active",
+      );
+      assert.strictEqual(permitCalls, 2);
+      permitCalls = 0;
+      assert.lengthOf(
+        (yield* service.history({ memorySpaceId: space, memoryId, limit: 1 }, permit)).revisions,
+        1,
+      );
+      assert.strictEqual(permitCalls, 2);
+      // SQL remains transactionally rolled back if the post-read permit is revoked.
+      let calls = 0;
+      const error = yield* service
+        .history(
+          { memorySpaceId: space, memoryId, limit: 1 },
+          Effect.suspend(() => (++calls === 1 ? Effect.void : denied)),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(error._tag, "MemoryAccessError");
+    }).pipe(checkUsage, Effect.provide(live)),
+);
