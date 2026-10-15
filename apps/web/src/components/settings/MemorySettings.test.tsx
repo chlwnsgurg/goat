@@ -47,7 +47,7 @@ vi.mock("@effect/atom-react", async (original) => ({
   ...(await original<typeof import("@effect/atom-react")>()),
   useAtomValue: (atom: { label: string }) => {
     useFixtureVersion();
-    return state.allowed && (!["forget", "upsert"].includes(atom.label) || state.write);
+    return ["forget", "upsert"].includes(atom.label) ? state.write : state.allowed;
   },
 }));
 vi.mock("../../state/memory", async () => {
@@ -110,6 +110,7 @@ vi.mock("../../state/session", async (original) => ({
     return Option.fromNullishOr(state.connection);
   },
   readPreparedConnection: () => state.connection,
+  readEnvironmentScope: () => state.allowed,
   useEnvironmentScope: () => {
     useFixtureVersion();
     return state.allowed;
@@ -392,7 +393,7 @@ afterEach(async () => {
 async function renderForget() {
   const { AtomRegistry } = await import("effect/reactivity");
   const registry = AtomRegistry.make();
-  vi.spyOn(registry, "get").mockImplementation(() => state.allowed as never);
+  vi.spyOn(registry, "get").mockImplementation(() => state.write as never);
   await act(async () => {
     notifyFixture();
     root.render(
@@ -441,10 +442,10 @@ it("cancels without mutation and removes an open intent when permission is revok
   await click("Cancel");
   expect(state.calls).not.toHaveBeenCalled();
   await click("Forget memory");
-  state.allowed = false;
+  state.write = false;
   await renderForget();
   expect(container.querySelector('[aria-label="Forget confirmation"]')).toBeNull();
-  state.allowed = true;
+  state.write = true;
   await renderForget();
   expect(container.querySelector('[aria-label="Forget confirmation"]')).toBeNull();
 });
@@ -571,8 +572,7 @@ async function supportedScreen(withDetails = true) {
   const get = registry.get.bind(registry);
   vi.spyOn(registry, "get").mockImplementation((atom) => {
     const label = (atom as unknown as { label?: string }).label;
-    if (label)
-      return (state.allowed && (!["forget", "upsert"].includes(label) || state.write)) as never;
+    if (label) return (["forget", "upsert"].includes(label) ? state.write : state.allowed) as never;
     return get(atom);
   });
   state.environment = {
@@ -902,22 +902,51 @@ it.each(["write", "read", "reconnect", "close"])(
   },
 );
 
-it.each(["write", "reconnect"])(
+it.each(["write", "read", "reconnect"])(
   "checks the current %s before sending a retry from the rendered confirmation",
   async (boundary) => {
+    const forgetCalls = vi.fn();
+    state.executors.set("forget", async (input) => {
+      forgetCalls(input);
+      return { _tag: "Failure" };
+    });
     const { render } = await supportedScreen();
     await click("Forget memory");
     await click("Confirm forget");
+    const original = forgetCalls.mock.calls[0]![0];
+    expect(container.textContent).toContain("Retry this request with the same operation ID");
     state.queries.set("read", Option.none());
     state.queries.set("history", Option.none());
     await render();
-    const calls = state.calls.mock.calls.length;
+    expect(container.textContent).not.toContain("Synthetic original");
+    const calls = forgetCalls.mock.calls.length;
+    const connection = state.connection;
     // Change the authoritative guard before React has observed the new lifecycle.
     if (boundary === "write") state.write = false;
-    else state.connection = {};
+    if (boundary === "read") state.allowed = false;
+    if (boundary === "reconnect") state.connection = {};
+    if (boundary === "read") {
+      expect(state.write).toBe(true);
+      expect(state.connection).toBe(connection);
+    }
     await click("Confirm forget");
-    expect(state.calls.mock.calls.length).toBe(calls);
+    expect(forgetCalls.mock.calls.length).toBe(calls);
     await render();
     expect(container.querySelector('[aria-label="Forget confirmation"]')).toBeNull();
+    expect(container.textContent).not.toContain("Forget request failed");
+    state.write = true;
+    state.allowed = true;
+    await render();
+    expect(container.querySelector('[aria-label="Forget confirmation"]')).toBeNull();
+    expect(container.textContent).not.toContain("Forget request failed");
+    expect(forgetCalls.mock.calls.length).toBe(calls);
+    // A returning body permits a new explicit intent, never revives the old one.
+    state.queries.set("read", Option.some(activeItem));
+    await render();
+    expect(container.querySelector('[aria-label="Forget confirmation"]')).toBeNull();
+    await click("Forget memory");
+    await click("Confirm forget");
+    expect(forgetCalls.mock.calls.length).toBe(calls + 1);
+    expect(forgetCalls.mock.calls.at(-1)![0]).not.toEqual(original);
   },
 );

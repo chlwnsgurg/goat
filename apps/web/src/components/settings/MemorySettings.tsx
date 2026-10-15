@@ -41,6 +41,7 @@ import * as Schema from "effect/Schema";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useEnvironment, useEnvironments } from "../../state/environments";
 import {
+  readEnvironmentScope,
   readPreparedConnection,
   useEnvironmentScope,
   usePreparedConnection,
@@ -1166,6 +1167,7 @@ function MemoryForgetRequest({
       mounted.current &&
       connection !== null &&
       readPreparedConnection(environmentId) === connection &&
+      readEnvironmentScope(environmentId, AuthMemoryReadScope) &&
       registry.get(memoryEnvironment.forget.permissionAtom(environmentId))
     );
   }
