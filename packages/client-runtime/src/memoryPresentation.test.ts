@@ -2,6 +2,8 @@ import * as M from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import {
+  MEMORY_FORGET_NOTICE,
+  MEMORY_REVOCATION_NOTICE,
   memoryReportTarget,
   presentMemoryAvailability,
   presentMemoryForget,
@@ -95,18 +97,26 @@ const report = Schema.decodeUnknownSync(M.MemoryReportDelivery)({
 });
 
 describe("memory presentation boundaries", () => {
+  it("explains removal and forgetting in the app language", () => {
+    expect(MEMORY_REVOCATION_NOTICE).toBe(
+      "Removing a device applies to later requests and to results still on the hub.",
+    );
+    expect(MEMORY_FORGET_NOTICE).toBe(
+      "The provider's original conversation stays, but forgotten content is never imported again.",
+    );
+  });
   it("keeps propagation separate from usable memory", () => {
     expect(presentMemoryItem(item)).toMatchObject({
-      label: "사용 가능",
-      syncLabel: "전파 대기",
+      label: "Available",
+      syncLabel: "Waiting to sync",
       canEdit: true,
     });
   });
   it.each([
-    ["scanner_pending", "내용 확인 중", true],
-    ["secret_detected", "민감한 내용으로 보류됨", true],
-    ["forget_pending", "잊기 처리 중", false],
-    ["missing_parent", "이전 기억 수신 대기", true],
+    ["scanner_pending", "Checking content", true],
+    ["secret_detected", "Held for sensitive content", true],
+    ["forget_pending", "Forgetting memory", false],
+    ["missing_parent", "Waiting for earlier memory", true],
   ] as const)("presents %s without offering a rescan", (reason, label, canForget) => {
     expect(presentMemoryAvailability({ ...visible, exposure: "held", reasons: [reason] })).toEqual({
       label,
@@ -118,7 +128,7 @@ describe("memory presentation boundaries", () => {
     expect(
       presentMemoryAvailability({ ...visible, exposure: "forgotten", cleanupPending: true }),
     ).toEqual({
-      label: "잊은 기억",
+      label: "Forgotten memory",
       detailsAvailable: false,
       canForget: false,
     });
@@ -141,7 +151,7 @@ describe("memory presentation boundaries", () => {
   });
   it("shows retained resolution metadata without regenerating purged judgment", () => {
     expect(presentMemoryResolution({ ...entry, payload: null })).toMatchObject({
-      label: "자동 해결 적용됨",
+      label: "Automatic resolution applied",
       providerLabel: "Codex",
       effectiveModel: "synthetic",
       resolvingEnvironmentId: "owner",
@@ -152,28 +162,34 @@ describe("memory presentation boundaries", () => {
         ...entry,
         resolution: { ...resolution, revertsResolutionId: resolution.resolutionId },
       }).label,
-    ).toBe("되돌리기 적용됨");
+    ).toBe("Revert applied");
   });
-  it("allows a retained current resolution only before the 30-day deadline", () => {
-    const input = { item, entry, history, now: Date.parse(deadline) - 1 };
-    expect(presentMemoryRevert(input).canRevert).toBe(true);
-    expect(presentMemoryRevert({ ...input, now: Date.parse(deadline) })).toMatchObject({
-      canRevert: false,
-      reason: "되돌리기 기간 만료",
+  it.each([
+    ["behind", Date.parse(applied), "before_deadline"],
+    ["just before deadline", Date.parse(deadline) - 1, "before_deadline"],
+    ["at deadline", Date.parse(deadline), "confirmation_needed"],
+    ["ahead", Date.parse(deadline) + 1, "confirmation_needed"],
+    ["unknown", NaN, "confirmation_needed"],
+  ] as const)("keeps the client clock %s advisory", (_clock, now, localDeadlineState) => {
+    expect(presentMemoryRevert({ item, entry, history, now })).toMatchObject({
+      canRevert: true,
+      reason: null,
+      localDeadlineState,
     });
   });
-  it("requires retained originals, complete history and the current result", () => {
+  it("requires complete history and the current result", () => {
     const input = { item, entry, history, now: Date.parse(applied) };
-    expect(
-      presentMemoryRevert({ ...input, history: { ...history, nextCursor: "more" } }).canRevert,
-    ).toBe(false);
-    expect(
-      presentMemoryRevert({ ...input, history: { ...history, revisions: [] } }).canRevert,
-    ).toBe(false);
+    const incomplete = presentMemoryRevert({
+      ...input,
+      history: { ...history, nextCursor: "more", revisions: [] },
+    });
+    const absent = presentMemoryRevert({ ...input, history: { ...history, revisions: [] } });
+    expect(incomplete.canRevert).toBe(false);
+    expect(absent.canRevert).toBe(false);
+    expect(incomplete.reason).not.toBe(absent.reason);
     expect(
       presentMemoryRevert({ ...input, item: { ...item, revision: revision(8) } }).canRevert,
     ).toBe(false);
-    expect(presentMemoryRevert({ ...input, now: NaN }).canRevert).toBe(false);
     expect(
       presentMemoryRevert({
         ...input,
@@ -183,6 +199,90 @@ describe("memory presentation boundaries", () => {
         },
       }).canRevert,
     ).toBe(false);
+  });
+  it("can restore a retained input without the resolution judgment", () => {
+    const missingJudgment = { ...entry, payload: null };
+    expect(presentMemoryResolution(missingJudgment).judgmentAvailable).toBe(false);
+    expect(
+      presentMemoryRevert({
+        item,
+        entry: missingJudgment,
+        history,
+        now: Date.parse(applied),
+        restoredRevisionId: revision(3).revisionId,
+      }),
+    ).toMatchObject({ canRevert: true, reason: null });
+  });
+  it("offers only retained inputs and validates the chosen original", () => {
+    const input = {
+      item,
+      entry,
+      now: Date.parse(applied),
+      history: {
+        ...history,
+        revisions: [
+          { revision: revision(3), payload },
+          { revision: revision(4), payload: null },
+          { revision: revision(8), payload },
+        ],
+      },
+    };
+    expect(presentMemoryRevert(input)).toMatchObject({
+      canRevert: true,
+      restorableRevisionIds: [revision(3).revisionId],
+    });
+    expect(
+      presentMemoryRevert({ ...input, restoredRevisionId: revision(3).revisionId }).canRevert,
+    ).toBe(true);
+    for (const n of [4, 8]) {
+      expect(
+        presentMemoryRevert({ ...input, restoredRevisionId: revision(n).revisionId }).canRevert,
+      ).toBe(false);
+    }
+  });
+  it.each([
+    ["just before hub deadline with client ahead", "accepted", Date.parse(deadline) + 1000],
+    ["at hub deadline with client behind", "revert_expired", Date.parse(deadline) - 1000],
+  ] as const)("settles from the supplied hub result: %s", (_scenario, status, now) => {
+    // The result is producer evidence; no hub clock is inferred or added to the DTO.
+    const identity = {
+      operationId: report.operationId,
+      memoryId: item.memoryId,
+      resolutionId: resolution.resolutionId,
+      revertDeadlineUtc: resolution.revertDeadlineUtc,
+    };
+    const result =
+      status === "accepted"
+        ? M.MemoryRevertResult.make({
+            ...identity,
+            status,
+            receipt: {
+              operationId: report.operationId,
+              memoryId: item.memoryId,
+              outcome: "accepted",
+              revisionId: revision(8).revisionId,
+              pendingSync: false,
+            },
+            localAvailability: visible,
+          })
+        : M.MemoryRevertResult.make({ ...identity, status });
+    expect(presentMemoryRevert({ item, entry, history, now }).canRevert).toBe(true);
+    expect(presentMemoryRevertResult(result)).toMatchObject({
+      settled: true,
+      detailsAvailable: status === "accepted",
+    });
+    expect(
+      presentMemoryRevert({
+        item,
+        entry,
+        history: { ...history, revertResults: [result] },
+        now,
+      }),
+    ).toMatchObject({
+      canRevert: false,
+      reason: presentMemoryRevertResult(result).label,
+      timeNotice: null,
+    });
   });
   it("keeps replayed accepted revert accepted after expiry and body held", () => {
     const result = M.MemoryRevertResult.make({
@@ -201,7 +301,7 @@ describe("memory presentation boundaries", () => {
       localAvailability: { ...visible, exposure: "held", reasons: ["scanner_pending"] },
     });
     expect(presentMemoryRevertResult(result)).toEqual({
-      label: "되돌리기 승인됨",
+      label: "Revert approved",
       settled: true,
       detailsAvailable: false,
     });
@@ -212,7 +312,7 @@ describe("memory presentation boundaries", () => {
         history: { ...history, revertResults: [result] },
         now: Date.parse(deadline) + 1,
       }),
-    ).toMatchObject({ canRevert: false, reason: "되돌리기 승인됨" });
+    ).toMatchObject({ canRevert: false, reason: "Revert approved" });
   });
   it("does not promote a forget receipt into completed propagation or cleanup", () => {
     expect(
@@ -223,7 +323,11 @@ describe("memory presentation boundaries", () => {
         revisionId: null,
         pendingSync: true,
       }),
-    ).toMatchObject({ label: "잊기 요청 반영됨", pendingSync: true, expansionStatus: "unknown" });
+    ).toMatchObject({
+      label: "Forget request applied",
+      pendingSync: true,
+      expansionStatus: "unknown",
+    });
   });
   it("preserves desired pending enrollment without claiming effective permission", () => {
     const view = decodeOwnerView({
@@ -263,8 +367,8 @@ describe("memory presentation boundaries", () => {
     expect(presentMemoryOwnerPolicy(view)).toMatchObject({
       effectiveRequesterEnvironmentIds: ["active"],
       desiredRequesterEnvironmentIds: ["active", "pending"],
-      revocationLabel: "철회 전파 중",
-      pendingEnrollments: [{ label: "재등록 대기 — 이전 철회가 끝나면 다시 허용됩니다" }],
+      revocationLabel: "Syncing device removal",
+      pendingEnrollments: [{ label: "Waiting to allow this device again after removal completes" }],
     });
   });
   it.each([undefined, -1, 11, 1.5, NaN])(
@@ -286,7 +390,7 @@ describe("memory presentation boundaries", () => {
     };
     expect(presentMemoryReport(report, options)).toMatchObject({
       canResetInSettings: true,
-      label: "자동 재시도 10회 소진",
+      label: "All 10 automatic retries used",
     });
     for (const overrides of [
       { automaticAttempts: 9 },
@@ -328,10 +432,10 @@ describe("memory presentation boundaries", () => {
       { diagnostics: "unknown", canReconcileInSettings: false },
     );
     expect(presentMemorySync({ state: "offline", memorySpaceId: null }).label).toBe(
-      "메모리 공간 연결 필요",
+      "Connect a memory space",
     );
     expect(presentMemorySync({ state: "disabled", memorySpaceId: null }).label).toBe(
-      "메모리 공유 꺼짐",
+      "Memory sharing off",
     );
     expect(presentMemoryRunAccess({})).toEqual({
       savedCeiling: "none",
