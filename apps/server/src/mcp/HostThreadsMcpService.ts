@@ -33,6 +33,7 @@ import * as Schema from "effect/Schema";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { hostFailure } from "./hostFailure.ts";
+import { withHostFanOutDeadline } from "./hostFanOutDeadline.ts";
 import type { LaunchWatch } from "./launchWatch.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
@@ -484,6 +485,7 @@ const make = Effect.gen(function* () {
           hosts,
           (host) =>
             listOnHost(scope, host, filters).pipe(
+              withHostFanOutDeadline(host),
               Effect.result,
               Effect.map((result) => ({ host, result })),
             ),

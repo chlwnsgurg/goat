@@ -36,6 +36,8 @@ import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { HostStatusToolkit } from "./toolkits/hostStatus/tools.ts";
 import * as HostStatusHandlers from "./toolkits/hostStatus/handlers.ts";
+import { ProviderToolkit } from "./toolkits/provider/tools.ts";
+import * as ProviderHandlers from "./toolkits/provider/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
 import { RemoteReportToolkit } from "./toolkits/remoteReport/tools.ts";
@@ -968,6 +970,12 @@ export const layerHostStatusToolkit = toolkitRegistration(
   HostStatusToolkit,
   HostStatusHandlers.layer,
 );
+
+/**
+ * goat_provider_diagnose. Composed beside `layer` by the server, which provides
+ * ProviderDiagnosisService from the provider registry, host, and ACP catalog.
+ */
+export const layerProviderToolkit = toolkitRegistration(ProviderToolkit, ProviderHandlers.layer);
 
 const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer).pipe(
   Layer.provide(ThreadLaunchMcpService.layer),

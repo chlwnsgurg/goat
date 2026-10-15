@@ -6,17 +6,37 @@ import { mergeProviderInstanceEnvironment } from "@goat/provider-core/server/ins
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 const decodeSiblingSettings = Schema.decodeUnknownEffect(AcpRegistrySettings);
+const decodeInstanceId = Schema.decodeUnknownOption(ProviderInstanceId);
 
 export class DevinCloudCliError extends Schema.TaggedError<DevinCloudCliError>()(
   "DevinCloudCliError",
   {
     stage: Schema.Literals(["sibling", "resolve", "probe", "version", "auth", "relay"]),
+    /**
+     * The finer cause for `sibling` and `resolve`, for provider diagnosis. A `resolve`
+     * reason is the ACP Registry inspection status, such as `unprepared` or `missing_runner`.
+     */
+    reason: Schema.optional(
+      Schema.Literals([
+        "missing",
+        "not_acp_registry",
+        "disabled",
+        "not_devin",
+        "unconfigured",
+        "not_found",
+        "unsupported",
+        "unprepared",
+        "missing_runner",
+        "package_runner",
+      ]),
+    ),
     cause: Schema.optional(Schema.Defect()),
     detail: Schema.optional(Schema.String),
   },
@@ -97,22 +117,28 @@ const make = Effect.gen(function* () {
     const all = yield* host.settings.get.pipe(
       Effect.mapError((cause) => new DevinCloudCliError({ stage: "sibling", cause })),
     );
-    const sibling = all.providerInstances?.[ProviderInstanceId.make(siblingId)];
-    if (!siblingId || sibling?.driver !== "acpRegistry") {
-      return yield* new DevinCloudCliError({ stage: "sibling" });
+    // The default sibling id is "", which is not a valid instance id; treat it as missing.
+    const id = decodeInstanceId(siblingId);
+    const sibling = Option.isSome(id) ? all.providerInstances?.[id.value] : undefined;
+    if (!sibling) {
+      return yield* new DevinCloudCliError({ stage: "sibling", reason: "missing" });
+    }
+    if (sibling.driver !== "acpRegistry") {
+      return yield* new DevinCloudCliError({ stage: "sibling", reason: "not_acp_registry" });
     }
     const settings = yield* decodeSiblingSettings(sibling.config ?? {}).pipe(
       Effect.mapError((cause) => new DevinCloudCliError({ stage: "sibling", cause })),
     );
     // Local commands must be a direct Devin executable, not a generic shell wrapper.
     const localName = settings.commandPath.split(/[\\/]/u).pop() ?? "";
+    if (sibling.enabled === false || !settings.enabled) {
+      return yield* new DevinCloudCliError({ stage: "sibling", reason: "disabled" });
+    }
     if (
-      sibling.enabled === false ||
-      !settings.enabled ||
       (settings.source === "registry" && settings.agentId !== "devin") ||
       (settings.source === "local" && !/^devin(?:\.exe)?$/iu.test(localName))
     ) {
-      return yield* new DevinCloudCliError({ stage: "sibling" });
+      return yield* new DevinCloudCliError({ stage: "sibling", reason: "not_devin" });
     }
     const env = yield* mergeProviderInstanceEnvironment(sibling.environment).pipe(
       Effect.mapError((cause) => new DevinCloudCliError({ stage: "resolve", cause })),
@@ -122,12 +148,14 @@ const make = Effect.gen(function* () {
       .pipe(Effect.mapError((cause) => new DevinCloudCliError({ stage: "resolve", cause })));
     // Package runners can inspect as ready before resolve installs their agent.
     // Cloud readiness needs an already selected executable, never an installer.
+    if (inspection.status !== "ready") {
+      return yield* new DevinCloudCliError({ stage: "resolve", reason: inspection.status });
+    }
     if (
-      inspection.status !== "ready" ||
-      ((inspection.distribution === "npx" || inspection.distribution === "uvx") &&
-        !settings.commandPath)
+      (inspection.distribution === "npx" || inspection.distribution === "uvx") &&
+      !settings.commandPath
     ) {
-      return yield* new DevinCloudCliError({ stage: "resolve" });
+      return yield* new DevinCloudCliError({ stage: "resolve", reason: "package_runner" });
     }
     const resolved = yield* catalog
       .resolve(settings, cwd, env)

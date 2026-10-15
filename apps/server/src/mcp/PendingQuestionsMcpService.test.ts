@@ -13,10 +13,12 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2TurnItem,
   type OrchestrationV2ServerCommand,
+  type OrchestrationV2UserInputQuestion,
   type UserInputRespondedBy,
 } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -68,7 +70,13 @@ const foreign: UserInputRespondedBy = {
 };
 const answers = { q: "  exact label\n" };
 const respondInput = { threadId: targetId, requestId, reason, answers };
-const questionProjection = (id = targetId, rid = requestId): OrchestrationV2ThreadProjection => {
+const questionProjection = (
+  id = targetId,
+  rid = requestId,
+  questions: ReadonlyArray<OrchestrationV2UserInputQuestion> = [
+    { id: "q", header: "Choice", question: "Use the existing API?", options: [] },
+  ],
+): OrchestrationV2ThreadProjection => {
   const projection = idleThreadProjection(liveThreadShell(id));
   const request: OrchestrationV2RuntimeRequest = {
     id: rid,
@@ -98,7 +106,7 @@ const questionProjection = (id = targetId, rid = requestId): OrchestrationV2Thre
     completedAt: null,
     updatedAt: now,
     requestId: rid,
-    questions: [{ id: "q", header: "Choice", question: "Use the existing API?", options: [] }],
+    questions,
   };
   return { ...projection, runtimeRequests: [request], turnItems: [item] };
 };
@@ -250,6 +258,65 @@ const runService = <A, E>(
 };
 
 describe("PendingQuestionsMcpService", () => {
+  it.effect("returns fast hosts at the fan-out deadline without interrupting a slow launch", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const finished = yield* Deferred.make<void>();
+      const interrupted = yield* Deferred.make<void>();
+      const returned = yield* Deferred.make<void>();
+      const slow = Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(Deferred.await(release)),
+        Effect.andThen(Deferred.succeed(finished, undefined)),
+        Effect.as({ questions: [], truncated: false, unavailableHosts: [] }),
+        Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+      );
+      const fiber = yield* runService(
+        {
+          candidates: [{ threadId: targetId, requestId }],
+          hosts: ["fast", "slow"],
+          hostCall: (call) =>
+            call.host === "slow"
+              ? slow
+              : Effect.succeed({
+                  questions: [remoteQuestion()],
+                  truncated: false,
+                  unavailableHosts: [],
+                }),
+        },
+        (service) => service.list(scope, { scope: "launched" }),
+      ).pipe(
+        Effect.tap(() => Deferred.succeed(returned, undefined)),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(14_999);
+      expect(yield* Deferred.isDone(returned)).toBe(false);
+      yield* TestClock.adjust(1);
+      const returnedOnTime = yield* Deferred.isDone(returned);
+      const wasInterrupted = yield* Deferred.isDone(interrupted);
+      // Release even on the old implementation so a failing regression cannot hang.
+      yield* Deferred.succeed(release, undefined);
+      const { result } = yield* Fiber.join(fiber);
+      if (!wasInterrupted) yield* Deferred.await(finished);
+      expect(returnedOnTime).toBe(true);
+      expect(wasInterrupted).toBe(false);
+      expect(result._tag).toBe("Success");
+      if (result._tag !== "Success") return;
+      expect("questions" in result.success).toBe(true);
+      if (!("questions" in result.success)) return;
+      expect(result.success.questions.map((question) => question.host)).toEqual([null, "fast"]);
+      expect(result.success.unavailableHosts).toEqual([
+        {
+          host: "slow",
+          code: "host_unavailable",
+          message: expect.stringContaining("host:slow"),
+        },
+      ]);
+      expect(result.success.unavailableHosts?.[0]?.message).toContain("waits longer");
+    }),
+  );
+
   it.effect("keeps default local list restricted to pending user_input", () =>
     Effect.gen(function* () {
       const projection = questionProjection(callerId);
@@ -368,6 +435,106 @@ describe("PendingQuestionsMcpService", () => {
         type: "agent",
       });
     }),
+  );
+  it.effect.each([
+    { name: "missing answers", answers: undefined },
+    { name: "empty answers", answers: {} },
+    { name: "a header instead of an id", answers: { Choice: "Yes" } },
+    { name: "an extra question id", answers: { q: "Yes", extra: "No" } },
+  ])("explains the expected question ids for $name without dispatching", ({ answers }) =>
+    Effect.gen(function* () {
+      const run = yield* runService({}, (service) =>
+        service.respond(scope, {
+          threadId: targetId,
+          requestId,
+          reason,
+          ...(answers === undefined ? {} : { answers }),
+        }),
+      );
+      expect(run.result).toMatchObject({
+        failure: {
+          code: "invalid_request",
+          message: expect.stringContaining("Expected question ids: q."),
+        },
+      });
+      expect(run.commands).toEqual([]);
+    }),
+  );
+  it.effect.each([
+    { name: "an unknown option", answer: "Maybe", multiSelect: false },
+    { name: "multiple choices for single select", answer: ["Yes", "No"], multiSelect: false },
+    { name: "an empty selection", answer: [], multiSelect: true },
+    { name: "an unknown multi select option", answer: ["Yes", "Maybe"], multiSelect: true },
+  ])(
+    "lists allowed choices for $name when custom answers are forbidden",
+    ({ answer, multiSelect }) =>
+      Effect.gen(function* () {
+        const records = [
+          questionProjection(targetId, requestId, [
+            {
+              id: "q",
+              header: "Choice",
+              question: "Proceed?",
+              multiSelect,
+              allowCustomAnswer: false,
+              options: [
+                { label: "Yes", description: "Proceed", value: "yes-id" },
+                { label: "No", description: "Stop" },
+              ],
+            },
+          ]),
+        ];
+        const run = yield* runService({ records }, (service) =>
+          service.respond(scope, { ...respondInput, answers: { q: answer } }),
+        );
+        expect(run.result).toMatchObject({
+          failure: {
+            code: "invalid_request",
+            message: expect.stringContaining('Allowed options: "yes-id", "No".'),
+          },
+        });
+        expect(run.commands).toEqual([]);
+      }),
+  );
+  it.effect.each([
+    { answer: "Yes", multiSelect: false, allowCustomAnswer: false },
+    { answer: "yes-id", multiSelect: false, allowCustomAnswer: false },
+    { answer: ["yes-id", "No"], multiSelect: true, allowCustomAnswer: false },
+    { answer: "  custom text\n", multiSelect: false, allowCustomAnswer: true },
+    { answer: ["Yes", "custom"], multiSelect: true, allowCustomAnswer: undefined },
+  ])(
+    "preserves valid answers ($answer, custom=$allowCustomAnswer)",
+    ({ answer, multiSelect, allowCustomAnswer }) =>
+      Effect.gen(function* () {
+        const records = [
+          questionProjection(targetId, requestId, [
+            {
+              id: "q",
+              header: "Choice",
+              question: "Proceed?",
+              multiSelect,
+              ...(allowCustomAnswer === undefined ? {} : { allowCustomAnswer }),
+              options: [
+                { label: "Yes", description: "Proceed", value: "yes-id" },
+                { label: "No", description: "Stop" },
+              ],
+            },
+            {
+              id: "optional",
+              header: "Notes",
+              question: "Anything else?",
+              required: false,
+              options: [],
+            },
+          ]),
+        ];
+        const run = yield* runService({ records }, (service) =>
+          service.respond(scope, { ...respondInput, answers: { q: answer } }),
+        );
+        expect(run.result).toMatchObject({ success: { sequence: 7 } });
+        expect(run.commands).toHaveLength(1);
+        expect(run.commands[0]).toMatchObject({ answers: { q: answer } });
+      }),
   );
   it.effect("rejects forged provenance from a thread caller", () =>
     Effect.gen(function* () {
@@ -620,13 +787,23 @@ describe("PendingQuestionsMcpService", () => {
         const refused = yield* runService({ records }, (service) =>
           service.respond(caller, decideInput),
         );
-        expect(refused.result).toMatchObject({ failure: { code: "capability_denied" } });
+        expect(refused.result).toMatchObject({
+          failure: {
+            code: "capability_denied",
+            message: expect.stringContaining("orchestration:approve"),
+          },
+        });
         expect(refused.commands).toEqual([]);
       }
       const both = yield* runService({ records }, (service) =>
         service.respond(approver, { ...decideInput, answers }),
       );
-      expect(both.result).toMatchObject({ failure: { code: "invalid_request" } });
+      expect(both.result).toMatchObject({
+        failure: {
+          code: "invalid_request",
+          message: expect.stringContaining("omit the other field"),
+        },
+      });
       const answeredApproval = yield* runService({ records }, (service) =>
         service.respond(approver, respondInput),
       );
