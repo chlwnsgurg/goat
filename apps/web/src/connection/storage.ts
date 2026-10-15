@@ -447,42 +447,55 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
   const state = yield* Ref.make<Option.Option<ConnectionCatalogDocumentType>>(Option.none());
   const lock = yield* Semaphore.make(1);
 
-  const loadUnlocked = Effect.fn("web.connectionStorage.loadCatalog")(function* () {
-    const cached = yield* Ref.get(state);
-    if (Option.isSome(cached)) {
-      return cached.value;
-    }
-    const raw = yield* backend.read;
-    let catalog = EMPTY_CONNECTION_CATALOG_DOCUMENT;
-    if (raw !== null && raw.trim() !== "") {
-      catalog = yield* decodeCatalog(raw).pipe(
-        Effect.catch((error) =>
-          Effect.gen(function* () {
-            yield* Effect.logWarning("Discarding a corrupt web connection catalog.", {
-              error: error.message,
-            });
-            if (backend.quarantine !== undefined) {
-              yield* backend.quarantine(raw).pipe(
-                Effect.catch((cause) =>
-                  Effect.logWarning("Could not quarantine the corrupt web connection catalog.", {
-                    error: cause.message,
-                  }),
-                ),
-              );
-            }
+  /** A corrupt document is quarantined and treated as empty, on reads and before a save. */
+  const decodeOrDiscard = Effect.fn("web.connectionStorage.decodeOrDiscard")(function* (
+    raw: string | null,
+    persistEmpty: boolean,
+  ) {
+    if (raw === null || raw.trim() === "") return EMPTY_CONNECTION_CATALOG_DOCUMENT;
+    return yield* decodeCatalog(raw).pipe(
+      Effect.catch((error) =>
+        Effect.gen(function* () {
+          yield* Effect.logWarning("Discarding a corrupt web connection catalog.", {
+            error: error.message,
+          });
+          if (backend.quarantine !== undefined) {
+            yield* backend.quarantine(raw).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Could not quarantine the corrupt web connection catalog.", {
+                  error: cause.message,
+                }),
+              ),
+            );
+          }
+          if (persistEmpty) {
             const encoded = yield* encodeCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT);
-            yield* backend.write(encoded).pipe(
+            // Replace exactly the corrupt bytes; a concurrent save from another channel wins.
+            const persist =
+              backend.compareAndSet !== undefined
+                ? backend.compareAndSet(encoded, raw).pipe(Effect.asVoid)
+                : backend.write(encoded);
+            yield* persist.pipe(
               Effect.catch((cause) =>
                 Effect.logWarning("Could not persist the recovered web connection catalog.", {
                   error: cause.message,
                 }),
               ),
             );
-            return EMPTY_CONNECTION_CATALOG_DOCUMENT;
-          }),
-        ),
-      );
+          }
+          return EMPTY_CONNECTION_CATALOG_DOCUMENT;
+        }),
+      ),
+    );
+  });
+
+  const loadUnlocked = Effect.fn("web.connectionStorage.loadCatalog")(function* () {
+    const cached = yield* Ref.get(state);
+    if (Option.isSome(cached)) {
+      return cached.value;
     }
+    const raw = yield* backend.read;
+    const catalog = yield* decodeOrDiscard(raw, true);
     yield* Ref.set(state, Option.some(catalog));
     return catalog;
   });
@@ -497,8 +510,7 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
             // rather than merging an obsolete full document (which can resurrect deletions).
             for (let attempt = 0; attempt < 5; attempt++) {
               const raw = yield* backend.read;
-              const current =
-                raw === null ? EMPTY_CONNECTION_CATALOG_DOCUMENT : yield* decodeCatalog(raw);
+              const current = yield* decodeOrDiscard(raw, false);
               const next = transform(current);
               if (yield* backend.compareAndSet(yield* encodeCatalog(next), raw)) {
                 yield* Ref.set(state, Option.some(next));

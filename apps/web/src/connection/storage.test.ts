@@ -142,6 +142,32 @@ describe("ConnectionStorage.makeCatalogStore", () => {
       }),
   );
 
+  it.effect("replaces a corrupt desktop catalog on read and on a save without a read", () =>
+    Effect.gen(function* () {
+      let disk: string | null = "{not-json";
+      vi.stubGlobal("window", {
+        desktopBridge: {
+          getConnectionCatalog: async () => disk,
+          setConnectionCatalog: async (raw: string, expected: string | null) => {
+            if (disk !== expected) return "conflict" as const;
+            disk = raw;
+            return true;
+          },
+        },
+      });
+      const backend = () => ConnectionStorage.makeCatalogBackend(fixedHandle({} as IDBDatabase));
+      const reader = yield* ConnectionStorage.makeCatalogStore(backend());
+      expect(yield* reader.read).toEqual(emptyCatalog);
+      expect(decodeCatalog(disk!)).toEqual(emptyCatalog);
+
+      disk = "{not-json";
+      const a = new RelayConnectionTarget({ environmentId: EnvironmentId.make("A"), label: "A" });
+      const writer = yield* ConnectionStorage.makeCatalogStore(backend());
+      yield* writer.update((catalog) => ({ ...catalog, targets: [...catalog.targets, a] }));
+      expect(decodeCatalog(disk!).targets).toEqual([a]);
+    }),
+  );
+
   it.effect("does not hide catalog read failures", () =>
     Effect.gen(function* () {
       const failure = new ConnectionTransientError({
