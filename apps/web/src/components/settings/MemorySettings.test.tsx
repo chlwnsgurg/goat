@@ -2132,11 +2132,11 @@ it("shows refused history without consuming the one-time revert slot", async () 
         resolutionId: id(6),
         revertDeadlineUtc: resolution.revertDeadlineUtc,
         status: "refused",
-        failureCode: "permission_denied",
+        failureCode: "source_invalidated",
       }),
     ],
   });
-  expect(container.textContent).toContain("Last revert attempt was refused: permission denied");
+  expect(container.textContent).toContain("Last revert attempt was refused: source invalidated");
   expect(container.querySelector('[aria-label="Revert confirmation"]')).not.toBeNull();
   expect(state.calls).not.toHaveBeenCalled();
 });
