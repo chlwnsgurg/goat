@@ -3651,8 +3651,18 @@ const make = Effect.gen(function* () {
           (yield* receiptCodec.encode(previous)) !== (yield* receiptCodec.encode(acknowledged))
         )
           return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        const rejectedExpansion =
+          result.outcome === "rejected" &&
+          work.metadata.kind === "forget" &&
+          (yield* stored(
+            "ack-forget-expansion",
+            sql`SELECT 1 FROM memory_events WHERE memory_space_id=${work.space}
+            AND json_extract(receipt_json,'$.forgetExpansion.operationId')=${result.operationId}
+            UNION ALL SELECT 1 FROM memory_compact_receipts WHERE space=${work.space}
+            AND json_extract(receipt_json,'$.forgetExpansion.operationId')=${result.operationId} LIMIT 1`,
+          )).length > 0;
         if (
-          (result.hubSequence !== null || result.outcome === "rejected") &&
+          (result.hubSequence !== null || rejectedExpansion) &&
           previous &&
           !("hubSequence" in previous)
         )
