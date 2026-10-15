@@ -1,4 +1,8 @@
 // @vitest-environment jsdom
+import { memoryImportTestLocks } from "../../test/memoryImportLocks";
+import { MemoryHubDiagnosticsSettings } from "./MemoryHubDiagnosticsSettings";
+import { MemoryRunAccessLabel } from "./MemoryRunAccessLabel";
+import { memorySyncFixture } from "../../test/memorySyncFixture";
 import { act, useSyncExternalStore, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -33,6 +37,10 @@ const state = vi.hoisted(() => ({
   navigate: vi.fn(),
   responses: new Map<string, unknown>(),
   executors: new Map<string, (input: unknown) => Promise<unknown>>(),
+  projects: [] as { id: string; environmentId: string; title: string }[],
+  threads: [] as { id: string; environmentId: string; title: string }[],
+  threadReads: vi.fn(),
+  agentAccess: true,
   connection: {} as object | null,
   deviceConnections: new Map<string, object | null>(),
 }));
@@ -63,6 +71,8 @@ vi.mock("@effect/atom-react", async (original) => ({
   },
 }));
 vi.mock("../../state/memory", async () => {
+  const { createMemoryImportWorkflow } =
+    await import("@goat/client-runtime/memory-import-workflow");
   const { Atom } = await import("effect/reactivity");
   const drafts = Atom.family((_key: string) => {
     const stored = Atom.make<{ text: string; memoryIds: readonly string[] } | null>(null);
@@ -73,10 +83,32 @@ vi.mock("../../state/memory", async () => {
   });
   return {
     memoryEnvironment: {
+      createImportWorkflow: (
+        _registry: unknown,
+        options: Parameters<typeof createMemoryImportWorkflow>[0],
+      ) =>
+        createMemoryImportWorkflow({
+          ...options,
+          canImport: () => state.allowed && state.write,
+          request: async (environmentId, input) => {
+            const execute = state.executors.get("importProvider");
+            if (!execute) throw new Error("No import fixture");
+            return (await execute({
+              environmentId,
+              input,
+            })) as import("@goat/contracts").MemoryImportProviderResult;
+          },
+        }),
       exposureAtom: () => ({ label: "syncChanges" }),
       ...Object.fromEntries(
         [
+          "importProvider",
+          "resetReportAttempts",
+          "projectBindingGet",
+          "projectBindingUpdate",
           "syncStatus",
+          "hubDiagnostics",
+          "hubReconcile",
           "upsert",
           "forget",
           "revertResolution",
@@ -96,6 +128,31 @@ vi.mock("../../state/memory", async () => {
     },
   };
 });
+vi.mock("../../state/entities", () => ({
+  useProjects: () => {
+    useFixtureVersion();
+    return state.projects;
+  },
+  useThreadShells: (enabled = true) => {
+    state.threadReads(enabled);
+    useFixtureVersion();
+    return enabled ? state.threads : [];
+  },
+}));
+vi.mock("../../hooks/useSettings", () => ({
+  useEnvironmentSettings: (_id: string, selector: (settings: unknown) => unknown) => {
+    useFixtureVersion();
+    return selector({ enableAgentMemoryAccess: state.agentAccess });
+  },
+}));
+vi.mock("../../state/server", () => ({
+  serverEnvironment: {
+    updateSettings: {
+      label: "updateSettings",
+      permissionAtom: () => ({ label: "updateSettings" }),
+    },
+  },
+}));
 vi.mock("../../state/query", () => ({
   useEnvironmentQuery: ({ label }: { label: string }) => {
     useFixtureVersion();
@@ -113,7 +170,10 @@ vi.mock("../../state/use-atom-command", () => ({
   },
 }));
 vi.mock("../../state/environments", () => ({
-  useEnvironment: () => state.environment,
+  useEnvironment: () => {
+    useFixtureVersion();
+    return state.environment;
+  },
   useEnvironments: () => ({ environments: state.environments }),
 }));
 vi.mock("../../state/session", async (original) => ({
@@ -145,6 +205,32 @@ vi.mock("@legendapp/list/react", () => ({
         <div key={item.memoryId}>{renderItem({ item })}</div>
       ))}
     </div>
+  ),
+}));
+vi.mock("./MemoryScopePicker", () => ({
+  MemoryScopePicker: ({
+    items,
+    value,
+    onChange,
+    disabled,
+  }: {
+    items: { id: string; title: string }[];
+    value: string | null;
+    onChange: (id: string) => void;
+    disabled: boolean;
+  }) => (
+    <select
+      value={value ?? ""}
+      disabled={disabled}
+      onChange={(event) => onChange(event.target.value)}
+    >
+      <option value="">Choose</option>
+      {items.map((item) => (
+        <option key={item.id} value={item.id}>
+          {item.title}
+        </option>
+      ))}
+    </select>
   ),
 }));
 vi.mock("../ui/select", () => ({
@@ -199,7 +285,9 @@ vi.mock("./settingsLayout", () => ({
     </div>
   ),
   SettingsPageContainer: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  SettingsSection: ({ children }: { children: ReactNode }) => <section>{children}</section>,
+  SettingsSection: ({ children, id }: { children: ReactNode; id?: string }) => (
+    <section id={id}>{children}</section>
+  ),
 }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
 import { RegistryContext } from "@effect/atom-react";
@@ -228,11 +316,17 @@ const item = Schema.decodeUnknownSync(MemoryItem)({
 let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
+  Object.defineProperty(navigator, "locks", { configurable: true, value: memoryImportTestLocks() });
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-15T00:00:00.000Z"));
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
+  window.localStorage.clear();
+  state.threadReads.mockClear();
+  state.projects = [];
+  state.threads = [];
+  state.agentAccess = true;
   state.allowed = true;
   state.write = true;
   state.exposure = 0;
@@ -652,7 +746,13 @@ async function deferredResult() {
   });
   return { promise, resolve };
 }
-const success = (value: unknown) => ({ _tag: "Success", value });
+const success = (value: unknown) => ({
+  _tag: "Success",
+  value:
+    typeof value === "object" && value !== null && "state" in value && "memorySpaceId" in value
+      ? { ...memorySyncFixture, ...value }
+      : value,
+});
 const hubView = (version: number, space = id(1)) => ({
   version,
   members: [] as {
@@ -1486,4 +1586,750 @@ it("removes an open editor and history when shared admission removes the derived
   expect(state.navigate).toHaveBeenCalledWith(
     expect.objectContaining({ to: "/settings/memory", hash: "" }),
   );
+});
+
+// WP6 controls exercise the actual workflow/store; command transport is the fixture boundary.
+async function renderControl(element: ReactNode | (() => ReactNode)) {
+  const { AtomRegistry } = await import("effect/reactivity");
+  const registry = AtomRegistry.make();
+  const get = registry.get.bind(registry);
+  vi.spyOn(registry, "get").mockImplementation((atom) => {
+    const label = (atom as unknown as { label?: string }).label;
+    return label ? (state.allowed as never) : get(atom);
+  });
+  const render = () =>
+    act(async () => {
+      notifyFixture();
+      root.render(
+        <RegistryContext value={registry}>
+          {typeof element === "function" ? element() : element}
+        </RegistryContext>,
+      );
+    });
+  await render();
+  return { registry, render };
+}
+async function chooseControl(value: string, index = 0) {
+  const picker = container.querySelectorAll("select")[index]!;
+  expect(picker).toBeDefined();
+  await act(async () => {
+    picker.value = value;
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+const envId = EnvironmentId.make("remote-owner");
+import { MemoryAgentAccessSettings } from "./MemoryAgentAccessSettings";
+import { MemoryReportRetrySettings } from "./MemoryReportRetrySettings";
+import { MemoryScopeSettings } from "./MemoryScopeSettings";
+import { MemoryImportSettings } from "./MemoryImportSettings";
+import {
+  MemorySpaceId,
+  type MemoryImportProviderInput,
+  type MemoryReportDelivery,
+} from "@goat/contracts";
+import {
+  registerMemoryImportDestination,
+  memoryImportRecoveryStorage,
+} from "../../lib/memoryImportRecoveryStorage";
+const spaceId = MemorySpaceId.make(id(1));
+it("toggles environment agent access off and on through updateSettings independently of sharing", async () => {
+  state.executors.set("updateSettings", async (input) => {
+    state.calls(input);
+    state.agentAccess = (
+      input as { input: { patch: { enableAgentMemoryAccess: boolean } } }
+    ).input.patch.enableAgentMemoryAccess;
+    notifyFixture();
+    return success({});
+  });
+  const view = await renderControl(<MemoryAgentAccessSettings environmentId={envId} />);
+  const toggle = () => container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+  await act(async () => toggle().click());
+  expect(state.agentAccess).toBe(false);
+  await act(async () => toggle().click());
+  expect(state.agentAccess).toBe(true);
+  expect(state.calls.mock.calls.map((call) => call[0])).toEqual(
+    [false, true].map((enableAgentMemoryAccess) => ({
+      environmentId: envId,
+      input: { patch: { enableAgentMemoryAccess } },
+    })),
+  );
+  state.allowed = false;
+  await view.render();
+  await act(async () => toggle().click());
+  expect(state.calls).toHaveBeenCalledTimes(2);
+});
+it("bounds retry selection, preserves Unknown attempts, and displays reset/unchanged counts", async () => {
+  const reports = Array.from({ length: 34 }, (_, index) => ({
+    reportId: String(index).padStart(64, "0"),
+    state: "failed",
+    automaticAttempts: index === 33 ? undefined : 10,
+    resolvingEnvironmentId: envId,
+  })) as MemoryReportDelivery[];
+  state.responses.set("resetReportAttempts", success({ resetCount: 30, unchangedCount: 2 }));
+  const settled = vi.fn();
+  const view = await renderControl(
+    <MemoryReportRetrySettings
+      environmentId={envId}
+      memorySpaceId={spaceId}
+      reports={reports}
+      onSettled={settled}
+    />,
+  );
+  expect(container.textContent).toContain("Automatic attempts: Unknown");
+  for (const box of [
+    ...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+  ].slice(0, 33))
+    await act(async () => box.click());
+  expect(container.querySelectorAll("input:checked")).toHaveLength(32);
+  await click("Retry selected reports");
+  expect(state.calls.mock.calls[0]![0]).toMatchObject({
+    environmentId: envId,
+    input: {
+      environmentId: envId,
+      memorySpaceId: spaceId,
+      reportIds: reports.slice(0, 32).map((r) => r.reportId),
+    },
+  });
+  expect(container.textContent).toContain("30 reports ready to retry; 2 unchanged");
+  expect(settled).toHaveBeenCalledOnce();
+  state.allowed = false;
+  await view.render();
+  expect(container.querySelectorAll("input:checked")).toHaveLength(0);
+});
+it("shows reset denial and does not offer unknown or foreign-owner reports", async () => {
+  const reports = [
+    {
+      reportId: "a".repeat(64),
+      state: "failed",
+      automaticAttempts: 10,
+      resolvingEnvironmentId: envId,
+    },
+    {
+      reportId: "b".repeat(64),
+      state: "failed",
+      automaticAttempts: 10,
+      resolvingEnvironmentId: "foreign",
+    },
+  ] as MemoryReportDelivery[];
+  await renderControl(
+    <MemoryReportRetrySettings
+      environmentId={envId}
+      memorySpaceId={spaceId}
+      reports={reports}
+      onSettled={() => undefined}
+    />,
+  );
+  expect(container.querySelectorAll<HTMLInputElement>("input")[1]!.disabled).toBe(true);
+  await act(async () => container.querySelector<HTMLInputElement>("input")!.click());
+  await click("Retry selected reports");
+  expect(container.textContent).toContain("Report retry denied or unavailable");
+});
+it("uses binding CAS, reloads after conflict, and reverses dedicated identity to repository", async () => {
+  state.projects = [{ id: "project-a", environmentId: envId, title: "Project A" }];
+  const binding = {
+    memorySpaceId: spaceId,
+    project: { environmentId: envId, projectId: "project-a" },
+    version: 4,
+    projectKey: { kind: "repository", groupingKey: "private-repository-key" },
+    repositoryKey: { kind: "repository", groupingKey: "private-repository-key" },
+  };
+  state.responses.set("projectBindingGet", success(binding));
+  const selection = vi.fn();
+  await renderControl(
+    <MemoryScopeSettings environmentId={envId} memorySpaceId={spaceId} onChange={selection} />,
+  );
+  await chooseControl("project");
+  await chooseControl("project-a", 1);
+  expect(selection).toHaveBeenLastCalledWith({
+    scope: { kind: "project", projectKey: binding.projectKey },
+    project: binding.project,
+  });
+  await click("Create dedicated shared project");
+  await click("Confirm binding change");
+  expect(container.textContent).toContain("Reload before trying again");
+  expect(state.calls.mock.calls.at(-1)![0]).toMatchObject({
+    input: { expectedVersion: 4, action: "setExplicit" },
+  });
+  const dedicated = {
+    ...binding,
+    version: 5,
+    projectKey: { kind: "explicit", sharedProjectId: "private-shared-key" },
+  };
+  state.responses.set("projectBindingGet", success(dedicated));
+  await click("Reload binding");
+  state.responses.set("projectBindingUpdate", success({ binding: { ...binding, version: 6 } }));
+  await click("Use repository identity");
+  await click("Confirm binding change");
+  expect(state.calls.mock.calls.at(-1)![0]).toMatchObject({
+    input: { expectedVersion: 5, action: "useRepository" },
+  });
+  expect(container.textContent).not.toContain("private-");
+});
+it("chooses all-project and thread scopes explicitly and clears a removed destination", async () => {
+  state.threads = [{ id: "thread-a", environmentId: envId, title: "Thread A" }];
+  const selection = vi.fn();
+  const view = await renderControl(
+    <MemoryScopeSettings environmentId={envId} memorySpaceId={spaceId} onChange={selection} />,
+  );
+  expect(selection).toHaveBeenLastCalledWith(null);
+  await chooseControl("user");
+  expect(selection).toHaveBeenLastCalledWith({ scope: { kind: "user" } });
+  await chooseControl("thread");
+  await chooseControl("thread-a", 1);
+  expect(selection).toHaveBeenLastCalledWith({
+    scope: { kind: "thread", thread: { environmentId: envId, threadId: "thread-a" } },
+  });
+  state.threads = [];
+  await view.render();
+  expect(selection).toHaveBeenLastCalledWith(null);
+});
+it("checks saved imports on a fresh mount without discovering, previewing, or applying", async () => {
+  const operationId = (await import("@goat/contracts")).MemoryOperationId.make(id(77));
+  await memoryImportRecoveryStorage().save(
+    { environmentId: envId, memorySpaceId: spaceId },
+    operationId,
+  );
+  state.executors.set("importProvider", async (request) => {
+    state.calls(request);
+    throw new Error("offline");
+  });
+  await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  expect(
+    state.calls.mock.calls.map(
+      (call) => (call[0] as { input: MemoryImportProviderInput }).input.action,
+    ),
+  ).toEqual(["status"]);
+  expect(container.textContent).toContain("Reconnect and check the import result");
+  await click("Check import result");
+  expect(
+    state.calls.mock.calls.map(
+      (call) => (call[0] as { input: MemoryImportProviderInput }).input.action,
+    ),
+  ).toEqual(["status", "status"]);
+});
+it("requires discover, preview, scope and selection confirmation before an explicit apply", async () => {
+  const sourceId = id(61);
+  state.executors.set("importProvider", async (request) => {
+    state.calls(request);
+    const input = (request as { input: MemoryImportProviderInput }).input;
+    if (input.action === "discover")
+      return {
+        action: "discover",
+        sources: [
+          {
+            sourceId,
+            format: "codex",
+            parserVersion: "one",
+            profile: "private-profile",
+            label: "private-path",
+          },
+        ],
+      };
+    if (input.action === "preview")
+      return {
+        action: "preview",
+        sourceId,
+        sessionId: "private-session",
+        items: [
+          {
+            sourceItemKey: "private-selector",
+            sourceFingerprint: "a".repeat(64),
+            byteCount: 1,
+            mappingRequired: false,
+            title: "Synthetic memory",
+          },
+        ],
+      };
+    throw new Error("response lost");
+  });
+  await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  await chooseControl("codex");
+  await chooseControl("user", 1);
+  await click("Discover profiles");
+  await click("Preview profile 1");
+  await act(async () =>
+    container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(),
+  );
+  await click("Confirm selection");
+  expect(
+    state.calls.mock.calls.map(
+      (call) => (call[0] as { input: MemoryImportProviderInput }).input.action,
+    ),
+  ).toEqual(["discover", "preview"]);
+  await click("Apply import");
+  expect(state.calls.mock.calls.at(-1)![0]).toMatchObject({
+    environmentId: envId,
+    input: { action: "apply", items: [{ scope: { kind: "user" } }] },
+  });
+  expect(container.textContent).toContain("The result is unknown");
+  expect(container.textContent).not.toContain("private-");
+});
+it("shows the original empty list without inventing unknown coverage", async () => {
+  state.queries.set("list", Option.some({ items: [], projectionWatermark: 0, nextCursor: null }));
+  await supportedScreen(false);
+  const records = container.querySelector("#memory-records")!;
+  expect(records.textContent).toContain("No memories yet");
+  expect(records.textContent).toContain("Memories saved on this device will appear here.");
+  expect(records.textContent).not.toContain("Results are incomplete");
+  expect(records.textContent).not.toContain("Memory coverage unknown");
+});
+it.each([undefined, "unknown", "partial", "available", "unavailable"] as const)(
+  "shows one empty search message for %s coverage",
+  async (status) => {
+    state.queries.set(
+      "search",
+      Option.some({
+        items: [],
+        projectionWatermark: 0,
+        nextCursor: null,
+        ...(status
+          ? {
+              indexCoverage: {
+                status,
+                eligibleItems: 0,
+                indexedItems: 0,
+                unindexedItems: 0,
+                projectionWatermark: 0,
+              },
+            }
+          : {}),
+      }),
+    );
+    await supportedScreen(false);
+    await searchRecords();
+    const records = container.querySelector("#memory-records")!;
+    const incomplete = status !== undefined && status !== "available";
+    expect(records.textContent?.match(/Results are incomplete/g) ?? []).toHaveLength(
+      incomplete ? 1 : 0,
+    );
+    expect(records.textContent?.match(/No memories found/g) ?? []).toHaveLength(incomplete ? 0 : 1);
+    expect(records.textContent).not.toContain("No memories yet");
+    expect(records.textContent).not.toContain("Memory coverage unknown");
+    expect(records.textContent).not.toContain("Some memories are still being indexed");
+    expect(records.textContent).not.toContain("Memory search ready");
+    if (status === "unavailable")
+      expect(records.textContent).toContain("Memory search unavailable");
+  },
+);
+it.each(["available", "partial"] as const)(
+  "only shows a coverage row for incomplete populated search (%s)",
+  async (status) => {
+    state.queries.set(
+      "search",
+      Option.some({
+        items: [activeItem],
+        projectionWatermark: 0,
+        nextCursor: null,
+        indexCoverage: {
+          status,
+          eligibleItems: 2,
+          indexedItems: status === "available" ? 2 : 1,
+          unindexedItems: status === "available" ? 0 : 1,
+          projectionWatermark: 0,
+        },
+      }),
+    );
+    await supportedScreen(false);
+    await searchRecords();
+    const records = container.querySelector("#memory-records")!;
+    expect(records.textContent).toContain("Synthetic original");
+    expect(records.textContent).not.toContain("Memory search ready");
+    expect(records.textContent?.match(/Some memories are still being indexed/g) ?? []).toHaveLength(
+      status === "partial" ? 1 : 0,
+    );
+    expect(records.textContent).not.toContain("Results are incomplete");
+  },
+);
+async function searchRecords() {
+  const input = container.querySelector<HTMLInputElement>('[aria-label="Search memories"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+      input,
+      "synthetic",
+    );
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await click("Search");
+}
+it("preserves the recovery handle while disconnected and checks it on reconnect", async () => {
+  const operationId = (await import("@goat/contracts")).MemoryOperationId.make(id(78));
+  const store = memoryImportRecoveryStorage();
+  await store.save({ environmentId: envId, memorySpaceId: spaceId }, operationId);
+  state.executors.set("importProvider", async (request) => {
+    state.calls(request);
+    throw new Error("offline");
+  });
+  await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  state.connection = null;
+  await act(async () => root.render(null));
+  expect((await store.load({ environmentId: envId, memorySpaceId: spaceId }))?.operationId).toBe(
+    operationId,
+  );
+  state.connection = {};
+  await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  expect(
+    state.calls.mock.calls.map(
+      (call) => (call[0] as { input: MemoryImportProviderInput }).input.action,
+    ),
+  ).toEqual(["status", "status"]);
+});
+it("waits for initial grants without deleting saved recovery and then issues status only", async () => {
+  const operationId = (await import("@goat/contracts")).MemoryOperationId.make(id(79));
+  const store = memoryImportRecoveryStorage();
+  await store.save({ environmentId: envId, memorySpaceId: spaceId }, operationId);
+  state.allowed = false;
+  const view = await renderControl(
+    <MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />,
+  );
+  expect((await store.load({ environmentId: envId, memorySpaceId: spaceId }))?.operationId).toBe(
+    operationId,
+  );
+  expect(state.calls).not.toHaveBeenCalled();
+  state.executors.set("importProvider", async (request) => {
+    state.calls(request);
+    throw new Error("offline");
+  });
+  state.allowed = true;
+  await view.render();
+  expect(
+    state.calls.mock.calls.map(
+      (call) => (call[0] as { input: MemoryImportProviderInput }).input.action,
+    ),
+  ).toEqual(["status"]);
+});
+it("drops an old reset response after revoke/regrant and accepts a fresh selection", async () => {
+  const first = await deferredResult();
+  state.executors.set("resetReportAttempts", async (request) => {
+    state.calls(request);
+    return first.promise;
+  });
+  const reports = [
+    {
+      reportId: "a".repeat(64),
+      state: "failed",
+      automaticAttempts: 10,
+      resolvingEnvironmentId: envId,
+    },
+  ] as MemoryReportDelivery[];
+  const view = await renderControl(
+    <MemoryReportRetrySettings
+      environmentId={envId}
+      memorySpaceId={spaceId}
+      reports={reports}
+      onSettled={() => undefined}
+    />,
+  );
+  await act(async () => container.querySelector<HTMLInputElement>("input")!.click());
+  await click("Retry selected reports");
+  state.allowed = false;
+  await view.render();
+  state.allowed = true;
+  await view.render();
+  await act(async () => first.resolve(success({ resetCount: 1, unchangedCount: 0 })));
+  expect(container.textContent).not.toContain("1 reports ready to retry");
+  expect(container.querySelector<HTMLInputElement>("input")!.disabled).toBe(false);
+  expect(container.querySelector<HTMLInputElement>("input")!.checked).toBe(false);
+});
+it("awaits importer removal before submitting a binding CAS change", async () => {
+  state.projects = [{ id: "project-a", environmentId: envId, title: "Project A" }];
+  const binding = {
+    memorySpaceId: spaceId,
+    project: { environmentId: envId, projectId: "project-a" },
+    version: 4,
+    projectKey: { kind: "repository", groupingKey: "repository" },
+    repositoryKey: { kind: "repository", groupingKey: "repository" },
+  };
+  state.responses.set("projectBindingGet", success(binding));
+  state.responses.set(
+    "projectBindingUpdate",
+    success({
+      binding: {
+        ...binding,
+        version: 5,
+        projectKey: { kind: "explicit", sharedProjectId: "shared" },
+      },
+    }),
+  );
+  const removed = await deferredResult();
+  let started = false;
+  const unregister = registerMemoryImportDestination(
+    { environmentId: envId, memorySpaceId: spaceId },
+    async () => {
+      started = true;
+      await removed.promise;
+    },
+  );
+  try {
+    await renderControl(
+      <MemoryScopeSettings
+        environmentId={envId}
+        memorySpaceId={spaceId}
+        onChange={() => undefined}
+      />,
+    );
+    await chooseControl("project");
+    await chooseControl("project-a", 1);
+    await click("Create dedicated shared project");
+    await click("Confirm binding change");
+    expect(started).toBe(true);
+    expect(
+      state.calls.mock.calls.filter(([request]) => request.input.action === "setExplicit"),
+    ).toEqual([]);
+    await act(async () => removed.resolve(undefined));
+    expect(state.calls.mock.calls.at(-1)![0]).toMatchObject({
+      input: { action: "setExplicit", expectedVersion: 4 },
+    });
+  } finally {
+    unregister();
+  }
+});
+
+it("gates diagnostics by capability and rearms with its version, then reloads both views", async () => {
+  const refresh = vi.fn();
+  state.responses.set(
+    "hubDiagnostics",
+    success({
+      version: 7,
+      publication: { state: "last_valid" },
+      readiness: "ready",
+      connection: "unreachable",
+      recoverableHolds: ["availability"],
+      permanentHolds: [],
+      reconcile: "available",
+    }),
+  );
+  state.responses.set("hubReconcile", success({}));
+  const view = await renderControl(
+    <MemoryHubDiagnosticsSettings
+      environmentId={envId}
+      sync={memorySyncFixture}
+      onRefresh={refresh}
+    />,
+  );
+  expect(container.textContent).not.toContain("Reconcile");
+  state.environment = {
+    serverConfig: {
+      environment: { capabilities: { memory: { protocolVersion: 1, hubDiagnostics: true } } },
+    },
+  };
+  await view.render();
+  expect(container.textContent).toContain("Last valid settings in use");
+  expect(container.textContent).toContain("Hub disconnected");
+  await click("Reconcile");
+  expect(state.calls).toHaveBeenCalledWith({
+    environmentId: envId,
+    input: {
+      environmentId: envId,
+      memorySpaceId: memorySyncFixture.memorySpaceId,
+      expectedVersion: 7,
+    },
+  });
+  expect(refresh).toHaveBeenCalledOnce();
+  expect(container.textContent).toContain("Synchronization may still be in progress");
+  state.allowed = false;
+  await view.render();
+  expect(
+    Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Reconcile")!
+      .disabled,
+  ).toBe(true);
+  expect(container.textContent).not.toContain("Last valid settings in use");
+});
+it("distinguishes a saved memory ceiling from current permission and drops unknown evidence", async () => {
+  let current: import("@goat/contracts").MemoryCurrentAccess | undefined = {
+    access: "none",
+    reason: "environment_off",
+  };
+  const view = await renderControl(() => (
+    <MemoryRunAccessLabel memoryGrantCeiling="read_write" currentMemoryAccess={current} />
+  ));
+  expect(container.textContent).toContain("Saved limit: Read and write");
+  expect(container.textContent).toContain("Allowed now: None");
+  current = undefined;
+  await view.render();
+  expect(container.textContent).not.toContain("Allowed now");
+});
+
+it("renders save failure, retries only on click and shows totals across chunks", async () => {
+  const sourceId = id(61);
+  const inputs: MemoryImportProviderInput[] = [];
+  state.executors.set("importProvider", async (request) => {
+    const input = (request as { input: MemoryImportProviderInput }).input;
+    inputs.push(input);
+    if (input.action === "discover")
+      return {
+        action: "discover",
+        sources: [
+          { sourceId, format: "codex", parserVersion: "one", profile: "fixture", label: "fixture" },
+        ],
+      };
+    if (input.action === "preview")
+      return {
+        action: "preview",
+        sourceId,
+        sessionId: "fixture",
+        items: Array.from({ length: 33 }, (_, i) => ({
+          sourceItemKey: `item-${i}`,
+          sourceFingerprint: "a".repeat(64),
+          byteCount: 1,
+          mappingRequired: false,
+        })),
+      };
+    if (input.action === "apply")
+      return {
+        action: "apply",
+        syncStatus: memorySyncFixture,
+        receipt: {
+          operationId: input.operationId,
+          sourceId,
+          sessionId: "fixture",
+          sessionNewItems: 0,
+          sessionBodyBytes: 0,
+          state: "completed",
+          remaining: 0,
+          items: input.items.map((item) => ({
+            sourceItemKey: item.sourceItemKey,
+            outcome: "rejected",
+            issue: "source_changed",
+          })),
+        },
+      };
+    throw new Error("Unexpected request");
+  });
+  await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  await chooseControl("codex");
+  await chooseControl("user", 1);
+  await click("Discover profiles");
+  await click("Preview profile 1");
+  await act(async () => {
+    for (const checkbox of container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+      checkbox.click();
+  });
+  await click("Confirm selection");
+  const save = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+    throw new Error("quota");
+  });
+  await click("Apply import");
+  expect(container.textContent).toContain("Retry saving import");
+  expect(inputs.filter((i) => i.action === "apply")).toHaveLength(0);
+  save.mockRestore();
+  await click("Retry saving import");
+  expect(inputs.filter((i) => i.action === "apply")).toHaveLength(2);
+  expect(container.textContent).toContain("33 rejected");
+  expect(container.textContent).toContain("2 chunks completed");
+});
+
+it("shows refused history without consuming the one-time revert slot", async () => {
+  await renderRevert({
+    ...retained,
+    revertResults: [
+      decodeRevert({
+        operationId: id(9),
+        memoryId: id(2),
+        resolutionId: id(6),
+        revertDeadlineUtc: resolution.revertDeadlineUtc,
+        status: "refused",
+        failureCode: "source_invalidated",
+      }),
+    ],
+  });
+  expect(container.textContent).toContain("Last revert attempt was refused: source invalidated");
+  expect(container.querySelector('[aria-label="Revert confirmation"]')).not.toBeNull();
+  expect(state.calls).not.toHaveBeenCalled();
+});
+
+it("allows a fresh explicit attempt after a refused response", async () => {
+  await renderRevert();
+  await chooseOriginal();
+  state.result = success(
+    decodeRevert({
+      operationId: id(9),
+      memoryId: id(2),
+      resolutionId: id(6),
+      revertDeadlineUtc: resolution.revertDeadlineUtc,
+      status: "refused",
+      failureCode: "source_invalidated",
+    }),
+  );
+  await click("Revert resolution");
+  const first = state.calls.mock.calls[0]![0] as { input: { operationId: string } };
+  expect(container.textContent).toContain("Revert attempt refused");
+  await chooseOriginal();
+  state.result = success(
+    decodeRevert({
+      operationId: id(10),
+      memoryId: id(2),
+      resolutionId: id(6),
+      revertDeadlineUtc: resolution.revertDeadlineUtc,
+      status: "pending",
+    }),
+  );
+  await click("Revert resolution");
+  const second = state.calls.mock.calls[1]![0] as { input: { operationId: string } };
+  expect(second.input.operationId).not.toBe(first.input.operationId);
+  expect(container.textContent).toContain("Waiting for revert approval");
+});
+
+it("keeps 2000 unrelated shells unsubscribed in user/project scope and only reports thread identity changes", async () => {
+  state.threads = Array.from({ length: 2000 }, (_, i) => ({
+    id: `thread-${i}`,
+    environmentId: envId,
+    title: `Thread ${i}`,
+  }));
+  const selection = vi.fn();
+  const view = await renderControl(
+    <MemoryScopeSettings environmentId={envId} memorySpaceId={spaceId} onChange={selection} />,
+  );
+  await chooseControl("user");
+  selection.mockClear();
+  state.threadReads.mockClear();
+  state.threads = state.threads.map((thread) => ({ ...thread, title: `${thread.title} updated` }));
+  await view.render();
+  expect(state.threadReads.mock.calls.every(([enabled]) => enabled === false)).toBe(true);
+  expect(selection).not.toHaveBeenCalled();
+  await chooseControl("project");
+  selection.mockClear();
+  state.threadReads.mockClear();
+  await view.render();
+  expect(state.threadReads.mock.calls.every(([enabled]) => enabled === false)).toBe(true);
+  expect(selection).not.toHaveBeenCalled();
+  await chooseControl("thread");
+  await chooseControl("thread-1999", 1);
+  selection.mockClear();
+  state.threads = state.threads.map((thread) => ({ ...thread, title: `${thread.title} again` }));
+  await view.render();
+  expect(selection).not.toHaveBeenCalled();
+});
+it("explains unavailable safe import admission while keeping Check import result enabled", async () => {
+  Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+  await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  expect(container.textContent).toContain("This browser can't safely run imports");
+  const check = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Check import result",
+  )!;
+  expect(check.disabled).toBe(false);
+});
+it("storage generation notification stops selection without deleting recovery", async () => {
+  const { memoryImportGenerationKey } = await import("../../lib/memoryImportRecoveryStorage");
+  const destination = { environmentId: envId, memorySpaceId: spaceId };
+  const operationId = (await import("@goat/contracts")).MemoryOperationId.make(id(80));
+  const store = memoryImportRecoveryStorage();
+  await store.save(destination, operationId);
+  state.executors.set("importProvider", async (request) => {
+    state.calls(request);
+    throw new Error("offline");
+  });
+  await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  await chooseControl("user", 1);
+  expect(container.querySelectorAll("select")[1]!.value).toBe("user");
+  await act(async () =>
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: memoryImportGenerationKey({ environmentId: envId, memorySpaceId: spaceId }),
+        storageArea: localStorage,
+        newValue: "changed-by-other-tab",
+      }),
+    ),
+  );
+  expect(container.textContent).toContain("Destination changed. Choose a scope and preview again.");
+  expect((await store.load(destination))?.operationId).toBe(operationId);
 });
