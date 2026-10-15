@@ -25,7 +25,21 @@ import { MEMORY_SCANNER_POLICY_VERSION, scanMemoryValue } from "./MemorySecretSc
 
 export class MemoryWorkerError extends Schema.TaggedError<MemoryWorkerError>()(
   "MemoryWorkerError",
-  { code: M.MemoryFailureCode, cause: Schema.optionalKey(Schema.Defect()) },
+  {
+    code: M.MemoryFailureCode,
+    stage: Schema.optionalKey(
+      Schema.Literals([
+        "catch-up",
+        "deferred",
+        "due-work",
+        "claim-work",
+        "read-work",
+        "execute",
+        "maintenance",
+      ]),
+    ),
+    cause: Schema.optionalKey(Schema.Defect()),
+  },
 ) {
   override get message() {
     return "Memory work failed.";
@@ -74,7 +88,16 @@ const safeCode = (error: unknown): M.MemoryFailureCode => {
   }
   return "storage_failed";
 };
-const workerError = (cause: unknown) => new MemoryWorkerError({ code: safeCode(cause), cause });
+const isWorkerError = Schema.is(MemoryWorkerError);
+const workerError = (cause: unknown) =>
+  isWorkerError(cause) ? cause : new MemoryWorkerError({ code: safeCode(cause), cause });
+const sweepStage = <A, E>(
+  stage: NonNullable<MemoryWorkerError["stage"]>,
+  effect: Effect.Effect<A, E>,
+) =>
+  effect.pipe(
+    Effect.mapError((cause) => new MemoryWorkerError({ code: safeCode(cause), stage, cause })),
+  );
 const make = Effect.gen(function* () {
   const store = yield* Store.MemoryStore;
   const service = yield* Service.MemoryService;
@@ -242,7 +265,10 @@ const make = Effect.gen(function* () {
       ORDER BY e.sequence LIMIT 100`);
     if (!rows.length && !continuations.length) return;
     const snapshot = yield* query(settings.getSettings);
-    const modelSelection = yield* query(decodeSelection(snapshot.defaultModelSelection, strict));
+    const modelSelection =
+      snapshot.defaultModelSelection === null
+        ? null
+        : yield* query(decodeSelection(snapshot.defaultModelSelection, strict));
     const space = snapshot.memoryHub.mode === "disabled" ? null : snapshot.memoryHub.memorySpaceId;
     const work: Store.MemoryWork[] = [];
     yield* store
@@ -274,6 +300,9 @@ const make = Effect.gen(function* () {
               continue;
             }
             if (!terminal.has(run.status)) continue;
+            // A fresh install has no default model. Still process deletion/rollback and
+            // advance the hook; continuations recover these summaries once a model is set.
+            if (modelSelection === null) continue;
             const source = yield* query(
               sql<{
                 event_id: string;
@@ -708,17 +737,22 @@ const make = Effect.gen(function* () {
   });
   const sweepDue = Effect.fn("MemoryWorker.sweepDue")(
     function* () {
-      yield* catchUp();
-      yield* deferred();
+      yield* sweepStage("catch-up", catchUp());
+      yield* sweepStage("deferred", deferred());
       const now = yield* Clock.currentTimeMillis;
-      for (const candidate of yield* store.dueWork(now, 100)) {
+      for (const candidate of yield* sweepStage("due-work", store.dueWork(now, 100))) {
         if (!["summary", "consolidate", "rebuild"].includes(candidate.kind)) continue;
-        if (!(yield* store.claimWork(candidate.id, runtime.instanceId, now, now + workClaimMs)))
+        if (
+          !(yield* sweepStage(
+            "claim-work",
+            store.claimWork(candidate.id, runtime.instanceId, now, now + workClaimMs),
+          ))
+        )
           continue;
-        const work = yield* store.readWork(candidate.id);
-        if (work) yield* execute(work);
+        const work = yield* sweepStage("read-work", store.readWork(candidate.id));
+        if (work) yield* sweepStage("execute", execute(work));
       }
-      yield* maintenance.cycle(environmentId);
+      yield* sweepStage("maintenance", maintenance.cycle(environmentId));
     },
     Effect.mapError(workerError),
     sweepLock.withPermits(1),
@@ -730,7 +764,9 @@ const make = Effect.gen(function* () {
     const worker = yield* makeDrainableWorker<void, never, never>(() =>
       Ref.set(queued, false).pipe(
         Effect.andThen(sweepDue()),
-        Effect.catch((error) => Effect.logWarning("Memory sweep deferred", { code: error.code })),
+        Effect.catch((error) =>
+          Effect.logWarning("Memory sweep deferred", { code: error.code, stage: error.stage }),
+        ),
       ),
     );
     const wake = Ref.getAndSet(queued, true).pipe(
