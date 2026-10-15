@@ -19,6 +19,9 @@ export default Effect.gen(function* () {
       AND json_extract(c.compact_json,'$.operationKind') IN ('resolve','revert')
       AND json_extract(c.compact_json,'$.receipt.hubSequence') IS NOT NULL
       AND json_extract(c.compact_json,'$.receipt.outcome') IN ('accepted','conflicted')
+      AND json_extract(c.compact_json,'$.originEnvironmentId')=r.resolving_environment_id
+      AND json_extract(c.compact_json,'$.receipt.operationId')=r.operation_id
+      AND json_extract(c.compact_json,'$.resolutionId')=r.resolution_id
       AND json_extract(c.compact_json,'$.reportGuard.reportId')=r.report_id
       AND json_extract(c.compact_json,'$.reportGuard.resolvingEnvironmentId')=r.resolving_environment_id
       AND json_extract(c.compact_json,'$.reportGuard.outcome')=r.outcome
@@ -82,7 +85,7 @@ export default Effect.gen(function* () {
       AND (coalesce((SELECT value FROM memory_quota_counters WHERE space=NEW.space AND dimension='report_items' AND scope_key=''),0)+1>${M.MEMORY_REPORT_MAX_PENDING_ITEMS}
         OR coalesce((SELECT value FROM memory_quota_counters WHERE space=NEW.space AND dimension='report_bytes' AND scope_key=''),0)+(${reportMetadataBytes("NEW.")})>${M.MEMORY_REPORT_MAX_PENDING_BYTES})
     BEGIN ${counter("NEW.space", "processing_admission_failures", "1")} SELECT RAISE(IGNORE); END`);
-  yield* sql`CREATE INDEX memory_report_delivery_due ON memory_report_outbox(resolving_environment_id,next_attempt_at,claimed_until,created_at,report_id) WHERE state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure') AND automatic_attempts<10`;
+  yield* sql`CREATE INDEX memory_report_delivery_due ON memory_report_outbox(resolving_environment_id,next_attempt_at,claimed_until,created_at,report_id) WHERE state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure')`;
   yield* sql`CREATE INDEX memory_report_local_retention ON memory_report_outbox(resolving_environment_id,delivered_at,report_id) WHERE state='delivered'`;
   yield* sql`CREATE INDEX memory_report_retention ON memory_report_outbox(space,delivered_at,report_id) WHERE state='delivered'`;
 });

@@ -103,9 +103,31 @@ it.effect("077 classifies only matching durable guards and leaves legacy attempt
     yield* sql`INSERT INTO memory_compact_receipts(space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json) VALUES (${space},${operationId},${record.receipt.operationDigest},1,${receipt},${compact})`;
     for (const rid of [proven, ambiguous])
       yield* sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,resolving_environment_id,outcome,state,created_at) VALUES (${rid},${space},${memory},${operationId},${resolutionId},'A','resolved','pending',0)`;
+    const contradictions = [
+      ["c", "$.originEnvironmentId", "B"],
+      ["d", "$.receipt.operationId", "00000000-0000-4000-8000-000000000099"],
+      ["e", "$.resolutionId", "00000000-0000-4000-8000-000000000098"],
+    ] as const;
+    for (const [n, [key, path, value]] of contradictions.entries()) {
+      const op = M.MemoryOperationId.make(
+        `00000000-0000-4000-8000-${String(20 + n).padStart(12, "0")}`,
+      );
+      const rid = key.repeat(64);
+      const canonical = {
+        ...record,
+        receipt: { ...record.receipt, operationId: op },
+        reportGuard: { ...record.reportGuard!, reportId: rid },
+      };
+      yield* sql`INSERT INTO memory_compact_receipts(space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json) VALUES (${space},${op},${record.receipt.operationDigest},1,${yield* encodeReceipt(canonical.receipt)},json_set(${yield* encodeCompact(canonical)},${path},${value}))`;
+      yield* sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,resolving_environment_id,outcome,state,created_at) VALUES (${rid},${space},${memory},${op},${resolutionId},'A','resolved','pending',0)`;
+    }
     yield* runMigrations();
     assert.deepStrictEqual(
-      yield* sql`SELECT report_id,report_kind,report_approved,automatic_attempts,attempts_known FROM memory_report_outbox ORDER BY report_id`,
+      yield* sql`SELECT report_kind,report_approved FROM memory_report_outbox WHERE report_id IN (${"c".repeat(64)},${"d".repeat(64)},${"e".repeat(64)})`,
+      Array.from({ length: 3 }, () => ({ report_kind: "unknown", report_approved: 0 })),
+    );
+    assert.deepStrictEqual(
+      yield* sql`SELECT report_id,report_kind,report_approved,automatic_attempts,attempts_known FROM memory_report_outbox WHERE report_id IN (${proven},${ambiguous}) ORDER BY report_id`,
       [
         {
           report_id: proven,

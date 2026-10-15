@@ -5217,7 +5217,7 @@ const make = Effect.gen(function* () {
       sql<{
         wake: number | null;
       }>`SELECT min(max(${now},next_attempt_at,coalesce(claimed_until,0))) AS wake FROM memory_report_outbox r
-      WHERE resolving_environment_id=${owner} AND state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure') AND ((report_kind='resolve' AND outcome='resolved') OR (report_kind='revert' AND outcome='reverted') OR (report_kind='conflict_failure' AND outcome='failed')) AND automatic_attempts<10
+      WHERE resolving_environment_id=${owner} AND state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure') AND ((report_kind='resolve' AND outcome='resolved') OR (report_kind='revert' AND outcome='reverted') OR (report_kind='conflict_failure' AND outcome='failed')) AND (automatic_attempts<10 OR (automatic_attempts=10 AND claimed_until>${now}))
       AND NOT EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=r.space AND g.key_kind='report_delivered' AND g.key=r.report_id)`,
     );
     return rows[0]?.wake ?? null;

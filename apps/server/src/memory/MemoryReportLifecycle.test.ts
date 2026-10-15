@@ -107,6 +107,7 @@ describe("MemoryReportLifecycle", () => {
       yield* insert();
       yield* sql`UPDATE memory_report_outbox SET automatic_attempts=9`;
       assert.strictEqual((yield* acquire(store, 0))[0]!.automaticAttempts, 10);
+      assert.strictEqual(yield* store.nextReportWakeAt(0, owner), 1000);
       yield* store.normalizeExpiredReports(999);
       assert.strictEqual(
         (yield* sql<{ state: string }>`SELECT state FROM memory_report_outbox`)[0]!.state,
