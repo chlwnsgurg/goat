@@ -7,6 +7,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -35,6 +36,7 @@ const make = Effect.gen(function* () {
   const adapter = yield* MemoryReportAdapter.MemoryReportAdapter;
   const environment = yield* ServerEnvironment.ServerEnvironmentIdentity;
   const owner = yield* environment.getEnvironmentId;
+  const sweepLock = yield* Semaphore.make(1);
   const started = yield* Ref.make(false);
   const queue = yield* Ref.make<DrainableWorker<void> | undefined>(undefined);
 
@@ -75,7 +77,7 @@ const make = Effect.gen(function* () {
       if (!report) break;
       yield* deliver(report, claimUntil);
     }
-  });
+  }).pipe(sweepLock.withPermits(1));
 
   const start = Effect.fn("MemoryReportWorker.start")(function* () {
     if (yield* Ref.getAndSet(started, true)) return;
