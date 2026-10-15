@@ -59,6 +59,7 @@ export function MemoryAdministration({
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<"hub" | "owner" | "device" | null>(null);
   const [device, setDevice] = useState<EnvironmentId | null>(null);
   const [requester, setRequester] = useState<EnvironmentId | null>(null);
   const [endpoint, setEndpoint] = useState(connection?.httpBaseUrl ?? "");
@@ -111,6 +112,7 @@ export function MemoryAdministration({
   async function saveHub(input: MemoryHubSettingsUpdateInput) {
     if (busy || !live() || !writable(environmentId)) return;
     intent.current = input;
+    setPending("hub");
     setBusy(true);
     setError(null);
     const result = await updateHub({ environmentId, input });
@@ -121,6 +123,7 @@ export function MemoryAdministration({
       return;
     }
     intent.current = null;
+    setPending(null);
     setHub(result.value.view);
     setConfirm(null);
     onSharingRefresh?.();
@@ -141,6 +144,7 @@ export function MemoryAdministration({
       allowedRequesterEnvironmentIds: memoryOwnerDesiredIds(owner, id, allowed),
     };
     ownerIntent.current = input;
+    setPending("owner");
     setBusy(true);
     setError(null);
     const result = await updateOwner({ environmentId, input });
@@ -149,6 +153,7 @@ export function MemoryAdministration({
     if (result._tag === "Success") {
       setOwner(result.value);
       ownerIntent.current = null;
+      setPending(null);
       setRequester(null);
     } else setError("Could not update access. Retry to continue the same request.");
   }
@@ -167,6 +172,7 @@ export function MemoryAdministration({
         if (!live() || readPreparedConnection(device) !== deviceConnection) return;
         if (target._tag === "Failure") throw new Error();
         const selected = device;
+        setPending("device");
         flow.current = memoryDeviceFlow({
           hubId: environmentId,
           deviceId: selected,
@@ -194,6 +200,7 @@ export function MemoryAdministration({
       setKnownMembers((ids) => [...new Set([...ids, device])]);
       flow.current.dispose();
       flow.current = null;
+      setPending(null);
       setConfirm(null);
       setDevice(null);
       onSharingRefresh?.();
@@ -214,13 +221,7 @@ export function MemoryAdministration({
     label: string,
   ) {
     return (
-      <Select
-        value={value}
-        onValueChange={onChange}
-        disabled={
-          busy || flow.current !== null || intent.current !== null || ownerIntent.current !== null
-        }
-      >
+      <Select value={value} onValueChange={onChange} disabled={busy || pending !== null}>
         <SelectTrigger aria-label={label}>
           <SelectValue placeholder="Choose a device">{value ? name(value) : undefined}</SelectValue>
         </SelectTrigger>
@@ -234,7 +235,7 @@ export function MemoryAdministration({
       </Select>
     );
   }
-  const blocked = busy || !canHub || intent.current !== null || flow.current !== null;
+  const blocked = busy || !canHub || pending !== null;
   return (
     <>
       <SettingsSection title="Sharing" id="memory-sharing">
@@ -310,7 +311,7 @@ export function MemoryAdministration({
                 <Button
                   size="sm"
                   variant="ghost"
-                  disabled={busy || intent.current !== null}
+                  disabled={busy || pending !== null}
                   onClick={() => setConfirm(null)}
                 >
                   Cancel
@@ -450,7 +451,7 @@ export function MemoryAdministration({
                   <Button
                     size="sm"
                     variant="ghost"
-                    disabled={busy || flow.current !== null}
+                    disabled={busy || pending !== null}
                     onClick={() => setConfirm(null)}
                   >
                     Cancel
@@ -482,7 +483,7 @@ export function MemoryAdministration({
                   <Button
                     size="sm"
                     variant="ghost"
-                    disabled={busy || intent.current !== null}
+                    disabled={busy || pending !== null}
                     onClick={() => setConfirm(null)}
                   >
                     Cancel
@@ -507,7 +508,7 @@ export function MemoryAdministration({
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={busy || !canOwner || ownerIntent.current !== null}
+                disabled={busy || !canOwner || pending !== null}
                 onClick={() => void saveOwner(id, false)}
               >
                 Remove
@@ -539,7 +540,7 @@ export function MemoryAdministration({
               )}
               <Button
                 size="sm"
-                disabled={busy || !canOwner || !requester || ownerIntent.current !== null}
+                disabled={busy || !canOwner || !requester || pending !== null}
                 onClick={() => requester && void saveOwner(requester, true)}
               >
                 Allow

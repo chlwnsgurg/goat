@@ -203,7 +203,10 @@ function MemoryDestinationContent({
     };
   }, [canSync, environmentId, getSync, syncReload]);
   const memorySpaceId =
-    target.memorySpaceId ?? (sync?.state === "online" ? sync.memorySpaceId : null);
+    target.memorySpaceId ??
+    (sync && sync.state !== "disabled" && sync.state !== "bootstrapping"
+      ? sync.memorySpaceId
+      : null);
 
   return (
     <>
@@ -477,6 +480,9 @@ function MemoryDetails({
   environmentId: EnvironmentId;
   memorySpaceId: MemorySpaceId;
 }) {
+  const { environments } = useEnvironments();
+  const deviceName = (id: EnvironmentId) =>
+    environments.find((e) => e.environmentId === id)?.label ?? "Unknown device";
   const memoryId = target.memoryId!;
   const [editing, setEditing] = useState(false);
   const canWrite = useAtomValue(memoryEnvironment.upsert.permissionAtom(environmentId));
@@ -496,150 +502,160 @@ function MemoryDetails({
   const navigate = useNavigate();
   return (
     <SettingsSection title="Memory details" id="memory-details">
-      <Button
-        size="sm"
-        variant="ghost"
-        onClick={() =>
-          void navigate({
-            to: "/settings/memory",
-            search: validateMemorySettingsSearch({ environmentId, memorySpaceId }),
-            hash: "",
-          })
-        }
-      >
-        Close details
-      </Button>
-      {read.error || history.error ? <p role="alert">{read.error ?? history.error}</p> : null}
-      {item ? (
-        <>
-          <p>{presentMemoryItem(item).label}</p>
-          <p>
-            {presentMemoryItem(item).syncLabel} {presentMemoryItem(item).cleanupLabel}
-          </p>
-          {item.status === "active" ? (
-            <p className="whitespace-pre-wrap break-words">{item.payload.text}</p>
-          ) : null}
-          {item.status === "active" && canWrite ? (
-            <>
-              <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
-                Edit memory
-              </Button>
-              {editing ? (
-                <MemoryEditor
-                  key={item.revision.revisionId}
-                  environmentId={environmentId}
-                  memorySpaceId={memorySpaceId}
-                  item={item}
-                  onClose={() => {
-                    setEditing(false);
-                    read.refresh();
-                    history.refresh();
-                  }}
-                />
-              ) : null}
-            </>
-          ) : null}
-        </>
-      ) : (
-        <p role="status">This memory is unavailable. Visible details have been cleared.</p>
-      )}
-      {/* A forget signal hides bodies while the same request may still need its receipt retried. */}
-      <MemoryForgetControl environmentId={environmentId} item={item} />
-      <Button
-        size="sm"
-        variant="ghost"
-        onClick={() => {
-          read.refresh();
-          history.refresh();
-        }}
-      >
-        Refresh details
-      </Button>
-      <h3>Resolution history</h3>
-      {item && value ? (
-        <>
-          {value.resolutions.map((entry) => {
-            const display = presentMemoryResolution(entry);
-            return (
-              <details
-                key={entry.resolution.resolutionId}
-                open={target.resolutionId === entry.resolution.resolutionId}
-              >
-                <summary>
-                  {display.label} · {display.providerLabel} · {display.appliedAtUtc}
-                </summary>
-                <p>Requested model: {JSON.stringify(display.requestedModelSelection)}</p>
-                <p>Effective model: {display.effectiveModel}</p>
-                <p>Resolving environment: {display.resolvingEnvironmentId}</p>
-                <p>Revert deadline: {display.revertDeadlineUtc}</p>
-                <p>
-                  {entry.payload ? JSON.stringify(entry.payload) : "Retained judgment unavailable."}
-                </p>
-                {item ? (
-                  <MemoryRevertControl
-                    environmentId={environmentId}
-                    item={item}
-                    entry={entry}
-                    history={value}
-                    onSettled={() => {
-                      read.refresh();
-                      history.refresh();
-                    }}
-                  />
-                ) : null}
-              </details>
-            );
-          })}
-          <h3>Retained originals</h3>
-          {value.revisions.map((entry) => (
-            <details key={entry.revision.revisionId}>
-              <summary>
-                {entry.revision.revisionId} · {entry.revision.createdAtUtc}
-              </summary>
-              <p className="whitespace-pre-wrap break-words">
-                {entry.payload?.text ?? "Original unavailable."}
-              </p>
-              <p>Source environment: {entry.revision.provenance.environmentId}</p>
-              {entry.payload?.evidence
-                .filter(
-                  (evidence) =>
-                    evidence.sourceThread !== undefined && evidence.messageIds.length > 0,
-                )
-                .map((evidence) => (
-                  <MemorySourceControl
-                    key={`${evidence.sourceThread!.environmentId}:${evidence.sourceThread!.threadId}:${evidence.messageIds.join(",")}`}
-                    environmentId={environmentId}
-                    memorySpaceId={memorySpaceId}
-                    memoryId={memoryId}
-                    sourceThread={evidence.sourceThread!}
-                    messageIds={evidence.messageIds}
-                  />
-                ))}
-            </details>
-          ))}
-          {value.revertResults.map((result) => (
-            <p key={result.operationId}>{presentMemoryRevertResult(result).label}</p>
-          ))}
-          {value.reports.map((report) => (
-            <MemoryReportControl key={report.reportId} report={report} />
-          ))}
-          <Button size="sm" variant="ghost" disabled={!cursor} onClick={() => setCursor(undefined)}>
-            First history page
-          </Button>
+      <SettingsRow title="Selected memory">
+        <div className="space-y-3">
           <Button
             size="sm"
-            variant="outline"
-            disabled={!value.nextCursor}
+            variant="ghost"
+            onClick={() =>
+              void navigate({
+                to: "/settings/memory",
+                search: validateMemorySettingsSearch({ environmentId, memorySpaceId }),
+                hash: "",
+              })
+            }
+          >
+            Close details
+          </Button>
+          {read.error || history.error ? <p role="alert">{read.error ?? history.error}</p> : null}
+          {item ? (
+            <>
+              <p>{presentMemoryItem(item).label}</p>
+              <p>
+                {presentMemoryItem(item).syncLabel} {presentMemoryItem(item).cleanupLabel}
+              </p>
+              {item.status === "active" ? (
+                <p className="whitespace-pre-wrap break-words">{item.payload.text}</p>
+              ) : null}
+              {item.status === "active" && canWrite ? (
+                <>
+                  <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
+                    Edit memory
+                  </Button>
+                  {editing ? (
+                    <MemoryEditor
+                      key={item.revision.revisionId}
+                      environmentId={environmentId}
+                      memorySpaceId={memorySpaceId}
+                      item={item}
+                      onClose={() => {
+                        setEditing(false);
+                        read.refresh();
+                        history.refresh();
+                      }}
+                    />
+                  ) : null}
+                </>
+              ) : null}
+            </>
+          ) : (
+            <p role="status">This memory is unavailable. Visible details have been cleared.</p>
+          )}
+          {/* A forget signal hides bodies while the same request may still need its receipt retried. */}
+          <MemoryForgetControl environmentId={environmentId} item={item} />
+          <Button
+            size="sm"
+            variant="ghost"
             onClick={() => {
-              if (value.nextCursor) setCursor(value.nextCursor);
+              read.refresh();
+              history.refresh();
             }}
           >
-            Next history page
+            Refresh details
           </Button>
-        </>
-      ) : (
-        <p>History unavailable.</p>
-      )}
+          <h3>Resolution history</h3>
+          {item && value ? (
+            <>
+              {value.resolutions.map((entry) => {
+                const display = presentMemoryResolution(entry);
+                return (
+                  <details
+                    key={entry.resolution.resolutionId}
+                    open={target.resolutionId === entry.resolution.resolutionId}
+                  >
+                    <summary>
+                      {display.label} · {display.providerLabel} · {display.appliedAtUtc}
+                    </summary>
+                    <p>Effective model: {display.effectiveModel}</p>
+                    <p>Resolved on {deviceName(display.resolvingEnvironmentId)}</p>
+                    <p>Revert deadline: {display.revertDeadlineUtc}</p>
+                    <p>
+                      {entry.payload
+                        ? JSON.stringify(entry.payload)
+                        : "Retained judgment unavailable."}
+                    </p>
+                    {item ? (
+                      <MemoryRevertControl
+                        environmentId={environmentId}
+                        item={item}
+                        entry={entry}
+                        history={value}
+                        onSettled={() => {
+                          read.refresh();
+                          history.refresh();
+                        }}
+                      />
+                    ) : null}
+                  </details>
+                );
+              })}
+              <h3>Retained originals</h3>
+              {value.revisions.map((entry, index) => (
+                <details key={entry.revision.revisionId}>
+                  <summary>
+                    Original {index + 1} · {entry.revision.createdAtUtc}
+                  </summary>
+                  <p className="whitespace-pre-wrap break-words">
+                    {entry.payload?.text ?? "Original unavailable."}
+                  </p>
+                  <p>Saved on {deviceName(entry.revision.provenance.environmentId)}</p>
+                  {entry.payload?.evidence
+                    .filter(
+                      (evidence) =>
+                        evidence.sourceThread !== undefined && evidence.messageIds.length > 0,
+                    )
+                    .map((evidence) => (
+                      <MemorySourceControl
+                        key={`${evidence.sourceThread!.environmentId}:${evidence.sourceThread!.threadId}:${evidence.messageIds.join(",")}`}
+                        environmentId={environmentId}
+                        memorySpaceId={memorySpaceId}
+                        memoryId={memoryId}
+                        sourceThread={evidence.sourceThread!}
+                        messageIds={evidence.messageIds}
+                      />
+                    ))}
+                </details>
+              ))}
+              {value.revertResults.map((result) => (
+                <p key={result.operationId}>{presentMemoryRevertResult(result).label}</p>
+              ))}
+              {value.reports.map((report) => (
+                <MemoryReportControl key={report.reportId} report={report} />
+              ))}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={!cursor}
+                onClick={() => setCursor(undefined)}
+              >
+                First history page
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!value.nextCursor}
+                onClick={() => {
+                  if (value.nextCursor) setCursor(value.nextCursor);
+                }}
+              >
+                Next history page
+              </Button>
+            </>
+          ) : (
+            <p>History unavailable.</p>
+          )}
+        </div>
+      </SettingsRow>
     </SettingsSection>
   );
 }
@@ -746,7 +762,7 @@ export function MemoryRevertControl({
       {!result && available ? (
         <div role="group" aria-label="Revert confirmation">
           <p>Choose the retained original to restore.</p>
-          {display.restorableRevisionIds.map((revisionId) => (
+          {display.restorableRevisionIds.map((revisionId, index) => (
             <label key={revisionId}>
               <input
                 type="radio"
@@ -756,7 +772,7 @@ export function MemoryRevertControl({
                 disabled={busy || intent !== null}
                 onChange={() => setSelected(revisionId)}
               />
-              {revisionId}
+              Original {index + 1}
             </label>
           ))}
           <Button

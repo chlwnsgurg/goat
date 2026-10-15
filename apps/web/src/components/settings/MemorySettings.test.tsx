@@ -738,13 +738,6 @@ it("retries a failed load inline without a reload control", async () => {
   expect(container.textContent).not.toContain("Device removal applied");
 });
 
-async function enterInput(label: string, text: string) {
-  const input = container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`)!;
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, text);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-}
 it("automatically opens the ready space and shows the off empty state after confirmation", async () => {
   state.responses.set("syncStatus", success({ state: "online", memorySpaceId: id(1) }));
   state.queries.set("list", Option.some({ items: [activeItem], nextCursor: null }));
