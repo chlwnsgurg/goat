@@ -4872,14 +4872,6 @@ it.effect.each(["bootstrap", "exchange"] as const)(
           Layer.provideMerge(NodeServices.layer),
         );
         const selfCore = Service.layer.pipe(
-          Layer.provide(
-            Layer.succeed(Settings.MemoryHubCommittedSettings, {
-              read: Effect.succeed({
-                settings: { mode: "hub" as const, memorySpaceId: space },
-                version: 1,
-              }),
-            }),
-          ),
           Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(Store.layer))),
           Layer.provideMerge(settingsLayer),
           Layer.provideMerge(identity),

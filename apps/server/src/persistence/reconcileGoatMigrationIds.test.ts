@@ -262,7 +262,7 @@ it.effect("restarts the current WP5 registry without rewriting lineage or accoun
     const before =
       yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`;
     const schema = yield* sql`SELECT name,sql FROM sqlite_master ORDER BY name`;
-    assert.deepStrictEqual(migrationManifest.slice(-2), [
+    assert.deepStrictEqual(migrationManifest.slice(-3), [
       [75, "MemoryImportLineage"],
       [76, "MemoryCheckpointAccounting"],
       [77, "MemoryReportLifecycle"],
