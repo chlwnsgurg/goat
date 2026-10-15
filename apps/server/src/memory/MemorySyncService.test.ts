@@ -32,6 +32,7 @@ import * as Events from "../orchestration-v2/EventSink.ts";
 import * as RuntimeIdentity from "../runtimeIdentity.ts";
 import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
+import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Service from "./MemoryService.ts";
 import * as Quota from "./MemoryQuotaService.ts";
@@ -5893,6 +5894,7 @@ it.effect.each(["offline", "next-page", "transport-retry", "chain", "rejected"] 
         const hStore = Context.get(h, Store.MemoryStore);
         const hService = Context.get(h, Service.MemoryService);
         const hSql = Context.get(h, SqlClient.SqlClient);
+        yield* searchMigration.pipe(Effect.provideService(SqlClient.SqlClient, hSql));
         yield* hSql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${local},${"a".repeat(64)},1,'active',0)`;
         const sent: M.MemoryOperationId[] = [];
         let failedTransport = false;
@@ -5975,7 +5977,9 @@ it.effect.each(["offline", "next-page", "transport-retry", "chain", "rejected"] 
             );
           }
           yield* sync.syncOnce;
+          assert.isUndefined(yield* hStore.receipt(space, s.operationId));
           assert.deepStrictEqual(sent, [a.operationId]);
+          assert.isTrue((yield* store.loadAggregate(space, s.memoryId)).item!.pendingSync);
           const waiting = yield* sql<{
             status: string;
             attempt: number;
