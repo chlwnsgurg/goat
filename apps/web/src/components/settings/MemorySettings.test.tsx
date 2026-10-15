@@ -751,7 +751,17 @@ it("discards the editor and its draft on write-only revoke and requires Edit aft
 });
 
 it("retries a failed load inline without a reload control", async () => {
+  let loads = 0;
+  state.executors.set("hubSettingsGet", async () =>
+    ++loads === 1 ? { _tag: "Failure" } : success(hubView(3)),
+  );
+  state.responses.set("syncStatus", success({ state: "disabled", memorySpaceId: null }));
   await supportedScreen(false);
+  expect(container.textContent).toContain("Could not load sharing settings.");
+  await click("Retry");
+  expect(loads).toBe(2);
+  expect(container.textContent).toContain("This device is the hub");
+  expect(container.textContent).not.toContain("Could not load sharing settings.");
   expect(container.textContent).not.toContain("Reload sharing settings");
   expect(container.textContent).not.toContain("Operational details");
   expect(container.textContent).not.toContain("Device removal applied");
