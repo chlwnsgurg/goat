@@ -284,7 +284,7 @@ printf 'GOAT_REPO\\n%s\\n' "$repo"
         code: "environment_mismatch",
         host: target.alias,
       });
-    const operationId = (yield* crypto.randomUUIDv4.pipe(Effect.orDie))
+    const operationId = (yield* crypto.randomUUIDv4().pipe(Effect.orDie))
       .replaceAll("-", "")
       .slice(0, 8);
     const snapshotRef = `refs/goat/snapshots/${operationId}`;

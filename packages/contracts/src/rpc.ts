@@ -365,6 +365,7 @@ import {
   ServerSettings,
   ServerSettingsError,
   ServerSettingsPatch,
+  WorktreesDirectoryStatus,
 } from "./settings.ts";
 import {
   ScheduledTaskDeleteInput,
@@ -549,6 +550,7 @@ export const WS_METHODS = {
   serverRemoveKeybinding: "server.removeKeybinding",
   serverRunStorageCleanup: "server.runStorageCleanup",
   serverGetStorageCleanupReport: "server.getStorageCleanupReport",
+  serverGetWorktreesDirectoryStatus: "server.getWorktreesDirectoryStatus",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
@@ -834,6 +836,14 @@ const WsServerGetStorageCleanupReportRpc = Rpc.make(WS_METHODS.serverGetStorageC
   stream: true,
   error: EnvironmentAuthorizationError,
 });
+const WsServerGetWorktreesDirectoryStatusRpc = Rpc.make(
+  WS_METHODS.serverGetWorktreesDirectoryStatus,
+  {
+    payload: Schema.Struct({}),
+    success: WorktreesDirectoryStatus,
+    error: EnvironmentAuthorizationError,
+  },
+);
 
 const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
   payload: Schema.Struct({}),
@@ -2097,6 +2107,7 @@ export const WsCoreRpcGroup = RpcGroup.make(
   WsServerRemoveKeybindingRpc,
   WsServerRunStorageCleanupRpc,
   WsServerGetStorageCleanupReportRpc,
+  WsServerGetWorktreesDirectoryStatusRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
   WsServerDiscoverSourceControlRpc,

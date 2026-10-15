@@ -7,6 +7,9 @@ import * as SchemaGetter from "effect/SchemaGetter";
 
 import { PortSchema, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
+// A supervisor must not restart a server refused by the state-directory owner.
+export const SERVER_EXIT_CODE_STATE_DIR_OWNED = 78;
+
 const GoatDesktopBackendBootstrap = Schema.Struct({
   mode: Schema.Literal("desktop"),
   noBrowser: Schema.Boolean,

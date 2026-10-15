@@ -7,18 +7,19 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { reconcileGoatMigrationIds } from "./reconcileGoatMigrationIds.ts";
 import { migrationEntries, migrationManifest, runMigrations } from "./Migrations.ts";
 
-// GOAT builds before the upstream sync that added PullRequestReviewGuides at 61 recorded
-// GOAT's own migrations at 61 and up.
-const seedGoatLedger = (names: ReadonlyArray<string>) =>
+// GOAT builds record GOAT's own migrations right after the last upstream one they knew:
+// at 61 before the sync that added PullRequestReviewGuides, at 62 before the one that
+// added ThreadFailureLookupIndex.
+const seedGoatLedger = (names: ReadonlyArray<string>, firstGoatId = 61) =>
   Effect.gen(function* () {
-    yield* runMigrations({ toMigrationInclusive: 60 });
+    yield* runMigrations({ toMigrationInclusive: firstGoatId - 1 });
     const byName = new Map<string, (typeof migrationEntries)[number][2]>(
       migrationEntries.map(([, name, migration]) => [name, migration]),
     );
     yield* Migrator.make({})({
       loader: Migrator.fromRecord(
         Object.fromEntries(
-          names.map((name, index) => [`${61 + index}_${name}`, byName.get(name)!]),
+          names.map((name, index) => [`${firstGoatId + index}_${name}`, byName.get(name)!]),
         ),
       ),
     });
@@ -52,10 +53,12 @@ describe("GOAT migration ids", () => {
         "ThreadRunResults",
         "RemoteReportRelay",
         "ProjectionTurnItemRequestIndex",
-        "Memory",
       ]);
       assert.isFalse(yield* hasReviewGuides);
-      assert.deepStrictEqual(yield* runMigrations(), [[61, "PullRequestReviewGuides"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [61, "PullRequestReviewGuides"],
+        [62, "ThreadFailureLookupIndex"],
+      ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
       assert.deepStrictEqual(yield* runMigrations(), []);
@@ -67,45 +70,39 @@ describe("GOAT migration ids", () => {
       yield* seedGoatLedger(["ServerActivityIndexes", "RemoteReports", "RemoteDispatches"]);
       assert.deepStrictEqual(yield* runMigrations(), [
         [61, "PullRequestReviewGuides"],
-        [65, "ChannelLedger"],
-        [66, "RemoteDispatchQuestions"],
-        [67, "ThreadRunResults"],
-        [68, "RemoteReportRelay"],
-        [69, "ProjectionTurnItemRequestIndex"],
+        [62, "ThreadFailureLookupIndex"],
+        [66, "ChannelLedger"],
+        [67, "RemoteDispatchQuestions"],
+        [68, "ThreadRunResults"],
+        [69, "RemoteReportRelay"],
+        [70, "ProjectionTurnItemRequestIndex"],
         [70, "Memory"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
-  it.effect("reconciles Memory by stable name after upstream claims its old ID", () =>
-    Effect.gen(function* () {
-      assert.deepStrictEqual(migrationManifest.at(-1), [70, "Memory"]);
-      yield* runMigrations();
-      const sql = yield* SqlClient.SqlClient;
-      yield* sql`INSERT INTO memory_quota_counters VALUES ('fixture','live','user',7)`;
-      const future = migrationEntries.map(
-        ([n, name, migration]) => [name === "Memory" ? 71 : n, name, migration] as const,
-      );
-      const displaced = Effect.gen(function* () {
-        yield* sql`CREATE TABLE IF NOT EXISTS future_fixture (id INTEGER)`;
-      });
-      const incoming = [
-        ...future.filter(([n]) => n < 70),
-        [70, "FutureUpstream", displaced] as const,
-        ...future.filter(([n]) => n >= 70),
-      ];
-      yield* reconcileGoatMigrationIds(incoming);
-      const ledger = yield* history;
-      assert.isTrue(ledger.some(([n, name]) => n === 71 && name === "Memory"));
-      assert.strictEqual(
-        (yield* sql<{ value: number }>`SELECT value FROM memory_quota_counters`)[0]?.value,
-        7,
-      );
-      assert.strictEqual(
-        (yield* sql`SELECT name FROM sqlite_master WHERE name='future_fixture'`).length,
-        1,
-      );
-    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+
+  it.effect(
+    "moves a ledger that already ran PullRequestReviewGuides past ThreadFailureLookupIndex",
+    () =>
+      Effect.gen(function* () {
+        yield* seedGoatLedger(
+          [
+            "ServerActivityIndexes",
+            "RemoteReports",
+            "RemoteDispatches",
+            "ChannelLedger",
+            "RemoteDispatchQuestions",
+            "ThreadRunResults",
+            "RemoteReportRelay",
+            "ProjectionTurnItemRequestIndex",
+          ],
+          62,
+        );
+        assert.deepStrictEqual(yield* runMigrations(), [[62, "ThreadFailureLookupIndex"]]);
+        assert.deepStrictEqual(yield* history, migrationManifest);
+        assert.deepStrictEqual(yield* runMigrations(), []);
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });

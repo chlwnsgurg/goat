@@ -24,9 +24,9 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
-import migration from "../persistence/Migrations/063_RemoteReports.ts";
-import dispatchMigration from "../persistence/Migrations/064_RemoteDispatches.ts";
-import relayMigration from "../persistence/Migrations/068_RemoteReportRelay.ts";
+import migration from "../persistence/Migrations/064_RemoteReports.ts";
+import dispatchMigration from "../persistence/Migrations/065_RemoteDispatches.ts";
+import relayMigration from "../persistence/Migrations/069_RemoteReportRelay.ts";
 import * as RemoteReportService from "./RemoteReportService.ts";
 
 const threadId = ThreadId.make("remote-thread");

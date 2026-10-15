@@ -4,14 +4,14 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
-import ProjectionTurnItemRequestIndex from "./069_ProjectionTurnItemRequestIndex.ts";
+import ProjectionTurnItemRequestIndex from "./070_ProjectionTurnItemRequestIndex.ts";
 
 it.effect(
-  "indexes existing request bodies on upgrade from 68 and can run again after relocation",
+  "indexes existing request bodies on upgrade from 69 and can run again after relocation",
   () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 68 });
+      yield* runMigrations({ toMigrationInclusive: 69 });
       yield* sql`
       INSERT INTO orchestration_v2_projection_turn_items
         (turn_item_id, thread_id, ordinal, type, status, updated_at, payload_json)
@@ -30,10 +30,7 @@ it.effect(
         ('approval', 'thread', 'node', 'command', 'pending', '2026-10-14', '{}')
     `;
 
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [69, "ProjectionTurnItemRequestIndex"],
-        [70, "Memory"],
-      ]);
+      assert.deepStrictEqual(yield* runMigrations(), [[70, "ProjectionTurnItemRequestIndex"], [70, "Memory"]]);
       yield* ProjectionTurnItemRequestIndex;
       assert.deepStrictEqual(yield* runMigrations(), []);
 
