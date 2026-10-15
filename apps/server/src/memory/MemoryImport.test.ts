@@ -541,6 +541,24 @@ describe("MemoryImport durable ports", () => {
           },
         };
         const before = yield* durableInventory;
+        const scope: M.MemoryScope = {
+          kind: "thread",
+          thread: { environmentId, threadId: M.ThreadId.make("synthetic-thread") },
+        };
+        const changedSelection = { ...p.selection, selector: { ...p.selection.selector, scope } };
+        const changedScope = {
+          ...p,
+          selection: changedSelection,
+          next: { ...p.next, scope },
+          batch: { ...p.batch, selections: [changedSelection] },
+        };
+        const denied = yield* service.importPorts
+          .commit(changedScope, Effect.void)
+          .pipe(Effect.flip);
+        if (denied._tag === "MemoryStoreConflict")
+          assert.strictEqual(denied.code, "identity_mismatch");
+        else assert.fail("expected scope identity conflict");
+        assert.deepStrictEqual(yield* durableInventory, before);
         const result = yield* service.importPorts.commit(p, Effect.void);
         assert.strictEqual(result.outcome, "noop");
         assert.strictEqual(result.revisionId, first.selection.revisionId);

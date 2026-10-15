@@ -9923,7 +9923,7 @@ const make = Effect.gen(function* () {
     readImportBatchTx,
     readImportReceiptTx,
     readImportItemTx,
-    commitImportItemTx,
+    commitImportItemTx: (input) => withHubBudget(commitImportItemTx(input)),
     findImportMatchTx,
     readImportLineage,
     unionImportLineageTx,

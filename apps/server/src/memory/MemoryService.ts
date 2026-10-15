@@ -642,6 +642,8 @@ const make = Effect.fnUntraced(function* (
             return;
           }
           const current = yield* store.loadAggregate(batch.memorySpaceId, next.memoryId);
+          if (current.identity && !NodeUtil.isDeepStrictEqual(current.identity.scope, next.scope))
+            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
           if (current.tombstone) return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
           if (current.pendingForget)
             return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
