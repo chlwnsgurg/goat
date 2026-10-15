@@ -1721,4 +1721,32 @@ describe("native WP6 Settings commands", () => {
       });
     },
   );
+  it.each(["replacement", "refresh"])(
+    "preserves recovery while a %s session is still loading its grants",
+    async (mode) => {
+      setupImport();
+      await show();
+      await select();
+      h.responses.set(WS_METHODS.memoryImportProvider, () =>
+        Effect.fail(new Error("synthetic lost")),
+      );
+      await view.click("Apply selected memories");
+      const handle = [...h.secureValues.values()][0]!;
+      await act(async () => {
+        if (mode === "replacement") h.registry.set(h.prepared(nativeEnv), Option.some({} as never));
+        h.registry.set(h.grants(nativeEnv), AsyncResult.initial());
+      });
+      expect([...h.secureValues.values()]).toEqual([handle]);
+      const before = importCalls().length;
+      await act(async () =>
+        h.grant(["memory:read", "memory:write", "filesystem:read", "settings:write"]),
+      );
+      expect(
+        importCalls()
+          .slice(before)
+          .map((call) => (call.input as { action: string }).action),
+      ).toEqual(["status"]);
+      expect([...h.secureValues.values()]).toEqual([handle]);
+    },
+  );
 });

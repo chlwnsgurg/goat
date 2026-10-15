@@ -189,6 +189,7 @@ vi.mock("../state/session", () => ({
     return AsyncResult.isSuccess(result) && sessionGrantsScope(result.value, scope);
   },
   environmentSession: {
+    sessionStateAtom: (id: EnvironmentId) => (bridge.current as NativeMemoryHarness).grants(id),
     preparedConnectionValueAtom: (id: EnvironmentId) =>
       (bridge.current as NativeMemoryHarness).prepared(id),
   },
@@ -432,7 +433,7 @@ export function createNativeMemoryHarness() {
   const registry = AtomRegistry.make();
   const configs = Atom.family((_id: EnvironmentId | null) => Atom.make<ServerConfig | null>(null));
   const grants = Atom.family((_id: EnvironmentId | null) =>
-    Atom.make(AsyncResult.success(scopes([]))),
+    Atom.make<AsyncResult.AsyncResult<AuthSessionState, never>>(AsyncResult.success(scopes([]))),
   );
   const prepared = Atom.family((_id: EnvironmentId | null) =>
     Atom.make(Option.some({} as PreparedConnection)),

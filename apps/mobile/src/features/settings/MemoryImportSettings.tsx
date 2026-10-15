@@ -2,6 +2,7 @@ import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { useFocusEffect } from "@react-navigation/native";
 import {
   MemoryOperationId,
+  sessionGrantsScope,
   type MemoryImportFormat,
   type MemoryImportProviderResult,
   type MemoryScope,
@@ -12,10 +13,11 @@ import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 import * as Crypto from "expo-crypto";
 import * as Option from "effect/Option";
+import { AsyncResult } from "effect/reactivity";
 import { mobileMemoryImportRecovery } from "../../persistence/memory-import-recovery";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { memoryEnvironment as memory } from "../../state/memory";
-import { environmentSession, readEnvironmentScope } from "../../state/session";
+import { environmentSession } from "../../state/session";
 import { AppText as Text } from "../../components/AppText";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsActionRow } from "./components/SettingsActionRow";
@@ -55,6 +57,11 @@ export function MemoryImportSettings({
   const connection = useAtomValue(
     environmentSession.preparedConnectionValueAtom(params.environmentId),
   );
+  const grants = useAtomValue(environmentSession.sessionStateAtom(params.environmentId));
+  const revoked =
+    AsyncResult.isSuccess(grants) &&
+    (!sessionGrantsScope(grants.value, "memory:write") ||
+      !sessionGrantsScope(grants.value, "filesystem:read"));
   const [workflow] = useState(() =>
     memory.createImportWorkflow(registry, {
       fence: { environmentId: params.environmentId, memorySpaceId, session: Crypto.randomUUID() },
@@ -88,17 +95,19 @@ export function MemoryImportSettings({
       generation.current++;
       workflow.invalidate();
       // A lost connection preserves recovery. Explicit grant revocation removes this destination.
+      const latestGrants = registry.get(environmentSession.sessionStateAtom(params.environmentId));
       if (
-        Option.isSome(
-          registry.get(environmentSession.preparedConnectionValueAtom(params.environmentId)),
-        ) &&
-        (!readEnvironmentScope(params.environmentId, "memory:write") ||
-          !readEnvironmentScope(params.environmentId, "filesystem:read"))
+        AsyncResult.isSuccess(latestGrants) &&
+        registry.get(environmentSession.preparedConnectionValueAtom(params.environmentId)) ===
+          connection &&
+        Option.isSome(connection) &&
+        (!sessionGrantsScope(latestGrants.value, "memory:write") ||
+          !sessionGrantsScope(latestGrants.value, "filesystem:read"))
       ) {
         void workflow.removeDestination().catch(() => {});
       }
     };
-  }, [workflow, params.environmentId, registry]);
+  }, [workflow, params.environmentId, registry, connection]);
   const run = useCallback(
     async (action: () => Promise<unknown>) => {
       if (pending.current) return;
@@ -159,7 +168,7 @@ export function MemoryImportSettings({
     const old = previous.current;
     previous.current = { connection, allowed, enabled, bindingToken, scope };
     const remove =
-      (old.allowed && !allowed && Option.isSome(connection)) ||
+      (revoked && old.connection === connection && Option.isSome(connection)) ||
       (old.enabled && !enabled) ||
       old.bindingToken !== bindingToken;
     if (remove || old.connection !== connection || old.scope !== scope) {
@@ -192,6 +201,7 @@ export function MemoryImportSettings({
     } else if (allowed) void Promise.resolve().then(recover);
   }, [
     allowed,
+    revoked,
     enabled,
     connection,
     bindingToken,
