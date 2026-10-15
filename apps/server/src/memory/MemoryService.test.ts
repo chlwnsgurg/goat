@@ -3129,6 +3129,7 @@ it.effect(
     Effect.gen(function* () {
       const service = yield* Service.MemoryService;
       const sql = yield* SqlClient.SqlClient;
+      const storage = yield* Store.MemoryStore;
       const { op } = yield* stageReportRevert;
       const foreign = M.EnvironmentId.make("foreign");
       for (let n = 0; n <= M.MEMORY_REPORT_MAX_PENDING_ITEMS; n++) {
@@ -3166,9 +3167,21 @@ it.effect(
         { count: 0 },
       ]);
       assert.strictEqual(
-        (yield* sql`SELECT 1 FROM memory_compact_receipts`).length,
+        (yield* sql`SELECT 1 FROM memory_events WHERE json_extract(receipt_json,'$.hubSequence') IS NOT NULL`)
+          .length,
         M.MEMORY_REPORT_MAX_PENDING_ITEMS + 1,
       );
+      // Model the exact pre-fix foreign intent for one body-bearing approved event.
+      const legacyId = Store.resolutionReportId(
+        space,
+        M.MemoryOperationId.make(id(10000)),
+        op.revertsResolutionId,
+      );
+      yield* sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,resolving_environment_id,outcome,state,created_at) VALUES (${legacyId},${space},${id(30000)},${id(10000)},${op.revertsResolutionId},${foreign},'reverted','pending',0)`;
+      yield* storage.transact(storage.normalizeForeignReportIntentsTx(environmentId));
+      assert.deepStrictEqual(yield* sql`SELECT count(*) AS count FROM memory_report_outbox`, [
+        { count: 0 },
+      ]);
       yield* service.applyReceived(op, {
         operationId: op.operationId,
         memoryId,
