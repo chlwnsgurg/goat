@@ -107,6 +107,53 @@ const pull = (afterSequence: number, environmentId = hubEnv): M.MemoryHubPullInp
   limit: 100,
 });
 
+const escapedOperation = () => {
+  const base = operation(15);
+  const sourceThread = {
+    environmentId: hubEnv,
+    threadId: M.ThreadId.make("\u0000".repeat(1024)),
+  };
+  const op = {
+    ...base,
+    revision: {
+      ...base.revision,
+      scope: { kind: "thread" as const, thread: sourceThread },
+      provenance: {
+        environmentId: hubEnv,
+        sourceThread,
+        sourceWatermark: {
+          fromEventId: M.EventId.make('"'.repeat(1024)),
+          toEventId: M.EventId.make("\\".repeat(1024)),
+          throughSequence: Number.MAX_SAFE_INTEGER,
+        },
+        importSource: {
+          sourceId: M.MemoryImportSourceId.make(id(8000)),
+          format: "codex" as const,
+          parserVersion: '"'.repeat(1024),
+          sourceLocator: "\u0000".repeat(1024),
+          sourceItemKey: "\u0000".repeat(512),
+          sourceFingerprint: "a".repeat(64),
+          contentFingerprint: "b".repeat(64),
+          sourceAliases: Array.from({ length: 3 }, (_, i) => ({
+            environmentId: hubEnv,
+            sourceId: M.MemoryImportSourceId.make(id(8100 + i)),
+            sourceItemKey: "\u0000".repeat(512),
+          })),
+          acceptedContentFingerprints: Array.from({ length: 100 }, (_, i) =>
+            String(i).padStart(64, "0"),
+          ),
+        },
+      },
+    },
+    payload: {
+      text: '\u0000\u0001"\\한🙂'.repeat(100),
+      evidence: [],
+      derivedFromMemoryRevisions: [],
+    },
+  };
+  return op;
+};
+
 describe("MemoryCompactor", () => {
   it.effect(
     "retains 101 import deltas through real compaction, paged bootstrap and delete fences",
@@ -457,49 +504,7 @@ describe("MemoryCompactor", () => {
     () =>
       Effect.gen(function* () {
         yield* seed;
-        const base = operation(15);
-        const sourceThread = {
-          environmentId: hubEnv,
-          threadId: M.ThreadId.make("\u0000".repeat(1024)),
-        };
-        const op = {
-          ...base,
-          revision: {
-            ...base.revision,
-            scope: { kind: "thread" as const, thread: sourceThread },
-            provenance: {
-              environmentId: hubEnv,
-              sourceThread,
-              sourceWatermark: {
-                fromEventId: M.EventId.make('"'.repeat(1024)),
-                toEventId: M.EventId.make("\\".repeat(1024)),
-                throughSequence: Number.MAX_SAFE_INTEGER,
-              },
-              importSource: {
-                sourceId: M.MemoryImportSourceId.make(id(8000)),
-                format: "codex" as const,
-                parserVersion: '"'.repeat(1024),
-                sourceLocator: "\u0000".repeat(1024),
-                sourceItemKey: "\u0000".repeat(512),
-                sourceFingerprint: "a".repeat(64),
-                contentFingerprint: "b".repeat(64),
-                sourceAliases: Array.from({ length: 3 }, (_, i) => ({
-                  environmentId: hubEnv,
-                  sourceId: M.MemoryImportSourceId.make(id(8100 + i)),
-                  sourceItemKey: "\u0000".repeat(512),
-                })),
-                acceptedContentFingerprints: Array.from({ length: 100 }, (_, i) =>
-                  String(i).padStart(64, "0"),
-                ),
-              },
-            },
-          },
-          payload: {
-            text: '\u0000\u0001"\\한🙂'.repeat(100),
-            evidence: [],
-            derivedFromMemoryRevisions: [],
-          },
-        };
+        const op = escapedOperation();
         assert.strictEqual((yield* push(op)).receipts[0]!.outcome, "accepted");
         const store = yield* Store.MemoryStore;
         const usage = yield* store.transact(store.readHubUsageTx(space));
@@ -529,6 +534,14 @@ describe("MemoryCompactor", () => {
       Effect.gen(function* () {
         yield* seed;
         yield* push();
+        const escaped = escapedOperation();
+        const otherMemory = M.MemoryId.make(id(3));
+        yield* push({
+          ...escaped,
+          memoryId: otherMemory,
+          revision: { ...escaped.revision, memoryId: otherMemory },
+        });
+
         const store = yield* Store.MemoryStore;
         const sql = yield* SqlClient.SqlClient;
         const compactor = yield* Compactor.MemoryCompactor;
