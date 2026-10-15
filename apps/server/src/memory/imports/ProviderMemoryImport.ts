@@ -49,6 +49,7 @@ const importError = (error: ImportError): ImportError => {
 };
 const validateOutput = Schema.decodeUnknownEffect(M.MemoryImportProviderResult);
 const validPayload = Schema.is(M.MemoryPayload);
+const validCapacity = Schema.is(M.MemoryCapacityExceeded);
 
 /** Closed coordinator. Reader acquisition and Service/Sync ownership stay with the composition root. */
 export const makeProviderMemoryImport: MakeProviderMemoryImport = (
@@ -433,8 +434,8 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
             },
           };
         }
-        // Prepare every unfinished selection before any durable write. L1 target-frontier
-        // preparation and scope-preserving rejection ports belong in this phase.
+        // Prepare all selections before import commits. Project binding getters can still
+        // persist bindings; replace them with the read-only L1 port when available.
         const prepared: Omit<
           PreparedImportCommit,
           "registrationVersion" | "registration" | "batch"
@@ -476,8 +477,9 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
               { ...address, sourceId: r.sourceId, sourceItemKey: selector.sourceItemKey },
               permit,
             )) ?? null;
-          if (previous && !same(previous.scope, selector.scope))
-            return yield* new M.MemoryImportRpcError({ issue: "mapping_changed" });
+          if (previous && previous.memoryId !== frozen.memoryId)
+            return yield* new MemoryStoreConflict({ code: "revision_changed" });
+          const mappingChanged = previous !== null && !same(previous.scope, selector.scope);
           let projectBinding: M.MemoryProjectBinding | null = null;
           if (selector.project) {
             projectBinding = yield* ports.binding(
@@ -509,38 +511,61 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
             },
             permit,
           );
-          const suppressed = match.kind !== "live" && match.kind !== "none";
+          if (mappingChanged) {
+            prepared.push({
+              selection: frozen,
+              candidate: c,
+              previous,
+              next: previous!,
+              expectedHeads: [],
+              parents: [],
+              projectBinding,
+              rejectOnly: { issue: "mapping_changed" },
+            });
+            continue;
+          }
+          const target = yield* ports.prepareTarget(
+            {
+              ...address,
+              memoryId: frozen.memoryId,
+              scope: selector.scope,
+              acceptedRevisionId: previous?.accepted?.revisionId ?? null,
+            },
+            permit,
+          );
+          const suppressed =
+            (match.kind !== "live" && match.kind !== "none") ||
+            target.forgotten ||
+            target.pendingForget;
           const observation = previous?.pending ?? previous?.accepted;
-          const live = match.kind === "live" && match.memoryId === frozen.memoryId ? match : null;
+          const alias = target.alias?.payload.text === c.payload.text ? target.alias : null;
           const noop =
             observation &&
-            live &&
+            target.heads.includes(observation.revisionId) &&
             observation.sourceFingerprint === c.sourceFingerprint &&
-            observation.contentFingerprint === c.contentFingerprint &&
-            live.payload.text === c.payload.text;
+            observation.contentFingerprint === c.contentFingerprint;
           const issue = row.kind === "rejected" ? row.issue : attached.issue;
-          // The port exposes only a single live head. Refuse an unknown frontier rather than invent ancestry.
-          if (previous && !suppressed && !issue && !live)
-            return yield* new MemoryStoreConflict({ code: "revision_changed" });
+          if (!suppressed && !issue && !noop && target.acceptedParent?.status === "compacted")
+            return yield* new MemoryStoreConflict({ code: "base_compacted" });
           const parents = previous?.accepted
             ? [previous.accepted.revisionId]
-            : live
-              ? [live.revision.revisionId]
+            : !previous?.pending && alias
+              ? [alias.revision.revisionId]
               : [];
-          const expectedHeads = live ? [live.revision.revisionId] : [];
+          const expectedHeads = target.heads;
           const outcome: M.MemoryImportOutcome = suppressed
             ? "suppressed"
             : issue
               ? "rejected"
               : noop
                 ? "noop"
-                : previous
-                  ? parents.length === expectedHeads.length &&
-                    parents.every((p) => expectedHeads.includes(p))
-                    ? "revised"
-                    : "conflicted"
-                  : live
-                    ? "aliased"
+                : !previous?.accepted && !previous?.pending && alias
+                  ? "aliased"
+                  : previous
+                    ? parents.length === expectedHeads.length &&
+                      parents.every((p) => expectedHeads.includes(p))
+                      ? "revised"
+                      : "conflicted"
                     : "created";
           const next: ImportItem = {
             ...address,
@@ -578,9 +603,36 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
         }
         // Independent commits retain final Service CAS/permit checks and partial-resume semantics.
         for (const preparation of prepared) {
-          const item = yield* ports.commit(
-            { ...preparation, registrationVersion: r.version, registration: r, batch },
-            permit,
+          const commit = (p: typeof preparation) =>
+            ports.commit({ ...p, registrationVersion: r.version, registration: r, batch }, permit);
+          const item = yield* commit(preparation).pipe(
+            Effect.catchTags({
+              MemoryCapacityError: (error) => {
+                const capacity = {
+                  code: "capacity_exceeded" as const,
+                  dimension: error.dimension,
+                  current: error.current ?? error.limit,
+                  limit: error.limit,
+                  reclaimable: error.reclaimable ?? 0,
+                };
+                // Unknown dimensions and rejection-metadata exhaustion remain typed failures.
+                if (preparation.rejectOnly || !validCapacity(capacity)) return Effect.fail(error);
+                return commit({
+                  ...preparation,
+                  next: preparation.previous ?? {
+                    ...preparation.next,
+                    accepted: null,
+                    pending: null,
+                    outcome: "rejected",
+                    rejected: {
+                      sourceFingerprint: preparation.candidate.sourceFingerprint,
+                      issue: "capacity_exceeded",
+                    },
+                  },
+                  rejectOnly: { issue: "capacity_exceeded", capacity },
+                });
+              },
+            }),
           );
           batch = {
             ...batch,

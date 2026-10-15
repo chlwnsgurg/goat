@@ -213,18 +213,29 @@ const harness = (initial: ImportSnapshot) => {
     readItem: (a, permit) =>
       permit.pipe(Effect.andThen(Effect.sync(() => items.get(a.sourceItemKey)))),
     findMatch: (_a, permit) => permit.pipe(Effect.as({ kind: "none" as const })),
+    prepareTarget: (_a, permit) =>
+      permit.pipe(
+        Effect.as({
+          identity: null,
+          heads: [],
+          forgotten: false,
+          pendingForget: false,
+          acceptedParent: null,
+          alias: null,
+        }),
+      ),
     binding: (a, permit) =>
       permit.pipe(Effect.as({ ...a, projectKey: null, repositoryKey: null, version: 0 })),
     resolveProjectKey: () => Effect.succeed(null),
     commit: (a, permit) =>
       Effect.gen(function* () {
         yield* permit;
-        if (commitError) return yield* commitError;
+        if (commitError && !a.rejectOnly) return yield* commitError;
         if (!registration || registration.version !== a.registrationVersion)
           return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
         const result: M.MemoryImportItemResult = {
           sourceItemKey: a.next.sourceItemKey,
-          outcome: a.next.outcome,
+          outcome: a.rejectOnly ? "rejected" : a.next.outcome,
           memoryId:
             a.next.outcome === "rejected" || a.next.outcome === "suppressed"
               ? null
@@ -237,8 +248,16 @@ const harness = (initial: ImportSnapshot) => {
             ? { issue: a.next.rejected.issue }
             : {}),
         };
+        if (a.rejectOnly) {
+          Object.assign(result, {
+            outcome: "rejected",
+            memoryId: null,
+            revisionId: null,
+            ...a.rejectOnly,
+          });
+        }
         commits.push(a);
-        items.set(a.next.sourceItemKey, a.next);
+        if (!a.rejectOnly) items.set(a.next.sourceItemKey, a.next);
         const selections = a.batch.selections.map((s) =>
           s.selector.sourceItemKey === a.next.sourceItemKey ? { ...s, result } : s,
         );
@@ -662,20 +681,18 @@ describe("ProviderMemoryImport closed coordinator", () => {
         yield* h.make().run(input, Effect.void);
         const previous = h.commits[0]!.next;
         const thread = { environmentId, threadId: M.ThreadId.make("synthetic-thread") };
-        const e = yield* h
-          .make()
-          .run(
-            {
-              ...input,
-              operationId: M.MemoryOperationId.make(uuid(900)),
-              items: input.items.map((s) => ({ ...s, scope: { kind: "thread", thread } })),
-            },
-            Effect.void,
-          )
-          .pipe(Effect.flip);
-        issue(e, "mapping_changed");
-        assert.equal(h.commits.length, 1);
-        assert.deepEqual(h.commits[0]!.next, previous);
+        const result = yield* h.make().run(
+          {
+            ...input,
+            operationId: M.MemoryOperationId.make(uuid(900)),
+            items: input.items.map((s) => ({ ...s, scope: { kind: "thread", thread } })),
+          },
+          Effect.void,
+        );
+        assert.equal(result.action, "apply");
+        assert.equal(h.commits.length, 2);
+        assert.deepEqual(h.commits[1]!.next, previous);
+        assert.deepEqual(h.commits[1]!.rejectOnly, { issue: "mapping_changed" });
       }),
     ),
   );
@@ -700,18 +717,34 @@ describe("ProviderMemoryImport closed coordinator", () => {
       }),
     ),
   );
-  it.effect("refuses an unavailable current frontier instead of guessing pending ancestry", () =>
+  it.effect("records capacity rejection without allocating an item", () =>
     fixtureTest((h) =>
       Effect.gen(function* () {
         const { input } = yield* prepare(h);
-        yield* h.make().run(input, Effect.void);
-        const e = yield* h
-          .make()
-          .run({ ...input, operationId: M.MemoryOperationId.make(uuid(902)) }, Effect.void)
-          .pipe(Effect.flip);
-        assert.equal(e._tag, "MemoryStoreConflict");
-        if (e._tag === "MemoryStoreConflict") assert.equal(e.code, "revision_changed");
+        yield* h
+          .make({
+            commit: (a, permit) =>
+              a.rejectOnly
+                ? h.ports.commit(a, permit)
+                : Effect.fail(
+                    new Store.MemoryCapacityError({
+                      dimension: "import_source_items",
+                      current: 10,
+                      limit: 10,
+                      reclaimable: 2,
+                    }),
+                  ),
+          })
+          .run(input, Effect.void);
         assert.equal(h.commits.length, 1);
+        assert.equal(h.commits[0]!.rejectOnly?.issue, "capacity_exceeded");
+        assert.deepEqual(h.commits[0]!.rejectOnly?.capacity, {
+          code: "capacity_exceeded",
+          dimension: "import_source_items",
+          current: 10,
+          limit: 10,
+          reclaimable: 2,
+        });
       }),
     ),
   );
@@ -768,6 +801,17 @@ describe("ProviderMemoryImport closed coordinator", () => {
             .make({
               findMatch: (_a, p) =>
                 p.pipe(Effect.as({ kind: "live" as const, memoryId, revision, payload })),
+              prepareTarget: (_a, p) =>
+                p.pipe(
+                  Effect.as({
+                    identity: null,
+                    heads: [head],
+                    forgotten: false,
+                    pendingForget: false,
+                    acceptedParent: null,
+                    alias: { revision, payload },
+                  }),
+                ),
             })
             .run(input, Effect.void);
           const commit = h.commits[0]!;
@@ -780,6 +824,114 @@ describe("ProviderMemoryImport closed coordinator", () => {
         }),
       ),
   );
+  it.effect.each(["multi", "compacted", "compacted-noop"] as const)(
+    "uses target frontier for %s",
+    (kind) =>
+      fixtureTest((h) =>
+        Effect.gen(function* () {
+          const { input } = yield* prepare(h);
+          yield* h.make().run(input, Effect.void);
+          const first = h.commits[0]!;
+          const accepted = first.next.pending!;
+          h.seedItem({
+            ...first.next,
+            accepted: {
+              ...accepted,
+              sourceFingerprint:
+                kind === "compacted-noop" ? accepted.sourceFingerprint : "e".repeat(64),
+            },
+            pending: null,
+          });
+          const heads =
+            kind === "compacted-noop"
+              ? [accepted.revisionId]
+              : [M.MemoryRevisionId.make(uuid(980)), M.MemoryRevisionId.make(uuid(981))];
+          const run = h
+            .make({
+              prepareTarget: (_a, p) =>
+                p.pipe(
+                  Effect.as({
+                    identity: null,
+                    heads,
+                    forgotten: false,
+                    pendingForget: false,
+                    alias: null,
+                    acceptedParent:
+                      kind === "multi"
+                        ? {
+                            status: "retained" as const,
+                            revisionId: accepted.revisionId,
+                            parents: [],
+                          }
+                        : {
+                            status: "compacted" as const,
+                            revisionId: accepted.revisionId,
+                            boundary: { checkpointSequence: 1, boundaryId: "synthetic-boundary" },
+                          },
+                  }),
+                ),
+            })
+            .run({ ...input, operationId: M.MemoryOperationId.make(uuid(982)) }, Effect.void);
+          if (kind === "compacted") {
+            const e = yield* run.pipe(Effect.flip);
+            assert.equal(e._tag, "MemoryStoreConflict");
+            if (e._tag === "MemoryStoreConflict") assert.equal(e.code, "base_compacted");
+            assert.equal(h.commits.length, 1);
+          } else {
+            yield* run;
+            const commit = h.commits[1]!;
+            assert.equal(commit.next.outcome, kind === "multi" ? "conflicted" : "noop");
+            assert.deepEqual(commit.parents, [accepted.revisionId]);
+            assert.deepEqual(commit.expectedHeads, heads);
+          }
+        }),
+      ),
+  );
+
+  it.effect("documents binding getter writes before a later whole-call refusal", () =>
+    fixtureTest((h, snapshot) =>
+      Effect.gen(function* () {
+        h.source(batchSnapshot(snapshot));
+        const { input } = yield* prepare(h);
+        let bindingWrites = 0;
+        const projectKey = M.MemoryProjectKey.make({
+          kind: "explicit",
+          sharedProjectId: "synthetic-project",
+        });
+        const project = { environmentId, projectId: M.ProjectId.make("synthetic-project") };
+        const e = yield* h
+          .make({
+            binding: (a, p) =>
+              p.pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    bindingWrites++;
+                    return { ...a, projectKey, repositoryKey: null, version: 1 };
+                  }),
+                ),
+              ),
+            resolveProjectKey: () => Effect.succeed(projectKey),
+          })
+          .run(
+            {
+              ...input,
+              items: input.items.map((s, i) =>
+                i === 0
+                  ? { ...s, scope: { kind: "project", projectKey }, project }
+                  : { ...s, sourceFingerprint: "f".repeat(64) },
+              ),
+            },
+            Effect.void,
+          )
+          .pipe(Effect.flip);
+        issue(e, "source_changed");
+        assert.equal(h.commits.length, 0);
+        // This deliberately records the M3d dependency; commit=0 does not imply no binding writes.
+        assert.equal(bindingWrites, 1);
+      }),
+    ),
+  );
+
   it.effect("valid Claude item remains selectable beside malformed topic", () =>
     fixtureTest(
       (h, s) =>
@@ -956,8 +1108,11 @@ describe("ProviderMemoryImport actual Service/Store ports", () => {
     { refusal: "frontier", partial: false },
     { refusal: "scope", partial: true },
     { refusal: "frontier", partial: true },
+    { refusal: "capacity", partial: false },
+    { refusal: "fingerprint", partial: false },
+    { refusal: "fingerprint", partial: true },
   ] as const)(
-    "pre-admission refuses $refusal partial=$partial without any additional writes",
+    "prepares $refusal partial=$partial and continues independent selections",
     ({ refusal, partial }) =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -968,12 +1123,26 @@ describe("ProviderMemoryImport actual Service/Store ports", () => {
           yield* sql`INSERT INTO memory_compaction_state(space,published) VALUES (${space},1)`;
           let commits = 0;
           let failSecond = false;
+          let capacityFailure = false;
           const runtime = makeProviderMemoryImport(
             {
               ...h.ports,
               ...service.importPorts,
               commit: (a, permit) => {
                 commits++;
+                if (
+                  capacityFailure &&
+                  a.candidate.sourceItemKey.endsWith("/z.md#body") &&
+                  !a.rejectOnly
+                )
+                  return Effect.fail(
+                    new Store.MemoryCapacityError({
+                      dimension: "import_source_items",
+                      current: 10,
+                      limit: 10,
+                      reclaimable: 2,
+                    }),
+                  );
                 return failSecond && commits === 2
                   ? Effect.fail(new Store.MemoryStoreConflict({ code: "revision_changed" }))
                   : service.importPorts.commit(a, permit);
@@ -1021,6 +1190,18 @@ describe("ProviderMemoryImport actual Service/Store ports", () => {
           };
           assert.equal(input.items.length, partial ? 3 : 2);
           assert.equal(input.items.filter((r) => r.sourceItemKey.endsWith("/z.md#body")).length, 1);
+          // Freeze the existing z identity before the partial batch is persisted.
+          if (refusal !== "capacity")
+            yield* runtime.run(
+              {
+                ...input,
+                operationId: M.MemoryOperationId.make(uuid(71)),
+                items: input.items
+                  .filter((r) => r.sourceItemKey.endsWith("/z.md#body"))
+                  .map((r) => ({ ...r, scope: { kind: "user" } })),
+              },
+              Effect.void,
+            );
           if (partial) {
             failSecond = true;
             const e = yield* runtime.run(input, Effect.void).pipe(Effect.flip);
@@ -1033,27 +1214,65 @@ describe("ProviderMemoryImport actual Service/Store ports", () => {
             assert.equal(receipt.state, "partial");
             failSecond = false;
           }
-          // z becomes an existing pending item after any prior independent a commit.
-          yield* runtime.run(
+          const zSelector = input.items.find((r) => r.sourceItemKey.endsWith("/z.md#body"))!;
+          const previous = yield* service.importPorts.readItem(
             {
-              ...input,
-              operationId: M.MemoryOperationId.make(uuid(71)),
-              items: input.items
-                .filter((r) => r.sourceItemKey.endsWith("/z.md#body"))
-                .map((r) => ({ ...r, scope: { kind: "user" } })),
+              memorySpaceId: space,
+              environmentId,
+              sourceId,
+              sourceItemKey: zSelector.sourceItemKey,
             },
             Effect.void,
           );
-          const before = yield* inventory;
           commits = 0;
-          const e = yield* runtime.run(input, Effect.void).pipe(Effect.flip);
-          if (refusal === "scope") issue(e, "mapping_changed");
-          else {
-            assert.equal(e._tag, "MemoryStoreConflict");
-            if (e._tag === "MemoryStoreConflict") assert.equal(e.code, "revision_changed");
+          if (refusal === "fingerprint") {
+            const before = yield* inventory;
+            const invalid = {
+              ...input,
+              items: input.items.map((r) =>
+                r.sourceItemKey.endsWith("/z.md#body")
+                  ? { ...r, sourceFingerprint: "f".repeat(64) }
+                  : r,
+              ),
+            };
+            const error = yield* runtime.run(invalid, Effect.void).pipe(Effect.flip);
+            if (partial) issue(error, "operation_id_reused");
+            else issue(error, "source_changed");
+            assert.equal(commits, 0);
+            assert.deepEqual(yield* inventory, before);
+            return;
           }
-          assert.equal(commits, 0);
-          assert.deepEqual(yield* inventory, before);
+          capacityFailure = refusal === "capacity";
+          const result = yield* runtime.run(input, Effect.void);
+          assert.equal(result.action, "apply");
+          if (result.action !== "apply") return;
+          assert.equal(result.receipt.state, "completed");
+          assert.equal(commits, refusal === "capacity" ? 3 : 2);
+          const zResult = result.receipt.items.find(
+            (r) => r.sourceItemKey === zSelector.sourceItemKey,
+          )!;
+          assert.equal(zResult.outcome, refusal === "frontier" ? "noop" : "rejected");
+          if (refusal === "scope") assert.equal(zResult.issue, "mapping_changed");
+          if (refusal === "capacity")
+            assert.deepEqual(zResult.capacity, {
+              code: "capacity_exceeded",
+              dimension: "import_source_items",
+              current: 10,
+              limit: 10,
+              reclaimable: 2,
+            });
+          assert.deepEqual(
+            yield* service.importPorts.readItem(
+              {
+                memorySpaceId: space,
+                environmentId,
+                sourceId,
+                sourceItemKey: zSelector.sourceItemKey,
+              },
+              Effect.void,
+            ),
+            refusal === "frontier" ? { ...previous!, outcome: "noop" } : previous,
+          );
         }),
       ).pipe(Effect.provide(live)),
   );
