@@ -417,7 +417,12 @@ describe("shared memory client", () => {
             recovery,
             operationId: () => MemoryOperationId.make("00000000-0000-4000-8000-000000000008"),
           });
+          const phases: string[] = [];
+          const unsubscribe = workflow.subscribe(() => phases.push(workflow.getSnapshot().phase));
           const result = yield* Effect.promise(() => workflow.discover("codex"));
+          expect(phases).toEqual(["discovering", "discovered"]);
+          expect(workflow.getSnapshot()).toBe(workflow.getState());
+          unsubscribe();
           expect(result).toEqual({ action: "discover", sources: [] });
           expect(h.destinations).toEqual([env]);
           h.registry.set(grants(env), AsyncResult.success(sessionScopes(["memory:write"])));

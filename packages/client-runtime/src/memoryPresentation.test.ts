@@ -567,6 +567,23 @@ describe("shared memory progress presentation", () => {
         projectionWatermark: 4,
       },
     });
+    for (const work of [
+      { scannerPendingItems: 1, unindexedItems: 0, pendingCleanupItems: 0 },
+      { scannerPendingItems: 0, unindexedItems: 1, pendingCleanupItems: 0 },
+      { scannerPendingItems: 0, unindexedItems: 0, pendingCleanupItems: 1 },
+    ]) {
+      const shown = presentMemoryProcessing({
+        ...processing,
+        ...work,
+        missingParentItems: 0,
+        reportBacklog: 0,
+        reportFailed: 0,
+      });
+      expect(shown.waitingLabel).toBe(
+        work.scannerPendingItems > 0 ? null : "Memory processing pending",
+      );
+      expect(shown.checkingLabel).toBe(work.scannerPendingItems > 0 ? "Checking content" : null);
+    }
     expect(presentMemoryProcessing(processing)).toMatchObject({
       checkingLabel: "Checking content",
       heldLabel: "Sensitive content on hold; forgetting is available",

@@ -379,9 +379,16 @@ export function presentMemoryProcessing(processing: MemoryProcessingStatus) {
     heldLabel:
       processing.scannerHeldItems > 0 ? "Sensitive content on hold; forgetting is available" : null,
     waitingLabel:
-      processing.deferred > 0 || processing.missingParentItems > 0
+      processing.missingParentItems > 0
         ? "Waiting for earlier memories"
-        : null,
+        : processing.deferred > 0 &&
+            (processing.scannerPendingItems === 0 ||
+              processing.unindexedItems > 0 ||
+              processing.pendingCleanupItems > 0 ||
+              processing.reportBacklog > 0 ||
+              processing.reportFailed > 0)
+          ? "Memory processing pending"
+          : null,
     cleanupLabel: processing.pendingCleanupItems > 0 ? "Cleaning up remaining content" : null,
     receiveLabel:
       processing.receiveLag === null
