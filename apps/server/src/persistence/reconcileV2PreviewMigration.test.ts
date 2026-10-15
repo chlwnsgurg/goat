@@ -28,6 +28,39 @@ const seedPreview = Effect.gen(function* () {
 });
 
 describe("V2 preview upgrade", () => {
+  it.effect.each([false, true])(
+    "rejects preview memory evidence before reconciliation (old ledger: %s)",
+    (withOldMemoryLedger) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* seedPreview;
+        yield* sql`CREATE TABLE memory_items (body TEXT)`;
+        yield* sql`INSERT INTO memory_items VALUES ('synthetic preview memory')`;
+        if (withOldMemoryLedger) {
+          yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (70, 'Memory')`;
+        }
+        const ledger = yield* sql`SELECT * FROM effect_sql_migrations ORDER BY migration_id`;
+        const schema = yield* sql`SELECT * FROM sqlite_master ORDER BY type, name`;
+        const body = yield* sql`SELECT * FROM memory_items`;
+        const imports = yield* sql`SELECT * FROM orchestration_v2_legacy_imports`;
+        const result = yield* Effect.flip(runMigrations());
+        // Check preservation before the error message so moving only the preflight exposes writes.
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM effect_sql_migrations ORDER BY migration_id`,
+          ledger,
+        );
+        assert.deepStrictEqual(yield* sql`SELECT * FROM sqlite_master ORDER BY type, name`, schema);
+        assert.deepStrictEqual(yield* sql`SELECT * FROM memory_items`, body);
+        assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
+        assert.instanceOf(result, Migrator.MigrationError);
+        assert.strictEqual(result.kind, "BadState");
+        assert.strictEqual(
+          result.message,
+          "Unreleased memory DB is incompatible; reset this sandbox's memory development state and restart.",
+        );
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
   it.effect("upgrades a published preview without replaying V2 or losing import progress", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
