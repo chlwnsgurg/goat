@@ -434,8 +434,8 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
             },
           };
         }
-        // Prepare all selections before import commits. Project binding getters can still
-        // persist bindings; replace them with the read-only L1 port when available.
+        // Prepare every selection through read-only ports before any import commit.
+        // Freeze the observed binding for materialization in the final Service transaction.
         const prepared: Omit<
           PreparedImportCommit,
           "registrationVersion" | "registration" | "batch"

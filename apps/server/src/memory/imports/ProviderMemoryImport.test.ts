@@ -3,6 +3,7 @@ import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../../persistence/Migrations/070_Memory.ts";
@@ -893,11 +894,12 @@ describe("ProviderMemoryImport closed coordinator", () => {
       ),
   );
 
-  it.effect("documents binding getter writes before a later whole-call refusal", () =>
+  it.effect("reads binding without writes before a later whole-call refusal", () =>
     fixtureTest((h, snapshot) =>
       Effect.gen(function* () {
         h.source(batchSnapshot(snapshot));
         const { input } = yield* prepare(h);
+        let bindingReads = 0;
         let bindingWrites = 0;
         const projectKey = M.MemoryProjectKey.make({
           kind: "explicit",
@@ -910,12 +912,16 @@ describe("ProviderMemoryImport closed coordinator", () => {
               p.pipe(
                 Effect.andThen(
                   Effect.sync(() => {
-                    bindingWrites++;
+                    bindingReads++;
                     return { ...a, projectKey, repositoryKey: null, version: 1 };
                   }),
                 ),
               ),
             resolveProjectKey: () => Effect.succeed(projectKey),
+            commit: (a, p) => {
+              bindingWrites++;
+              return h.ports.commit(a, p);
+            },
           })
           .run(
             {
@@ -931,8 +937,8 @@ describe("ProviderMemoryImport closed coordinator", () => {
           .pipe(Effect.flip);
         issue(e, "source_changed");
         assert.equal(h.commits.length, 0);
-        // This deliberately records the M3d dependency; commit=0 does not imply no binding writes.
-        assert.equal(bindingWrites, 1);
+        assert.equal(bindingReads, 1);
+        assert.equal(bindingWrites, 0);
       }),
     ),
   );
@@ -1092,21 +1098,328 @@ const database = Layer.effectDiscard(
     Effect.andThen(lineageMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
-const live = Service.layer.pipe(
-  Layer.provide(
-    Layer.succeed(Environment.ServerEnvironmentIdentity, {
-      getEnvironmentId: Effect.succeed(environmentId),
-    }),
-  ),
-  Layer.provide(
-    Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
-      resolve: () => Effect.succeed(null),
-    }),
-  ),
-  Layer.provideMerge(
-    Quota.layer.pipe(Layer.provideMerge(Store.layer.pipe(Layer.provideMerge(database)))),
-  ),
-);
+const serviceLive = (
+  resolve: RepositoryResolver.RepositoryIdentityResolver["Service"]["resolve"],
+) =>
+  Service.layer.pipe(
+    Layer.provide(
+      Layer.succeed(Environment.ServerEnvironmentIdentity, {
+        getEnvironmentId: Effect.succeed(environmentId),
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+        resolve,
+      }),
+    ),
+    Layer.provideMerge(
+      Quota.layer.pipe(Layer.provideMerge(Store.layer.pipe(Layer.provideMerge(database)))),
+    ),
+  );
+const live = serviceLive(() => Effect.succeed(null));
+
+const repository = (root: string, remapped = false) => ({
+  canonicalKey: `github.com/synthetic/${root.split("/").at(-1)}${remapped ? "-remapped" : ""}`,
+  rootPath: root,
+  locator: {
+    source: "git-remote" as const,
+    remoteName: "origin",
+    remoteUrl: "https://github.com/synthetic/import.git",
+  },
+});
+const projectA = { environmentId, projectId: M.ProjectId.make("synthetic-a") };
+const projectZ = { environmentId, projectId: M.ProjectId.make("synthetic-z") };
+const setupProjects = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`CREATE TABLE projection_projects(project_id TEXT PRIMARY KEY,workspace_root TEXT,deleted_at TEXT)`;
+  yield* sql`INSERT INTO projection_projects VALUES ('synthetic-a','/synthetic/a',NULL),('synthetic-z','/synthetic/z',NULL)`;
+  yield* sql`INSERT INTO memory_compaction_state(space,published) VALUES (${space},1)`;
+});
+
+describe("ProviderMemoryImport read-only binding preparation", () => {
+  it.effect.each([
+    { refusal: "scope", partial: false },
+    { refusal: "scope", partial: true },
+    { refusal: "frontier", partial: false },
+    { refusal: "frontier", partial: true },
+    { refusal: "single-mapping", partial: false },
+  ] as const)(
+    "preserves all memory inventory for $refusal partial=$partial",
+    ({ refusal, partial }) => {
+      let remapped = false;
+      return Effect.scoped(
+        Effect.gen(function* () {
+          yield* setupProjects;
+          const fixture = yield* buildMemoryImportFixture("codex-ad-hoc-v1");
+          // 0 completes before a in a partial batch, leaving project a's binding unsaved.
+          const h = harness(
+            snapshotMemoryImportFiles(
+              fixture.snapshot,
+              ["0", "a", "z"].map((key) => ({
+                ...fixture.snapshot.files[0]!,
+                selector: `extensions/ad_hoc/notes/${key}.md`,
+                text: `${key} guidance`,
+                byteCount: 10,
+              })),
+            ),
+          );
+          const service = yield* Service.MemoryService;
+          const sql = yield* SqlClient.SqlClient;
+          let commits = 0;
+          let stopAtA = false;
+          let bindingReads = 0;
+          const runtime = makeProviderMemoryImport(
+            {
+              ...h.ports,
+              ...service.importPorts,
+              binding: (a, permit) => {
+                bindingReads++;
+                return service.importPorts.binding(a, permit);
+              },
+              commit: (a, permit) => {
+                commits++;
+                return stopAtA && a.candidate.sourceItemKey.endsWith("/a.md#body")
+                  ? Effect.fail(new Store.MemoryStoreConflict({ code: "revision_changed" }))
+                  : service.importPorts.commit(a, permit);
+              },
+            },
+            h.reader,
+            parsers,
+            h.primitives,
+          );
+          const discovered = yield* runtime.run(
+            { action: "discover", memorySpaceId: space, format: "codex" },
+            Effect.void,
+          );
+          if (discovered.action !== "discover") return assert.fail("discover result");
+          const sourceId = discovered.sources[0]!.sourceId;
+          const preview = yield* runtime.run(
+            { action: "preview", memorySpaceId: space, sourceId },
+            Effect.void,
+          );
+          if (preview.action !== "preview") return assert.fail("preview result");
+          const bindingA = yield* service.importPorts.binding(
+            { memorySpaceId: space, project: projectA },
+            Effect.void,
+          );
+          const bindingZ = yield* service.importPorts.binding(
+            { memorySpaceId: space, project: projectZ },
+            Effect.void,
+          );
+          assert.isNotNull(bindingA.repositoryKey);
+          assert.isNotNull(bindingZ.repositoryKey);
+          if (!bindingA.projectKey || !bindingZ.projectKey)
+            return assert.fail("repository binding");
+          const input: Extract<M.MemoryImportProviderInput, { action: "apply" }> = {
+            action: "apply",
+            memorySpaceId: space,
+            sourceId,
+            sessionId: preview.sessionId,
+            operationId: M.MemoryOperationId.make(uuid(700)),
+            items: preview.items
+              .filter((r) => partial || !r.sourceItemKey.endsWith("/0.md#body"))
+              .filter((r) => refusal !== "single-mapping" || r.sourceItemKey.endsWith("/a.md#body"))
+              .map((r) => ({
+                sourceItemKey: r.sourceItemKey,
+                sourceFingerprint: r.sourceFingerprint!,
+                ...(r.sourceItemKey.endsWith("/a.md#body")
+                  ? {
+                      project: projectA,
+                      scope: {
+                        kind: "project" as const,
+                        projectKey:
+                          refusal === "single-mapping"
+                            ? bindingZ.projectKey!
+                            : bindingA.projectKey!,
+                      },
+                    }
+                  : refusal === "scope" && r.sourceItemKey.endsWith("/z.md#body")
+                    ? {
+                        project: projectZ,
+                        scope: { kind: "project" as const, projectKey: bindingZ.projectKey! },
+                      }
+                    : { scope: { kind: "user" as const } }),
+              })),
+          };
+          if (refusal === "frontier") {
+            yield* runtime.run(
+              {
+                ...input,
+                operationId: M.MemoryOperationId.make(uuid(701)),
+                items: input.items.filter((r) => r.sourceItemKey.endsWith("/z.md#body")),
+              },
+              Effect.void,
+            );
+          }
+          if (partial) {
+            stopAtA = true;
+            const error = yield* runtime.run(input, Effect.void).pipe(Effect.flip);
+            assert.equal(error._tag, "MemoryStoreConflict");
+            const receipt = yield* service.importPorts.readReceipt(
+              { memorySpaceId: space, environmentId, operationId: input.operationId },
+              Effect.void,
+            );
+            assert.equal(receipt.state, "partial");
+            assert.equal(receipt.items.length, 1);
+            assert.match(receipt.items[0]!.sourceItemKey, /\/0.md#body$/);
+            stopAtA = false;
+          }
+          if (refusal === "scope") remapped = true;
+          if (refusal === "frontier") {
+            // A target whose durable identity moved scope must fail during prepareTarget,
+            // even though the source item and frozen batch still name the original user scope.
+            const z = yield* service.importPorts.readItem(
+              {
+                memorySpaceId: space,
+                environmentId,
+                sourceId,
+                sourceItemKey: input.items.find((r) => r.sourceItemKey.endsWith("/z.md#body"))!
+                  .sourceItemKey,
+              },
+              Effect.void,
+            );
+            assert.isDefined(z);
+            yield* sql`UPDATE memory_identity_ledger SET identity_json=json_set(identity_json,'$.scope',json(${JSON.stringify({ kind: "thread", thread: { environmentId, threadId: "synthetic-other" } })})) WHERE space=${space} AND memory_id=${z!.memoryId}`;
+          }
+          assert.equal((yield* sql`SELECT * FROM memory_project_bindings`).length, 0);
+          const before = yield* inventory;
+          assert.isTrue(before.some((t) => t.name === "memory_project_bindings"));
+          assert.isTrue(before.some((t) => t.name === "memory_compaction_state"));
+          const store = yield* Store.MemoryStore;
+          const changes = yield* Stream.toPull(yield* store.changes(space));
+          const initial = yield* changes;
+          assert.equal(initial.length, 1);
+          commits = 0;
+          bindingReads = 0;
+          const error = yield* runtime.run(input, Effect.void).pipe(Effect.flip);
+          if (refusal === "frontier") {
+            assert.equal(error._tag, "MemoryStoreConflict");
+            if (error._tag === "MemoryStoreConflict") assert.equal(error.code, "identity_mismatch");
+          } else issue(error, "mapping_changed");
+          assert.isAbove(bindingReads, 0);
+          assert.equal(commits, 0);
+          assert.deepEqual(yield* inventory, before);
+          // A synchronous marker write lets us inspect the subscription without sleeps:
+          // its reset must be the very next signal, with no reset from preparation.
+          yield* service.getProjectBinding(
+            { memorySpaceId: space, project: projectA },
+            Effect.void,
+          );
+          const marker = yield* sql<{
+            projection_watermark: number;
+          }>`SELECT projection_watermark FROM memory_compaction_state WHERE space=${space}`;
+          assert.deepEqual(yield* changes, [
+            {
+              memorySpaceId: space,
+              kind: "reset",
+              projectionWatermark: marker[0]!.projection_watermark,
+            },
+          ]);
+        }),
+      ).pipe(
+        Effect.provide(
+          serviceLive((root) =>
+            Effect.sync(() => repository(root, remapped && root.endsWith("/z"))),
+          ),
+        ),
+      );
+    },
+  );
+
+  it.effect("materializes frozen binding atomically with the actual factory import commit", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* setupProjects;
+        const fixture = yield* buildMemoryImportFixture("codex-ad-hoc-v1");
+        const h = harness(batchSnapshot(fixture.snapshot));
+        const service = yield* Service.MemoryService;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        let rollback = true;
+        let commits = 0;
+        const runtime = makeProviderMemoryImport(
+          {
+            ...h.ports,
+            ...service.importPorts,
+            commit: (a, permit) =>
+              store.transact(
+                Effect.gen(function* () {
+                  commits++;
+                  assert.equal((yield* sql`SELECT * FROM memory_project_bindings`).length, 0);
+                  assert.deepEqual(
+                    a.projectBinding,
+                    yield* service.importPorts.binding(
+                      { memorySpaceId: space, project: projectA },
+                      permit,
+                    ),
+                  );
+                  const result = yield* service.importPorts.commit(a, permit);
+                  assert.equal((yield* sql`SELECT * FROM memory_project_bindings`).length, 1);
+                  assert.equal((yield* sql`SELECT * FROM memory_revisions`).length, 1);
+                  if (rollback)
+                    return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+                  return result;
+                }).pipe(
+                  Effect.catchTags({
+                    SqlError: (cause) =>
+                      Effect.fail(
+                        new Store.MemoryStorageError({ stage: "test-transaction", cause }),
+                      ),
+                  }),
+                ),
+              ),
+          },
+          h.reader,
+          parsers,
+          h.primitives,
+        );
+        const d = yield* runtime.run(
+          { action: "discover", memorySpaceId: space, format: "codex" },
+          Effect.void,
+        );
+        if (d.action !== "discover") return assert.fail("discover result");
+        const sourceId = d.sources[0]!.sourceId;
+        const p = yield* runtime.run(
+          { action: "preview", memorySpaceId: space, sourceId },
+          Effect.void,
+        );
+        if (p.action !== "preview") return assert.fail("preview result");
+        const binding = yield* service.importPorts.binding(
+          { memorySpaceId: space, project: projectA },
+          Effect.void,
+        );
+        if (!binding.projectKey) return assert.fail("repository binding");
+        const input: Extract<M.MemoryImportProviderInput, { action: "apply" }> = {
+          action: "apply",
+          memorySpaceId: space,
+          sourceId,
+          sessionId: p.sessionId,
+          operationId: M.MemoryOperationId.make(uuid(710)),
+          items: [
+            {
+              sourceItemKey: p.items[0]!.sourceItemKey,
+              sourceFingerprint: p.items[0]!.sourceFingerprint!,
+              project: projectA,
+              scope: { kind: "project", projectKey: binding.projectKey },
+            },
+          ],
+        };
+        const before = yield* inventory;
+        const error = yield* runtime.run(input, Effect.void).pipe(Effect.flip);
+        assert.equal(error._tag, "MemoryStoreConflict");
+        assert.deepEqual(yield* inventory, before);
+        rollback = false;
+        const result = yield* runtime.run(input, Effect.void);
+        if (result.action !== "apply") return assert.fail("apply result");
+        assert.equal(result.receipt.state, "completed");
+        assert.equal(commits, 2);
+        assert.equal((yield* sql`SELECT * FROM memory_project_bindings`).length, 1);
+        assert.equal((yield* sql`SELECT * FROM memory_revisions`).length, 1);
+      }),
+    ).pipe(Effect.provide(serviceLive((root) => Effect.succeed(repository(root))))),
+  );
+});
+
 describe("ProviderMemoryImport actual Service/Store ports", () => {
   it.effect.each([
     { refusal: "scope", partial: false },
