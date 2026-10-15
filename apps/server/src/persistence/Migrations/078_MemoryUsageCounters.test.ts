@@ -48,7 +48,10 @@ it.effect(
         yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`,
         before,
       );
-      assert.deepStrictEqual(yield* runMigrations(), [[78, "MemoryUsageCounters"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [78, "MemoryUsageCounters"],
+        [79, "MemoryRevertResults"],
+      ]);
       yield* assertUsageCounters;
       assert.deepStrictEqual(yield* runMigrations(), []);
       yield* assertUsageCounters;

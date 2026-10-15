@@ -13,6 +13,7 @@ import searchMigration from "../../persistence/Migrations/073_MemorySearchCounte
 import checkpointMigration from "../../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import reportMigration from "../../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import usageMigration from "../../persistence/Migrations/078_MemoryUsageCounters.ts";
+import revertMigration from "../../persistence/Migrations/079_MemoryRevertResults.ts";
 import lineageMigration from "../../persistence/Migrations/075_MemoryImportLineage.ts";
 import * as Service from "../MemoryService.ts";
 import * as Store from "../MemoryStore.ts";
@@ -1103,6 +1104,7 @@ const database = Layer.effectDiscard(
     Effect.andThen(checkpointMigration),
     Effect.andThen(reportMigration),
     Effect.andThen(usageMigration),
+    Effect.andThen(revertMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const serviceLive = (

@@ -39,6 +39,7 @@ import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
 import type { PreparedConnection } from "../connection/model.ts";
 import type { RpcSession } from "../rpc/session.ts";
+import { requestMemoryQuery } from "../rpc/client.ts";
 import {
   createMemoryEnvironmentAtoms,
   createMemoryTombstoneLedger,
@@ -220,6 +221,7 @@ const harness = Effect.fn(function* (
       responded.add(method);
       return Deferred.await(reply).pipe(Effect.as(value));
     });
+  const historyInputs: unknown[] = [];
   let diagnosticRequests = 0;
   const rpc = {
     [WS_METHODS.memoryHubDiagnostics]: () =>
@@ -251,7 +253,10 @@ const harness = Effect.fn(function* (
       }),
     [WS_METHODS.memoryList]: () => respondOnce("list", pageValue),
     [WS_METHODS.memorySearch]: () => respondOnce("search", pageValue),
-    [WS_METHODS.memoryHistory]: () => respondOnce("history", historyValue),
+    [WS_METHODS.memoryHistory]: (input: unknown) => {
+      historyInputs.push(input);
+      return respondOnce("history", historyValue);
+    },
     [WS_METHODS.memoryReadSource]: () => respondOnce("source", sourcePage),
     [WS_METHODS.memoryImportProvider]: () =>
       Effect.succeed(decodeImport({ action: "discover", sources: [] })),
@@ -296,13 +301,10 @@ const harness = Effect.fn(function* (
     ]),
   );
   const clock = yield* Clock.Clock;
+  const environments = { run, followStream, entries } as unknown as EnvironmentRegistry["Service"];
   const runtime = Atom.runtime(
     Layer.merge(
-      Layer.succeed(EnvironmentRegistry, {
-        run,
-        followStream,
-        entries,
-      } as unknown as EnvironmentRegistry["Service"]),
+      Layer.succeed(EnvironmentRegistry, environments),
       Layer.succeed(Clock.Clock, clock),
     ),
   );
@@ -341,8 +343,10 @@ const harness = Effect.fn(function* (
     otherQueue,
     rpc,
     runtime,
+    environments,
     ledger,
     recreate: () => createMemoryEnvironmentAtoms(runtime, ledger),
+    historyInputs,
     readCount: () => readCount,
     reads,
     readFinalized,
@@ -1854,4 +1858,85 @@ it.effect(
         expect(h.readCount()).toBe(1);
       }),
     ),
+);
+
+it.effect.each([
+  { advertised: undefined, dispatched: undefined },
+  { advertised: false, dispatched: false },
+  { advertised: true, dispatched: true },
+  { advertised: true, dispatched: undefined },
+])(
+  "history gates refused opt-in on atom and dispatch capabilities: %s",
+  ({ advertised: supported, dispatched }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness();
+        h.registry.set(configs(env), {
+          ...config,
+          environment: {
+            ...config.environment,
+            capabilities: {
+              memory: {
+                protocolVersion: 1,
+                ...(supported === undefined ? {} : { refusedReverts: supported }),
+              },
+            },
+          },
+        } as ServerConfig);
+        yield* SubscriptionRef.set(
+          h.active,
+          Option.some({
+            client: h.rpc,
+            initialConfig: Effect.succeed({
+              ...config,
+              environment: {
+                ...config.environment,
+                capabilities: {
+                  memory: {
+                    protocolVersion: 1,
+                    ...(dispatched === undefined ? {} : { refusedReverts: dispatched }),
+                  },
+                },
+              },
+            } as ServerConfig),
+          } as unknown as RpcSession),
+        );
+        const exposure = h.memory.exposureAtom(target);
+        h.registry.mount(exposure);
+        yield* Queue.offer(h.queue, signal("reset"));
+        yield* waitFor(h.registry, exposure, (state) => state.ready);
+        const body = hasBody(
+          h.memory.history({
+            ...readTarget,
+            input: { ...readTarget.input, limit: 10, includeRefusedReverts: true },
+          }),
+        );
+        h.registry.mount(body);
+        yield* Deferred.succeed(h.reply, item);
+        yield* waitFor(h.registry, body, Boolean);
+        expect(h.historyInputs).toEqual([
+          {
+            ...readTarget.input,
+            limit: 10,
+            ...(supported && dispatched ? { includeRefusedReverts: true } : {}),
+          },
+        ]);
+      }),
+    ),
+);
+
+// Direct helper callers bypass atom opt-in and still use the selected session gate.
+it.effect("direct history helper strips caller opt-in for an unsupported session", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* harness();
+      yield* Deferred.succeed(h.reply, item);
+      const input = { ...readTarget.input, limit: 10, includeRefusedReverts: true as const };
+      yield* requestMemoryQuery(h.runtime, h.registry, env, WS_METHODS.memoryHistory, input).pipe(
+        Effect.provideService(EnvironmentRegistry, h.environments),
+      );
+      expect(h.historyInputs).toEqual([{ ...readTarget.input, limit: 10 }]);
+      expect(input.includeRefusedReverts).toBe(true);
+    }),
+  ),
 );

@@ -37,6 +37,7 @@ const payload = M.MemoryPayload.make({
   evidence: [{ origin: "user", messageIds: [] }],
   derivedFromMemoryRevisions: [],
 });
+const decodeRevertResult = Schema.decodeUnknownSync(M.MemoryRevertResult);
 const decodeRevision = Schema.decodeUnknownSync(M.MemoryRevision);
 const decodeOwnerView = Schema.decodeUnknownSync(M.MemoryOwnerSourceReadPolicyView);
 const revision = (n: number) =>
@@ -460,6 +461,61 @@ describe("memory presentation boundaries", () => {
       effectiveAccess: "unknown",
     });
   });
+});
+
+it("uses only the optional server assessment for current permission and reason", () => {
+  for (const [access, reason] of [
+    ["none", "environment_off"],
+    ["read", "read_only_destination"],
+    ["read_write", "ceiling"],
+  ] as const) {
+    expect(
+      presentMemoryRunAccess({
+        memoryGrantCeiling: "read_write",
+        currentMemoryAccess: { access, reason },
+      }),
+    ).toEqual({
+      savedCeiling: "read_write",
+      effectiveAccess: access,
+      effectiveReason: reason,
+    });
+  }
+  expect(presentMemoryRunAccess({ memoryGrantCeiling: "none" }).effectiveAccess).toBe("unknown");
+});
+
+it("refused is settled while retry still checks head, history and originals", () => {
+  const result = decodeRevertResult({
+    operationId: id(60),
+    memoryId: item.memoryId,
+    resolutionId: resolution.resolutionId,
+    revertDeadlineUtc: deadline,
+    status: "refused",
+    failureCode: "source_unavailable",
+  });
+  expect(presentMemoryRevertResult(result)).toMatchObject({
+    label: "Revert attempt refused",
+    settled: true,
+  });
+  const input = {
+    item,
+    entry,
+    history: { ...history, revertResults: [result] },
+    now: Date.parse(applied),
+  };
+  expect(presentMemoryRevert(input)).toMatchObject({
+    canRevert: true,
+    reason: null,
+    notice: "Last revert attempt was refused: source unavailable",
+  });
+  expect(
+    presentMemoryRevert({ ...input, history: { ...input.history, nextCursor: "more" } }).canRevert,
+  ).toBe(false);
+  expect(
+    presentMemoryRevert({ ...input, history: { ...input.history, revisions: [] } }).canRevert,
+  ).toBe(false);
+  expect(
+    presentMemoryRevert({ ...input, item: { ...item, revision: revision(7) } }).canRevert,
+  ).toBe(false);
 });
 
 it("presents separate diagnostics only for an advertised capability", () => {

@@ -1,4 +1,8 @@
-import { checkUsage } from "./MemoryUsageScan.testkit.ts";
+import {
+  checkUsage,
+  scanRevertResultBytes,
+  assertUsageCounters,
+} from "./MemoryUsageScan.testkit.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
@@ -16,12 +20,14 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
 import migration from "../persistence/Migrations/071_Memory.ts";
+import { runMigrations } from "../persistence/Migrations.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import usageMigration from "../persistence/Migrations/078_MemoryUsageCounters.ts";
+import revertMigration from "../persistence/Migrations/079_MemoryRevertResults.ts";
 import * as Store from "./MemoryStore.ts";
 import { CheckpointAccountingError } from "./MemoryCheckpointAccounting.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
@@ -122,6 +128,7 @@ const setup = Layer.effectDiscard(
     Effect.andThen(checkpointMigration),
     Effect.andThen(reportMigration),
     Effect.andThen(usageMigration),
+    Effect.andThen(revertMigration),
     Effect.andThen(searchMigration),
   ),
 ).pipe(Layer.provideMerge(database));
@@ -2992,6 +2999,7 @@ describe("MemoryStore transient source relay", () => {
                 Effect.andThen(checkpointMigration),
                 Effect.andThen(reportMigration),
                 Effect.andThen(usageMigration),
+                Effect.andThen(revertMigration),
                 Effect.andThen(searchMigration),
               ),
             ).pipe(Layer.provideMerge(db)),
@@ -8347,5 +8355,485 @@ it.effect(
       const failed = yield* store.transact(store.readHubUsageTx(space)).pipe(Effect.flip);
       assert.instanceOf(failed, Store.MemoryStorageError);
       assert.instanceOf(failed.cause, CheckpointAccountingError);
+    }).pipe(checkUsage, Effect.provide(live)),
+);
+
+it.effect(
+  "A2 bounded history shares candidate budget, advances empty slots, and uses indexed SQL before decode",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.apply(decision());
+      const item = (yield* store.readAccess(space, memory)).item!;
+      // Invalid codecs in the large tail prove that LIMIT precedes decoding.
+      const ids = Array.from({ length: 2000 }, (_, n) => id(100000 + n));
+      yield* sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at)
+    SELECT ${space},value,${memory},value,'invalid','invalid','inference','invalid',NULL,0 FROM json_each(${JSON.stringify(ids)})`;
+      const queries: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+      const record: Statement.Transformer = (statement) =>
+        Effect.sync(() => {
+          queries.push(statement.compile());
+          return statement;
+        });
+      const first = yield* store
+        .historyPage({ memorySpaceId: space, memoryId: memory, limit: 1 }, item, env)
+        .pipe(Effect.provideService(Statement.CurrentTransformer, record));
+      assert.lengthOf(first.page.revisions, 1);
+      assert.isNotNull(first.page.nextCursor);
+      assert.lengthOf(first.page.resolutions, 0);
+      const keyQueries = queries.filter(([query]) => query.includes("AS key"));
+      assert.lengthOf(keyQueries, 1);
+      let read = 0;
+      for (const [query, params] of keyQueries) {
+        read += (yield* sql.unsafe(query, params)).length;
+        assert.match(query, /LIMIT/);
+        const plan = yield* sql.unsafe<{ detail: string }>(`EXPLAIN QUERY PLAN ${query}`, params);
+        const details = plan.map((r) => r.detail).join("\n");
+        assert.match(
+          details,
+          /SEARCH memory_revisions USING COVERING INDEX memory_revisions_memory_idx/,
+        );
+        assert.notMatch(details, /SCAN|TEMP B-TREE/);
+      }
+      assert.strictEqual(read, 1);
+      yield* sql`DELETE FROM memory_revisions WHERE revision_id IN (SELECT value FROM json_each(${JSON.stringify(ids)}))`;
+      yield* sql`INSERT INTO memory_resolutions(space,resolution_id,memory_id,input_revision_ids_json,input_payload_refs_json,judgment_payload_ref,requested_model_selection_json,effective_provider_model_json,resolving_environment_id,fencing_token,result_revision_id,applied_at,revert_deadline,resolution_json)
+    SELECT ${space},value,${memory},'[]','[]',value,'{}','{}',${env},1,value,0,0,'invalid' FROM json_each(${JSON.stringify(ids)})`;
+      // Null slot candidates consume budget without decoding unrelated resolution JSON.
+      queries.length = 0;
+      const empty = yield* store
+        .historyPage(
+          { memorySpaceId: space, memoryId: memory, limit: 2, cursor: "h1:3:0" },
+          item,
+          env,
+        )
+        .pipe(Effect.provideService(Statement.CurrentTransformer, record));
+      assert.isEmpty(empty.page.revertResults);
+      assert.isNotNull(empty.page.nextCursor);
+      const next = yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 2, cursor: empty.page.nextCursor! },
+        item,
+        env,
+      );
+      assert.notStrictEqual(next.page.nextCursor, empty.page.nextCursor);
+      const selected = queries.find(([query]) => query.includes("AS key"))!;
+      assert.lengthOf(yield* sql.unsafe(selected[0], selected[1]), 2);
+      yield* sql`DELETE FROM memory_resolutions WHERE resolution_json='invalid'`;
+      for (const [category, table] of [
+        [0, "memory_revisions"],
+        [1, "memory_resolutions"],
+        [2, "memory_report_outbox"],
+        [3, "memory_resolutions"],
+        [4, "memory_tombstones"],
+      ] as const) {
+        queries.length = 0;
+        yield* store
+          .historyPage(
+            { memorySpaceId: space, memoryId: memory, limit: 2, cursor: `h1:${category}:0` },
+            item,
+            env,
+          )
+          .pipe(Effect.provideService(Statement.CurrentTransformer, record));
+        const captured = queries.filter(([query]) => query.includes("AS key"));
+        assert.isNotEmpty(captured);
+        const [query, params] = captured[0]!;
+        assert.include(query, `FROM ${table} `);
+        assert.match(query, /LIMIT/);
+        assert.deepStrictEqual(params, [space, memory, 0, 2]);
+        const details = (yield* sql.unsafe<{ detail: string }>(
+          `EXPLAIN QUERY PLAN ${query}`,
+          params,
+        ))
+          .map((r) => r.detail)
+          .join("\n");
+        // Keep the actual SQLite plan in the focused-run evidence artifact.
+        yield* Effect.logInfo("A2 QUERY PLAN", table, details);
+        assert.match(details, /SEARCH/);
+        assert.match(details, /\(space=\? AND memory_id=\?/);
+        if (table === "memory_report_outbox") assert.include(details, "memory_report_memory_idx");
+        assert.notMatch(details, /SCAN|TEMP B-TREE/);
+      }
+    }).pipe(checkUsage, Effect.provide(live)),
+);
+
+it.effect(
+  "A2 resolution slot CAS keeps acceptance sticky and rolls back with its transaction",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const resolutionId = M.MemoryResolutionId.make(id(90000));
+      yield* sql`INSERT INTO memory_resolutions(space,resolution_id,memory_id,input_revision_ids_json,input_payload_refs_json,judgment_payload_ref,requested_model_selection_json,effective_provider_model_json,resolving_environment_id,fencing_token,result_revision_id,applied_at,revert_deadline,resolution_json) VALUES (${space},${resolutionId},${memory},'[]','[]','judgment','{}','{}',${env},1,${id(90001)},0,0,'{}')`;
+      const baseline = (yield* sql<{
+        value: number;
+      }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='memory_input_bytes' AND scope_key=''`)[0]!
+        .value;
+      const checkInput = Effect.gen(function* () {
+        const raw = (yield* sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='memory_input_bytes' AND scope_key=''`)[0]!
+          .value;
+        assert.strictEqual(
+          raw - baseline,
+          (yield* scanRevertResultBytes).find((r) => r.space === space)?.bytes ?? 0,
+        );
+      });
+      const write = (
+        n: number,
+        slot: Parameters<Store.MemoryStore["Service"]["recordRevertResultTx"]>[0]["slot"],
+        settlement = false,
+      ) =>
+        store.recordRevertResultTx({
+          space,
+          memoryId: memory,
+          resolutionId,
+          operationId: M.MemoryOperationId.make(id(n)),
+          slot,
+          settlement,
+        });
+      yield* store.transact(write(90002, { status: "pending" }));
+      yield* checkInput;
+      yield* store.transact(write(90003, { status: "revision_changed" }));
+      yield* checkInput;
+      yield* store.transact(write(90002, { status: "revert_expired" }, true));
+      assert.deepStrictEqual(yield* sql`SELECT revert_operation_id FROM memory_resolutions`, [
+        { revert_operation_id: id(90003) },
+      ]);
+      const rollback = yield* store
+        .transact(write(90004, { status: "pending" }).pipe(Effect.andThen(Effect.fail("rollback"))))
+        .pipe(Effect.exit);
+      assert.strictEqual(rollback._tag, "Failure");
+      yield* store.transact(
+        write(90002, { status: "accepted", revisionId: M.MemoryRevisionId.make(id(90005)) }, true),
+      );
+      yield* store.transact(write(90006, { status: "forgotten" }));
+      yield* store.transact(write(90007, { status: "pending" }));
+      yield* store.transact(
+        write(90008, { status: "accepted", revisionId: M.MemoryRevisionId.make(id(90009)) }, true),
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT revert_operation_id,revert_result_json FROM memory_resolutions`,
+        [
+          {
+            revert_operation_id: id(90002),
+            revert_result_json: `{"status":"accepted","revisionId":"${id(90005)}"}`,
+          },
+        ],
+      );
+      yield* checkInput;
+      yield* sql`DELETE FROM memory_resolutions WHERE space=${space} AND resolution_id=${resolutionId}`;
+      assert.strictEqual(
+        (yield* sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='memory_input_bytes' AND scope_key=''`)[0]!
+          .value,
+        0,
+      );
+    }).pipe(checkUsage, Effect.provide(live)),
+);
+
+it.effect.each(["pending", "revision_changed", "revert_expired", "forgotten", "accepted"] as const)(
+  "A2 reopens file SQLite with durable %s result and no body fields",
+  (status) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "a2-slot-restart-" });
+      const filename = `${dir}/memory.sqlite`;
+      const first = Store.layer.pipe(
+        Layer.provideMerge(
+          Layer.effectDiscard(runMigrations()).pipe(
+            Layer.provideMerge(NodeSqliteClient.layer({ filename })),
+          ),
+        ),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const store = yield* Store.MemoryStore;
+          yield* sql`INSERT INTO memory_resolutions(space,resolution_id,memory_id,input_revision_ids_json,input_payload_refs_json,judgment_payload_ref,requested_model_selection_json,effective_provider_model_json,resolving_environment_id,fencing_token,result_revision_id,applied_at,revert_deadline,resolution_json) VALUES (${space},${id(95000)},${memory},'[]','[]','judgment','{}','{}',${env},1,${id(95001)},0,0,'{}')`;
+          yield* store.transact(
+            store.recordRevertResultTx({
+              space,
+              memoryId: memory,
+              resolutionId: M.MemoryResolutionId.make(id(95000)),
+              operationId: M.MemoryOperationId.make(id(95002)),
+              slot:
+                status === "accepted"
+                  ? { status, revisionId: M.MemoryRevisionId.make(id(95003)) }
+                  : { status },
+            }),
+          );
+        }).pipe(Effect.provide(first)),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          assert.deepStrictEqual(
+            yield* sql`SELECT revert_operation_id,json_extract(revert_result_json,'$.status') AS status,json_extract(revert_result_json,'$.revisionId') AS revision_id FROM memory_resolutions`,
+            [
+              {
+                revert_operation_id: id(95002),
+                status,
+                revision_id: status === "accepted" ? id(95003) : null,
+              },
+            ],
+          );
+          assert.isEmpty(yield* sql`SELECT 1 FROM memory_payloads`);
+          yield* assertUsageCounters;
+        }).pipe(
+          Effect.provide(
+            Store.layer.pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename }))),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+// Synthetic checkpoint has the same resolve R and accepted revert X on both devices.
+const decodeCheckpointResolution = Schema.decodeUnknownSync(M.MemoryResolution);
+const acceptedRevertCheckpoint = () => {
+  const base = checkpoint();
+  const original = base.revisions[0]!;
+  const secondOp = operation(4);
+  const resolveOp = operation(5);
+  const revertOp = operation(6);
+  if (secondOp.kind === "forget" || resolveOp.kind === "forget" || revertOp.kind === "forget")
+    throw new Error("fixture");
+  const inputs = [original.revision.revisionId, secondOp.revision.revisionId];
+  const resolved = { ...resolveOp.revision, parents: inputs };
+  const reverted = { ...revertOp.revision, parents: [resolved.revisionId] };
+  const resolution = decodeCheckpointResolution({
+    resolutionId: id(900),
+    memorySpaceId: space,
+    memoryId: memory,
+    inputRevisionIds: inputs,
+    inputPayloadRefs: inputs,
+    judgmentRef: id(900),
+    requestedModelSelection: { instanceId: "fixture", model: "synthetic" },
+    effectiveProvider: "codex",
+    effectiveModel: "synthetic",
+    resolvingEnvironmentId: env,
+    fencingToken: 1,
+    resultRevisionId: resolved.revisionId,
+    appliedAtUtc: now,
+    revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+  });
+  const compact = (revision: M.MemoryRevision, sequence: number): M.MemoryCompactReceipt => ({
+    ...base.compactReceipts[0]!,
+    revisionId: revision.revisionId,
+    receipt: {
+      ...base.compactReceipts[0]!.receipt,
+      operationId: revision.operationId,
+      hubSequence: sequence,
+    },
+  });
+  const resolveReceipt: M.MemoryCompactReceipt = {
+    ...compact(resolved, 3),
+    operationKind: "resolve",
+    resolutionId: resolution.resolutionId,
+    attemptId: M.MemoryOperationId.make(id(901)),
+    fencingToken: 1,
+    receipt: {
+      ...compact(resolved, 3).receipt,
+      resolutionApproval: {
+        resolutionId: resolution.resolutionId,
+        appliedAtUtc: resolution.appliedAtUtc,
+        revertDeadlineUtc: resolution.revertDeadlineUtc,
+      },
+    },
+    reportGuard: {
+      reportId: "b".repeat(64),
+      resolvingEnvironmentId: env,
+      resolutionId: resolution.resolutionId,
+      outcome: "resolved",
+    },
+  };
+  const revertReceipt: M.MemoryCompactReceipt = {
+    ...compact(reverted, 4),
+    operationKind: "revert",
+    resolutionId: resolution.resolutionId,
+    revertsResolutionId: resolution.resolutionId,
+    reportGuard: {
+      reportId: "c".repeat(64),
+      resolvingEnvironmentId: env,
+      resolutionId: resolution.resolutionId,
+      outcome: "reverted",
+    },
+  };
+  return {
+    ...base,
+    checkpointSequence: 4,
+    causalBoundary: { ...base.causalBoundary, checkpointSequence: 4 },
+    items: [{ ...base.items[0]!, revision: reverted } as M.MemoryItem],
+    revisions: [
+      original,
+      { revision: secondOp.revision, payload: secondOp.payload },
+      { revision: resolved, payload: resolveOp.payload },
+      { revision: reverted, payload: revertOp.payload },
+    ],
+    resolutions: [{ resolution, payload: null }],
+    compactReceipts: [
+      base.compactReceipts[0]!,
+      compact(secondOp.revision, 2),
+      resolveReceipt,
+      revertReceipt,
+    ],
+    fences: [{ ...base.fences[0]!, highestFencingToken: 1 }],
+  } satisfies M.MemoryHubCheckpointPage;
+};
+it.effect.each([false, true])(
+  "A2 bootstrap restores accepted correlation across split pages: %s",
+  (split) =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const full = acceptedRevertCheckpoint();
+      const identity = { ...fixtureCheckpointIdentity, expectedCheckpointSequence: 4 };
+      assert.isTrue(M.validateMemoryCheckpointRecords([full]));
+      // Original device's durable settlement, then a genuinely empty member store.
+      yield* store.transact(
+        store.advanceBootstrapTx({
+          ...identity,
+          expectedState: "unbound",
+          nextState: "staging",
+          snapshotToken: identity.expectedSnapshotToken,
+          checkpointSequence: 4,
+          nextCursor: null,
+        }),
+      );
+      yield* store.installCheckpointPage({ ...identity, page: full });
+      yield* store.completeCheckpoint({ ...identity, pageCount: 1 });
+      const source = (yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 100 },
+        (yield* store.readAccess(space, memory)).item!,
+        env,
+      )).page.revertResults;
+      assert.strictEqual(source[0]?.status, "accepted");
+      assert.strictEqual(source[0]?.operationId, full.compactReceipts[3]!.receipt.operationId);
+      assert.isTrue(
+        source[0]?.status === "accepted" &&
+          source[0].receipt.revisionId === full.revisions[3]!.revision.revisionId,
+      );
+      const replica = Effect.gen(function* () {
+        const fresh = yield* Store.MemoryStore;
+        assert.isUndefined((yield* fresh.readAccess(space, memory)).item);
+        yield* fresh.transact(
+          fresh.advanceBootstrapTx({
+            ...identity,
+            expectedState: "unbound",
+            nextState: "staging",
+            snapshotToken: identity.expectedSnapshotToken,
+            checkpointSequence: 4,
+            nextCursor: null,
+          }),
+        );
+        const pages: M.MemoryHubCheckpointPage[] = split
+          ? [
+              { ...full, resolutions: [], nextCursor: "next", bootstrapComplete: false },
+              {
+                ...full,
+                pageOrdinal: 1,
+                items: [],
+                revisions: [],
+                compactReceipts: [],
+                identities: [],
+                fences: [],
+                resolutions: full.resolutions,
+              },
+            ]
+          : [full];
+        for (const page of pages) yield* fresh.installCheckpointPage({ ...identity, page });
+        yield* fresh.completeCheckpoint({ ...identity, pageCount: pages.length });
+        const history = (yield* fresh.historyPage(
+          { memorySpaceId: space, memoryId: memory, limit: 100 },
+          (yield* fresh.readAccess(space, memory)).item!,
+          env,
+        )).page;
+        assert.isNull(history.nextCursor);
+        assert.deepStrictEqual(history.revertResults, source);
+      });
+      yield* replica.pipe(checkUsage, Effect.provide(Layer.fresh(live)));
+    }).pipe(checkUsage, Effect.provide(live)),
+);
+
+it.effect(
+  "A2 live revision keyset survives deletion and sees only insertions ahead of cursor",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.apply(decision());
+      const item = (yield* store.readAccess(space, memory)).item!;
+      const insert = (row: number, n: number) =>
+        sql`INSERT INTO memory_revisions(rowid,space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at) SELECT ${row},space,${id(n)},memory_id,${id(n + 1)},parents_json,scope_json,assertion_kind,provenance_json,NULL,created_at FROM memory_revisions LIMIT 1`;
+      yield* insert(10, 70001);
+      const first = (yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 1 },
+        item,
+        env,
+      )).page;
+      yield* insert(11, 70003);
+      yield* sql`DELETE FROM memory_revisions WHERE rowid=1`;
+      // Reuse behind the cursor is visible only when restarting.
+      yield* insert(1, 70005);
+      const rest = (yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 100, cursor: first.nextCursor! },
+        item,
+        env,
+      )).page;
+      assert.deepStrictEqual(
+        rest.revisions.map((r) => r.revision.revisionId),
+        [id(70001), id(70003)],
+      );
+      const restart = (yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 100 },
+        item,
+        env,
+      )).page;
+      assert.deepStrictEqual(
+        restart.revisions.map((r) => r.revision.revisionId),
+        [id(70005), id(70001), id(70003)],
+      );
+    }).pipe(checkUsage, Effect.provide(live)),
+);
+
+it.effect(
+  "A2 UTF-8 page overflow retries the candidate and rejects a single oversized candidate",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.apply(decision());
+      const item = (yield* store.readAccess(space, memory)).item!;
+      const body = {
+        text: "한".repeat(1000),
+        evidence: [{ origin: "user", messageIds: ["m".repeat(30000)] }],
+        derivedFromMemoryRevisions: [],
+      };
+      yield* sql`UPDATE memory_payloads SET body_json=${JSON.stringify(body)}`;
+      yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) SELECT space,${id(71001)},memory_id,body_json,dependencies_json FROM memory_payloads LIMIT 1`;
+      yield* sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at) SELECT space,${id(71001)},memory_id,${id(71002)},parents_json,scope_json,assertion_kind,provenance_json,${id(71001)},created_at FROM memory_revisions LIMIT 1`;
+      const first = (yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 100 },
+        item,
+        env,
+      )).page;
+      assert.lengthOf(first.revisions, 1);
+      assert.isAtMost(new TextEncoder().encode(JSON.stringify(first)).length, 65536);
+      const next = (yield* store.historyPage(
+        { memorySpaceId: space, memoryId: memory, limit: 100, cursor: first.nextCursor! },
+        item,
+        env,
+      )).page;
+      assert.strictEqual(next.revisions[0]?.revision.revisionId, id(71001));
+      assert.isAtMost(new TextEncoder().encode(JSON.stringify(next)).length, 65536);
+      // Large valid revision metadata makes the single pair exceed the page budget.
+      yield* sql`UPDATE memory_payloads SET body_json=${JSON.stringify({ ...body, evidence: [{ origin: "user", messageIds: ["m".repeat(60000)] }] })}`;
+      yield* sql`UPDATE memory_revisions SET provenance_json=${JSON.stringify({ environmentId: "e".repeat(3000) })}`;
+      const error = yield* store
+        .historyPage({ memorySpaceId: space, memoryId: memory, limit: 100 }, item, env)
+        .pipe(Effect.flip);
+      assert.instanceOf(error, Store.MemoryStoreConflict);
+      assert.strictEqual(error.code, "payload_too_large");
     }).pipe(checkUsage, Effect.provide(live)),
 );

@@ -1,4 +1,4 @@
-import { MemoryTaskGrantCeilingField } from "./memory.ts";
+import { MemoryCurrentAccess, MemoryTaskGrantCeilingField } from "./memory.ts";
 import * as Schema from "effect/Schema";
 
 import {
@@ -189,6 +189,7 @@ export type ScheduledTaskWebhookEndpoint = typeof ScheduledTaskWebhookEndpoint.T
 
 export const ScheduledTask = Schema.Struct({
   memoryGrantCeiling: MemoryTaskGrantCeilingField,
+  currentMemoryAccess: Schema.optionalKey(MemoryCurrentAccess),
   id: ScheduledTaskId,
   title: TrimmedNonEmptyString,
   prompt: TrimmedNonEmptyString,
