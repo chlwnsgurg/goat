@@ -2469,6 +2469,19 @@ describe("MemoryImport physical-growth source harness", () => {
                       `${directory}/resolution-refusals.json`,
                       encodeUnknown(resolutionRefusals),
                     );
+                    // Match Sync's terminal cleanup: a refused attempt must release its lease.
+                    yield* hub.release(
+                      {
+                        protocolVersion: 1,
+                        memorySpaceId: space,
+                        memoryId: id,
+                        conflictId: lease.conflictId,
+                        holderEnvironmentId: environmentId,
+                        attemptId: lease.attemptId,
+                        fencingToken: lease.fencingToken,
+                      },
+                      authority.principal,
+                    );
                     continue;
                   }
                   assert.strictEqual(receipt.outcome, "accepted");
