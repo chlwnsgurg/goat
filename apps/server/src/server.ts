@@ -5,6 +5,7 @@ import * as NodeCrypto from "node:crypto";
 import { ProviderMemoryImportRuntime } from "./memory/imports/MemoryImportTypes.ts";
 import {
   acquireMemoryImportReader,
+  preflightMemoryImportStateDirectory,
   type MemoryImportReaderConfig,
 } from "./memory/imports/MemoryImportReader.ts";
 import { makeProviderMemoryImport } from "./memory/imports/ProviderMemoryImport.ts";
@@ -742,24 +743,33 @@ export const layerMemoryImport = (config?: MemoryImportReaderConfig) =>
       const home = yield* HostProcess.HomeDirectory;
       const gitExecutable =
         config === undefined ? yield* resolveCommandPath("git") : config.gitExecutable;
-      const reader = yield* acquireMemoryImportReader(
-        config ?? {
-          stateDir: server.stateDir,
-          ...(gitExecutable ? { gitExecutable } : {}),
-          roots: [
-            { format: "codex", rootSlot: "default", path: path.join(home, ".codex") },
-            { format: "claude", rootSlot: "default", path: path.join(home, ".claude", "projects") },
-            {
-              format: "omo",
-              rootSlot: "default",
-              path: path.join(home, ".omo", "memory", "agents"),
-            },
-          ],
-        },
-      ).pipe(Effect.result);
+      const readerConfig = config ?? {
+        stateDir: server.stateDir,
+        ...(gitExecutable ? { gitExecutable } : {}),
+        roots: [
+          { format: "codex", rootSlot: "default", path: path.join(home, ".codex") },
+          { format: "claude", rootSlot: "default", path: path.join(home, ".claude", "projects") },
+          {
+            format: "omo",
+            rootSlot: "default",
+            path: path.join(home, ".omo", "memory", "agents"),
+          },
+        ],
+      };
+      const reader = yield* preflightMemoryImportStateDirectory(readerConfig.stateDir).pipe(
+        Effect.andThen(acquireMemoryImportReader(readerConfig)),
+        Effect.result,
+      );
       if (reader._tag === "Failure") {
         yield* Effect.logWarning("Provider memory import unavailable", {
           issue: reader.failure.issue,
+          ...(reader.failure.issue === "path_rejected"
+            ? {
+                stateDir: readerConfig.stateDir,
+                recovery:
+                  "Match the stateDir owner to the server execution UID. If shared writes are not needed, remove group/other write permission and restart. If shared writes are needed, use a dedicated stateDir.",
+              }
+            : {}),
         });
         return Layer.empty;
       }

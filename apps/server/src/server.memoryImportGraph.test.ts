@@ -15,6 +15,8 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpRouter from "effect/http/HttpRouter";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- independent synthetic source hash/mtime oracle.
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as Logger from "effect/Logger";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- independent synthetic source hash oracle.
 import * as NodeCrypto from "node:crypto";
 import * as Config from "./config.ts";
@@ -51,6 +53,10 @@ import {
   layerMemorySyncRuntime,
   MemorySourceReadBinding,
 } from "./server.ts";
+
+// Actual filesystem semantics must not depend on the app's platform override.
+// oxlint-disable-next-line goat/no-global-process-runtime -- synthetic filesystem permission oracle.
+const posixPermissions = NodeOS.platform() !== "win32";
 
 const grants = ["memory:write", "filesystem:read"] as const;
 const id = () => M.MemoryOperationId.make(NodeCrypto.randomUUID());
@@ -348,7 +354,7 @@ it.effect.each(["codex-handbook-v1", "claude-topic-v1", "omo-memory-core-beta63"
 );
 
 it.effect(
-  "production defaults acquire reader and import from a synthetic home without snapshot setup",
+  "production defaults acquire reader and import from a synthetic home under umask 002 without snapshot setup",
   () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -366,7 +372,14 @@ it.effect(
       // Only provider input exists here. Config prepares server state; the production
       // reader must create its own private snapshot directories without an override.
       assert.deepEqual(NodeFS.readdirSync(home), [".codex"]);
+      // Scoped to this sequential test's worker; restore even when graph acquisition fails.
+      if (posixPermissions)
+        yield* Effect.acquireRelease(
+          Effect.sync(() => process.umask(0o002)),
+          (previous) => Effect.sync(() => process.umask(previous)),
+        );
       const g = yield* graph(undefined, undefined, undefined, home);
+      if (posixPermissions) assert.equal(NodeFS.lstatSync(g.stateDir).mode & 0o777, 0o700);
       assert.equal(
         (yield* Effect.serviceOption(ProviderMemoryImportRuntime).pipe(
           Effect.provideContext(g.context),
@@ -378,8 +391,10 @@ it.effect(
         const stat = NodeFS.lstatSync(`${g.stateDir}/${path}`);
         assert.isTrue(stat.isDirectory());
         assert.isFalse(stat.isSymbolicLink());
-        assert.equal(stat.mode & 0o777, 0o700);
-        assert.equal(stat.uid, process.getuid!());
+        if (posixPermissions) {
+          assert.equal(stat.mode & 0o777, 0o700);
+          assert.equal(stat.uid, process.getuid!());
+        }
       }
       const discovered = yield* g.call({
         action: "discover",
@@ -418,6 +433,79 @@ it.effect(
       assert.equal(item.revision.provenance.importSource?.sourceId, sourceId);
       assert.deepEqual(stamp(source), before);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  { timeout: 120000 },
+);
+
+it.effect.skipIf(!posixPermissions)(
+  "existing 0775 stateDir disables import with recovery guidance and keeps core and hub working",
+  () => {
+    const logs: unknown[] = [];
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const temporaryHome = yield* fs.makeTempDirectoryScoped({ prefix: "wp5-shared-state-" });
+      const home = NodeFS.realpathSync(temporaryHome);
+      const stateDir = `${home}/userdata`;
+      NodeFS.mkdirSync(stateDir);
+      NodeFS.chmodSync(stateDir, 0o775);
+      const g = yield* graph(undefined, undefined, undefined, home);
+      assert.equal(NodeFS.lstatSync(stateDir).mode & 0o777, 0o775);
+      assert.isFalse(NodeFS.existsSync(`${stateDir}/memory-import`));
+      assert.equal(
+        (yield* Effect.serviceOption(ProviderMemoryImportRuntime).pipe(
+          Effect.provideContext(g.context),
+        ))._tag,
+        "None",
+      );
+      assert.isUndefined(g.descriptor.capabilities.memory?.importProvider);
+      assert.equal(g.descriptor.capabilities.memory?.protocolVersion, 1);
+      assert.equal(g.descriptor.capabilities.memoryHubProtocolVersion, 1);
+      // This is a live core read and hub sync, not just capability labels.
+      yield* g.tick;
+      assert.equal(
+        (yield* Context.get(g.context, Sync.MemorySyncService).readLocalReadiness()).bootstrap,
+        "ready",
+      );
+      assert.deepEqual(
+        (yield* g.service.list(
+          { memorySpaceId: g.space, limit: 10, includeQuarantined: false },
+          Effect.void,
+        )).items,
+        [],
+      );
+      const unavailable = yield* g
+        .call({
+          action: "discover",
+          memorySpaceId: g.space,
+          format: "codex",
+        })
+        .pipe(Effect.flip);
+      assert.equal(unavailable._tag, "MemoryRpcError");
+      const warning = logs.find(
+        (message) => Array.isArray(message) && message[0] === "Provider memory import unavailable",
+      );
+      assert.deepEqual(warning, [
+        "Provider memory import unavailable",
+        {
+          issue: "path_rejected",
+          stateDir,
+          recovery:
+            "Match the stateDir owner to the server execution UID. If shared writes are not needed, remove group/other write permission and restart. If shared writes are needed, use a dedicated stateDir.",
+        },
+      ]);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.merge(
+          NodeServices.layer,
+          Logger.layer([
+            Logger.make(({ message }) => {
+              logs.push(message);
+            }),
+          ]),
+        ),
+      ),
+    );
+  },
   { timeout: 120000 },
 );
 

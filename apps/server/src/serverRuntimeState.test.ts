@@ -1,4 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- independent synthetic filesystem permission oracle.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -30,6 +33,30 @@ describe("server ownership", () => {
     config: { host: undefined, devUrl: undefined },
     port: 3773,
   });
+
+  // oxlint-disable-next-line goat/no-global-process-runtime -- actual filesystem semantics, independent of app overrides.
+  it.effect.skipIf(NodeOS.platform() === "win32")(
+    "creates private ownership state under umask 002 and preserves existing 0775 state",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-owner-mode-" });
+        yield* Effect.acquireRelease(
+          Effect.sync(() => process.umask(0o002)),
+          (previous) => Effect.sync(() => process.umask(previous)),
+        );
+        const stateDir = `${root}/userdata`;
+        const statePath = `${stateDir}/server-runtime.json`;
+        yield* Effect.scoped(ServerOwnership.acquireServerOwnership(statePath));
+        assert.equal(NodeFS.lstatSync(stateDir).mode & 0o777, 0o700);
+        const dbPath = `${stateDir}/server-owner.sqlite`;
+        const before = NodeFS.lstatSync(dbPath).mode & 0o777;
+        NodeFS.chmodSync(stateDir, 0o775);
+        yield* Effect.scoped(ServerOwnership.acquireServerOwnership(statePath));
+        assert.equal(NodeFS.lstatSync(stateDir).mode & 0o777, 0o775);
+        assert.equal(NodeFS.lstatSync(dbPath).mode & 0o777, before);
+      }).pipe(Effect.provide(layerOwnership), Effect.scoped),
+  );
 
   it.effect("lets only one of two racing starts own a state directory", () =>
     Effect.gen(function* () {
