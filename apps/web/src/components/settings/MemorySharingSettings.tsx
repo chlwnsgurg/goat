@@ -26,7 +26,7 @@ import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { isMemoryEnvironmentAvailable, memoryOwnerDesiredIds } from "./MemorySettings.logic";
-import { memoryDeviceFlow } from "./memoryDeviceFlow";
+import { memoryDeviceFlow } from "@goat/client-runtime/memory-device-flow";
 
 const decodeHubAddress = Schema.decodeUnknownSync(MemoryHubEndpoint);
 const loopbackAddress = (value: string) => {

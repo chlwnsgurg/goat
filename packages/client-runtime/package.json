@@ -458,6 +458,10 @@
     "./pull-request-markdown": {
       "types": "./src/pullRequestMarkdown.ts",
       "default": "./src/pullRequestMarkdown.ts"
+    },
+    "./memory-device-flow": {
+      "types": "./src/memoryDeviceFlow.ts",
+      "default": "./src/memoryDeviceFlow.ts"
     }
   },
   "scripts": {

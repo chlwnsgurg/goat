@@ -55,7 +55,7 @@ afterEach(async () => {
   await view?.unmount();
   h?.dispose();
 });
-it("opens memory from both platform header actions without substituting the environment", async () => {
+it("keeps memory management out of persistent headers on both platforms", async () => {
   h = createNativeMemoryHarness();
   const props = {
     title: "Synthetic thread",
@@ -78,23 +78,8 @@ it("opens memory from both platform header actions without substituting the envi
   } as unknown as Parameters<typeof ThreadHeader>[0];
   view = renderNative(h, <ThreadHeader {...props} />);
   await view.render();
-  await view.click("iOS thread-memory");
-  await view.click("Android Open memory");
-  expect(h.navigations).toHaveLength(2);
-  for (const call of h.navigations)
-    expect(call).toMatchObject([
-      "SettingsSheet",
-      {
-        screen: "SettingsContent",
-        params: {
-          screen: "SettingsMemory",
-          params: {
-            environmentId: nativeEnv,
-            thread: { environmentId: nativeEnv, threadId: "synthetic-thread" },
-          },
-        },
-      },
-    ]);
+  expect(view.container.textContent).not.toContain("memory");
+  expect(h.navigations).toHaveLength(0);
   await act(async () => h.registry.set(h.configs(nativeEnv), null));
   await view.rerender(<ThreadHeader {...props} />);
   expect(view.container.textContent).not.toContain("memory");

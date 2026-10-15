@@ -3,8 +3,6 @@ import { useNavigation, type StaticScreenProps } from "@react-navigation/native"
 import {
   AuthMemoryReadScope,
   AuthOrchestrationReadScope,
-  EnvironmentId as EnvironmentIdSchema,
-  MemorySpaceId as MemorySpaceIdSchema,
   MemoryId,
   MemoryOperationId,
   supportsMemoryProtocol,
@@ -13,10 +11,6 @@ import {
   type MemoryScope,
   type MemorySpaceId,
   type MemorySyncStatus,
-  type MemoryHubSettingsView,
-  type MemoryOwnerSourceReadPolicyView,
-  type MemoryProjectBinding,
-  type MemoryHubSettings,
   type MemoryReportReference,
   type MemoryReadSourceInput,
   type MemoryHistoryPage,
@@ -26,9 +20,6 @@ import {
 } from "@goat/contracts";
 import {
   presentMemoryItem,
-  presentMemorySync,
-  presentMemoryForget,
-  presentMemoryOwnerPolicy,
   presentMemoryResolution,
   presentMemoryRevertResult,
   presentMemoryRevert,
@@ -54,17 +45,28 @@ import { useHomeThreadSelection } from "../home/home-thread-navigation";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsActionRow } from "./components/SettingsActionRow";
+import { MemoryAdministration } from "./MemorySharingSettings";
 import { SettingsRow } from "./components/SettingsRow";
 import {
   memoryExpectedHeads,
-  memoryScopeForSelection,
-  toggleMemoryRequester,
   validateMemoryDestination,
   type MemoryScreenParams,
 } from "./SettingsMemoryRouteScreen.logic";
 
 const operationId = () => MemoryOperationId.make(Crypto.randomUUID());
 const PAGE_SIZE = 30;
+function formatMemoryTime(value: string | null) {
+  if (!value) return "Unavailable";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "Unavailable"
+    : date.toLocaleString([], {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+}
 function failureMessage(result: Parameters<typeof squashAtomCommandFailure>[0]) {
   const failure = squashAtomCommandFailure(result);
   return failure instanceof Error ? failure.message : "The request could not be completed.";
@@ -80,6 +82,7 @@ function Action(props: {
   readonly label: string;
   readonly onPress: () => void;
   readonly disabled?: boolean;
+  readonly tone?: "danger";
 }) {
   return <SettingsActionRow icon="brain" {...props} />;
 }
@@ -146,7 +149,7 @@ function MemoryConfirmation({
         <Copy>{title}</Copy>
         <Copy>{message}</Copy>
         <Action label="Cancel" onPress={onClose} />
-        <Action label={label} onPress={onConfirm} />
+        <Action label={label} tone="danger" onPress={onConfirm} />
       </View>
     </Modal>
   );
@@ -188,7 +191,7 @@ export function MemoryEnvironmentEntry({
   return visible ? (
     <SettingsRow
       icon="brain"
-      label={`Memory · ${savedConnectionsById[environmentId]?.environmentLabel ?? environmentId}`}
+      label={`Memory · ${savedConnectionsById[environmentId]?.environmentLabel ?? "Unknown device"}`}
       onPress={open}
     />
   ) : null;
@@ -255,11 +258,6 @@ function MemoryEnvironment({
 }) {
   const { environmentId } = params;
   const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
-  const [fixedSpace, setFixedSpace] = useState(params.memorySpaceId ?? null);
-  const fixSpace = useCallback(
-    (value: MemorySpaceId) => setFixedSpace((current) => current ?? value),
-    [],
-  );
   const session = useAtomValue(environmentSession.preparedConnectionValueAtom(environmentId));
   const [connectionVersion, setConnectionVersion] = useState({ connection: session, version: 0 });
   if (connectionVersion.connection !== session)
@@ -288,8 +286,7 @@ function MemoryEnvironment({
   return (
     <MemoryConnected
       key={`${connectionVersion.version}:${readAllowed}:${adminAllowed}:${writeAllowed}`}
-      params={fixedSpace ? { ...params, memorySpaceId: fixedSpace } : params}
-      onSpace={fixSpace}
+      params={params}
       readAllowed={readAllowed}
     />
   );
@@ -327,19 +324,17 @@ function MemoryConnectionHelp({
 
 function MemoryConnected({
   params,
-  onSpace,
   readAllowed,
 }: {
   readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
   readonly readAllowed: boolean;
-  readonly onSpace: (space: MemorySpaceId) => void;
 }) {
   const registry = useContext(RegistryContext);
   const { environmentId } = params;
   const sync = useAtomCommand(memory.syncStatus);
   const [status, setStatus] = useState<MemorySyncStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [diagnostics, setDiagnostics] = useState(false);
+  const [savedSpace, setSavedSpace] = useState<MemorySpaceId | null>(null);
   const generation = useRef(0);
   const mounted = useRef(true);
   useEffect(() => {
@@ -362,147 +357,93 @@ function MemoryConnected({
       return;
     if (AsyncResult.isSuccess(result)) {
       setStatus(result.value);
-      if (result.value.memorySpaceId) onSpace(result.value.memorySpaceId);
+
       setError(null);
     } else if (AsyncResult.isFailure(result)) setError(failureMessage(result));
-  }, [registry, environmentId, sync, onSpace]);
+  }, [registry, environmentId, sync]);
   useEffect(() => {
     // The command synchronizes the selected environment, not derived render state.
     // oxlint-disable-next-line react/set-state-in-effect
     if (readAllowed) void load();
   }, [load, readAllowed]);
-  const space = params.memorySpaceId ?? status?.memorySpaceId;
+  const readySpace =
+    status && status.state !== "disabled" && status.state !== "bootstrapping"
+      ? status.memorySpaceId
+      : null;
+  if (readySpace && readySpace !== savedSpace) setSavedSpace(readySpace);
+  const space = params.memorySpaceId ?? readySpace ?? savedSpace;
+  const enabled =
+    status !== null && status.state !== "disabled" && status.state !== "bootstrapping";
   return (
     <View className="flex-1">
-      <Copy>
-        Environment: {environmentId}
-        {space ? ` · Space: ${space}` : ""}
-      </Copy>
-      {error ? <Copy>{error}</Copy> : null}
-      {readAllowed ? (
-        <>
-          <Copy>
-            {status
-              ? presentMemorySync(status).label
-              : error
-                ? "Memory sharing status unavailable."
-                : "Checking memory sharing…"}
-          </Copy>
-          <Action label="Refresh sharing status" onPress={() => void load()} />
-        </>
+      {status?.state === "bootstrapping" && status.memorySpaceId ? (
+        <MemoryBootstrapRefresh
+          environmentId={environmentId}
+          memorySpaceId={status.memorySpaceId}
+          onChange={load}
+        />
       ) : null}
-      {status ? (
-        <>
-          <Action
-            label={diagnostics ? "Hide sharing details" : "Show sharing details"}
-            onPress={() => setDiagnostics((value) => !value)}
-          />
-          {diagnostics ? (
-            <>
-              <Copy>
-                Pending sync: {status.pendingSync} · Quarantined: {status.quarantined} · Parked:{" "}
-                {status.parked}
-              </Copy>
-              <Copy>
-                Last successful sync: {status.lastSuccessfulSyncAtUtc ?? "Unknown"}
-                {status.failureCode ? ` · ${status.failureCode}` : ""}
-              </Copy>
-              <Copy>
-                Detailed publication readiness: Unknown. Hub connection does not confirm publication
-                readiness.
-              </Copy>
-              <Copy>
-                Database: {status.storage.dbFileBytes ?? "Unknown"} bytes · WAL:{" "}
-                {status.storage.walBytes ?? "Unknown"} bytes · Free pages:{" "}
-                {status.storage.freelistBytes ?? "Unknown"} bytes. Physical files do not shrink
-                automatically.
-              </Copy>
-              {status.storage.growth.deltas.map((delta) => (
-                <Copy key={`${delta.days}:${delta.metric}`}>
-                  {delta.days} days · {delta.metric}:{" "}
-                  {delta.deltaBytes === null ? "Unavailable" : `${delta.deltaBytes} bytes`}
-                </Copy>
-              ))}
-              {status.storage.warnings.map((warning) => (
-                <Copy key={warning}>{warning}</Copy>
-              ))}
-            </>
-          ) : null}
-        </>
-      ) : null}
-      {params.memorySpaceId && status && status.memorySpaceId !== params.memorySpaceId ? (
-        <Copy>
-          The selected memory space is not currently bound. Its destination has been preserved.
-          Current bound space: {status.memorySpaceId ?? "None"}.
-        </Copy>
-      ) : null}
+      {error ? <Copy>Could not load memory status.</Copy> : null}
       {space && readAllowed ? (
-        <MemoryBrowser key={space} params={params} memorySpaceId={space} onSyncRefresh={load} />
+        <MemoryBrowser
+          key={space}
+          params={params}
+          memorySpaceId={space}
+          memoryEnabled={enabled}
+          onSyncRefresh={load}
+          status={status}
+        />
       ) : (
         <ScreenScrollView>
-          <Copy>
-            {readAllowed
-              ? "No memory space is bound yet. Configure sharing below."
-              : "Memory read access is unavailable. Administrative settings remain available."}
-          </Copy>
-          <MemoryWriteAccess params={params} />
-          <MemoryAdministration params={params} memorySpaceId={null} onSyncRefresh={load} />
+          <MemoryAdministration
+            environmentId={environmentId}
+            onSharingRefresh={() => void load()}
+            sync={status}
+          />
+          <SettingsSection title="Memories">
+            <Copy>
+              {!readAllowed
+                ? "Memory read permission is required to view records."
+                : status?.state === "disabled"
+                  ? "Turn on memory to see and save memories."
+                  : "Memory is getting ready."}
+            </Copy>
+          </SettingsSection>
+          {error ? <Action label="Retry memory status" onPress={() => void load()} /> : null}
         </ScreenScrollView>
       )}
     </View>
   );
 }
 
-function MemoryWriteAccess({
-  params,
+function MemoryBootstrapRefresh({
+  environmentId,
+  memorySpaceId,
+  onChange,
 }: {
-  readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
+  environmentId: EnvironmentId;
+  memorySpaceId: MemorySpaceId;
+  onChange: () => Promise<void>;
 }) {
-  const allowed = useAtomValue(memory.upsert.permissionAtom(params.environmentId));
-  const [space, setSpace] = useState(params.memorySpaceId ?? "");
-  const [selected, setSelected] = useState<MemorySpaceId | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  if (!allowed) return null;
-  if (selected)
-    return (
-      <MemoryEditor
-        params={params}
-        memorySpaceId={selected}
-        scope={{ kind: "user" }}
-        onClose={() => setSelected(null)}
-      />
-    );
-  return (
-    <>
-      <Copy>
-        Write access does not include reading existing memories. Choose the exact space for a new
-        memory.
-      </Copy>
-      <Field label="Memory space ID" value={space} onChange={setSpace} />
-      <Action
-        label="Remember in selected space"
-        disabled={!space.trim()}
-        onPress={() => {
-          try {
-            setSelected(MemorySpaceIdSchema.make(space.trim()));
-          } catch {
-            setError("Enter a valid memory space ID.");
-          }
-        }}
-      />
-      {error ? <Copy>{error}</Copy> : null}
-    </>
-  );
+  const exposure = useAtomValue(memory.exposureAtom({ environmentId, input: { memorySpaceId } }));
+  useEffect(() => {
+    void onChange();
+  }, [exposure, onChange]);
+  return null;
 }
 
 function MemoryBrowser({
   params,
   memorySpaceId,
   onSyncRefresh,
+  memoryEnabled,
+  status,
 }: {
   readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
   readonly memorySpaceId: MemorySpaceId;
   readonly onSyncRefresh: () => Promise<void>;
+  readonly memoryEnabled: boolean;
+  readonly status: MemorySyncStatus | null;
 }) {
   const registry = useContext(RegistryContext);
   const canWrite = useAtomValue(memory.upsert.permissionAtom(params.environmentId));
@@ -511,9 +452,24 @@ function MemoryBrowser({
   const [cursor, setCursor] = useState<string | undefined>();
   const [selected, setSelected] = useState(params.memoryId);
   const [creating, setCreating] = useState(false);
-  const [scope, setScope] = useState<MemoryScope | undefined>();
-  const [quarantine, setQuarantine] = useState(true);
-  const [binding, setBinding] = useState<MemoryProjectBinding | null>(null);
+  const [scope] = useState<MemoryScope | undefined>();
+  const [quarantine] = useState(true);
+  const [notice, setNotice] = useState<string | null>(null);
+  const exposure = useAtomValue(
+    memory.exposureAtom({ environmentId: params.environmentId, input: { memorySpaceId } }),
+  );
+  const [forgetGeneration, setForgetGeneration] = useState(exposure.forgetGeneration);
+  if (forgetGeneration !== exposure.forgetGeneration) {
+    setForgetGeneration(exposure.forgetGeneration);
+    setSelected(undefined);
+    setCreating(false);
+  }
+  const [wasEnabled, setWasEnabled] = useState(memoryEnabled);
+  if (wasEnabled !== memoryEnabled) {
+    setWasEnabled(memoryEnabled);
+    setCreating(false);
+  }
+
   const input = {
     memorySpaceId,
     limit: PAGE_SIZE,
@@ -538,10 +494,16 @@ function MemoryBrowser({
         params={params}
         memorySpaceId={memorySpaceId}
         memoryId={selected}
+        memoryEnabled={memoryEnabled}
         onClose={() => setSelected(undefined)}
+        onForgotten={() => {
+          setSelected(undefined);
+          setNotice("Forgotten. Other devices remove it when they sync.");
+          registry.refresh(atom);
+        }}
       />
     );
-  if (creating)
+  if (creating && memoryEnabled)
     return (
       <MemoryEditor
         params={params}
@@ -557,6 +519,17 @@ function MemoryBrowser({
       contentInsetAdjustmentBehavior="automatic"
       ListHeaderComponent={
         <>
+          <MemoryAdministration
+            environmentId={params.environmentId}
+            onSharingRefresh={() => void onSyncRefresh()}
+            sync={status}
+          />
+          <SettingsSection title="Memories">
+            {!memoryEnabled ? (
+              <Copy>Saved memories stay. Turn on memory to save new memories.</Copy>
+            ) : null}
+            {notice ? <Copy>{notice}</Copy> : null}
+          </SettingsSection>
           <Field label="Search memory" value={query} onChange={setQuery} />
           <Action
             label="Search"
@@ -566,55 +539,25 @@ function MemoryBrowser({
             }}
           />
           <Action
-            label="Clear search and filters"
-            onPress={() => {
-              setQuery("");
-              setSearch("");
-              setScope(undefined);
-              setCursor(undefined);
-            }}
-          />
-          <View className="flex-row flex-wrap">
-            {(["user", "project", "thread"] as const).map((kind) => (
-              <View key={kind}>
-                <Action
-                  label={`${kind} memory`}
-                  disabled={
-                    kind === "project"
-                      ? binding?.projectKey == null
-                      : kind === "thread" && !params.thread
-                  }
-                  onPress={() => {
-                    setScope(memoryScopeForSelection(kind, params, binding?.projectKey ?? null));
-                    setCursor(undefined);
-                  }}
-                />
-              </View>
-            ))}
-          </View>
-          <Action
-            label={quarantine ? "Hide quarantined memories" : "Include quarantined memories"}
-            onPress={() => {
-              setQuarantine((value) => !value);
-              setCursor(undefined);
-            }}
-          />
-          <Action
             label="Remember something"
             onPress={() => setCreating(true)}
-            disabled={!canWrite}
+            disabled={!canWrite || !memoryEnabled}
           />
         </>
       }
       renderItem={({ item }) => (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`Open memory ${item.memoryId}`}
-          onPress={() => setSelected(item.memoryId)}
+          accessibilityLabel={`Open memory: ${item.status === "active" ? item.payload.text : item.status === "forgotten" ? "Forgotten memory" : "Conflicting memory"}`}
+          onPress={() => {registry.refresh(memory.read({environmentId: params.environmentId, input: {memorySpaceId, memoryId: item.memoryId}})); setSelected(item.memoryId);}}
           className="gap-1 border-b border-border p-4"
         >
           <Text className="text-foreground">
-            {item.status === "active" ? item.payload.text : item.memoryId}
+            {item.status === "active"
+              ? item.payload.text
+              : item.status === "forgotten"
+                ? "Forgotten memory"
+                : "Conflicting memory"}
           </Text>
           <Text className="text-sm text-foreground-muted">
             {presentMemoryItem(item).label}
@@ -634,23 +577,14 @@ function MemoryBrowser({
       ListFooterComponent={
         <>
           <Action label="Refresh memories" onPress={() => registry.refresh(atom)} />
-          <Action
-            label="Next page"
-            disabled={!page?.nextCursor}
-            onPress={() => setCursor(page?.nextCursor ?? undefined)}
-          />
-          <Action label="First page" disabled={!cursor} onPress={() => setCursor(undefined)} />
-          {page ? <Copy>Index coverage: {page.indexCoverage?.status ?? "Unknown"}</Copy> : null}
-          <MemoryAdministration
-            onSyncRefresh={onSyncRefresh}
-            params={params}
-            memorySpaceId={memorySpaceId}
-            onBinding={(value) => {
-              setBinding(value);
-              setScope(undefined);
-              setCursor(undefined);
-            }}
-          />
+          {page?.nextCursor ? (
+            <Action
+              label="Next page"
+              disabled={!page?.nextCursor}
+              onPress={() => setCursor(page?.nextCursor ?? undefined)}
+            />
+          ) : null}
+          {cursor ? <Action label="First page" onPress={() => setCursor(undefined)} /> : null}
         </>
       }
     />
@@ -661,14 +595,21 @@ function MemoryDetails({
   params,
   memorySpaceId,
   memoryId,
+  memoryEnabled,
+  onForgotten,
   onClose,
 }: {
   readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
   readonly memorySpaceId: MemorySpaceId;
   readonly memoryId: MemoryId;
+  readonly memoryEnabled: boolean;
+  readonly onForgotten: () => void;
   readonly onClose: () => void;
 }) {
   const registry = useContext(RegistryContext);
+  const { savedConnectionsById } = useSavedRemoteConnections();
+  const deviceName = (id: EnvironmentId) =>
+    savedConnectionsById[id]?.environmentLabel ?? "Unknown device";
   const target = { environmentId: params.environmentId, input: { memorySpaceId, memoryId } };
   const readAtom = memory.read(target);
   const result = useAtomValue(readAtom);
@@ -738,10 +679,7 @@ function MemoryDetails({
       if (!mounted.current || !registry.get(memory.forget.permissionAtom(params.environmentId)))
         return;
       if (AsyncResult.isSuccess(result)) {
-        const view = presentMemoryForget(result.value);
-        setNotice(
-          `${view.label} · Expansion: ${view.expansionStatus}${view.pendingSync ? " · Propagation pending" : ""}${view.failureCode ? ` · ${view.failureCode}` : ""}`,
-        );
+        onForgotten();
         intent.current = null;
         setRetry(false);
         registry.refresh(readAtom);
@@ -755,7 +693,7 @@ function MemoryDetails({
       if (mounted.current) setPending(false);
     }
   }
-  if (editing && item?.status === "active")
+  if (editing && memoryEnabled && item?.status === "active")
     return (
       <MemoryEditor
         params={params}
@@ -770,8 +708,7 @@ function MemoryDetails({
     );
   return (
     <ScreenScrollView contentInsetAdjustmentBehavior="automatic">
-      <Action label="Back to memories" onPress={onClose} />
-      <Copy>Memory: {memoryId}</Copy>
+      <Action label="Close details" onPress={onClose} />
       {notice ? <Copy>{notice}</Copy> : null}
       {item ? (
         <>
@@ -787,18 +724,18 @@ function MemoryDetails({
               <Copy>{item.payload.text}</Copy>
               <Copy>
                 Source: {item.revision.provenance.provider ?? "User"} ·{" "}
-                {item.revision.provenance.environmentId}
+                {deviceName(item.revision.provenance.environmentId)}
               </Copy>
               <Action
-                label="Edit memory"
-                disabled={!canWrite || pending}
+                label="Edit"
+                disabled={!canWrite || !memoryEnabled || pending}
                 onPress={() => setEditing(true)}
               />
               {item.payload.evidence.map((evidence) =>
                 evidence.sourceThread && evidence.messageIds.length > 0 ? (
                   <Action
                     key={JSON.stringify(evidence)}
-                    label={`Read original on ${evidence.sourceThread.environmentId}`}
+                    label={`Read original on ${deviceName(evidence.sourceThread.environmentId)}`}
                     disabled={!canReadOriginal}
                     onPress={() =>
                       setSource({
@@ -816,7 +753,7 @@ function MemoryDetails({
           ) : null}
           {!retry ? (
             <Action
-              label="Forget memory"
+              label="Forget"
               disabled={!canForget || !presentMemoryItem(item).canForget || pending}
               onPress={() => setConfirmForget(true)}
             />
@@ -841,7 +778,7 @@ function MemoryDetails({
         <MemoryConfirmation
           title="Forget this memory?"
           message={MEMORY_FORGET_NOTICE}
-          label="Forget"
+          label="Confirm forget"
           onClose={() => setConfirmForget(false)}
           onConfirm={() => {
             setConfirmForget(false);
@@ -867,10 +804,16 @@ function MemoryDetails({
       <SettingsSection title="History">
         {item ? (
           <>
-            {history?.revisions.map((pair) => (
+            {history?.revisions.map((pair, index) => (
               <View key={pair.revision.revisionId}>
                 <Copy>
-                  {pair.revision.createdAtUtc} · {pair.revision.provenance.provider ?? "User"}
+                  {history.resolutions.some((r) =>
+                    r.resolution.inputRevisionIds.includes(pair.revision.revisionId),
+                  )
+                    ? "Original"
+                    : "Version"}{" "}
+                  {index + 1} · {formatMemoryTime(pair.revision.createdAtUtc)} ·{" "}
+                  {pair.revision.provenance.provider ?? "User"}
                 </Copy>
                 <Copy>{pair.payload?.text ?? "Original unavailable"}</Copy>
               </View>
@@ -884,10 +827,11 @@ function MemoryDetails({
                       ? "Selected resolution · "
                       : ""}
                     {view.label} · {view.providerLabel} · {view.effectiveModel} ·{" "}
-                    {view.resolvingEnvironmentId}
+                    {deviceName(view.resolvingEnvironmentId)}
                   </Copy>
                   <Copy>
-                    Applied: {view.appliedAtUtc} · Revert deadline: {view.revertDeadlineUtc}
+                    Applied: {formatMemoryTime(view.appliedAtUtc)} · Revert deadline:{" "}
+                    {formatMemoryTime(view.revertDeadlineUtc)}
                   </Copy>
                   <Copy>{entry.payload?.judgment ?? "Judgment unavailable"}</Copy>
                   {item && history ? (
@@ -1051,10 +995,10 @@ function MemoryRevertControl({
       {!result && available ? (
         <>
           <Copy>Choose the retained original to restore.</Copy>
-          {display.restorableRevisionIds.map((id) => (
+          {display.restorableRevisionIds.map((id, index) => (
             <Action
               key={id}
-              label={`${selected === id ? "Selected original" : "Restore original"} ${id}`}
+              label={`${selected === id ? "Selected original" : "Restore original"} ${index + 1}`}
               disabled={pending || intent !== null}
               onPress={() => setSelected(id)}
             />
@@ -1256,424 +1200,5 @@ function MemoryEditor({
       )}
       {error ? <Copy>{error}</Copy> : null}
     </ScreenScrollView>
-  );
-}
-
-function MemoryAdministration({
-  params,
-  memorySpaceId,
-  onBinding,
-  onSyncRefresh,
-}: {
-  readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
-  readonly memorySpaceId: MemorySpaceId | null;
-  readonly onBinding?: (value: MemoryProjectBinding) => void;
-  readonly onSyncRefresh: () => Promise<void>;
-}) {
-  const registry = useContext(RegistryContext);
-  const { environmentId } = params;
-  const navigation = useNavigation();
-  const { savedConnectionsById } = useSavedRemoteConnections();
-  const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
-  const adminAllowed = useAtomValue(memory.hubSettingsGet.permissionAtom(environmentId));
-  const bindingAllowed = useAtomValue(memory.projectBindingGet.permissionAtom(environmentId));
-  const settingsAllowed = useAtomValue(
-    serverEnvironment.updateSettings.permissionAtom(environmentId),
-  );
-  const getHub = useAtomCommand(memory.hubSettingsGet);
-  const updateHub = useAtomCommand(memory.hubSettingsUpdate);
-  const getOwner = useAtomCommand(memory.ownerSourceReadPolicyGet);
-  const updateOwner = useAtomCommand(memory.ownerSourceReadPolicyUpdate);
-  const getBinding = useAtomCommand(memory.projectBindingGet);
-  const updateBinding = useAtomCommand(memory.projectBindingUpdate);
-  const updateSettings = useAtomCommand(serverEnvironment.updateSettings);
-  const liveDestination = useMemoryLifetime(environmentId);
-  const [confirmation, setConfirmation] = useState<{
-    title: string;
-    message: string;
-    label: string;
-    settings: MemoryHubSettings;
-  } | null>(null);
-  const [hub, setHub] = useState<MemoryHubSettingsView | null>(null);
-  const [owner, setOwner] = useState<MemoryOwnerSourceReadPolicyView | null>(null);
-  const [binding, setBinding] = useState<MemoryProjectBinding | null>(null);
-  const [sharedProjectId, setSharedProjectId] = useState("");
-  const [hubId, setHubId] = useState("");
-  const [endpoint, setEndpoint] = useState("");
-  const [secretName, setSecretName] = useState("");
-  const [notice, setNotice] = useState<string | null>(null);
-  const [running, setPending] = useState(false);
-  const [retryAction, setRetryAction] = useState<(() => Promise<void>) | null>(null);
-  const pending = running || retryAction !== null;
-  const request = useRef<MemoryOperationId | null>(null);
-  function administrationRequestId() {
-    request.current ??= operationId();
-    return request.current;
-  }
-  const busy = useRef(false);
-  const mounted = useRef(true);
-  useEffect(
-    () => () => {
-      mounted.current = false;
-    },
-    [],
-  );
-  function active() {
-    return liveDestination() && registry.get(memory.hubSettingsGet.permissionAtom(environmentId));
-  }
-  async function run(action: () => Promise<void>) {
-    if (!liveDestination() || busy.current) return;
-    busy.current = true;
-    setPending(true);
-    setNotice(null);
-    try {
-      await action();
-      request.current = null;
-      if (mounted.current) setRetryAction(null);
-    } catch (error) {
-      if (mounted.current) {
-        setRetryAction(() => action);
-        setNotice(error instanceof Error ? error.message : "The action could not be completed.");
-      }
-    } finally {
-      busy.current = false;
-      if (mounted.current) setPending(false);
-    }
-  }
-  async function loadAdministration() {
-    if (!active()) return;
-    const h = await getHub({ environmentId, input: {} });
-    if (!active()) return;
-    if (AsyncResult.isFailure(h)) throw squashAtomCommandFailure(h);
-    if (AsyncResult.isSuccess(h)) {
-      setHub(h.value);
-      await onSyncRefresh();
-    }
-    if (!active()) return;
-    const o = await getOwner({ environmentId, input: {} });
-    if (!active()) return;
-    if (AsyncResult.isFailure(o)) throw squashAtomCommandFailure(o);
-    if (AsyncResult.isSuccess(o)) setOwner(o.value);
-  }
-  async function loadBinding() {
-    if (
-      !params.project ||
-      !memorySpaceId ||
-      !registry.get(memory.projectBindingGet.permissionAtom(environmentId))
-    )
-      return;
-    const result = await getBinding({
-      environmentId,
-      input: { memorySpaceId, project: params.project },
-    });
-    if (!mounted.current || !registry.get(memory.projectBindingGet.permissionAtom(environmentId)))
-      return;
-    if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
-    if (AsyncResult.isSuccess(result)) {
-      setBinding(result.value);
-      onBinding?.(result.value);
-    }
-  }
-  async function configure(settings: MemoryHubSettings) {
-    if (!hub || !active()) return;
-    const result = await updateHub({
-      environmentId,
-      input: {
-        requestId: administrationRequestId(),
-        expectedVersion: hub.version,
-        action: "configure",
-        settings,
-      },
-    });
-    if (!active()) return;
-    if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
-    if (AsyncResult.isSuccess(result)) {
-      setHub(result.value.view);
-      setNotice("Sharing settings saved.");
-      await onSyncRefresh();
-    }
-  }
-  const ownerView = owner ? presentMemoryOwnerPolicy(owner) : null;
-  const ownerSpaceMatches =
-    memorySpaceId === null ||
-    (hub?.settings.mode !== "disabled" && hub?.settings.memorySpaceId === memorySpaceId);
-  return (
-    <View className="gap-4">
-      {confirmation ? (
-        <MemoryConfirmation
-          {...confirmation}
-          onClose={() => setConfirmation(null)}
-          onConfirm={() => {
-            setConfirmation(null);
-            void run(() => configure(confirmation.settings));
-          }}
-        />
-      ) : null}
-      <SettingsSection title="Environment access">
-        <Copy>
-          Saved task access is a ceiling. This setting does not confirm effective run access.
-          Turning access on does not widen existing task permissions.
-        </Copy>
-        <Action
-          label={
-            config?.settings.enableAgentMemoryAccess === false
-              ? "Enable agent memory access"
-              : "Disable agent memory access"
-          }
-          disabled={pending || !settingsAllowed}
-          onPress={() => {
-            const current = registry.get(serverEnvironment.configValueAtom(environmentId));
-            if (!current) return;
-            const desired = current.settings.enableAgentMemoryAccess === false;
-            void run(async () => {
-              if (
-                !liveDestination() ||
-                !registry.get(serverEnvironment.updateSettings.permissionAtom(environmentId))
-              )
-                return;
-              const result = await updateSettings({
-                environmentId,
-                input: { patch: { enableAgentMemoryAccess: desired } },
-              });
-              if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
-            });
-          }}
-        />
-      </SettingsSection>
-      <SettingsSection title="Memory sharing">
-        <Action
-          label="Load sharing and original access settings"
-          disabled={!adminAllowed || pending}
-          onPress={() => void run(loadAdministration)}
-        />
-        {hub && adminAllowed ? (
-          <>
-            <Copy>
-              Mode: {hub.settings.mode} · Version: {hub.version}
-            </Copy>
-            {hub.settings.mode !== "disabled" ? (
-              <Action
-                label="Turn off memory sharing"
-                disabled={pending}
-                onPress={() =>
-                  setConfirmation({
-                    title: "Turn off memory sharing?",
-                    message: "Existing memories remain. Future sharing stops on this environment.",
-                    label: "Turn off",
-                    settings: { mode: "disabled" },
-                  })
-                }
-              />
-            ) : null}
-            <Action
-              label="Use this environment as the hub"
-              disabled={pending}
-              onPress={() =>
-                setConfirmation({
-                  title: "Use this environment as the hub?",
-                  message: "Choose this only for the environment you want to own the memory space.",
-                  label: "Configure hub",
-                  settings: { mode: "hub", memorySpaceId },
-                })
-              }
-            />
-            <Field
-              label="Hub environment ID"
-              disabled={pending}
-              value={hubId}
-              onChange={setHubId}
-            />
-            <Field
-              label="Hub endpoint"
-              disabled={pending}
-              value={endpoint}
-              onChange={setEndpoint}
-            />
-            <Field
-              label="Installed credential name"
-              disabled={pending}
-              value={secretName}
-              onChange={setSecretName}
-            />
-            <Action
-              label="Connect to selected hub"
-              disabled={pending || !hubId.trim() || !endpoint.trim() || !secretName.trim()}
-              onPress={() =>
-                void run(async () => {
-                  const { MemoryHubEndpoint } = await import("@goat/contracts");
-                  await configure({
-                    mode: "member",
-                    hubEnvironmentId: EnvironmentIdSchema.make(hubId.trim()),
-                    endpoint: MemoryHubEndpoint.make(endpoint.trim()),
-                    secretName: secretName.trim(),
-                    memorySpaceId: null,
-                  });
-                })
-              }
-            />
-          </>
-        ) : null}
-        <Copy>
-          Detailed publication diagnostics and manual reconciliation are unavailable on this server.
-        </Copy>
-        <SettingsRow
-          icon="desktopcomputer"
-          label="Connection and credentials"
-          onPress={() =>
-            navigation.navigate("SettingsSheet", {
-              screen: "SettingsContent",
-              params: { screen: "SettingsEnvironmentDetail", params: { environmentId } },
-            })
-          }
-        />
-      </SettingsSection>
-      <SettingsSection title="Original access">
-        {!ownerSpaceMatches ? (
-          <Copy>
-            The selected memory space is not the currently bound space. Original access changes are
-            unavailable here.
-          </Copy>
-        ) : null}
-        {ownerView && adminAllowed ? (
-          <>
-            <Copy>{ownerView.revocationLabel}</Copy>
-            <Copy>{ownerView.notice}</Copy>
-            {ownerView.pendingEnrollments.map((entry) => (
-              <Copy key={entry.requesterEnvironmentId}>
-                {entry.requesterEnvironmentId} · {entry.label}
-              </Copy>
-            ))}
-            {[
-              ...new Set([
-                ...Object.keys(savedConnectionsById),
-                ...ownerView.desiredRequesterEnvironmentIds,
-                ...(owner?.policy.removals.map((removal) => removal.requesterEnvironmentId) ?? []),
-              ]),
-            ].map((value) => {
-              const id = value as EnvironmentId;
-              return (
-                <Action
-                  key={id}
-                  label={`${ownerView.desiredRequesterEnvironmentIds.includes(id) ? "Remove" : "Allow"} ${savedConnectionsById[id]?.environmentLabel ?? id}`}
-                  disabled={pending || !ownerSpaceMatches}
-                  onPress={() =>
-                    void run(async () => {
-                      if (!owner || !active() || !ownerSpaceMatches) return;
-                      const result = await updateOwner({
-                        environmentId,
-                        input: {
-                          requestId: administrationRequestId(),
-                          expectedVersion: owner.version,
-                          allowedRequesterEnvironmentIds: toggleMemoryRequester(owner, id),
-                        },
-                      });
-                      if (!active()) return;
-                      if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
-                      if (AsyncResult.isSuccess(result)) setOwner(result.value);
-                    })
-                  }
-                />
-              );
-            })}
-          </>
-        ) : (
-          <Copy>
-            Load settings with administrative access to manage which environments may read
-            originals.
-          </Copy>
-        )}
-      </SettingsSection>
-      {params.project && memorySpaceId ? (
-        <SettingsSection title="Project memory">
-          <Copy>
-            Binding changes apply to future work. Existing memories keep their recorded scope.
-          </Copy>
-          <Action
-            label="Load project binding"
-            disabled={pending || !bindingAllowed}
-            onPress={() => void run(loadBinding)}
-          />
-          {binding && bindingAllowed ? (
-            <>
-              <Copy>
-                {binding.projectKey
-                  ? binding.projectKey.kind === "explicit"
-                    ? binding.projectKey.sharedProjectId
-                    : binding.projectKey.groupingKey
-                  : "No shared project binding"}
-              </Copy>
-              <Field
-                label="Shared project ID"
-                disabled={pending}
-                value={sharedProjectId}
-                onChange={setSharedProjectId}
-              />
-              {(["setExplicit", "useRepository"] as const).map((action) => (
-                <Action
-                  key={action}
-                  label={
-                    action === "setExplicit" ? "Use shared project" : "Use repository identity"
-                  }
-                  disabled={pending || (action === "setExplicit" && !sharedProjectId.trim())}
-                  onPress={() =>
-                    void run(async () => {
-                      if (
-                        !params.project ||
-                        !registry.get(memory.projectBindingUpdate.permissionAtom(environmentId))
-                      )
-                        return;
-                      const result = await updateBinding({
-                        environmentId,
-                        input: {
-                          memorySpaceId,
-                          project: params.project,
-                          requestId: administrationRequestId(),
-                          expectedVersion: binding.version,
-                          ...(action === "setExplicit"
-                            ? { action, sharedProjectId: sharedProjectId.trim() }
-                            : { action }),
-                        },
-                      });
-                      if (
-                        !mounted.current ||
-                        !registry.get(memory.projectBindingUpdate.permissionAtom(environmentId))
-                      )
-                        return;
-                      if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
-                      if (AsyncResult.isSuccess(result)) {
-                        setBinding(result.value.binding);
-                        onBinding?.(result.value.binding);
-                      }
-                    })
-                  }
-                />
-              ))}
-            </>
-          ) : null}
-        </SettingsSection>
-      ) : null}
-      <SettingsSection title="Provider memory">
-        <Copy>Provider memory import and recovery are unavailable on this server.</Copy>
-      </SettingsSection>
-      {notice ? <Copy>{notice}</Copy> : null}
-      {retryAction ? (
-        <>
-          <Action
-            label="Retry administrative request"
-            disabled={running}
-            onPress={() => void run(retryAction)}
-          />
-          <Action
-            label="Discard retry and reload settings"
-            disabled={running}
-            onPress={() => {
-              request.current = null;
-              setRetryAction(null);
-              void run(loadAdministration);
-            }}
-          />
-        </>
-      ) : null}
-    </View>
   );
 }

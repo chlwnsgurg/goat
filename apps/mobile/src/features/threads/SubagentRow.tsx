@@ -163,9 +163,6 @@ export function SubagentMemoryAccess({
   readonly subagent: Pick<OrchestrationV2Subagent, "memoryGrantCeiling">;
 }) {
   const view = presentMemoryRunAccess(subagent);
-  return (
-    <Text className="text-xs text-foreground-muted">
-      Saved memory access: {view.savedCeiling} · Effective access: {view.effectiveAccess}
-    </Text>
-  );
+  if (view.savedCeiling === "none") return null;
+  return <Text className="text-xs text-foreground-muted">Memory: {view.savedCeiling}</Text>;
 }
