@@ -22,6 +22,7 @@ import * as Secrets from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
+import checkpointMigration from "../persistence/Migrations/075_MemoryCheckpointAccounting.ts";
 import lineageMigration from "../persistence/Migrations/074_MemoryImportLineage.ts";
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
@@ -44,7 +45,11 @@ const principal = (environmentId = hubEnv): M.MemoryHubPrincipal => ({
   scopes: ["memory:sync"],
 });
 const database = Layer.effectDiscard(
-  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(lineageMigration)),
+  migration.pipe(
+    Effect.andThen(hubMigration),
+    Effect.andThen(lineageMigration),
+    Effect.andThen(checkpointMigration),
+  ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storeLayer = Store.layer.pipe(Layer.provideMerge(database));
 const core = Service.layer.pipe(

@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
+import checkpointMigration from "../persistence/Migrations/075_MemoryCheckpointAccounting.ts";
 import lineageMigration from "../persistence/Migrations/074_MemoryImportLineage.ts";
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import * as Store from "./MemoryStore.ts";
@@ -78,7 +79,11 @@ const decision = (op = operation()): Store.MemoryDecision => ({
 });
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
 const setup = Layer.effectDiscard(
-  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(lineageMigration)),
+  migration.pipe(
+    Effect.andThen(hubMigration),
+    Effect.andThen(lineageMigration),
+    Effect.andThen(checkpointMigration),
+  ),
 ).pipe(Layer.provideMerge(database));
 const live = Store.layer.pipe(Layer.provideMerge(setup));
 

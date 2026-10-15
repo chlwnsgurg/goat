@@ -1,3 +1,5 @@
+import lineageMigration from "../persistence/Migrations/074_MemoryImportLineage.ts";
+import checkpointMigration from "../persistence/Migrations/075_MemoryCheckpointAccounting.ts";
 import { assert, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -16,9 +18,13 @@ const space = M.MemorySpaceId.make("00000000-0000-4000-8000-000000000001");
 const member = M.EnvironmentId.make("synthetic-member");
 const credential = "a".repeat(43);
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
-const setup = Layer.effectDiscard(migration.pipe(Effect.andThen(hubMigration))).pipe(
-  Layer.provideMerge(database),
-);
+const setup = Layer.effectDiscard(
+  migration.pipe(
+    Effect.andThen(hubMigration),
+    Effect.andThen(lineageMigration),
+    Effect.andThen(checkpointMigration),
+  ),
+).pipe(Layer.provideMerge(database));
 const live = Auth.layer.pipe(
   Layer.provideMerge(Store.layer.pipe(Layer.provideMerge(setup))),
   Layer.provideMerge(NodeServices.layer),

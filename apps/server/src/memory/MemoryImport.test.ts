@@ -26,6 +26,7 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/072_MemorySearchCounters.ts";
+import checkpointMigration from "../persistence/Migrations/075_MemoryCheckpointAccounting.ts";
 import lineageMigration from "../persistence/Migrations/074_MemoryImportLineage.ts";
 import * as Service from "./MemoryService.ts";
 import * as Quota from "./MemoryQuotaService.ts";
@@ -48,6 +49,7 @@ const database = Layer.effectDiscard(
     Effect.andThen(hubMigration),
     Effect.andThen(searchMigration),
     Effect.andThen(lineageMigration),
+    Effect.andThen(checkpointMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const live = Store.layer.pipe(Layer.provideMerge(database));
@@ -2244,6 +2246,7 @@ const growthLayer = (filename: string) => {
       yield* hubMigration;
       yield* searchMigration;
       yield* lineageMigration;
+      yield* checkpointMigration;
       const sql = yield* SqlClient.SqlClient;
       yield* sql.unsafe("PRAGMA journal_mode=WAL");
       yield* sql`CREATE TABLE orchestration_events(sequence INTEGER PRIMARY KEY,event_id TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT,occurred_at TEXT,application_event_version INTEGER,aggregate_kind TEXT)`;

@@ -15,6 +15,7 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
 import migration from "../persistence/Migrations/070_Memory.ts";
+import checkpointMigration from "../persistence/Migrations/075_MemoryCheckpointAccounting.ts";
 import lineageMigration from "../persistence/Migrations/074_MemoryImportLineage.ts";
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/072_MemorySearchCounters.ts";
@@ -114,6 +115,7 @@ const setup = Layer.effectDiscard(
   migration.pipe(
     Effect.andThen(hubMigration),
     Effect.andThen(lineageMigration),
+    Effect.andThen(checkpointMigration),
     Effect.andThen(searchMigration),
   ),
 ).pipe(Layer.provideMerge(database));
@@ -2949,6 +2951,7 @@ describe("MemoryStore transient source relay", () => {
               migration.pipe(
                 Effect.andThen(hubMigration),
                 Effect.andThen(lineageMigration),
+                Effect.andThen(checkpointMigration),
                 Effect.andThen(searchMigration),
               ),
             ).pipe(Layer.provideMerge(db)),

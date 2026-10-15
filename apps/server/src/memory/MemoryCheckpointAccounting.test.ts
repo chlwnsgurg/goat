@@ -1,0 +1,355 @@
+import { assert, it } from "@effect/vitest";
+import * as M from "@goat/contracts";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
+import migration from "../persistence/Migrations/070_Memory.ts";
+import hub from "../persistence/Migrations/071_MemoryHubSync.ts";
+import lineage from "../persistence/Migrations/074_MemoryImportLineage.ts";
+import checkpoint from "../persistence/Migrations/075_MemoryCheckpointAccounting.ts";
+import { refreshCheckpointAccounting } from "./MemoryCheckpointAccounting.ts";
+import {
+  selectCheckpointMemory,
+  selectCheckpointReceipt,
+  checkpointInventorySize,
+  emptyCheckpointInventory,
+  encodeCheckpointPage,
+  encodeCheckpointRecord,
+  checkpointKeys,
+} from "./MemoryCheckpointInventory.ts";
+import {
+  checkpointBound,
+  CHECKPOINT_PAGE_OVERHEAD,
+  futureForgetReserve,
+} from "./MemoryCheckpointBound.ts";
+import { encodeCompactReceipt, ImportCompletedNoopCodec } from "./MemoryStore.ts";
+
+const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const space = M.MemorySpaceId.make(id(1));
+const memoryId = M.MemoryId.make(id(2));
+const environmentId = M.EnvironmentId.make('"\\한'.repeat(100));
+const identity: M.MemoryIdentityRecord = {
+  memorySpaceId: space,
+  memoryId,
+  scope: { kind: "user" },
+  creatingEnvironmentId: environmentId,
+  createOperationId: M.MemoryOperationId.make(id(3)),
+  createdAtUtc: M.MemoryUtcTimestamp.make("1970-01-01T00:00:00.000Z"),
+};
+const fence: M.MemoryFenceRecord = {
+  memorySpaceId: space,
+  memoryId,
+  highestFencingToken: 0,
+  activeLease: null,
+};
+const old = Layer.effectDiscard(migration.pipe(Effect.andThen(hub), Effect.andThen(lineage))).pipe(
+  Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
+);
+const seed = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`INSERT INTO memory_identity_ledger VALUES (${space},${memoryId},${JSON.stringify(identity)},${JSON.stringify(fence)},66560,0)`;
+});
+const counters = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`;
+});
+const readSize = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* sql<{
+    dimension: string;
+    value: number;
+  }>`SELECT dimension,value FROM memory_quota_counters WHERE space=${space} AND scope_key='' AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows')`;
+  const m = new Map(rows.map((r) => [r.dimension, r.value]));
+  return { bytes: m.get("hub_snapshot_bytes") ?? 0, rows: m.get("hub_snapshot_rows") ?? 0 };
+});
+
+it.effect(
+  "upgrades 074 atomically, recalculates canonical counters, preserves pinned pages and charges private rows",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* seed;
+      // Legacy detailed/retired/pending private records are intentionally not checkpoint data.
+      for (const [i, kind] of ["detailed", "retired", "detailed"].entries())
+        yield* sql`INSERT INTO memory_import_receipts(receipt_id,space,environment_id,record_kind,source_id,batch_operation_id,completed_items_json,observed_at_utc) VALUES (${id(10 + i)},${space},'origin','batch',${id(30)},${id(10 + i)},${JSON.stringify({ kind, data: "\\\u0000한".repeat(100) })},'1970-01-01T00:00:00.000Z')`;
+      yield* sql`INSERT INTO memory_hub_retention(space,checkpoint_id,handles_json,published_pinned_bytes) VALUES (${space},'published','[{"checkpointId":"published"},{"checkpointId":"published"}]',37)`;
+      yield* sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,missing_parents_json,reason,checkpoint_id,page_ordinal,metadata_json) VALUES (${space},'page','checkpoint','[]','hub_snapshot','hub:published',0,'{"preserve":"exact"}')`;
+      const pages = yield* sql`SELECT * FROM memory_inbox_pending`;
+      const retention = yield* sql`SELECT * FROM memory_hub_retention`;
+      const before = yield* counters;
+      const rolled = yield* sql
+        .withTransaction(checkpoint.pipe(Effect.andThen(Effect.fail("interrupted"))))
+        .pipe(Effect.flip);
+      assert.strictEqual(rolled, "interrupted");
+      assert.deepStrictEqual(yield* counters, before);
+      assert.deepStrictEqual(
+        yield* sql`SELECT name FROM sqlite_master WHERE name='memory_import_noop_results'`,
+        [],
+      );
+      assert.isFalse(
+        (yield* sql<{ name: string }>`PRAGMA table_info(memory_import_receipts)`).some(
+          (c) => c.name === "result_ref",
+        ),
+      );
+      yield* sql.withTransaction(checkpoint);
+      assert.deepStrictEqual(yield* sql`SELECT * FROM memory_inbox_pending`, pages);
+      assert.deepStrictEqual(yield* sql`SELECT * FROM memory_hub_retention`, retention);
+      const actual = checkpointInventorySize(yield* selectCheckpointMemory(space, memoryId, 0));
+      const reserve = futureForgetReserve(66560, 0);
+      assert.deepStrictEqual(yield* readSize, {
+        bytes: actual.bytes + reserve.bytes,
+        rows: actual.rows + reserve.rows,
+      });
+      const after = yield* counters;
+      // Noop private writes neither invalidate producer generation nor grow canonical U_next.
+      yield* sql`UPDATE memory_import_receipts SET completed_items_json='{"kind":"detailed","larger":"private"}' WHERE receipt_id=${id(10)}`;
+      yield* refreshCheckpointAccounting();
+      assert.deepStrictEqual(yield* readSize, {
+        bytes: actual.bytes + reserve.bytes,
+        rows: actual.rows + reserve.rows,
+      });
+      assert.isTrue(after.some((r) => r.dimension === "import_staging" && Number(r.value) > 0));
+      const triggers = yield* sql<{
+        sql: string;
+      }>`SELECT sql FROM sqlite_master WHERE name LIKE 'memory_import_lineage_%' AND type='trigger'`;
+      assert.isTrue(
+        triggers.every(
+          (t) => !t.sql.includes("'hub_snapshot_bytes'") && !t.sql.includes("'hub_snapshot_rows'"),
+        ),
+      );
+      const result = { items: [] };
+      yield* sql`INSERT INTO memory_import_noop_results VALUES (${space},'origin',${id(30)},${"a".repeat(64)},1,${JSON.stringify(result)})`;
+      const ref = JSON.stringify({ kind: "completed-noop-ref", resultRef: "a".repeat(64) });
+      yield* sql`UPDATE memory_import_receipts SET result_ref=${"a".repeat(64)},completed_items_json=${ref} WHERE receipt_id=${id(10)}`;
+      assert.isTrue(
+        (yield* sql`DELETE FROM memory_import_noop_results`.pipe(Effect.exit))._tag === "Failure",
+      );
+      assert.isTrue(
+        (yield* sql`UPDATE memory_import_receipts SET result_ref=${"b".repeat(64)} WHERE receipt_id=${id(10)}`.pipe(
+          Effect.exit,
+        ))._tag === "Failure",
+      );
+      yield* sql`UPDATE memory_import_receipts SET result_ref=NULL,completed_items_json='{"kind":"retired"}' WHERE receipt_id=${id(10)}`;
+      yield* sql`DELETE FROM memory_import_noop_results`;
+    }).pipe(Effect.provide(old)),
+);
+
+it.effect(
+  "accounts each alias revision-payload pair and selected head transition with atomic rollback",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* seed;
+      yield* checkpoint;
+      const payload = {
+        text: '\u0000\u0001"\\한🙂'.repeat(1000),
+        evidence: [],
+        derivedFromMemoryRevisions: [],
+      };
+      yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},${id(40)},${memoryId},${JSON.stringify(payload)},'[]')`;
+      for (const n of [40, 41])
+        yield* sql`INSERT INTO memory_revisions VALUES (${space},${id(n)},${memoryId},${id(n + 100)},'[]','{"kind":"user"}','inference',${JSON.stringify({ environmentId })},${id(40)},0)`;
+      const item = {
+        memorySpaceId: space,
+        memoryId,
+        status: "quarantined",
+        scope: { kind: "user" },
+        pendingSync: false,
+        heads: [id(40), id(41)],
+        localAvailability: { exposure: "held", reasons: [], deferred: [], cleanupPending: false },
+      };
+      // Use a valid blocked item; its heads still select both revision/payload pairs.
+      const projection = {
+        memorySpaceId: space,
+        memoryId,
+        status: "blocked",
+        scope: { kind: "user" },
+        pendingSync: false,
+        failureCode: "missing_parent",
+        localAvailability: {
+          exposure: "held",
+          reasons: ["missing_parent"],
+          deferred: [],
+          cleanupPending: false,
+        },
+      };
+      yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json) VALUES (${space},${memoryId},'{"kind":"user"}','user',${JSON.stringify(item.heads)},'blocked',1,${JSON.stringify(projection)},${JSON.stringify(projection.localAvailability)})`;
+      yield* refreshCheckpointAccounting();
+      const inventory = yield* selectCheckpointMemory(space, memoryId, 0);
+      assert.strictEqual(inventory.revisions.length, 2);
+      assert.deepStrictEqual(inventory.revisions[0]!.payload, inventory.revisions[1]!.payload);
+      const before = yield* readSize;
+      const pairBytes = new TextEncoder().encode(
+        encodeCheckpointRecord(inventory.revisions[1]!),
+      ).length;
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* sql`UPDATE memory_items SET heads_json=${JSON.stringify([id(40)])} WHERE space=${space}`;
+            yield* refreshCheckpointAccounting();
+            assert.deepStrictEqual(yield* readSize, {
+              bytes: before.bytes - pairBytes,
+              rows: before.rows - 1,
+            });
+            return yield* Effect.fail("rollback");
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.deepStrictEqual(yield* readSize, before);
+      const compact: M.MemoryCompactReceipt = {
+        memorySpaceId: space,
+        originEnvironmentId: environmentId,
+        operationKind: "upsert",
+        receipt: {
+          operationId: M.MemoryOperationId.make(id(140)),
+          memoryId,
+          operationDigest: "a".repeat(64),
+          outcome: "accepted",
+          hubSequence: 1,
+        },
+        revisionId: M.MemoryRevisionId.make(id(40)),
+        resolutionId: null,
+        revertsResolutionId: null,
+        attemptId: null,
+        fencingToken: null,
+        reportGuard: null,
+      };
+      const binary = encodeCompactReceipt(compact, () => 1);
+      yield* sql`INSERT INTO memory_compact_receipts(space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json,compact_blob) VALUES (${space},${id(140)},${"a".repeat(64)},1,${JSON.stringify(compact.receipt)},${JSON.stringify(compact)},${binary})`;
+      yield* refreshCheckpointAccounting();
+      const expanded = checkpointInventorySize(yield* selectCheckpointReceipt(space, id(140)));
+      assert.isTrue(expanded.bytes > binary.length);
+      assert.deepStrictEqual(yield* readSize, {
+        bytes: before.bytes + expanded.bytes,
+        rows: before.rows + 1,
+      });
+    }).pipe(Effect.provide(old)),
+);
+
+it.effect.each([0, 1, 100, 101])(
+  "literal producer bound covers %s records, escaping and framing without sixfold multiplication",
+  (count) =>
+    Effect.gen(function* () {
+      const records = emptyCheckpointInventory();
+      records.identities = Array.from({ length: count }, (_, n) => ({
+        ...identity,
+        memoryId: M.MemoryId.make(id(100 + n)),
+      }));
+      const size = checkpointInventorySize(records);
+      assert.strictEqual(
+        size.bytes,
+        new TextEncoder().encode(records.identities.map(encodeCheckpointRecord).join("")).length,
+      );
+      let actual = 0;
+      for (let start = 0; start < Math.max(1, count); start += 100) {
+        const page: M.MemoryHubCheckpointPage = {
+          memorySpaceId: space,
+          checkpointSequence: Number.MAX_SAFE_INTEGER,
+          retentionFloor: Number.MAX_SAFE_INTEGER,
+          causalBoundary: {
+            checkpointSequence: Number.MAX_SAFE_INTEGER,
+            boundaryId: "f".repeat(64),
+          },
+          pageOrdinal: start / 100,
+          ...emptyCheckpointInventory(),
+          identities: records.identities.slice(start, start + 100),
+          nextCursor: start + 100 < count ? "f".repeat(64) : null,
+          bootstrapComplete: start + 100 >= count,
+        };
+        const encoded = yield* encodeCheckpointPage(page);
+        const decoded = JSON.parse(encoded);
+        assert.strictEqual(typeof decoded.identities[0], count === 0 ? "undefined" : "object");
+        const recordBytes = checkpointInventorySize({
+          ...emptyCheckpointInventory(),
+          identities: page.identities.slice(),
+        }).bytes;
+        assert.isTrue(
+          new TextEncoder().encode(encoded).length - recordBytes < CHECKPOINT_PAGE_OVERHEAD,
+        );
+        actual += new TextEncoder().encode(encoded).length;
+      }
+      assert.isTrue(actual <= checkpointBound(size.bytes, size.rows));
+      assert.strictEqual(
+        checkpointBound(size.bytes, size.rows),
+        size.bytes + Math.max(1, count) * CHECKPOINT_PAGE_OVERHEAD,
+      );
+    }),
+);
+
+it.effect("private completed-noop codec slot is strict and body-free", () =>
+  Effect.gen(function* () {
+    const value = {
+      memorySpaceId: space,
+      environmentId,
+      sourceId: M.MemoryImportSourceId.make(id(50)),
+      kind: "completed-noop-ref",
+      codecVersion: 1,
+      operationId: M.MemoryOperationId.make(id(51)),
+      selectionDigest: "a".repeat(64),
+      sessionId: "session",
+      resultRef: "b".repeat(64),
+      sessionNewItems: 0,
+      sessionBodyBytes: 0,
+      createdAtUtc: "1970-01-01T00:00:00.000Z",
+    };
+    const decode = Schema.decodeUnknownEffect(ImportCompletedNoopCodec);
+    yield* decode(value, { onExcessProperty: "error" });
+    assert.strictEqual(
+      (yield* decode({ ...value, body: "forbidden" }, { onExcessProperty: "error" }).pipe(
+        Effect.exit,
+      ))._tag,
+      "Failure",
+    );
+  }),
+);
+
+it.effect("accepts exactly 262144 encoded page bytes and refuses one more byte", () =>
+  Effect.gen(function* () {
+    const revision: M.MemoryRevision = {
+      memorySpaceId: space,
+      memoryId,
+      operationId: M.MemoryOperationId.make(id(60)),
+      revisionId: M.MemoryRevisionId.make(id(61)),
+      parents: [],
+      scope: { kind: "user" },
+      payloadRef: M.MemoryRevisionId.make(id(61)),
+      assertionKind: "inference",
+      createdAtUtc: identity.createdAtUtc,
+      provenance: { environmentId },
+    };
+    const pair = (text: string) => ({
+      revision,
+      payload: { text, evidence: [], derivedFromMemoryRevisions: [] },
+    });
+    const page: M.MemoryHubCheckpointPage = {
+      memorySpaceId: space,
+      checkpointSequence: 1,
+      retentionFloor: 0,
+      causalBoundary: { checkpointSequence: 1, boundaryId: "a".repeat(64) },
+      pageOrdinal: 0,
+      ...emptyCheckpointInventory(),
+      revisions: [...Array.from({ length: 5 }, () => pair("\u0000".repeat(8000))), pair("x")],
+      nextCursor: null,
+      bootstrapComplete: true,
+    };
+    const remaining = 262144 - new TextEncoder().encode(JSON.stringify(page)).length;
+    const last = pair("\u0000".repeat(Math.floor(remaining / 6)) + "x".repeat(1 + (remaining % 6)));
+    const exact = { ...page, revisions: [...page.revisions.slice(0, -1), last] };
+    const encoded = yield* encodeCheckpointPage(exact);
+    assert.strictEqual(new TextEncoder().encode(encoded).length, 262144);
+    const size = checkpointInventorySize({
+      ...emptyCheckpointInventory(),
+      revisions: exact.revisions.slice(),
+    });
+    assert.isTrue(
+      new TextEncoder().encode(encoded).length <= checkpointBound(size.bytes, size.rows),
+    );
+    const over = {
+      ...exact,
+      revisions: [...exact.revisions.slice(0, -1), pair(last.payload.text + "x")],
+    };
+    assert.strictEqual((yield* encodeCheckpointPage(over).pipe(Effect.exit))._tag, "Failure");
+  }),
+);

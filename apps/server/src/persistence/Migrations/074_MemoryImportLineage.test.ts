@@ -20,7 +20,9 @@ it.effect(
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 73 });
       yield* sql`INSERT INTO memory_search_counters VALUES ('synthetic','user',7,5,123)`;
-      assert.deepStrictEqual(yield* runMigrations(), [[74, "MemoryImportLineage"]]);
+      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 74 }), [
+        [74, "MemoryImportLineage"],
+      ]);
       assert.deepStrictEqual(yield* sql`SELECT * FROM memory_search_counters`, [
         { space: "synthetic", scope_key: "user", eligible: 7, indexed: 5, text_bytes: 123 },
       ]);
@@ -90,7 +92,7 @@ it.effect.each(["event", "compact", "hubReceipt"] as const)(
       const memoryId = M.MemoryId.make("00000000-0000-4000-8000-000000000002");
       const environmentId = M.EnvironmentId.make("synthetic-legacy");
       const sourceId = M.MemoryImportSourceId.make("00000000-0000-4000-8000-000000000003");
-      yield* sql`INSERT INTO memory_identity_ledger VALUES (${space},${memoryId},'{}','{}',20000,0)`;
+      yield* sql`INSERT INTO memory_identity_ledger VALUES (${space},${memoryId},${json({ memorySpaceId: space, memoryId, scope: { kind: "user" }, creatingEnvironmentId: environmentId, createOperationId: "00000000-0000-4000-8000-000000000010", createdAtUtc: "1970-01-01T00:00:00.000Z" })},${json({ memorySpaceId: space, memoryId, highestFencingToken: 0, activeLease: null })},20000,0)`;
       const records: M.MemoryImportLineageRecord[] = [];
       for (let n = 0; n < 2; n++) {
         const op = `00000000-0000-4000-8000-00000000001${n}`;
@@ -121,7 +123,7 @@ it.effect.each(["event", "compact", "hubReceipt"] as const)(
           VALUES (1,${space},${memoryId},${op},'upsert',${environmentId},${receipt.operationDigest},'{}',${json(receipt)},0)`;
         else if (evidence === "compact")
           yield* sql`INSERT INTO memory_compact_receipts(space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json)
-          VALUES (${space},${op},${receipt.operationDigest},${receipt.hubSequence},${json(receipt)},'{}')`;
+          VALUES (${space},${op},${receipt.operationDigest},${receipt.hubSequence},${json(receipt)},${json({ memorySpaceId: space, originEnvironmentId: environmentId, operationKind: "upsert", receipt, revisionId: op, resolutionId: null, revertsResolutionId: null, attemptId: null, fencingToken: null, reportGuard: null })})`;
         else
           yield* sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json)
           VALUES (${space},'hubReceipt',${op},${memoryId},${json({ memoryId, receipt })})`;
@@ -144,6 +146,7 @@ it.effect.each(["event", "compact", "hubReceipt"] as const)(
           },
         );
       }
+      yield* runMigrations({ toMigrationInclusive: 74 });
       yield* runMigrations();
       // A structurally valid staged page isolates the lineage guard from ordinary
       // missing-page refusal. Without the guard publication really advances the floor.
