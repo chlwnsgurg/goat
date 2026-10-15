@@ -172,11 +172,17 @@ vi.mock("../state/entities", () => ({
   useEnvironmentServerConfig: () => null,
 }));
 vi.mock("../state/use-remote-environment-registry", () => ({
-  useSavedRemoteConnections: () => ({ savedConnectionsById: {
-    [nativeEnv]: {environmentId: nativeEnv, environmentLabel: "Test hub"},
-    [nativeDevice]: {environmentId: nativeDevice, environmentLabel: "Test device"},
-  } }),
-  useRemoteConnectionStatus: () => ({ connectedEnvironments: [{environmentId: nativeDevice}] }),
+  useSavedRemoteConnections: () => ({
+    savedConnectionsById: {
+      [nativeEnv]: { environmentId: nativeEnv, environmentLabel: "Test hub" },
+      [nativeDevice]: { environmentId: nativeDevice, environmentLabel: "Test device" },
+    },
+  }),
+  useRemoteConnectionStatus: () => ({
+    connectedEnvironments: [
+      { environmentId: nativeDevice, isEnabled: true, connectionState: "connected" },
+    ],
+  }),
 }));
 vi.mock("../features/home/home-thread-navigation", () => ({
   useHomeThreadSelection: () => (thread: unknown) => bridge.navigations.push(thread),
@@ -195,8 +201,7 @@ vi.mock("../features/settings/components/SettingsSection", () => ({
 }));
 vi.mock("../features/settings/components/SettingsActionRow", () => ({
   SettingsActionRow: (props: { label: string; disabled?: boolean; onPress: () => void }) => {
-    if (["Confirm forget"].includes(props.label))
-      bridge.confirmations.push(props.onPress);
+    if (["Confirm forget"].includes(props.label)) bridge.confirmations.push(props.onPress);
     return (
       <button disabled={props.disabled} onClick={props.onPress}>
         {props.label}
@@ -383,7 +388,10 @@ export function createNativeMemoryHarness() {
     settings: { enableAgentMemoryAccess: true },
   } as ServerConfig;
   const responses = new Map<string, (input: unknown) => unknown>([
-    [WS_METHODS.memoryHubSettingsGet, () => ({settings: {mode: "hub", memorySpaceId: nativeSpace}, members: [], version: 1})],
+    [
+      WS_METHODS.memoryHubSettingsGet,
+      () => ({ settings: { mode: "hub", memorySpaceId: nativeSpace }, members: [], version: 1 }),
+    ],
     [WS_METHODS.memoryOwnerSourceReadPolicyGet, () => nativeOwnerPolicy],
     [WS_METHODS.memorySyncStatus, () => nativeSyncStatus],
     [
@@ -409,60 +417,86 @@ export function createNativeMemoryHarness() {
       }),
     ],
   ]);
-  const rpcFor = (environmentId: EnvironmentId) => new Proxy(
-    {},
-    {
-      get: (_object, method) => (input: unknown) => {
-        if (method === WS_METHODS.memoryChanges)
-          return Stream.concat(
-            Stream.succeed({
-              kind: "reset",
-              memorySpaceId: nativeSpace,
-              projectionWatermark: 1,
-            } as MemoryChangeSignal),
-            Stream.fromQueue(queue),
-          );
-        return Effect.suspend(() => {
-          calls.push({ method: String(method), input, environmentId });
-          waiters
-            .filter(
-              (waiter) =>
-                waiter.method === method &&
-                calls.filter((call) => call.method === method).length >= waiter.count,
-            )
-            .forEach((waiter) => waiter.resolve());
-          const response = responses.get(String(method))?.(input);
-          return Effect.isEffect(response) ? response : Effect.succeed(response);
-        });
+  const rpcFor = (environmentId: EnvironmentId) =>
+    new Proxy(
+      {},
+      {
+        get: (_object, method) => (input: unknown) => {
+          if (method === WS_METHODS.memoryChanges)
+            return Stream.concat(
+              Stream.succeed({
+                kind: "reset",
+                memorySpaceId: nativeSpace,
+                projectionWatermark: 1,
+              } as MemoryChangeSignal),
+              Stream.fromQueue(queue),
+            );
+          return Effect.suspend(() => {
+            calls.push({ method: String(method), input, environmentId });
+            waiters
+              .filter(
+                (waiter) =>
+                  waiter.method === method &&
+                  calls.filter((call) => call.method === method).length >= waiter.count,
+              )
+              .forEach((waiter) => waiter.resolve());
+            const response = responses.get(String(method))?.(input);
+            return Effect.isEffect(response) ? response : Effect.succeed(response);
+          });
+        },
       },
-    },
-  );
+    );
   const active = Effect.runSync(
     SubscriptionRef.make(
-      Option.some({ client: rpcFor(nativeEnv), initialConfig: Effect.succeed(config) } as unknown as RpcSession),
+      Option.some({
+        client: rpcFor(nativeEnv),
+        initialConfig: Effect.succeed(config),
+      } as unknown as RpcSession),
     ),
   );
   const supervisor = {
     target: { environmentId: nativeEnv, label: "Synthetic tunnel" },
     session: active,
   } as EnvironmentSupervisor.EnvironmentSupervisor["Service"];
-  const deviceSession = Effect.runSync(SubscriptionRef.make(Option.some({ client: rpcFor(nativeDevice), initialConfig: Effect.succeed(config) } as unknown as RpcSession)));
-  const deviceSupervisor = {...supervisor, target: {...supervisor.target, environmentId: nativeDevice, label: "Test device"}, session: deviceSession};
+  const deviceSession = Effect.runSync(
+    SubscriptionRef.make(
+      Option.some({
+        client: rpcFor(nativeDevice),
+        initialConfig: Effect.succeed(config),
+      } as unknown as RpcSession),
+    ),
+  );
+  const deviceSupervisor = {
+    ...supervisor,
+    target: { ...supervisor.target, environmentId: nativeDevice, label: "Test device" },
+    session: deviceSession,
+  };
   const entries = Effect.runSync(
     SubscriptionRef.make<ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>>(
-      new Map([[nativeEnv, { enabled: true } as ConnectionCatalogEntry], [nativeDevice, { enabled: true } as ConnectionCatalogEntry]]),
+      new Map([
+        [nativeEnv, { enabled: true } as ConnectionCatalogEntry],
+        [nativeDevice, { enabled: true } as ConnectionCatalogEntry],
+      ]),
     ),
   );
   const runtime = Atom.runtime(
     Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, {
       entries,
       run: (id, effect) =>
-        (id === nativeEnv || id === nativeDevice)
-          ? Effect.provideService(effect, EnvironmentSupervisor.EnvironmentSupervisor, id === nativeEnv ? supervisor : deviceSupervisor)
+        id === nativeEnv || id === nativeDevice
+          ? Effect.provideService(
+              effect,
+              EnvironmentSupervisor.EnvironmentSupervisor,
+              id === nativeEnv ? supervisor : deviceSupervisor,
+            )
           : Effect.die("Unexpected destination"),
       followStream: (id, stream) =>
-        (id === nativeEnv || id === nativeDevice)
-          ? Stream.provideService(stream, EnvironmentSupervisor.EnvironmentSupervisor, id === nativeEnv ? supervisor : deviceSupervisor)
+        id === nativeEnv || id === nativeDevice
+          ? Stream.provideService(
+              stream,
+              EnvironmentSupervisor.EnvironmentSupervisor,
+              id === nativeEnv ? supervisor : deviceSupervisor,
+            )
           : Stream.empty,
     } as EnvironmentRegistry.EnvironmentRegistry["Service"]),
   );
@@ -532,8 +566,14 @@ export function createNativeMemoryHarness() {
     grants(nativeEnv),
     AsyncResult.success(scopes(["memory:read", "memory:write", "orchestration:read"])),
   );
-  registry.mount(configs(nativeDevice)); registry.mount(grants(nativeDevice)); registry.mount(prepared(nativeDevice));
-  registry.set(configs(nativeDevice), config); registry.set(grants(nativeDevice), AsyncResult.success(scopes(["memory:read", "memory:write", "settings:write"])));
+  registry.mount(configs(nativeDevice));
+  registry.mount(grants(nativeDevice));
+  registry.mount(prepared(nativeDevice));
+  registry.set(configs(nativeDevice), config);
+  registry.set(
+    grants(nativeDevice),
+    AsyncResult.success(scopes(["memory:read", "memory:write", "settings:write"])),
+  );
   return harness;
 }
 

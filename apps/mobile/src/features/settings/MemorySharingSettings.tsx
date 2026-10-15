@@ -73,8 +73,11 @@ export function MemoryAdministration({
     environmentId: e.environmentId,
     label: e.environmentLabel,
   }));
-  const readPreparedConnection = (id: EnvironmentId) => Option.getOrNull(registry.get(environmentSession.preparedConnectionValueAtom(id)));
-  const connection = Option.getOrNull(useAtomValue(environmentSession.preparedConnectionValueAtom(environmentId)));
+  const readPreparedConnection = (id: EnvironmentId) =>
+    Option.getOrNull(registry.get(environmentSession.preparedConnectionValueAtom(id)));
+  const connection = Option.getOrNull(
+    useAtomValue(environmentSession.preparedConnectionValueAtom(environmentId)),
+  );
   const getHub = useAtomCommand(memory.hubSettingsGet, { reportFailure: false });
   const updateHub = useAtomCommand(memory.hubSettingsUpdate, {
     reportFailure: false,
@@ -95,7 +98,9 @@ export function MemoryAdministration({
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<"hub" | "owner" | "device" | null>(null);
   const [device, setDevice] = useState<EnvironmentId | null>(null);
-  const selectedConnection = Option.getOrNull(useAtomValue(environmentSession.preparedConnectionValueAtom(device ?? environmentId)));
+  const selectedConnection = Option.getOrNull(
+    useAtomValue(environmentSession.preparedConnectionValueAtom(device ?? environmentId)),
+  );
 
   const [endpoint, setEndpoint] = useState(connection?.httpBaseUrl ?? "");
   const [confirm, setConfirm] = useState<"disable" | "add" | "rotate" | EnvironmentId | null>(null);
@@ -155,8 +160,14 @@ export function MemoryAdministration({
   const candidates = environments.filter(
     (e) =>
       e.environmentId !== environmentId &&
-      connectedEnvironments.some((c) => c.environmentId === e.environmentId) &&
-      supportsMemoryProtocol(registry.get(serverEnvironment.configValueAtom(e.environmentId))!.environment.capabilities),
+      connectedEnvironments.some(
+        (c) =>
+          c.environmentId === e.environmentId && c.isEnabled && c.connectionState === "connected",
+      ) &&
+      registry.get(serverEnvironment.configValueAtom(e.environmentId)) !== null &&
+      supportsMemoryProtocol(
+        registry.get(serverEnvironment.configValueAtom(e.environmentId))!.environment.capabilities,
+      ),
   );
   useEffect(() => {
     let current = true;
@@ -177,7 +188,9 @@ export function MemoryAdministration({
     return () => {
       current = false;
     };
-  }, [environmentId, reload]);
+    // Explicit reload starts a new settings read even when the connection is unchanged.
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies
+  }, [environmentId, getHub, getOwner, registry, reload]);
   async function saveHub(input: MemoryHubSettingsUpdateInput) {
     if (busy || !live() || !writable(environmentId)) return;
     loadGeneration.current += 1;

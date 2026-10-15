@@ -427,7 +427,7 @@ function MemoryBootstrapRefresh({
 }) {
   const exposure = useAtomValue(memory.exposureAtom({ environmentId, input: { memorySpaceId } }));
   useEffect(() => {
-    void onChange();
+    if (exposure.ready) void onChange();
   }, [exposure, onChange]);
   return null;
 }
@@ -509,7 +509,10 @@ function MemoryBrowser({
         params={params}
         memorySpaceId={memorySpaceId}
         scope={scope ?? { kind: "user" }}
-        onClose={() => setCreating(false)}
+        onClose={() => {
+          setCreating(false);
+          registry.refresh(atom);
+        }}
       />
     );
   return (
@@ -549,7 +552,15 @@ function MemoryBrowser({
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={`Open memory: ${item.status === "active" ? item.payload.text : item.status === "forgotten" ? "Forgotten memory" : "Conflicting memory"}`}
-          onPress={() => {registry.refresh(memory.read({environmentId: params.environmentId, input: {memorySpaceId, memoryId: item.memoryId}})); setSelected(item.memoryId);}}
+          onPress={() => {
+            registry.refresh(
+              memory.read({
+                environmentId: params.environmentId,
+                input: { memorySpaceId, memoryId: item.memoryId },
+              }),
+            );
+            setSelected(item.memoryId);
+          }}
           className="gap-1 border-b border-border p-4"
         >
           <Text className="text-foreground">
@@ -834,7 +845,7 @@ function MemoryDetails({
                     {formatMemoryTime(view.revertDeadlineUtc)}
                   </Copy>
                   <Copy>{entry.payload?.judgment ?? "Judgment unavailable"}</Copy>
-                  {item && history ? (
+                  {item && history && memoryEnabled ? (
                     <MemoryRevertControl
                       environmentId={params.environmentId}
                       item={item}
@@ -1068,7 +1079,6 @@ function MemoryReport({ report }: { readonly report: Parameters<typeof presentMe
     <View>
       <Copy>
         {view.label} · Automatic attempts: {view.automaticAttempts ?? "Unknown"}
-        {view.failureCode ? ` · ${view.failureCode}` : ""}
       </Copy>
       {target ? (
         <Action
@@ -1164,7 +1174,7 @@ function MemoryEditor({
         return;
       if (AsyncResult.isSuccess(result)) {
         setError(
-          `Request ${result.value.outcome}${result.value.pendingSync ? " · Propagation pending" : ""}${result.value.failureCode ? ` · ${result.value.failureCode}` : ""}`,
+          `Request ${result.value.outcome}${result.value.pendingSync ? " · Propagation pending" : ""}`,
         );
         intent.current = null;
         if (result.value.outcome === "accepted" || result.value.outcome === "noop") onClose();
