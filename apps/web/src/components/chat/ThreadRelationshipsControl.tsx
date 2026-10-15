@@ -300,18 +300,17 @@ export function ThreadRelationshipsPanel(props: {
   );
   const projection = useThreadProjection(ref)?.projection ?? null;
   const providers = useServerConfigs().get(props.environmentId)?.providers;
-  const runtimeSubagents = useMemo(
-    () =>
-      projectedSubagentsToRuntime(projection?.subagents ?? []).map((agent, index) => {
-        const record = projection?.subagents[index];
-        return {
-          ...agent,
-          memoryGrantCeiling: record?.memoryGrantCeiling,
-          currentMemoryAccess: record?.currentMemoryAccess,
-        };
-      }),
-    [projection?.subagents],
-  );
+  const runtimeSubagents = useMemo(() => {
+    const records = new Map((projection?.subagents ?? []).map((record) => [record.id, record]));
+    return projectedSubagentsToRuntime(projection?.subagents ?? []).map((agent) => {
+      const record = records.get(agent.id);
+      return {
+        ...agent,
+        memoryGrantCeiling: record?.memoryGrantCeiling,
+        currentMemoryAccess: record?.currentMemoryAccess,
+      };
+    });
+  }, [projection?.subagents]);
   const subagentsByThreadId = useMemo(() => {
     const byId = new Map(runtimeSubagents.map((agent) => [agent.id, agent]));
     return new Map(
