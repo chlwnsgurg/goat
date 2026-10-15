@@ -1878,6 +1878,7 @@ const isSqlError = Schema.is(SqlError);
 const isStorageError = Schema.is(MemoryStorageError);
 const decodeMemoryId = Schema.decodeUnknownEffect(M.MemoryId);
 const decodeMemorySpaceId = Schema.decodeUnknownEffect(M.MemorySpaceId);
+const decodeAssertionKind = Schema.decodeUnknownEffect(M.MemoryAssertionKind);
 const decodeReceipt = Schema.decodeUnknownEffect(Receipt);
 const decodeFtsState = Schema.decodeUnknownEffect(FtsState);
 const suppressionCodec = codec(M.MemorySuppressionRecord);
@@ -6074,7 +6075,7 @@ const make = Effect.gen(function* () {
       };
       const assertionKind = yield* stored(
         "lineage-assertion",
-        Schema.decodeUnknownEffect(M.MemoryAssertionKind)(row.assertion_kind),
+        decodeAssertionKind(row.assertion_kind),
       );
       const records: M.MemoryImportLineageRecord[] = [
         ...[

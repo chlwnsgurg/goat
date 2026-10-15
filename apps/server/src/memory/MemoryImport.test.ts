@@ -812,9 +812,12 @@ describe("MemoryImport settlement", () => {
           ))!.pending,
           null,
         );
-        assert.strictEqual(
-          (yield* store.transact(store.readImportBatchTx(first.batch)))?.kind,
-          "retired",
+        const guard = yield* store.transact(store.readImportBatchTx(first.batch));
+        assert.strictEqual(guard?.kind, "retired");
+        // Fixed ASCII tag/version and a 64-byte hex digest have no escaping expansion.
+        assert.isAtMost(
+          new TextEncoder().encode(JSON.stringify(guard)).length,
+          M.MEMORY_COMPACT_RECEIPT_MAX_BYTES,
         );
         const before = yield* durableInventory;
         const failure = yield* service.importPorts.commit(first, Effect.void).pipe(Effect.flip);
