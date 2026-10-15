@@ -894,13 +894,13 @@ exec(compile(code,'<descriptor-broker>','exec'),{'__name__':'__main__'})
     ),
   );
 
-  it.effect("source aggregate accepts 8 MiB and refuses +1 before retaining text", () =>
+  it.effect("UTF-8 source aggregate accepts 8 MiB and refuses +1 before retaining text", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const files = Object.fromEntries(
           Array.from({ length: 32 }, (_, i) => [
             `extensions/ad_hoc/notes/n${i}.md`,
-            "a".repeat(262144),
+            "가".repeat(87381) + "a",
           ]),
         );
         const fixture = yield* buildMemoryImportFixture("codex-ad-hoc-v1", { files });

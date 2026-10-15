@@ -54,7 +54,7 @@ export type MemoryImportReaderConfig = {
 // Python is invoked isolated (-I -S), with a complete static env and no shell. It never imports
 // source modules/configuration. Only private snapshot paths can be opened for writes/removal.
 const DESCRIPTORS = String.raw`
-import os, sys, stat, json, errno, re
+import os, sys, stat, json, errno, re, base64
 class Refusal(Exception):
     def __init__(self, issue): self.issue = issue
 
@@ -257,7 +257,7 @@ try:
                     checks[-1]=(parent,name,None,s,True); held.remove(fd); os.close(fd)
                     if git: write(out,name,data)
                     else:
-                        content=text(data); files.append({'selector':selector,'text':content,'byteCount':len(data)})
+                        text(data); files.append({'selector':selector,'utf8Base64':base64.b64encode(data).decode('ascii'),'byteCount':len(data)})
                         write(out,str(len(files))+'.txt',data)
         if c['format']=='omo':
             metadata=open_child(source,'.git',True)
@@ -438,7 +438,7 @@ const decodeBroker = Schema.decodeUnknownSync(
         Schema.Array(
           Schema.Struct({
             selector: Schema.String,
-            text: Schema.String,
+            utf8Base64: Schema.String,
             byteCount: Schema.Number,
           }),
         ),
@@ -653,7 +653,24 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
               config: slot.format === "omo" ? CONFIG : "",
             });
             if (config.onSnapshotSealed) yield* Effect.suspend(config.onSnapshotSealed);
-            let files = [...(copied.files ?? [])];
+            let files = yield* Effect.try({
+              try: () =>
+                (copied.files ?? []).map((file) => {
+                  const bytes = Buffer.from(file.utf8Base64, "base64");
+                  if (
+                    bytes.length !== file.byteCount ||
+                    bytes.length > 262144 ||
+                    bytes.toString("base64") !== file.utf8Base64
+                  )
+                    throw error("source_unreadable");
+                  return {
+                    selector: file.selector,
+                    text: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+                    byteCount: file.byteCount,
+                  };
+                }),
+              catch: normalize,
+            });
             let commitOid: string | undefined;
             let profile: string;
             if (slot.format === "omo") {
