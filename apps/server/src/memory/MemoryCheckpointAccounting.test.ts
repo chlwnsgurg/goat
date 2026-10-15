@@ -485,7 +485,7 @@ it.effect(
       yield* expected;
       const before = yield* counters;
       const forget = Effect.gen(function* () {
-        yield* sql`INSERT INTO memory_tombstones VALUES (${space},${memoryId},${id(82)},${environmentId},0,'[]','[]','[]')`;
+        yield* sql`INSERT INTO memory_tombstones(space,memory_id,delete_operation_id,deleting_environment_id,deleted_at,suppressed_source_keys_json,suppressed_content_json,source_exclusions_json) VALUES (${space},${memoryId},${id(82)},${environmentId},0,'[]','[]','[]')`;
         yield* refreshCheckpointAccounting();
         yield* expected;
         assert.strictEqual(

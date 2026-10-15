@@ -2940,6 +2940,7 @@ describe("MemoryImport physical-growth source harness", () => {
           }).pipe(Effect.provide(growthLayer(filename)));
         }),
       ).pipe(Effect.provide(NodeServices.layer)),
-    { timeout: 1800000 },
+    // Full admission now retains all 16 rounds instead of stopping growth at capacity.
+    { timeout: 3600000 },
   );
 });
