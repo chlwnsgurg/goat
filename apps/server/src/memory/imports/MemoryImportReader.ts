@@ -209,6 +209,8 @@ const nodeSnapshot = (config: MemoryImportReaderConfig, input: SnapshotOperation
           };
           const read = async (path: string, before: Stamp, maximum: number) => {
             if (before.size > BigInt(maximum)) throw error("limit_exceeded");
+            // Node/libuv opens descriptors close-on-exec; O_CLOEXEC is not exposed by Node.
+            // If a platform omits O_NOFOLLOW, the lstat/fstat/ancestor checks still apply.
             let handle: NodeFS.promises.FileHandle;
             try {
               handle = await fs.open(
@@ -232,7 +234,12 @@ const nodeSnapshot = (config: MemoryImportReaderConfig, input: SnapshotOperation
                 if (!bytesRead) break;
                 chunks.push(bytes.subarray(0, bytesRead));
                 size += bytesRead;
-                if (size > maximum) throw error("limit_exceeded");
+                if (size > maximum) {
+                  if (!stamp(before, await handle.stat({ bigint: true })))
+                    throw error("source_changed");
+                  await verify(path);
+                  throw error("limit_exceeded");
+                }
               }
               config.onSourceRead?.();
               if (
