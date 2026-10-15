@@ -2,13 +2,14 @@ import type { LegendListRef } from "@legendapp/list/react";
 import type { RunId } from "@goat/contracts";
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { TimelineEntry } from "../../session-logic";
-import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
+import { timelineEntryTurnFoldRunId, type MessagesTimelineRow } from "./MessagesTimeline.logic";
 import type { AssistantCitationRequest, AssistantCitationTarget } from "./AssistantCitationSource";
 import { toastManager } from "../ui/toast";
 
 export interface CitationHistoryPage {
   readonly loading: boolean;
   readonly cursor?: string | null;
+  readonly error?: string | null;
   readonly onLoadEarlier: () => void;
 }
 
@@ -21,6 +22,7 @@ export function useAssistantCitationTarget({
   viewport,
   historyLoading,
   loadEarlier,
+  foldInput,
   onExpandTurn,
   onManualNavigation,
 }: {
@@ -31,9 +33,11 @@ export function useAssistantCitationTarget({
   viewport: HTMLElement | null;
   historyLoading: boolean;
   loadEarlier: CitationHistoryPage | null;
+  foldInput: Omit<Parameters<typeof timelineEntryTurnFoldRunId>[0], "timelineEntries">;
   onExpandTurn: (runId: RunId) => void;
   onManualNavigation: () => void;
 }) {
+  const { latestRun = null, runningRunId = null, isWorking, runlessWorkActive = false } = foldInput;
   const [ready, setReady] = useState<AssistantCitationTarget | null>(null);
   const [finishedKey, setFinishedKey] = useState<string | null>(null);
   const [listLoaded, setListLoaded] = useState(false);
@@ -41,6 +45,7 @@ export function useAssistantCitationTarget({
   const navigationRef = useRef<{
     target: AssistantCitationTarget;
     requestedPages: Set<string>;
+    pageLoadingObserved: boolean;
     done: boolean;
   } | null>(null);
 
@@ -70,6 +75,7 @@ export function useAssistantCitationTarget({
       navigationRef.current = {
         target,
         requestedPages: new Set(),
+        pageLoadingObserved: false,
         done: false,
       };
       setReady(null);
@@ -89,9 +95,16 @@ export function useAssistantCitationTarget({
     );
     if (!source) {
       if (loadEarlier) {
-        if (loadEarlier.loading) return;
+        if (loadEarlier.loading) {
+          navigation.pageLoadingObserved = true;
+          return;
+        }
         const cursor = loadEarlier.cursor ?? entries[0]?.id ?? "first";
-        if (navigation.requestedPages.has(cursor) || navigation.requestedPages.size >= 20) {
+        const alreadyRequested = navigation.requestedPages.has(cursor);
+        // List mounting or a row update can rerun this effect before the history
+        // store publishes loading. Only judge a repeated cursor after its request settles.
+        if (alreadyRequested && !navigation.pageLoadingObserved && !loadEarlier.error) return;
+        if (loadEarlier.error || alreadyRequested || navigation.requestedPages.size >= 20) {
           fail(
             "Could not load the cited response",
             "Load earlier turns, then click the citation to try again. Your saved quote is unchanged.",
@@ -99,6 +112,7 @@ export function useAssistantCitationTarget({
           return;
         }
         navigation.requestedPages.add(cursor);
+        navigation.pageLoadingObserved = false;
         loadEarlier.onLoadEarlier();
         return;
       }
@@ -119,12 +133,27 @@ export function useAssistantCitationTarget({
       (row) => row.kind === "message" && row.message.id === navigation.target.citation.messageId,
     );
     if (index < 0) {
-      if (source.message.runId) onExpandTurn(source.message.runId);
+      const foldRunId = timelineEntryTurnFoldRunId(
+        { latestRun, runningRunId, isWorking, runlessWorkActive, timelineEntries: entries },
+        source.id,
+      );
+      if (foldRunId) {
+        onExpandTurn(foldRunId);
+      } else {
+        fail(
+          "The cited response is unavailable",
+          "It cannot be displayed. The selected text is still saved in your citation.",
+        );
+      }
       return;
     }
     if (listLoaded && listRef.current) setReady(navigation.target);
   }, [
     entries,
+    latestRun,
+    runningRunId,
+    isWorking,
+    runlessWorkActive,
     historyLoading,
     listLoaded,
     listRef,

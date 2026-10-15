@@ -1098,6 +1098,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     viewport: timelineViewportElement,
     historyLoading: citationHistoryLoading,
     loadEarlier,
+    foldInput: { latestRun, runningRunId, isWorking, runlessWorkActive },
     onExpandTurn: expandCitedRun,
     onManualNavigation,
   });

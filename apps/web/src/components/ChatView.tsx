@@ -1586,7 +1586,6 @@ function chatActionErrorMessage(error: unknown): string {
 }
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
-const EMPTY_HELD_TURN_DIFF_SUMMARIES: readonly never[] = [];
 const noopHeldTurnDiff = (_turnId: RunId, _filePath?: string) => {};
 const noopHeldRevert = (_targetTurnCount: number) => {};
 const noopHeldAttachment = (_attachment: ChatFileAttachment) => {};
@@ -4377,6 +4376,37 @@ export default function ChatView(props: ChatViewProps) {
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
+  const timelineActivity = useMemo(
+    () => ({
+      isWorking,
+      runlessWorkActive: runlessWorkStartedAt !== null,
+      activeTurnInProgress: isWorking || !latestRunSettled,
+      isCompacting,
+      awaitingUser:
+        activePendingApproval !== null ||
+        activePendingUserInput !== null ||
+        activeThreadShell?.hasPendingUserInput === true,
+      activeTurnStartedAt: activeWorkStartedAt,
+      latestRun: activeActivityRun,
+      runningRunId: activeRuntime?.activeRunId ?? null,
+      runs: serverProjection?.runs ?? [],
+      turnDiffSummaries,
+    }),
+    [
+      isWorking,
+      runlessWorkStartedAt,
+      latestRunSettled,
+      isCompacting,
+      activePendingApproval,
+      activePendingUserInput,
+      activeThreadShell?.hasPendingUserInput,
+      activeWorkStartedAt,
+      activeActivityRun,
+      activeRuntime?.activeRunId,
+      serverProjection?.runs,
+      turnDiffSummaries,
+    ],
+  );
   useLayoutEffect(() => {
     if (
       threadDetailLoading ||
@@ -4390,8 +4420,16 @@ export default function ChatView(props: ChatViewProps) {
       entries: timelineEntries,
       markdownCwd: gitCwd,
       workspaceRoot: activeWorkspaceRoot ?? null,
+      activity: timelineActivity,
     });
-  }, [activeThreadKey, activeWorkspaceRoot, gitCwd, threadDetailLoading, timelineEntries]);
+  }, [
+    activeThreadKey,
+    activeWorkspaceRoot,
+    gitCwd,
+    threadDetailLoading,
+    timelineEntries,
+    timelineActivity,
+  ]);
   const heldPaintContext = paintOnlyDisplayedTimeline
     ? peekHeldThreadTimeline<typeof timelineEntries>()
     : null;
@@ -12084,20 +12122,8 @@ export default function ChatView(props: ChatViewProps) {
                       ...(activeProject ? { onRunShellCommand: runShellCommand } : {}),
                     }
                   : {})}
-                isWorking={!paintOnlyDisplayedTimeline && isWorking}
-                runlessWorkActive={runlessWorkStartedAt !== null}
-                activeTurnInProgress={
-                  !paintOnlyDisplayedTimeline && (isWorking || !latestRunSettled)
-                }
-                isCompacting={!paintOnlyDisplayedTimeline && isCompacting}
-                awaitingUser={
-                  !paintOnlyDisplayedTimeline &&
-                  (activePendingApproval !== null ||
-                    activePendingUserInput !== null ||
-                    // A secret request has no runtime request; the shell carries it.
-                    activeThreadShell?.hasPendingUserInput === true)
-                }
-                activeTurnStartedAt={paintOnlyDisplayedTimeline ? null : activeWorkStartedAt}
+                {...((paintOnlyDisplayedTimeline ? heldPaintContext?.activity : null) ??
+                  timelineActivity)}
                 worktreeSetup={paintOnlyDisplayedTimeline ? null : worktreeSetup}
                 onCancelWorktreeSetup={onCancelWorktreeSetup}
                 {...(paintOnlyDisplayedTimeline
@@ -12128,12 +12154,6 @@ export default function ChatView(props: ChatViewProps) {
                   environmentById.get(
                     displayedThreadRef?.environmentId ?? activeThread.environmentId,
                   )?.serverConfig?.providers ?? EMPTY_PROVIDERS
-                }
-                runs={paintOnlyDisplayedTimeline ? [] : (serverProjection?.runs ?? [])}
-                latestRun={paintOnlyDisplayedTimeline ? null : activeActivityRun}
-                runningRunId={paintOnlyDisplayedTimeline ? null : activeRunningTurnId}
-                turnDiffSummaries={
-                  paintOnlyDisplayedTimeline ? EMPTY_HELD_TURN_DIFF_SUMMARIES : turnDiffSummaries
                 }
                 activeThreadEnvironmentId={
                   displayedThreadRef?.environmentId ?? activeThread.environmentId
@@ -12188,7 +12208,17 @@ export default function ChatView(props: ChatViewProps) {
                 topFadeEnabled={!hasTimelineTopBanner}
                 {...(paintOnlyDisplayedTimeline || threadHistoryControls === undefined
                   ? {}
-                  : { historyControls: threadHistoryControls })}
+                  : {
+                      historyControls: threadHistoryControls,
+                      loadEarlier: threadHistoryControls.hasMoreHistory
+                        ? {
+                            loading: threadHistoryControls.loading,
+                            cursor: serverThreadHistory.historyCursor,
+                            error: threadHistoryControls.error,
+                            onLoadEarlier: threadHistoryControls.onLoadEarlier,
+                          }
+                        : null,
+                    })}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
