@@ -14,6 +14,7 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Settings from "../serverSettings.ts";
 import * as Generation from "../textGeneration/TextGeneration.ts";
@@ -132,6 +133,7 @@ const decodePull = Schema.decodeUnknownEffect(M.MemoryHubPullResult);
 const decodeSource = Schema.decodeUnknownEffect(M.MemorySourceReadOutcome);
 const decodeGenerated = Schema.decodeUnknownEffect(M.ResolveMemoryConflictExecutionResult);
 const decodeResolveInput = Schema.decodeUnknownEffect(M.ResolveMemoryConflictInput);
+const decodeLineagePayload = Schema.decodeUnknownEffect(M.MemoryPayload);
 const decodeSubmission = Schema.decodeUnknownEffect(M.MemoryHubApplyResolutionInput);
 const encodePush = Schema.encodeEffect(Schema.fromJsonString(M.MemoryHubPushInput));
 const failureCode = (e: Error): M.MemoryFailureCode =>
@@ -163,6 +165,7 @@ const transient = (e: Error) =>
     ["unavailable", "storage_failed", "cursor_expired"].includes(e.code));
 
 const make = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
   const store = yield* Store.MemoryStore;
   const service = yield* Service.MemoryService;
   const client = yield* Client.MemoryHubClient;
@@ -585,6 +588,25 @@ const make = Effect.gen(function* () {
             (h) => row.ticket.conflictHeadSet.includes(h.revision.revisionId) && h.payload !== null,
           )
           .map((h) => ({ revision: h.revision, payload: h.payload! }));
+        const inheritedDependencies = [
+          ...new Set(heads.flatMap((h) => h.payload.derivedFromMemoryRevisions)),
+        ];
+        const dependencies = [
+          ...new Set([...row.ticket.conflictHeadSet, ...inheritedDependencies]),
+        ];
+        // Check the existing payload codec's dependency/byte bounds before generation.
+        const lineage = yield* decodeLineagePayload({
+          text: "lineage admission",
+          evidence: [],
+          derivedFromMemoryRevisions: dependencies,
+        }).pipe(Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })));
+        const recheckDependencies = Service.validateSummaryDependencies(row.ticket.memorySpaceId, {
+          ...lineage,
+          derivedFromMemoryRevisions: inheritedDependencies.filter(
+            (id) => !row.ticket.conflictHeadSet.includes(id),
+          ),
+        }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+        yield* recheckDependencies;
         const input = yield* decodeResolveInput({
           cwd: runtime.cwd,
           memorySpaceId: row.ticket.memorySpaceId,
@@ -684,7 +706,7 @@ const make = Effect.gen(function* () {
             payload: {
               text: trusted.result.text,
               evidence: trusted.result.evidence,
-              derivedFromMemoryRevisions: row.ticket.conflictHeadSet,
+              derivedFromMemoryRevisions: dependencies,
             },
             resolution: {
               resolutionId,
@@ -706,10 +728,13 @@ const make = Effect.gen(function* () {
           },
         }).pipe(Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })));
         row = yield* store.transact(
-          store.persistResolutionSubmissionTx({
-            ownership: ownership(row),
-            submission,
-            digest: memoryOperationDigest(submission.operation),
+          Effect.gen(function* () {
+            yield* recheckDependencies;
+            return yield* store.persistResolutionSubmissionTx({
+              ownership: ownership(row),
+              submission,
+              digest: memoryOperationDigest(submission.operation),
+            });
           }),
         );
       }

@@ -159,35 +159,54 @@ const make = Effect.gen(function* () {
             AND NOT EXISTS (SELECT 1 FROM orchestration_events n WHERE n.application_event_version=2 AND n.aggregate_kind='thread' AND n.stream_id=e.stream_id AND n.event_type='message.updated' AND json_extract(n.payload_json,'$.id')=json_extract(e.payload_json,'$.id') AND n.sequence>e.sequence AND n.sequence<=${meta.observedThroughSequence ?? meta.sourceWatermark.throughSequence})
             AND (CASE WHEN json_extract(e.payload_json,'$.runId') IS NULL THEN '' ELSE coalesce((SELECT json_extract(r.payload_json,'$.status') FROM orchestration_events r WHERE r.application_event_version=2 AND r.aggregate_kind='thread' AND r.stream_id=e.stream_id AND r.event_type IN ('run.created','run.updated') AND json_extract(r.payload_json,'$.id')=json_extract(e.payload_json,'$.runId') AND r.sequence<=${meta.observedThroughSequence ?? meta.sourceWatermark.throughSequence} ORDER BY r.sequence DESC LIMIT 1),'') END)!='rolled_back'
             AND (json_extract(e.payload_json,'$.role')='user' OR (SELECT json_extract(r.payload_json,'$.status') FROM orchestration_events r WHERE r.application_event_version=2 AND r.aggregate_kind='thread' AND r.stream_id=e.stream_id AND r.event_type IN ('run.created','run.updated') AND json_extract(r.payload_json,'$.id')=json_extract(e.payload_json,'$.runId') AND r.sequence<=${meta.observedThroughSequence ?? meta.sourceWatermark.throughSequence} ORDER BY r.sequence DESC LIMIT 1)='completed')
-            ORDER BY e.sequence LIMIT 101`);
+            ORDER BY e.sequence LIMIT 102`);
           const messages: M.GenerateMemorySummaryInput["messages"][number][] = [];
           let bytes = 0;
           let last = rows[0];
-          for (const row of rows) {
+          let hasMore = false;
+          // One lookahead row distinguishes a full filtered page from actual EOF.
+          for (const row of rows.slice(0, 101)) {
             const message = yield* query(decodeMessage(row.payload_json));
-            const input = { messageId: message.id, text: message.text, completed: true };
+            // Native history imports can contain the provider-only WP4 frame. It is
+            // reference data, not a new transcript fact (including an unfinished frame).
+            const text = message.text
+              .replace(/<external_goat_memory>[\s\S]*?(?:<\/external_goat_memory>|$)/g, "")
+              .trim();
+            if (!text) {
+              last = row;
+              continue;
+            }
+            const input = { messageId: message.id, text, completed: true };
             const size = new TextEncoder().encode(
               yield* query(encodeGenerationMessage(input)),
             ).length;
-            if (messages.length === 100 || bytes + size > 180000) break;
+            if (messages.length === 100 || bytes + size > 180000) {
+              if (!messages.length) return yield* new MemoryWorkerError({ code: "invalid_output" });
+              hasMore = true;
+              break;
+            }
             messages.push(input);
             bytes += size;
             last = row;
           }
-          if (!messages.length) return yield* new MemoryWorkerError({ code: "source_invalidated" });
           if (scanMemoryValue({ messages }).kind !== "allowed")
             return yield* new MemoryWorkerError({ code: "secret_detected" });
           return {
             messages,
             watermark:
-              messages.length < rows.length && last
+              (hasMore || rows.length > 101) && last
                 ? {
                     ...meta.sourceWatermark,
                     fromEventId: M.EventId.make(rows[0]!.event_id),
                     toEventId: M.EventId.make(last.event_id),
                     throughSequence: last.sequence,
                   }
-                : { ...meta.sourceWatermark, fromEventId: M.EventId.make(rows[0]!.event_id) },
+                : {
+                    ...meta.sourceWatermark,
+                    fromEventId: M.EventId.make(
+                      rows[0]?.event_id ?? meta.sourceWatermark.fromEventId,
+                    ),
+                  },
           };
         }),
       )
@@ -485,6 +504,13 @@ const make = Effect.gen(function* () {
         : (current?.revisions.find(
             (pair) => current.heads.length === 1 && current.heads[0] === pair.revision.revisionId,
           )?.payload ?? undefined);
+      const dependencySpace = M.MemorySpaceId.make(
+        work.space.startsWith("_local:") ? Service.memoryStableUuid(work.space) : work.space,
+      );
+      if (previousSummary)
+        yield* Service.validateSummaryDependencies(dependencySpace, previousSummary).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+        );
       if (previousSummary && scanMemoryValue(previousSummary).kind !== "allowed")
         return yield* new MemoryWorkerError({ code: "secret_detected" });
       let sourceWork = work;
@@ -495,13 +521,36 @@ const make = Effect.gen(function* () {
       }
       const recheckSource = Effect.gen(function* () {
         yield* readSource(work);
+        if (previousSummary)
+          yield* Service.validateSummaryDependencies(dependencySpace, previousSummary).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+          );
         if (previousSummary && !(yield* summaryEvidenceValid(work, previousSummary)))
           return yield* new MemoryWorkerError({ code: "source_invalidated" });
       });
       const generated = yield* Effect.scoped(
         Effect.gen(function* () {
           const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "memory-generation-" });
+          let lastGenerated:
+            | {
+                input: M.GenerateMemorySummaryInput;
+                output: M.GenerateMemorySummaryExecutionResult;
+              }
+            | undefined;
           while (true) {
+            // Empty filtered pages still consume their bounded source range. A trailing
+            // empty page completes the work without sending an invalid empty model input.
+            if (!source.messages.length) {
+              if (source.watermark.throughSequence >= meta.sourceWatermark.throughSequence)
+                return lastGenerated;
+              yield* renewClaim;
+              sourceWork = {
+                ...work,
+                metadata: { ...meta, fromSequence: source.watermark.throughSequence },
+              };
+              source = yield* readSource(sourceWork);
+              continue;
+            }
             const input = yield* query(
               decodeInput(
                 {
@@ -529,10 +578,11 @@ const make = Effect.gen(function* () {
               return yield* new MemoryWorkerError({ code: "secret_detected" });
             if (source.watermark.throughSequence >= meta.sourceWatermark.throughSequence)
               return { input, output };
+            lastGenerated = { input, output };
             previousSummary = {
               text: output.result.text,
               evidence: output.result.evidence,
-              derivedFromMemoryRevisions: [],
+              derivedFromMemoryRevisions: previousSummary?.derivedFromMemoryRevisions ?? [],
             };
             sourceWork = {
               ...work,
@@ -542,6 +592,16 @@ const make = Effect.gen(function* () {
           }
         }),
       );
+      if (!generated) {
+        yield* store.transact(
+          Effect.gen(function* () {
+            yield* recheckSource;
+            if (!(yield* store.completeSummaryWork(owned)))
+              return yield* new MemoryWorkerError({ code: "attempt_expired" });
+          }),
+        );
+        return;
+      }
       if (work.space.startsWith("_local:")) {
         if (
           generated.output.execution.environmentId !== environmentId ||
@@ -573,7 +633,8 @@ const make = Effect.gen(function* () {
               payload: {
                 text: generated.output.result.text,
                 evidence: generated.output.result.evidence,
-                derivedFromMemoryRevisions: [],
+                derivedFromMemoryRevisions:
+                  generated.input.previousSummary?.derivedFromMemoryRevisions ?? [],
               },
               provenance: {
                 environmentId,
