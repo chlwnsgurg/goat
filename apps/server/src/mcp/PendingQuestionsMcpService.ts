@@ -26,6 +26,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import { exceededDispatchModeLimit } from "../orchestration-v2/DispatchModeLimit.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
 import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
+import { withHostFanOutDeadline } from "./hostFanOutDeadline.ts";
 import {
   dispatchFailure,
   newCommandId,
@@ -314,6 +315,7 @@ const make = Effect.gen(function* () {
                       })),
                     }),
               ),
+              withHostFanOutDeadline(host),
               Effect.result,
               Effect.map((result) => ({ host, result })),
             ),
