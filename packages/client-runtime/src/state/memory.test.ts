@@ -1104,25 +1104,22 @@ describe("shared memory client", () => {
           const restoredRead = yield* Queue.take(h.reads);
           const forgottenBody = hasBody(h.memory.read(readTarget));
           h.registry.mount(forgottenBody);
-          const list = hasBody(
-            h.memory.list({
-              ...target,
-              input: { ...target.input, limit: 10, includeQuarantined: false },
-            }),
-          );
+          const list = h.memory.list({
+            ...target,
+            input: { ...target.input, limit: 10, includeQuarantined: false },
+          });
           h.registry.mount(list);
           yield* Deferred.succeed(restoredRead.reply, unrelatedItem);
-          yield* waitFor(h.registry, body, Boolean);
           yield* waitFor(
             h.registry,
-            h.memory.list({
-              ...target,
-              input: { ...target.input, limit: 10, includeQuarantined: false },
-            }),
-            (result) => result._tag === "Success",
+            list,
+            (result) => result._tag === "Success" && Option.isSome(result.value),
           );
           expect(h.registry.get(forgottenBody)).toBe(false);
-          expect(h.registry.get(list)).toBe(false);
+          const result = h.registry.get(list);
+          if (result._tag !== "Success" || Option.isNone(result.value))
+            throw new Error("Page required");
+          expect(result.value.value.items).toEqual([]);
           expect(h.readCount()).toBe(2);
           expect(h.registry.get(edit)).toBeNull();
           h.memory.dispose(h.registry);

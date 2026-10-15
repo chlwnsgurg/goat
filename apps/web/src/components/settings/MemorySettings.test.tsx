@@ -1212,19 +1212,22 @@ async function selectAddDevice() {
   await click("Add");
 }
 
-it("blocks localhost addresses before provisioning another device", async () => {
-  state.connection = { httpBaseUrl: "http://localhost:3773" };
-  await supportedScreen(false);
-  await selectAddDevice();
-  expect(container.textContent).toContain("Localhost points to the device itself");
-  const confirm = [...container.querySelectorAll("button")].find(
-    (button) => button.textContent === "Confirm",
-  )!;
-  expect(confirm.disabled).toBe(true);
-  expect(state.calls.mock.calls.some(([call]) => call.input.action === "provisionMember")).toBe(
-    false,
-  );
-});
+it.each(["http://localhost:3773", "https://127.0.0.2", "http://[::1]:3773", "https://localhost."])(
+  "blocks loopback %s before provisioning another device",
+  async (address) => {
+    state.connection = { httpBaseUrl: address };
+    await supportedScreen(false);
+    await selectAddDevice();
+    expect(container.textContent).toContain("Localhost points to the device itself");
+    const confirm = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Confirm",
+    )!;
+    expect(confirm.disabled).toBe(true);
+    expect(state.calls.mock.calls.some(([call]) => call.input.action === "provisionMember")).toBe(
+      false,
+    );
+  },
+);
 
 it.each(["reading", "installing"])(
   "recovers on member-only reconnection while %s without reusing a stale credential",

@@ -31,7 +31,8 @@ import { memoryDeviceFlow } from "./memoryDeviceFlow";
 const decodeHubAddress = Schema.decodeUnknownSync(MemoryHubEndpoint);
 const loopbackAddress = (value: string) => {
   try {
-    return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(value).hostname);
+    const host = new URL(value).hostname;
+    return /^(127\.|(?:.*\.)?localhost\.?$)/i.test(host) || host === "[::1]";
   } catch {
     return false;
   }
