@@ -490,8 +490,8 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
             if (
               selector.scope.kind !== "project" ||
               key === null ||
-              key !== selector.scope.projectKey ||
-              projectBinding.projectKey !== key
+              !same(key, selector.scope.projectKey) ||
+              !same(projectBinding.projectKey, key)
             )
               return yield* new M.MemoryImportRpcError({ issue: "mapping_changed" });
           }
@@ -642,6 +642,10 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
                 : s,
             ),
           };
+          // Service owns observation/settlement metadata on completed selections.
+          // Carry its durable batch into the next independent commit, including after ACK races.
+          const current = yield* ports.preflightBatch({ ...batchAddress, selectionDigest }, permit);
+          if (current.kind === "partial") batch = current.batch;
           r = yield* registration(input.memorySpaceId, input.sourceId, permit);
         }
         return yield* finish(
