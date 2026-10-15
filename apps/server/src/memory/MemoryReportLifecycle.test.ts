@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -519,5 +521,59 @@ it.effect("r2 M1 normalizes only canonically proven foreign pending intents", ()
     yield* store.transact(store.normalizeForeignReportIntentsTx(owner));
     assert.deepStrictEqual(yield* counters, after);
     assert.strictEqual((yield* acquire(store, 0, owner)).length, 1);
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("r3 bounds PK pages before foreign filtering and releases the writer between pages", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    // Three spaces, including unprovable foreign rows, local rows and delivered rows.
+    yield* sql`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<600)
+      INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,resolving_environment_id,outcome,state,created_at)
+      SELECT printf('%064x',x), CASE WHEN x%3=0 THEN ${id(100)} WHEN x%3=1 THEN ${id(101)} ELSE ${space} END,${memory},${id(11)},${id(7)},CASE WHEN x%3=0 THEN ${owner} ELSE ${other} END,'reverted',CASE WHEN x%5=0 THEN 'delivered' ELSE 'pending' END,0 FROM n`;
+    const before = yield* sql`SELECT * FROM memory_report_outbox ORDER BY report_id`;
+    const usage = yield* counters;
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const first = yield* store
+      .transact(
+        Effect.gen(function* () {
+          const page = yield* store.normalizeForeignReportIntentsTx(owner);
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+          return page;
+        }),
+      )
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(entered);
+    const attempted = yield* Deferred.make<void>();
+    const competing = yield* Effect.gen(function* () {
+      yield* Deferred.succeed(attempted, undefined);
+      yield* store.transact(
+        sql`UPDATE memory_report_outbox SET created_at=1 WHERE report_id=${reportId(600)}`,
+      );
+    }).pipe(Effect.forkChild);
+    yield* Deferred.await(attempted);
+    yield* Deferred.succeed(release, undefined);
+    assert.deepStrictEqual(yield* Fiber.join(first), { examined: 256, nextCursor: reportId(256) });
+    // A separate writer completes before the next page, without waiting for all 600 rows.
+    yield* Fiber.join(competing);
+    assert.deepStrictEqual(
+      yield* store.transact(store.normalizeForeignReportIntentsTx(owner, reportId(256))),
+      { examined: 256, nextCursor: reportId(512) },
+    );
+    assert.deepStrictEqual(
+      yield* store.transact(store.normalizeForeignReportIntentsTx(owner, reportId(512))),
+      { examined: 88, nextCursor: null },
+    );
+    yield* store.transact(
+      sql`UPDATE memory_report_outbox SET created_at=0 WHERE report_id=${reportId(600)}`,
+    );
+    assert.deepStrictEqual(
+      yield* sql`SELECT * FROM memory_report_outbox ORDER BY report_id`,
+      before,
+    );
+    assert.deepStrictEqual(yield* counters, usage);
   }).pipe(Effect.provide(live)),
 );

@@ -3286,3 +3286,49 @@ it.effect.each(["disabled", "other-space", "writer-wait"] as const)(
       }),
     ),
 );
+
+it.effect(
+  "r3 disabled service construction does not wait for the report normalization writer",
+  () =>
+    Effect.gen(function* () {
+      const storage = yield* Store.MemoryStore;
+      const quota = yield* Quota.MemoryQuotaService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,resolving_environment_id,outcome,state,created_at) VALUES (${"f".repeat(64)},${space},${memoryId},${id(99)},${id(7)},'foreign','reverted','pending',0)`;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const writer = yield* storage
+        .transact(
+          Effect.gen(function* () {
+            yield* Deferred.succeed(entered, undefined);
+            yield* Deferred.await(release);
+          }),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      const rebuilt = Service.layer.pipe(
+        Layer.provide(Layer.succeed(Store.MemoryStore, storage)),
+        Layer.provide(Layer.succeed(Quota.MemoryQuotaService, quota)),
+        Layer.provide(
+          Layer.succeed(Settings.MemoryHubCommittedSettings, {
+            read: Effect.succeed({ settings: { mode: "disabled" as const }, version: 1 }),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(Environment.ServerEnvironmentIdentity, {
+            getEnvironmentId: Effect.succeed(environmentId),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+            resolve: () => Effect.succeed(null),
+          }),
+        ),
+      );
+      // Building against the same locked store must complete before releasing it.
+      yield* Effect.service(Service.MemoryService).pipe(Effect.provide(rebuilt));
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(writer);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_report_outbox`).length, 1);
+    }).pipe(Effect.provide(live)),
+);

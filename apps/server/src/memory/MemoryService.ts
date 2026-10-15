@@ -393,7 +393,6 @@ const make = Effect.fnUntraced(function* (
   const quota = yield* Quota.MemoryQuotaService;
   const identity = yield* Environment.ServerEnvironmentIdentity;
   const environmentId = yield* identity.getEnvironmentId;
-  yield* store.transact(store.normalizeForeignReportIntentsTx(environmentId));
   const sql = yield* SqlClient.SqlClient;
   const query = <A, E>(effect: Effect.Effect<A, E>) =>
     effect.pipe(

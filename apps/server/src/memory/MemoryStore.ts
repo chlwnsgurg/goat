@@ -1298,7 +1298,10 @@ export class MemoryStore extends Context.Service<
       memorySpaceId: M.MemorySpaceId;
       entry: Extract<M.MemoryHubEntry, { kind: "metadata" }>;
     }) => InTx<void>;
-    readonly normalizeForeignReportIntentsTx: (localEnvironmentId: M.EnvironmentId) => InTx<void>;
+    readonly normalizeForeignReportIntentsTx: (
+      localEnvironmentId: M.EnvironmentId,
+      after?: string | null,
+    ) => InTx<{ examined: number; nextCursor: string | null }>;
     readonly reconcileOperationReportTx: (input: {
       operation: M.MemoryOperation;
       receipt: M.MemoryHubReceipt;
@@ -11111,82 +11114,111 @@ const make = Effect.gen(function* () {
       // permanent compact metadata (including their immutable attempt identity).
       yield* reconcileResolutionReportTx({ record, localEnvironmentId: input.localEnvironmentId });
     });
-  // Runs once with the real environment identity; ambiguous legacy rows remain retained.
+  // Page the PK before inspecting ownership/evidence: ambiguous rows cannot starve later spaces.
   const normalizeForeignReportIntentsTx: MemoryStore["Service"]["normalizeForeignReportIntentsTx"] =
-    Effect.fn("MemoryStore.normalizeForeignReportIntentsTx")(function* (localEnvironmentId) {
+    Effect.fn("MemoryStore.normalizeForeignReportIntentsTx")(function* (
+      localEnvironmentId,
+      after = null,
+    ) {
       yield* Transaction;
-      const rows = yield* stored(
-        "foreign-report-evidence",
-        sql<{
-          compact_json: string;
-        }>`SELECT c.compact_json FROM memory_report_outbox r JOIN memory_compact_receipts c ON c.space=r.space AND c.operation_id=r.operation_id WHERE r.resolving_environment_id!=${localEnvironmentId} AND r.state!='delivered'`,
+      const page = yield* stored(
+        "foreign-report-page",
+        after === null
+          ? sql<{
+              report_id: string;
+              resolving_environment_id: string;
+              state: string;
+            }>`SELECT report_id,resolving_environment_id,state FROM memory_report_outbox ORDER BY report_id LIMIT 256`
+          : sql<{
+              report_id: string;
+              resolving_environment_id: string;
+              state: string;
+            }>`SELECT report_id,resolving_environment_id,state FROM memory_report_outbox WHERE report_id>${after} ORDER BY report_id LIMIT 256`,
       );
-      for (const row of rows) {
-        const record = yield* compactCodec
-          .decode(row.compact_json, strict)
-          .pipe(Effect.catch(() => Effect.succeed(undefined)));
+      for (const candidate of page) {
         if (
-          record?.reportGuard &&
-          record.reportGuard.reportId ===
-            resolutionReportId(
-              record.memorySpaceId,
-              record.receipt.operationId,
-              record.reportGuard.resolutionId,
-            )
-        )
-          yield* reconcileResolutionReportTx({ record, localEnvironmentId });
-      }
-      // Older body-bearing receives may not have a compact checkpoint receipt yet.
-      // Their canonical event metadata and approved receipt are sufficient without
-      // loading payloads or inventing a missing claim attempt identity.
-      const events = yield* stored(
-        "foreign-report-events",
-        sql<{
-          report_id: string;
-          metadata_json: string;
-          receipt_json: string;
-          operation_digest: string;
-        }>`SELECT r.report_id,e.metadata_json,e.receipt_json,e.operation_digest FROM memory_report_outbox r JOIN memory_events e ON e.memory_space_id=r.space AND e.operation_id=r.operation_id WHERE r.resolving_environment_id!=${localEnvironmentId} AND r.state!='delivered'`,
-      );
-      for (const row of events) {
-        const metadata = yield* metadataCodec
-          .decode(row.metadata_json, strict)
-          .pipe(Effect.orElseSucceed(() => undefined));
-        const approval = yield* receiptCodec
-          .decode(row.receipt_json, strict)
-          .pipe(Effect.orElseSucceed(() => undefined));
-        if (
-          !metadata ||
-          !approval ||
-          !("hubSequence" in approval) ||
-          approval.hubSequence === null ||
-          !["accepted", "conflicted"].includes(approval.outcome) ||
-          metadata.originEnvironmentId === localEnvironmentId ||
-          approval.operationId !== metadata.operationId ||
-          approval.memoryId !== metadata.memoryId ||
-          approval.operationDigest !== row.operation_digest
+          candidate.resolving_environment_id === localEnvironmentId ||
+          candidate.state === "delivered"
         )
           continue;
-        const resolutionId =
-          metadata.kind === "resolve"
-            ? metadata.resolution?.resolutionId
-            : metadata.kind === "revert"
-              ? metadata.revertsResolutionId
-              : undefined;
-        if (
-          !resolutionId ||
-          !M.validateMemoryResolutionApproval(metadata.kind, resolutionId, approval) ||
-          (metadata.kind === "resolve" &&
-            metadata.resolution?.resolvingEnvironmentId !== metadata.originEnvironmentId) ||
-          row.report_id !==
-            resolutionReportId(metadata.memorySpaceId, metadata.operationId, resolutionId)
-        )
-          continue;
-        yield* stored(
-          "foreign-report-event-intent",
-          sql`DELETE FROM memory_report_outbox WHERE report_id=${row.report_id} AND space=${metadata.memorySpaceId} AND memory_id=${metadata.memoryId} AND operation_id=${metadata.operationId} AND resolution_id=${resolutionId} AND resolving_environment_id=${metadata.originEnvironmentId} AND outcome=${metadata.kind === "resolve" ? "resolved" : "reverted"} AND state!='delivered'`,
+        const rows = yield* stored(
+          "foreign-report-evidence",
+          sql<{
+            compact_json: string;
+          }>`SELECT c.compact_json FROM memory_report_outbox r JOIN memory_compact_receipts c ON c.space=r.space AND c.operation_id=r.operation_id WHERE r.report_id=${candidate.report_id}`,
         );
+        for (const row of rows) {
+          const record = yield* compactCodec
+            .decode(row.compact_json, strict)
+            .pipe(Effect.catch(() => Effect.succeed(undefined)));
+          if (
+            record?.reportGuard &&
+            record.reportGuard.reportId === candidate.report_id &&
+            record.reportGuard.reportId ===
+              resolutionReportId(
+                record.memorySpaceId,
+                record.receipt.operationId,
+                record.reportGuard.resolutionId,
+              )
+          )
+            yield* reconcileResolutionReportTx({ record, localEnvironmentId });
+        }
+        // Older body-bearing receives may not have a compact checkpoint receipt yet.
+        // Their canonical event metadata and approved receipt are sufficient without
+        // loading payloads or inventing a missing claim attempt identity.
+        const events = yield* stored(
+          "foreign-report-events",
+          sql<{
+            report_id: string;
+            metadata_json: string;
+            receipt_json: string;
+            operation_digest: string;
+          }>`SELECT r.report_id,e.metadata_json,e.receipt_json,e.operation_digest FROM memory_report_outbox r JOIN memory_events e ON e.memory_space_id=r.space AND e.operation_id=r.operation_id WHERE r.report_id=${candidate.report_id}`,
+        );
+        for (const row of events) {
+          const metadata = yield* metadataCodec
+            .decode(row.metadata_json, strict)
+            .pipe(Effect.orElseSucceed(() => undefined));
+          const approval = yield* receiptCodec
+            .decode(row.receipt_json, strict)
+            .pipe(Effect.orElseSucceed(() => undefined));
+          if (
+            !metadata ||
+            !approval ||
+            !("hubSequence" in approval) ||
+            approval.hubSequence === null ||
+            !["accepted", "conflicted"].includes(approval.outcome) ||
+            metadata.originEnvironmentId === localEnvironmentId ||
+            approval.operationId !== metadata.operationId ||
+            approval.memoryId !== metadata.memoryId ||
+            approval.operationDigest !== row.operation_digest
+          )
+            continue;
+          const resolutionId =
+            metadata.kind === "resolve"
+              ? metadata.resolution?.resolutionId
+              : metadata.kind === "revert"
+                ? metadata.revertsResolutionId
+                : undefined;
+          if (
+            !resolutionId ||
+            !M.validateMemoryResolutionApproval(metadata.kind, resolutionId, approval) ||
+            (metadata.kind === "resolve" &&
+              metadata.resolution?.resolvingEnvironmentId !== metadata.originEnvironmentId) ||
+            row.report_id !==
+              resolutionReportId(metadata.memorySpaceId, metadata.operationId, resolutionId)
+          )
+            continue;
+          yield* stored(
+            "foreign-report-event-intent",
+            sql`DELETE FROM memory_report_outbox WHERE report_id=${row.report_id} AND space=${metadata.memorySpaceId} AND memory_id=${metadata.memoryId} AND operation_id=${metadata.operationId} AND resolution_id=${resolutionId} AND resolving_environment_id=${metadata.originEnvironmentId} AND outcome=${metadata.kind === "resolve" ? "resolved" : "reverted"} AND state!='delivered'`,
+          );
+        }
       }
+      return {
+        examined: page.length,
+        nextCursor: page.length === 256 ? page[255]!.report_id : null,
+      };
     });
   const reconcileResolutionReportTx: MemoryStore["Service"]["reconcileResolutionReportTx"] =
     Effect.fn("MemoryStore.reconcileResolutionReportTx")(function* (input) {
