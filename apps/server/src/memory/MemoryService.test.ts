@@ -3094,32 +3094,34 @@ it.effect.each(["ack", "pull", "hub-local"] as const)(
       assert.strictEqual(reports[0]!.resolvingEnvironmentId, environmentId);
     }).pipe(Effect.provide(live)),
 );
-it.effect.each([null, 1])("r2 H1 refuses report approval for rejected ACK %s", (hubSequence) =>
-  Effect.gen(function* () {
-    const service = yield* Service.MemoryService;
-    const { op, workId } = yield* stageReportRevert;
-    yield* service.settleHubAcknowledgement({
-      memorySpaceId: space,
-      hubEnvironmentId: environmentId,
-      localEnvironmentId: environmentId,
-      workId,
-      operation: { operationId: op.operationId, operationDigest: memoryOperationDigest(op) },
-      reauthorize: Effect.void,
-      receipt: {
-        operationId: op.operationId,
-        memoryId,
-        operationDigest: memoryOperationDigest(op),
-        outcome: "rejected",
-        hubSequence,
-        failureCode: "revert_expired",
-      },
-    });
-    assert.isNull(yield* service.nextReportWakeAt(0));
-    assert.deepStrictEqual(
-      yield* service.acquireReports({ owner: environmentId, now: 0, until: 1000, limit: 32 }),
-      [],
-    );
-  }).pipe(Effect.provide(live)),
+it.effect.each([{ hubSequence: null }, { hubSequence: 1 }])(
+  "r2 H1 refuses report approval for rejected ACK %j",
+  ({ hubSequence }) =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const { op, workId } = yield* stageReportRevert;
+      yield* service.settleHubAcknowledgement({
+        memorySpaceId: space,
+        hubEnvironmentId: environmentId,
+        localEnvironmentId: environmentId,
+        workId,
+        operation: { operationId: op.operationId, operationDigest: memoryOperationDigest(op) },
+        reauthorize: Effect.void,
+        receipt: {
+          operationId: op.operationId,
+          memoryId,
+          operationDigest: memoryOperationDigest(op),
+          outcome: "rejected",
+          hubSequence,
+          failureCode: "revert_expired",
+        },
+      });
+      assert.isNull(yield* service.nextReportWakeAt(0));
+      assert.deepStrictEqual(
+        yield* service.acquireReports({ owner: environmentId, now: 0, until: 1000, limit: 32 }),
+        [],
+      );
+    }).pipe(Effect.provide(live)),
 );
 it.effect(
   "r2 M1 foreign operation backlog leaves local report capacity available",
@@ -3129,17 +3131,22 @@ it.effect(
       const sql = yield* SqlClient.SqlClient;
       const { op } = yield* stageReportRevert;
       const foreign = M.EnvironmentId.make("foreign");
-      let parents = op.revision.parents;
       for (let n = 0; n <= M.MEMORY_REPORT_MAX_PENDING_ITEMS; n++) {
         const operationId = M.MemoryOperationId.make(id(10000 + n));
         const revisionId = M.MemoryRevisionId.make(id(20000 + n));
+        const foreignMemoryId = M.MemoryId.make(id(30000 + n));
+        // Independent approved histories may arrive before their ancestry. Do not turn
+        // the quota regression into a quadratic replay of one ever-growing aggregate.
+        const parents = [M.MemoryRevisionId.make(id(40000 + n))];
         const operation: M.MemoryOperation = {
           ...op,
+          memoryId: foreignMemoryId,
           operationId,
           originEnvironmentId: foreign,
           expectedHeads: parents,
           revision: {
             ...op.revision,
+            memoryId: foreignMemoryId,
             parents,
             operationId,
             revisionId,
@@ -3149,12 +3156,11 @@ it.effect(
         };
         yield* service.applyReceived(operation, {
           operationId,
-          memoryId,
+          memoryId: foreignMemoryId,
           operationDigest: memoryOperationDigest(operation),
           outcome: "accepted",
           hubSequence: n + 1,
         });
-        parents = [revisionId];
       }
       assert.deepStrictEqual(yield* sql`SELECT count(*) AS count FROM memory_report_outbox`, [
         { count: 0 },
