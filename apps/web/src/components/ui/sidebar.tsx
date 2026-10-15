@@ -341,7 +341,7 @@ function Sidebar({
               variant === "framed"
                 ? // The panel surface starts under the titlebar strip; the strip shows the frame.
                   // Its top edge lands on the titlebar hairline, so the corner curves out of it.
-                  "relative isolate bg-transparent before:absolute before:inset-x-0 before:top-[calc(var(--workspace-topbar-height)-1px)] before:bottom-0 before:-z-10 before:rounded-tl-xl before:border-t before:border-l before:border-sidebar-border before:bg-sidebar"
+                  "relative isolate bg-transparent before:absolute before:inset-x-0 before:top-[calc(var(--workspace-topbar-height)-1px)] before:bottom-0 before:-z-10 before:rounded-tl-xl before:border-t before:border-l before:border-chrome-divider before:bg-sidebar"
                 : "bg-sidebar surface-grain group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:shadow-sm/5",
             )}
             data-sidebar="sidebar"

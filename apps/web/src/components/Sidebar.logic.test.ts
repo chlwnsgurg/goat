@@ -11,6 +11,7 @@ import {
   sidebarFolderName,
   sidebarShortDeviceName,
   sidebarHostHueClassName,
+  assignSidebarHostHues,
   animateSidebarLayoutChanges,
   canPromoteThread,
   buildSidebarSubagentIndex,
@@ -3041,5 +3042,32 @@ describe("sidebarHostHueClassName", () => {
       expect(hue).toBe(sidebarHostHueClassName(environmentId));
       expect(palette).toContain(hue);
     }
+  });
+});
+
+describe("assignSidebarHostHues", () => {
+  const environmentIds = [
+    "juns-macbook-pro",
+    "juns-mac-studio",
+    "lidge-ai",
+    "epyc-01",
+    "headless-1",
+    "headless-2",
+    "cloud-sandbox",
+    "raspberry-pi",
+  ];
+
+  it("gives every device its own hue even when their hashed hues collide", () => {
+    // Eight ids over eight hues: the hash alone reuses some of them.
+    expect(new Set(environmentIds.map(sidebarHostHueClassName)).size).toBeLessThan(8);
+
+    const hues = assignSidebarHostHues(environmentIds);
+    expect(new Set(environmentIds.map((environmentId) => hues.get(environmentId))).size).toBe(8);
+  });
+
+  it("does not depend on the order devices are listed in", () => {
+    expect([...assignSidebarHostHues(environmentIds.toReversed())].toSorted()).toEqual(
+      [...assignSidebarHostHues(environmentIds)].toSorted(),
+    );
   });
 });

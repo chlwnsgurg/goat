@@ -44,7 +44,7 @@ function railItemClassName(active: boolean) {
   return cn(
     "relative flex size-10 shrink-0 items-center justify-center rounded-xl outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&_svg]:size-5",
     active
-      ? "bg-sidebar-row-selected text-sidebar-foreground ring-1 ring-inset ring-sidebar-border"
+      ? "bg-sidebar-row-selected text-sidebar-foreground ring-1 ring-inset ring-chrome-divider"
       : "text-sidebar-muted-foreground hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
   );
 }
