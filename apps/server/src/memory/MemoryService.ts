@@ -2063,6 +2063,9 @@ const make = Effect.fnUntraced(function* (
           memorySpaceId: input.memorySpaceId,
           originEnvironmentId: meta.originEnvironmentId,
           operationKind: meta.kind,
+          ...(meta.kind === "upsert" && meta.revision?.provenance.upsertRequestDigest !== undefined
+            ? { upsertRequestDigest: meta.revision.provenance.upsertRequestDigest }
+            : {}),
           receipt,
           revisionId:
             receipt.outcome === "rejected" || meta.kind === "forget"
