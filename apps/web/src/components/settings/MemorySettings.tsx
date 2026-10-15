@@ -864,7 +864,7 @@ export function MemoryRevertControl({
     setBusy(false);
     if (!liveDestination()) return;
     if (response._tag === "Failure") {
-      setError("Revert request failed. Retry this request with the same operation ID.");
+      setError("Revert request failed. Try again to continue this request.");
       return;
     }
     setResult(response.value);
@@ -1011,7 +1011,7 @@ function MemoryForgetRequest({
       setMessage(notice);
       onForgotten?.(notice);
       setIntent(null);
-    } else setMessage("Forget request failed. Retry this request with the same operation ID.");
+    } else setMessage("Forget request failed. Try again to continue this request.");
   }
   return (
     <div>

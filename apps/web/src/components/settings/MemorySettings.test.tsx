@@ -897,7 +897,7 @@ it.each([false, true])(
       await first.promise;
     });
     if (!signalFirst) await invalidate();
-    expect(container.textContent).toContain("Retry this request with the same operation ID");
+    expect(container.textContent).toContain("Try again to continue this request");
     state.executors.set("forget", async (input) => {
       state.calls(input);
       return { _tag: "Failure" };
@@ -962,7 +962,7 @@ it.each(["write", "read", "reconnect"])(
     await click("Forget memory");
     await click("Confirm forget");
     const original = forgetCalls.mock.calls[0]![0];
-    expect(container.textContent).toContain("Retry this request with the same operation ID");
+    expect(container.textContent).toContain("Try again to continue this request");
     state.queries.set("read", Option.none());
     state.queries.set("history", Option.none());
     await render();
@@ -1324,3 +1324,39 @@ it("refreshes a confirmed owner policy conflict and asks for a new access change
   expect(next.input.expectedVersion).toBe(8);
   expect(next.input.requestId).not.toBe(first.input.requestId);
 });
+
+it.each([false, true])(
+  "focuses details and closes a successful forget with only the appropriate origin notice (imported: %s)",
+  async (imported) => {
+    const { render } = await supportedScreen();
+    if (activeItem.status !== "active") throw new Error("Active fixture required");
+    state.queries.set(
+      "read",
+      Option.some({
+        ...activeItem,
+        payload: {
+          ...activeItem.payload,
+          evidence: imported
+            ? [{ origin: "import", importSourceId: id(8), messageIds: [] }]
+            : activeItem.payload.evidence,
+        },
+      }),
+    );
+    await render();
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("Memory details");
+    state.responses.set("forget", success({ outcome: "deleted", pendingSync: true }));
+    state.navigate.mockClear();
+    await click("Forget memory");
+    await click("Confirm forget");
+    expect(state.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({ search: expect.not.objectContaining({ memoryId: id(2) }) }),
+    );
+    expect(container.textContent).toContain("Forgotten. Other devices remove it when they sync.");
+    expect(container.textContent?.includes("The provider's original conversation stays")).toBe(
+      imported,
+    );
+    expect(container.textContent).not.toContain("Expansion:");
+    expect(container.textContent).not.toContain("Sharing pending:");
+    expect(state.refresh).toHaveBeenCalled();
+  },
+);
