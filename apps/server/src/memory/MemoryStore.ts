@@ -6994,6 +6994,23 @@ const make = Effect.gen(function* () {
             AND (r.requester=m.environment OR r.owner=m.environment)
             AND r.state='pending' AND r.deadline>${input.now})`,
       );
+      // Revoke/rotation already expired every relay for these identities. The
+      // durable version high-water above prevents reenrollment from reviving them.
+      // Keep pair fences only while both member rows exist, in this same writer Tx.
+      yield* stored(
+        "hub-source-fence-reclaim-owners",
+        sql`DELETE FROM memory_import_keys AS f WHERE f.space=${input.memorySpaceId}
+          AND f.key_kind='hub_source_fences' AND NOT EXISTS
+            (SELECT 1 FROM memory_hub_members m WHERE m.space=f.space AND m.environment=f.key)`,
+      );
+      yield* stored(
+        "hub-source-fence-reclaim-requesters",
+        sql`UPDATE memory_import_keys AS f SET record_json=(
+          SELECT json_group_array(json(p.value)) FROM json_each(f.record_json) p
+          WHERE EXISTS (SELECT 1 FROM memory_hub_members m WHERE m.space=f.space
+            AND m.environment=json_extract(p.value,'$.requesterEnvironmentId')))
+          WHERE f.space=${input.memorySpaceId} AND f.key_kind='hub_source_fences'`,
+      );
       const remaining = yield* stored(
         "hub-member-count-after-reclaim",
         sql<{
@@ -7314,7 +7331,7 @@ const make = Effect.gen(function* () {
   const sourceThreadCodec = codec(M.ScopedThreadRef);
   const sourceWatermarkCodec = codec(M.MemorySourceWatermark);
   // Relay authority metadata shares the existing body-free replay registry. One
-  // bounded map per member; membership itself is capped and retained on retirement.
+  // bounded map per retained member; membership reclamation prunes both ends.
   const pairFencesCodec = codec(M.MemorySourceReadPairFences);
   const settlementCodec = codec(
     Schema.Struct({
@@ -7671,8 +7688,32 @@ const make = Effect.gen(function* () {
   )(function* (authority, input) {
     const { member, now } = yield* authorizeSource(authority, input.memorySpaceId);
     if (input.kind === "revoke") {
-      if (!(yield* readHubMember(input.memorySpaceId, input.requesterEnvironmentId)))
-        return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+      const requester = yield* readHubMember(input.memorySpaceId, input.requesterEnvironmentId);
+      if (!requester) {
+        // An absent identity has no authority. Reclamation only runs after saving
+        // this space high-water; future credentials exceed every retired version.
+        // No pair fence is needed: old relays fail membership/version checks and
+        // the owner's committed removal still denies reads after reenrollment.
+        const versions = yield* stored(
+          "relay-absent-member-fence",
+          sql<{ value: number }>`SELECT value FROM memory_quota_counters
+            WHERE space=${input.memorySpaceId} AND dimension='hub_member_version' AND scope_key=''`,
+        );
+        const highWater = versions[0]?.value;
+        if (highWater === undefined || !Number.isSafeInteger(highWater) || highWater <= 0)
+          return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+        return {
+          kind: "revoke" as const,
+          accepted: true as const,
+          ack: {
+            memorySpaceId: input.memorySpaceId,
+            ownerEnvironmentId: member.environmentId,
+            requesterEnvironmentId: input.requesterEnvironmentId,
+            removalEpoch: input.ownerPolicyEpoch,
+            revokedThroughEpoch: input.ownerPolicyEpoch,
+          },
+        };
+      }
       const fences = yield* readPairFences(input.memorySpaceId, member.environmentId);
       const previous = fences.find(
         (f) => f.requesterEnvironmentId === input.requesterEnvironmentId,

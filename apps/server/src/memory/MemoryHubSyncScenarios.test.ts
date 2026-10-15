@@ -147,7 +147,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const sourceRequested = yield* Deferred.make<M.MemorySourceReadRequest>();
     const sourceSecondRequested = yield* Deferred.make<M.MemorySourceReadRequest>();
     let sourceAdmissions = 0;
-    let sourceAckFault = false;
+    let sourceAckFault: boolean | M.EnvironmentId = false;
     let sourceSendGate: Deferred.Deferred<void> | null = null;
     const sourceSendEntered = yield* Deferred.make<void>();
     let pullFault: "failure" | "budget" | null = null;
@@ -320,7 +320,8 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
               return yield* client.respondSourceRead(connection, input, observedPrepare);
             }).pipe(
               Effect.map((result) =>
-                sourceAckFault && result.kind === "revoke"
+                result.kind === "revoke" &&
+                (sourceAckFault === true || sourceAckFault === result.ack.requesterEnvironmentId)
                   ? {
                       ...result,
                       ack: {
@@ -490,7 +491,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
           // sees the real commit notification once production startup subscribes.
           yield* PubSub.publish(sourceChanges, next);
         }),
-      setSourceAckFault: (fault: boolean) => {
+      setSourceAckFault: (fault: boolean | M.EnvironmentId) => {
         sourceAckFault = fault;
       },
       sourceSecondRequested,
@@ -1561,6 +1562,156 @@ it.effect(
       );
       yield* Deferred.succeed(nextGate, undefined);
       assert.strictEqual((yield* Fiber.join(next)).kind, "available");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "settles offline policy removal after reclamation and continues past one failed ack",
+  () =>
+    Effect.gen(function* () {
+      const c = yield* sourceFixture();
+      const connection = yield* c.a.connection;
+      const submission = {
+        ...c.validated.request,
+        protocolVersion: 1 as const,
+        requestId: M.MemorySourceReadRequestId.make(id(50000)),
+      };
+      const requested = yield* c.a.run(
+        Client.MemoryHubClient.use((client) => client.requestSourceRead(connection, submission)),
+      );
+      const oldResponse: M.MemoryHubSourceReadRespondInput = {
+        protocolVersion: 1,
+        kind: "normal",
+        memorySpaceId: c.space,
+        requestId: submission.requestId,
+        ownerPolicyEpoch: 1,
+        outcome: {
+          kind: "available",
+          page: {
+            sourceThread: c.thread,
+            watermark: c.watermark,
+            messages: [{ messageId: c.messageId, text: "synthetic original" }],
+            nextCursor: null,
+          },
+        },
+      };
+      const ownerConnection = yield* c.owner.connection;
+      yield* c.owner.run(
+        Client.MemoryHubClient.use((client) =>
+          client.respondSourceRead(ownerConnection, oldResponse),
+        ),
+      );
+      yield* c.remove(); // owner is offline from here until the explicit syncOnce below
+      const pending = yield* Ref.get(c.owner.sourcePolicy);
+      yield* c.owner.commitSourcePolicy({
+        ...pending.policy,
+        removals: [
+          ...pending.policy.removals,
+          {
+            memorySpaceId: c.space,
+            ownerEnvironmentId: c.owner.identity,
+            requesterEnvironmentId: c.h.identity,
+            removalEpoch: 2,
+            state: "pending",
+          },
+        ],
+      });
+      let sequence = 51000;
+      const update = (action: "provisionMember" | "revokeMember", environmentId: M.EnvironmentId) =>
+        Effect.gen(function* () {
+          const current = yield* c.h.run(Settings.MemoryHubCommittedSettings.use((s) => s.read));
+          return yield* c.h.update(
+            { action, environmentId, requestId: id(sequence++), expectedVersion: current.version },
+            Effect.void,
+          );
+        });
+      // Synthetic filler rows only; Remove/reclaim/auth/relay are production paths.
+      yield* c.h.run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          for (let n = 0; n < 125; n++)
+            yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at)
+          VALUES (${c.space},${`offline-filler-${n}`},${(n + 1000).toString(16).padStart(64, "0")},1,'active',0)`;
+        }),
+      );
+      yield* update("revokeMember", c.a.identity);
+      yield* update("provisionMember", M.EnvironmentId.make("offline-replacement"));
+      yield* c.h.run(
+        Store.MemoryStore.use((store) =>
+          store
+            .readHubMember(c.space, c.a.identity)
+            .pipe(Effect.tap((value) => Effect.sync(() => assert.isUndefined(value)))),
+        ),
+      );
+      c.owner.setSourceAckFault(c.a.identity);
+      yield* c.owner.sync.syncOnce;
+      const partial = yield* Ref.get(c.owner.sourcePolicy);
+      assert.strictEqual(partial.policy.removals.length, 1);
+      assert.strictEqual(partial.policy.removals[0]!.requesterEnvironmentId, c.a.identity);
+      c.owner.setSourceAckFault(false);
+      yield* c.owner.sync.syncOnce;
+      assert.deepStrictEqual((yield* Ref.get(c.owner.sourcePolicy)).policy.removals, []);
+      assert.deepStrictEqual(
+        (yield* Ref.get(c.owner.sourcePolicy)).policy.allowedRequesterEnvironmentIds,
+        [],
+      );
+      // Old credential cannot submit or retrieve a relay after reclamation.
+      assert.strictEqual(
+        (yield* c.a
+          .run(
+            Client.MemoryHubClient.use((client) =>
+              client.requestSourceRead(connection, {
+                ...submission,
+                requestId: M.MemorySourceReadRequestId.make(id(52000)),
+              }),
+            ),
+          )
+          .pipe(Effect.flip))._tag,
+        "MemoryHubUnauthorizedError",
+      );
+      const readded = yield* update("provisionMember", c.a.identity);
+      const newPrincipal: M.MemoryHubPrincipal = {
+        memorySpaceId: c.space,
+        environmentId: c.a.identity,
+        credentialVersion: readded.credential!.credentialVersion,
+        scopes: ["memory:sync"],
+      };
+      assert.isAbove(
+        newPrincipal.credentialVersion,
+        requested.request.stamp!.requesterCredentialVersion,
+      );
+      yield* c.h.run(
+        Effect.gen(function* () {
+          const hub = yield* Hub.MemoryHubService;
+          const owner = yield* (yield* Store.MemoryStore).readHubMember(c.space, c.owner.identity);
+          assert.isFalse(
+            (yield* hub.respondSourceRead(oldResponse, {
+              ...newPrincipal,
+              environmentId: c.owner.identity,
+              credentialVersion: owner!.credentialVersion,
+            })).accepted,
+          );
+          assert.strictEqual(
+            (yield* hub.resultSourceRead(
+              { protocolVersion: 1, memorySpaceId: c.space, requestId: submission.requestId },
+              newPrincipal,
+            )).state,
+            "expired",
+          );
+          const next = yield* hub.requestSourceRead(
+            { ...submission, requestId: M.MemorySourceReadRequestId.make(id(52001)) },
+            newPrincipal,
+          );
+          assert.strictEqual(
+            (yield* c.owner.run(
+              Sync.MemorySyncRuntime.use((runtime) =>
+                Effect.result(runtime.ownerPermit(next.request)),
+              ),
+            ))._tag,
+            "Failure",
+          );
+        }),
+      );
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 

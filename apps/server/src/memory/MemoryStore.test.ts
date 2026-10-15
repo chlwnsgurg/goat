@@ -2801,6 +2801,26 @@ describe("MemoryStore transient source relay", () => {
       }).pipe(Effect.provide(live)),
   );
 
+  it.effect("refuses absent requester revoke without a durable membership high-water", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const store = yield* Store.MemoryStore;
+      const result = yield* store
+        .transact(
+          store.respondHubSourceReadTx(authority(owner), {
+            protocolVersion: 1,
+            kind: "revoke",
+            memorySpaceId: space,
+            requesterEnvironmentId: M.EnvironmentId.make("absent"),
+            ownerPolicyEpoch: 2,
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(result._tag, "MemoryHubError");
+      if (result._tag === "MemoryHubError") assert.strictEqual(result.code, "identity_mismatch");
+    }).pipe(Effect.provide(live)),
+  );
+
   it.effect.each(["legacy", "digest", "deadline", "credential"] as const)(
     `terminally denies corrupted persisted relay %s`,
     (mutation) =>

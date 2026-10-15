@@ -853,6 +853,115 @@ describe("MemoryHubAdministrator", () => {
     }).pipe(Effect.provide(adminDependencies)),
   );
 
+  it.effect(
+    "bounds source fences across 130 reclaimed requesters and settles delayed revokes",
+    () =>
+      Effect.gen(function* () {
+        const { admin, backend } = yield* adminFixture;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        let sequence = 20000;
+        const update = Effect.fnUntraced(function* (
+          action: "provisionMember" | "revokeMember",
+          environmentId: M.EnvironmentId,
+        ) {
+          return yield* admin.update(
+            {
+              requestId: M.MemoryOperationId.make(id(sequence++)),
+              expectedVersion: (yield* backend.read).version,
+              action,
+              environmentId,
+            },
+            Effect.void,
+          );
+        });
+        const authority = (environmentId = hubEnv, credentialVersion = 1): Store.HubAuthority => ({
+          principal: { ...principal(environmentId), credentialVersion },
+          now: Clock.currentTimeMillis,
+          reauthorize: Effect.void,
+        });
+        const revoke = (requesterEnvironmentId: M.EnvironmentId) => ({
+          protocolVersion: 1 as const,
+          kind: "revoke" as const,
+          memorySpaceId: space,
+          requesterEnvironmentId,
+          ownerPolicyEpoch: 2,
+        });
+        // Keep 127 rows live so every replacement exercises the real capacity path.
+        for (let n = 0; n < 125; n++)
+          yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at)
+          VALUES (${space},${`filler-${n}`},${(n + 1000).toString(16).padStart(64, "0")},1,'active',0)`;
+        let current = M.EnvironmentId.make("source-churn-0");
+        let added = yield* update("provisionMember", current);
+        const originalVersion = added.credential!.credentialVersion;
+        const original = current;
+        // A retired owner must lose its entire fence row as well.
+        yield* store.transact(store.respondHubSourceReadTx(authority(otherEnv), revoke(hubEnv)));
+        for (let n = 0; n < 130; n++) {
+          const ack = yield* store.transact(
+            store.respondHubSourceReadTx(authority(), revoke(current)),
+          );
+          assert.strictEqual(ack.kind, "revoke");
+          yield* update("revokeMember", current);
+          const retired = current;
+          current = M.EnvironmentId.make(`source-churn-${n + 1}`);
+          added = yield* update("provisionMember", current);
+          assert.isUndefined(yield* store.readHubMember(space, retired));
+          const delayed = yield* store.transact(
+            store.respondHubSourceReadTx(authority(), revoke(retired)),
+          );
+          assert.deepStrictEqual(delayed, {
+            kind: "revoke",
+            accepted: true,
+            ack: {
+              memorySpaceId: space,
+              ownerEnvironmentId: hubEnv,
+              requesterEnvironmentId: retired,
+              removalEpoch: 2,
+              revokedThroughEpoch: 2,
+            },
+          });
+          const fences = yield* sql<{
+            record_json: string;
+          }>`SELECT record_json FROM memory_import_keys
+          WHERE space=${space} AND key_kind='hub_source_fences' AND key=${hubEnv}`;
+          assert.deepStrictEqual(JSON.parse(fences[0]!.record_json), []);
+          assert.strictEqual(
+            (yield* sql`SELECT 1 FROM memory_hub_members WHERE space=${space}`).length,
+            128,
+          );
+        }
+        yield* update("revokeMember", otherEnv);
+        yield* update("revokeMember", current);
+        const readded = yield* update("provisionMember", original);
+        assert.isAbove(readded.credential!.credentialVersion, originalVersion);
+        assert.strictEqual(
+          (yield* store
+            .transact(
+              store.requireHubMemberTx({
+                ...principal(original),
+                credentialVersion: originalVersion,
+              }),
+            )
+            .pipe(Effect.flip))._tag,
+          "MemoryHubUnauthorizedError",
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_import_keys
+        WHERE space=${space} AND key_kind='hub_source_fences' AND key=${otherEnv}`).length,
+          0,
+        );
+        // The re-enrolled pair gets a fresh fence; a delayed old response cannot
+        // regain authority through a retired requester version (covered above).
+        yield* store.transact(store.respondHubSourceReadTx(authority(), revoke(original)));
+        const fences = yield* sql<{
+          record_json: string;
+        }>`SELECT record_json FROM memory_import_keys
+        WHERE space=${space} AND key_kind='hub_source_fences' AND key=${hubEnv}`;
+        assert.strictEqual(JSON.parse(fences[0]!.record_json).length, 1);
+      }).pipe(Effect.provide(adminDependencies)),
+  );
+
   it.effect.each(["active", "admin", "lease", "token"] as const)(
     "keeps unreclaimable %s rows and preserves typed capacity through the RPC codec",
     (blocker) =>
