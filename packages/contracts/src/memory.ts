@@ -1143,7 +1143,6 @@ export type MemoryHubReconcileResult = typeof MemoryHubReconcileResult.Type;
 export const MemorySyncStatus = struct({
   memorySpaceId: Schema.NullOr(MemorySpaceId),
   state: Schema.Literals(["disabled", "bootstrapping", "online", "offline", "error"]),
-  diagnostics: Schema.optionalKey(MemoryHubDiagnostics),
   pendingSync: NonNegativeInt,
   quarantined: NonNegativeInt,
   parked: NonNegativeInt,

@@ -68,6 +68,7 @@ it("registers every core read and owner policy administration guard", () => {
     WS_METHODS.memoryHistory,
     WS_METHODS.memoryChanges,
     WS_METHODS.memorySyncStatus,
+    WS_METHODS.memoryHubDiagnostics,
   ]) {
     expect(CLIENT_GUARDED_RPC_SCOPES[method]).toBe("memory:read");
     expect(clientRpcRequiredScopes(method, {})).toEqual(["memory:read"]);

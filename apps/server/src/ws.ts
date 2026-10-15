@@ -1473,6 +1473,8 @@ const layerWsRpc = (
           memory.read(input, memoryRead).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryHistory]: (input) =>
           memory.history(input, memoryRead).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryHubDiagnostics]: (input) =>
+          memorySync.hubDiagnostics(input, memoryRead).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memorySyncStatus]: (input) =>
           memorySync.syncStatus(input, memoryRead).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryUpsert]: (input) =>

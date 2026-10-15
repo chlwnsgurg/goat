@@ -10,6 +10,8 @@ import {
   type MemoryRevertResult,
   type MemoryRevisionId,
   type MemorySyncStatus,
+  type MemoryHubDiagnostics,
+  type ExecutionEnvironmentCapabilities,
   type MemoryTaskGrantCeiling,
 } from "@goat/contracts";
 
@@ -246,8 +248,14 @@ export function presentMemoryReport(
 
 /** Online is a connection state, not proof of publication, exposure or policy readiness. */
 export function presentMemorySync(
-  status: Pick<MemorySyncStatus, "state" | "memorySpaceId" | "diagnostics">,
+  status: Pick<MemorySyncStatus, "state" | "memorySpaceId">,
+  options?: {
+    readonly capabilities: ExecutionEnvironmentCapabilities;
+    readonly diagnostics?: MemoryHubDiagnostics;
+  },
 ) {
+  const diagnostics =
+    options?.capabilities.memory?.hubDiagnostics === true ? options.diagnostics : undefined;
   const labels = {
     disabled: "Memory sharing off",
     bootstrapping: "Receiving initial memories",
@@ -256,29 +264,29 @@ export function presentMemorySync(
     error: "Memory sync error",
   } as const;
   return {
-    label: status.diagnostics
-      ? status.diagnostics.readiness === "disabled"
+    label: diagnostics
+      ? diagnostics.readiness === "disabled"
         ? labels.disabled
-        : status.diagnostics.readiness === "unbound"
+        : diagnostics.readiness === "unbound"
           ? "Connect a memory space"
-          : status.diagnostics.readiness === "staging"
+          : diagnostics.readiness === "staging"
             ? labels.bootstrapping
-            : status.diagnostics.connection === "connected"
+            : diagnostics.connection === "connected"
               ? labels.online
-              : status.diagnostics.connection === "unreachable"
+              : diagnostics.connection === "unreachable"
                 ? labels.offline
                 : "Hub connection not confirmed"
       : status.state !== "disabled" && status.memorySpaceId === null
         ? "Connect a memory space"
         : labels[status.state],
-    diagnostics: status.diagnostics?.publication.state ?? "unknown",
-    readiness: status.diagnostics?.readiness ?? "unknown",
-    connection: status.diagnostics?.connection ?? "unknown",
+    diagnostics: diagnostics?.publication.state ?? "unknown",
+    readiness: diagnostics?.readiness ?? "unknown",
+    connection: diagnostics?.connection ?? "unknown",
     publicationLabel:
-      status.diagnostics?.publication.state === "last_valid" ? "Last valid settings in use" : null,
-    recoverableHolds: status.diagnostics?.recoverableHolds ?? [],
-    permanentHolds: status.diagnostics?.permanentHolds ?? [],
-    canReconcileInSettings: status.diagnostics?.reconcile === "available",
+      diagnostics?.publication.state === "last_valid" ? "Last valid settings in use" : null,
+    recoverableHolds: diagnostics?.recoverableHolds ?? [],
+    permanentHolds: diagnostics?.permanentHolds ?? [],
+    canReconcileInSettings: diagnostics?.reconcile === "available",
   };
 }
 

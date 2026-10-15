@@ -426,6 +426,7 @@ export const WS_METHODS = {
   memoryList: "memory.list",
   memoryRead: "memory.read",
   memoryHistory: "memory.history",
+  memoryHubDiagnostics: "memory.hub.diagnostics",
   memoryHubReconcile: "memory.hub.reconcile",
   memoryResetReportAttempts: "memory.resetReportAttempts",
   memorySyncStatus: "memory.syncStatus",
@@ -2355,6 +2356,11 @@ export const WsMemorySyncStatusRpc = Rpc.make(WS_METHODS.memorySyncStatus, {
   success: Memory.MemorySyncStatus,
   error: MemoryRpcErrors,
 });
+export const WsMemoryHubDiagnosticsRpc = Rpc.make(WS_METHODS.memoryHubDiagnostics, {
+  payload: Memory.MemorySyncStatusInput,
+  success: Memory.MemoryHubDiagnostics,
+  error: MemoryRpcErrors,
+});
 export const WsMemoryUpsertRpc = Rpc.make(WS_METHODS.memoryUpsert, {
   payload: Memory.MemoryUpsertInput,
   success: Memory.MemoryMutationReceipt,
@@ -2431,6 +2437,7 @@ export const WsMemoryCoreRpcGroup = RpcGroup.make(
   WsMemoryReadRpc,
   WsMemoryHistoryRpc,
   WsMemorySyncStatusRpc,
+  WsMemoryHubDiagnosticsRpc,
   WsMemoryUpsertRpc,
   WsMemoryForgetRpc,
   WsMemoryRevertResolutionRpc,

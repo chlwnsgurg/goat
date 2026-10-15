@@ -449,7 +449,7 @@ describe("memory presentation boundaries", () => {
   });
 });
 
-it("presents only authoritative publication/readiness and recoverable Settings eligibility", () => {
+it("presents separate diagnostics only for an advertised capability", () => {
   const diagnostics: M.MemoryHubDiagnostics = {
     version: 7,
     publication: { state: "last_valid", code: "invalid_settings" },
@@ -459,23 +459,35 @@ it("presents only authoritative publication/readiness and recoverable Settings e
     permanentHolds: [],
     reconcile: "unavailable",
   };
-  const status = { state: "offline" as const, memorySpaceId: item.memorySpaceId, diagnostics };
-  expect(presentMemorySync(status)).toMatchObject({
+  const status = { state: "offline" as const, memorySpaceId: item.memorySpaceId };
+  const capabilities = {
+    repositoryIdentity: false,
+    memory: { protocolVersion: 1, hubDiagnostics: true },
+  };
+  expect(presentMemorySync(status, { capabilities, diagnostics })).toMatchObject({
     diagnostics: "last_valid",
     publicationLabel: "Last valid settings in use",
     readiness: "ready",
     connection: "unreachable",
     canReconcileInSettings: false,
   });
+  const available = {
+    ...diagnostics,
+    publication: { state: "current" as const },
+    reconcile: "available" as const,
+  };
   expect(
-    presentMemorySync({
-      ...status,
-      diagnostics: { ...diagnostics, publication: { state: "current" }, reconcile: "available" },
-    }).canReconcileInSettings,
+    presentMemorySync(status, { capabilities, diagnostics: available }).canReconcileInSettings,
   ).toBe(true);
   expect(
-    presentMemorySync({
-      ...status,
+    presentMemorySync(status, {
+      capabilities: { repositoryIdentity: false, memory: { protocolVersion: 1 } },
+      diagnostics: available,
+    }).canReconcileInSettings,
+  ).toBe(false);
+  expect(
+    presentMemorySync(status, {
+      capabilities,
       diagnostics: { ...diagnostics, permanentHolds: ["identity"], reconcile: "permanent_hold" },
     }).canReconcileInSettings,
   ).toBe(false);

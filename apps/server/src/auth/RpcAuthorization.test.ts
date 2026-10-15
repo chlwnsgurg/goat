@@ -616,6 +616,7 @@ it.effect(
         WS_METHODS.memoryHistory,
         WS_METHODS.memoryChanges,
         WS_METHODS.memorySyncStatus,
+        WS_METHODS.memoryHubDiagnostics,
       ];
       const writes = [
         WS_METHODS.memoryUpsert,

@@ -277,6 +277,8 @@ export function createMemoryEnvironmentAtoms<R, E>(
           Option.isSome(get(sessions.preparedConnectionValueAtom(environmentId))) &&
           config !== null &&
           supportsMemoryProtocol(config.environment.capabilities) &&
+          ((tag !== WS_METHODS.memoryHubDiagnostics && tag !== WS_METHODS.memoryHubReconcile) ||
+            config.environment.capabilities.memory?.hubDiagnostics === true) &&
           (tag !== WS_METHODS.memoryImportProvider ||
             config.environment.capabilities.memory?.importProvider === true)
         );
@@ -457,6 +459,7 @@ export function createMemoryEnvironmentAtoms<R, E>(
     read: bodyQuery(WS_METHODS.memoryRead),
     history: bodyQuery(WS_METHODS.memoryHistory),
     resetReportAttempts: command(WS_METHODS.memoryResetReportAttempts),
+    hubDiagnostics: command(WS_METHODS.memoryHubDiagnostics),
     hubReconcile: command(WS_METHODS.memoryHubReconcile),
     readSource: bodyQuery(WS_METHODS.memoryReadSource),
     upsert: command(WS_METHODS.memoryUpsert),

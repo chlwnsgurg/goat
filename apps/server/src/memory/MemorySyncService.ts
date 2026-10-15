@@ -104,6 +104,10 @@ export class MemorySyncService extends Context.Service<
       input: M.MemorySyncStatusInput,
       permit: Permit,
     ) => Effect.Effect<M.MemorySyncStatus, Error>;
+    readonly hubDiagnostics: (
+      input: M.MemorySyncStatusInput,
+      permit: Permit,
+    ) => Effect.Effect<M.MemoryHubDiagnostics, Error>;
     readonly reconcileHub: (
       input: M.MemoryHubReconcileInput,
       permit: Permit,
@@ -1658,44 +1662,65 @@ const make = Effect.gen(function* () {
       const permit = pending.permit;
       yield* ensureEpoch(pending.epoch);
       const now = yield* Clock.currentTimeMillis;
-      const page = yield* store.transact(
-        Effect.gen(function* () {
-          yield* ensureEpoch(pending.epoch);
-          if (permit) {
-            yield* permit;
-            yield* requireCurrentPublication;
-            if ((yield* runtime.readBootstrap(pending.space, r.hubId)).state !== "ready")
-              return yield* new M.MemoryHubError({ code: "bootstrap_required" });
-          }
-          const input = { memorySpaceId: pending.space, holdClass: c, now, limit: 100 };
-          const empty: Store.HoldRearmPage = {
-            changedIds: [],
-            inspected: 0,
-            next: null,
-            more: false,
-          };
-          const sync = pending.syncDone
-            ? empty
-            : yield* store.rearmSyncHoldsTx({ ...input, afterId: pending.syncAfter });
-          const resolution = pending.resolutionDone
-            ? empty
-            : yield* store.rearmResolutionHoldsTx({ ...input, afterId: pending.resolutionAfter });
-          const key = { memorySpaceId: pending.space, hubEnvironmentId: r.hubId };
-          const retry = yield* store.readPullRetry(key);
-          if (retry.holdClass === c)
-            yield* store.writePullRetryTx({
-              ...key,
-              expectedVersion: retry.version,
-              retry: { attempts: 0, nextAttemptAt: now, failureCode: null, holdClass: null },
-            });
-          if (permit) {
-            yield* permit;
+      const page = yield* store
+        .transact(
+          Effect.gen(function* () {
             yield* ensureEpoch(pending.epoch);
-            yield* requireCurrentPublication;
-          }
-          return { sync, resolution };
-        }),
-      );
+            if (permit) {
+              yield* permit;
+              yield* requireCurrentPublication;
+              if ((yield* runtime.readBootstrap(pending.space, r.hubId)).state !== "ready")
+                return yield* new M.MemoryHubError({ code: "bootstrap_required" });
+            }
+            const input = { memorySpaceId: pending.space, holdClass: c, now, limit: 100 };
+            const empty: Store.HoldRearmPage = {
+              changedIds: [],
+              inspected: 0,
+              next: null,
+              more: false,
+            };
+            const sync = pending.syncDone
+              ? empty
+              : yield* store.rearmSyncHoldsTx({ ...input, afterId: pending.syncAfter });
+            const resolution = pending.resolutionDone
+              ? empty
+              : yield* store.rearmResolutionHoldsTx({ ...input, afterId: pending.resolutionAfter });
+            const key = { memorySpaceId: pending.space, hubEnvironmentId: r.hubId };
+            const retry = yield* store.readPullRetry(key);
+            if (retry.holdClass === c)
+              yield* store.writePullRetryTx({
+                ...key,
+                expectedVersion: retry.version,
+                retry: { attempts: 0, nextAttemptAt: now, failureCode: null, holdClass: null },
+              });
+            if (permit) {
+              yield* permit;
+              yield* ensureEpoch(pending.epoch);
+              yield* requireCurrentPublication;
+            }
+            return { sync, resolution };
+          }),
+          {
+            requireOuter: true,
+            finalGuard: ensureEpoch(pending.epoch).pipe(
+              Effect.andThen(permit ?? Effect.void),
+              Effect.andThen(permit ? requireCurrentPublication : Effect.void),
+            ),
+          },
+        )
+        .pipe(
+          Effect.tapError(() =>
+            Effect.gen(function* () {
+              // Retire only this request's pending work, including background pages.
+              // Any coalesced automatic observation is replaced by a fresh probe;
+              // remaining manual work never inherits automatic authority.
+              if (permit && rearms.get(c) === pending && pending.permit === permit) {
+                rearms.delete(c);
+                yield* scheduleRecovery(r, c, false);
+              }
+            }),
+          ),
+        );
       if (pending.restartRequested) {
         pending.restartRequested = false;
         pending.syncDone = false;
@@ -2059,13 +2084,7 @@ const make = Effect.gen(function* () {
           yield* ensureEpoch(input.expectedVersion);
           yield* requireCurrentPublication;
           enqueueRearm(input.expectedVersion, r.space, recoverable, permit);
-          yield* rearmPage(r).pipe(
-            Effect.tapError(() =>
-              Effect.sync(() => {
-                for (const c of recoverable) if (rearms.get(c)?.permit === permit) rearms.delete(c);
-              }),
-            ),
-          );
+          yield* rearmPage(r);
           return { version: input.expectedVersion, rearmedClasses: recoverable };
         }),
       )
@@ -2111,7 +2130,7 @@ const make = Effect.gen(function* () {
         yield* guardedSync;
         return result;
       }),
-    syncStatus: (_input, permit) =>
+    hubDiagnostics: (_input, permit) =>
       Effect.gen(function* () {
         yield* permit;
         const s = yield* readSettings;
@@ -2121,14 +2140,8 @@ const make = Effect.gen(function* () {
         const hubId = s.memoryHub.mode === "member" ? s.memoryHub.hubEnvironmentId : local;
         const bootstrap = space ? (yield* runtime.readBootstrap(space, hubId)).state : "unbound";
         const holds = space
-          ? yield* store
-              .readPersistedHoldClasses({ memorySpaceId: space, hubEnvironmentId: hubId })
-              .pipe(Effect.orElseSucceed(() => null))
+          ? yield* store.readPersistedHoldClasses({ memorySpaceId: space, hubEnvironmentId: hubId })
           : [];
-        const persisted = yield* runtime.readProcessing(space, space ? hubId : null);
-        const storage = space
-          ? yield* quota.readStorageStatus({ memorySpaceId: space, environmentId: local })
-          : yield* runtime.readUnboundStorage;
         yield* permit;
         const current = yield* readSettings;
         if (current.memoryHubVersion !== epoch)
@@ -2136,14 +2149,14 @@ const make = Effect.gen(function* () {
         const failure = lastFailure?.epoch === epoch ? lastFailure.code : undefined;
         const success = lastSuccess?.epoch === epoch ? lastSuccess.at : null;
         const publication = yield* readPublication;
-        const recoverableHolds = (holds ?? []).filter(
+        const recoverableHolds = holds.filter(
           (c): c is "protocol" | "availability" => c === "protocol" || c === "availability",
         );
-        const permanentHolds = (holds ?? []).filter(
+        const permanentHolds = holds.filter(
           (c): c is "identity" | "authorization" => c === "identity" || c === "authorization",
         );
         const disabled = s.memoryHub.mode === "disabled";
-        const diagnostics: M.MemoryHubDiagnostics = {
+        return {
           version: epoch,
           publication,
           readiness: disabled ? "disabled" : bootstrap,
@@ -2167,9 +2180,28 @@ const make = Effect.gen(function* () {
                   ? "available"
                   : "not_needed",
         };
+      }),
+    syncStatus: (_input, permit) =>
+      Effect.gen(function* () {
+        yield* permit;
+        const s = yield* readSettings;
+        const epoch = s.memoryHubVersion;
+        resetStatus(epoch);
+        const space = s.memoryHub.mode === "disabled" ? null : s.memoryHub.memorySpaceId;
+        const hubId = s.memoryHub.mode === "member" ? s.memoryHub.hubEnvironmentId : local;
+        const bootstrap = space ? (yield* runtime.readBootstrap(space, hubId)).state : "unbound";
+        const persisted = yield* runtime.readProcessing(space, space ? hubId : null);
+        const storage = space
+          ? yield* quota.readStorageStatus({ memorySpaceId: space, environmentId: local })
+          : yield* runtime.readUnboundStorage;
+        yield* permit;
+        const current = yield* readSettings;
+        if (current.memoryHubVersion !== epoch)
+          return yield* new M.MemoryHubError({ code: "fenced" });
+        const failure = lastFailure?.epoch === epoch ? lastFailure.code : undefined;
+        const success = lastSuccess?.epoch === epoch ? lastSuccess.at : null;
         return {
           memorySpaceId: space,
-          ...(holds ? { diagnostics } : {}),
           state:
             s.memoryHub.mode === "disabled"
               ? "disabled"
