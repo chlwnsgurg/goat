@@ -480,6 +480,10 @@ describe("memory sync and views", () => {
   });
   it("preserves original digest outcome and report retry identities", () => {
     expect(round(M.MemoryCompactReceipt, compact).receipt).toEqual(receipt);
+    const replay = { ...compact, upsertRequestDigest: "a".repeat(64) };
+    expect(round(M.MemoryCompactReceipt, replay).upsertRequestDigest).toBe("a".repeat(64));
+    rejects(M.MemoryCompactReceipt, { ...replay, upsertRequestDigest: "body" });
+
     rejects(M.MemoryCompactReceipt, {
       ...compact,
       reportGuard: {

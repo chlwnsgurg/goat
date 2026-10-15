@@ -1205,6 +1205,8 @@ const MemoryForgetExpansion = struct({
   status: Schema.Literals(["accepted", "pending", "rejected"]),
 });
 
+// Initial local writes are pending. Replay after hub ACK projects the final outcome
+// with pendingSync=false (and no revision on rejection), without replaying the body.
 export const MemoryMutationReceipt = struct({
   operationId: MemoryOperationId,
   memoryId: MemoryId,
@@ -2172,6 +2174,8 @@ export const MemoryCheckpointReportGuard = struct({
 export type MemoryCheckpointReportGuard = typeof MemoryCheckpointReportGuard.Type;
 
 export const MemoryCompactReceipt = struct({
+  // Body-free original input+caller identity; retained only for this receipt's lifetime.
+  upsertRequestDigest: Schema.optionalKey(digest),
   memorySpaceId: MemorySpaceId,
   originEnvironmentId: EnvironmentId,
   operationKind: Schema.Literals(["upsert", "forget", "resolve", "revert"]),
@@ -2184,6 +2188,7 @@ export const MemoryCompactReceipt = struct({
   reportGuard: Schema.NullOr(MemoryCheckpointReportGuard),
 }).check(
   Schema.makeFilter((v) => {
+    if (v.upsertRequestDigest !== undefined && v.operationKind !== "upsert") return false;
     if (
       v.receipt.hubSequence === null ||
       !validateMemoryResolutionApproval(v.operationKind, v.resolutionId, v.receipt)

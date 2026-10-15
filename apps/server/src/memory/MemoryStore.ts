@@ -358,7 +358,7 @@ export function encodeCompactReceipt(
   record: M.MemoryCompactReceipt,
   environmentOrdinal: (id: M.EnvironmentId) => number,
 ): Uint8Array {
-  const bytes: number[] = [2];
+  const bytes: number[] = [record.upsertRequestDigest === undefined ? 2 : 3];
   const byte = (value: number) => bytes.push(value);
   const number = (value: number) => {
     let remaining = BigInt(value);
@@ -424,10 +424,11 @@ export function encodeCompactReceipt(
     uuid(record.receipt.forgetRetryOf.operationId);
     hash(record.receipt.forgetRetryOf.operationDigest);
   }
+  if (record.upsertRequestDigest !== undefined) hash(record.upsertRequestDigest);
   return Uint8Array.from(bytes);
 }
 
-/** Decode stored v1/v2 rows without granting old resolve rows authoritative approval. */
+/** Decode stored v1/v2/v3 rows without granting old resolve rows authoritative approval. */
 export function decodeCompactReceipt(
   bytes: Uint8Array,
   space: M.MemorySpaceId,
@@ -439,7 +440,8 @@ export function decodeCompactReceipt(
     return bytes[offset++]!;
   };
   const version = byte();
-  if (version !== 1 && version !== 2) throw new RangeError("Unsupported compact receipt");
+  if (version !== 1 && version !== 2 && version !== 3)
+    throw new RangeError("Unsupported compact receipt");
   const number = () => {
     let value = 0n;
     let shift = 0n;
@@ -494,9 +496,9 @@ export function decodeCompactReceipt(
         reclaimable: number(),
       }
     : undefined;
-  const appliedAt = version === 2 && byte() ? (byte() ? -1 : 1) * number() : undefined;
+  const appliedAt = version >= 2 && byte() ? (byte() ? -1 : 1) * number() : undefined;
   const forgetExpansion =
-    version === 2 && byte()
+    version >= 2 && byte()
       ? {
           requestDigest: hash(),
           operationId: uuid(),
@@ -505,7 +507,8 @@ export function decodeCompactReceipt(
         }
       : undefined;
   const forgetRetryOf =
-    version === 2 && byte() ? { operationId: uuid(), operationDigest: hash() } : undefined;
+    version >= 2 && byte() ? { operationId: uuid(), operationDigest: hash() } : undefined;
+  const upsertRequestDigest = version === 3 ? hash() : undefined;
   if (offset !== bytes.length) throw new RangeError("Trailing compact receipt bytes");
   // Legacy storage accepts approval-free resolves. It must not pass the current wire decoder.
   const storedSchema =
@@ -528,6 +531,7 @@ export function decodeCompactReceipt(
       memorySpaceId: space,
       originEnvironmentId,
       operationKind,
+      ...(upsertRequestDigest !== undefined ? { upsertRequestDigest } : {}),
       receipt: {
         operationId,
         memoryId,
@@ -8898,6 +8902,9 @@ const make = Effect.gen(function* () {
       memorySpaceId: op.memorySpaceId,
       originEnvironmentId: op.originEnvironmentId,
       operationKind: op.kind,
+      ...(op.kind === "upsert" && op.revision.provenance.upsertRequestDigest !== undefined
+        ? { upsertRequestDigest: op.revision.provenance.upsertRequestDigest }
+        : {}),
       receipt,
       revisionId:
         op.kind === "forget" || input.outcome === "rejected" ? null : op.revision.revisionId,

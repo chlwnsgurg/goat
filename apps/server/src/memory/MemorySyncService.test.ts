@@ -1,3 +1,7 @@
+import { McpServer } from "effect/ai";
+import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as McpAccess from "../mcp/McpToolAccess.testkit.ts";
+import * as McpFixture from "../mcp/toolkits/memory/handlers.testkit.ts";
 import { assert, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -43,6 +47,7 @@ import * as Worker from "./MemoryWorker.ts";
 import { sourceReadLocatorDigest } from "./MemoryOwnerSourceReader.ts";
 import * as Maintenance from "./MemoryFtsMaintenance.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
+const decodeReplayReceipt = Schema.decodeUnknownEffect(M.MemoryMutationReceipt);
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const space = M.MemorySpaceId.make(id(1));
 const local = M.EnvironmentId.make("fixture-member");
@@ -6050,6 +6055,142 @@ it.effect.each(["offline", "next-page", "transport-retry", "chain", "rejected"] 
             );
           }
         }).pipe(Effect.provide(fixture(client)));
+      }),
+    ),
+);
+
+it.effect.each(["accepted", "rejected"] as const)(
+  "M-R5-2 real toolkit replays %s Sync ACK without writes after forget and unknown",
+  (outcome) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* Layer.build(Layer.fresh(core));
+        const hService = Context.get(h, Service.MemoryService);
+        const hStore = Context.get(h, Store.MemoryStore);
+        const hSql = Context.get(h, SqlClient.SqlClient);
+        yield* hSql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${local},${"a".repeat(64)},1,'active',0)`;
+        const client = peer({
+          push: (_c, input) =>
+            Effect.gen(function* () {
+              const receipt = yield* hService.admitHubOperation({
+                operation: input.operations[0]!,
+                authority: {
+                  principal: {
+                    memorySpaceId: space,
+                    environmentId: local,
+                    credentialVersion: 1,
+                    scopes: ["memory:sync"],
+                  },
+                  now: Clock.currentTimeMillis,
+                  reauthorize: Effect.void,
+                },
+              });
+              return { receipts: [receipt] };
+            }).pipe(Effect.mapError(() => new M.MemoryHubError({ code: "unavailable" }))),
+        });
+        const integrated = McpHttpServer.layerMemoryToolkit.pipe(
+          Layer.provideMerge(fixture(client)),
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provide(McpAccess.liveThreadsLayer),
+          Layer.provide(NodeServices.layer),
+        );
+        yield* Effect.gen(function* () {
+          yield* ready;
+          const service = yield* Service.MemoryService;
+          const store = yield* Store.MemoryStore;
+          const sql = yield* SqlClient.SqlClient;
+          const sync = yield* Sync.MemorySyncService;
+          const input = { ...McpFixture.upsert(97001), memorySpaceId: space };
+          const invocation = {
+            ...McpFixture.scope(),
+            environmentId: local,
+            client: undefined,
+            thread: {
+              threadId: M.ThreadId.make("r6-caller"),
+              providerSessionId: "synthetic",
+              providerInstanceId: M.ProviderInstanceId.make("codex"),
+            },
+          };
+          if (outcome === "rejected") {
+            yield* hService.upsert(
+              { ...input, operationId: M.MemoryOperationId.make(id(97002)) },
+              Effect.void,
+            );
+            yield* hService.forget(
+              {
+                memorySpaceId: space,
+                memoryId: input.memoryId,
+                operationId: M.MemoryOperationId.make(id(97003)),
+                expectedHeads: (yield* hStore.loadAggregate(space, input.memoryId)).heads,
+              },
+              Effect.void,
+            );
+          }
+          const first = yield* McpFixture.call("memory_upsert", input, invocation);
+          assert.isNotTrue(first.result.isError);
+          const pending = yield* decodeReplayReceipt(first.body, {
+            onExcessProperty: "error",
+          });
+          assert.isTrue(pending.pendingSync);
+          yield* sync.syncOnce;
+          const canonical = (yield* store.receipt(space, input.operationId))!;
+          assert.strictEqual(canonical.receipt.outcome, outcome);
+          assert.property(canonical.receipt, "hubSequence");
+          const counts = sql`SELECT (SELECT count(*) FROM memory_events) AS events,(SELECT count(*) FROM memory_payloads) AS payloads,(SELECT count(*) FROM memory_outbox) AS outbox`;
+          const replay = Effect.gen(function* () {
+            const before = yield* counts;
+            const response = yield* McpFixture.call("memory_upsert", input, invocation);
+            assert.isNotTrue(response.result.isError);
+            const receipt = yield* decodeReplayReceipt(response.body, {
+              onExcessProperty: "error",
+            });
+            assert.strictEqual(receipt.outcome, outcome);
+            assert.isFalse(receipt.pendingSync);
+            assert.strictEqual(
+              receipt.revisionId,
+              outcome === "rejected" ? null : pending.revisionId,
+            );
+            if (outcome === "rejected")
+              assert.strictEqual(receipt.failureCode, canonical.receipt.failureCode);
+            assert.deepStrictEqual(yield* counts, before);
+            assert.deepStrictEqual(yield* store.receipt(space, input.operationId), canonical);
+          });
+          yield* replay;
+          yield* service.forget(
+            {
+              memorySpaceId: space,
+              memoryId: input.memoryId,
+              operationId: M.MemoryOperationId.make(id(97004)),
+              expectedHeads: (yield* store.loadAggregate(space, input.memoryId)).heads,
+            },
+            Effect.void,
+          );
+          yield* sql`INSERT INTO orchestration_events(application_event_version,aggregate_kind,stream_id,event_type,payload_json) VALUES(2,'thread','r6-caller','context-transfer.created','{"targetThreadId":"r6-caller","sourceThreadId":"other"}')`;
+          yield* replay;
+          assert.lengthOf(
+            yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${input.memoryId}`,
+            0,
+          );
+          // Settings WS calls the same service without a caller, then strict-decodes its receipt.
+          const settingsInput = {
+            ...McpFixture.upsert(97011),
+            memorySpaceId: space,
+            memoryId: M.MemoryId.make(id(97012)),
+          };
+          const settingsFirst = yield* service.upsert(settingsInput, Effect.void);
+          yield* sync.syncOnce;
+          const before = yield* counts;
+          const settingsReplay = yield* service.upsert(settingsInput, Effect.void);
+          const settingsReceipt = yield* decodeReplayReceipt(settingsReplay.receipt, {
+            onExcessProperty: "error",
+          });
+          assert.isFalse(settingsReceipt.pendingSync);
+          assert.strictEqual(
+            settingsReceipt.revisionId,
+            (settingsFirst.receipt as M.MemoryMutationReceipt).revisionId,
+          );
+          assert.deepStrictEqual(yield* counts, before);
+        }).pipe(Effect.provide(integrated));
       }),
     ),
 );

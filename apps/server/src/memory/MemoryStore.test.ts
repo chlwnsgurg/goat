@@ -1879,6 +1879,18 @@ it("measures the versioned compact maximum and preserves approval and correlatio
     fencingToken: null,
     reportGuard: null,
   });
+  const replayRecord = M.MemoryCompactReceipt.make({
+    ...legacyRecord,
+    upsertRequestDigest: hash,
+    revisionId: null,
+    receipt: { ...rejected.receipt },
+  });
+  const replayBytes = Store.encodeCompactReceipt(replayRecord, () => Number.MAX_SAFE_INTEGER);
+  assert.isAtMost(replayBytes.length, M.MEMORY_COMPACT_RECEIPT_ENCODING_MAX_BYTES);
+  assert.deepStrictEqual(
+    Store.decodeCompactReceipt(replayBytes, space, () => env),
+    replayRecord,
+  );
   const v2 = Store.encodeCompactReceipt(legacyRecord, () => 1);
   const v1 = v2.slice(0, -3);
   v1[0] = 1;

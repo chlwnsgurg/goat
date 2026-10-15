@@ -636,13 +636,35 @@ const make = Effect.fnUntraced(function* (
         const prior = yield* store.receipt(value.memorySpaceId, value.operationId);
         if (prior) {
           const rows = yield* query(sql<{ request_digest: string | null }>`
-            SELECT json_extract(metadata_json,'$.revision.provenance.upsertRequestDigest') AS request_digest
-            FROM memory_events WHERE memory_space_id=${value.memorySpaceId} AND operation_id=${value.operationId}`);
+            SELECT json_extract(compact_json,'$.upsertRequestDigest') AS request_digest
+            FROM memory_compact_receipts WHERE space=${value.memorySpaceId} AND operation_id=${value.operationId}
+            UNION ALL SELECT json_extract(metadata_json,'$.revision.provenance.upsertRequestDigest') AS request_digest
+            FROM memory_events WHERE memory_space_id=${value.memorySpaceId} AND operation_id=${value.operationId} LIMIT 1`);
           if (rows[0]?.request_digest !== requestDigest)
             return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
           // Receipt recovery precedes the new-write lineage fence and dependency reads.
           // Never reconstruct the first operation with today's context or revive its body.
-          return prior;
+          if (!("hubSequence" in prior.receipt)) return prior;
+          const acknowledged = prior.receipt;
+          const receipt: M.MemoryMutationReceipt = {
+            operationId: acknowledged.operationId,
+            memoryId: acknowledged.memoryId,
+            outcome: acknowledged.outcome,
+            revisionId:
+              acknowledged.outcome === "rejected"
+                ? null
+                : M.MemoryRevisionId.make(
+                    memoryStableUuid(`${value.memorySpaceId}:${value.operationId}:revision`),
+                  ),
+            pendingSync: false,
+            ...(acknowledged.failureCode ? { failureCode: acknowledged.failureCode } : {}),
+            ...(acknowledged.capacity ? { capacity: acknowledged.capacity } : {}),
+            ...(acknowledged.forgetExpansion
+              ? { forgetExpansion: acknowledged.forgetExpansion }
+              : {}),
+            ...(acknowledged.forgetRetryOf ? { forgetRetryOf: acknowledged.forgetRetryOf } : {}),
+          };
+          return { operationDigest: prior.operationDigest, receipt };
         }
         yield* requireScope(value.scope);
         const lineage = yield* requireCompleteLineage(value.memorySpaceId, sourceThread);
