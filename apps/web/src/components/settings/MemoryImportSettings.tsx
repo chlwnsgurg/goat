@@ -35,12 +35,9 @@ export function MemoryImportSettings({
 }) {
   const registry = useContext(RegistryContext);
   const canImport = useAtomValue(memoryEnvironment.importProvider.permissionAtom(environmentId));
-  const [admissionListener] = useState(() => ({ invalidate: () => {} }));
   const [admission] = useState(() => {
     try {
-      return createMemoryImportAdmission({ environmentId, memorySpaceId }, () =>
-        admissionListener.invalidate(),
-      );
+      return createMemoryImportAdmission({ environmentId, memorySpaceId });
     } catch {
       return null;
     }
@@ -156,11 +153,18 @@ export function MemoryImportSettings({
     setSources([]);
   }, [environmentId, memorySpaceId, workflow]);
   useEffect(() => {
-    admissionListener.invalidate = () => {
+    const unsubscribe = admission?.subscribeInvalidation(() => {
       void invalidateDestination();
+    });
+    const unregister = registerMemoryImportDestination(
+      { environmentId, memorySpaceId },
+      invalidateDestination,
+    );
+    return () => {
+      unsubscribe?.();
+      unregister();
     };
-    return registerMemoryImportDestination({ environmentId, memorySpaceId }, invalidateDestination);
-  }, [environmentId, memorySpaceId, invalidateDestination, admissionListener]);
+  }, [environmentId, memorySpaceId, invalidateDestination, admission]);
   const locked =
     busy ||
     ["previewed", "save_failed", "recovery", "saving", "applying", "checking"].includes(

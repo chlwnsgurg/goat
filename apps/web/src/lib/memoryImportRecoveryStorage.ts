@@ -49,12 +49,19 @@ export function memoryImportRecoveryStorage(
 /** One preview generation per importer; the shared generation is the authoritative fence. */
 export function createMemoryImportAdmission(
   destination: MemoryImportDestination,
-  invalidate: () => void,
+  invalidate: () => void = () => {},
   storage: MemoryImportRecoveryStorage = window.localStorage,
 ) {
   const base = createMemoryImportRecoveryStore(storage, () => Date.now());
+  const invalidations = new Set([invalidate]);
   let previewGeneration: string | null | undefined;
   return {
+    subscribeInvalidation: (listener: () => void) => {
+      invalidations.add(listener);
+      return () => {
+        invalidations.delete(listener);
+      };
+    },
     capturePreview: async () => {
       previewGeneration = await storage.getItem(memoryImportGenerationKey(destination));
     },
@@ -67,7 +74,7 @@ export function createMemoryImportAdmission(
             previewGeneration === undefined ||
             previewGeneration !== (await storage.getItem(memoryImportGenerationKey(target)))
           ) {
-            invalidate();
+            for (const listener of invalidations) listener();
             throw new Error(changedImportDestinationMessage);
           }
           return base.save(target, operationId);
