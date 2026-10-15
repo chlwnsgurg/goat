@@ -191,6 +191,7 @@ it.effect.each(["codex-handbook-v1", "claude-topic-v1", "omo-memory-core-beta63"
       const inventory = captureMemoryImportInventory(fixture.sourceRoot);
       const g = yield* graph({
         stateDir: fixture.stateDir,
+        gitExecutable: "/usr/bin/git",
         roots: [
           {
             format: fixture.snapshot.format,
@@ -232,7 +233,7 @@ it.effect.each(["codex-handbook-v1", "claude-topic-v1", "omo-memory-core-beta63"
       if (applied.action !== "apply") return assert.fail("apply");
       assert.equal(applied.receipt.state, "completed");
       assert.lengthOf(applied.receipt.items, 1);
-      assert.equal(applied.receipt.items[0]!.outcome, "imported");
+      assert.equal(applied.receipt.items[0]!.outcome, "created");
       // Real hub admission and ACK settle the ordinary pending local import.
       yield* g.tick;
       const readCount = reads;
@@ -349,6 +350,7 @@ it.effect(
       const g = yield* graph(
         {
           stateDir: fixture.stateDir,
+          gitExecutable: "/usr/bin/git",
           roots: [{ format: "omo", rootSlot: "synthetic", path: fixture.trustedRoot }],
           onSnapshotSealed: () =>
             barrier
@@ -415,7 +417,8 @@ it.effect(
       const g = yield* graph(
         {
           stateDir: fixture.stateDir,
-          roots: [{ format: "codex", rootSlot: "synthetic", path: fixture.sourceRoot }],
+          gitExecutable: "/usr/bin/git",
+          roots: [{ format: "codex", rootSlot: "synthetic", path: fixture.trustedRoot }],
         },
         scopes,
       );

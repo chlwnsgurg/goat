@@ -1,3 +1,4 @@
+import { resolveCommandPath } from "@goat/shared/shell";
 import * as HostProcess from "@goat/shared/HostProcess";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- the closed import factory requires a synchronous UUID callback.
 import * as NodeCrypto from "node:crypto";
@@ -739,11 +740,14 @@ export const layerMemoryImport = (config?: MemoryImportReaderConfig) =>
       const server = yield* ServerConfig.ServerConfig;
       const path = yield* Path.Path;
       const home = yield* HostProcess.HomeDirectory;
+      const gitExecutable =
+        config === undefined ? yield* resolveCommandPath("git") : config.gitExecutable;
       const reader = yield* acquireMemoryImportReader(
         config ?? {
           stateDir: path.join(server.stateDir, "memory-import-snapshots"),
+          ...(gitExecutable ? { gitExecutable } : {}),
           roots: [
-            { format: "codex", rootSlot: "default", path: path.join(home, ".codex", "memories") },
+            { format: "codex", rootSlot: "default", path: path.join(home, ".codex") },
             { format: "claude", rootSlot: "default", path: path.join(home, ".claude", "projects") },
             {
               format: "omo",

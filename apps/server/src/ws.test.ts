@@ -506,6 +506,6 @@ it.effect("an unavailable import runtime rejects before invoking the service fac
       format: "codex",
     }).pipe(Effect.flip);
     assert.equal(result._tag, "MemoryRpcError");
-    assert.equal(result.code, "unavailable");
+    if (result._tag === "MemoryRpcError") assert.equal(result.code, "unavailable");
   }),
 );
