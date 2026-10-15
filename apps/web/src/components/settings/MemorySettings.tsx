@@ -376,6 +376,9 @@ function MemoryRecords({
   );
   const value = page.data ? Option.getOrNull(page.data) : null;
   const items = value?.items ?? [];
+  const coverage = value?.indexCoverage
+    ? presentMemoryCoverage(value.indexCoverage, items.length)
+    : null;
   const [listLayout, setListLayout] = useState<{
     items: readonly MemoryItem[];
     height: number;
@@ -487,8 +490,8 @@ function MemoryRecords({
             }
           />
         ) : null}
-        {value ? (
-          <SettingsRow title={presentMemoryCoverage(value.indexCoverage, items.length).label} />
+        {items.length > 0 && coverage && coverage.status !== "available" ? (
+          <SettingsRow title={coverage.label} />
         ) : null}
         {notice ? <SettingsRow title={<span role="status">{notice}</span>} /> : null}
         {!value && !page.error ? (
@@ -498,8 +501,16 @@ function MemoryRecords({
           />
         ) : !value ? null : items.length === 0 ? (
           <SettingsRow
-            title={presentMemoryCoverage(value.indexCoverage, 0).emptyLabel ?? "No memories found"}
-            description={presentMemoryCoverage(value.indexCoverage, 0).label}
+            title={coverage?.emptyLabel ?? (query ? "No memories found" : "No memories yet")}
+            description={
+              coverage
+                ? coverage.status === "unavailable"
+                  ? coverage.label
+                  : undefined
+                : query
+                  ? undefined
+                  : "Memories saved on this device will appear here."
+            }
           />
         ) : (
           <LegendList

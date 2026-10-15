@@ -285,7 +285,9 @@ vi.mock("./settingsLayout", () => ({
     </div>
   ),
   SettingsPageContainer: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  SettingsSection: ({ children }: { children: ReactNode }) => <section>{children}</section>,
+  SettingsSection: ({ children, id }: { children: ReactNode; id?: string }) => (
+    <section id={id}>{children}</section>
+  ),
 }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
 import { RegistryContext } from "@effect/atom-react";
@@ -1862,30 +1864,93 @@ it("requires discover, preview, scope and selection confirmation before an expli
   expect(container.textContent).toContain("The result is unknown");
   expect(container.textContent).not.toContain("private-");
 });
-it.each(["available", "partial", "unavailable"])(
-  "distinguishes empty %s coverage in the actual records view",
+it("shows the original empty list without inventing unknown coverage", async () => {
+  state.queries.set("list", Option.some({ items: [], projectionWatermark: 0, nextCursor: null }));
+  await supportedScreen(false);
+  const records = container.querySelector("#memory-records")!;
+  expect(records.textContent).toContain("No memories yet");
+  expect(records.textContent).toContain("Memories saved on this device will appear here.");
+  expect(records.textContent).not.toContain("Results are incomplete");
+  expect(records.textContent).not.toContain("Memory coverage unknown");
+});
+it.each([undefined, "unknown", "partial", "available", "unavailable"] as const)(
+  "shows one empty search message for %s coverage",
   async (status) => {
     state.queries.set(
-      "list",
+      "search",
       Option.some({
         items: [],
         projectionWatermark: 0,
         nextCursor: null,
+        ...(status
+          ? {
+              indexCoverage: {
+                status,
+                eligibleItems: 0,
+                indexedItems: 0,
+                unindexedItems: 0,
+                projectionWatermark: 0,
+              },
+            }
+          : {}),
+      }),
+    );
+    await supportedScreen(false);
+    await searchRecords();
+    const records = container.querySelector("#memory-records")!;
+    const incomplete = status !== undefined && status !== "available";
+    expect(records.textContent?.match(/Results are incomplete/g) ?? []).toHaveLength(
+      incomplete ? 1 : 0,
+    );
+    expect(records.textContent?.match(/No memories found/g) ?? []).toHaveLength(incomplete ? 0 : 1);
+    expect(records.textContent).not.toContain("No memories yet");
+    expect(records.textContent).not.toContain("Memory coverage unknown");
+    expect(records.textContent).not.toContain("Some memories are still being indexed");
+    expect(records.textContent).not.toContain("Memory search ready");
+    if (status === "unavailable")
+      expect(records.textContent).toContain("Memory search unavailable");
+  },
+);
+it.each(["available", "partial"] as const)(
+  "only shows a coverage row for incomplete populated search (%s)",
+  async (status) => {
+    state.queries.set(
+      "search",
+      Option.some({
+        items: [activeItem],
+        projectionWatermark: 0,
+        nextCursor: null,
         indexCoverage: {
           status,
-          eligibleItems: 0,
-          indexedItems: 0,
-          unindexedItems: 0,
+          eligibleItems: 2,
+          indexedItems: status === "available" ? 2 : 1,
+          unindexedItems: status === "available" ? 0 : 1,
           projectionWatermark: 0,
         },
       }),
     );
     await supportedScreen(false);
-    expect(container.textContent).toContain(
-      status === "available" ? "No memories found" : "Results are incomplete",
+    await searchRecords();
+    const records = container.querySelector("#memory-records")!;
+    expect(records.textContent).toContain("Synthetic original");
+    expect(records.textContent).not.toContain("Memory search ready");
+    expect(records.textContent?.match(/Some memories are still being indexed/g) ?? []).toHaveLength(
+      status === "partial" ? 1 : 0,
     );
+    expect(records.textContent).not.toContain("Results are incomplete");
   },
 );
+async function searchRecords() {
+  const input = container.querySelector<HTMLInputElement>('[aria-label="Search memories"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+      input,
+      "synthetic",
+    );
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await click("Search");
+}
 it("preserves the recovery handle while disconnected and checks it on reconnect", async () => {
   const operationId = (await import("@goat/contracts")).MemoryOperationId.make(id(78));
   const store = memoryImportRecoveryStorage();
