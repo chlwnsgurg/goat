@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -57,13 +58,15 @@ const id = () => M.MemoryOperationId.make(NodeCrypto.randomUUID());
 // real Sync/Hub and the same scoped reader/factory used by server.ts. Only unused
 // provider generation/registry boundaries are doubles; import has no mocked ports.
 const graph = (
-  config: Parameters<typeof layerMemoryImport>[0],
+  config: Parameters<typeof layerMemoryImport>[0] = undefined,
   scopes?: Effect.Effect<readonly M.AuthEnvironmentScope[]>,
   afterCommit?: Effect.Effect<void>,
+  syntheticHome?: string,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const home = yield* fs.makeTempDirectoryScoped({ prefix: "wp5-import-graph-" });
+    const home =
+      syntheticHome ?? (yield* fs.makeTempDirectoryScoped({ prefix: "wp5-import-graph-" }));
     const memo = yield* Layer.makeMemoMap;
     const scope = yield* Scope.Scope;
     const settings = Settings.layer.pipe(
@@ -115,7 +118,10 @@ const graph = (
       }),
     ).pipe(Layer.provideMerge(sync));
     const context = yield* Layer.buildWithMemoMap(
-      layerMemoryImport(config).pipe(Layer.provideMerge(afterCommit ? observed : sync)),
+      layerMemoryImport(config).pipe(
+        Layer.provideMerge(afterCommit ? observed : sync),
+        Layer.provide(Layer.succeed(HostProcess.HomeDirectory, home)),
+      ),
       memo,
       scope,
     );
@@ -178,6 +184,7 @@ const graph = (
       call: client[M.WS_METHODS.memoryImportProvider],
       tick: memorySync.syncOnce,
       context,
+      stateDir: Context.get(context, Config.ServerConfig).stateDir,
     };
   });
 const stamp = (root: string) => {
@@ -336,6 +343,74 @@ it.effect.each(["codex-handbook-v1", "claude-topic-v1", "omo-memory-core-beta63"
           `${process.env.WP5_IMPORT_EVIDENCE_DIR}/${fixture.snapshot.format}.json`,
           JSON.stringify(evidence, null, 2),
         );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  { timeout: 120000 },
+);
+
+it.effect(
+  "production defaults acquire reader and import from a synthetic home without snapshot setup",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "wp5-default-import-" });
+      const source = `${home}/.codex/memories`;
+      yield* fs.makeDirectory(source, { recursive: true, mode: 0o700 });
+      yield* fs.writeFileString(`${source}/AGENTS.md`, "Synthetic default assembly guidance.\n");
+      const before = stamp(source);
+      // Only provider input exists here. Config prepares server state; the production
+      // reader must create its own private snapshot directories without an override.
+      assert.deepEqual(NodeFS.readdirSync(home), [".codex"]);
+      const g = yield* graph(undefined, undefined, undefined, home);
+      assert.equal(
+        (yield* Effect.serviceOption(ProviderMemoryImportRuntime).pipe(
+          Effect.provideContext(g.context),
+        ))._tag,
+        "Some",
+      );
+      assert.equal(g.descriptor.capabilities.memory?.importProvider, true);
+      for (const path of ["memory-import", "memory-import/snapshots"]) {
+        const stat = NodeFS.lstatSync(`${g.stateDir}/${path}`);
+        assert.isTrue(stat.isDirectory());
+        assert.isFalse(stat.isSymbolicLink());
+        assert.equal(stat.mode & 0o777, 0o700);
+        assert.equal(stat.uid, process.getuid!());
+      }
+      const discovered = yield* g.call({
+        action: "discover",
+        memorySpaceId: g.space,
+        format: "codex",
+      });
+      if (discovered.action !== "discover") return assert.fail("discover");
+      assert.lengthOf(discovered.sources, 1);
+      const sourceId = discovered.sources[0]!.sourceId;
+      const preview = yield* g.call({ action: "preview", memorySpaceId: g.space, sourceId });
+      if (preview.action !== "preview") return assert.fail("preview");
+      assert.lengthOf(preview.items, 1);
+      const applied = yield* g.call({
+        action: "apply",
+        memorySpaceId: g.space,
+        sourceId,
+        sessionId: preview.sessionId,
+        operationId: id(),
+        items: preview.items.map((item) => ({
+          sourceItemKey: item.sourceItemKey,
+          sourceFingerprint: item.sourceFingerprint!,
+          scope: { kind: "user" },
+        })),
+      });
+      if (applied.action !== "apply") return assert.fail("apply");
+      assert.equal(applied.receipt.state, "completed");
+      assert.lengthOf(applied.receipt.items, 1);
+      assert.equal(applied.receipt.items[0]!.outcome, "created");
+      yield* g.tick;
+      const item = yield* g.service.read(
+        { memorySpaceId: g.space, memoryId: applied.receipt.items[0]!.memoryId! },
+        Effect.void,
+      );
+      if (item.status !== "active") return assert.fail("active memory");
+      assert.equal(item.pendingSync, false);
+      assert.equal(item.revision.provenance.importSource?.sourceId, sourceId);
+      assert.deepEqual(stamp(source), before);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   { timeout: 120000 },
 );

@@ -744,7 +744,7 @@ export const layerMemoryImport = (config?: MemoryImportReaderConfig) =>
         config === undefined ? yield* resolveCommandPath("git") : config.gitExecutable;
       const reader = yield* acquireMemoryImportReader(
         config ?? {
-          stateDir: path.join(server.stateDir, "memory-import-snapshots"),
+          stateDir: server.stateDir,
           ...(gitExecutable ? { gitExecutable } : {}),
           roots: [
             { format: "codex", rootSlot: "default", path: path.join(home, ".codex") },
