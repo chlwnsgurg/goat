@@ -878,6 +878,7 @@ function MemoryDetails({
       ) : (
         <p role="status">This memory is unavailable. Visible details have been cleared.</p>
       )}
+      {/* A forget signal hides bodies while the same request may still need its receipt retried. */}
       <MemoryForgetControl environmentId={environmentId} item={item} />
       <Button
         size="sm"

@@ -849,7 +849,9 @@ it.each([false, true])(
       return { _tag: "Failure" };
     });
     await render();
+    const callsBeforeRetry = state.calls.mock.calls.length;
     await click("Confirm forget");
+    expect(state.calls.mock.calls.length).toBe(callsBeforeRetry + 1);
     expect(state.calls.mock.calls.at(-1)![0]).toEqual(original);
     expect(original).toMatchObject({
       environmentId: "remote-owner",
@@ -889,5 +891,25 @@ it.each(["write", "read", "reconnect", "close"])(
     expect(container.querySelector('[aria-label="Forget confirmation"]')).toBeNull();
     expect(container.textContent).not.toContain("Forget request failed");
     expect(state.calls.mock.calls.length).toBe(calls);
+  },
+);
+
+it.each(["write", "reconnect"])(
+  "checks the current %s before sending a retry from the rendered confirmation",
+  async (boundary) => {
+    const { render } = await supportedScreen();
+    await click("Forget memory");
+    await click("Confirm forget");
+    state.queries.set("read", Option.none());
+    state.queries.set("history", Option.none());
+    await render();
+    const calls = state.calls.mock.calls.length;
+    // Change the authoritative guard before React has observed the new lifecycle.
+    if (boundary === "write") state.write = false;
+    else state.connection = {};
+    await click("Confirm forget");
+    expect(state.calls.mock.calls.length).toBe(calls);
+    await render();
+    expect(container.querySelector('[aria-label="Forget confirmation"]')).toBeNull();
   },
 );
