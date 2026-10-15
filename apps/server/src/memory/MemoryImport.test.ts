@@ -1,6 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
+import * as TestClock from "effect/testing/TestClock";
+import * as Compactor from "./MemoryCompactor.ts";
+import * as Hub from "./MemoryHubService.ts";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Ref from "effect/Ref";
@@ -262,6 +266,66 @@ const durableInventory = Effect.gen(function* () {
     counters: yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`,
   };
 });
+const authority = {
+  principal: {
+    memorySpaceId: space,
+    environmentId,
+    credentialVersion: 1,
+    scopes: ["memory:sync"] as const,
+  },
+  now: Clock.currentTimeMillis,
+  reauthorize: Effect.void,
+};
+const seedMember = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at)
+    VALUES (${space},${environmentId},${"a".repeat(64)},1,'active',0)`;
+});
+// A fresh database models the hub; its approval cannot mutate the origin item fixture.
+const remoteApproval = (operation: M.MemoryOperation, forgotten = false) =>
+  Effect.gen(function* () {
+    yield* seedMember;
+    const service = yield* Service.MemoryService;
+    if (forgotten) {
+      const operationId = M.MemoryOperationId.make(uuid(800));
+      yield* (yield* Store.MemoryStore).transact(
+        service.admitHubOperationTx({
+          authority,
+          operation: {
+            protocolVersion: 1,
+            kind: "forget",
+            memorySpaceId: space,
+            memoryId,
+            operationId,
+            originEnvironmentId: environmentId,
+            expectedHeads: [],
+            tombstone: {
+              memorySpaceId: space,
+              memoryId,
+              deleteOperationId: operationId,
+              deletingEnvironmentId: environmentId,
+              deletedAtUtc: stamp,
+              suppressedSourceKeys: [],
+              suppressedContent: [],
+              sourceExclusions: [],
+            },
+          },
+        }),
+      );
+    }
+    return yield* (yield* Store.MemoryStore).transact(
+      service.admitHubOperationTx({ authority, operation }),
+    );
+  }).pipe(Effect.provide(importLive));
+const compactorLive = Compactor.layer.pipe(
+  Layer.provideMerge(importLive),
+  Layer.provideMerge(Hub.activityLayer),
+  Layer.provide(
+    Layer.succeed(Hub.MemoryHubConfiguration, {
+      read: Effect.succeed({ memorySpaceId: space, hubEnvironmentId: environmentId }),
+    }),
+  ),
+);
 const encodeUnknown = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const retired = Effect.fnUntraced(function* (p: PreparedImportCommit) {
   const sql = yield* SqlClient.SqlClient;
@@ -492,32 +556,26 @@ describe("MemoryImport durable ports", () => {
       yield* setupImport;
       const service = yield* Service.MemoryService;
       const store = yield* Store.MemoryStore;
-      const sql = yield* SqlClient.SqlClient;
       const first = prepared();
       yield* service.importPorts.commit(first, Effect.void);
-      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active',0)`;
-      const operation = yield* store.readWorkOperation(
+      const operation = (yield* store.readWorkOperation(
         `sync:${space}:${first.selection.operationId}`,
+      ))!;
+      const approval = yield* remoteApproval(operation);
+      assert.strictEqual(
+        (yield* service.importPorts.readItem(
+          { ...address, sourceId, sourceItemKey: "synthetic-item" },
+          Effect.void,
+        ))!.accepted,
+        null,
       );
-      assert.isDefined(operation);
-      yield* store.transact(
-        service.admitHubOperationTx({
-          operation: operation!,
-          authority: {
-            principal: {
-              memorySpaceId: space,
-              environmentId,
-              credentialVersion: 1,
-              scopes: ["memory:sync"],
-            },
-            now: Effect.succeed(0),
-            reauthorize: Effect.void,
-          },
-        }),
-      );
-      // M3b owns item settlement; seed its accepted observation after the real hub approval.
-      const accepted: ImportItem = { ...first.next, accepted: first.next.pending, pending: null };
-      yield* sql`UPDATE memory_import_receipts SET registration_json=${encodeUnknown(accepted)} WHERE record_kind='item'`;
+      yield* store.acknowledgeOutbox(`sync:${space}:${first.selection.operationId}`, approval);
+      const accepted = (yield* service.importPorts.readItem(
+        { ...address, sourceId, sourceItemKey: "synthetic-item" },
+        Effect.void,
+      ))!;
+      assert.deepStrictEqual(accepted.accepted, first.next.pending);
+      assert.strictEqual(accepted.pending, null);
       const reg = yield* service.importPorts.readRegistration(
         { ...address, sourceId, by: "source" },
         Effect.void,
@@ -694,5 +752,93 @@ describe("MemoryImport durable ports", () => {
         assert.strictEqual(result._tag, "Failure");
         assert.deepStrictEqual(yield* durableInventory, before);
       }).pipe(Effect.provide(importLive)),
+  );
+});
+
+describe("MemoryImport settlement", () => {
+  it.effect("settles actual hub rejection on ACK and preserves charges across replay", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const first = prepared();
+      yield* service.importPorts.commit(first, Effect.void);
+      const operation = (yield* store.readWorkOperation(
+        `sync:${space}:${first.selection.operationId}`,
+      ))!;
+      const refusal = yield* remoteApproval(operation, true);
+      assert.strictEqual(refusal.outcome, "rejected");
+      yield* store.acknowledgeOutbox(`sync:${space}:${first.selection.operationId}`, refusal);
+      const item = (yield* service.importPorts.readItem(
+        { ...address, sourceId, sourceItemKey: "synthetic-item" },
+        Effect.void,
+      ))!;
+      assert.strictEqual(item.pending, null);
+      assert.strictEqual(item.accepted, null);
+      assert.strictEqual(item.outcome, "rejected");
+      const receipt = yield* service.importPorts.readReceipt(first.batch, Effect.void);
+      assert.strictEqual(receipt.items[0]!.outcome, "rejected");
+      assert.strictEqual(receipt.sessionNewItems, 1);
+      const before = yield* durableInventory;
+      yield* store.acknowledgeOutbox(`sync:${space}:${first.selection.operationId}`, refusal);
+      assert.deepStrictEqual(yield* durableInventory, before);
+    }).pipe(Effect.provide(importLive)),
+  );
+  it.effect(
+    "settles a pulled canonical operation and retires only settled expired batch details",
+    () =>
+      Effect.gen(function* () {
+        yield* setupImport;
+        yield* seedMember;
+        const service = yield* Service.MemoryService;
+        const store = yield* Store.MemoryStore;
+        const first = prepared();
+        yield* service.importPorts.commit(first, Effect.void);
+        const operation = (yield* store.readWorkOperation(
+          `sync:${space}:${first.selection.operationId}`,
+        ))!;
+        const receipt = yield* remoteApproval(operation);
+        yield* TestClock.setTime(Date.parse(stamp) + M.MEMORY_IMPORT_BATCH_RETENTION_MS + 1);
+        // Still pending on the origin: an ordinary compaction must keep the detailed receipt.
+        yield* (yield* Compactor.MemoryCompactor).compact(authority.principal);
+        assert.strictEqual(
+          (yield* store.transact(store.readImportBatchTx(first.batch)))?.kind,
+          "detailed",
+        );
+        yield* store.transact(
+          service.settleHubEntryTx({
+            memorySpaceId: space,
+            localEnvironmentId: environmentId,
+            entry: {
+              kind: "operation",
+              hubSequence: receipt.hubSequence!,
+              memoryId,
+              operation,
+              receipt,
+            },
+          }),
+        );
+        assert.strictEqual(
+          (yield* service.importPorts.readItem(
+            { ...address, sourceId, sourceItemKey: "synthetic-item" },
+            Effect.void,
+          ))!.pending,
+          null,
+        );
+        yield* (yield* Compactor.MemoryCompactor).compact(authority.principal);
+        assert.strictEqual(
+          (yield* store.transact(store.readImportBatchTx(first.batch)))?.kind,
+          "retired",
+        );
+        const before = yield* durableInventory;
+        const failure = yield* service.importPorts.commit(first, Effect.void).pipe(Effect.flip);
+        assert.strictEqual(failure._tag, "MemoryStoreConflict");
+        if (failure._tag === "MemoryStoreConflict") assert.strictEqual(failure.code, "not_found");
+        assert.deepStrictEqual(yield* durableInventory, before);
+        const changed = yield* service.importPorts
+          .preflightBatch({ ...first.batch, selectionDigest: "f".repeat(64) }, Effect.void)
+          .pipe(Effect.flip);
+        assert.strictEqual(changed._tag, "MemoryImportRpcError");
+      }).pipe(Effect.provide(compactorLive)),
   );
 });

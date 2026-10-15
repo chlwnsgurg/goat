@@ -1508,6 +1508,9 @@ export class MemoryStore extends Context.Service<
     readonly readImportItemTx: ImportStorePorts["readImportItemTx"];
     readonly commitImportItemTx: ImportStorePorts["commitImportItemTx"];
     readonly findImportMatchTx: ImportStorePorts["findImportMatchTx"];
+    readonly requireImportLineageCompleteTx: (
+      space: M.MemorySpaceId,
+    ) => InTx<void, MemoryStorageError | MemoryStoreConflict>;
     readonly readImportLineage: (
       space: M.MemorySpaceId,
       id: M.MemoryId,
@@ -3195,6 +3198,7 @@ const make = Effect.gen(function* () {
           });
         for (const signal of decision.signals ?? [])
           yield* emit({ ...signal, projectionWatermark: watermark });
+        if ("hubSequence" in outcome) yield* settleImportOperationTx(op.memorySpaceId, outcome);
         return { operationDigest: decision.operationDigest, receipt: outcome };
       }),
     );
@@ -3626,6 +3630,10 @@ const make = Effect.gen(function* () {
             "ack-settle",
             sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(acknowledged)} WHERE memory_space_id=${work.space} AND operation_id=${result.operationId}`,
           );
+        yield* settleImportOperationTx(
+          yield* stored("import-settlement-space", decodeMemorySpaceId(work.space)),
+          result,
+        );
         yield* finishWork(id, result.outcome === "rejected" ? "failed" : "completed", result);
         if (
           result.outcome === "rejected" &&
@@ -5913,6 +5921,176 @@ const make = Effect.gen(function* () {
     },
   );
 
+  // ACK and pull share this writer. Only the exact pending operation can move the
+  // origin observation; late approvals still settle their own immutable batch result.
+  const settleImportOperationTx = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    receipt: M.MemoryHubReceipt,
+  ) {
+    yield* Transaction;
+    if (receipt.hubSequence === null && receipt.outcome !== "rejected") return;
+    const rows = yield* stored(
+      "import-settlement-items",
+      sql<{ receipt_id: string; registration_json: string }>`
+      SELECT receipt_id,registration_json FROM memory_import_receipts WHERE space=${space} AND record_kind='item'
+      AND json_extract(registration_json,'$.pending.operationId')=${receipt.operationId}`,
+    );
+    for (const row of rows) {
+      const item = yield* importItemCodec.decode(row.registration_json, strict);
+      const pending = item.pending!;
+      if (item.memoryId !== receipt.memoryId)
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      const next = {
+        ...item,
+        accepted: receipt.outcome === "rejected" ? item.accepted : pending,
+        pending: null,
+        rejected:
+          receipt.outcome === "rejected"
+            ? { sourceFingerprint: pending.sourceFingerprint, issue: "source_changed" as const }
+            : null,
+        outcome:
+          receipt.outcome === "rejected"
+            ? ("rejected" as const)
+            : receipt.outcome === "conflicted"
+              ? ("conflicted" as const)
+              : item.outcome,
+      };
+      yield* stored(
+        "import-settlement-item",
+        sql`UPDATE memory_import_receipts SET registration_json=${yield* importItemCodec.encode(next)},outcome=${next.outcome} WHERE receipt_id=${row.receipt_id}`,
+      );
+    }
+    const batches = yield* stored(
+      "import-settlement-batches",
+      sql<{ receipt_id: string; completed_items_json: string }>`
+      SELECT receipt_id,completed_items_json FROM memory_import_receipts WHERE space=${space} AND record_kind='batch'
+      AND json_extract(completed_items_json,'$.kind')='detailed'
+      AND EXISTS (SELECT 1 FROM json_each(completed_items_json,'$.selections') s
+        WHERE json_extract(s.value,'$.operationId')=${receipt.operationId} AND json_type(s.value,'$.result')='object')`,
+    );
+    for (const row of batches) {
+      const batch = yield* importBatchCodec.decode(row.completed_items_json, strict);
+      if (batch.kind !== "detailed") continue;
+      const selections = batch.selections.map((s) =>
+        s.operationId !== receipt.operationId || !s.result
+          ? s
+          : {
+              ...s,
+              result:
+                receipt.outcome === "rejected"
+                  ? {
+                      sourceItemKey: s.selector.sourceItemKey,
+                      outcome: "rejected" as const,
+                      issue: "source_changed" as const,
+                      memoryId: null,
+                      revisionId: null,
+                    }
+                  : receipt.outcome === "conflicted"
+                    ? { ...s.result, outcome: "conflicted" as const }
+                    : s.result,
+            },
+      );
+      const next = {
+        ...batch,
+        selections,
+        receipt: {
+          ...batch.receipt,
+          items: selections.flatMap((s) => (s.result ? [s.result] : [])),
+        },
+      };
+      yield* stored(
+        "import-settlement-batch",
+        sql`UPDATE memory_import_receipts SET completed_items_json=${yield* importBatchCodec.encode(next)} WHERE receipt_id=${row.receipt_id}`,
+      );
+    }
+  });
+  const retireImportBatchesTx = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    now: number,
+    limit: number,
+  ) {
+    yield* Transaction;
+    const rows = yield* stored(
+      "import-batch-expired",
+      sql<{ receipt_id: string; completed_items_json: string }>`
+      SELECT receipt_id,completed_items_json FROM memory_import_receipts b WHERE space=${space} AND record_kind='batch'
+      AND json_extract(completed_items_json,'$.kind')='detailed'
+      AND observed_at_utc<=${DateTime.formatIso(DateTime.makeUnsafe(now - M.MEMORY_IMPORT_BATCH_RETENTION_MS))}
+      AND NOT EXISTS (SELECT 1 FROM json_each(completed_items_json,'$.selections') s JOIN memory_import_receipts i
+        ON i.space=b.space AND i.environment_id=b.environment_id AND i.record_kind='item'
+        WHERE json_extract(i.registration_json,'$.pending.operationId')=json_extract(s.value,'$.operationId'))
+      ORDER BY observed_at_utc,receipt_id LIMIT ${limit}`,
+    );
+    for (const row of rows) {
+      const batch = yield* importBatchCodec.decode(row.completed_items_json, strict);
+      yield* stored(
+        "import-batch-retire",
+        sql`UPDATE memory_import_receipts SET completed_items_json=${yield* importBatchCodec.encode({ kind: "retired", codecVersion: 1, selectionDigest: batch.selectionDigest })} WHERE receipt_id=${row.receipt_id}`,
+      );
+    }
+    return rows.length;
+  });
+  // Pre-release databases with approved import provenance but no lifetime evidence must
+  // be explicitly rebuilt by their operator. Never infer an empty ledger is complete.
+  const requireImportLineageCompleteTx = Effect.fnUntraced(function* (space: M.MemorySpaceId) {
+    yield* Transaction;
+    const rows = yield* stored(
+      "import-lineage-completeness",
+      sql<{
+        memory_id: string;
+        provenance_json: string;
+        scope_json: string;
+        assertion_kind: string;
+      }>`SELECT r.memory_id,r.provenance_json,r.scope_json,r.assertion_kind FROM memory_revisions r
+      WHERE r.space=${space} AND json_type(r.provenance_json,'$.importSource')='object'
+      AND (EXISTS (SELECT 1 FROM memory_events e WHERE e.memory_space_id=r.space AND e.operation_id=r.operation_id
+        AND json_extract(e.receipt_json,'$.hubSequence') IS NOT NULL AND json_extract(e.receipt_json,'$.outcome')!='rejected')
+      OR EXISTS (SELECT 1 FROM memory_compact_receipts c WHERE c.space=r.space AND c.operation_id=r.operation_id
+        AND c.hub_sequence IS NOT NULL AND json_extract(c.receipt_json,'$.outcome')!='rejected'))`,
+    );
+    for (const row of rows) {
+      const provenance = yield* provenanceCodec.decode(row.provenance_json, strict);
+      const scope = yield* scopeCodec.decode(row.scope_json, strict);
+      const source = provenance.importSource!;
+      const base = {
+        memorySpaceId: space,
+        memoryId: yield* stored("lineage-memory-id", decodeMemoryId(row.memory_id)),
+      };
+      const assertionKind = yield* stored(
+        "lineage-assertion",
+        Schema.decodeUnknownEffect(M.MemoryAssertionKind)(row.assertion_kind),
+      );
+      const records: M.MemoryImportLineageRecord[] = [
+        ...[
+          {
+            environmentId: provenance.environmentId,
+            sourceId: source.sourceId,
+            sourceItemKey: source.sourceItemKey,
+          },
+          ...source.sourceAliases,
+        ].map((sourceKey) => ({ ...base, kind: "sourceKey" as const, sourceKey })),
+        ...[source.contentFingerprint, ...source.acceptedContentFingerprints].map(
+          (contentFingerprint) => ({
+            ...base,
+            kind: "content" as const,
+            content: { scope, assertionKind, contentFingerprint },
+          }),
+        ),
+      ];
+      for (const record of records) {
+        const key = M.memoryImportLineageRecordKey({
+          ...record,
+          memoryId: M.MemoryId.make("00000000-0000-4000-8000-000000000000"),
+        });
+        const found = yield* stored(
+          "import-lineage-required",
+          sql`SELECT 1 FROM memory_import_lineage
+          WHERE space=${space} AND memory_id=${base.memoryId} AND kind=${record.kind} AND key=${key}`,
+        );
+        if (!found.length) return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
+      }
+    }
+  });
   const readImportLineage = Effect.fn("MemoryStore.readImportLineage")(function* (
     space: M.MemorySpaceId,
     id: M.MemoryId,
@@ -8486,6 +8664,7 @@ const make = Effect.gen(function* () {
     id: string,
     now: number,
   ) {
+    yield* requireImportLineageCompleteTx(space);
     const blank = (ordinal: number): M.MemoryHubCheckpointPage => ({
       memorySpaceId: space,
       checkpointSequence: sequence,
@@ -8852,6 +9031,7 @@ const make = Effect.gen(function* () {
   const publishCheckpointAndFloorTx: MemoryStore["Service"]["publishCheckpointAndFloorTx"] =
     Effect.fn("MemoryStore.publishCheckpointAndFloorTx")(function* (input) {
       yield* Transaction;
+      yield* requireImportLineageCompleteTx(input.memorySpaceId);
       const old = yield* readHubRetentionTx(input.memorySpaceId);
       if (old.checkpointId === input.checkpointId && old.retentionFloor === input.nextFloor)
         return old;
@@ -8905,6 +9085,8 @@ const make = Effect.gen(function* () {
     "MemoryStore.compactEligibleHistoryTx",
   )(function* (input) {
     yield* Transaction;
+    yield* requireImportLineageCompleteTx(input.memorySpaceId);
+    yield* retireImportBatchesTx(input.memorySpaceId, input.now, input.limit);
     const retention = yield* readHubRetentionTx(input.memorySpaceId);
     if (retention.retentionFloor !== input.expectedFloor || !retention.checkpointId)
       return yield* new MemoryStoreConflict({ code: "revision_changed" });
@@ -9741,6 +9923,7 @@ const make = Effect.gen(function* () {
       "metadata-receipt-promotion",
       sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(settledReceipt)} WHERE memory_space_id=${input.memorySpaceId} AND operation_id=${entry.receipt.operationId}`,
     );
+    yield* settleImportOperationTx(input.memorySpaceId, settledReceipt);
     // A compact guard retains body-free approval even when no local operation body remains.
     const existing = yield* stored(
       "metadata-compact",
@@ -9925,6 +10108,7 @@ const make = Effect.gen(function* () {
     readImportItemTx,
     commitImportItemTx: (input) => withHubBudget(commitImportItemTx(input)),
     findImportMatchTx,
+    requireImportLineageCompleteTx,
     readImportLineage,
     unionImportLineageTx,
     readSuppressions,

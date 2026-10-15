@@ -530,6 +530,7 @@ const make = Effect.fnUntraced(function* (
       Effect.gen(function* () {
         yield* permit;
         yield* requireImportAddress(address);
+        yield* store.requireImportLineageCompleteTx(address.memorySpaceId);
         return yield* effect;
       }),
       { requireOuter: true },
