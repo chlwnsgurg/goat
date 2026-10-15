@@ -13,6 +13,7 @@ import { liveThreadShell } from "../../McpToolAccess.testkit.ts";
 import * as Service from "../../../memory/MemoryService.ts";
 import * as Store from "../../../memory/MemoryStore.ts";
 import * as Fixture from "./handlers.testkit.ts";
+import { threadProvenanceCases } from "../../../memory/threadProvenance.testkit.ts";
 
 const caller = (name = "r5-caller") => ({
   ...Fixture.scope(),
@@ -340,5 +341,29 @@ it.effect(
         state: "unknown",
         revisions: [a.revision],
       });
+    }).pipe(Effect.provide(Fixture.layer)),
+);
+
+it.effect.each(threadProvenanceCases(ref().threadId))(
+  "production origin $name: $state permits only tracked MCP writes",
+  (origin) =>
+    Effect.gen(function* () {
+      yield* setup;
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* Store.MemoryStore;
+      yield* sql`INSERT INTO orchestration_events VALUES(2,'thread',${ref().threadId},'thread.created',${origin.createdJson})`;
+      for (const event of origin.events)
+        yield* sql`INSERT INTO orchestration_events VALUES(2,'thread',${ref().threadId},${event.type},${event.payloadJson})`;
+      expect((yield* store.readThreadLineage(ref(), Fixture.space)).state).toBe(origin.state);
+      const before = yield* counts;
+      const saved = yield* Fixture.call("memory_upsert", Fixture.upsert(), caller());
+      if (origin.state === "tracked") {
+        expect(saved.result.isError, JSON.stringify(saved.body)).not.toBe(true);
+        expect((yield* store.loadAggregate(Fixture.space, Fixture.memoryId)).heads).toHaveLength(1);
+      } else {
+        expect(saved.result.isError).toBe(true);
+        expect(saved.body).toMatchObject({ code: "thread_lineage_incomplete" });
+        expect(yield* counts).toEqual(before);
+      }
     }).pipe(Effect.provide(Fixture.layer)),
 );

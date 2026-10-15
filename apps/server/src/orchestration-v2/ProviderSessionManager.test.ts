@@ -5293,14 +5293,12 @@ it.effect(
           modelSelection,
           runtimePolicy,
         });
-        assert.notEqual(
-          (yield* MemoryToolkitFixture.call(
-            "memory_upsert",
-            MemoryToolkitFixture.upsert(),
-            yield* readScope(),
-          )).result.isError,
-          true,
+        const savedMemory = yield* MemoryToolkitFixture.call(
+          "memory_upsert",
+          MemoryToolkitFixture.upsert(),
+          yield* readScope(),
         );
+        assert.notEqual(savedMemory.result.isError, true, JSON.stringify(savedMemory.body));
         assert.notEqual(
           (yield* MemoryToolkitFixture.call(
             "memory_list",
@@ -5531,14 +5529,12 @@ it.effect.each(["new", "existing"] as const)(
         });
         yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
         assert.equal((yield* readScope()).memoryPolicy?.grant, "read_write");
-        assert.notEqual(
-          (yield* MemoryToolkitFixture.call(
-            "memory_upsert",
-            MemoryToolkitFixture.upsert(),
-            yield* readScope(),
-          )).result.isError,
-          true,
+        const savedMemory = yield* MemoryToolkitFixture.call(
+          "memory_upsert",
+          MemoryToolkitFixture.upsert(),
+          yield* readScope(),
         );
+        assert.notEqual(savedMemory.result.isError, true, JSON.stringify(savedMemory.body));
         // A subsequent open without a fresh prepare cannot reuse the old admission.
         yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
         assert.equal((yield* readScope()).memoryPolicy?.grant, "none");

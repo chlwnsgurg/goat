@@ -24,6 +24,7 @@ import * as Service from "./MemoryService.ts";
 import * as Maintenance from "./MemoryFtsMaintenance.ts";
 import * as Worker from "./MemoryWorker.ts";
 import * as Snapshot from "./MemorySnapshot.ts";
+import { threadProvenanceCases } from "./threadProvenance.testkit.ts";
 import * as Sync from "./MemorySyncService.ts";
 import * as Projection from "../orchestration-v2/ProjectionStore.ts";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -31,7 +32,6 @@ const environmentId = M.EnvironmentId.make("fixture");
 const space = M.MemorySpaceId.make(id(1));
 const memoryId = M.MemoryId.make(id(2));
 const threadId = M.ThreadId.make("thread");
-const decodeCreatedThread = Schema.decodeUnknownEffect(M.OrchestrationV2AppThreadJson);
 const selection = { instanceId: M.ProviderInstanceId.make("fixture"), model: "fixture" };
 const now = "2026-10-14T00:00:00.000Z";
 const setup = Layer.effectDiscard(
@@ -1437,67 +1437,45 @@ it.effect("r3 previous summary plus thread lineage exceeding 100 never reaches g
   );
 });
 
-it.effect.each([false, true])("r4 production side chat origin (fork=%s)", (fork) => {
-  let generated = 0;
-  return Effect.gen(function* () {
-    yield* lineageSetup;
-    const sql = yield* SqlClient.SqlClient;
-    const store = yield* Store.MemoryStore;
-    const service = yield* Service.MemoryService;
-    const snapshot = yield* Snapshot.MemorySnapshot;
-    const worker = yield* Worker.MemoryWorker;
-    // These provenance fields match Orchestrator.createThread / the actual fork event.
-    const created = yield* decodeCreatedThread({
-      createdBy: "user",
-      creationSource: "web",
-      providerInstanceId: selection.instanceId,
-      modelSelection: selection,
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: null,
-      worktreePath: null,
-      createdAt: now,
-      updatedAt: now,
-      archivedAt: null,
-      settledOverride: null,
-      settledAt: null,
-      lastVisitedAt: null,
-      deletedAt: null,
-      id: threadId,
-      projectId: "project",
-      title: "synthetic side chat",
-      sideChatOf: "parent",
-      forkedFrom: fork ? { type: "provider_thread", providerThreadId: "parent-native" } : null,
-      lineage: {
-        parentThreadId: fork ? "parent" : null,
-        relationshipToParent: fork ? "fork" : null,
-        rootThreadId: fork ? "parent" : threadId,
-      },
-      activeProviderThreadId: fork ? "child-native" : null,
-    });
-    yield* sql`INSERT INTO orchestration_events VALUES (0,${id(14500)},${threadId},'thread.created',${JSON.stringify(created)},${now},2,'thread')`;
-    assert.strictEqual(
-      (yield* store.readThreadLineage({ environmentId, threadId }, space)).state,
-      fork ? "unknown" : "tracked",
+it.effect.each(threadProvenanceCases(threadId))(
+  "production origin $name: $state gates summary generation",
+  (origin) => {
+    let generated = 0;
+    return Effect.gen(function* () {
+      yield* lineageSetup;
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* Store.MemoryStore;
+      const service = yield* Service.MemoryService;
+      yield* sql`INSERT INTO orchestration_events VALUES (-10,${id(14500)},${threadId},'thread.created',${origin.createdJson},${now},2,'thread')`;
+      for (const [i, event] of origin.events.entries())
+        yield* sql`INSERT INTO orchestration_events VALUES (${i - 9},${id(14510 + i)},${threadId},${event.type},${event.payloadJson},${now},2,'thread')`;
+      assert.strictEqual(
+        (yield* store.readThreadLineage({ environmentId, threadId }, space)).state,
+        origin.state,
+      );
+      yield* service.upsert(lineageUpsert(14501), Effect.void);
+      assert.isDefined(
+        yield* (yield* Snapshot.MemorySnapshot).forThread(
+          threadId,
+          lineagePolicy,
+          Effect.succeed(lineagePolicy),
+        ),
+      );
+      yield* (yield* Worker.MemoryWorker).sweepDue();
+      assert.strictEqual(generated, origin.state === "tracked" ? 1 : 0);
+      assert.strictEqual(
+        (yield* store.loadAggregate(space, summaryMemoryId)).heads.length,
+        origin.state === "tracked" ? 1 : 0,
+      );
+    }).pipe(
+      Effect.provide(
+        lineageLive(() => {
+          generated++;
+        }),
+      ),
     );
-    yield* service.upsert(lineageUpsert(14501), Effect.void);
-    assert.isDefined(
-      yield* snapshot.forThread(threadId, lineagePolicy, Effect.succeed(lineagePolicy)),
-    );
-    yield* worker.sweepDue();
-    assert.strictEqual(generated, fork ? 0 : 1);
-    assert.strictEqual(
-      (yield* store.loadAggregate(space, summaryMemoryId)).heads.length,
-      fork ? 0 : 1,
-    );
-  }).pipe(
-    Effect.provide(
-      lineageLive(() => {
-        generated++;
-      }),
-    ),
-  );
-});
+  },
+);
 
 it.effect("r5 MCP body consumption reaches Worker summary and forget purges summary", () => {
   let generated = 0;
