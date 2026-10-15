@@ -33,6 +33,11 @@ import * as Schema from "effect/Schema";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 import { fileHeaderMimeType } from "./fileHeaderMimeType.ts";
+import {
+  atomicWorkspaceWrite,
+  isAtomicWriteOperationError,
+  isAtomicWritePathEscapeError,
+} from "./atomicWorkspaceWrite.ts";
 
 const PROJECT_READ_FILE_MAX_BYTES = 1024 * 1024;
 
@@ -365,32 +370,36 @@ export const make = Effect.gen(function* () {
       relativePath: input.relativePath,
     });
 
-    yield* fileSystem.makeDirectory(path.dirname(target.absolutePath), { recursive: true }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new WorkspaceFileSystemOperationError({
+    const platform = yield* HostProcess.Platform;
+    yield* Effect.tryPromise({
+      try: () =>
+        atomicWorkspaceWrite({
+          workspaceRoot: input.cwd,
+          absolutePath: target.absolutePath,
+          contents: new TextEncoder().encode(input.contents),
+          platform,
+        }),
+      catch: (cause) => {
+        if (isAtomicWritePathEscapeError(cause)) {
+          return new WorkspaceFilePathEscapeError({
             workspaceRoot: input.cwd,
             relativePath: input.relativePath,
-            resolvedPath: target.absolutePath,
-            operationPath: path.dirname(target.absolutePath),
-            operation: "make-directory",
-            cause,
-          }),
-      ),
-    );
-    yield* fileSystem.writeFileString(target.absolutePath, input.contents).pipe(
-      Effect.mapError(
-        (cause) =>
-          new WorkspaceFileSystemOperationError({
-            workspaceRoot: input.cwd,
-            relativePath: input.relativePath,
-            resolvedPath: target.absolutePath,
-            operationPath: target.absolutePath,
-            operation: "write-file",
-            cause,
-          }),
-      ),
-    );
+            resolvedWorkspaceRoot: cause.resolvedWorkspaceRoot,
+            resolvedPath: cause.resolvedPath,
+          });
+        }
+        return new WorkspaceFileSystemOperationError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          resolvedPath: target.absolutePath,
+          operationPath: isAtomicWriteOperationError(cause)
+            ? cause.operationPath
+            : target.absolutePath,
+          operation: isAtomicWriteOperationError(cause) ? cause.operation : "write-file",
+          cause,
+        });
+      },
+    });
     yield* workspaceEntries.refresh(input.cwd);
     return { relativePath: target.relativePath };
   });
