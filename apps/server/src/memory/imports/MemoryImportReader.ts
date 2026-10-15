@@ -4,7 +4,6 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- bounded no-follow snapshot adapter.
 import * as NodeFS from "node:fs";
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- filesystem adapter platform permissions.
 import * as NodeOS from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- acquisition validates absolute server configuration only.
 import * as NodePath from "node:path";

@@ -184,16 +184,16 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
   // admission and publication identical without cross-memory cache invalidation.
   // A shared payload is deliberately joined once per selected revision.
   const revisions = yield* sql<{
-        revision_id: string;
-        operation_id: string;
-        parents_json: string;
-        scope_json: string;
-        assertion_kind: string;
-        provenance_json: string;
-        payload_ref: string | null;
-        created_at: number;
-        body_json: string | null;
-      }>`SELECT r.*,p.body_json FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${space} AND r.memory_id=${id} ORDER BY r.revision_id`;
+    revision_id: string;
+    operation_id: string;
+    parents_json: string;
+    scope_json: string;
+    assertion_kind: string;
+    provenance_json: string;
+    payload_ref: string | null;
+    created_at: number;
+    body_json: string | null;
+  }>`SELECT r.*,p.body_json FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${space} AND r.memory_id=${id} ORDER BY r.revision_id`;
   for (const r of revisions)
     all.revisions.push({
       revision: yield* decodeRevision({
@@ -208,9 +208,10 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
         payloadRef: r.payload_ref ?? r.revision_id,
         createdAtUtc: timestamp(r.created_at),
       }),
-      payload: needed.has(M.MemoryRevisionId.make(r.revision_id)) && r.body_json
-        ? yield* decodePayload(r.body_json)
-        : null,
+      payload:
+        needed.has(M.MemoryRevisionId.make(r.revision_id)) && r.body_json
+          ? yield* decodePayload(r.body_json)
+          : null,
     });
   const conflicts = yield* sql<{
     conflict_id: string;

@@ -62,6 +62,8 @@ describe("GOAT migration ids", () => {
         [72, "MemoryHubSync"],
         [73, "MemorySearchCounters"],
         [74, "MemoryTaskGrantCeiling"],
+        [75, "MemoryImportLineage"],
+        [76, "MemoryCheckpointAccounting"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -115,6 +117,8 @@ describe("GOAT migration ids", () => {
           [72, "MemoryHubSync"],
           [73, "MemorySearchCounters"],
           [74, "MemoryTaskGrantCeiling"],
+          [75, "MemoryImportLineage"],
+          [76, "MemoryCheckpointAccounting"],
         ]);
         assert.deepStrictEqual(yield* history, migrationManifest);
         assert.deepStrictEqual(yield* runMigrations(), []);
@@ -220,5 +224,49 @@ it.effect("validates later Memory migrations against the registry without a fixe
     if (stale._tag !== "MigrationError") return yield* stale;
     assert.strictEqual(stale.kind, "BadState");
     assert.deepStrictEqual(yield* history, before);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+// WP5 names are stable registration keys; old ordinals must never migrate data.
+it.effect.each([
+  ["MemoryImportLineage", 74],
+  ["MemoryCheckpointAccounting", 75],
+] as const)("rejects the old %s ordinal %s without changing schema or ledger", (name, oldId) =>
+  Effect.gen(function* () {
+    yield* runMigrations();
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id=${oldId}`;
+    yield* sql`UPDATE effect_sql_migrations SET migration_id=${oldId} WHERE name=${name}`;
+    const before = yield* history;
+    const schema = yield* sql`SELECT name,sql FROM sqlite_master ORDER BY name`;
+    const failure = yield* Effect.flip(runMigrations());
+    assert.strictEqual(failure._tag, "MigrationError");
+    if (failure._tag === "MigrationError") {
+      assert.strictEqual(failure.kind, "BadState");
+      assert.include(failure.message, "Unreleased memory DB is incompatible");
+    }
+    assert.deepStrictEqual(yield* history, before);
+    assert.deepStrictEqual(yield* sql`SELECT name,sql FROM sqlite_master ORDER BY name`, schema);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("restarts the current WP5 registry without rewriting lineage or accounting", () =>
+  Effect.gen(function* () {
+    yield* runMigrations();
+    const sql = yield* SqlClient.SqlClient;
+    const before =
+      yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`;
+    const schema = yield* sql`SELECT name,sql FROM sqlite_master ORDER BY name`;
+    assert.deepStrictEqual(migrationManifest.slice(-2), [
+      [75, "MemoryImportLineage"],
+      [76, "MemoryCheckpointAccounting"],
+    ]);
+    assert.deepStrictEqual(yield* runMigrations(), []);
+    assert.deepStrictEqual(yield* history, migrationManifest);
+    assert.deepStrictEqual(
+      yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`,
+      before,
+    );
+    assert.deepStrictEqual(yield* sql`SELECT name,sql FROM sqlite_master ORDER BY name`, schema);
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );

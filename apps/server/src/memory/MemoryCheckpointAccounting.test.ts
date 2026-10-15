@@ -198,14 +198,17 @@ it.effect(
       const pairBytes = new TextEncoder().encode(
         encodeCheckpointRecord(inventory.revisions[1]!),
       ).length;
+      const bodyFreeBytes = new TextEncoder().encode(
+        encodeCheckpointRecord({ ...inventory.revisions[1]!, payload: null }),
+      ).length;
       yield* sql
         .withTransaction(
           Effect.gen(function* () {
             yield* sql`UPDATE memory_items SET heads_json=${JSON.stringify([id(40)])} WHERE space=${space}`;
             yield* refreshCheckpointAccounting();
             assert.deepStrictEqual(yield* readSize, {
-              bytes: before.bytes - pairBytes,
-              rows: before.rows - 1,
+              bytes: before.bytes - pairBytes + bodyFreeBytes,
+              rows: before.rows,
             });
             return yield* Effect.fail("rollback");
           }),
@@ -216,6 +219,7 @@ it.effect(
         memorySpaceId: space,
         originEnvironmentId: environmentId,
         operationKind: "upsert",
+        upsertRequestDigest: "f".repeat(64),
         receipt: {
           operationId: M.MemoryOperationId.make(id(140)),
           memoryId,
@@ -235,6 +239,11 @@ it.effect(
       yield* refreshCheckpointAccounting();
       const expanded = checkpointInventorySize(yield* selectCheckpointReceipt(space, id(140)));
       assert.isTrue(expanded.bytes > binary.length);
+      assert.strictEqual(binary[0], 3);
+      assert.strictEqual(
+        (yield* selectCheckpointReceipt(space, id(140))).compactReceipts[0]!.upsertRequestDigest,
+        "f".repeat(64),
+      );
       assert.deepStrictEqual(yield* readSize, {
         bytes: before.bytes + expanded.bytes,
         rows: before.rows + 1,
