@@ -94,11 +94,7 @@ export function MemoryReportRetrySettings({
           setMessage(null);
           void reset({
             environmentId,
-            input: {
-              environmentId,
-              memorySpaceId,
-              reportIds: selectedReports.map((report) => report.reportId),
-            },
+            input,
           }).then((result) => {
             if (
               !mounted.current ||

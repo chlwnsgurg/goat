@@ -147,7 +147,7 @@ it("builds a valid bounded retry command from current exhausted exact-owner rows
     memoryReportRetryIntent(
       owner,
       space,
-      reports.map((r) => ({ ...r, automaticAttempts: undefined })),
+      reports.map(({ automaticAttempts: _attempts, ...r }) => r),
       reports.map((r) => r.reportId),
     ),
   ).toBeNull();

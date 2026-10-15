@@ -1,5 +1,7 @@
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
+  AuthMemoryWriteScope,
+  AuthFilesystemReadScope,
   MemoryOperationId,
   type EnvironmentId,
   type MemorySpaceId,
@@ -8,6 +10,7 @@ import {
   type MemoryImportPreviewItem,
 } from "@goat/contracts";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { readEnvironmentScope, readPreparedConnection } from "../../state/session";
 import { memoryEnvironment } from "../../state/memory";
 import { memoryImportRecoveryStorage } from "../../lib/memoryImportRecoveryStorage";
 import { randomUUID } from "../../lib/utils";
@@ -71,7 +74,13 @@ export function MemoryImportSettings({
     // Recover synchronizes the saved handle with the server, never admitting a write.
     // eslint-disable-next-line react/set-state-in-effect
     if (canImport && workflow) void run(() => workflow.recover());
-    if (!canImport && workflow) {
+    if (
+      !canImport &&
+      workflow &&
+      readPreparedConnection(environmentId) !== null &&
+      (!readEnvironmentScope(environmentId, AuthMemoryWriteScope) ||
+        !readEnvironmentScope(environmentId, AuthFilesystemReadScope))
+    ) {
       generation.current++;
       setItems([]);
       setSelected([]);
@@ -92,7 +101,12 @@ export function MemoryImportSettings({
     return () => {
       mounted.current = false;
       generation.current++;
-      if (workflow && !registry.get(memoryEnvironment.importProvider.permissionAtom(environmentId)))
+      if (
+        workflow &&
+        readPreparedConnection(environmentId) !== null &&
+        (!readEnvironmentScope(environmentId, AuthMemoryWriteScope) ||
+          !readEnvironmentScope(environmentId, AuthFilesystemReadScope))
+      )
         void workflow.removeDestination().catch(() => undefined);
       else workflow?.invalidate({ environmentId, memorySpaceId, session: randomUUID() });
     };

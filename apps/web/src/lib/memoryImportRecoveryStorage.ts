@@ -1,7 +1,16 @@
 import {
   createMemoryImportRecoveryStore,
+  memoryImportRecoveryKey,
+  type MemoryImportDestination,
   type MemoryImportRecoveryStorage,
 } from "@goat/client-runtime/memory-import-recovery";
+
+/** A browser-wide lock prevents two tabs from replacing the same unresolved handle. */
+function withDestinationLock<T>(destination: MemoryImportDestination, run: () => Promise<T>) {
+  return typeof navigator !== "undefined" && navigator.locks
+    ? navigator.locks.request(memoryImportRecoveryKey(destination), run)
+    : run();
+}
 
 /** One store owns serialization for each browser storage adapter, including remounts. */
 const stores = new WeakMap<
@@ -13,7 +22,14 @@ export function memoryImportRecoveryStorage(
 ) {
   let store = stores.get(storage);
   if (!store) {
-    store = createMemoryImportRecoveryStore(storage, Date.now);
+    const base = createMemoryImportRecoveryStore(storage, () => Date.now());
+    store = {
+      load: (destination) => withDestinationLock(destination, () => base.load(destination)),
+      save: (destination, operationId) =>
+        withDestinationLock(destination, () => base.save(destination, operationId)),
+      clear: (destination, operationId) =>
+        withDestinationLock(destination, () => base.clear(destination, operationId)),
+    };
     stores.set(storage, store);
   }
   return store;
