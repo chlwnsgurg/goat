@@ -195,6 +195,83 @@ const work = (kind: Store.MemoryWork["kind"] = "summary"): Store.MemoryWork => (
     modelSelection: selection,
   },
 });
+// Build canonical lineage through the real Worker/Service/Store, with synthetic content only.
+const seedDerivedSummary = Effect.gen(function* () {
+  yield* TestClock.setTime(Date.parse(now));
+  yield* seed;
+  const worker = yield* Worker.MemoryWorker;
+  const service = yield* Service.MemoryService;
+  const store = yield* Store.MemoryStore;
+  yield* worker.sweepDue();
+  const target = M.MemoryId.make(Service.memoryStableUuid(`${environmentId}:${threadId}:summary`));
+  const current = yield* store.loadAggregate(space, target);
+  const first = current.revisions.find((p) => p.revision.revisionId === current.heads[0])!;
+  yield* service.upsert(
+    {
+      memorySpaceId: space,
+      memoryId,
+      operationId: M.MemoryOperationId.make(id(8100)),
+      expectedHeads: [],
+      scope: { kind: "user" },
+      assertionKind: "inference",
+      payload: { text: "synthetic source A", evidence: [], derivedFromMemoryRevisions: [] },
+      baseBoundary: null,
+    },
+    Effect.void,
+  );
+  const rA = (yield* store.loadAggregate(space, memoryId)).heads[0]!;
+  yield* service.upsert(
+    {
+      memorySpaceId: space,
+      memoryId: target,
+      operationId: M.MemoryOperationId.make(id(8101)),
+      expectedHeads: current.heads,
+      scope: first.revision.scope,
+      assertionKind: "inference",
+      payload: { ...first.payload!, text: "synthetic derived A", derivedFromMemoryRevisions: [rA] },
+      baseBoundary: null,
+    },
+    Effect.void,
+  );
+  return { target, rA, d0: (yield* store.loadAggregate(space, target)).heads[0]! };
+});
+const incrementalSummary = (target: M.MemoryId) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const store = yield* Store.MemoryStore;
+    const worker = yield* Worker.MemoryWorker;
+    const original = (yield* sql<{
+      payload_json: string;
+    }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
+    const message = yield* decodeMessage(original.payload_json);
+    // Force two generation calls in the same claim, covering the in-memory carry too.
+    for (let index = 3; index <= 103; index++)
+      yield* sql`INSERT INTO orchestration_events VALUES (${index},${id(8200 + index)},${threadId},'message.updated',${encodeMessage({ ...message, id: M.MessageId.make(`increment-${index}`), runId: null })},${now},2,'thread')`;
+    const queued: Store.MemoryWork = {
+      ...work(),
+      id: "lineage-increment",
+      memoryId: target,
+      status: "pending",
+      claimedBy: null,
+      claimedUntil: null,
+      metadata: {
+        ...(work().metadata as Extract<Store.MemoryWork["metadata"], { kind: "summary" }>),
+        memoryId: target,
+        operationId: M.MemoryOperationId.make(id(8102)),
+        revisionId: M.MemoryRevisionId.make(id(8103)),
+        fromSequence: 2,
+        sourceWatermark: {
+          fromEventId: M.EventId.make(id(8203)),
+          toEventId: M.EventId.make(id(8303)),
+          throughSequence: 103,
+        },
+      },
+    };
+    yield* store.enqueueWork(queued);
+    yield* store.claimWork(queued.id, "worker", Date.parse(now), Number.MAX_SAFE_INTEGER);
+    yield* worker.execute((yield* store.readWork(queued.id))!);
+    return yield* store.loadAggregate(space, target);
+  });
 // Summary A covers a run that is then rolled back, and run B adds 101 messages. The next
 // summary must drop A and regenerate from the start: two bounded chunks in one work item.
 const seedRolledBackRegeneration = Effect.gen(function* () {
@@ -314,6 +391,190 @@ describe("MemoryWorker", () => {
       assert.strictEqual(yield* store.readThreadHookWatermark(), 3);
       assert.isNotNull((yield* store.ftsState(environmentId)).measuredAt);
     }).pipe(Effect.provide(live(false, undefined, false, 0, true))),
+  );
+  it.effect("inherits summary lineage across incremental generation chunks", () => {
+    const inputs: M.GenerateMemorySummaryInput[] = [];
+    return Effect.gen(function* () {
+      const { target, rA, d0 } = yield* seedDerivedSummary;
+      const aggregate = yield* incrementalSummary(target);
+      assert.strictEqual(inputs.length, 3);
+      assert.deepStrictEqual(inputs[1]!.previousSummary!.derivedFromMemoryRevisions, [rA]);
+      assert.deepStrictEqual(inputs[2]!.previousSummary!.derivedFromMemoryRevisions, [rA]);
+      assert.notStrictEqual(aggregate.heads[0], d0);
+      assert.deepStrictEqual(
+        aggregate.revisions.find((p) => p.revision.revisionId === aggregate.heads[0])!.payload!
+          .derivedFromMemoryRevisions,
+        [rA],
+      );
+    }).pipe(Effect.provide(live(false, (input) => inputs.push(input))));
+  });
+  it.effect("forgets derived summaries after retention removes the previous payload", () =>
+    Effect.gen(function* () {
+      const { target, rA, d0 } = yield* seedDerivedSummary;
+      const aggregate = yield* incrementalSummary(target);
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const unrelated = M.MemoryId.make(id(8104));
+      yield* service.upsert(
+        {
+          memorySpaceId: space,
+          memoryId: unrelated,
+          operationId: M.MemoryOperationId.make(id(8105)),
+          expectedHeads: [],
+          scope: { kind: "thread", thread: { environmentId, threadId } },
+          assertionKind: "inference",
+          payload: {
+            text: "unrelated synthetic summary",
+            evidence: [],
+            derivedFromMemoryRevisions: [],
+          },
+          baseBoundary: null,
+        },
+        Effect.void,
+      );
+      // Model an acknowledged, published retention boundary; deletion itself uses production Store.
+      yield* sql`UPDATE memory_events SET receipt_json=json_set(receipt_json,'$.hubSequence',1) WHERE operation_id=${M.MemoryOperationId.make(id(8101))}`;
+      yield* sql`UPDATE memory_outbox SET status='completed' WHERE space=${space} AND payload_ref=${d0}`;
+      yield* sql`UPDATE memory_payloads SET purge_eligible_after=0 WHERE space=${space} AND payload_ref=${d0}`;
+      yield* sql`INSERT INTO memory_compaction_state(space,published) VALUES (${space},1) ON CONFLICT(space) DO UPDATE SET published=1`;
+      assert.strictEqual(yield* store.prunePayloads(Date.parse(now), 100), 1);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${d0}`).length,
+        0,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${aggregate.heads[0]!}`).length,
+        1,
+      );
+      yield* service.forget(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(id(8106)),
+          expectedHeads: [rA],
+        },
+        Effect.void,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${target}`).length,
+        0,
+      );
+      const page = yield* store.list({
+        memorySpaceId: space,
+        scope: { kind: "thread", thread: { environmentId, threadId } },
+        limit: 20,
+      });
+      assert.strictEqual(page.find((item) => item.memoryId === target)!.status, "blocked");
+      assert.strictEqual(page.find((item) => item.memoryId === unrelated)!.status, "active");
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${unrelated}`).length,
+        1,
+      );
+    }).pipe(Effect.provide(live())),
+  );
+  it.effect("rejects a dependency invalidated inside the summary commit transaction", () =>
+    Effect.gen(function* () {
+      const { target, d0 } = yield* seedDerivedSummary;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const current = yield* store.loadAggregate(space, target);
+      const previousSummary = current.revisions.find((p) => p.revision.revisionId === d0)!.payload!;
+      const template = work();
+      if (template.metadata.kind !== "summary") throw new Error("Expected summary work");
+      const queued = {
+        ...template,
+        id: "commit-fence",
+        memoryId: target,
+        metadata: { ...template.metadata, memoryId: target },
+      };
+      yield* store.enqueueWork(queued);
+      const input: M.GenerateMemorySummaryInput = {
+        cwd: "/tmp/synthetic-memory-generation",
+        sourceThread: template.metadata.sourceThread,
+        sourceWatermark: template.metadata.sourceWatermark,
+        messages: [
+          { messageId: M.MessageId.make("message"), text: "synthetic statement", completed: true },
+        ],
+        previousSummary,
+        modelSelection: selection,
+      };
+      const failure = yield* service
+        .commitSummary({
+          work: queued,
+          expectedHeads: [d0],
+          input,
+          generated: {
+            result: {
+              text: "synthetic newly generated summary",
+              assertionKind: "inference",
+              evidence: previousSummary.evidence,
+            },
+            execution: {
+              environmentId,
+              providerInstanceId: selection.instanceId,
+              requestedModelSelection: selection,
+              effectiveProvider: M.ProviderDriverKind.make("codex"),
+              effectiveModel: "fixture",
+            },
+          },
+          recheckSource:
+            sql`UPDATE memory_items SET status='forgotten' WHERE space=${space} AND memory_id=${memoryId}`.pipe(
+              Effect.orDie,
+              Effect.asVoid,
+            ),
+        })
+        .pipe(Effect.flip);
+      if (failure._tag !== "MemoryStoreConflict") throw failure;
+      assert.strictEqual(failure.code, "source_invalidated");
+      assert.deepStrictEqual((yield* store.loadAggregate(space, target)).heads, [d0]);
+      assert.isUndefined(yield* store.receipt(space, template.metadata.operationId));
+    }).pipe(Effect.provide(live())),
+  );
+  it.effect.each(["forgotten", "missing", "held"] as const)(
+    "does not generate from an invalid summary dependency: %s",
+    (invalid) => {
+      const inputs: M.GenerateMemorySummaryInput[] = [];
+      return Effect.gen(function* () {
+        const { target, rA, d0 } = yield* seedDerivedSummary;
+        const sql = yield* SqlClient.SqlClient;
+        // Preserve D's body to exercise pre-generation validation independently of purge.
+        if (invalid === "missing") yield* sql`DELETE FROM memory_revisions WHERE revision_id=${rA}`;
+        else if (invalid === "held")
+          yield* sql`UPDATE memory_items SET availability_json=json_set(availability_json,'$.exposure','held') WHERE memory_id=${memoryId}`;
+        else yield* sql`UPDATE memory_items SET status='forgotten' WHERE memory_id=${memoryId}`;
+        const aggregate = yield* incrementalSummary(target);
+        assert.strictEqual(inputs.length, 1);
+        assert.deepStrictEqual(aggregate.heads, [d0]);
+        assert.strictEqual(
+          (yield* (yield* Store.MemoryStore).readWork("lineage-increment"))!.status,
+          "cancelled",
+        );
+      }).pipe(Effect.provide(live(false, (input) => inputs.push(input))));
+    },
+  );
+  it.effect.each([false, true])(
+    "excludes WP4 frames from imported transcript inputs (local=%s)",
+    (local) => {
+      const inputs: M.GenerateMemorySummaryInput[] = [];
+      return Effect.gen(function* () {
+        yield* seed;
+        const sql = yield* SqlClient.SqlClient;
+        const row = (yield* sql<{
+          payload_json: string;
+        }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
+        const message = yield* decodeMessage(row.payload_json);
+        yield* sql`UPDATE orchestration_events SET payload_json=${encodeMessage({ ...message, creationSource: "provider", text: "keep before\n<external_goat_memory>synthetic forgotten memory</external_goat_memory>\nkeep after\n<external_goat_memory>unfinished synthetic memory" })} WHERE sequence=1`;
+        yield* (yield* Worker.MemoryWorker).sweepDue();
+        assert.strictEqual(inputs.length, 1);
+        assert.strictEqual(inputs[0]!.messages[0]!.text, "keep before\n\nkeep after");
+        assert.deepStrictEqual(
+          inputs[0]!.messages.map((m) => m.messageId),
+          [message.id],
+        );
+      }).pipe(Effect.provide(live(false, (input) => inputs.push(input), local)));
+    },
   );
   it.effect("catches up committed termination and emits one stable summary", () =>
     Effect.gen(function* () {

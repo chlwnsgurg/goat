@@ -163,13 +163,26 @@ const make = Effect.gen(function* () {
           const messages: M.GenerateMemorySummaryInput["messages"][number][] = [];
           let bytes = 0;
           let last = rows[0];
+          let hasMore = false;
           for (const row of rows) {
             const message = yield* query(decodeMessage(row.payload_json));
-            const input = { messageId: message.id, text: message.text, completed: true };
+            // Native history imports can contain the provider-only WP4 frame. It is
+            // reference data, not a new transcript fact (including an unfinished frame).
+            const text = message.text
+              .replace(/<external_goat_memory>[\s\S]*?(?:<\/external_goat_memory>|$)/g, "")
+              .trim();
+            if (!text) {
+              last = row;
+              continue;
+            }
+            const input = { messageId: message.id, text, completed: true };
             const size = new TextEncoder().encode(
               yield* query(encodeGenerationMessage(input)),
             ).length;
-            if (messages.length === 100 || bytes + size > 180000) break;
+            if (messages.length === 100 || bytes + size > 180000) {
+              hasMore = true;
+              break;
+            }
             messages.push(input);
             bytes += size;
             last = row;
@@ -180,7 +193,7 @@ const make = Effect.gen(function* () {
           return {
             messages,
             watermark:
-              messages.length < rows.length && last
+              (hasMore || rows.length === 101) && last
                 ? {
                     ...meta.sourceWatermark,
                     fromEventId: M.EventId.make(rows[0]!.event_id),
@@ -485,6 +498,13 @@ const make = Effect.gen(function* () {
         : (current?.revisions.find(
             (pair) => current.heads.length === 1 && current.heads[0] === pair.revision.revisionId,
           )?.payload ?? undefined);
+      const dependencySpace = M.MemorySpaceId.make(
+        work.space.startsWith("_local:") ? Service.memoryStableUuid(work.space) : work.space,
+      );
+      if (previousSummary)
+        yield* Service.validateSummaryDependencies(dependencySpace, previousSummary).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+        );
       if (previousSummary && scanMemoryValue(previousSummary).kind !== "allowed")
         return yield* new MemoryWorkerError({ code: "secret_detected" });
       let sourceWork = work;
@@ -495,6 +515,10 @@ const make = Effect.gen(function* () {
       }
       const recheckSource = Effect.gen(function* () {
         yield* readSource(work);
+        if (previousSummary)
+          yield* Service.validateSummaryDependencies(dependencySpace, previousSummary).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+          );
         if (previousSummary && !(yield* summaryEvidenceValid(work, previousSummary)))
           return yield* new MemoryWorkerError({ code: "source_invalidated" });
       });
@@ -532,7 +556,7 @@ const make = Effect.gen(function* () {
             previousSummary = {
               text: output.result.text,
               evidence: output.result.evidence,
-              derivedFromMemoryRevisions: [],
+              derivedFromMemoryRevisions: previousSummary?.derivedFromMemoryRevisions ?? [],
             };
             sourceWork = {
               ...work,
@@ -573,7 +597,8 @@ const make = Effect.gen(function* () {
               payload: {
                 text: generated.output.result.text,
                 evidence: generated.output.result.evidence,
-                derivedFromMemoryRevisions: [],
+                derivedFromMemoryRevisions:
+                  generated.input.previousSummary?.derivedFromMemoryRevisions ?? [],
               },
               provenance: {
                 environmentId,

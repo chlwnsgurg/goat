@@ -272,7 +272,29 @@ export const memoryStableUuid = (text: string) => {
   const h = hash(text);
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 };
+const decodeSummaryPayload = Schema.decodeEffect(M.MemoryPayload);
 const decode = <A, E>(effect: Effect.Effect<A, E>) => effect.pipe(Effect.mapError(invalid));
+/** A missing revision cannot support forget's reverse walk; never reuse its derived text. */
+export const validateSummaryDependencies = Effect.fn("MemoryService.validateSummaryDependencies")(
+  function* (space: M.MemorySpaceId, payload: M.MemoryPayload) {
+    const revisions = [...new Set(payload.derivedFromMemoryRevisions)];
+    if (!revisions.length) return;
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{ count: number }>`
+      SELECT count(*) AS count FROM memory_revisions r JOIN memory_items i ON i.space=r.space AND i.memory_id=r.memory_id
+      WHERE r.space=${space} AND r.revision_id IN (SELECT value FROM json_each(${encodeHeads(revisions)}))
+      AND NOT EXISTS (SELECT 1 FROM memory_inbox_pending p WHERE p.space=r.space AND p.operation_id=r.operation_id AND p.record_kind='operation')
+      AND i.status='active' AND json_extract(i.availability_json,'$.exposure')='visible'
+      AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=r.space AND f.memory_id=r.memory_id)
+    `.pipe(
+      Effect.mapError(
+        (cause) => new Store.MemoryStorageError({ stage: "summary-dependencies", cause }),
+      ),
+    );
+    if (rows[0]?.count !== revisions.length)
+      return yield* new Store.MemoryStoreConflict({ code: "source_invalidated" });
+  },
+);
 const make = Effect.fnUntraced(function* (
   sourceReadAuthority?: MemorySourceReadAuthority["readSource"],
 ) {
@@ -1142,6 +1164,23 @@ const make = Effect.fnUntraced(function* (
           return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
         if (encodeHeads(current.heads) !== encodeHeads(input.expectedHeads))
           return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+        // The final input also carries lineage across in-memory generation chunks. Rebuilds
+        // without the old summary must not inherit dependencies from the discarded head.
+        const payload = yield* decode(
+          decodeSummaryPayload(
+            {
+              text: generated.result.text,
+              evidence: generated.result.evidence,
+              derivedFromMemoryRevisions: [
+                ...new Set(input.input.previousSummary?.derivedFromMemoryRevisions ?? []),
+              ],
+            },
+            strict,
+          ),
+        );
+        yield* validateSummaryDependencies(M.MemorySpaceId.make(work.space), payload).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+        );
         const execution = generated.execution;
         const receipt = yield* apply(
           {
@@ -1152,11 +1191,7 @@ const make = Effect.fnUntraced(function* (
             operationId: meta.operationId,
             originEnvironmentId: environmentId,
             expectedHeads: input.expectedHeads,
-            payload: {
-              text: generated.result.text,
-              evidence: generated.result.evidence,
-              derivedFromMemoryRevisions: [],
-            },
+            payload,
             revision: {
               memorySpaceId: M.MemorySpaceId.make(work.space),
               memoryId: work.memoryId!,
