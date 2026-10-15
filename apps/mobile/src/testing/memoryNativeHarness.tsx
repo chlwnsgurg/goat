@@ -44,6 +44,7 @@ const bridge = vi.hoisted(() => ({
   active: new Set<(state: string) => void>(),
   confirmations: [] as Array<() => void>,
   secure: new Map<string, string>(),
+  beforeSecureWrite: null as (() => Promise<void>) | null,
   projects: [] as Array<{ id: string; title: string; environmentId: EnvironmentId }>,
 }));
 vi.mock("react-native", async () => {
@@ -128,9 +129,9 @@ vi.mock("react-native", async () => {
 vi.mock("../persistence/namespaced-secure-store", () => ({
   secureStore: {
     getItem: (key: string) => Promise.resolve(bridge.secure.get(key) ?? null),
-    setItem: (key: string, value: string) => {
+    setItem: async (key: string, value: string) => {
+      await bridge.beforeSecureWrite?.();
       bridge.secure.set(key, value);
-      return Promise.resolve();
     },
     removeItem: (key: string) => {
       bridge.secure.delete(key);
@@ -559,6 +560,9 @@ export function createNativeMemoryHarness() {
   const harness = {
     registry,
     secureValues: bridge.secure,
+    setSecureWrite: (before: (() => Promise<void>) | null) => {
+      bridge.beforeSecureWrite = before;
+    },
     projects: bridge.projects,
     configs,
     grants,
@@ -619,6 +623,7 @@ export function createNativeMemoryHarness() {
   };
   bridge.current = harness;
   bridge.secure.clear();
+  bridge.beforeSecureWrite = null;
   bridge.projects.length = 0;
   bridge.navigations.length = 0;
   bridge.confirmations.length = 0;

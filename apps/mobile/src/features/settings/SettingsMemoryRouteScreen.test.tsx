@@ -109,7 +109,9 @@ describe("native Memory with shared factory", () => {
     expect(view.container.textContent).toContain("Synthetic memory body");
     await view.type("Search memory", "absent");
     await view.click("Search");
-    expect(view.container.textContent).toContain("No matching memories on this page");
+    expect(view.container.textContent).toContain(
+      "Results are incomplete; memories may still be available",
+    );
     await view.click("Next page");
     const searches = h.calls.filter((call) => call.method === WS_METHODS.memorySearch);
     expect(searches).toHaveLength(2);
@@ -1334,5 +1336,161 @@ describe("native WP6 Settings commands", () => {
       reportIds: [report.reportId],
     });
     expect(view.container.textContent).toContain("0 reports ready to retry; 1 unchanged");
+  });
+  it("awaits secure storage and Stop before persistence prevents admission", async () => {
+    setupImport();
+    await show();
+    await select();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const writing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    h.setSecureWrite(() => {
+      entered();
+      return gate;
+    });
+    await view.click("Apply selected memories");
+    await writing;
+    expect(
+      importCalls().filter((call) => (call.input as { action: string }).action === "apply"),
+    ).toHaveLength(0);
+    await view.click("Stop import");
+    await act(async () => release());
+    expect(
+      importCalls().filter((call) => (call.input as { action: string }).action === "apply"),
+    ).toHaveLength(0);
+    expect(h.secureValues.size).toBe(0);
+  });
+  it("storage failure blocks apply and never fabricates success", async () => {
+    setupImport();
+    await show();
+    await select();
+    h.setSecureWrite(() => Promise.reject(new Error("synthetic storage failed")));
+    await view.click("Apply selected memories");
+    expect(
+      importCalls().filter((call) => (call.input as { action: string }).action === "apply"),
+    ).toHaveLength(0);
+    expect(view.container.textContent).toContain("Import could not finish");
+    expect(view.container.textContent).not.toContain("Import completed");
+  });
+  it("offline reconnect preserves the exact handle and ignores the previous session reply", async () => {
+    setupImport();
+    await show();
+    await select();
+    const late = h.deferred<unknown>();
+    h.responses.set(WS_METHODS.memoryImportProvider, () => late.response);
+    await view.click("Apply selected memories");
+    const handle = [...h.secureValues.values()][0]!;
+    await act(async () => h.registry.set(h.prepared(nativeEnv), Option.none()));
+    expect([...h.secureValues.values()]).toEqual([handle]);
+    h.responses.set(WS_METHODS.memoryImportProvider, () =>
+      Effect.fail(new Error("synthetic offline")),
+    );
+    await act(async () => h.registry.set(h.prepared(nativeEnv), Option.some({} as never)));
+    expect(importCalls().at(-1)!.input).toMatchObject({
+      action: "status",
+      operationId: JSON.parse(handle).handle.operationId,
+    });
+    expect([...h.secureValues.values()]).toEqual([handle]);
+    await act(async () => {
+      await late.succeed({
+        action: "apply",
+        receipt: {
+          operationId: JSON.parse(handle).handle.operationId,
+          sourceId,
+          sessionId: "synthetic-session",
+          state: "completed",
+          sessionNewItems: 1,
+          sessionBodyBytes: 10,
+          items: [],
+          remaining: 0,
+        },
+        syncStatus: nativeSyncStatus,
+      });
+    });
+    expect(view.container.textContent).not.toContain("Import completed");
+    expect(h.secureValues.size).toBe(1);
+  });
+  it("revocation removes the old handle and never restores a late admitted receipt", async () => {
+    setupImport();
+    await show();
+    await select();
+    const late = h.deferred<unknown>();
+    h.responses.set(WS_METHODS.memoryImportProvider, () => late.response);
+    await view.click("Apply selected memories");
+    const operationId = JSON.parse([...h.secureValues.values()][0]!).handle.operationId;
+    await act(async () => h.grant(["memory:read"]));
+    expect(h.secureValues.size).toBe(0);
+    await act(async () => {
+      await late.succeed({
+        action: "apply",
+        receipt: {
+          operationId,
+          sourceId,
+          sessionId: "synthetic-session",
+          state: "completed",
+          sessionNewItems: 1,
+          sessionBodyBytes: 10,
+          items: [],
+          remaining: 0,
+        },
+        syncStatus: nativeSyncStatus,
+      });
+    });
+    expect(view.container.textContent).not.toContain("Import completed");
+  });
+  it.each(["malformed", "expired"])(
+    "clears a %s handle on a fresh mount without status or automatic apply",
+    async (kind) => {
+      setupImport();
+      await show();
+      await select();
+      h.responses.set(WS_METHODS.memoryImportProvider, () =>
+        Effect.fail(new Error("synthetic lost")),
+      );
+      await view.click("Apply selected memories");
+      await view.unmount();
+      const key = [...h.secureValues.keys()][0]!;
+      const value = JSON.parse(h.secureValues.get(key)!);
+      if (kind === "expired") {
+        value.handle.savedAt = 0;
+        value.handle.expiresAt = 30 * 24 * 60 * 60 * 1000;
+      }
+      h.secureValues.set(key, kind === "malformed" ? "invalid" : JSON.stringify(value));
+      const before = importCalls().length;
+      await show();
+      expect(importCalls()).toHaveLength(before);
+      expect(h.secureValues.size).toBe(0);
+    },
+  );
+  it("report reset denial preserves selection and exposes no invented reset count", async () => {
+    setupImport();
+    const report = {
+      reportId: "a".repeat(64),
+      operationId: "00000000-0000-4000-8000-000000000008",
+      outcome: "failed",
+      state: "failed",
+      failureCode: "generation_failed",
+      resolvingEnvironmentId: nativeEnv,
+      resolutionId: null,
+      reportThread: null,
+      sequence: null,
+      automaticAttempts: 10,
+    };
+    h.responses.set(WS_METHODS.memoryHistory, () => ({ ...revertHistory(), reports: [report] }));
+    h.responses.set(WS_METHODS.memoryResetReportAttempts, () =>
+      Effect.fail({ code: "permission_denied" }),
+    );
+    await show();
+    await view.click("Open memory: Synthetic memory body");
+    await view.click("Select exhausted report 1");
+    await view.click("Retry selected reports");
+    expect(view.container.textContent).toContain("Report retry was denied");
+    expect(view.container.textContent).not.toContain("reports ready to retry");
+    expect(view.container.querySelector('[role="switch"][aria-checked="true"]')).not.toBeNull();
   });
 });

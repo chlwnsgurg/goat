@@ -488,10 +488,13 @@ function MemoryBrowser({
   );
   const retireImport = useRef<() => Promise<void>>(async () => {});
   const bindingToken = JSON.stringify([projectRef, binding?.version, binding?.projectKey]);
+  const seenProjects = useRef(new Set<string>());
+  for (const project of projects) seenProjects.current.add(project.id);
   const projectExists =
     !projectRef ||
-    !!params.project ||
-    projects.some((project) => project.id === projectRef.projectId);
+    projects.some((project) => project.id === projectRef.projectId) ||
+    (!seenProjects.current.has(projectRef.projectId) &&
+      params.project?.projectId === projectRef.projectId);
 
   const [quarantine, setQuarantine] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -630,7 +633,11 @@ function MemoryBrowser({
                     setBinding(null);
                     setScopeKind(null);
                     setProjectRef({ environmentId: params.environmentId, projectId: project.id });
-                  })();
+                  })().catch(() =>
+                    setNotice(
+                      "Could not clear the previous import. Reopen Settings before changing projects.",
+                    ),
+                  );
                 }}
               />
             ))}
@@ -643,7 +650,11 @@ function MemoryBrowser({
                     setProjectRef(undefined);
                     setBinding(null);
                     setScopeKind(null);
-                  })();
+                  })().catch(() =>
+                    setNotice(
+                      "Could not clear the previous import. Reopen Settings before changing projects.",
+                    ),
+                  );
                 }}
               />
             ) : null}
@@ -658,14 +669,16 @@ function MemoryBrowser({
               beforeChange={() => retireImport.current()}
             />
           ) : null}
-          <MemoryImportSettings
-            params={effectiveParams}
-            memorySpaceId={memorySpaceId}
-            scope={scope}
-            bindingToken={bindingToken}
-            enabled={memoryEnabled && projectExists}
-            retireRef={retireImport}
-          />
+          {!projectRef || binding ? (
+            <MemoryImportSettings
+              params={effectiveParams}
+              memorySpaceId={memorySpaceId}
+              scope={scope}
+              bindingToken={bindingToken}
+              enabled={memoryEnabled && projectExists}
+              retireRef={retireImport}
+            />
+          ) : null}
           <SettingsSection title="Memories">
             {!memoryEnabled ? (
               <Copy>Saved memories stay. Turn on memory to save new memories.</Copy>
@@ -1435,8 +1448,8 @@ function MemoryStatusRows({ status }: { status: MemorySyncStatus }) {
         processing.admissionLabel,
       ]
         .filter(Boolean)
-        .map((label, index) => (
-          <Copy key={index}>{label}</Copy>
+        .map((label) => (
+          <Copy key={label}>{label}</Copy>
         ))}
     </SettingsSection>
   );

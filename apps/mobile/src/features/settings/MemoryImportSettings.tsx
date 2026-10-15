@@ -72,12 +72,12 @@ export function MemoryImportSettings({
   const generation = useRef(0);
   const previous = useRef({ connection, allowed, enabled, bindingToken, scope });
   const transition = useRef(Promise.resolve());
-  const invalidateSelection = () => {
+  const invalidateSelection = useCallback(() => {
     setPreview(null);
     setSources(null);
     setSelected(new Set());
     setDestinationConfirmed(false);
-  };
+  }, []);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -86,13 +86,16 @@ export function MemoryImportSettings({
       workflow.invalidate();
       // A lost connection preserves recovery. Explicit grant revocation removes this destination.
       if (
-        !readEnvironmentScope(params.environmentId, "memory:write") ||
-        !readEnvironmentScope(params.environmentId, "filesystem:read")
+        Option.isSome(
+          registry.get(environmentSession.preparedConnectionValueAtom(params.environmentId)),
+        ) &&
+        (!readEnvironmentScope(params.environmentId, "memory:write") ||
+          !readEnvironmentScope(params.environmentId, "filesystem:read"))
       ) {
         void workflow.removeDestination().catch(() => {});
       }
     };
-  }, [workflow, params.environmentId]);
+  }, [workflow, params.environmentId, registry]);
   const run = useCallback(
     async (action: () => Promise<unknown>) => {
       if (pending.current) return;
@@ -135,7 +138,7 @@ export function MemoryImportSettings({
     return () => {
       retireRef.current = async () => {};
     };
-  }, [workflow, retireRef]);
+  }, [workflow, retireRef, invalidateSelection]);
   const recover = useCallback(() => {
     if (!registry.get(memory.importProvider.permissionAtom(params.environmentId)) || !enabled)
       return;
@@ -159,6 +162,7 @@ export function MemoryImportSettings({
     if (remove || old.connection !== connection || old.scope !== scope) {
       generation.current++;
       pending.current = false;
+      // The workflow is external mutable state; retire the displayed preview with its fence.
       setBusy(false);
       invalidateSelection();
       workflow.invalidate();
@@ -182,10 +186,19 @@ export function MemoryImportSettings({
           if (mounted.current)
             setError("Could not clear the previous import. Reopen Settings before importing.");
         });
-    } else if (allowed) recover();
-    // Scope and binding changes retire the previous preview before any new admission.
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies
-  }, [allowed, enabled, connection, bindingToken, scope]);
+    } else if (allowed) void Promise.resolve().then(recover);
+  }, [
+    allowed,
+    enabled,
+    connection,
+    bindingToken,
+    scope,
+    workflow,
+    params.environmentId,
+    memorySpaceId,
+    recover,
+    invalidateSelection,
+  ]);
   useFocusEffect(
     useCallback(() => {
       recover();
