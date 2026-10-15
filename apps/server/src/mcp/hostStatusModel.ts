@@ -42,7 +42,7 @@ export function countHostThreads(threads: ReadonlyArray<HostThreadCountSource>):
 
 /** A remote GOAT that answered, but does not implement this tool. */
 export function isUnsupportedHostStatusMessage(message: string): boolean {
-  return /tool ['"]goat_host_status['"] not found/i.test(message);
+  return /tool ['"]goat_host_status['"] not found|does not have goat_host_status/i.test(message);
 }
 
 export function clipHostStatusMessage(message: string): string {
