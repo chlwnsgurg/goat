@@ -1070,7 +1070,7 @@ export class MemoryStore extends Context.Service<
       memorySpaceId: M.MemorySpaceId;
       environmentId: M.EnvironmentId;
       expectedCredentialVersion: number | null;
-      next: { credentialDigest: string; credentialVersion: number } | "revoked";
+      next: { credentialDigest: string } | "revoked";
       now: number;
     }) => InTx<HubMember, MemoryStorageError | MemoryStoreConflict | MemoryCapacityError>;
     readonly readActivatedHubAdminTx: () => InTx<AdminRecord | undefined, MemoryStorageError>;
@@ -6928,30 +6928,88 @@ const make = Effect.gen(function* () {
       (input.next === "revoked" && !old)
     )
       return yield* new MemoryStoreConflict({ code: "revision_changed" });
-    if (
-      input.next !== "revoked" &&
-      (!/^[a-f0-9]{64}$/.test(input.next.credentialDigest) ||
-        input.next.credentialVersion !== (old?.credentialVersion ?? 0) + 1)
-    )
+    if (input.next !== "revoked" && !/^[a-f0-9]{64}$/.test(input.next.credentialDigest))
       return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    // Allocate before reclaiming: this one durable space counter survives deleted
+    // identities, seeds from legacy members, and rolls back with activation.
+    const versions = yield* stored(
+      "hub-member-version",
+      sql<{ version: number }>`SELECT max(
+        coalesce((SELECT value FROM memory_quota_counters WHERE space=${input.memorySpaceId}
+          AND dimension='hub_member_version' AND scope_key=''),0),
+        coalesce((SELECT max(credential_version) FROM memory_hub_members WHERE space=${input.memorySpaceId}),0)
+      ) AS version`,
+    );
+    const version = versions[0]!.version + 1;
+    if (!Number.isSafeInteger(version))
+      return yield* new MemoryStoreConflict({ code: "revision_changed" });
+    yield* stored(
+      "hub-member-version-write",
+      sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
+        VALUES (${input.memorySpaceId},'hub_member_version','',${version})
+        ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=excluded.value`,
+    );
     const count = yield* stored(
       "hub-member-count",
       sql<{
         count: number;
       }>`SELECT count(*) AS count FROM memory_hub_members WHERE space=${input.memorySpaceId}`,
     );
-    if (!old && count[0]!.count >= M.MEMORY_HUB_MAX_MEMBERS)
-      return yield* new MemoryCapacityError({
-        dimension: "members",
-        limit: M.MEMORY_HUB_MAX_MEMBERS,
-      });
+    if (!old && count[0]!.count >= M.MEMORY_HUB_MAX_MEMBERS) {
+      // Older ready revokes already committed both SQL authority and settings.
+      // They have no install step; finish them here as well as on the normal path.
+      yield* stored(
+        "hub-member-settle-revokes",
+        sql`UPDATE memory_outbox SET status='completed',terminal_at=coalesce(terminal_at,${input.now}),
+          admin_json=json_set(admin_json,'$.stage','acknowledged')
+          WHERE kind='admin' AND status='pending' AND json_extract(admin_json,'$.stage')='ready'
+            AND json_extract(admin_json,'$.action.action')='revokeMember'
+            AND json_extract(admin_json,'$.result.view.settings.memorySpaceId')=${input.memorySpaceId}`,
+      );
+      // Revoked authority cannot authenticate. Keep any row that still anchors live
+      // work; terminal receipts/token guards remain independently fenced and bounded.
+      yield* stored(
+        "hub-member-reclaim",
+        sql`DELETE FROM memory_hub_members AS m WHERE m.space=${input.memorySpaceId} AND m.status='revoked'
+          AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.kind='admin' AND o.status!='completed'
+            AND (json_extract(o.admin_json,'$.action.environmentId')=m.environment
+              OR (json_extract(o.admin_json,'$.action.action')='configure'
+                AND json_extract(o.admin_json,'$.stage') IN ('prepared','activated'))))
+          AND NOT EXISTS (SELECT 1 FROM memory_hub_leases l WHERE l.space=m.space
+            AND json_extract(l.lease_json,'$.holderEnvironmentId')=m.environment
+            AND l.lease_json IS NOT NULL)
+          AND NOT EXISTS (SELECT 1 FROM memory_hub_retention r,json_each(r.handles_json) h
+            WHERE r.space=m.space AND json_extract(h.value,'$.memberEnvironmentId')=m.environment
+              AND json_extract(h.value,'$.expiresAt')>${input.now})
+          AND NOT EXISTS (SELECT 1 FROM memory_import_keys k WHERE k.space=m.space
+            AND k.key_kind='hub_checkpoint_token'
+            AND json_extract(k.record_json,'$.handle.memberEnvironmentId')=m.environment
+            AND json_extract(k.record_json,'$.retired')=0
+            AND json_extract(k.record_json,'$.handle.expiresAt')>${input.now})
+          AND NOT EXISTS (SELECT 1 FROM memory_hub_source_reads r WHERE r.space=m.space
+            AND (r.requester=m.environment OR r.owner=m.environment)
+            AND r.state='pending' AND r.deadline>${input.now})`,
+      );
+      const remaining = yield* stored(
+        "hub-member-count-after-reclaim",
+        sql<{
+          count: number;
+        }>`SELECT count(*) AS count FROM memory_hub_members WHERE space=${input.memorySpaceId}`,
+      );
+      if (remaining[0]!.count >= M.MEMORY_HUB_MAX_MEMBERS)
+        return yield* new MemoryCapacityError({
+          dimension: "members",
+          limit: M.MEMORY_HUB_MAX_MEMBERS,
+          current: remaining[0]!.count,
+          reclaimable: 0,
+        });
+    }
     const next: HubMember = {
       memorySpaceId: input.memorySpaceId,
       environmentId: input.environmentId,
       credentialDigest:
         input.next === "revoked" ? old!.credentialDigest : input.next.credentialDigest,
-      credentialVersion:
-        input.next === "revoked" ? old!.credentialVersion + 1 : input.next.credentialVersion,
+      credentialVersion: version,
       status: input.next === "revoked" ? "revoked" : "active",
       joinedAt: old?.joinedAt ?? input.now,
     };

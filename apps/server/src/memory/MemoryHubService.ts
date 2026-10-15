@@ -735,7 +735,7 @@ export const makeAdministrator = Effect.gen(function* () {
                     memorySpaceId,
                     environmentId,
                     expectedCredentialVersion: null,
-                    next: { credentialDigest, credentialVersion: 1 },
+                    next: { credentialDigest },
                     now: yield* Clock.currentTimeMillis,
                   });
                 }
@@ -774,7 +774,6 @@ export const makeAdministrator = Effect.gen(function* () {
                       ? "revoked"
                       : {
                           credentialDigest,
-                          credentialVersion: (member?.credentialVersion ?? 0) + 1,
                         },
                   now: yield* Clock.currentTimeMillis,
                 });
@@ -866,7 +865,18 @@ export const makeAdministrator = Effect.gen(function* () {
             credential: Buffer.from(saved.value).toString("base64url"),
           };
         }
-        return { view: yield* readSettingsView(store, record.result.view), credential };
+        // Revoke has no remote installation acknowledgement. Its committed result is
+        // terminal, so it must not pin a removed member indefinitely.
+        if (request.action === "revokeMember" && record.stage === "ready") {
+          record = yield* tx(
+            permit,
+            store.writeHubAdminTx({
+              record: { ...record, stage: "acknowledged" },
+              expectedStage: "ready",
+            }),
+          );
+        }
+        return { view: yield* readSettingsView(store, record.result!.view), credential };
       }),
     );
   });

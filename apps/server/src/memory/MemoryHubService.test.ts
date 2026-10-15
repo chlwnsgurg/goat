@@ -26,6 +26,7 @@ import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Store from "./MemoryStore.ts";
+import { memoryError } from "../mcp/toolkits/memory/handlers.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as Service from "./MemoryService.ts";
 import * as Hub from "./MemoryHubService.ts";
@@ -648,7 +649,7 @@ describe("MemoryHubAdministrator", () => {
         Effect.void,
       );
       assert.strictEqual(target(rotated.view).status, "pending_ack");
-      assert.strictEqual(target(rotated.view).credentialVersion, 2);
+      assert.strictEqual(target(rotated.view).credentialVersion, 3);
       const revoked = yield* admin.update(
         {
           action: "revokeMember",
@@ -665,7 +666,7 @@ describe("MemoryHubAdministrator", () => {
         Effect.void,
       );
       assert.strictEqual(target(readded.view).status, "pending_ack");
-      assert.strictEqual(target(readded.view).credentialVersion, 4);
+      assert.strictEqual(target(readded.view).credentialVersion, 5);
       assert.deepStrictEqual(
         (yield* Hub.readSettingsView(store, { settings: { mode: "disabled" }, version: 4 }))
           .members,
@@ -673,25 +674,245 @@ describe("MemoryHubAdministrator", () => {
       );
     }).pipe(Effect.provide(adminDependencies)),
   );
-  it.effect(
-    "rejects provisioning above the existing retained-member capacity, including revoked slots",
-    () =>
+  it.effect("reclaims removed devices at capacity without reviving their authority", () =>
+    Effect.gen(function* () {
+      const { admin, backend } = yield* adminFixture;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      let sequence = 10000;
+      const update = Effect.fnUntraced(function* (
+        action:
+          | { action: "provisionMember" | "revokeMember"; environmentId: M.EnvironmentId }
+          | { action: "acknowledgeCredential"; credentialRequestId: M.MemoryOperationId },
+      ) {
+        return yield* admin.update(
+          {
+            ...action,
+            requestId: M.MemoryOperationId.make(id(sequence++)),
+            expectedVersion: (yield* backend.read).version,
+          },
+          Effect.void,
+        );
+      });
+      const first = yield* update({
+        action: "provisionMember",
+        environmentId: provision.environmentId,
+      });
+      const oldCredential = first.credential!;
+      yield* update({
+        action: "acknowledgeCredential",
+        credentialRequestId: oldCredential.requestId,
+      });
+      const oldPrincipal = {
+        ...principal(provision.environmentId),
+        credentialVersion: oldCredential.credentialVersion,
+      };
+      const authority = {
+        principal: oldPrincipal,
+        now: Clock.currentTimeMillis,
+        reauthorize: Effect.void,
+      };
+      const token = yield* store.transact(
+        store.prepareHubCheckpointTx({
+          authority,
+          checkpointId: "reclaim-snapshot",
+          snapshotToken: "reclaim-token",
+          hubEnvironmentId: hubEnv,
+        }),
+      );
+      const hub = yield* Hub.make.pipe(
+        Effect.provide(Layer.merge(Hub.activityLayer, configuration)),
+      );
+      const { claim } = yield* conflict.pipe(Effect.provideService(Hub.MemoryHubService, hub));
+      const ownedClaim = { ...claim, holderEnvironmentId: provision.environmentId };
+      const lease = yield* hub.claim(ownedClaim, oldPrincipal);
+      const devices = [otherEnv, provision.environmentId];
+      for (let n = 0; n < M.MEMORY_HUB_MAX_MEMBERS - 3; n++) {
+        const environmentId = M.EnvironmentId.make(`device-${n}`);
+        const added = yield* update({ action: "provisionMember", environmentId });
+        yield* update({
+          action: "acknowledgeCredential",
+          credentialRequestId: added.credential!.requestId,
+        });
+        devices.push(environmentId);
+      }
+      assert.strictEqual((yield* store.readHubMembers(space)).length, 128);
+      for (const environmentId of devices) yield* update({ action: "revokeMember", environmentId });
+      assert.deepStrictEqual(
+        (yield* store.readHubMembers(space)).map((m) => m.environmentId),
+        [hubEnv],
+      );
+      const added = yield* update({
+        action: "provisionMember",
+        environmentId: M.EnvironmentId.make("after-removals"),
+      });
+      assert.isNotNull(added.credential);
+      assert.isUndefined(yield* store.readHubMember(space, provision.environmentId));
+      assert.strictEqual(
+        (yield* sql<{
+          count: number;
+        }>`SELECT count(*) AS count FROM memory_hub_members WHERE space=${space}`)[0]!.count,
+        2,
+      );
+      assert.isUndefined(
+        yield* store.findHubMemberByCredential(
+          NodeCrypto.createHash("sha256").update(oldCredential.credential).digest("hex"),
+        ),
+      );
+      assert.strictEqual(
+        (yield* store.transact(store.requireHubMemberTx(oldPrincipal)).pipe(Effect.flip))._tag,
+        "MemoryHubUnauthorizedError",
+      );
+      const readded = yield* update({
+        action: "provisionMember",
+        environmentId: provision.environmentId,
+      });
+      const currentPrincipal = {
+        ...oldPrincipal,
+        credentialVersion: readded.credential!.credentialVersion,
+      };
+      assert.isAbove(currentPrincipal.credentialVersion, oldCredential.credentialVersion);
+      assert.strictEqual(
+        (yield* store.transact(store.requireHubMemberTx(oldPrincipal)).pipe(Effect.flip))._tag,
+        "MemoryHubUnauthorizedError",
+      );
+      const renew = {
+        protocolVersion: 1 as const,
+        memorySpaceId: space,
+        memoryId,
+        holderEnvironmentId: provision.environmentId,
+        conflictId: claim.conflictId,
+        attemptId: claim.attemptId,
+        fencingToken: lease.fencingToken,
+      };
+      assert.strictEqual(
+        (yield* hub.renew(renew, oldPrincipal).pipe(Effect.flip))._tag,
+        "MemoryHubUnauthorizedError",
+      );
+      assert.strictEqual(
+        (yield* hub.renew(renew, currentPrincipal).pipe(Effect.flip))._tag,
+        "MemoryHubError",
+      );
+      assert.strictEqual(
+        (yield* store
+          .transact(
+            store.readHubCheckpointPageTx({
+              authority: { ...authority, principal: currentPrincipal },
+              snapshotToken: token.snapshotToken,
+              cursor: null,
+            }),
+          )
+          .pipe(Effect.flip))._tag,
+        "MemoryHubError",
+      );
+      const original = yield* store.transact(store.readHubAdminTx(oldCredential.requestId));
+      assert.isDefined(original);
+      assert.strictEqual(
+        (yield* store
+          .transact(
+            store.activateHubMemberTx({
+              requestId: oldCredential.requestId,
+              requestDigest: original!.requestDigest,
+              memorySpaceId: space,
+              environmentId: provision.environmentId,
+              expectedCredentialVersion: null,
+              next: {
+                credentialDigest: NodeCrypto.createHash("sha256")
+                  .update(oldCredential.credential)
+                  .digest("hex"),
+              },
+              now: 0,
+            }),
+          )
+          .pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+      // An acknowledged receipt can replay its safe result, never its old key or activation.
+      const replay = yield* admin.update(
+        { ...provision, requestId: oldCredential.requestId },
+        Effect.void,
+      );
+      assert.isNull(replay.credential);
+      assert.strictEqual(
+        (yield* store.readHubMember(space, provision.environmentId))!.credentialVersion,
+        currentPrincipal.credentialVersion,
+      );
+    }).pipe(Effect.provide(adminDependencies)),
+  );
+
+  it.effect.each(["active", "admin", "lease", "token"] as const)(
+    "keeps unreclaimable %s rows and preserves typed capacity through the RPC codec",
+    (blocker) =>
       Effect.gen(function* () {
         const { admin } = yield* adminFixture;
         const sql = yield* SqlClient.SqlClient;
-        for (let n = 2; n < M.MEMORY_HUB_MAX_MEMBERS; n++)
-          yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${`retained-${n}`},${n.toString(16).padStart(64, "0")},1,'revoked',0)`;
+        const store = yield* Store.MemoryStore;
+        for (let n = 2; n < M.MEMORY_HUB_MAX_MEMBERS; n++) {
+          const environment = `retained-${n}`;
+          yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${environment},${n.toString(16).padStart(64, "0")},500,${blocker === "active" ? "active" : "revoked"},0)`;
+          if (blocker === "admin") {
+            const requestId = M.MemoryOperationId.make(id(20000 + n));
+            yield* store.transact(
+              store.writeHubAdminTx({
+                expectedStage: null,
+                record: {
+                  requestId,
+                  requestDigest: "c".repeat(64),
+                  expectedVersion: 0,
+                  stage: "prepared",
+                  memberVersion: null,
+                  action: {
+                    action: "provisionMember",
+                    environmentId: M.EnvironmentId.make(environment),
+                    requestId,
+                    expectedVersion: 0,
+                  },
+                  secretName: "synthetic-key",
+                  result: null,
+                },
+              }),
+            );
+          } else if (blocker === "lease") {
+            yield* sql`INSERT INTO memory_hub_leases(space,memory_id,highest_token,lease_json) VALUES (${space},${id(30000 + n)},1,${JSON.stringify({ holderEnvironmentId: environment })})`;
+          } else if (blocker === "token") {
+            yield* sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${space},'hub_checkpoint_token',${`token-${n}`},${space},${JSON.stringify({ retired: false, handle: { memberEnvironmentId: environment, expiresAt: 1000000 } })})`;
+          }
+        }
         const error = yield* admin.update(provision, Effect.void).pipe(Effect.flip);
         assert.strictEqual(error._tag, "MemoryCapacityError");
-        if (error._tag === "MemoryCapacityError") {
-          assert.strictEqual(error.dimension, "members");
-          assert.strictEqual(error.limit, M.MEMORY_HUB_MAX_MEMBERS);
-        }
+        if (error._tag !== "MemoryCapacityError") return;
+        assert.deepStrictEqual(
+          {
+            dimension: error.dimension,
+            current: error.current,
+            limit: error.limit,
+            reclaimable: error.reclaimable,
+          },
+          {
+            dimension: "members",
+            current: 128,
+            limit: 128,
+            reclaimable: 0,
+          },
+        );
+        // ws.ts uses this mapper and this exact RPC error schema.
+        const codec = Schema.fromJsonString(M.WsMemoryHubSettingsUpdateRpc.errorSchema);
+        const wire = yield* Schema.encodeEffect(codec)(memoryError(error));
+        const decoded = yield* Schema.decodeUnknownEffect(codec)(wire);
+        assert.strictEqual(decoded._tag, "MemoryRpcError");
+        if (decoded._tag === "MemoryRpcError")
+          assert.deepStrictEqual(decoded.capacity, {
+            code: "capacity_exceeded",
+            dimension: "members",
+            current: 128,
+            limit: 128,
+            reclaimable: 0,
+          });
         assert.strictEqual(
           (yield* sql<{
             count: number;
           }>`SELECT count(*) AS count FROM memory_hub_members WHERE space=${space}`)[0]!.count,
-          M.MEMORY_HUB_MAX_MEMBERS,
+          128,
         );
       }).pipe(Effect.provide(adminDependencies)),
   );
@@ -860,7 +1081,7 @@ describe("MemoryHubAdministrator", () => {
         );
         const pending = yield* admin.pending(Effect.void);
         assert.strictEqual(pending[0]!.stage, "activated");
-        assert.strictEqual(pending[0]!.memberVersion, 1);
+        assert.strictEqual(pending[0]!.memberVersion, 2);
         const secrets = yield* Secrets.ServerSecretStore;
         const staged = yield* secrets.get(pending[0]!.secretName!);
         assert.isTrue(Option.isSome(staged));
@@ -869,7 +1090,7 @@ describe("MemoryHubAdministrator", () => {
           Effect.provideService(Hub.MemoryHubAdminSettings, backend),
         );
         const result = yield* restarted.update(provision, Effect.void);
-        assert.strictEqual(result.credential!.credentialVersion, 1);
+        assert.strictEqual(result.credential!.credentialVersion, 2);
         assert.strictEqual(
           result.credential!.credential,
           Buffer.from(Option.getOrThrow(staged)).toString("base64url"),
@@ -1095,7 +1316,7 @@ describe("MemoryHubAdministrator", () => {
       );
       const recovered = yield* admin.update(provision, Effect.void);
       assert.strictEqual(recovered.view.version, 1);
-      assert.strictEqual(recovered.credential!.credentialVersion, 1);
+      assert.strictEqual(recovered.credential!.credentialVersion, 2);
       assert.strictEqual((yield* Ref.get(view)).version, 1);
       yield* admin.update(blocked, Effect.void);
       assert.strictEqual((yield* Ref.get(view)).version, 2);
@@ -1210,7 +1431,7 @@ describe("MemoryHubAdministrator", () => {
         },
         Effect.void,
       );
-      assert.strictEqual(rotated.credential!.credentialVersion, 2);
+      assert.strictEqual(rotated.credential!.credentialVersion, 3);
       assert.notStrictEqual(rotated.credential!.credential, first.credential!.credential);
       const store = yield* Store.MemoryStore;
       assert.strictEqual(

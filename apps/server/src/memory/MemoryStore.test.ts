@@ -2230,7 +2230,7 @@ describe("MemoryStore hub administration", () => {
         memorySpaceId: space,
         environmentId: env,
         expectedCredentialVersion: null,
-        next: { credentialDigest: "a".repeat(64), credentialVersion: 1 },
+        next: { credentialDigest: "a".repeat(64) },
         now: 100,
       };
       const member = yield* store.transact(store.activateHubMemberTx(activation));
@@ -2243,7 +2243,7 @@ describe("MemoryStore hub administration", () => {
           ...activation,
           requestId: rotate.requestId,
           expectedCredentialVersion: 1,
-          next: { credentialDigest: "c".repeat(64), credentialVersion: 2 },
+          next: { credentialDigest: "c".repeat(64) },
         }),
       );
       assert.isUndefined(yield* store.findHubMemberByCredential("a".repeat(64)));
@@ -2293,7 +2293,7 @@ describe("MemoryStore hub administration", () => {
               memorySpaceId: space,
               environmentId: env,
               expectedCredentialVersion: null,
-              next: { credentialDigest: "a".repeat(64), credentialVersion: 1 },
+              next: { credentialDigest: "a".repeat(64) },
               now: 0,
             });
             return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
@@ -2346,7 +2346,7 @@ describe("MemoryStore hub administration", () => {
           memorySpaceId: space,
           environmentId: env,
           expectedCredentialVersion: null,
-          next: { credentialDigest: hash, credentialVersion: 1 },
+          next: { credentialDigest: hash },
           now: 0,
         };
         yield* store
