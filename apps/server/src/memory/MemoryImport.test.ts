@@ -2166,6 +2166,7 @@ describe("MemoryImport dependent purge accounting", () => {
       const selection = {
         ...next.selection,
         memoryId: freshId,
+        result: null,
         selector: { ...next.selection.selector, sourceItemKey: "quota-reuse" },
       };
       yield* sql`UPDATE memory_quota_counters SET value=${M.MEMORY_IMPORT_MAX_LIVE_BODY_BYTES - 16}
@@ -2175,8 +2176,18 @@ describe("MemoryImport dependent purge accounting", () => {
           ...next,
           selection,
           batch: { ...next.batch, selections: [selection] },
-          candidate: { ...next.candidate, sourceItemKey: "quota-reuse" },
-          next: { ...next.next, memoryId: freshId, sourceItemKey: "quota-reuse" },
+          candidate: {
+            ...next.candidate,
+            sourceItemKey: "quota-reuse",
+            contentFingerprint: "f".repeat(64),
+            payload: { ...next.candidate.payload, text: "quota reused new" },
+          },
+          next: {
+            ...next.next,
+            memoryId: freshId,
+            sourceItemKey: "quota-reuse",
+            pending: { ...next.next.pending!, contentFingerprint: "f".repeat(64) },
+          },
         },
         Effect.void,
       );
