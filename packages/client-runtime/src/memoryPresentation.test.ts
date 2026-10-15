@@ -99,7 +99,7 @@ const report = Schema.decodeUnknownSync(M.MemoryReportDelivery)({
 describe("memory presentation boundaries", () => {
   it("explains removal and forgetting in the app language", () => {
     expect(MEMORY_REVOCATION_NOTICE).toBe(
-      "Removing a device applies to later requests and to results still waiting on the hub.",
+      "Removing a device applies to later requests and to results still on the hub.",
     );
     expect(MEMORY_FORGET_NOTICE).toBe(
       "The provider's original conversation stays, but forgotten content is never imported again.",
