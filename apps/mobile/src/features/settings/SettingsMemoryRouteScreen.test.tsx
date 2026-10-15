@@ -1522,7 +1522,20 @@ describe("native WP6 Settings commands", () => {
     expect(view.container.textContent).toContain("31 reports ready to retry; 1 unchanged");
     await view.click("Select exhausted report 1");
     await act(async () => h.grant(["memory:read", "memory:write", "filesystem:read"]));
-    await view.click("Retry selected reports");
+    expect(
+      [...view.container.querySelectorAll("button")].some(
+        (button) => button.textContent === "Retry selected reports",
+      ),
+    ).toBe(false);
+    const denied = await h.memory.resetReportAttempts.run(h.registry, {
+      environmentId: nativeEnv,
+      input: {
+        environmentId: nativeEnv,
+        memorySpaceId: nativeSpace,
+        reportIds: [reports[0]!.reportId],
+      },
+    });
+    expect(denied._tag).toBe("Failure");
     expect(
       h.calls.filter((call) => call.method === WS_METHODS.memoryResetReportAttempts),
     ).toHaveLength(1);
@@ -1670,4 +1683,41 @@ describe("native WP6 Settings commands", () => {
     });
     expect(view.container.textContent).not.toContain("private-shared-key");
   });
+  it.each(["user", "project", "thread"] as const)(
+    "sends the chosen %s scope through the real new-memory command without filtering the browser",
+    async (kind) => {
+      setupImport();
+      const project = { environmentId: nativeEnv, projectId: "synthetic-project" as never };
+      const thread = { environmentId: nativeEnv, threadId: "synthetic-thread" as never };
+      const projectKey = { kind: "explicit", sharedProjectId: "private-shared-key" };
+      h.responses.set(WS_METHODS.memoryProjectBindingGet, () => ({
+        memorySpaceId: nativeSpace,
+        project,
+        version: 1,
+        projectKey,
+        repositoryKey: null,
+      }));
+      h.responses.set(WS_METHODS.memoryUpsert, () =>
+        Effect.fail(new Error("synthetic request refused")),
+      );
+      await show({ environmentId: nativeEnv, project, thread });
+      expect(
+        h.calls.findLast((call) => call.method === WS_METHODS.memoryList)?.input,
+      ).not.toHaveProperty("scope");
+      if (kind !== "user") await view.click(`Scope: ${kind}`);
+      await view.click("Remember something");
+      await view.type("Memory text", "Synthetic scoped memory");
+      await view.click("Save memory");
+      expect(
+        h.calls.findLast((call) => call.method === WS_METHODS.memoryUpsert)?.input,
+      ).toMatchObject({
+        scope:
+          kind === "user"
+            ? { kind }
+            : kind === "project"
+              ? { kind, projectKey }
+              : { kind, thread, projectKey },
+      });
+    },
+  );
 });

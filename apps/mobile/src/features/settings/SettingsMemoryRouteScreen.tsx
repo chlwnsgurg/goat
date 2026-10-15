@@ -552,7 +552,6 @@ function MemoryBrowser({
     memorySpaceId,
     limit: PAGE_SIZE,
     ...(cursor ? { cursor } : {}),
-    ...(scope ? { scope } : {}),
   };
   const atom = search
     ? memory.search({
@@ -607,13 +606,6 @@ function MemoryBrowser({
             <Copy>
               Select a scope for new memories and imports. Existing memories keep their scope.
             </Copy>
-            <Action
-              label="All memories"
-              onPress={() => {
-                setScopeKind(null);
-                setCursor(undefined);
-              }}
-            />
             {(["user", "project", "thread"] as const).map((kind) => (
               <SettingsSwitchRow
                 key={kind}
