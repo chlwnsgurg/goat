@@ -1,3 +1,10 @@
+import { McpServer } from "effect/ai";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as McpAccess from "../mcp/McpToolAccess.testkit.ts";
+import * as McpFixture from "../mcp/toolkits/memory/handlers.testkit.ts";
+import * as Sync from "./MemorySyncService.ts";
+import * as Schema from "effect/Schema";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
@@ -23,6 +30,7 @@ import * as Service from "./MemoryService.ts";
 import * as Hub from "./MemoryHubService.ts";
 import * as Compactor from "./MemoryCompactor.ts";
 
+const decodeReplayReceipt = Schema.decodeUnknownEffect(M.MemoryMutationReceipt);
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const space = M.MemorySpaceId.make(id(1));
 const memoryId = M.MemoryId.make(id(2));
@@ -492,3 +500,121 @@ describe("MemoryCompactor", () => {
     }).pipe(Effect.provide(live)),
   );
 });
+
+it.effect(
+  "M-R5-1 toolkit replay survives actual event and superseded revision compaction and forget",
+  () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const sql = yield* SqlClient.SqlClient;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const hub = yield* Hub.MemoryHubService;
+      const compactor = yield* Compactor.MemoryCompactor;
+      const input = { ...McpFixture.upsert(96001), memorySpaceId: space };
+      const invocation = { ...McpFixture.scope(), environmentId: hubEnv };
+      const first = yield* McpFixture.call("memory_upsert", input, invocation);
+      assert.isNotTrue(first.result.isError);
+      const pending = yield* decodeReplayReceipt(first.body);
+      const ack = Effect.fnUntraced(function* (operationId: M.MemoryOperationId) {
+        const workId = `sync:${space}:${operationId}`;
+        const op = yield* store.readWorkOperation(workId);
+        assert.isDefined(op);
+        const response = yield* hub.push(
+          { protocolVersion: 1, memorySpaceId: space, environmentId: hubEnv, operations: [op!] },
+          principal(),
+        );
+        yield* store.acknowledgeOutbox(workId, response.receipts[0]!);
+      });
+      yield* ack(input.operationId);
+      const counts = sql`SELECT (SELECT count(*) FROM memory_events) AS events,(SELECT count(*) FROM memory_payloads) AS payloads,(SELECT count(*) FROM memory_outbox) AS outbox`;
+      const replay = Effect.gen(function* () {
+        const before = yield* counts;
+        const response = yield* McpFixture.call("memory_upsert", input, invocation);
+        assert.isNotTrue(response.result.isError);
+        const receipt = yield* decodeReplayReceipt(response.body, {
+          onExcessProperty: "error",
+        });
+        assert.isFalse(receipt.pendingSync);
+        assert.strictEqual(receipt.revisionId, pending.revisionId);
+        assert.strictEqual(
+          (
+            (yield* McpFixture.call(
+              "memory_upsert",
+              { ...input, payload: { ...input.payload, text: "changed" } },
+              invocation,
+            )).body as { code: string }
+          ).code,
+          "operation_id_reused",
+        );
+        const otherCaller = {
+          ...invocation,
+          client: undefined,
+          thread: {
+            threadId: M.ThreadId.make("changed-caller"),
+            providerSessionId: "synthetic",
+            providerInstanceId: M.ProviderInstanceId.make("codex"),
+          },
+        };
+        assert.strictEqual(
+          ((yield* McpFixture.call("memory_upsert", input, otherCaller)).body as { code: string })
+            .code,
+          "operation_id_reused",
+        );
+        assert.deepStrictEqual(yield* counts, before);
+      });
+      yield* TestClock.adjust(M.MEMORY_LOG_RETENTION_MS);
+      yield* compactor.compact(principal());
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM memory_events WHERE operation_id=${input.operationId}`,
+        0,
+      );
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM memory_revisions WHERE operation_id=${input.operationId}`,
+        1,
+      );
+      yield* replay;
+      const updated = {
+        ...input,
+        operationId: M.MemoryOperationId.make(id(96002)),
+        expectedHeads: [pending.revisionId!],
+        payload: { ...input.payload, text: "replacement" },
+      };
+      yield* service.upsert(updated, Effect.void);
+      yield* ack(updated.operationId);
+      yield* TestClock.adjust(M.MEMORY_LOG_RETENTION_MS);
+      yield* compactor.compact(principal());
+      // The old payload is collected first, then its now-unreferenced revision.
+      yield* compactor.compact(principal());
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM memory_revisions WHERE operation_id=${input.operationId}`,
+        0,
+      );
+      yield* replay;
+      const forgotten = {
+        memorySpaceId: space,
+        memoryId: input.memoryId,
+        operationId: M.MemoryOperationId.make(id(96003)),
+        expectedHeads: (yield* store.loadAggregate(space, input.memoryId)).heads,
+      };
+      yield* service.forget(forgotten, Effect.void);
+      yield* ack(forgotten.operationId);
+      yield* TestClock.adjust(M.MEMORY_LOG_RETENTION_MS);
+      yield* compactor.compact(principal());
+      yield* replay;
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${input.memoryId}`,
+        0,
+      );
+    }).pipe(
+      Effect.provide(
+        McpHttpServer.layerMemoryToolkit.pipe(
+          Layer.provideMerge(live),
+          Layer.provide(Layer.mock(Sync.MemorySyncService)({})),
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provide(McpAccess.liveThreadsLayer),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
+);

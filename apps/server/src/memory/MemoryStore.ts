@@ -141,7 +141,19 @@ const ThreadHookMetadata = Schema.Struct({
   kind: Schema.Literal("threadHook"),
   watermark: Schema.Int.check(Schema.makeFilter((n) => n >= 0)),
 });
+// One body-free cumulative set per native context owner, never one receipt per run.
+const ThreadLineageMetadata = Schema.Struct({
+  kind: Schema.Literal("threadLineage"),
+  sourceThread: M.ScopedThreadRef,
+  memorySpaceId: M.MemorySpaceId,
+  state: Schema.Literals(["tracked", "unknown", "overflow"]),
+  revisions: Schema.Array(M.MemoryRevisionId).check(Schema.isMaxLength(100)),
+});
+type ThreadLineage = typeof ThreadLineageMetadata.Type;
+const threadLineageId = (thread: M.ScopedThreadRef) =>
+  `memory:thread-lineage:${JSON.stringify([thread.environmentId, thread.threadId])}`;
 const WorkMetadata = Schema.Union([
+  ThreadLineageMetadata,
   ThreadHookMetadata,
   Metadata,
   LocalIntentMetadata,
@@ -346,7 +358,7 @@ export function encodeCompactReceipt(
   record: M.MemoryCompactReceipt,
   environmentOrdinal: (id: M.EnvironmentId) => number,
 ): Uint8Array {
-  const bytes: number[] = [2];
+  const bytes: number[] = [record.upsertRequestDigest === undefined ? 2 : 3];
   const byte = (value: number) => bytes.push(value);
   const number = (value: number) => {
     let remaining = BigInt(value);
@@ -412,10 +424,11 @@ export function encodeCompactReceipt(
     uuid(record.receipt.forgetRetryOf.operationId);
     hash(record.receipt.forgetRetryOf.operationDigest);
   }
+  if (record.upsertRequestDigest !== undefined) hash(record.upsertRequestDigest);
   return Uint8Array.from(bytes);
 }
 
-/** Decode stored v1/v2 rows without granting old resolve rows authoritative approval. */
+/** Decode stored v1/v2/v3 rows without granting old resolve rows authoritative approval. */
 export function decodeCompactReceipt(
   bytes: Uint8Array,
   space: M.MemorySpaceId,
@@ -427,7 +440,8 @@ export function decodeCompactReceipt(
     return bytes[offset++]!;
   };
   const version = byte();
-  if (version !== 1 && version !== 2) throw new RangeError("Unsupported compact receipt");
+  if (version !== 1 && version !== 2 && version !== 3)
+    throw new RangeError("Unsupported compact receipt");
   const number = () => {
     let value = 0n;
     let shift = 0n;
@@ -482,9 +496,9 @@ export function decodeCompactReceipt(
         reclaimable: number(),
       }
     : undefined;
-  const appliedAt = version === 2 && byte() ? (byte() ? -1 : 1) * number() : undefined;
+  const appliedAt = version >= 2 && byte() ? (byte() ? -1 : 1) * number() : undefined;
   const forgetExpansion =
-    version === 2 && byte()
+    version >= 2 && byte()
       ? {
           requestDigest: hash(),
           operationId: uuid(),
@@ -493,7 +507,8 @@ export function decodeCompactReceipt(
         }
       : undefined;
   const forgetRetryOf =
-    version === 2 && byte() ? { operationId: uuid(), operationDigest: hash() } : undefined;
+    version >= 2 && byte() ? { operationId: uuid(), operationDigest: hash() } : undefined;
+  const upsertRequestDigest = version === 3 ? hash() : undefined;
   if (offset !== bytes.length) throw new RangeError("Trailing compact receipt bytes");
   // Legacy storage accepts approval-free resolves. It must not pass the current wire decoder.
   const storedSchema =
@@ -516,6 +531,7 @@ export function decodeCompactReceipt(
       memorySpaceId: space,
       originEnvironmentId,
       operationKind,
+      ...(upsertRequestDigest !== undefined ? { upsertRequestDigest } : {}),
       receipt: {
         operationId,
         memoryId,
@@ -863,6 +879,18 @@ export class MemoryStore extends Context.Service<
       effect: Effect.Effect<A, E, R>,
       options?: { requireOuter: boolean },
     ) => Effect.Effect<A, E | MemoryStorageError, Exclude<R, Transaction>>;
+    readonly readThreadLineage: (
+      thread: M.ScopedThreadRef,
+      space: M.MemorySpaceId,
+    ) => Effect.Effect<ThreadLineage, MemoryStorageError>;
+    readonly appendThreadLineage: (
+      thread: M.ScopedThreadRef,
+      space: M.MemorySpaceId,
+      revisions: ReadonlyArray<M.MemoryRevisionId>,
+    ) => Effect.Effect<boolean, MemoryStorageError>;
+    readonly deleteThreadLineage: (
+      thread: M.ScopedThreadRef,
+    ) => Effect.Effect<void, MemoryStorageError>;
     readonly acquireSyncWorkTx: (input: {
       workId: string;
       operationId: M.MemoryOperationId;
@@ -1645,6 +1673,7 @@ const resolutionReasonsCodec = codec(Schema.Array(M.MemoryDeferredReason));
 const hubReceiptCodec = codec(M.MemoryHubReceipt);
 const decodeFailureEnvironment = Schema.decodeUnknownEffect(M.EnvironmentId);
 const threadHookCodec = codec(ThreadHookMetadata);
+const threadLineageCodec = codec(ThreadLineageMetadata);
 const deferredRowCodec = codec(DeferredRow);
 const decodeLocalIntent = Schema.decodeUnknownEffect(LocalMemoryIntent);
 const localMetadataCodec = codec(LocalIntentMetadata);
@@ -3214,6 +3243,97 @@ const make = Effect.gen(function* () {
     );
     return (yield* workRows(rows))[0];
   });
+  const readThreadLineage = Effect.fn("MemoryStore.readThreadLineage")(function* (
+    thread: M.ScopedThreadRef,
+    space: M.MemorySpaceId,
+  ) {
+    const rows = yield* stored(
+      "thread-lineage-read",
+      sql<{ metadata_json: string }>`
+      SELECT metadata_json FROM memory_outbox WHERE id=${threadLineageId(thread)}`,
+    );
+    const lineage: ThreadLineage = rows[0]
+      ? yield* threadLineageCodec
+          .decode(rows[0].metadata_json, strict)
+          .pipe(
+            Effect.mapError(
+              (cause) => new MemoryStorageError({ stage: "thread-lineage-codec", cause }),
+            ),
+          )
+      : {
+          kind: "threadLineage",
+          sourceThread: thread,
+          memorySpaceId: space,
+          state: "tracked",
+          revisions: [],
+        };
+    // Cross-thread history has no transferable receipt contract yet. Refuse its summaries,
+    // including imports with an already attached native conversation. Same-thread handoffs
+    // and native compaction keep the original cumulative set. Never infer clean from rollback.
+    const unknown = yield* stored(
+      "thread-lineage-origin",
+      sql`SELECT 1 FROM orchestration_events
+      WHERE application_event_version=2 AND aggregate_kind='thread' AND stream_id=${thread.threadId}
+      AND ((event_type='thread.created' AND (
+        json_type(payload_json,'$.forkedFrom') NOT IN ('null')
+        OR json_extract(payload_json,'$.lineage.parentThreadId') IS NOT NULL
+        OR json_extract(payload_json,'$.historyOrigin')='v1_import'
+        OR json_extract(payload_json,'$.activeProviderThreadId') IS NOT NULL))
+        OR (event_type='provider-thread.updated' AND json_extract(payload_json,'$.status')='not_loaded' AND json_extract(payload_json,'$.nativeThreadRef') IS NOT NULL AND json_extract(payload_json,'$.providerSessionId') IS NULL)
+        OR (event_type IN ('context-transfer.created','context-transfer.updated')
+          AND json_extract(payload_json,'$.targetThreadId')=${thread.threadId}
+          AND json_extract(payload_json,'$.sourceThreadId')!=${thread.threadId})) LIMIT 1`,
+    );
+    return lineage.memorySpaceId !== space || unknown.length
+      ? { ...lineage, state: "unknown" as const }
+      : lineage;
+  });
+  const appendThreadLineage = Effect.fn("MemoryStore.appendThreadLineage")(function* (
+    thread: M.ScopedThreadRef,
+    space: M.MemorySpaceId,
+    revisions: ReadonlyArray<M.MemoryRevisionId>,
+  ) {
+    return yield* transact(
+      Effect.gen(function* () {
+        const previous = yield* readThreadLineage(thread, space);
+        const union = [...new Set([...previous.revisions, ...revisions])];
+        const state =
+          previous.state !== "tracked"
+            ? previous.state
+            : union.length > 100
+              ? "overflow"
+              : "tracked";
+        // Injection remains available for unknown/overflow contexts. Persist the fence
+        // before delivery so every thread-derived producer stays disabled thereafter.
+        // Overflow preserves the previous set, including an initially empty set.
+        const metadata = yield* stored(
+          "thread-lineage-codec",
+          threadLineageCodec.encode({
+            ...previous,
+            state,
+            revisions: union.length > 100 ? previous.revisions : union,
+          }),
+        );
+        yield* stored(
+          "thread-lineage-write",
+          sql`INSERT INTO memory_outbox
+        (id,space,kind,status,metadata_json,next_attempt_at)
+        VALUES (${threadLineageId(thread)},'_worker','rebuild','completed',${metadata},0)
+        ON CONFLICT(id) DO UPDATE SET metadata_json=excluded.metadata_json
+        WHERE memory_outbox.metadata_json!=excluded.metadata_json`,
+        );
+        return true;
+      }),
+    );
+  });
+  const deleteThreadLineage = Effect.fn("MemoryStore.deleteThreadLineage")(function* (
+    thread: M.ScopedThreadRef,
+  ) {
+    yield* stored(
+      "thread-lineage-delete",
+      sql`DELETE FROM memory_outbox WHERE id=${threadLineageId(thread)}`,
+    );
+  });
   const retryWork = Effect.fn("MemoryStore.retryWork")(function* (
     work: MemoryWork,
     nextAttemptAt: number,
@@ -3346,12 +3466,24 @@ const make = Effect.gen(function* () {
     now: number,
     limit: number,
   ) {
+    // Filter before LIMIT: a page of derived work must not hide its unsent inputs.
+    // Payload deps are bounded to 100; CROSS JOIN keeps edge iteration ahead of
+    // revision/outbox PK probes instead of letting SQLite scan all revisions in a space.
+    // Only live local submissions wait. Missing/GC/terminal inputs still reach the hub's
+    // authoritative typed rejection, without inventing a receipt or retry attempt here.
     const rows = yield* stored(
       "sync-outbox",
       sql<WorkRow & { sync_version: number; operation_digest: string | null }>`
       SELECT o.* FROM memory_outbox o LEFT JOIN memory_events e ON e.memory_space_id=o.space AND e.operation_id=json_extract(o.metadata_json,'$.operationId')
       WHERE o.space=${space} AND o.kind IN ('sync','revert_intent')
       AND (o.status IN ('pending','retry') OR (o.status='running' AND o.claimed_until<=${now})) AND o.next_attempt_at<=${now}
+      AND NOT EXISTS (
+        SELECT 1 FROM memory_payloads p CROSS JOIN json_each(p.dependencies_json) dep
+        CROSS JOIN memory_revisions r ON r.space=o.space AND r.revision_id=dep.value
+        CROSS JOIN memory_outbox prerequisite ON prerequisite.id='sync:'||r.space||':'||r.operation_id
+        WHERE p.space=o.space AND p.payload_ref=o.payload_ref
+          AND prerequisite.status IN ('pending','retry','running')
+      )
       ORDER BY CASE WHEN json_extract(o.metadata_json,'$.kind')='forget'
         THEN CASE WHEN json_extract(e.receipt_json,'$.forgetRetryOf') IS NOT NULL OR
           EXISTS (SELECT 1 FROM memory_events b WHERE b.memory_space_id=o.space AND json_extract(b.receipt_json,'$.forgetExpansion.operationId')=json_extract(o.metadata_json,'$.operationId'))
@@ -3434,6 +3566,15 @@ const make = Effect.gen(function* () {
           yield* stored(
             "ack-settle",
             sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(acknowledged)} WHERE memory_space_id=${work.space} AND operation_id=${result.operationId}`,
+          );
+        if (
+          result.outcome === "rejected" &&
+          result.failureCode === "source_invalidated" &&
+          work.metadata.kind === "upsert"
+        )
+          yield* stored(
+            "derived-admission-refusal",
+            sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${work.space},'derived_admission_rejected','',1) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=min(value+1,2147483647)`,
           );
         yield* finishWork(id, result.outcome === "rejected" ? "failed" : "completed", result);
         if (
@@ -8502,7 +8643,8 @@ const make = Effect.gen(function* () {
       AND NOT EXISTS (SELECT 1 FROM memory_revert_intents v WHERE v.space=r.space AND (v.restored_revision_id=r.revision_id OR v.payload_ref=r.payload_ref))
       AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.space=r.space AND o.status IN ('pending','running','retry') AND (o.payload_ref=r.payload_ref OR instr(o.metadata_json,r.revision_id)>0 OR instr(coalesce(o.ticket_json,''),r.revision_id)>0 OR instr(coalesce(o.frozen_claim_json,''),r.revision_id)>0))
       AND NOT EXISTS (SELECT 1 FROM memory_inbox_pending b WHERE b.space=r.space AND (b.payload_ref=r.payload_ref OR b.reason='hub_snapshot' AND b.checkpoint_id IN (SELECT value FROM json_each(${keep})) AND EXISTS (SELECT 1 FROM json_each(b.metadata_json,'$.revisions') j WHERE json_extract(j.value,'$.revision.revisionId')=r.revision_id AND json_type(j.value,'$.payload')!='null')))
-      AND (p.payload_ref IS NOT NULL OR NOT EXISTS (SELECT 1 FROM memory_payloads d, json_each(d.dependencies_json) dep WHERE d.space=r.space AND dep.value=r.revision_id))
+      AND (p.payload_ref IS NOT NULL OR (NOT EXISTS (SELECT 1 FROM memory_payloads d, json_each(d.dependencies_json) dep WHERE d.space=r.space AND dep.value=r.revision_id)
+        AND NOT EXISTS (SELECT 1 FROM memory_outbox o,json_each(o.metadata_json,'$.revisions') dep WHERE o.space='_worker' AND json_extract(o.metadata_json,'$.kind')='threadLineage' AND json_extract(o.metadata_json,'$.memorySpaceId')=r.space AND dep.value=r.revision_id)))
       ORDER BY coalesce(p.purge_eligible_after,r.created_at),r.revision_id LIMIT ${Math.max(0, limit - removedRows)}`,
     );
     for (const revision of revisions) {
@@ -8515,7 +8657,8 @@ const make = Effect.gen(function* () {
       // revision->memory edge for forget's reverse closure. Its body was deleted above.
       const retained = yield* stored(
         "hub-compact-lineage-reference",
-        sql`SELECT 1 FROM memory_payloads p, json_each(p.dependencies_json) d WHERE p.space=${input.memorySpaceId} AND d.value=${revision.revision_id} LIMIT 1`,
+        sql`SELECT 1 FROM memory_payloads p, json_each(p.dependencies_json) d WHERE p.space=${input.memorySpaceId} AND d.value=${revision.revision_id}
+          UNION ALL SELECT 1 FROM memory_outbox o,json_each(o.metadata_json,'$.revisions') d WHERE o.space='_worker' AND json_extract(o.metadata_json,'$.kind')='threadLineage' AND json_extract(o.metadata_json,'$.memorySpaceId')=${input.memorySpaceId} AND d.value=${revision.revision_id} LIMIT 1`,
       );
       if (retained.length) {
         removedRows++;
@@ -8904,6 +9047,9 @@ const make = Effect.gen(function* () {
       memorySpaceId: op.memorySpaceId,
       originEnvironmentId: op.originEnvironmentId,
       operationKind: op.kind,
+      ...(op.kind === "upsert" && op.revision.provenance.upsertRequestDigest !== undefined
+        ? { upsertRequestDigest: op.revision.provenance.upsertRequestDigest }
+        : {}),
       receipt,
       revisionId:
         op.kind === "forget" || input.outcome === "rejected" ? null : op.revision.revisionId,
@@ -9426,6 +9572,9 @@ const make = Effect.gen(function* () {
     renewWork,
     readThreadHookWatermark,
     cancelThreadWork,
+    readThreadLineage,
+    appendThreadLineage,
+    deleteThreadLineage,
     commitThreadHook,
     readParked,
     enqueueWork,

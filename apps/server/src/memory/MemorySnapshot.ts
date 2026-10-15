@@ -89,6 +89,43 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  // The writer transaction pins canonical identity and the selected payload's already
+  // flattened lineage before any adapter can receive the snapshot. A failed write sends none.
+  const admit = Effect.fnUntraced(function* (
+    snapshot: M.MemoryContextSnapshot,
+    threadId: M.ThreadId,
+  ) {
+    return yield* store.transact(
+      Effect.gen(function* () {
+        const revisions: M.MemoryRevisionId[] = [];
+        for (const item of snapshot.items) {
+          const current = yield* store.loadAggregate(snapshot.memorySpaceId, item.memoryId);
+          const pair = current.revisions.find((p) => p.revision.revisionId === item.revisionId);
+          if (
+            current.tombstone ||
+            current.pendingForget ||
+            current.heads.length !== 1 ||
+            current.heads[0] !== item.revisionId ||
+            !pair?.payload
+          )
+            return false;
+          yield* Service.validateSummaryDependencies(snapshot.memorySpaceId, {
+            ...pair.payload,
+            derivedFromMemoryRevisions: [
+              item.revisionId,
+              ...pair.payload.derivedFromMemoryRevisions,
+            ],
+          }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+          revisions.push(item.revisionId, ...pair.payload.derivedFromMemoryRevisions);
+        }
+        return yield* store.appendThreadLineage(
+          { environmentId, threadId },
+          snapshot.memorySpaceId,
+          revisions,
+        );
+      }),
+    );
+  });
   type View = NonNullable<Effect.Success<ReturnType<typeof capture>>>;
   const sameView = (a: View, b: View | undefined) =>
     !!b &&
@@ -242,6 +279,10 @@ const make = Effect.gen(function* () {
         })),
       });
       cacheBytes += bytes;
+      if (!(yield* admit(snapshot, threadId))) {
+        remove(snapshot);
+        return undefined;
+      }
       return snapshot;
     },
     Effect.mapError((cause) => new MemorySnapshotError({ cause })),
@@ -345,6 +386,7 @@ const make = Effect.gen(function* () {
         })),
       });
       cacheBytes += bytes;
+      if (!(yield* admit(restored, execution.threadId))) return clear();
       return restored;
     },
     Effect.mapError((cause) => new MemorySnapshotError({ cause })),
