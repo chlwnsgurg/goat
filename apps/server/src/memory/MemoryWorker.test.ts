@@ -1498,3 +1498,52 @@ it.effect.each([false, true])("r4 production side chat origin (fork=%s)", (fork)
     ),
   );
 });
+
+it.effect("r5 MCP body consumption reaches Worker summary and forget purges summary", () => {
+  let generated = 0;
+  return Effect.gen(function* () {
+    yield* lineageSetup;
+    const service = yield* Service.MemoryService;
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const a = lineageUpsert(24000);
+    yield* service.upsert(a, Effect.void);
+    const rA = yield* head(store, a.memoryId);
+    // The MCP read service boundary, without automatic snapshot injection.
+    yield* service.read({ memorySpaceId: space, memoryId: a.memoryId }, Effect.void, {
+      environmentId,
+      threadId,
+    });
+    assert.deepStrictEqual(
+      (yield* store.readThreadLineage({ environmentId, threadId }, space)).revisions,
+      [rA],
+    );
+    yield* (yield* Worker.MemoryWorker).sweepDue();
+    assert.strictEqual(generated, 1);
+    const summary = yield* store.loadAggregate(space, summaryMemoryId);
+    assert.include(
+      summary.revisions.find((p) => p.revision.revisionId === summary.heads[0])!.payload!
+        .derivedFromMemoryRevisions,
+      rA,
+    );
+    yield* service.forget(
+      {
+        memorySpaceId: space,
+        memoryId: a.memoryId,
+        operationId: M.MemoryOperationId.make(id(24001)),
+        expectedHeads: [rA],
+      },
+      Effect.void,
+    );
+    assert.lengthOf(
+      yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${summaryMemoryId}`,
+      0,
+    );
+  }).pipe(
+    Effect.provide(
+      lineageLive(() => {
+        generated++;
+      }),
+    ),
+  );
+});

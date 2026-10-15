@@ -280,6 +280,7 @@ export const MemoryFailureCode = Schema.Literals([
   "generation_input_too_large",
   "storage_failed",
   "source_invalidated",
+  "thread_lineage_incomplete",
   "capacity_exceeded",
   "base_compacted",
   "revert_expired",
@@ -391,6 +392,10 @@ export type MemoryEvidence = typeof MemoryEvidence.Type;
 
 export const MemoryProvenance = struct({
   environmentId: EnvironmentId,
+  // Body-free identity of the original explicit upsert request and its caller.
+  upsertRequestDigest: Schema.optionalKey(
+    Schema.String.check(Schema.makeFilter((s) => /^[a-f0-9]{64}$/.test(s))),
+  ),
   providerInstanceId: Schema.optionalKey(canonical.pipe(Schema.brand("ProviderInstanceId"))),
   provider: Schema.optionalKey(ProviderDriverKind),
   requestedModelSelection: Schema.optionalKey(MemoryModelSelection),
@@ -802,6 +807,11 @@ const safeErrorFields = {
   memoryId: Schema.optionalKey(MemoryId),
   operationId: Schema.optionalKey(MemoryOperationId),
   capacity: Schema.optionalKey(MemoryCapacityExceeded),
+  guidance: Schema.optionalKey(
+    Schema.Literal(
+      "This conversation has incomplete memory provenance and cannot save new memories. Start a new conversation to save this memory.",
+    ),
+  ),
 };
 const safeDomainError = Schema.Struct(safeErrorFields).check(
   Schema.makeFilter((v) => (v.code === "capacity_exceeded") === (v.capacity !== undefined)),
@@ -825,7 +835,9 @@ export class MemoryRpcError extends Schema.TaggedError<MemoryRpcError>()(
     return strictSchema(Schema.make(super.ast)).ast;
   }
   override get message(): string {
-    return `Memory request failed (${this.code}).`;
+    return this.code === "thread_lineage_incomplete"
+      ? "This conversation has incomplete memory provenance and cannot save new memories. Start a new conversation to save this memory."
+      : `Memory request failed (${this.code}).`;
   }
 }
 export class MemoryHubError extends Schema.TaggedError<MemoryHubError>()(

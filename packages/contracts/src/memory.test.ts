@@ -1832,3 +1832,28 @@ describe("task memory grant ceiling JSON", () => {
     }
   });
 });
+
+it("r5 bounds upsert request identity and exposes incomplete provenance guidance", () => {
+  expect(() =>
+    decode(M.MemoryProvenance, { environmentId: "env", upsertRequestDigest: "x" }),
+  ).toThrow();
+  expect(
+    decode(M.MemoryProvenance, { environmentId: "env", upsertRequestDigest: "a".repeat(64) })
+      .upsertRequestDigest,
+  ).toBe("a".repeat(64));
+  const guidance =
+    "This conversation has incomplete memory provenance and cannot save new memories. Start a new conversation to save this memory.";
+  const error = new M.MemoryRpcError({ code: "thread_lineage_incomplete", guidance });
+  expect(Schema.encodeSync(M.MemoryRpcError)(error)).toMatchObject({
+    code: "thread_lineage_incomplete",
+    guidance,
+  });
+  expect(error.message).toBe(guidance);
+  expect(() =>
+    decode(M.MemoryRpcError, {
+      _tag: "MemoryRpcError",
+      code: "thread_lineage_incomplete",
+      guidance: "arbitrary",
+    }),
+  ).toThrow();
+});
