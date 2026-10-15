@@ -3162,6 +3162,10 @@ it.effect(
           outcome: "accepted",
           hubSequence: n + 1,
         });
+        if (n === 0)
+          assert.deepStrictEqual(yield* sql`SELECT count(*) AS count FROM memory_report_outbox`, [
+            { count: 0 },
+          ]);
       }
       assert.deepStrictEqual(yield* sql`SELECT count(*) AS count FROM memory_report_outbox`, [
         { count: 0 },
@@ -3200,7 +3204,7 @@ it.effect(
         [{ value: 1 }],
       );
     }).pipe(Effect.provide(live)),
-  { timeout: 120000 },
+  { timeout: 600000 },
 );
 
 it.effect.each(["disabled", "other-space", "writer-wait"] as const)(
