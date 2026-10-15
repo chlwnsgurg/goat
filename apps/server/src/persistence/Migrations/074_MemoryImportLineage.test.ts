@@ -125,6 +125,31 @@ it.effect(
         );
       }
       yield* runMigrations();
+      // A structurally valid staged page isolates the lineage guard from ordinary
+      // missing-page refusal. Without the guard publication really advances the floor.
+      const page: M.MemoryHubCheckpointPage = {
+        memorySpaceId: space,
+        checkpointSequence: 2,
+        retentionFloor: 0,
+        causalBoundary: { checkpointSequence: 2, boundaryId: "a".repeat(64) },
+        pageOrdinal: 0,
+        items: [],
+        revisions: [],
+        tombstones: [],
+        conflicts: [],
+        resolutions: [],
+        compactReceipts: [],
+        identities: [],
+        fences: [],
+        suppressions: [],
+        importLineage: [],
+        nextCursor: null,
+        bootstrapComplete: true,
+      };
+      assert.isTrue(M.validateMemoryCheckpointRecords([page]));
+      yield* sql`INSERT INTO memory_hub_retention(space) VALUES (${space})`;
+      yield* sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,missing_parents_json,reason,hub_sequence,checkpoint_id,page_ordinal,metadata_json)
+        VALUES (${space},'hub:synthetic-checkpoint:0','checkpoint','[]','hub_snapshot',2,'hub:synthetic-checkpoint',0,${JSON.stringify(page)})`;
       const snapshot = Effect.gen(function* () {
         return {
           revisions: yield* sql`SELECT * FROM memory_revisions ORDER BY revision_id`,
