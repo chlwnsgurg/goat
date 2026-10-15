@@ -5,10 +5,14 @@ import * as SqlClient from "effect/sql/SqlClient";
 const bytes = (column: string) => `length(CAST(${column} AS BLOB))`;
 export const memoryUsageHeadBytes = (p: string) =>
   `(SELECT coalesce(sum(${bytes("p.body_json")}),0) FROM (SELECT DISTINCT r.payload_ref FROM json_each(${p}.heads_json) h CROSS JOIN memory_revisions r ON r.space=${p}.space AND r.revision_id=h.value) head CROSS JOIN memory_payloads p ON p.space=${p}.space AND p.payload_ref=head.payload_ref AND p.memory_id=${p}.memory_id)`;
-const summary = (p: string) =>
+export const memoryUsageSummary = (p: string) =>
   `(${p}.status!='forgotten' AND EXISTS(SELECT 1 FROM json_each(${p}.heads_json) h CROSS JOIN memory_revisions r ON r.space=${p}.space AND r.revision_id=h.value WHERE json_extract(r.provenance_json,'$.sourceThread') IS NOT NULL))`;
-const payloadLive = (p: string) =>
+export const memoryUsagePayloadLive = (p: string) =>
   `EXISTS(SELECT 1 FROM memory_items i CROSS JOIN json_each(i.heads_json) h CROSS JOIN memory_revisions r ON r.space=i.space AND r.revision_id=h.value WHERE i.space=${p}.space AND i.memory_id=${p}.memory_id AND r.payload_ref=${p}.payload_ref)`;
+
+export const memoryUsageRevisionItemMatch = (p: string, distinctNew: boolean) =>
+  `i.space=${p}.space AND i.memory_id=${p}.memory_id` +
+  (distinctNew ? " AND (NEW.space!=OLD.space OR NEW.memory_id!=OLD.memory_id)" : "");
 
 /** Fixed dimensions only. Head joins start with bounded json_each and use revision/payload PKs.
  * BEFORE/AFTER revision triggers also cover head references arriving before their revision.
@@ -86,7 +90,7 @@ export default Effect.gen(function* () {
   };
   const scoped = (p: string, sign: number) =>
     delta(`${p}.space`, "items", `${p}.scope_key`, `(${p}.status!='forgotten')`, sign) +
-    delta(`${p}.space`, "summaries", `${p}.scope_key`, summary(p), sign);
+    delta(`${p}.space`, "summaries", `${p}.scope_key`, memoryUsageSummary(p), sign);
   for (const [table, spaceColumn, metrics] of tables) {
     for (const [dimension, value] of Object.entries(metrics("accounted"))) {
       if (table === "memory_compact_receipts" && dimension === "receipt_bytes") continue;
@@ -132,7 +136,7 @@ export default Effect.gen(function* () {
   );
   for (const [d, v] of [
     ["items", "(accounted.status!='forgotten')"],
-    ["summaries", summary("accounted")],
+    ["summaries", memoryUsageSummary("accounted")],
   ])
     yield* sql.unsafe(
       `INSERT INTO memory_quota_counters SELECT space,'usage_${d}',scope_key,sum(${v}) FROM memory_items accounted GROUP BY space,scope_key`,
@@ -141,11 +145,11 @@ export default Effect.gen(function* () {
   for (const action of ["INSERT", "UPDATE", "DELETE"] as const) {
     if (action !== "INSERT")
       yield* sql.unsafe(
-        `CREATE TRIGGER usage_payload_live_${action.toLowerCase()}_old BEFORE ${action} ON memory_payloads BEGIN ${both("OLD.space", "live_bytes", `CASE WHEN ${payloadLive("OLD")} THEN ${bytes("OLD.body_json")} ELSE 0 END`, -1)} END`,
+        `CREATE TRIGGER usage_payload_live_${action.toLowerCase()}_old BEFORE ${action} ON memory_payloads BEGIN ${both("OLD.space", "live_bytes", `CASE WHEN ${memoryUsagePayloadLive("OLD")} THEN ${bytes("OLD.body_json")} ELSE 0 END`, -1)} END`,
       );
     if (action !== "DELETE")
       yield* sql.unsafe(
-        `CREATE TRIGGER usage_payload_live_${action.toLowerCase()}_new AFTER ${action} ON memory_payloads BEGIN ${both("NEW.space", "live_bytes", `CASE WHEN ${payloadLive("NEW")} THEN ${bytes("NEW.body_json")} ELSE 0 END`, 1)} END`,
+        `CREATE TRIGGER usage_payload_live_${action.toLowerCase()}_new AFTER ${action} ON memory_payloads BEGIN ${both("NEW.space", "live_bytes", `CASE WHEN ${memoryUsagePayloadLive("NEW")} THEN ${bytes("NEW.body_json")} ELSE 0 END`, 1)} END`,
       );
   }
   for (const action of ["INSERT", "UPDATE", "DELETE"] as const) {
@@ -157,11 +161,7 @@ export default Effect.gen(function* () {
     ] as const) {
       const updates = prefixes
         .map((p) => {
-          const match =
-            `i.space=${p}.space AND i.memory_id=${p}.memory_id` +
-            (action === "UPDATE" && p === "NEW"
-              ? " AND (NEW.space!=OLD.space OR NEW.memory_id!=OLD.memory_id)"
-              : "");
+          const match = memoryUsageRevisionItemMatch(p, action === "UPDATE" && p === "NEW");
           const amount = (expression: string) =>
             `(SELECT coalesce(sum(${expression}),0) FROM memory_items i WHERE ${match})`;
           const liveDelta = both(`${p}.space`, "live_bytes", amount(live("i")), sign);
@@ -169,8 +169,8 @@ export default Effect.gen(function* () {
           return (
             liveDelta +
             (sign < 0
-              ? delta(`${p}.space`, "summaries", scope, amount(summary("i")), sign)
-              : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT i.space,'usage_summaries',i.scope_key,${summary("i")} FROM memory_items i WHERE ${match} ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`)
+              ? delta(`${p}.space`, "summaries", scope, amount(memoryUsageSummary("i")), sign)
+              : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT i.space,'usage_summaries',i.scope_key,${memoryUsageSummary("i")} FROM memory_items i WHERE ${match} ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`)
           );
         })
         .join("");

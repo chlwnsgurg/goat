@@ -1,10 +1,18 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Statement from "effect/sql/Statement";
+import * as M from "@goat/contracts";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import { runMigrations } from "../Migrations.ts";
-import migration, { memoryUsageHeadBytes } from "./078_MemoryUsageCounters.ts";
+import migration, {
+  memoryUsageHeadBytes,
+  memoryUsageSummary,
+  memoryUsagePayloadLive,
+  memoryUsageRevisionItemMatch,
+} from "./078_MemoryUsageCounters.ts";
 import * as Store from "../../memory/MemoryStore.ts";
 import { assertUsageCounters } from "../../memory/MemoryUsageScan.testkit.ts";
 
@@ -32,22 +40,16 @@ it.effect(
       }
       const before =
         yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`;
-      yield* sql
+      const rollback = yield* sql
         .withTransaction(migration.pipe(Effect.andThen(Effect.fail("rollback"))))
         .pipe(Effect.exit);
+      assert.deepStrictEqual(rollback, Exit.fail("rollback"));
       assert.deepStrictEqual(
         yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`,
         before,
       );
       assert.deepStrictEqual(yield* runMigrations(), [[78, "MemoryUsageCounters"]]);
       yield* assertUsageCounters;
-      const plan = yield* sql.unsafe<{ detail: string }>(
-        `EXPLAIN QUERY PLAN SELECT ${memoryUsageHeadBytes("i")} FROM memory_items i WHERE i.space='00000000-0000-4000-8000-000000000001' AND i.memory_id='memory'`,
-      );
-      const details = plan.map((row) => row.detail).join("\n");
-      assert.match(details, /SEARCH r .*\(space=\? AND revision_id=\?\)/, details);
-      assert.match(details, /SEARCH p .*\(space=\? AND payload_ref=\?\)/, details);
-      assert.isFalse(/SCAN [rp]\b/.test(details), details);
       assert.deepStrictEqual(yield* runMigrations(), []);
       yield* assertUsageCounters;
       yield* sql`DELETE FROM memory_compact_receipts`;
@@ -57,4 +59,74 @@ it.effect(
       yield* sql`DELETE FROM memory_payloads`;
       yield* assertUsageCounters;
     }).pipe(Effect.provide(live)),
+);
+
+it.effect("actual trigger expressions and runtime usage queries use complete lookup keys", () =>
+  Effect.gen(function* () {
+    yield* runMigrations();
+    const sql = yield* SqlClient.SqlClient;
+    const store = yield* Store.MemoryStore;
+    const explain = (query: string, params: ReadonlyArray<unknown> = []) =>
+      sql
+        .unsafe<{ detail: string }>(`EXPLAIN QUERY PLAN ${query}`, params)
+        .pipe(Effect.map((rows) => rows.map((r) => r.detail).join("\n")));
+    const itemLookup = /SEARCH i .*\(space=\? AND memory_id=\?\)/;
+    const revisionLookup = /SEARCH r .*\(space=\? AND revision_id=\?\)/;
+    const payloadLookup = /SEARCH p .*\(space=\? AND payload_ref=\?\)/;
+    const root = "FROM memory_items i WHERE i.space='fixture' AND i.memory_id='memory'";
+    for (const [name, expression, lookups] of [
+      ["head bytes", memoryUsageHeadBytes("i"), [itemLookup, revisionLookup, payloadLookup]],
+      ["summary", memoryUsageSummary("i"), [itemLookup, revisionLookup]],
+      ["payload live", memoryUsagePayloadLive("p"), [itemLookup, revisionLookup, payloadLookup]],
+    ] as const) {
+      const from =
+        name === "payload live"
+          ? "FROM memory_payloads p WHERE p.space='fixture' AND p.payload_ref='payload'"
+          : root;
+      const details = yield* explain(`SELECT ${expression} ${from}`);
+      for (const lookup of lookups) assert.match(details, lookup, `${name}: ${details}`);
+      assert.isFalse(/SCAN [irp]\b/.test(details), `${name}: ${details}`);
+    }
+    // Exercise the same OLD/NEW predicates used by revision INSERT/UPDATE/DELETE triggers.
+    for (const [prefix, distinctNew] of [
+      ["OLD", false],
+      ["NEW", false],
+      ["NEW", true],
+    ] as const) {
+      const match = memoryUsageRevisionItemMatch(prefix, distinctNew);
+      for (const expression of [
+        memoryUsageHeadBytes("i"),
+        memoryUsageSummary("i"),
+        "i.scope_key",
+      ]) {
+        const details = yield* explain(
+          `SELECT (SELECT ${expression} FROM memory_items i WHERE ${match}) FROM (SELECT 'fixture' space,'memory' memory_id) OLD CROSS JOIN (SELECT 'fixture' space,'other' memory_id) NEW`,
+        );
+        assert.match(details, itemLookup, details);
+        if (expression !== "i.scope_key") assert.match(details, revisionLookup, details);
+        if (expression === memoryUsageHeadBytes("i")) assert.match(details, payloadLookup, details);
+        assert.isFalse(/SCAN [irp]\b/.test(details), details);
+      }
+    }
+    yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT 'fixture','usage_items','explicit:' || value,0 FROM json_each(${JSON.stringify(Array.from({ length: 1000 }, (_, n) => n))})`;
+    const queries: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+    const record: Statement.Transformer = (statement) =>
+      Effect.sync(() => {
+        queries.push(statement.compile());
+        return statement;
+      });
+    yield* store
+      .usage(M.MemorySpaceId.make("00000000-0000-4000-8000-000000000001"), { kind: "user" })
+      .pipe(Effect.provideService(Statement.CurrentTransformer, record));
+    assert.lengthOf(queries, 2);
+    for (const [query, params] of queries) {
+      const details = yield* explain(query, params);
+      assert.match(
+        details,
+        /SEARCH memory_quota_counters .*\(space=\? AND dimension=\? AND scope_key=\?\)/,
+        details,
+      );
+      assert.isFalse(/SCAN memory_quota_counters/.test(details), details);
+    }
+  }).pipe(Effect.provide(live)),
 );

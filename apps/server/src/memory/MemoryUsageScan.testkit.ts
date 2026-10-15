@@ -176,13 +176,51 @@ export const scanUsage = Effect.fn("scanUsage")(function* (
 });
 
 /** Full scan oracle is intentionally test-only; check every persisted space and scope. */
+const decodeScopeKey = Schema.decodeUnknownEffect(M.MemoryScope);
 const decodeScope = Schema.decodeEffect(Schema.fromJsonString(M.MemoryScope));
+// Counter scope addresses survive the last item moving or being deleted.
+const scopeFromKey = (key: string): unknown => {
+  if (key === "user") return { kind: "user" };
+  for (const kind of ["repository", "explicit"] as const) {
+    const prefix = `${kind}:`;
+    if (key.startsWith(prefix))
+      return {
+        kind: "project",
+        projectKey: {
+          kind,
+          [kind === "repository" ? "groupingKey" : "sharedProjectId"]: key.slice(prefix.length),
+        },
+      };
+  }
+  const thread = /^thread:(\d+):/.exec(key);
+  if (thread) {
+    const start = thread[0].length;
+    const end = start + Number(thread[1]);
+    if (key[end] === ":")
+      return {
+        kind: "thread",
+        thread: { environmentId: key.slice(start, end), threadId: key.slice(end + 1) },
+      };
+  }
+  return null;
+};
 export const assertUsageCounters = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const store = yield* Store.MemoryStore;
   const spaces = yield* sql<{
     space: string;
-  }>`SELECT space FROM memory_items UNION SELECT space FROM memory_identity_ledger UNION SELECT space FROM memory_payloads UNION SELECT memory_space_id AS space FROM memory_events`;
+  }>`SELECT space FROM memory_items
+    UNION SELECT space FROM memory_identity_ledger
+    UNION SELECT space FROM memory_payloads
+    UNION SELECT memory_space_id AS space FROM memory_events
+    UNION SELECT space FROM memory_compact_receipts
+    UNION SELECT space FROM memory_import_keys
+    UNION SELECT space FROM memory_import_lineage
+    UNION SELECT space FROM memory_outbox
+    UNION SELECT space FROM memory_import_receipts
+    UNION SELECT space FROM memory_import_noop_results
+    UNION SELECT space FROM memory_report_outbox
+    UNION SELECT space FROM memory_quota_counters WHERE space NOT IN ('_usage_environment','_hub_global')`;
   for (const { space } of spaces) {
     // Internal unbound storage uses _local:<environment>, alongside UUID spaces.
     const id = space as M.MemorySpaceId;
@@ -197,7 +235,14 @@ export const assertUsageCounters = Effect.gen(function* () {
       );
       if (scope) candidates.push(scope);
     }
-    for (const scope of candidates)
+    const addresses = yield* sql<{
+      scope_key: string;
+    }>`SELECT DISTINCT scope_key FROM memory_quota_counters WHERE space=${space} AND dimension GLOB 'usage_*' AND scope_key!=''`;
+    for (const { scope_key } of addresses) {
+      const scope = yield* decodeScopeKey(scopeFromKey(scope_key));
+      candidates.push(scope);
+    }
+    for (const scope of new Map(candidates.map((scope) => [scopeKey(scope), scope])).values())
       assert.deepStrictEqual(yield* store.usage(id, scope), yield* scanUsage(id, scope));
   }
 });

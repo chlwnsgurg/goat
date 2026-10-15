@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -13,7 +14,7 @@ import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as Service from "./MemoryService.ts";
 import { memoryOperationDigest } from "./MemoryDecider.ts";
-import { scanUsage } from "./MemoryUsageScan.testkit.ts";
+import { assertUsageCounters, scanUsage } from "./MemoryUsageScan.testkit.ts";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const space = M.MemorySpaceId.make(id(1));
 const environmentId = M.EnvironmentId.make("fixture");
@@ -48,6 +49,7 @@ const serviceLive = (
   );
 const live = serviceLive();
 
+const decodeScope = Schema.decodeUnknownEffect(M.MemoryScope);
 const decodeOperation = Schema.decodeUnknownSync(M.MemoryOperation);
 const decodeOperationEffect = Schema.decodeUnknownEffect(M.MemoryOperation);
 const operation = (n: number, chain = false): M.MemoryOperation =>
@@ -110,9 +112,10 @@ it.effect(
       yield* receive(operation(4, true), 4);
       yield* check;
       const before = yield* storage.usage(space, { kind: "user" });
-      yield* storage
+      const rollback = yield* storage
         .transact(receive(operation(5, true), 5).pipe(Effect.andThen(Effect.fail("rollback"))))
         .pipe(Effect.exit);
+      assert.deepStrictEqual(rollback, Exit.fail("rollback"));
       assert.deepStrictEqual(yield* storage.usage(space, { kind: "user" }), before);
       yield* check;
       yield* sql`UPDATE memory_revisions SET provenance_json=json_set(provenance_json,'$.sourceThread',json('{"environmentId":"fixture","threadId":"synthetic"}'),'$.sourceWatermark',json('{"fromEventId":"synthetic-from","toEventId":"synthetic-to","throughSequence":1}')) WHERE revision_id=${id(30004)}`;
@@ -160,4 +163,64 @@ it.effect(
       yield* sql`DELETE FROM memory_compact_receipts WHERE space=${space}`;
       yield* check;
     }).pipe(Effect.provide(live)),
+);
+
+it.effect("oracle checks vanished scopes, empty spaces, and compact/outbox-only spaces", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const storage = yield* Store.MemoryStore;
+    const scopes = [
+      { kind: "project", projectKey: { kind: "repository", groupingKey: "repo:synthetic" } },
+      { kind: "project", projectKey: { kind: "explicit", sharedProjectId: "synthetic" } },
+      { kind: "thread", thread: { environmentId: "한:env", threadId: "synthetic:thread" } },
+    ];
+    const keys = [
+      "repository:repo:synthetic",
+      "explicit:synthetic",
+      "thread:5:한:env:synthetic:thread",
+    ];
+    yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json) VALUES (${space},'last',${JSON.stringify(scopes[0])},${keys[0]!},'[]','active',0,'{}','{}')`;
+    for (let n = 1; n < scopes.length; n++) {
+      yield* sql`UPDATE memory_items SET scope_json=${JSON.stringify(scopes[n])},scope_key=${keys[n]!} WHERE space=${space}`;
+      yield* assertUsageCounters;
+      const previous = yield* decodeScope(scopes[n - 1]);
+      assert.strictEqual((yield* storage.usage(space, previous)).scopeItems, 0);
+      // A stale old scope must be discovered even though it has no remaining item.
+      yield* sql`UPDATE memory_quota_counters SET value=1 WHERE space=${space} AND dimension='usage_items' AND scope_key=${keys[n - 1]!}`;
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(assertUsageCounters)));
+      yield* sql`UPDATE memory_quota_counters SET value=0 WHERE space=${space} AND dimension='usage_items' AND scope_key=${keys[n - 1]!}`;
+    }
+    yield* sql`DELETE FROM memory_items WHERE space=${space}`;
+    yield* assertUsageCounters;
+    assert.isTrue(
+      Object.values(yield* storage.usage(space, { kind: "user" })).every((n) => n === 0),
+    );
+    yield* sql`UPDATE memory_quota_counters SET value=1 WHERE space=${space} AND dimension='usage_items' AND scope_key=''`;
+    assert.isTrue(Exit.isFailure(yield* Effect.exit(assertUsageCounters)));
+    yield* sql`UPDATE memory_quota_counters SET value=0 WHERE space=${space} AND dimension='usage_items' AND scope_key=''`;
+    const compactSpace = id(700);
+    const outboxSpace = id(701);
+    yield* sql`INSERT INTO memory_compact_receipts(space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json) VALUES (${compactSpace},'op','digest',1,'{}','{}')`;
+    yield* sql`INSERT INTO memory_outbox(id,space,memory_id,kind,status,metadata_json,attempt,next_attempt_at) VALUES ('only',${outboxSpace},'memory','admin','pending','{}',0,0)`;
+    yield* assertUsageCounters;
+    for (const [address, dimension] of [
+      [compactSpace, "usage_receipts"],
+      [outboxSpace, "usage_work_items"],
+    ]) {
+      // Remove its counters to prove the contributing table itself supplies this address.
+      const rows =
+        yield* sql`DELETE FROM memory_quota_counters WHERE space=${address!} RETURNING *`;
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(assertUsageCounters)), dimension);
+      for (const row of rows) yield* sql`INSERT INTO memory_quota_counters ${sql.insert(row)}`;
+    }
+    yield* sql`DELETE FROM memory_compact_receipts WHERE space=${compactSpace}`;
+    yield* sql`DELETE FROM memory_outbox WHERE space=${outboxSpace}`;
+    yield* assertUsageCounters;
+    for (const address of [space, compactSpace, outboxSpace])
+      assert.isTrue(
+        Object.values(yield* storage.usage(M.MemorySpaceId.make(address), { kind: "user" })).every(
+          (n) => n === 0,
+        ),
+      );
+  }).pipe(Effect.provide(live)),
 );
