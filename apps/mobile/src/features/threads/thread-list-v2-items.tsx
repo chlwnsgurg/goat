@@ -1138,10 +1138,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                 pr.state === null || pr.isDraft
                   ? rowAppearance.mutedIconTintClassName
                   : pr.state === "open"
-                    ? "accent-adaptive-emerald-600-400"
+                    ? "accent-pr-open"
                     : pr.state === "closed"
-                      ? "accent-adaptive-rose-600-400"
-                      : "accent-adaptive-violet-600-400"
+                      ? "accent-pr-closed"
+                      : "accent-pr-merged"
               }
             />
             <Text

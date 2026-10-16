@@ -1,7 +1,7 @@
-export type MobileStageLabel = "Alpha" | "Dev" | "Nightly";
+import type { BrandChannel } from "@goat/shared/brandChannels";
 
-export function resolveMobileStageLabel(appVariant: unknown): MobileStageLabel {
-  if (appVariant === "development") return "Dev";
-  if (appVariant === "preview") return "Nightly";
-  return "Alpha";
+export function resolveMobileBrandChannel(appVariant: unknown): BrandChannel {
+  if (appVariant === "development") return "dev";
+  if (appVariant === "preview") return "nightly";
+  return "stable";
 }

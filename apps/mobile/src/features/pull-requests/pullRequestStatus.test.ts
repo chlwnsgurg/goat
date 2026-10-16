@@ -1,6 +1,11 @@
 import type { PullRequestActivity, PullRequestCheck, PullRequestComment } from "@goat/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { pullRequestChecksSummary, pullRequestReviewSummary } from "./pullRequestStatus";
+import {
+  checkStatus,
+  pullRequestStatus,
+  pullRequestChecksSummary,
+  pullRequestReviewSummary,
+} from "./pullRequestStatus";
 
 const author = { login: "julius", name: null, avatarUrl: null };
 function review(state: string, at: string): PullRequestComment {
@@ -23,6 +28,25 @@ function activity(
 function check(status: PullRequestCheck["status"]): PullRequestCheck {
   return { name: status, status, url: null, description: null };
 }
+
+describe("mobile pull request lifecycle status", () => {
+  it.each(["open", "closed", "merged"] as const)("uses semantic %s tones", (state) => {
+    expect(pullRequestStatus({ state, isDraft: false })).toMatchObject({
+      tint: `accent-pr-${state}`,
+      text: `text-pr-${state}`,
+      background: `bg-pr-${state}-surface`,
+    });
+  });
+
+  it("keeps drafts muted and check-run success green", () => {
+    expect(pullRequestStatus({ state: "open", isDraft: true })).toMatchObject({
+      tint: "accent-icon-muted",
+      text: "text-foreground-muted",
+      background: "bg-grouped-card",
+    });
+    expect(checkStatus(check("success")).tint).toBe("accent-adaptive-emerald-600-400");
+  });
+});
 
 describe("mobile overview review status", () => {
   it("uses each reviewer's latest verdict even when history arrives out of order", () => {

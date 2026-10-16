@@ -12,6 +12,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useHomeThreadSelection } from "../home/home-thread-navigation";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
 import { useMobileGoatBotSession } from "./useMobileGoatBotSession";
+import { GoatBotAvatar } from "./GoatBotAvatar";
 
 type ThreadSelection = Pick<EnvironmentThreadShell, "environmentId" | "id">;
 const rowKey = (row: GoatBotRow) => row.id;
@@ -150,7 +151,10 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
     <View className="my-1 items-start gap-1">
       <View className="max-w-[85%] gap-1 rounded-2xl bg-card px-3 py-2">
         {row.firstInGroup ? (
-          <Text className="text-xs font-semibold text-foreground-muted">GOAT Bot</Text>
+          <View className="flex-row items-center gap-1.5">
+            <GoatBotAvatar size="sm" />
+            <Text className="text-xs font-semibold text-foreground-muted">GOAT Bot</Text>
+          </View>
         ) : null}
         {row.replyTo ? (
           <Text
@@ -306,10 +310,10 @@ export function GoatBotScreen(props: {
           accessibilityLabel="Send message"
           disabled={!session.canSend || !text.trim()}
           onPress={send}
-          className="rounded-xl bg-user-bubble px-4 py-3"
+          className="rounded-xl bg-composer-send px-4 py-3"
           style={{ opacity: session.canSend && text.trim() ? 1 : 0.45 }}
         >
-          <Text className="font-semibold text-user-bubble-foreground">Send</Text>
+          <Text className="font-semibold text-primary-foreground">Send</Text>
         </Pressable>
       </View>
     </KeyboardAvoidingView>

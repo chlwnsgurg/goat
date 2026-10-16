@@ -1,5 +1,6 @@
 import {
   BUILT_IN_THEMES,
+  deriveSemanticColors,
   normalizeThemeId,
   GOAT_CHAT_THEME,
   GOAT_LIGHT_THEME_COLORS,
@@ -249,6 +250,8 @@ export function createMobileThemeVariables(
   prominentAction: readonly [string, string] = [colors.text, colors.canvas],
 ) {
   const c = nativeColors(colors);
+  const semantic = deriveSemanticColors(colors, appearance);
+  const prSurfaceAlpha = appearance === "dark" ? 0.16 : 0.12;
   const groupedCard = themeColorToNativeColor(groupedCardColor);
   const textSurfaces = [
     c.canvas,
@@ -260,6 +263,18 @@ export function createMobileThemeVariables(
     groupedCard,
   ];
   return {
+    "--color-pr-open": semantic.prOpen,
+    "--color-pr-open-surface": themeColorWithAlpha(semantic.prOpen, prSurfaceAlpha),
+    "--color-pr-closed": semantic.prClosed,
+    "--color-pr-closed-surface": themeColorWithAlpha(semantic.prClosed, prSurfaceAlpha),
+    "--color-pr-merged": semantic.prMerged,
+    "--color-pr-merged-surface": themeColorWithAlpha(semantic.prMerged, prSurfaceAlpha),
+    "--color-composer-send": semantic.composerSend,
+    "--color-composer-stop": semantic.composerStop,
+    "--color-composer-stop-foreground": "#ffffff",
+    "--color-goat-avatar": semantic.goatAvatar,
+    "--color-goat-avatar-border": semantic.goatAvatarBorder,
+    "--color-goat-avatar-foreground": semantic.goatAvatarForeground,
     "--color-screen": c.canvas,
     "--color-sheet": withAlpha(c.chrome, 0.98),
     "--color-sheet-solid": c.chrome,

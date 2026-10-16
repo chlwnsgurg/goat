@@ -30,9 +30,9 @@ export interface ThreadPrPresentation {
 }
 
 const PR_STATE_TEXT_CLASS: Record<ThreadPr["state"], string> = {
-  open: "text-adaptive-emerald-600-400",
-  merged: "text-adaptive-violet-600-400",
-  closed: "text-foreground-muted",
+  open: "text-pr-open",
+  merged: "text-pr-merged",
+  closed: "text-pr-closed",
 };
 
 export function presentThreadPr(
@@ -94,12 +94,7 @@ export function presentThreadLinkedPullRequests(
         : linkedCount !== null
           ? `${linkedCount} linked pull requests, overall ${badge.state}`
           : `#${link.number} pull request ${state === null ? "status pending" : isDraft ? "draft" : state}`,
-    textClassName:
-      state === null || isDraft
-        ? "text-foreground-muted"
-        : isMultiple && state === "closed"
-          ? "text-adaptive-rose-600-400"
-          : PR_STATE_TEXT_CLASS[state],
+    textClassName: state === null || isDraft ? "text-foreground-muted" : PR_STATE_TEXT_CLASS[state],
   };
 }
 
