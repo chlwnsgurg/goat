@@ -6,7 +6,6 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import { resolveKey, makeCursorCloudCredentials } from "./credentials.ts";
-import * as CursorCloudSdk from "./sdk.ts";
 
 const instanceId = ProviderInstanceId.make("cursorCloud-test");
 const siblingId = ProviderInstanceId.make("cursor-account-2");
@@ -20,11 +19,15 @@ const stored = (apiKey: string, apiKeyExpiresAtMs?: number) => ({
 
 const decodeSettings = Schema.decodeEffect(ServerSettings);
 
-const credentialFixture = (settings: ServerSettings) => {
+const credentialFixture = (
+  settings: ServerSettings,
+  saved: ReturnType<typeof stored> | null = stored("binding-fixture"),
+) => {
   const getKey = vi.fn(() =>
-    Effect.succeedSome(new TextEncoder().encode(JSON.stringify(stored("binding-fixture")))),
+    saved === null
+      ? Effect.succeedNone
+      : Effect.succeedSome(new TextEncoder().encode(JSON.stringify(saved))),
   );
-  const readLogin = vi.fn(() => Effect.succeed(stored("fallback-fixture")));
   const set = vi.fn(() => Effect.void);
   const remove = vi.fn(() => Effect.void);
   const open = vi.fn(() =>
@@ -53,29 +56,33 @@ const credentialFixture = (settings: ServerSettings) => {
     resolveAttachmentPath: () => null,
     credentials: open,
   });
-  const sdk = CursorCloudSdk.CursorCloudSdk.of({
-    create: () => Promise.reject(new Error("not used")),
-    resume: () => Promise.reject(new Error("not used")),
-    getRun: () => Promise.reject(new Error("not used")),
-    cancelRun: () => Promise.reject(new Error("not used")),
-    readLogin: Effect.suspend(readLogin),
-    checkAccess: () => Effect.void,
-    readModels: () => Effect.succeed([]),
-  });
-  return { host, sdk, getKey, readLogin, set, remove, open };
+  return { host, getKey, set, remove, open };
 };
 
+const withProcessKey = <A, E, R>(value: string | undefined, effect: Effect.Effect<A, E, R>) =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.CURSOR_API_KEY;
+      if (value === undefined) delete process.env.CURSOR_API_KEY;
+      else process.env.CURSOR_API_KEY = value;
+      return previous;
+    }),
+    () => effect,
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.CURSOR_API_KEY;
+        else process.env.CURSOR_API_KEY = previous;
+      }),
+  );
+
 describe("Cursor Cloud credential precedence", () => {
-  it.effect("uses the sibling key without reading the SDK fallback", () =>
+  it.effect("uses the sibling's GOAT sign-in", () =>
     Effect.gen(function* () {
-      const fallback = vi.fn(() => Effect.succeed(stored("sdk-fixture")));
       const key = yield* resolveKey({
         instanceId,
         sibling: Effect.succeed(stored("sibling-fixture")),
-        fallback: Effect.suspend(fallback),
       });
       expect(key).toBe("sibling-fixture");
-      expect(fallback).not.toHaveBeenCalled();
     }),
   );
   it.effect("retains the sibling's existing explicit-key override", () =>
@@ -85,39 +92,87 @@ describe("Cursor Cloud credential precedence", () => {
         instanceId,
         configuredKey: "configured-fixture",
         sibling: Effect.suspend(sibling),
-        fallback: Effect.succeed(undefined),
       });
       expect(key).toBe("configured-fixture");
       expect(sibling).not.toHaveBeenCalled();
     }),
   );
-  it.effect("falls back when the GOAT key is missing or expired", () =>
+  it.effect(
+    "fails instead of using another account when the sign-in is absent, expired or foreign",
+    () =>
+      Effect.gen(function* () {
+        for (const value of [
+          undefined,
+          stored("expired-fixture", 0),
+          { ...stored("foreign-fixture"), backendUrl: "https://example.invalid" },
+        ]) {
+          const result = yield* resolveKey({
+            instanceId,
+            sibling: Effect.succeed(value),
+          }).pipe(Effect.flip);
+          expect(result._tag).toBe("ProviderSetupError");
+          expect(result.message).not.toContain("foreign-fixture");
+        }
+      }),
+  );
+  it.effect("uses the server's CURSOR_API_KEY like the local Cursor provider does", () =>
     Effect.gen(function* () {
-      for (const value of [undefined, stored("expired-fixture", 0)]) {
-        const key = yield* resolveKey({
-          instanceId,
-          sibling: Effect.succeed(value),
-          fallback: Effect.succeed(stored("sdk-fixture")),
-        });
-        expect(key).toBe("sdk-fixture");
-      }
+      const settings = yield* decodeSettings({
+        providerInstances: {
+          [siblingId]: { driver: "cursor", enabled: true, config: {} },
+        },
+      });
+      const h = credentialFixture(settings);
+      const key = yield* withProcessKey(
+        "process-fixture",
+        Effect.gen(function* () {
+          const credentials = yield* makeCursorCloudCredentials(instanceId, siblingId);
+          return yield* credentials.requireApiKey;
+        }).pipe(Effect.provideService(ProviderHost.ProviderHost, h.host)),
+      );
+      expect(key).toBe("process-fixture");
     }),
   );
-  it.effect("rejects absent/expired or foreign-backend fallback keys", () =>
+  it.effect("prefers the sibling's configured key over the server's", () =>
     Effect.gen(function* () {
-      for (const value of [
+      const settings = yield* decodeSettings({
+        providerInstances: {
+          [siblingId]: {
+            driver: "cursor",
+            enabled: true,
+            config: {},
+            environment: [{ name: "CURSOR_API_KEY", value: "instance-fixture" }],
+          },
+        },
+      });
+      const h = credentialFixture(settings);
+      const key = yield* withProcessKey(
+        "process-fixture",
+        Effect.gen(function* () {
+          const credentials = yield* makeCursorCloudCredentials(instanceId, siblingId);
+          return yield* credentials.requireApiKey;
+        }).pipe(Effect.provideService(ProviderHost.ProviderHost, h.host)),
+      );
+      expect(key).toBe("instance-fixture");
+    }),
+  );
+  it.effect("fails when the selected Cursor provider is signed out", () =>
+    Effect.gen(function* () {
+      const settings = yield* decodeSettings({
+        providerInstances: {
+          [siblingId]: { driver: "cursor", enabled: true, config: {} },
+        },
+      });
+      const h = credentialFixture(settings, null);
+      const failure = yield* withProcessKey(
         undefined,
-        stored("expired-fixture", 0),
-        { ...stored("foreign-fixture"), backendUrl: "https://example.invalid" },
-      ]) {
-        const result = yield* resolveKey({
-          instanceId,
-          sibling: Effect.succeed(undefined),
-          fallback: Effect.succeed(value),
-        }).pipe(Effect.flip);
-        expect(result._tag).toBe("ProviderSetupError");
-        expect(result.message).not.toContain("foreign-fixture");
-      }
+        Effect.gen(function* () {
+          const credentials = yield* makeCursorCloudCredentials(instanceId, siblingId);
+          return yield* credentials.requireApiKey;
+        }).pipe(Effect.provideService(ProviderHost.ProviderHost, h.host), Effect.flip),
+      );
+      expect(failure._tag).toBe("ProviderSetupError");
+      expect(h.getKey).toHaveBeenCalled();
     }),
   );
   it.effect("opens the sibling GOAT binding and never writes or clears credentials", () =>
@@ -127,15 +182,15 @@ describe("Cursor Cloud credential precedence", () => {
           [siblingId]: { driver: "cursor", enabled: true, config: {} },
         },
       });
-      const { host, sdk, set, remove, open } = credentialFixture(settings);
-      const result = yield* Effect.gen(function* () {
-        const credentials = yield* makeCursorCloudCredentials(instanceId, siblingId);
-        const key = yield* credentials.requireApiKey;
-        const logout = yield* credentials.auth.logout(Effect.void).pipe(Effect.flip);
-        return { key, binding: credentials.auth.credentialBinding, logout };
-      }).pipe(
-        Effect.provideService(ProviderHost.ProviderHost, host),
-        Effect.provideService(CursorCloudSdk.CursorCloudSdk, sdk),
+      const { host, set, remove, open } = credentialFixture(settings);
+      const result = yield* withProcessKey(
+        undefined,
+        Effect.gen(function* () {
+          const credentials = yield* makeCursorCloudCredentials(instanceId, siblingId);
+          const key = yield* credentials.requireApiKey;
+          const logout = yield* credentials.auth.logout(Effect.void).pipe(Effect.flip);
+          return { key, binding: credentials.auth.credentialBinding, logout };
+        }).pipe(Effect.provideService(ProviderHost.ProviderHost, host)),
       );
       expect(open).toHaveBeenCalledWith("cursor", siblingId);
       expect(result.key).toBe("binding-fixture");
@@ -145,25 +200,20 @@ describe("Cursor Cloud credential precedence", () => {
       expect(remove).not.toHaveBeenCalled();
     }),
   );
-  it.effect("rejects a missing explicit sibling before reading either key source", () =>
+  it.effect("rejects a missing explicit sibling before reading its sign-in", () =>
     Effect.gen(function* () {
       const settings = yield* decodeSettings({ providerInstances: {} });
       const h = credentialFixture(settings);
       const failure = yield* Effect.gen(function* () {
         const credentials = yield* makeCursorCloudCredentials(instanceId, siblingId);
         return yield* credentials.requireApiKey;
-      }).pipe(
-        Effect.provideService(ProviderHost.ProviderHost, h.host),
-        Effect.provideService(CursorCloudSdk.CursorCloudSdk, h.sdk),
-        Effect.flip,
-      );
+      }).pipe(Effect.provideService(ProviderHost.ProviderHost, h.host), Effect.flip);
       expect(failure._tag).toBe("ProviderSetupError");
       expect(failure.instanceId).toBe(instanceId);
       expect(h.getKey).not.toHaveBeenCalled();
-      expect(h.readLogin).not.toHaveBeenCalled();
     }),
   );
-  it.effect("rejects an existing non-Cursor sibling before reading either key source", () =>
+  it.effect("rejects an existing non-Cursor sibling before reading its sign-in", () =>
     Effect.gen(function* () {
       const settings = yield* decodeSettings({
         providerInstances: {
@@ -174,15 +224,10 @@ describe("Cursor Cloud credential precedence", () => {
       const failure = yield* Effect.gen(function* () {
         const credentials = yield* makeCursorCloudCredentials(instanceId, siblingId);
         return yield* credentials.requireApiKey;
-      }).pipe(
-        Effect.provideService(ProviderHost.ProviderHost, h.host),
-        Effect.provideService(CursorCloudSdk.CursorCloudSdk, h.sdk),
-        Effect.flip,
-      );
+      }).pipe(Effect.provideService(ProviderHost.ProviderHost, h.host), Effect.flip);
       expect(failure._tag).toBe("ProviderSetupError");
       expect(failure.instanceId).toBe(instanceId);
       expect(h.getKey).not.toHaveBeenCalled();
-      expect(h.readLogin).not.toHaveBeenCalled();
     }),
   );
 });

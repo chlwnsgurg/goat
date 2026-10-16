@@ -69,6 +69,11 @@ builds `EventSink`, `ProjectionStore`, and `EffectOutbox`. Adapters translate a 
 orchestration events. The registry that returns an adapter for an instance is
 `ProviderAdapterRegistryV2` in `apps/server/src/orchestration-v2/ProviderAdapterRegistry.ts`.
 
+Human handoffs are owned by `apps/server/src/handoffs/Handoffs.ts`. Their safe metadata and actor-labelled
+state changes commit through orchestration; sign-in URLs, device codes and continuation arguments
+are encrypted separately. Only authorized client sessions can read the human instructions. The legacy secret request
+keeps its wire shape and adds handoff metadata; secret values still stay in the one-use server store.
+
 An earlier engine stored an append-only log in SQLite. That tree is gone. v2 is the commit path
 above.
 

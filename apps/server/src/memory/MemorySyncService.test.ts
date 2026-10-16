@@ -39,7 +39,7 @@ import * as Events from "../orchestration-v2/EventSink.ts";
 import * as RuntimeIdentity from "../runtimeIdentity.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
 import migration from "../persistence/Migrations/071_Memory.ts";
-import lastReadyMigration from "../persistence/Migrations/080_MemoryLastReadySpace.ts";
+import lastReadyMigration from "../persistence/Migrations/081_MemoryLastReadySpace.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
@@ -2078,12 +2078,12 @@ it.effect.each([
   "memory-activity",
   "tied-memory-activity",
 ] as const)(
-  "080 upgrade recovers a retained ready space with sharing already disabled: %s",
+  "081 upgrade recovers a retained ready space with sharing already disabled: %s",
   (candidates) =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
-        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "memory-080-upgrade-" });
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "memory-081-upgrade-" });
         const filename = `${directory}/state.sqlite`;
         const database = (through: number) =>
           Quota.layer.pipe(
@@ -2136,7 +2136,7 @@ it.effect.each([
             assert.isEmpty(
               yield* sql`SELECT name FROM sqlite_master WHERE name='memory_last_ready_space'`,
             );
-            assert.deepStrictEqual(yield* runMigrations(), [[80, "MemoryLastReadySpace"]]);
+            assert.deepStrictEqual(yield* runMigrations(), [[81, "MemoryLastReadySpace"]]);
             const adapter = yield* statusRuntime;
             const result = yield* Effect.scoped(
               Effect.gen(function* () {
@@ -2152,7 +2152,7 @@ it.effect.each([
             );
             assert.strictEqual(result.state, "disabled");
             assert.strictEqual(result.retainedLocalSpaceId, space);
-          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(79)))),
+          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(80)))),
         );
         // Close the SQLite connection and rebuild the service, preserving only the upgraded file.
         yield* Effect.scoped(
@@ -2193,7 +2193,7 @@ it.effect.each([
             const item = listed.items[0];
             if (item?.status !== "active") throw new Error("retained memory missing");
             assert.strictEqual(item.payload.text, "synthetic fact 98010");
-          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(80)))),
+          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(81)))),
         );
       }).pipe(Effect.provide(NodeServices.layer)),
     ),

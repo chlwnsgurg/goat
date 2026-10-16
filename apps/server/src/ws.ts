@@ -1,3 +1,4 @@
+import * as Handoffs from "./handoffs/Handoffs.ts";
 import { ProviderMemoryImportRuntime } from "./memory/imports/MemoryImportTypes.ts";
 import * as MemoryService from "./memory/MemoryService.ts";
 import * as MemorySyncService from "./memory/MemorySyncService.ts";
@@ -140,7 +141,6 @@ import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
-import * as SecretRequests from "./secrets/SecretRequests.ts";
 import {
   archivedShellStreamItemFromThreadShell,
   buildActiveShellSnapshot,
@@ -1342,7 +1342,7 @@ const layerWsRpc = (
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
-      const secretRequests = yield* SecretRequests.SecretRequests;
+      const handoffs = yield* Handoffs.Handoffs;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
       const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
@@ -2350,9 +2350,11 @@ const layerWsRpc = (
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.rotateWebhookToken(input)),
           ),
+        [WS_METHODS.handoffsOpen]: (input) => handoffs.open(input, currentSessionId),
+        [WS_METHODS.handoffsRespond]: (input) => handoffs.respond(input, currentSessionId),
         [WS_METHODS.secretsAnswerRequest]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
-            Effect.andThen(secretRequests.answer(input)),
+            Effect.andThen(handoffs.answerSecret(input, currentSessionId)),
           ),
         [WS_METHODS.remoteLaunchesList]: (input) => remoteLaunchCatalog.list(input),
         [WS_METHODS.scheduledTasksListWebhookDeliveries]: (input) =>

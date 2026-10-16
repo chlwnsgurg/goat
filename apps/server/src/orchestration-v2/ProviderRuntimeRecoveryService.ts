@@ -162,7 +162,23 @@ const cancelledItem = (
   now: DateTime.Utc,
 ): OrchestrationV2ThreadProjection["turnItems"][number] =>
   item.type === "secret_request" && item.secretStatus === "pending"
-    ? { ...item, status: "cancelled", secretStatus: "cancelled", completedAt: now, updatedAt: now }
+    ? {
+        ...item,
+        status: "cancelled",
+        secretStatus: "cancelled",
+        completedAt: now,
+        updatedAt: now,
+        ...(item.handoff
+          ? {
+              handoff: {
+                ...item.handoff,
+                state: "cancelled" as const,
+                resolvedAt: now,
+                actor: { type: "server" as const },
+              },
+            }
+          : {}),
+      }
     : { ...item, status: "cancelled", completedAt: now, updatedAt: now };
 
 /**
@@ -483,6 +499,7 @@ export const make = Effect.gen(function* () {
         }
         for (const item of projection.turnItems.filter(
           (candidate) =>
+            candidate.type !== "human_handoff" &&
             candidate.runId === run.id &&
             (candidate.nodeId === null || !messageRequestNodeIds.has(candidate.nodeId)) &&
             !isAppOwnedDelegationItem(candidate, delegatedTaskNodeIds) &&

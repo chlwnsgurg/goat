@@ -145,6 +145,7 @@ const make = Effect.gen(function* () {
       epoch: number;
       expires: number;
       bytes: number;
+      hasMore: boolean;
       selected: ReadonlyArray<{
         memoryId: M.MemoryId;
         revisionId: M.MemoryRevisionId;
@@ -218,15 +219,19 @@ const make = Effect.gen(function* () {
         { kind: "user" },
       ];
       let pages = 0;
+      let hasMore = false;
       const candidates: M.MemoryContextCandidate[] = [];
-      for (const scope of scopes) {
+      for (const [index, scope] of scopes.entries()) {
+        // Guarantee each remaining scope a share; unused pages flow to the next scope.
+        const pageBudget = Math.floor((10 - pages) / (scopes.length - index));
+        let scopePages = 0;
         let cursor: string | undefined;
         do {
-          if (pages === 10) break;
           if (!permits(yield* currentPolicy, policy) || !sameView(view, yield* capture(threadId)))
             return undefined;
           // Each page reserves 100 slots and 64 KiB, regardless of filtering/oversize output.
           pages++;
+          scopePages++;
           const page = yield* service.readContextCandidates(
             {
               memorySpaceId: view.space,
@@ -240,8 +245,8 @@ const make = Effect.gen(function* () {
           if (page.projectionWatermark !== view.watermark) return undefined;
           candidates.push(...page.items);
           cursor = page.nextCursor ?? undefined;
-        } while (cursor);
-        if (pages === 10) break;
+        } while (cursor && scopePages < pageBudget);
+        hasMore ||= !!cursor;
       }
       if (!permits(yield* currentPolicy, policy) || !sameView(view, yield* capture(threadId)))
         return undefined;
@@ -249,6 +254,7 @@ const make = Effect.gen(function* () {
         memorySpaceId: view.space,
         projectionWatermark: view.watermark,
         items: candidates,
+        hasMore,
       });
       if (!snapshot) return undefined;
       const bytes = yield* Effect.try({
@@ -272,6 +278,7 @@ const make = Effect.gen(function* () {
         epoch: policy.policyEpoch,
         expires,
         bytes,
+        hasMore: snapshot.renderedText === Renderer.renderMemoryContext(snapshot.items, true),
         selected: snapshot.items.map((item) => ({
           memoryId: item.memoryId,
           revisionId: item.revisionId,
@@ -356,6 +363,7 @@ const make = Effect.gen(function* () {
         memorySpaceId: view.space,
         projectionWatermark: view.watermark,
         items: survivors,
+        hasMore: entry.hasMore,
       });
       if (!restored) return clear();
       const bytes = yield* Effect.try({

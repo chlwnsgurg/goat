@@ -1,3 +1,4 @@
+import { HandoffCard } from "./HandoffCard";
 import { ThreadFindTimelineContext } from "./ThreadFindProvider";
 import { shouldPreserveAssistantLineBreaks } from "@goat/shared/markdownPipeline";
 import { MarkdownFindContext, useFindRevealRef } from "./markdownFindContext";
@@ -3219,6 +3220,14 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
   if (item.type === "subagent" && (row.subagents?.length ?? 1) > 1) {
     return <V2SubagentGroup key={row.id} row={row} />;
   }
+  if (item.type === "human_handoff")
+    return (
+      <HandoffCard
+        environmentId={ctx.activeThreadEnvironmentId}
+        handoff={item.handoff}
+        inherited={visibility !== "local"}
+      />
+    );
   if (item.type === "secret_request") {
     return (
       <SecretRequestCard

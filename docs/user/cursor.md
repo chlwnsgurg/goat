@@ -33,9 +33,9 @@ Cursor Cloud appears automatically in **Settings > Providers** and becomes avail
 sign in to Cursor. You can start sign-in from the Cursor Cloud card; it uses the Cursor account.
 Turn Cursor Cloud off with its toggle. To follow Cursor's enabled state again, reset the cloud
 card. For another account, add a custom Cursor Cloud instance and choose its Cursor source.
-On mobile, manage the account under **Settings > Provider accounts**. If this environment
-has a saved Cursor SDK browser sign-in, GOAT can use it when the selected provider has
-no usable saved key. That saved sign-in may belong to a different account.
+On mobile, manage the account under **Settings > Provider accounts**. Cursor Cloud uses only
+the selected Cursor provider's sign-in or its `CURSOR_API_KEY`; when that provider is signed
+out, Cursor Cloud is unavailable until you sign in again.
 
 Select Cursor Cloud for a repository with a pushed branch. The first message starts
 from the published revision; local edits and unpushed commits are not included.

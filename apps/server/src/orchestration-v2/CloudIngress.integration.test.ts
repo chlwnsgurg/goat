@@ -637,7 +637,6 @@ const makeCursorIngress = Effect.fnUntraced(function* (
     resume,
     getRun,
     cancelRun,
-    readLogin: Effect.succeed(undefined),
     checkAccess: () => Effect.void,
     readModels: () => Effect.succeed([]),
   });

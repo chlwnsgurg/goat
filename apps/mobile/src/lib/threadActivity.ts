@@ -350,7 +350,8 @@ export function isContextHandoffActivityGroup(entry: ThreadFeedActivityGroup): b
 export function isSecretRequestActivityGroup(entry: ThreadFeedActivityGroup): boolean {
   return (
     entry.activities.length === 1 &&
-    entry.activities[0]?.projectedItem.item.type === "secret_request"
+    (entry.activities[0]?.projectedItem.item.type === "secret_request" ||
+      entry.activities[0]?.projectedItem.item.type === "human_handoff")
   );
 }
 
@@ -455,7 +456,8 @@ function itemIsProminent(item: OrchestrationV2TurnItem): boolean {
     item.type === "thread_created" ||
     item.type === "system_notice" ||
     // An answerable card: it must stand alone and never fold away with the run.
-    item.type === "secret_request"
+    item.type === "secret_request" ||
+    item.type === "human_handoff"
   );
 }
 
@@ -576,6 +578,7 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     case "fork":
     case "thread_created":
       return "zap";
+    case "human_handoff":
     case "secret_request":
       return "lock";
   }
@@ -634,6 +637,8 @@ function itemSummary(
       return "Thread forked";
     case "thread_created":
       return "Thread created";
+    case "human_handoff":
+      return item.handoff.title;
     case "secret_request":
       return item.label;
     case "dynamic_tool": {
@@ -693,6 +698,8 @@ function itemPreview(item: OrchestrationV2TurnItem): string | null {
     case "fork":
     case "thread_created":
       return item.targetThreadId;
+    case "human_handoff":
+      return item.handoff.reason;
     case "secret_request":
       return item.reason || null;
     case "subagent":

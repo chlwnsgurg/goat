@@ -407,7 +407,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         ) : dividerVisible ? (
           <div
             aria-hidden
-            className="pointer-events-none fixed inset-x-0 top-[calc(var(--workspace-topbar-height)-1px)] z-30 h-px bg-sidebar-border"
+            className="pointer-events-none fixed inset-x-0 top-[calc(var(--workspace-topbar-height)-1px)] z-30 h-px bg-chrome-divider"
           />
         ) : null}
         <SidebarControl

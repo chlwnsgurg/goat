@@ -9,6 +9,7 @@
  * @module SecretRequests
  */
 import {
+  type HandoffActor,
   CommandId,
   SecretRef,
   SecretRequestError,
@@ -69,7 +70,10 @@ export class SecretRequests extends Context.Service<
      * Answers a pending request in a thread. Saving stores the value under a
      * new ref that the requesting tool reads from the request's status.
      */
-    readonly answer: (input: SecretRequestAnswerInput) => Effect.Effect<void, SecretRequestError>;
+    readonly answer: (
+      input: SecretRequestAnswerInput,
+      actor?: HandoffActor,
+    ) => Effect.Effect<void, SecretRequestError>;
     /** The ref minted when this request was saved, for the tool that asked. */
     readonly savedRef: (input: {
       readonly threadId: ThreadId;
@@ -95,7 +99,7 @@ const make = Effect.gen(function* () {
     yield* store.getOrCreateRandom("secret-request-salt", 32).pipe(Effect.orDie),
   ).toString("hex");
 
-  const answer: SecretRequests["Service"]["answer"] = (input) =>
+  const answer: SecretRequests["Service"]["answer"] = (input, actor) =>
     Effect.gen(function* () {
       yield* Effect.annotateCurrentSpan({
         "orchestration_v2.thread_id": input.threadId,
@@ -146,6 +150,7 @@ const make = Effect.gen(function* () {
       yield* threadManagement
         .dispatch({
           type: "secret_request.record",
+          ...(actor === undefined ? {} : { actor }),
           commandId: CommandId.make(`secret-request:${item.id}:${secretStatus}`),
           threadId: input.threadId,
           runId: item.runId,
