@@ -21,6 +21,21 @@ const descriptor = {
 } as const;
 
 describe("ExecutionEnvironmentDescriptor", () => {
+  it("keeps memory browsing extensions optional for older environments", () => {
+    for (const value of [undefined, false, true]) {
+      const memory = decodeDescriptor({
+        ...descriptor,
+        capabilities: {
+          memory: {
+            protocolVersion: 1,
+            ...(value === undefined ? {} : { resolutionInputs: value, retainedLocalSpace: value }),
+          },
+        },
+      }).capabilities.memory!;
+      expect(memory.resolutionInputs).toBe(value);
+      expect(memory.retainedLocalSpace).toBe(value);
+    }
+  });
   it("keeps legacy SSH signals absent and preserves explicit integers", () => {
     expect(decodeDescriptor(descriptor).sshRuntimeProtocolVersion).toBeUndefined();
     expect(

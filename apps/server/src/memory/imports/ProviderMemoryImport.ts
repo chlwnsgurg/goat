@@ -127,13 +127,8 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
     };
   };
   // Receipt status needs no source or public memory:read capability. The passed permit owns both grants.
-  const finish = (
-    action: "apply" | "status",
-    space: M.MemorySpaceId,
-    receipt: M.MemoryImportReceipt,
-    permit: Permit,
-  ) =>
-    ports.syncStatus({ memorySpaceId: space }, permit).pipe(
+  const finish = (action: "apply" | "status", receipt: M.MemoryImportReceipt, permit: Permit) =>
+    ports.syncStatus({}, permit).pipe(
       Effect.mapError(syncError),
       Effect.map((syncStatus) => ({ action, receipt, syncStatus })),
     );
@@ -148,7 +143,6 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
         if (input.action === "status")
           return yield* finish(
             "status",
-            input.memorySpaceId,
             yield* ports.readReceipt({ ...address, operationId: input.operationId }, permit),
             permit,
           );
@@ -346,7 +340,7 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
         const batchAddress = { ...address, operationId: input.operationId };
         const preflight = yield* ports.preflightBatch({ ...batchAddress, selectionDigest }, permit);
         if (preflight.kind === "completed")
-          return yield* finish("apply", input.memorySpaceId, preflight.receipt, permit);
+          return yield* finish("apply", preflight.receipt, permit);
         if (preflight.kind === "retired") return yield* new M.MemoryRpcError({ code: "not_found" });
         const readiness = yield* ports.readiness().pipe(Effect.mapError(syncError));
         if (readiness.memorySpaceId !== input.memorySpaceId || readiness.bootstrap !== "ready")
@@ -648,12 +642,7 @@ export const makeProviderMemoryImport: MakeProviderMemoryImport = (
           if (current.kind === "partial") batch = current.batch;
           r = yield* registration(input.memorySpaceId, input.sourceId, permit);
         }
-        return yield* finish(
-          "apply",
-          input.memorySpaceId,
-          yield* ports.readReceipt(batchAddress, permit),
-          permit,
-        );
+        return yield* finish("apply", yield* ports.readReceipt(batchAddress, permit), permit);
       }).pipe(
         Effect.mapError(importError),
         Effect.flatMap((output) =>

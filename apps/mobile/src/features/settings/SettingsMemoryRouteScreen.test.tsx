@@ -7,7 +7,7 @@ import {
   MemoryMutationReceipt,
   type MemoryForgetInput,
   MemorySourcePage,
-  type MemoryUpsertInput,
+  MemoryUpsertInput,
   MemoryHistoryPage,
   MemoryRevertResult,
   type MemoryRevertResolutionInput,
@@ -29,6 +29,7 @@ import { AsyncResult } from "effect/reactivity";
 import * as Schema from "effect/Schema";
 import { SettingsMemoryRouteScreen, MemoryEnvironmentEntry } from "./SettingsMemoryRouteScreen";
 
+const encodeUpsert = Schema.encodeSync(MemoryUpsertInput);
 let h: NativeMemoryHarness;
 let view: ReturnType<typeof renderNative>;
 afterEach(async () => {
@@ -36,8 +37,12 @@ afterEach(async () => {
   h?.dispose();
   vi.restoreAllMocks();
 });
-async function mount(scopes?: Parameters<NativeMemoryHarness["grant"]>[0]) {
+async function mount(
+  scopes?: Parameters<NativeMemoryHarness["grant"]>[0],
+  setup?: (harness: NativeMemoryHarness) => void,
+) {
   h = createNativeMemoryHarness();
+  setup?.(h);
   if (scopes) h.grant(scopes);
   await h.waitForAtom(h.memory.syncStatus.permissionAtom(nativeEnv), Boolean);
   view = renderNative(
@@ -384,7 +389,11 @@ describe("native Memory with shared factory", () => {
   });
   it("selects a retained original despite a local deadline warning and settles with the hub result", async () => {
     await mount();
-    h.responses.set(WS_METHODS.memoryHistory, revertHistory);
+    h.responses.set(WS_METHODS.memoryHistory, (input) => ({
+      ...revertHistory(),
+      revisions: "resolutionInputsFor" in (input as object) ? revertHistory().revisions : [],
+      nextCursor: "more",
+    }));
     h.responses.set(WS_METHODS.memoryRevertResolution, () => {
       throw new Error("Synthetic revert response lost");
     });
@@ -962,6 +971,212 @@ describe("native sharing workflow", () => {
   });
 });
 
+it("reopens native saved memories after sharing off and remount without an explicit space", async () => {
+  h = createNativeMemoryHarness();
+  h.grant(["memory:read", "memory:write", "settings:write"]);
+  await h.waitForAtom(h.memory.hubSettingsUpdate.permissionAtom(nativeEnv), Boolean);
+  const screen = <SettingsMemoryRouteScreen route={{ params: { environmentId: nativeEnv } }} />;
+  view = renderNative(h, screen);
+  await view.render();
+  h.responses.set(WS_METHODS.memoryHubSettingsUpdate, () => ({
+    view: { settings: { mode: "disabled" }, members: [], version: 2 },
+    credential: null,
+  }));
+  h.responses.set(WS_METHODS.memorySyncStatus, () => ({
+    ...nativeSyncStatus,
+    state: "disabled",
+    memorySpaceId: null,
+    retainedLocalSpaceId: nativeSpace,
+  }));
+  await view.click("Turn sharing off");
+  await view.click("Stop sharing");
+  await view.unmount();
+  view = renderNative(h, screen);
+  await view.render();
+  expect(view.container.textContent).toContain("Synthetic memory body");
+  expect(view.container.textContent).toContain(
+    "Saved memories stay. Turn on memory to save new memories.",
+  );
+  await view.click("Open memory: Synthetic memory body");
+  expect(view.container.textContent).toContain("Synthetic memory body");
+});
+
+it("uses the bound project for native list, search and creation, and resets on returning to user", async () => {
+  const scope = {
+    kind: "project",
+    projectKey: { kind: "explicit", sharedProjectId: "synthetic-shared" },
+  };
+  await mount(undefined, (harness) => {
+    harness.projects.push({
+      id: "synthetic-project",
+      title: "Synthetic project",
+      environmentId: nativeEnv,
+      repositoryIdentity: null,
+    });
+    harness.responses.set(WS_METHODS.memoryProjectBindingGet, () => ({
+      memorySpaceId: nativeSpace,
+      project: { environmentId: nativeEnv, projectId: "synthetic-project" },
+      projectKey: scope.projectKey,
+      repositoryKey: null,
+      version: 1,
+    }));
+    harness.responses.set(WS_METHODS.memoryUpsert, (input) => {
+      const request = input as MemoryUpsertInput;
+      return {
+        operationId: request.operationId,
+        memoryId: request.memoryId,
+        revisionId: "00000000-0000-4000-8000-000000000009",
+        outcome: "accepted",
+        pendingSync: false,
+      };
+    });
+  });
+  await view.click("Memory scope");
+  await view.click("Synthetic project");
+  expect(h.calls.findLast((call) => call.method === WS_METHODS.memoryList)).toMatchObject({
+    input: { scope },
+  });
+  await view.type("Search memory", "absent");
+  await view.click("Search");
+  expect(h.calls.findLast((call) => call.method === WS_METHODS.memorySearch)).toMatchObject({
+    input: { scope, mode: "fts" },
+  });
+  await view.click("Remember something");
+  expect(view.container.textContent).toContain("Save to: Synthetic project");
+  expect(view.container.textContent?.match(/Save to:/g)).toHaveLength(1);
+  await view.type("Memory text", "Synthetic project memory");
+  await view.click("Save memory");
+  const request = h.calls.findLast((call) => call.method === WS_METHODS.memoryUpsert)!
+    .input as MemoryUpsertInput;
+  expect(encodeUpsert(MemoryUpsertInput.make(request))).toMatchObject({
+    scope,
+    payload: { text: "Synthetic project memory" },
+  });
+  h.projects.splice(0);
+  await view.rerender(
+    <SettingsMemoryRouteScreen
+      route={{ params: { environmentId: nativeEnv, memorySpaceId: nativeSpace } }}
+    />,
+  );
+  expect(view.container.textContent).toContain("Selected project is no longer available");
+  expect(view.container.querySelector('[aria-label="Memory text"]')).toBeNull();
+  await view.click("Memory scope");
+  await view.click("User");
+  expect(view.container.textContent).toContain("Memory scope: User");
+  expect(view.container.querySelector('[aria-label="Memory text"]')).toBeNull();
+});
+
+it("retains native project selection while project options and the binding resolve", async () => {
+  const project = {
+    id: "synthetic-project",
+    title: "Synthetic project",
+    environmentId: nativeEnv,
+    repositoryIdentity: null,
+  };
+  await mount(undefined, (harness) => harness.projects.push(project));
+  const pending = h.deferred<unknown>();
+  h.responses.set(WS_METHODS.memoryProjectBindingGet, () => pending.response);
+  await view.click("Memory scope");
+  await view.click("Synthetic project");
+  await h.waitForCall(WS_METHODS.memoryProjectBindingGet);
+  h.projects.splice(0, 1, { ...project, title: "Resolved project" });
+  await view.rerender(
+    <SettingsMemoryRouteScreen
+      route={{ params: { environmentId: nativeEnv, memorySpaceId: nativeSpace } }}
+    />,
+  );
+  expect(view.container.textContent).toContain("Memory scope: Resolved project");
+  expect(view.container.textContent).toContain("Loading project memory scope");
+  expect(view.container.textContent).not.toContain("Remember something");
+  const scope = {
+    kind: "project",
+    projectKey: { kind: "explicit", sharedProjectId: "synthetic-shared" },
+  };
+  await act(async () => {
+    await pending.succeed({
+      memorySpaceId: nativeSpace,
+      project: { environmentId: nativeEnv, projectId: project.id },
+      projectKey: scope.projectKey,
+      repositoryKey: null,
+      version: 1,
+    });
+  });
+  expect(h.calls.findLast((call) => call.method === WS_METHODS.memoryList)).toMatchObject({
+    input: { scope },
+  });
+  await view.click("Remember something");
+  expect(view.container.textContent).toContain("Save to: Resolved project");
+  expect(view.container.textContent).not.toContain("Save to: User");
+});
+
+it("bounds native previews and explains incomplete indexed search results", async () => {
+  await mount(undefined, (harness) => {
+    const item = decodeItem({
+      ...nativeItem,
+      payload: {
+        ...(nativeItem.status === "active" ? nativeItem.payload : {}),
+        text: "x".repeat(120) + "hidden preview tail",
+      },
+    });
+    harness.responses.set(WS_METHODS.memoryList, () => ({
+      items: [item],
+      nextCursor: null,
+      projectionWatermark: 1,
+    }));
+    harness.responses.set(WS_METHODS.memorySearch, () => ({
+      items: [],
+      nextCursor: null,
+      projectionWatermark: 1,
+      indexCoverage: {
+        status: "partial",
+        eligibleItems: 2,
+        indexedItems: 1,
+        unindexedItems: 1,
+        projectionWatermark: 1,
+      },
+    }));
+  });
+  expect(view.container.textContent).toContain("x".repeat(120));
+  expect(view.container.textContent).not.toContain("hidden preview tail");
+  await view.type("Search memory", "pending");
+  await view.click("Search");
+  expect(view.container.textContent).toContain(
+    "Results are incomplete; memories may still be available",
+  );
+  expect(view.container.textContent).not.toContain("No memories yet");
+});
+
+it("keeps dozens of native projects behind one menu row", async () => {
+  await mount(undefined, (harness) => {
+    harness.projects.push(
+      ...Array.from({ length: 60 }, (_, index) => ({
+        id: `project-${index}`,
+        title: `Project ${index}`,
+        environmentId: nativeEnv,
+        repositoryIdentity: null,
+      })),
+    );
+    harness.responses.set(WS_METHODS.memoryProjectBindingGet, () => ({
+      memorySpaceId: nativeSpace,
+      project: { environmentId: nativeEnv, projectId: "project-59" },
+      projectKey: { kind: "explicit", sharedProjectId: "last-shared" },
+      repositoryKey: null,
+      version: 1,
+    }));
+  });
+  expect(view.container.textContent).not.toContain("Project 59");
+  expect(view.container.querySelectorAll('button[aria-label="Memory scope"]')).toHaveLength(1);
+  await view.click("Memory scope");
+  await view.click("Project 59");
+  expect(view.container.textContent).toContain("Memory scope: Project 59");
+  expect(view.container.textContent).not.toContain("Project 58");
+  expect(h.calls.findLast((call) => call.method === WS_METHODS.memoryList)).toMatchObject({
+    input: {
+      scope: { kind: "project", projectKey: { kind: "explicit", sharedProjectId: "last-shared" } },
+    },
+  });
+});
+
 describe("native WP6 Settings commands", () => {
   const importCalls = () =>
     h.calls.filter((call) => call.method === WS_METHODS.memoryImportProvider);
@@ -1376,7 +1591,7 @@ describe("native WP6 Settings commands", () => {
       projectionWatermark: 1,
     }));
     await show();
-    expect(view.container.textContent).toContain("No matching memories on this page.");
+    expect(view.container.textContent).toContain("No memories yet.");
     expect(view.container.textContent).not.toContain("Results are incomplete");
     expect(h.calls.some((call) => call.method === WS_METHODS.memoryList)).toBe(true);
   });
@@ -1407,7 +1622,7 @@ describe("native WP6 Settings commands", () => {
       expect(view.container.textContent).toContain(
         status === "available" ? "No memories found" : "Results are incomplete",
       );
-      expect(view.container.textContent).not.toContain("No matching memories on this page.");
+      expect(view.container.textContent).not.toContain("No memories yet.");
       if (status === "available") {
         expect(view.container.textContent).not.toContain("Results are incomplete");
       }
@@ -1896,7 +2111,7 @@ describe("native WP6 Settings commands", () => {
     expect(view.container.textContent).not.toContain("private-shared-key");
   });
   it.each(["user", "project", "thread"] as const)(
-    "sends the chosen %s scope through the real new-memory command without filtering the browser",
+    "uses the chosen %s scope for browsing and the real new-memory command",
     async (kind) => {
       setupImport();
       const project = { environmentId: nativeEnv, projectId: "synthetic-project" as never };
@@ -1912,11 +2127,31 @@ describe("native WP6 Settings commands", () => {
       h.responses.set(WS_METHODS.memoryUpsert, () =>
         Effect.fail(new Error("synthetic request refused")),
       );
+      if (kind === "project") {
+        h.projects.push({
+          id: "synthetic-project",
+          title: "Synthetic project",
+          environmentId: nativeEnv,
+        });
+      }
       await show({ environmentId: nativeEnv, project, thread });
       expect(
         h.calls.findLast((call) => call.method === WS_METHODS.memoryList)?.input,
-      ).not.toHaveProperty("scope");
-      if (kind !== "user") await view.click(`Scope: ${kind}`);
+      ).toMatchObject({ scope: { kind: "user" } });
+      await view.click("Memory scope");
+      await view.click(
+        kind === "user" ? "User" : kind === "project" ? "Synthetic project" : "Thread",
+      );
+      expect(
+        h.calls.findLast((call) => call.method === WS_METHODS.memoryList)?.input,
+      ).toMatchObject({
+        scope:
+          kind === "user"
+            ? { kind }
+            : kind === "project"
+              ? { kind, projectKey }
+              : { kind, thread, projectKey },
+      });
       await view.click("Remember something");
       await view.type("Memory text", "Synthetic scoped memory");
       await view.click("Save memory");
@@ -1993,3 +2228,29 @@ it.each([
     ).toHaveLength(0);
   },
 );
+
+it.each([false, true])("keeps native legacy revert with incomplete page=%s", async (incomplete) => {
+  await mount(undefined, (harness) => {
+    Object.assign(
+      harness.registry.get(harness.configs(nativeEnv))!.environment.capabilities.memory!,
+      { resolutionInputs: false },
+    );
+    harness.responses.set(WS_METHODS.memoryHistory, (input) => {
+      expect(input).not.toHaveProperty("resolutionInputsFor");
+      return { ...revertHistory(), nextCursor: incomplete ? "more" : null };
+    });
+  });
+  await view.click("Open memory: Synthetic memory body");
+  if (incomplete) {
+    expect(view.container.textContent).toContain("Load complete history before reverting");
+    expect(view.container.textContent).not.toContain("Restore original 1");
+  } else {
+    await view.click("Restore original 1");
+    await view.click("Revert resolution");
+    expect(h.calls.find((call) => call.method === WS_METHODS.memoryRevertResolution)).toMatchObject(
+      {
+        input: { restoredRevisionId: originalId },
+      },
+    );
+  }
+});

@@ -229,6 +229,18 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
           }),
       ),
     );
+    if (tag === WS_METHODS.memorySyncStatus) {
+      // Only an opted-in response may add fields unknown to a strict legacy decoder.
+      const { includeRetainedLocalSpaceId: _hint, ...legacyInput } = input as {
+        readonly includeRetainedLocalSpaceId?: true;
+      };
+      dispatchInput = {
+        ...legacyInput,
+        ...(config.environment.capabilities.memory?.retainedLocalSpace === true
+          ? { includeRetainedLocalSpaceId: true as const }
+          : {}),
+      } as EnvironmentRpcInput<TTag>;
+    }
     if (tag === WS_METHODS.memoryHistory) {
       dispatchInput = memoryHistoryDispatchInput(
         input as MemoryHistoryInput,
@@ -237,6 +249,9 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
     }
     if (
       !supportsMemoryProtocol(config.environment.capabilities) ||
+      (tag === WS_METHODS.memoryHistory &&
+        (input as MemoryHistoryInput).resolutionInputsFor !== undefined &&
+        config.environment.capabilities.memory?.resolutionInputs !== true) ||
       ((tag === WS_METHODS.memoryHubDiagnostics || tag === WS_METHODS.memoryHubReconcile) &&
         config.environment.capabilities.memory?.hubDiagnostics !== true) ||
       (tag === WS_METHODS.memoryImportProvider &&

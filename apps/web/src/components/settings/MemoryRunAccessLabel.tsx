@@ -25,7 +25,7 @@ export function MemoryRunAccessLabel(props: {
   });
   return (
     <span className="text-xs text-muted-foreground">
-      Saved limit: {accessLabels[view.savedCeiling]}
+      {view.savedCeilingLabel}
       {view.effectiveAccess !== "unknown" ? (
         <>
           {" "}

@@ -1,4 +1,5 @@
 import type { SearchMiddleware } from "@tanstack/react-router";
+import type { EnvironmentId } from "@goat/contracts";
 
 import { validateSettingsScopeSearch, type SettingsScopeSearch } from "./settingsScope";
 
@@ -30,3 +31,16 @@ export const retainSettingsScope: SearchMiddleware<SettingsScopeSearch> = ({ sea
   );
   return { ...previousScope, ...result };
 };
+
+/** Memory owns its record/space lifetime; URL cleanup must not reset its scope picker. */
+export function settingsContentScopeKey(
+  pathname: string,
+  search: SettingsScopeSearch,
+  environmentId: EnvironmentId | undefined,
+) {
+  return pathname === "/settings/diagnostics" ||
+    pathname === "/settings/providers" ||
+    pathname === "/settings/memory"
+    ? environmentId
+    : JSON.stringify(search);
+}

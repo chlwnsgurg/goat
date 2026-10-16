@@ -1822,6 +1822,15 @@ const make = Effect.fnUntraced(function* (
         const current = yield* store.readAccess(value.memorySpaceId, value.memoryId);
         if (!current.item) return yield* new Store.MemoryStoreConflict({ code: "not_found" });
         if (current.identity) yield* requireScope(current.identity.scope);
+        if (value.resolutionInputsFor !== undefined) {
+          const result = yield* store.readResolutionInputsPage({
+            ...value,
+            resolutionInputsFor: value.resolutionInputsFor,
+          });
+          yield* permit;
+          yield* consume(value.memorySpaceId, sourceThread, result.page.revisions);
+          return result.page;
+        }
         const { page, consumed } = yield* store.historyPage(value, current.item, environmentId);
         yield* permit;
         yield* consume(value.memorySpaceId, sourceThread, consumed);

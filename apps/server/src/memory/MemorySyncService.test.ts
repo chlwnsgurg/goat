@@ -37,7 +37,9 @@ import * as Generation from "../textGeneration/TextGeneration.ts";
 import * as Secrets from "../auth/ServerSecretStore.ts";
 import * as Events from "../orchestration-v2/EventSink.ts";
 import * as RuntimeIdentity from "../runtimeIdentity.ts";
+import { runMigrations } from "../persistence/Migrations.ts";
 import migration from "../persistence/Migrations/071_Memory.ts";
+import lastReadyMigration from "../persistence/Migrations/081_MemoryLastReadySpace.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
@@ -84,6 +86,7 @@ const setup = Layer.effectDiscard(
     yield* reportMigration;
     yield* usageMigration;
     yield* revertMigration;
+    yield* lastReadyMigration;
     const sql = yield* SqlClient.SqlClient;
     yield* sql`CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY,event_id TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT,occurred_at TEXT,application_event_version INTEGER,aggregate_kind TEXT)`;
     yield* sql`CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT PRIMARY KEY,deleted_at TEXT)`;
@@ -91,7 +94,7 @@ const setup = Layer.effectDiscard(
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storage = Store.layer.pipe(Layer.provideMerge(setup));
 const quota = Quota.layer.pipe(Layer.provideMerge(storage));
-const coreFor = (environmentIdentity = identity) =>
+const coreFor = (environmentIdentity = identity, quotaLayer = quota) =>
   Service.layer.pipe(
     Layer.provide(
       Layer.succeed(Settings.MemoryHubCommittedSettings, {
@@ -101,7 +104,7 @@ const coreFor = (environmentIdentity = identity) =>
         }),
       }),
     ),
-    Layer.provideMerge(quota),
+    Layer.provideMerge(quotaLayer),
     Layer.provide(environmentIdentity),
     Layer.provide(
       Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
@@ -304,6 +307,7 @@ const fixture = (
   disabled = false,
   changing = false,
   environmentId = local,
+  quotaLayer = quota,
 ) => {
   const environmentIdentity =
     environmentId === local
@@ -311,7 +315,10 @@ const fixture = (
       : Layer.succeed(Environment.ServerEnvironmentIdentity, {
           getEnvironmentId: Effect.succeed(environmentId),
         });
-  const serviceCore = environmentId === local ? core : coreFor(environmentIdentity);
+  const serviceCore =
+    environmentId === local && quotaLayer === quota
+      ? core
+      : coreFor(environmentIdentity, quotaLayer);
   const sharedSettings = changing
     ? changingSettings(disabled)
     : Settings.layerTest(
@@ -966,50 +973,55 @@ it.effect(
     }),
 );
 
+const checkpointPeer = (overrides: Partial<Client.MemoryHubClient["Service"]> = {}) =>
+  peer({
+    join: () =>
+      Effect.succeed({
+        protocolVersion: 1,
+        memorySpaceId: space,
+        hubEnvironmentId: remote,
+        checkpointSequence: 0,
+        retentionFloor: 0,
+        snapshotToken: "fixture-token",
+        causalBoundary: { checkpointSequence: 0, boundaryId: "fixture-boundary" },
+      }),
+    pull: (_c, input) =>
+      Effect.succeed(
+        input.snapshotToken
+          ? {
+              highWatermark: 0,
+              throughSequence: 0,
+              hasMore: false,
+              entries: [],
+              checkpoint: {
+                memorySpaceId: space,
+                checkpointSequence: 0,
+                retentionFloor: 0,
+                causalBoundary: { checkpointSequence: 0, boundaryId: "fixture-boundary" },
+                pageOrdinal: 0,
+                items: [],
+                revisions: [],
+                tombstones: [],
+                conflicts: [],
+                resolutions: [],
+                compactReceipts: [],
+                identities: [],
+                fences: [],
+                suppressions: [],
+                importLineage: [],
+                nextCursor: null,
+                bootstrapComplete: true,
+              },
+            }
+          : { highWatermark: 0, throughSequence: 0, hasMore: false, entries: [] },
+      ),
+    ...overrides,
+  });
+
 it.effect("member checkpoint completes before pushing and supplies local replica identity", () =>
   Effect.gen(function* () {
     let pushed = 0;
-    const client = peer({
-      join: () =>
-        Effect.succeed({
-          protocolVersion: 1,
-          memorySpaceId: space,
-          hubEnvironmentId: remote,
-          checkpointSequence: 0,
-          retentionFloor: 0,
-          snapshotToken: "fixture-token",
-          causalBoundary: { checkpointSequence: 0, boundaryId: "fixture-boundary" },
-        }),
-      pull: (_c, input) =>
-        Effect.succeed(
-          input.snapshotToken
-            ? {
-                highWatermark: 0,
-                throughSequence: 0,
-                hasMore: false,
-                entries: [],
-                checkpoint: {
-                  memorySpaceId: space,
-                  checkpointSequence: 0,
-                  retentionFloor: 0,
-                  causalBoundary: { checkpointSequence: 0, boundaryId: "fixture-boundary" },
-                  pageOrdinal: 0,
-                  items: [],
-                  revisions: [],
-                  tombstones: [],
-                  conflicts: [],
-                  resolutions: [],
-                  compactReceipts: [],
-                  identities: [],
-                  fences: [],
-                  suppressions: [],
-                  importLineage: [],
-                  nextCursor: null,
-                  bootstrapComplete: true,
-                },
-              }
-            : { highWatermark: 0, throughSequence: 0, hasMore: false, entries: [] },
-        ),
+    const client = checkpointPeer({
       push: () =>
         Effect.sync(() => {
           pushed++;
@@ -2058,6 +2070,284 @@ const statusRuntime = Effect.gen(function* () {
   });
 });
 
+it.effect.each([
+  "single",
+  "multiple",
+  "no-sync-time",
+  "empty-newer-sync",
+  "memory-activity",
+  "tied-memory-activity",
+] as const)(
+  "081 upgrade recovers a retained ready space with sharing already disabled: %s",
+  (candidates) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "memory-081-upgrade-" });
+        const filename = `${directory}/state.sqlite`;
+        const database = (through: number) =>
+          Quota.layer.pipe(
+            Layer.provideMerge(
+              Store.layer.pipe(
+                Layer.provideMerge(
+                  Layer.effectDiscard(
+                    runMigrations({ toMigrationInclusive: through }).pipe(Effect.orDie),
+                  ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename }))),
+                ),
+              ),
+            ),
+          );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const settings = yield* Settings.ServerSettingsService;
+            assert.deepStrictEqual((yield* settings.getSettings).memoryHub, { mode: "disabled" });
+            yield* ready;
+            yield* commit(operation(98010));
+            if (candidates !== "single") {
+              // Later empty cursors must not hide a space with retained memories.
+              yield* sql`UPDATE memory_sync_cursors SET last_success_at=200 WHERE space=${space}`;
+              yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state,last_success_at) VALUES (${id(999)},${remote},0,'ready',100),(${id(998)},${remote},0,'staging',300)`;
+              if (candidates === "empty-newer-sync")
+                yield* sql`UPDATE memory_sync_cursors SET last_success_at=300 WHERE space=${id(999)}`;
+              if (
+                candidates === "multiple" ||
+                candidates === "memory-activity" ||
+                candidates === "tied-memory-activity"
+              ) {
+                const other = operation(98011);
+                if (other.kind !== "upsert") throw new Error("fixture");
+                const otherSpace = M.MemorySpaceId.make(id(999));
+                yield* commit({
+                  ...other,
+                  memorySpaceId: otherSpace,
+                  revision: { ...other.revision, memorySpaceId: otherSpace },
+                });
+              }
+              if (candidates === "memory-activity")
+                yield* sql`UPDATE memory_revisions SET created_at=300 WHERE space=${space}`;
+              if (
+                candidates === "no-sync-time" ||
+                candidates === "memory-activity" ||
+                candidates === "tied-memory-activity"
+              )
+                yield* sql`UPDATE memory_sync_cursors SET last_success_at=NULL`;
+            }
+            assert.isEmpty(
+              yield* sql`SELECT name FROM sqlite_master WHERE name='memory_last_ready_space'`,
+            );
+            assert.deepStrictEqual(yield* runMigrations(), [[81, "MemoryLastReadySpace"]]);
+            const adapter = yield* statusRuntime;
+            const result = yield* Effect.scoped(
+              Effect.gen(function* () {
+                const sync = yield* Sync.MemorySyncService;
+                return yield* sync.syncStatus({ includeRetainedLocalSpaceId: true }, Effect.void);
+              }).pipe(
+                Effect.provide(
+                  Layer.fresh(Sync.layer).pipe(
+                    Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, adapter)),
+                  ),
+                ),
+              ),
+            );
+            assert.strictEqual(result.state, "disabled");
+            assert.strictEqual(result.retainedLocalSpaceId, space);
+          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(80)))),
+        );
+        // Close the SQLite connection and rebuild the service, preserving only the upgraded file.
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            assert.deepStrictEqual(yield* runMigrations(), []);
+            const expected = space;
+            assert.deepStrictEqual(yield* sql`SELECT space FROM memory_last_ready_space`, [
+              { space: expected },
+            ]);
+            // Recovery must be one-time: later legacy sync evidence cannot change the saved destination.
+            yield* sql`UPDATE memory_sync_cursors SET last_success_at=999 WHERE space!=${expected}`;
+            const adapter = yield* statusRuntime;
+            const result = yield* Effect.scoped(
+              Effect.gen(function* () {
+                const sync = yield* Sync.MemorySyncService;
+                return yield* sync.syncStatus({ includeRetainedLocalSpaceId: true }, Effect.void);
+              }).pipe(
+                Effect.provide(
+                  Layer.fresh(Sync.layer).pipe(
+                    Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, adapter)),
+                  ),
+                ),
+              ),
+            );
+            assert.strictEqual(result.retainedLocalSpaceId, expected);
+            const service = yield* Service.MemoryService;
+            const listed = yield* service.list(
+              {
+                memorySpaceId: result.retainedLocalSpaceId!,
+                scope: { kind: "user" },
+                limit: 20,
+                includeQuarantined: false,
+              },
+              Effect.void,
+            );
+            assert.lengthOf(listed.items, 1);
+            const item = listed.items[0];
+            if (item?.status !== "active") throw new Error("retained memory missing");
+            assert.strictEqual(item.payload.text, "synthetic fact 98010");
+          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(81)))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+    ),
+);
+
+it.effect.each(["unbound", "staging"] as const)(
+  "repeated retained status reads without ready candidates do not transact: %s",
+  (bootstrap) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        if (bootstrap === "staging")
+          yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES (${space},${remote},0,'staging')`;
+        const store = yield* Store.MemoryStore;
+        const adapter = yield* statusRuntime;
+        let transactions = 0;
+        const observed = Store.MemoryStore.of({
+          ...store,
+          transact: (effect, options) =>
+            Effect.suspend(() => {
+              transactions++;
+              return store.transact(effect, options);
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const sync = yield* Sync.MemorySyncService;
+            for (let i = 0; i < 3; i++) {
+              const result = yield* sync.syncStatus(
+                { includeRetainedLocalSpaceId: true },
+                Effect.void,
+              );
+              assert.strictEqual(result.retainedLocalSpaceId, null);
+            }
+            assert.strictEqual(transactions, 0);
+            // A later ready candidate must still be recoverable after the read-only misses.
+            yield* sql`DELETE FROM memory_sync_cursors`;
+            yield* ready;
+            const recovered = yield* sync.syncStatus(
+              { includeRetainedLocalSpaceId: true },
+              Effect.void,
+            );
+            assert.strictEqual(recovered.retainedLocalSpaceId, space);
+            assert.strictEqual(transactions, 1);
+          }).pipe(
+            Effect.provide(
+              Layer.fresh(Sync.layer).pipe(
+                Layer.provide(Layer.succeed(Store.MemoryStore, observed)),
+                Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, adapter)),
+              ),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(fixture(peer(), undefined, true))),
+    ),
+);
+
+it.effect(
+  "checkpoint completion retains its space atomically before immediate disable and restart",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const store = yield* Store.MemoryStore;
+        const adapter = yield* statusRuntime;
+        const previous = id(999);
+        yield* sql`INSERT INTO memory_last_ready_space(singleton,space) VALUES (1,${previous})`;
+        let disabled = false;
+        const boundary = Store.MemoryStore.of({
+          ...store,
+          transact: (effect, options) =>
+            store.transact(effect, options).pipe(
+              Effect.tap(() =>
+                Effect.gen(function* () {
+                  if (disabled) return;
+                  const state = yield* store.readBootstrap({
+                    memorySpaceId: space,
+                    hubEnvironmentId: remote,
+                  });
+                  if (state.state !== "ready") return;
+                  disabled = true;
+                  // First instruction after the completion transaction commits; no status read.
+                  yield* changeHub(1, { mode: "disabled" }).pipe(Effect.orDie);
+                }),
+              ),
+            ),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const sync = yield* Sync.MemorySyncService;
+            yield* sync.syncOnce.pipe(Effect.ignore);
+            assert.isTrue(disabled);
+          }).pipe(
+            Effect.provide(
+              Layer.fresh(Sync.layer).pipe(
+                Layer.provide(Layer.succeed(Store.MemoryStore, boundary)),
+              ),
+            ),
+          ),
+        );
+        assert.deepStrictEqual(yield* sql`SELECT space FROM memory_last_ready_space`, [{ space }]);
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const sync = yield* Sync.MemorySyncService;
+            const result = yield* sync.syncStatus(
+              { includeRetainedLocalSpaceId: true },
+              Effect.void,
+            );
+            assert.strictEqual(result.state, "disabled");
+            assert.strictEqual(result.retainedLocalSpaceId, space);
+          }).pipe(
+            Effect.provide(
+              Layer.fresh(Sync.layer).pipe(
+                Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, adapter)),
+              ),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(fixture(checkpointPeer()))),
+    ),
+);
+
+it.effect(
+  "failed retained-space write rolls checkpoint readiness back with its browsing destination",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const sync = yield* Sync.MemorySyncService;
+        const store = yield* Store.MemoryStore;
+        const previous = id(999);
+        yield* sql`INSERT INTO memory_last_ready_space(singleton,space) VALUES (1,${previous})`;
+        yield* sql`CREATE TEMP TRIGGER reject_retained_space BEFORE UPDATE ON memory_last_ready_space BEGIN SELECT RAISE(ABORT,'synthetic retained-space failure'); END`;
+        yield* sync.syncOnce.pipe(Effect.ignore);
+        assert.strictEqual(
+          (yield* store.readBootstrap({ memorySpaceId: space, hubEnvironmentId: remote })).state,
+          "staging",
+        );
+        assert.deepStrictEqual(yield* sql`SELECT space FROM memory_last_ready_space`, [
+          { space: previous },
+        ]);
+        assert.isEmpty(yield* sql`SELECT space FROM memory_compaction_state WHERE published=1`);
+        yield* sql`DROP TRIGGER reject_retained_space`;
+        yield* TestClock.adjust(1000);
+        yield* sync.syncOnce;
+        assert.strictEqual(
+          (yield* store.readBootstrap({ memorySpaceId: space, hubEnvironmentId: remote })).state,
+          "ready",
+        );
+        assert.deepStrictEqual(yield* sql`SELECT space FROM memory_last_ready_space`, [{ space }]);
+      }).pipe(Effect.provide(fixture(checkpointPeer()))),
+    ),
+);
+
 it.effect("status selects disabled and bootstrapping without requiring a bound route", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -2066,8 +2356,11 @@ it.effect("status selects disabled and bootstrapping without requiring a bound r
         Effect.gen(function* () {
           const sync = yield* Sync.MemorySyncService;
           const status = () =>
-            sync.syncStatus({}, Effect.void).pipe(Effect.tap((s) => decodeStatus(s)));
+            sync
+              .syncStatus({ includeRetainedLocalSpaceId: true }, Effect.void)
+              .pipe(Effect.tap((s) => decodeStatus(s)));
           assert.strictEqual((yield* status()).state, "disabled");
+          assert.isNull((yield* status()).retainedLocalSpaceId);
           assert.strictEqual((yield* sync.hubDiagnostics({}, Effect.void)).readiness, "disabled");
           yield* changeHub(1, { ...member, memorySpaceId: null });
           const unbound = yield* status();
@@ -2080,9 +2373,30 @@ it.effect("status selects disabled and bootstrapping without requiring a bound r
           yield* sync.syncOnce;
           assert.strictEqual((yield* status()).state, "online");
           assert.strictEqual((yield* status()).lastSuccessfulSyncAtUtc, timestamp);
-          yield* changeHub(3, { mode: "disabled" });
+          const latestSpace = M.MemorySpaceId.make(id(999));
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES (${latestSpace},${remote},0,'ready')`;
+          yield* changeHub(3, { ...member, memorySpaceId: latestSpace });
+          assert.strictEqual((yield* status()).retainedLocalSpaceId, latestSpace);
+          yield* changeHub(4, { mode: "disabled" });
           const disabled = yield* status();
           assert.strictEqual(disabled.state, "disabled");
+          assert.isNull(disabled.memorySpaceId);
+          assert.strictEqual(disabled.retainedLocalSpaceId, latestSpace);
+          const restarted = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const fresh = yield* Sync.MemorySyncService;
+              return yield* fresh.syncStatus({ includeRetainedLocalSpaceId: true }, Effect.void);
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, adapter)),
+                ),
+              ),
+            ),
+          );
+          assert.strictEqual(restarted.state, "disabled");
+          assert.strictEqual(restarted.retainedLocalSpaceId, latestSpace);
           assert.strictEqual(disabled.lastSuccessfulSyncAtUtc, null);
           assert.strictEqual(disabled.failureCode, undefined);
         }).pipe(

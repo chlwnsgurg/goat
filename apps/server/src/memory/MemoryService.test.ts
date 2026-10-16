@@ -87,6 +87,11 @@ const input = (n = 3): M.MemoryUpsertInput => ({
 });
 const decodeRpcError = Schema.decodeUnknownEffect(M.MemoryRpcError);
 const encodeRpcError = Schema.encodeEffect(M.MemoryRpcError);
+const encodeHistoryPageJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryHistoryPage));
+const encodeAvailabilityJson = Schema.encodeEffect(
+  Schema.fromJsonString(M.MemoryLocalAvailability),
+);
+const encodePayloadJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryPayload));
 const encodeItemJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryItem));
 const encodeResolution = Schema.encodeEffect(Schema.fromJsonString(M.MemoryResolution));
 const encodeSelectionJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryModelSelection));
@@ -2838,6 +2843,226 @@ for (const mutation of ["forget", "hold", "replace"] as const) {
   );
 }
 
+const seedPagedResolution = Effect.gen(function* () {
+  const service = yield* Service.MemoryService;
+  const sql = yield* SqlClient.SqlClient;
+  const revisions: M.MemoryRevisionId[] = [];
+  for (let n = 0; n < 42; n++) {
+    const saved = yield* service.upsert(
+      {
+        ...input(1000 + n),
+        expectedHeads: revisions.slice(-1),
+        payload: { ...input().payload, text: `Synthetic version ${n + 1}` },
+      },
+      Effect.void,
+    );
+    if (!("revisionId" in saved.receipt) || !saved.receipt.revisionId)
+      throw new Error("fixture revision missing");
+    revisions.push(saved.receipt.revisionId);
+  }
+  const resolutionId = M.MemoryResolutionId.make(id(2000));
+  const inputs = revisions.slice(0, 2).sort();
+  const selection: M.MemoryModelSelection = {
+    instanceId: M.ProviderInstanceId.make("fixture"),
+    model: "fixture",
+  };
+  const resolution: M.MemoryResolution = {
+    resolutionId,
+    memorySpaceId: space,
+    memoryId,
+    inputRevisionIds: inputs,
+    inputPayloadRefs: inputs,
+    judgmentRef: resolutionId,
+    requestedModelSelection: selection,
+    effectiveProvider: M.ProviderDriverKind.make("codex"),
+    effectiveModel: "fixture",
+    resolvingEnvironmentId: environmentId,
+    fencingToken: 1,
+    resultRevisionId: revisions.at(-1)!,
+    appliedAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+    revertDeadlineUtc: M.MemoryUtcTimestamp.make("2026-11-13T00:00:00.000Z"),
+  };
+  yield* sql`INSERT INTO memory_resolutions(space,resolution_id,memory_id,input_revision_ids_json,input_payload_refs_json,judgment_payload_ref,requested_model_selection_json,effective_provider_model_json,resolving_environment_id,fencing_token,result_revision_id,applied_at,revert_deadline,resolution_json)
+    VALUES (${space},${resolutionId},${memoryId},${yield* encodeRevisionIds(inputs)},${yield* encodeRevisionIds(inputs)},${resolutionId},${yield* encodeSelectionJson(selection)},'{}',${environmentId},1,${resolution.resultRevisionId},${Date.parse(resolution.appliedAtUtc)},${Date.parse(resolution.revertDeadlineUtc)},${yield* encodeResolution(resolution)})`;
+  return { resolution, revisions };
+});
+
+it.effect(
+  "reads a resolution's original inputs independently of forty-plus history revisions",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const { resolution, revisions } = yield* seedPagedResolution;
+      const sql = yield* SqlClient.SqlClient;
+      const ordinary = yield* service.history(
+        { memorySpaceId: space, memoryId, limit: 40, cursor: "h1:1:0" },
+        Effect.void,
+      );
+      assert.isTrue(
+        ordinary.resolutions.some((r) => r.resolution.resolutionId === resolution.resolutionId),
+      );
+      assert.isFalse(
+        ordinary.revisions.some((r) => resolution.inputRevisionIds.includes(r.revision.revisionId)),
+      );
+      // Unrelated historical bodies/metadata must not be decoded by this bounded selection.
+      const [original] = yield* sql<{
+        provenance_json: string;
+      }>`SELECT provenance_json FROM memory_revisions WHERE space=${space} AND revision_id=${revisions[5]!}`;
+      yield* sql`UPDATE memory_revisions SET provenance_json='invalid fixture metadata' WHERE space=${space} AND revision_id=${revisions[5]!}`;
+      const request = {
+        memorySpaceId: space,
+        memoryId,
+        resolutionInputsFor: resolution.resolutionId,
+        limit: 1,
+      };
+      // Probe the bounded store read before transaction accounting scans revision metadata.
+      const storage = yield* Store.MemoryStore;
+      const probe = yield* storage.readResolutionInputsPage(request);
+      assert.strictEqual(probe.page.revisions.length, 1);
+      yield* sql`UPDATE memory_revisions SET provenance_json=${original!.provenance_json} WHERE space=${space} AND revision_id=${revisions[5]!}`;
+      const first = yield* service.history(request, Effect.void);
+      assert.strictEqual(first.revisions.length, 1);
+      assert.isNotNull(first.revisions[0]!.payload);
+      assert.isNotNull(first.nextCursor);
+      assert.deepStrictEqual(first.restorableRevisionIds, [
+        first.revisions[0]!.revision.revisionId,
+      ]);
+      const second = yield* service.history({ ...request, cursor: first.nextCursor! }, Effect.void);
+      assert.deepStrictEqual(
+        [...first.revisions, ...second.revisions].map((p) => p.revision.revisionId),
+        resolution.inputRevisionIds,
+      );
+      assert.isTrue(second.revisions.every((p) => p.payload !== null));
+      assert.isNull(second.nextCursor);
+      assert.deepStrictEqual(first.resolutions, []);
+      assert.strictEqual(
+        (yield* service.history(request, denied).pipe(Effect.flip))._tag,
+        "MemoryAccessError",
+      );
+      yield* service.upsert({ ...input(4000), memoryId: M.MemoryId.make(id(9999)) }, Effect.void);
+      let checks = 0;
+      const revoked = Effect.suspend(() => (++checks === 1 ? Effect.void : denied));
+      assert.strictEqual(
+        (yield* service.history(request, revoked).pipe(Effect.flip))._tag,
+        "MemoryAccessError",
+      );
+      const foreign = yield* service
+        .history({ ...request, memoryId: M.MemoryId.make(id(9999)) }, Effect.void)
+        .pipe(Effect.flip);
+      assert.isTrue("code" in foreign && foreign.code === "not_found");
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect.each(["quarantined", "secret_detected", "forgotten"] as const)(
+  "does not expose resolution originals when the memory is %s",
+  (state) =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const sql = yield* SqlClient.SqlClient;
+      const { resolution } = yield* seedPagedResolution;
+      if (state === "forgotten") {
+        yield* service.forget(
+          {
+            memorySpaceId: space,
+            memoryId,
+            operationId: M.MemoryOperationId.make(id(3000)),
+            expectedHeads: [],
+          },
+          Effect.void,
+        );
+      } else {
+        const availability: M.MemoryLocalAvailability = {
+          exposure: "held",
+          reasons: [state === "secret_detected" ? "secret_detected" : "conflicted"],
+          deferred: [],
+          cleanupPending: false,
+        };
+        const held: M.MemoryItem =
+          state === "secret_detected"
+            ? {
+                memorySpaceId: space,
+                memoryId,
+                status: "blocked",
+                scope: { kind: "user" },
+                pendingSync: false,
+                failureCode: "secret_detected",
+                localAvailability: availability,
+              }
+            : {
+                memorySpaceId: space,
+                memoryId,
+                status: "quarantined",
+                scope: { kind: "user" },
+                pendingSync: false,
+                localAvailability: availability,
+                conflict: {
+                  memorySpaceId: space,
+                  memoryId,
+                  conflictId: M.MemoryConflictId.make(id(3001)),
+                  heads: [...resolution.inputRevisionIds].sort(),
+                  status: "quarantined",
+                },
+              };
+        const json = yield* encodeItemJson(held);
+        yield* sql`UPDATE memory_items SET status=${held.status},item_json=${json},availability_json=${yield* encodeAvailabilityJson(held.localAvailability)} WHERE space=${space} AND memory_id=${memoryId}`;
+      }
+      const page = yield* service.history(
+        { memorySpaceId: space, memoryId, resolutionInputsFor: resolution.resolutionId, limit: 20 },
+        Effect.void,
+      );
+      assert.isTrue(page.revisions.every((p) => p.payload === null));
+      assert.notStrictEqual(page.localAvailability.exposure, "visible");
+      assert.deepStrictEqual(page.restorableRevisionIds, []);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "keeps a large retained input restorable without exceeding the history response byte limit",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const sql = yield* SqlClient.SqlClient;
+      const { resolution } = yield* seedPagedResolution;
+      const original = resolution.inputRevisionIds[0]!;
+      const sample: M.MemoryPayload = {
+        text: "x",
+        evidence: [
+          {
+            origin: "user",
+            messageIds: Array.from({ length: 99 }, (_, n) =>
+              M.MessageId.make(`synthetic-${n}-${"x".repeat(590)}`),
+            ),
+          },
+        ],
+        derivedFromMemoryRevisions: [],
+      };
+      const overhead = new TextEncoder().encode(yield* encodePayloadJson(sample)).length - 1;
+      const body = yield* encodePayloadJson({
+        ...sample,
+        text: "x".repeat(M.MEMORY_PAYLOAD_MAX_UTF8_BYTES - overhead),
+      });
+      yield* sql`UPDATE memory_payloads SET body_json=${body} WHERE space=${space} AND payload_ref=${original}`;
+      const request = {
+        memorySpaceId: space,
+        memoryId,
+        resolutionInputsFor: resolution.resolutionId,
+        limit: 1,
+      };
+      const page = yield* service.history(request, Effect.void);
+      assert.isNull(page.revisions[0]!.payload);
+      assert.deepStrictEqual(page.restorableRevisionIds, [original]);
+      assert.isAtMost(
+        new TextEncoder().encode(yield* encodeHistoryPageJson(page)).length,
+        M.MEMORY_PAGE_MAX_UTF8_BYTES,
+      );
+      yield* sql`DELETE FROM memory_payloads WHERE space=${space} AND payload_ref=${original}`;
+      assert.deepStrictEqual(
+        (yield* service.history(request, Effect.void)).restorableRevisionIds,
+        [],
+      );
+    }).pipe(Effect.provide(live)),
+);
+
 it.effect("W2 rejects Settings writes while disabled and keeps saved records readable", () =>
   Effect.gen(function* () {
     let disabled = false;
@@ -3629,7 +3854,7 @@ it.effect("A2 keeps a generic authoritative refusal without inventing revision_c
       Effect.void,
     );
     assert.isEmpty(page.revertResults);
-    assert.deepStrictEqual(yield* decodeLegacyHistory(page), page);
+    assert.deepStrictEqual<unknown>(yield* decodeLegacyHistory(page), page);
     const optedIn = yield* service.history(
       { memorySpaceId: space, memoryId, limit: 100, includeRefusedReverts: true },
       Effect.void,

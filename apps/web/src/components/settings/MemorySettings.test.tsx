@@ -3,7 +3,7 @@ import { memoryImportTestLocks } from "../../test/memoryImportLocks";
 import { MemoryHubDiagnosticsSettings } from "./MemoryHubDiagnosticsSettings";
 import { MemoryRunAccessLabel } from "./MemoryRunAccessLabel";
 import { memorySyncFixture } from "../../test/memorySyncFixture";
-import { act, useSyncExternalStore, type ReactNode } from "react";
+import { act, Children, isValidElement, useSyncExternalStore, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import {
@@ -14,10 +14,13 @@ import {
   MemoryResolutionPayload,
   type MemoryHistoryPage,
   MemoryRevertResult,
+  MemoryUpsertInput,
 } from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
+const encodeUpsert = Schema.encodeSync(MemoryUpsertInput);
 const state = vi.hoisted(() => ({
+  requests: [] as { label: string; input: unknown }[],
   allowed: true,
   write: true,
   version: 0,
@@ -31,13 +34,17 @@ const state = vi.hoisted(() => ({
     environmentId: string;
     label: string;
     connection: { phase: string };
-    serverConfig: { environment: { capabilities: { memory: { protocolVersion: number } } } };
+    serverConfig: {
+      environment: {
+        capabilities: { memory: { protocolVersion: number; resolutionInputs?: boolean } };
+      };
+    };
   }[],
   result: null as unknown,
   navigate: vi.fn(),
   responses: new Map<string, unknown>(),
   executors: new Map<string, (input: unknown) => Promise<unknown>>(),
-  projects: [] as { id: string; environmentId: string; title: string }[],
+  projects: [] as { id: string; environmentId: string; title: string; repositoryIdentity?: null }[],
   threads: [] as { id: string; environmentId: string; title: string }[],
   threadReads: vi.fn(),
   agentAccess: true,
@@ -65,7 +72,7 @@ vi.mock("@effect/atom-react", async (original) => ({
     useFixtureVersion();
     return atom.label === "syncChanges"
       ? state.exposure
-      : ["forget", "upsert"].includes(atom.label)
+      : ["forget", "upsert", "projectBindingGet"].includes(atom.label)
         ? state.write
         : state.allowed;
   },
@@ -121,7 +128,15 @@ vi.mock("../../state/memory", async () => {
       ...Object.fromEntries(
         ["list", "search", "read", "history", "readSource"].map((label) => [
           label,
-          () => ({ label }),
+          (request: { input?: { resolutionInputsFor?: string } }) => {
+            state.requests.push({ label, input: request.input });
+            return {
+              label:
+                label === "history" && request.input?.resolutionInputsFor
+                  ? "resolutionInputs"
+                  : label,
+            };
+          },
         ]),
       ),
       draftAtom: ({ draftId }: { draftId: string }) => drafts(draftId),
@@ -156,7 +171,14 @@ vi.mock("../../state/server", () => ({
 vi.mock("../../state/query", () => ({
   useEnvironmentQuery: ({ label }: { label: string }) => {
     useFixtureVersion();
-    return { data: state.queries.get(label) ?? Option.none(), error: null, refresh: state.refresh };
+    return {
+      data:
+        state.queries.get(label) ??
+        (label === "resolutionInputs" ? state.queries.get("history") : undefined) ??
+        Option.none(),
+      error: null,
+      refresh: state.refresh,
+    };
   },
 }));
 vi.mock("../../state/use-atom-command", () => ({
@@ -244,22 +266,41 @@ vi.mock("../ui/select", () => ({
     value: string | null;
     onValueChange: (id: string) => void;
     disabled: boolean;
-  }) => (
-    <select
-      aria-label="Fixture device picker"
-      value={value ?? ""}
-      disabled={disabled}
-      onChange={(e) => onValueChange(e.currentTarget.value)}
-    >
-      <option value="">Choose a device</option>
-      {children}
-    </select>
-  ),
+  }) => {
+    const trigger = Children.toArray(children).find(
+      (child) => isValidElement<{ "aria-label"?: string }>(child) && child.props["aria-label"],
+    );
+    return (
+      <select
+        aria-label={
+          isValidElement<{ "aria-label"?: string }>(trigger)
+            ? trigger.props["aria-label"]
+            : "Fixture device picker"
+        }
+        value={value ?? ""}
+        disabled={disabled}
+        onChange={(e) => onValueChange(e.currentTarget.value)}
+      >
+        <option value="">Choose a device</option>
+        {children}
+      </select>
+    );
+  },
   SelectTrigger: () => null,
   SelectValue: () => null,
   SelectPopup: ({ children }: { children: ReactNode }) => <>{children}</>,
-  SelectItem: ({ children, value }: { children: ReactNode; value: string }) => (
-    <option value={value}>{children}</option>
+  SelectItem: ({
+    children,
+    value,
+    disabled,
+  }: {
+    children: ReactNode;
+    value: string;
+    disabled?: boolean;
+  }) => (
+    <option value={value} disabled={disabled}>
+      {children}
+    </option>
   ),
 }));
 vi.mock("./settingsLayout", () => ({
@@ -298,6 +339,7 @@ import {
   MemoryRevertControl,
 } from "./MemorySettings";
 import { validateMemorySettingsSearch } from "./MemorySettings.logic";
+import { settingsContentScopeKey } from "./settingsScopeNavigation";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const item = Schema.decodeUnknownSync(MemoryItem)({
   memorySpaceId: id(1),
@@ -323,6 +365,7 @@ beforeEach(() => {
   document.body.append(container);
   root = createRoot(container);
   window.localStorage.clear();
+  state.navigate.mockReset();
   state.threadReads.mockClear();
   state.projects = [];
   state.threads = [];
@@ -330,12 +373,15 @@ beforeEach(() => {
   state.allowed = true;
   state.write = true;
   state.exposure = 0;
+  state.projects = [];
+  state.requests = [];
   state.queries.clear();
   state.executors.clear();
   state.refresh.mockClear();
   state.calls.mockClear();
   state.environment = null;
   state.environments = [
+    "remote-owner",
     "active-device",
     "pending-device",
     "device-a",
@@ -345,7 +391,9 @@ beforeEach(() => {
     environmentId,
     label: environmentId.replace("-device", " device"),
     connection: { phase: "connected" },
-    serverConfig: { environment: { capabilities: { memory: { protocolVersion: 1 } } } },
+    serverConfig: {
+      environment: { capabilities: { memory: { protocolVersion: 1, resolutionInputs: true } } },
+    },
   }));
   state.result = { _tag: "Failure" };
   state.responses.clear();
@@ -419,7 +467,10 @@ async function renderRevert(
   history:
     | typeof retained
     | Pick<MemoryHistoryPage, "revisions" | "revertResults" | "nextCursor"> = retained,
+  originals = history,
 ) {
+  state.queries.set("history", Option.some(history));
+  state.queries.set("resolutionInputs", Option.some(originals));
   const { AtomRegistry } = await import("effect/reactivity");
   const registry = AtomRegistry.make();
   vi.spyOn(registry, "get").mockImplementation(() => state.allowed as never);
@@ -520,7 +571,7 @@ it.each(["pending", "accepted", "revision_changed", "forgotten"] as const)(
     expect(container.querySelector('[aria-label="Revert confirmation"]')).toBeNull();
   },
 );
-it("cancels without sending, revalidates missing originals, and closes on revoke or incomplete history", async () => {
+it("cancels without sending, revalidates missing originals, and closes on revoke, with paged history allowed", async () => {
   await renderRevert();
   await chooseOriginal();
   await click("Cancel");
@@ -530,7 +581,7 @@ it("cancels without sending, revalidates missing originals, and closes on revoke
   await renderRevert({ ...retained, revisions: [] });
   expect(container.querySelector('[aria-label="Revert confirmation"]')).toBeNull();
   await renderRevert({ ...retained, nextCursor: "more" });
-  expect(container.textContent).toContain("Load the remaining history before reverting");
+  expect(container.querySelector('[aria-label="Revert confirmation"]')).not.toBeNull();
   await renderRevert();
   await chooseOriginal();
   state.allowed = false;
@@ -773,35 +824,58 @@ const ownerView = (version: number, requester: string) => ({
     removals: [],
   },
 });
-async function supportedScreen(withDetails = true) {
+async function supportedScreen(withDetails = true, followNavigation = false) {
   const { AtomRegistry } = await import("effect/reactivity");
   const registry = AtomRegistry.make();
   const get = registry.get.bind(registry);
   vi.spyOn(registry, "get").mockImplementation((atom) => {
     const label = (atom as unknown as { label?: string }).label;
-    if (label) return (["forget", "upsert"].includes(label) ? state.write : state.allowed) as never;
+    if (label)
+      return (
+        ["forget", "upsert", "projectBindingGet"].includes(label) ? state.write : state.allowed
+      ) as never;
     return get(atom);
   });
   state.environment = {
-    serverConfig: { environment: { capabilities: { memory: { protocolVersion: 1 } } } },
+    serverConfig: {
+      environment: { capabilities: { memory: { protocolVersion: 1, resolutionInputs: true } } },
+    },
   };
   state.queries.set("read", Option.some(activeItem));
   if (!state.responses.has("syncStatus"))
     state.responses.set("syncStatus", success({ state: "online", memorySpaceId: id(1) }));
   state.responses.set("hubSettingsGet", success(hubView(2)));
   state.responses.set("ownerSourceReadPolicyGet", success(ownerView(2, "device-a")));
-  const target = validateMemorySettingsSearch({
+  let target = validateMemorySettingsSearch({
     environmentId: "remote-owner",
     ...(withDetails ? { memorySpaceId: id(1), memoryId: id(2) } : {}),
   });
+  let routeSearch = withDetails ? target : validateMemorySettingsSearch({});
+  const renderContent = () =>
+    root.render(
+      <RegistryContext value={registry}>
+        <div
+          key={settingsContentScopeKey(
+            "/settings/memory",
+            routeSearch,
+            EnvironmentId.make("remote-owner"),
+          )}
+        >
+          <MemorySettings target={target} />
+        </div>
+      </RegistryContext>,
+    );
+  if (followNavigation)
+    state.navigate.mockImplementation(({ search }) => {
+      routeSearch = validateMemorySettingsSearch(search);
+      target = routeSearch;
+      renderContent();
+      return Promise.resolve();
+    });
   const render = () =>
     act(async () => {
       notifyFixture();
-      root.render(
-        <RegistryContext value={registry}>
-          <MemorySettings target={target} />
-        </RegistryContext>,
-      );
+      renderContent();
     });
   await render();
   return { render, registry };
@@ -1588,6 +1662,342 @@ it("removes an open editor and history when shared admission removes the derived
   );
 });
 
+it("reopens saved memory after sharing is disabled and the settings screen remounts", async () => {
+  state.queries.set("list", Option.some({ items: [activeItem], nextCursor: null }));
+  await supportedScreen(false);
+  expect(container.textContent).toContain("Synthetic original");
+  state.responses.set(
+    "syncStatus",
+    success({ state: "disabled", memorySpaceId: null, retainedLocalSpaceId: id(1) }),
+  );
+  state.responses.set(
+    "hubSettingsUpdate",
+    success({ view: { version: 3, settings: { mode: "disabled" } }, credential: null }),
+  );
+  await click("Turn sharing off");
+  await click("Stop sharing");
+  await act(async () => root.render(null));
+  await supportedScreen(false);
+  expect(container.textContent).toContain("Synthetic original");
+  expect(container.textContent).toContain("Turn on memory to save new memories.");
+  expect(
+    [...container.querySelectorAll("button")].find((b) => b.textContent === "Remember something")!
+      .disabled,
+  ).toBe(true);
+});
+
+it("chooses an original from its bounded query while the ordinary history page has no input bodies", async () => {
+  await renderRevert({ ...retained, revisions: [], nextCursor: "80" }, retained);
+  expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(1);
+  await chooseOriginal();
+  await click("Revert resolution");
+  expect(state.calls).toHaveBeenCalledWith(
+    expect.objectContaining({ input: expect.objectContaining({ restoredRevisionId: id(3) }) }),
+  );
+});
+
+it("browses, searches and creates in an explicitly bound project, then returns to user scope", async () => {
+  state.projects = [
+    {
+      id: "synthetic-project",
+      title: "Synthetic project",
+      environmentId: "remote-owner",
+      repositoryIdentity: null,
+    },
+  ];
+  const scope = {
+    kind: "project",
+    projectKey: { kind: "explicit", sharedProjectId: "synthetic-shared" },
+  };
+  state.responses.set(
+    "projectBindingGet",
+    success({ projectKey: scope.projectKey, repositoryKey: null }),
+  );
+  state.queries.set("list", Option.some({ items: [], nextCursor: null, projectionWatermark: 1 }));
+  const { render } = await supportedScreen(false);
+  await selectMemoryScope("project:synthetic-project");
+  expect(state.calls).toHaveBeenCalledWith({
+    environmentId: "remote-owner",
+    input: {
+      memorySpaceId: id(1),
+      project: { environmentId: "remote-owner", projectId: "synthetic-project" },
+    },
+  });
+  expect(state.requests.at(-1)).toMatchObject({ label: "list", input: { scope } });
+  const search = container.querySelector<HTMLInputElement>('[aria-label="Search memories"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+      search,
+      "missing",
+    );
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  state.queries.set(
+    "search",
+    Option.some({ items: [], nextCursor: "more", projectionWatermark: 1 }),
+  );
+  await click("Search");
+  expect(state.requests.at(-1)).toMatchObject({
+    label: "search",
+    input: { scope, mode: "fts", query: "missing" },
+  });
+  expect(container.textContent).toContain("Continue to the next page");
+  await click("Remember something");
+  expect(container.textContent).toContain("Save to: Synthetic project");
+  expect(container.textContent?.match(/Save to:/g)).toHaveLength(1);
+  expect(container.textContent).not.toContain("New memory · Project");
+  const textarea = container.querySelector<HTMLTextAreaElement>('[aria-label="Memory text"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+      textarea,
+      "Synthetic project memory",
+    );
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  state.responses.set("upsert", success({ outcome: "accepted" }));
+  await act(async () =>
+    textarea
+      .closest("form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+  );
+  const request = state.calls.mock.calls.at(-1)?.[0].input;
+  expect(encodeUpsert(MemoryUpsertInput.make(request))).toMatchObject({
+    scope,
+    payload: { text: "Synthetic project memory" },
+  });
+  state.projects = [];
+  await render();
+  expect(container.querySelector('[aria-label="Search memories"]')).toBeNull();
+  await selectMemoryScope("user");
+  expect(state.requests.at(-1)).toMatchObject({
+    label: "list",
+    input: { scope: { kind: "user" } },
+  });
+  expect(container.querySelector('[aria-label="Memory text"]')).toBeNull();
+});
+
+it.each([false, true])(
+  "retains the first project selection through navigation and late options/binding (explicit destination: %s)",
+  async (explicitDestination) => {
+    const project = {
+      id: "synthetic-project",
+      title: "Synthetic project",
+      environmentId: "remote-owner",
+      repositoryIdentity: null,
+    };
+    state.projects = [project];
+    const pending = await deferredResult();
+    state.executors.set("projectBindingGet", () => pending.promise);
+    const { render } = await supportedScreen(explicitDestination, true);
+    await selectMemoryScope("project:synthetic-project");
+    state.projects = [{ ...project, title: "Resolved project" }];
+    await render();
+    expect(container.querySelector<HTMLSelectElement>("#memory-browse-scope select")?.value).toBe(
+      "project:synthetic-project",
+    );
+    expect(container.querySelector('[aria-label="Search memories"]')).toBeNull();
+    const scope = {
+      kind: "project",
+      projectKey: { kind: "explicit", sharedProjectId: "synthetic-shared" },
+    };
+    await act(async () =>
+      pending.resolve(success({ projectKey: scope.projectKey, repositoryKey: null })),
+    );
+    expect(state.requests.at(-1)).toMatchObject({ label: "list", input: { scope } });
+    await click("Remember something");
+    expect(container.textContent).toContain("Save to: Resolved project");
+    expect(container.textContent).not.toContain("Save to: User");
+  },
+);
+
+it("offers User and projects without a context-free Thread option in Settings", async () => {
+  state.threads = [{ id: "thread-a", environmentId: "remote-owner", title: "Thread A" }];
+  await supportedScreen(false);
+  const picker = container.querySelector<HTMLSelectElement>("#memory-browse-scope select")!;
+  expect([...picker.options].map((option) => option.value).filter(Boolean)).toEqual(["user"]);
+  expect(state.threadReads.mock.calls.every(([enabled]) => enabled === false)).toBe(true);
+});
+
+it.each([false, true])(
+  "keeps legacy history revert with incomplete page=%s",
+  async (incomplete) => {
+    for (const environment of state.environments)
+      delete environment.serverConfig.environment.capabilities.memory.resolutionInputs;
+    await renderRevert({ ...retained, nextCursor: incomplete ? "more" : null });
+    expect(
+      state.requests.some((request) => "resolutionInputsFor" in (request.input as object)),
+    ).toBe(false);
+    if (incomplete) {
+      expect(container.textContent).toContain("Load complete history before reverting");
+      expect(container.querySelector('[aria-label="Revert confirmation"]')).toBeNull();
+    } else {
+      await chooseOriginal();
+      await click("Revert resolution");
+      expect(state.calls).toHaveBeenCalledWith(
+        expect.objectContaining({ input: expect.objectContaining({ restoredRevisionId: id(3) }) }),
+      );
+    }
+  },
+);
+
+it("does not silently browse user memory when a project binding lookup fails", async () => {
+  state.projects = [
+    {
+      id: "synthetic-project",
+      title: "Synthetic project",
+      environmentId: "remote-owner",
+      repositoryIdentity: null,
+    },
+  ];
+  await supportedScreen(false);
+  await selectMemoryScope("project:synthetic-project");
+  expect(container.textContent).toContain("Could not load project memory scope");
+  expect(container.querySelector('[aria-label="Search memories"]')).toBeNull();
+  state.responses.set(
+    "projectBindingGet",
+    success({
+      projectKey: { kind: "explicit", sharedProjectId: "retry-shared" },
+      repositoryKey: null,
+    }),
+  );
+  await selectMemoryScope("project:synthetic-project");
+  expect(state.requests.at(-1)).toMatchObject({
+    label: "list",
+    input: {
+      scope: { kind: "project", projectKey: { kind: "explicit", sharedProjectId: "retry-shared" } },
+    },
+  });
+  await selectMemoryScope("user");
+  expect(container.querySelector('[aria-label="Search memories"]')).not.toBeNull();
+});
+
+it.each([{ items: [] }, { items: [activeItem] }])(
+  "shows incomplete search coverage with matching items %j",
+  async ({ items }) => {
+    await supportedScreen(false);
+    const input = container.querySelector<HTMLInputElement>('[aria-label="Search memories"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+        input,
+        "pending",
+      );
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    state.queries.set(
+      "search",
+      Option.some({
+        items,
+        nextCursor: null,
+        projectionWatermark: 1,
+        indexCoverage: {
+          status: "partial",
+          eligibleItems: 2,
+          indexedItems: 1,
+          unindexedItems: 1,
+          projectionWatermark: 1,
+        },
+      }),
+    );
+    await click("Search");
+    expect(container.textContent).toContain(
+      items.length
+        ? "Some memories are still being indexed"
+        : "Results are incomplete; memories may still be available",
+    );
+    expect(container.textContent).not.toContain("No memories yet");
+  },
+);
+
+it("ignores a late project binding after returning to user scope", async () => {
+  state.projects = [
+    {
+      id: "synthetic-project",
+      title: "Synthetic project",
+      environmentId: "remote-owner",
+      repositoryIdentity: null,
+    },
+  ];
+  const pending = await deferredResult();
+  state.executors.set("projectBindingGet", () => pending.promise);
+  await supportedScreen(false);
+  await selectMemoryScope("project:synthetic-project");
+  expect(container.textContent).toContain("Loading project memory scope");
+  await selectMemoryScope("user");
+  await act(async () =>
+    pending.resolve(
+      success({
+        projectKey: { kind: "explicit", sharedProjectId: "late-shared" },
+        repositoryKey: null,
+      }),
+    ),
+  );
+  expect(state.requests.at(-1)).toMatchObject({
+    label: "list",
+    input: { scope: { kind: "user" } },
+  });
+  expect(container.textContent).not.toContain("Loading project memory scope");
+});
+
+it("explains why a read-only session cannot look up project keys", async () => {
+  state.write = false;
+  state.projects = [
+    {
+      id: "synthetic-project",
+      title: "Synthetic project",
+      environmentId: "remote-owner",
+      repositoryIdentity: null,
+    },
+  ];
+  await supportedScreen(false);
+  expect(container.textContent).toContain("Project scope requires memory write permission");
+  await selectMemoryScope("project:synthetic-project");
+  expect(state.calls.mock.calls.some(([request]) => request?.input?.project)).toBe(false);
+  expect(container.querySelector('[aria-label="Search memories"]')).not.toBeNull();
+});
+
+async function selectMemoryScope(value: string) {
+  const picker = container.querySelector<HTMLSelectElement>(
+    '#memory-browse-scope select[aria-label="Memory scope"]',
+  )!;
+  await act(async () => {
+    picker.value = value;
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+it("keeps scope selection in one row with dozens of projects and selects the last project", async () => {
+  state.projects = Array.from({ length: 60 }, (_, index) => ({
+    id: `project-${index}`,
+    title: `Project ${index}`,
+    environmentId: "remote-owner",
+    repositoryIdentity: null,
+  }));
+  state.responses.set(
+    "projectBindingGet",
+    success({
+      projectKey: { kind: "explicit", sharedProjectId: "last-shared" },
+      repositoryKey: null,
+    }),
+  );
+  await supportedScreen(false);
+  const picker = container.querySelector<HTMLSelectElement>(
+    '#memory-browse-scope select[aria-label="Memory scope"]',
+  )!;
+  expect(picker.closest("section")!.querySelectorAll("[data-test-row]")).toHaveLength(1);
+  expect(picker.querySelectorAll("option[value^='project:']")).toHaveLength(60);
+  expect(picker.closest("section")!.querySelectorAll("button")).toHaveLength(0);
+  await selectMemoryScope("project:project-59");
+  expect(state.calls.mock.calls.at(-1)?.[0]).toMatchObject({
+    input: { project: { projectId: "project-59" } },
+  });
+  expect(state.requests.at(-1)).toMatchObject({
+    label: "list",
+    input: {
+      scope: { kind: "project", projectKey: { kind: "explicit", sharedProjectId: "last-shared" } },
+    },
+  });
+});
+
 // WP6 controls exercise the actual workflow/store; command transport is the fixture boundary.
 async function renderControl(element: ReactNode | (() => ReactNode)) {
   const { AtomRegistry } = await import("effect/reactivity");
@@ -2142,7 +2552,7 @@ it("distinguishes a saved memory ceiling from current permission and drops unkno
   const view = await renderControl(() => (
     <MemoryRunAccessLabel memoryGrantCeiling="read_write" currentMemoryAccess={current} />
   ));
-  expect(container.textContent).toContain("Saved limit: Read and write");
+  expect(container.textContent).toContain("Memory limit: read & write");
   expect(container.textContent).toContain("Allowed now: None");
   current = undefined;
   await view.render();

@@ -51,7 +51,7 @@ it("retains a delegated row's saved ceiling across actual connection grant revoc
   view = renderNative(h, <DelegatedRow />);
   await view.render();
   expect(view.container.textContent).toContain("Synthetic delegated work");
-  expect(view.container.textContent).toContain("Saved limit: Read and write");
+  expect(view.container.textContent).toContain("Memory limit: read & write");
   expect(view.container.textContent).not.toContain("Allowed now:");
   await act(async () =>
     h.registry.set(source, {
@@ -69,7 +69,7 @@ it("retains a delegated row's saved ceiling across actual connection grant revoc
   expect(view.container.textContent).toContain("Allowed now: None (Agent memory access is off)");
   await act(async () => h.revoke());
   expect(view.container.textContent).toContain("Connection grant revoked");
-  expect(view.container.textContent).toContain("Saved limit: Read and write");
+  expect(view.container.textContent).toContain("Memory limit: read & write");
   await act(async () => {
     const {
       memoryGrantCeiling: _ceiling,
@@ -78,5 +78,5 @@ it("retains a delegated row's saved ceiling across actual connection grant revoc
     } = h.registry.get(source);
     h.registry.set(source, legacy);
   });
-  expect(view.container.textContent).not.toContain("Saved limit:");
+  expect(view.container.textContent).not.toContain("Memory limit:");
 });

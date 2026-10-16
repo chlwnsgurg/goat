@@ -12,7 +12,7 @@ export function scheduledMemoryAccess(input: Parameters<typeof presentMemoryRunA
     read_only_destination: "Destination allows reading only",
     dispatch_scope: "Limited by dispatch permissions",
   };
-  return `Saved limit: ${labels[view.savedCeiling]}${view.effectiveAccess === "unknown" ? "" : ` · Allowed now: ${labels[view.effectiveAccess]}${view.effectiveReason ? ` (${reasons[view.effectiveReason]})` : ""}`}`;
+  return `${view.savedCeilingLabel}${view.effectiveAccess === "unknown" ? "" : ` · Allowed now: ${labels[view.effectiveAccess]}${view.effectiveReason ? ` (${reasons[view.effectiveReason]})` : ""}`}`;
 }
 
 const MINUTE = 60_000;

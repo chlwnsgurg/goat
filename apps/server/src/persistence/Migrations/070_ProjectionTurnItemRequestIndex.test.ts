@@ -42,6 +42,7 @@ it.effect(
         [78, "MemoryUsageCounters"],
         [79, "MemoryRevertResults"],
         [80, "HandoffLookupIndex"],
+        [81, "MemoryLastReadySpace"],
       ]);
       yield* ProjectionTurnItemRequestIndex;
       assert.deepStrictEqual(yield* runMigrations(), []);

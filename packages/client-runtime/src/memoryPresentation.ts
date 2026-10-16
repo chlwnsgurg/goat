@@ -115,22 +115,37 @@ export function presentMemoryRevertResult(result: MemoryRevertResult) {
   };
 }
 
-/** UI eligibility only; the hub authorizes the intent and its deadline. Incomplete pages cannot prove unused. */
+/** The server retains the local space identity; clients never persist memory bodies. */
+export function memoryLocalSpace(
+  status: Pick<MemorySyncStatus, "state" | "memorySpaceId" | "retainedLocalSpaceId"> | null,
+) {
+  if (!status || status.state === "bootstrapping") return null;
+  return status.state === "disabled" ? (status.retainedLocalSpaceId ?? null) : status.memorySpaceId;
+}
+
+/** UI eligibility only; the hub authorizes the intent and its deadline. */
 export function presentMemoryRevert(input: {
   readonly item: MemoryItem;
   readonly entry: MemoryHistoryPage["resolutions"][number];
-  readonly history: Pick<MemoryHistoryPage, "revertResults" | "revisions" | "nextCursor">;
+  readonly history: Pick<
+    MemoryHistoryPage,
+    "revertResults" | "revisions" | "nextCursor" | "restorableRevisionIds"
+  >;
   readonly now: number;
   /** Omit while choosing an original; once selected, validate only that input. */
   readonly restoredRevisionId?: MemoryRevisionId;
+  /** Legacy servers cannot fetch originals independently of the complete history. */
+  readonly requireCompleteHistory?: boolean;
 }) {
   const { item, entry, history, now, restoredRevisionId } = input;
   const resolution = entry.resolution;
   const result = history.revertResults.find(
     (value) => value.resolutionId === resolution.resolutionId && value.memoryId === item.memoryId,
   );
-  const restorableRevisionIds = resolution.inputRevisionIds.filter((id) =>
-    history.revisions.some((pair) => pair.revision.revisionId === id && pair.payload !== null),
+  const restorableRevisionIds = resolution.inputRevisionIds.filter(
+    (id) =>
+      history.restorableRevisionIds?.includes(id) ||
+      history.revisions.some((pair) => pair.revision.revisionId === id && pair.payload !== null),
   );
   // A client clock can warn, but cannot establish hub expiry or close admission.
   const localDeadlineState =
@@ -148,8 +163,8 @@ export function presentMemoryRevert(input: {
             ? "A revert cannot be reverted"
             : item.status !== "active" || item.revision.revisionId !== resolution.resultRevisionId
               ? "Check the current memory before reverting"
-              : history.nextCursor !== null
-                ? "Load the remaining history before reverting"
+              : input.requireCompleteHistory && history.nextCursor !== null
+                ? "Load complete history before reverting"
                 : restoredRevisionId !== undefined
                   ? restorableRevisionIds.includes(restoredRevisionId)
                     ? null
@@ -306,6 +321,7 @@ export function presentMemoryRunAccess(input: {
 }) {
   return {
     savedCeiling: input.memoryGrantCeiling ?? "none",
+    savedCeilingLabel: `Memory limit: ${{ none: "none", read: "read", read_write: "read & write" }[input.memoryGrantCeiling ?? "none"]}`,
     effectiveAccess: input.currentMemoryAccess?.access ?? ("unknown" as const),
     effectiveReason: input.currentMemoryAccess?.reason ?? null,
   };

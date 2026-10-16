@@ -172,6 +172,8 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         protocolVersion: 1,
         importProvider: true,
         refusedReverts: true,
+        resolutionInputs: true,
+        retainedLocalSpace: true,
         hubDiagnostics: true,
       });
       expect(descriptor.capabilities.memoryHubProtocolVersion).toBeUndefined();

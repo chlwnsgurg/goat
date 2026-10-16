@@ -49,6 +49,7 @@ it.effect(
         [78, "MemoryUsageCounters"],
         [79, "MemoryRevertResults"],
         [80, "HandoffLookupIndex"],
+        [81, "MemoryLastReadySpace"],
       ]);
       assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
         { memory_grant_ceiling: "none" },

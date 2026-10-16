@@ -318,6 +318,54 @@ const make = Effect.gen(function* () {
     };
   });
   type Route = NonNullable<Effect.Success<ReturnType<typeof route>>>;
+  const writeLastReadySpace = (space: M.MemorySpaceId) =>
+    sql`INSERT INTO memory_last_ready_space(singleton,space) VALUES (1,${space})
+      ON CONFLICT(singleton) DO UPDATE SET space=excluded.space WHERE space!=excluded.space`.pipe(
+      Effect.mapError(
+        (cause) => new Store.MemoryStorageError({ stage: "last-ready-space", cause }),
+      ),
+    );
+  // Already-ready bindings from before 080 are also observed by sync, without a status read.
+  let rememberedReadyEpoch: number | undefined;
+  const rememberReadySpace = Effect.fnUntraced(function* (r: Pick<Route, "space" | "settings">) {
+    if (!r.space || rememberedReadyEpoch === r.settings.memoryHubVersion) return;
+    yield* store.transact(
+      ensureEpoch(r.settings.memoryHubVersion).pipe(Effect.andThen(writeLastReadySpace(r.space))),
+      { finalGuard: ensureEpoch(r.settings.memoryHubVersion) },
+    );
+    rememberedReadyEpoch = r.settings.memoryHubVersion;
+  });
+  const readRetainedSpace = Effect.gen(function* () {
+    const read = sql<{
+      space: string;
+    }>`SELECT space FROM memory_last_ready_space WHERE singleton=1`;
+    const rows = yield* read;
+    if (rows[0]) return M.MemorySpaceId.make(rows[0].space);
+    const candidates =
+      yield* sql`SELECT 1 FROM memory_sync_cursors WHERE bootstrap_state='ready' LIMIT 1`;
+    if (!candidates[0]) return null;
+    // Legacy cursors have no ready timestamp. Prefer retained memories, then successful sync
+    // and memory activity, with a stable space-id tie-break. Never replace a saved destination.
+    return yield* store.transact(
+      Effect.gen(function* () {
+        yield* sql`INSERT INTO memory_last_ready_space(singleton,space)
+          SELECT 1,c.space FROM memory_sync_cursors AS c
+          WHERE c.bootstrap_state='ready'
+            AND NOT EXISTS (SELECT 1 FROM memory_last_ready_space WHERE singleton=1)
+          GROUP BY c.space ORDER BY
+            EXISTS (SELECT 1 FROM memory_items AS i WHERE i.space=c.space AND i.status!='forgotten') DESC,
+            max(c.last_success_at) DESC,
+            (SELECT max(r.created_at) FROM memory_revisions AS r WHERE r.space=c.space) DESC,
+            c.space ASC LIMIT 1`;
+        const recovered = yield* read;
+        return recovered[0] ? M.MemorySpaceId.make(recovered[0].space) : null;
+      }),
+    );
+  }).pipe(
+    Effect.mapError(
+      (cause) => new Store.MemoryStorageError({ stage: "retained-local-space", cause }),
+    ),
+  );
   // At most three descriptor-recoverable classes and one probe fiber per committed epoch.
   const recoveries = new Map<
     Store.MemoryHoldClass,
@@ -1206,7 +1254,10 @@ const make = Effect.gen(function* () {
   ) {
     if (!r.space) return yield* new M.MemoryHubError({ code: "bootstrap_required" });
     let state = yield* runtime.readBootstrap(r.space, r.hubId);
-    if (state.state === "ready") return true;
+    if (state.state === "ready") {
+      yield* rememberReadySpace(r);
+      return true;
+    }
     if (state.state === "unbound") {
       const input: M.MemoryHubJoinInput = {
         protocolVersion: 1,
@@ -1272,6 +1323,7 @@ const make = Effect.gen(function* () {
       const installed = yield* store
         .transact(
           Effect.gen(function* () {
+            yield* ensureEpoch(r.settings.memoryHubVersion);
             const stage = {
               memorySpaceId: r.space!,
               hubEnvironmentId: r.hubId,
@@ -1280,13 +1332,15 @@ const make = Effect.gen(function* () {
               expectedCheckpointSequence: state.checkpointSequence,
             };
             yield* store.installCheckpointPage({ ...stage, page });
-            if (page.bootstrapComplete)
+            if (page.bootstrapComplete) {
               yield* store.completeCheckpoint({
                 ...stage,
                 localEnvironmentId: local,
                 pageCount: state.pageCount + 1,
               });
-            else
+              // The ready transition and browsing destination commit or roll back together.
+              yield* writeLastReadySpace(r.space!);
+            } else
               yield* store.advanceBootstrapTx({
                 memorySpaceId: r.space!,
                 hubEnvironmentId: r.hubId,
@@ -1298,6 +1352,7 @@ const make = Effect.gen(function* () {
                 nextCursor: page.nextCursor,
               });
           }),
+          { finalGuard: ensureEpoch(r.settings.memoryHubVersion) },
         )
         .pipe(
           Effect.as(true),
@@ -2181,15 +2236,19 @@ const make = Effect.gen(function* () {
                   : "not_needed",
         };
       }),
-    syncStatus: (_input, permit) =>
+    syncStatus: (input, permit) =>
       Effect.gen(function* () {
         yield* permit;
         const s = yield* readSettings;
         const epoch = s.memoryHubVersion;
         resetStatus(epoch);
         const space = s.memoryHub.mode === "disabled" ? null : s.memoryHub.memorySpaceId;
+        const includeRetained =
+          "includeRetainedLocalSpaceId" in input && input.includeRetainedLocalSpaceId;
+        const retainedLocalSpaceId = includeRetained ? yield* readRetainedSpace : null;
         const hubId = s.memoryHub.mode === "member" ? s.memoryHub.hubEnvironmentId : local;
         const bootstrap = space ? (yield* runtime.readBootstrap(space, hubId)).state : "unbound";
+        if (bootstrap === "ready") yield* rememberReadySpace({ space, settings: s });
         const persisted = yield* runtime.readProcessing(space, space ? hubId : null);
         const storage = space
           ? yield* quota.readStorageStatus({ memorySpaceId: space, environmentId: local })
@@ -2202,6 +2261,9 @@ const make = Effect.gen(function* () {
         const success = lastSuccess?.epoch === epoch ? lastSuccess.at : null;
         return {
           memorySpaceId: space,
+          ...(includeRetained
+            ? { retainedLocalSpaceId: bootstrap === "ready" ? space : retainedLocalSpaceId }
+            : {}),
           state:
             s.memoryHub.mode === "disabled"
               ? "disabled"
