@@ -27,6 +27,8 @@ export class SshLaunchError extends Data.TaggedError("SshLaunchError")<{
 }> {}
 
 export class SshPairingError extends Data.TaggedError("SshPairingError")<{
+  /** `memory-scopes-unsupported`: the remote CLI cannot issue the memory grants a task asked for. */
+  readonly reason?: "memory-scopes-unsupported";
   readonly message: string;
   readonly stdout: string;
   readonly cause?: unknown;

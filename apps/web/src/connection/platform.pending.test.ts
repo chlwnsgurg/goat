@@ -51,6 +51,26 @@ describe.each([
       });
     }),
   );
+  it.effect("names the runtime a capability replacement waits on", () =>
+    Effect.gen(function* () {
+      const bridge = {
+        ensureSshEnvironment: async () => ({
+          type: "ssh-runtime-pending",
+          target,
+          pending: {
+            reason: "busy",
+            replacement: "capability",
+            requestedVersion: "1.2.3",
+            liveVersion: "1.2.3-dev.637a98351",
+          },
+        }),
+      } as unknown as DesktopBridge;
+      const error = yield* consumer(bridge, target).pipe(Effect.flip);
+      expect(error.detail).toBe(
+        "Remote runtime GOAT 1.2.3-dev.637a98351 cannot grant memory access to tasks, so it will be replaced with GOAT 1.2.3 when its work finishes.",
+      );
+    }),
+  );
   it.effect.each(["busy", "unknown", "contended"] as const)(
     "pending %s stops before authentication or descriptor calls",
     (reason) =>

@@ -228,6 +228,12 @@ build_commit_time() {
   t="$("$1" __ssh-helper commit-time 2>/dev/null || true)"
   valid_positive "$t" && printf '%s' "$t"
 }
+# True only when executable $1 lists its session scopes and memory:read is not among them.
+# Every GOAT CLI prints its scope choices here, so this also answers for builds before memory.
+lacks_memory_scopes() {
+  [ -x "$1" ] && scope_help="$("$1" auth session issue --help 2>/dev/null)" || return 1
+  case "$scope_help" in *memory:read*) return 1 ;; *--scope*) return 0 ;; *) return 1 ;; esac
+}
 runner_sha256() {
   if command -v shasum >/dev/null 2>&1; then digest="$(shasum -a 256 "$1")" || return 1
   elif command -v sha256sum >/dev/null 2>&1; then digest="$(sha256sum "$1")" || return 1
@@ -1077,7 +1083,13 @@ check_live_protocol() {
         if [ "$LIVE_COMPATIBLE" != 1 ]; then
           printf 'Remote runtime GOAT %s cannot be ordered against this app (GOAT %s); it was left running. Stop it on the remote host when its work is done, then reconnect.\n' "$LIVE_VERSION" "$REQUESTED_VERSION" >&2; exit 1
         fi
-        NEEDS_OWNED_UPGRADE=0 ;;
+        NEEDS_OWNED_UPGRADE=0
+        # Except a server that cannot issue the sessions this app needs: keeping it would leave
+        # the host unusable for those tasks, so an idle refresh replaces it with this build.
+        if [ "$REFRESH_IF_IDLE" = 1 ] && [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_OWNED" = 1 ] && [ "$REPLACEMENT_REASON" != legacy ] &&
+           lacks_memory_scopes "$HOME/.goat/runtime/goat/versions/$LIVE_VERSION/goat"; then
+          REPLACEMENT_REASON=capability; NEEDS_OWNED_UPGRADE=1
+        fi ;;
       older)
         if [ "$REFRESH_IF_IDLE" = 1 ] && [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_OWNED" = 1 ] && [ "$REPLACEMENT_REASON" != legacy ]; then
           REPLACEMENT_REASON=older; NEEDS_OWNED_UPGRADE=1
@@ -1772,6 +1784,8 @@ rm -f "$RUNNER_NEXT"`;
 // Issues an `mcp-client` bearer session, the only kind the remote's `/mcp`
 // admits from outside a thread. `--runtime-mode-ceiling` is newer than some
 // remotes, so an older CLI is retried without it and reports the default.
+// Memory grants are explicit consent, so they are never dropped: a CLI that cannot issue
+// them refuses with a GOAT_SESSION_ERROR line, and every CLI that can also applies a ceiling.
 const REMOTE_MCP_SESSION_SCRIPT = `set -eu
 STATE_DIR="$HOME/.goat/ssh-launch/@@GOAT_STATE_KEY@@"
 DEFAULT_SERVER_HOME="$HOME/.goat"
@@ -1780,10 +1794,20 @@ set -- auth session issue --base-dir "$DEFAULT_SERVER_HOME" --subject mcp-client
 CEILING=@@GOAT_CEILING@@
 MEMORY_SCOPES=@@GOAT_MEMORY_SCOPES@@
 recheck_selected_before_use
-if [ -n "$CEILING" ] && OUTPUT="$("$RUNNER_FILE" "$@" --runtime-mode-ceiling "$CEILING" 2>/dev/null)"; then
+if [ "$MEMORY_SCOPES" = required ]; then
+  if lacks_memory_scopes "$RUNNER_FILE"; then
+    runtime="$("$RUNNER_FILE" --version 2>/dev/null || true)"; runtime="\${runtime#goat v}"
+    printf 'GOAT_SESSION_ERROR=memory_scopes_unsupported runtime=%s\\n' "\${runtime:-unknown}"
+    printf 'GOAT %s on this host cannot grant memory access to tasks.\\n' "\${runtime:-unknown}" >&2
+    exit 1
+  fi
+  CEILING_RESULT=default
+  if [ -n "$CEILING" ]; then set -- "$@" --runtime-mode-ceiling "$CEILING"; CEILING_RESULT=applied; fi
+  OUTPUT="$("$RUNNER_FILE" "$@")"
+  printf 'GOAT_CEILING=%s\\n%s\\n' "$CEILING_RESULT" "$OUTPUT"
+elif [ -n "$CEILING" ] && OUTPUT="$("$RUNNER_FILE" "$@" --runtime-mode-ceiling "$CEILING" 2>/dev/null)"; then
   printf 'GOAT_CEILING=applied\\n%s\\n' "$OUTPUT"
 else
-  if [ "$MEMORY_SCOPES" = required ] && [ -n "$CEILING" ]; then exit 1; fi
   recheck_selected_before_use
   OUTPUT="$("$RUNNER_FILE" "$@")"
   printf 'GOAT_CEILING=default\\n%s\\n' "$OUTPUT"
@@ -2018,6 +2042,21 @@ export function buildRemoteMcpSessionScript(
   });
 }
 
+/** The session script's refusal when the remote CLI cannot issue requested memory scopes. */
+const MEMORY_SCOPES_UNSUPPORTED = /^GOAT_SESSION_ERROR=memory_scopes_unsupported runtime=(\S+)$/m;
+
+/** Turns that refusal into the error a user reads, with what will or should happen next. */
+const memoryScopesUnsupportedError = (stdout: string, alias: string, remedy: string) => {
+  const runtime = MEMORY_SCOPES_UNSUPPORTED.exec(stdout)?.[1];
+  return runtime === undefined
+    ? undefined
+    : new SshPairingError({
+        reason: "memory-scopes-unsupported",
+        message: `GOAT ${runtime} on ${alias} cannot grant memory access to tasks. ${remedy}`,
+        stdout,
+      });
+};
+
 /** Reads the remote session script's output: a ceiling marker line, then the CLI's JSON. */
 export const decodeRemoteMcpSessionOutput = Effect.fn("ssh/tunnel.decodeRemoteMcpSessionOutput")(
   function* (stdout: string) {
@@ -2186,6 +2225,9 @@ if ready_version "$retained_version"; then
     if retained_commit="$(build_commit_time "$HOME/.goat/runtime/goat/versions/$retained_version/goat")"; then
       retained_fields="$retained_fields,\\"retainedCommitTime\\":$retained_commit"
     fi
+    if [ "$retained_version" != "$V" ] && lacks_memory_scopes "$HOME/.goat/runtime/goat/versions/$retained_version/goat"; then
+      retained_fields="$retained_fields,\\"retainedLacksMemoryScopes\\":true"
+    fi
   fi
 fi
 # Persisted version is a path hint only. The live descriptor proves identity.
@@ -2217,6 +2259,9 @@ for candidate in "$live_hint" "$retained_version" "$V"; do
           live_fields="$live_fields$(printf ',"liveBinarySignals":%s' "$live_binary")"
           if live_commit="$(build_commit_time "$HOME/.goat/runtime/goat/versions/$live_version/goat")"; then
             live_fields="$live_fields,\\"liveCommitTime\\":$live_commit"
+          fi
+          if [ "$live_version" != "$V" ] && lacks_memory_scopes "$HOME/.goat/runtime/goat/versions/$live_version/goat"; then
+            live_fields="$live_fields,\\"liveLacksMemoryScopes\\":true"
           fi
         fi
       fi
@@ -2253,6 +2298,8 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
       ),
       /** Commit times of the installed retained and live builds; absent for unstamped builds. */
       retainedCommitTime: Schema.optionalKey(Schema.Int),
+      /** The installed build's CLI cannot issue memory scopes; absent when it can or is unknown. */
+      retainedLacksMemoryScopes: Schema.optionalKey(Schema.Boolean),
       liveStatus: Schema.optionalKey(Schema.Literals(["none", "live", "unknown"])),
       liveOwned: Schema.optionalKey(Schema.Boolean),
       identityAbsent: Schema.optionalKey(Schema.Boolean),
@@ -2260,6 +2307,7 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
       liveSignals: Schema.optionalKey(RuntimeSignals),
       liveBinarySignals: Schema.optionalKey(RuntimeSignals),
       liveCommitTime: Schema.optionalKey(Schema.Int),
+      liveLacksMemoryScopes: Schema.optionalKey(Schema.Boolean),
       /** The live server drains for a replacement. Without it the client only attaches. */
       liveDrain: Schema.optionalKey(Schema.Boolean),
     }),
@@ -2397,12 +2445,19 @@ export const prepareRemoteRuntime = (
       retainedOrder === undefined &&
       probe.retainedCommitTime === undefined &&
       runner?.archiveCommitTime !== undefined;
+    // A runtime of unknown order whose CLI cannot issue memory scopes is replaced as if older:
+    // keeping it would fail every memory task on this host until someone stops it by hand.
+    const retainedLacksCapability =
+      retainedOrder === undefined && probe.retainedLacksMemoryScopes === true;
+    const liveLacksCapability = liveOrder === undefined && probe.liveLacksMemoryScopes === true;
     const upgradeRetained =
       owningLaunch &&
       exact.mayUpgradeOwnedServer &&
       retainedCompatible &&
       probe.retainedVersion !== undefined &&
-      ((retainedOrder !== undefined && retainedOrder < 0) || retainedPredatesStamps);
+      ((retainedOrder !== undefined && retainedOrder < 0) ||
+        retainedPredatesStamps ||
+        retainedLacksCapability);
     const adoptLegacy =
       owningLaunch &&
       exact.mayUpgradeOwnedServer &&
@@ -2418,10 +2473,9 @@ export const prepareRemoteRuntime = (
       liveCompatible &&
       probe.liveOwned === true &&
       probe.identityAbsent !== true &&
-      liveOrder !== undefined &&
-      liveOrder < 0;
+      ((liveOrder !== undefined && liveOrder < 0) || liveLacksCapability);
     const unorderedVersion =
-      liveCompatible && liveOrder === undefined
+      liveCompatible && liveOrder === undefined && !refreshIfIdle
         ? probe.liveVersion
         : probe.liveStatus === "none" &&
             retainedCompatible &&
@@ -2434,7 +2488,21 @@ export const prepareRemoteRuntime = (
         ...sshTargetLogFields(target),
         installedVersion: unorderedVersion,
         requestedVersion: version,
-        reason: `GOAT ${unorderedVersion} and ${version} have no provable build order (a build without a commit time, or versions that only differ by sha or train), so the installed ${unorderedVersion} is kept.`,
+        reason: liveLacksCapability
+          ? `GOAT ${unorderedVersion} cannot issue memory-scoped sessions, but this connection cannot replace it (it cannot drain, another client owns it, or this app already decided on it), so it is kept and memory tasks on this host fail until it is stopped.`
+          : `GOAT ${unorderedVersion} and ${version} have no provable build order (a build without a commit time, or versions that only differ by sha or train), so the installed ${unorderedVersion} is kept.`,
+      });
+    }
+    if (
+      owningLaunch &&
+      ((refreshIfIdle && liveLacksCapability) || (upgradeRetained && retainedLacksCapability))
+    ) {
+      yield* Effect.logInfo("ssh.runtime.upgrade.capability", {
+        ...sshTargetLogFields(target),
+        installedVersion: refreshIfIdle ? probe.liveVersion : probe.retainedVersion,
+        requestedVersion: version,
+        reason:
+          "The installed runtime cannot issue memory-scoped sessions, so it is replaced when idle.",
       });
     }
     if (adoptLegacy || refreshIfIdle) {
@@ -2857,7 +2925,20 @@ export const issueRemoteMcpClientSession = Effect.fn("ssh/tunnel.issueRemoteMcpC
       ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
       ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
       ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
-    });
+    }).pipe(
+      Effect.catchTags({
+        SshCommandError: (error) =>
+          Effect.fail(
+            memoryScopesUnsupportedError(
+              error.stdout ?? "",
+              target.alias,
+              `Stop it on the remote host when its work is done, then reconnect so ${
+                selected.requestedVersion ? `GOAT ${selected.requestedVersion}` : "this app's GOAT"
+              } replaces it.`,
+            ) ?? error,
+          ),
+      }),
+    );
     const session = yield* decodeRemoteMcpSessionOutput(result.stdout).pipe(
       Effect.mapError(
         (cause) =>
@@ -4140,6 +4221,24 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
             runner,
             tunnels.get(key)?.selectedRuntime,
           ),
+      }),
+    ).pipe(
+      Effect.mapError((error) => {
+        const pending = pendingReplacements.get(key)?.pending;
+        if (
+          pending === undefined ||
+          error._tag !== "SshPairingError" ||
+          error.reason !== "memory-scopes-unsupported"
+        )
+          return error;
+        // The refresh already waits for this runtime to go idle; say so instead of asking for a stop.
+        return (
+          memoryScopesUnsupportedError(
+            error.stdout,
+            resolvedTarget.alias,
+            `It will be replaced with GOAT ${pending.requestedVersion} when its current work finishes.`,
+          ) ?? error
+        );
       }),
     );
   });

@@ -205,7 +205,14 @@ function sshPreparationError(cause: unknown) {
 function sshRuntimePendingError(pending: {
   readonly reason: "busy" | "unknown" | "contended";
   readonly detail?: "recovery-stale";
+  readonly replacement: "older" | "legacy" | "incompatible" | "capability";
+  readonly liveVersion: string;
+  readonly requestedVersion: string;
 }) {
+  const waiting =
+    pending.replacement === "capability"
+      ? `Remote runtime GOAT ${pending.liveVersion} cannot grant memory access to tasks, so it will be replaced with GOAT ${pending.requestedVersion} when its work finishes.`
+      : "Remote runtime will be replaced when its work finishes.";
   return new ConnectionTransientError({
     reason: "remote-unavailable",
     detail:
@@ -214,8 +221,8 @@ function sshRuntimePendingError(pending: {
         : pending.reason === "contended"
           ? "Another client is replacing the remote runtime."
           : pending.reason === "unknown"
-            ? "Remote runtime will be replaced when its work finishes. Waiting for a verified idle response."
-            : "Remote runtime will be replaced when its work finishes.",
+            ? `${waiting} Waiting for a verified idle response.`
+            : waiting,
   });
 }
 

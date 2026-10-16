@@ -142,10 +142,15 @@ time each server build embeds (`apps/server/vite.config.ts` reads it from git, o
 `GOAT_BUILD_COMMIT_TIME`). The probe reads the installed builds' times with
 `__ssh-helper commit-time`, and the client sends its own as `archiveCommitTime`. When either time
 is missing, the pair has no order: a running server is kept (`ssh.runtime.upgrade.skipped` logs
-why), and an incompatible one is refused and left running. The one exception is a stopped host: a
-retained build with no commit time predates stamping, so a stamped client installs its own release
-over it. Stopping a server from before commit stamps once therefore moves its host to the client's
-build.
+why), and an incompatible one is refused and left running. There are two exceptions. On a stopped
+host, a retained build with no commit time predates stamping, so a stamped client installs its own
+release over it. Stopping a server from before commit stamps once therefore moves its host to the
+client's build. And a build of unknown order whose CLI cannot issue memory scopes (the shell's
+`lacks_memory_scopes` reads `auth session issue --help`) counts as older, with pending replacement
+`capability`, because keeping it would fail every memory-granted task on that host. A newer build
+is never replaced for this. The MCP-session script never drops requested memory scopes: a CLI that
+cannot issue them makes it print `GOAT_SESSION_ERROR=memory_scopes_unsupported runtime=<version>`,
+which the client reports as an `SshPairingError` naming the runtime.
 
 Only the pairing and MCP-session helpers pass `keepExistingRunner`. It never installs, refreshes,
 or replaces a runtime.

@@ -140,6 +140,9 @@ const request = http.get("http://127.0.0.1:" + current.port + "/", response => {
 });
 request.on("error", () => process.exit(1));
   } else process.exit(2);
+} else if (args[0] === "auth" && args.includes("--help")) {
+  // Like current builds, these runtimes can issue memory scopes.
+  console.log("  --scope choice  (choices: memory:read, memory:write, orchestration:read)");
 } else if (args[0] === "auth") {
   event("auth", { args });
   if (args[1] === "pairing") console.log(JSON.stringify({ credential: "fixture-pairing" }));

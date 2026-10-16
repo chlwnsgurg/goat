@@ -501,7 +501,8 @@ export const DesktopSshEnvironmentBootstrapSchema = Schema.Struct({
 export const SshRuntimePendingReplacementSchema = Schema.Struct({
   reason: Schema.Literals(["busy", "unknown", "contended"]),
   detail: Schema.optionalKey(Schema.Literal("recovery-stale")),
-  replacement: Schema.Literals(["older", "legacy", "incompatible"]),
+  /** `capability`: the live runtime cannot issue sessions this app needs, such as memory scopes. */
+  replacement: Schema.Literals(["older", "legacy", "incompatible", "capability"]),
   requestedVersion: Schema.String,
   liveVersion: Schema.String,
 });
