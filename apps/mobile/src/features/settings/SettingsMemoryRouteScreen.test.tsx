@@ -1049,7 +1049,9 @@ it("uses the bound project for native list, search and creation, and resets on r
   });
   h.projects.splice(0);
   await view.rerender(
-    <SettingsMemoryRouteScreen route={{ params: { environmentId: nativeEnv } }} />,
+    <SettingsMemoryRouteScreen
+      route={{ params: { environmentId: nativeEnv, memorySpaceId: nativeSpace } }}
+    />,
   );
   expect(view.container.textContent).toContain("Selected project is no longer available");
   expect(view.container.querySelector('[aria-label="Memory text"]')).toBeNull();
