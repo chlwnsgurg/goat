@@ -52,6 +52,7 @@ const store = Store.layer.pipe(Layer.provideMerge(database));
 const serviceLive = (
   serviceLayer = Service.layer,
   readSettings: Settings.MemoryHubCommittedSettings["Service"]["read"] = Effect.succeed({
+    provenance: null,
     settings: { mode: "hub" as const, memorySpaceId: space },
     version: 1,
   }),
@@ -3068,6 +3069,7 @@ it.effect("W2 rejects Settings writes while disabled and keeps saved records rea
     let disabled = false;
     const binding: Settings.MemoryHubCommittedSettings["Service"] = {
       read: Effect.sync(() => ({
+        provenance: null,
         settings: disabled
           ? { mode: "disabled" as const }
           : { mode: "hub" as const, memorySpaceId: space },
@@ -3463,6 +3465,7 @@ it.effect.each(["disabled", "other-space", "writer-wait"] as const)(
         let blocked = false;
         const readSettings: Settings.MemoryHubCommittedSettings["Service"]["read"] = Effect.sync(
           () => ({
+            provenance: null,
             settings: blocked
               ? mode === "other-space"
                 ? { mode: "hub" as const, memorySpaceId: M.MemorySpaceId.make(id(999)) }
@@ -3550,7 +3553,11 @@ it.effect(
         Layer.provide(Layer.succeed(Quota.MemoryQuotaService, quota)),
         Layer.provide(
           Layer.succeed(Settings.MemoryHubCommittedSettings, {
-            read: Effect.succeed({ settings: { mode: "disabled" as const }, version: 1 }),
+            read: Effect.succeed({
+              provenance: null,
+              settings: { mode: "disabled" as const },
+              version: 1,
+            }),
           }),
         ),
         Layer.provide(

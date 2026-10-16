@@ -2283,3 +2283,25 @@ it("opts into retained local space without changing legacy sync status requests"
   rejects(M.MemorySyncStatusInput, { includeRetainedLocalSpaceId: false });
   rejects(M.MemorySyncStatusInput, { includeRetainedLocalSpaceId: null });
 });
+
+const decodeHubSnapshot = Schema.decodeUnknownSync(M.MemoryHubSettingsSnapshot);
+const decodeHubView = Schema.decodeUnknownSync(M.MemoryHubSettingsView);
+it("automatically initialized hub provenance decodes old receipts as unknown and rejects a mismatched space", () => {
+  const decode = decodeHubSnapshot;
+  expect(decode({ settings: { mode: "disabled" }, version: 0 }).provenance).toBeNull();
+  const settings = { mode: "hub", memorySpaceId: id(1) };
+  const provenance = { source: "auto-initialized", memorySpaceId: id(1) };
+  expect(decode({ settings, version: 1, provenance }).provenance).toEqual(provenance);
+  expect(() =>
+    decode({ settings, version: 1, provenance: { ...provenance, memorySpaceId: id(2) } }),
+  ).toThrow();
+  expect(() =>
+    decode({ settings, version: 1, provenance: { ...provenance, source: "manual" } }),
+  ).toThrow();
+  const view = decodeHubView({
+    settings,
+    version: 1,
+    members: [],
+  });
+  expect(view.provenance).toBeNull();
+});

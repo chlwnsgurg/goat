@@ -457,7 +457,11 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         yield* service.start;
         yield* awaitWatch(path.dirname(config.settingsPath), 2);
         if (damage === "missing symlink target") yield* awaitWatch(path.dirname(target));
-        assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 7 });
+        assert.deepStrictEqual(yield* snapshot.read, {
+          provenance: null,
+          settings: hub,
+          version: 7,
+        });
         assert.deepStrictEqual(yield* snapshot.readPublication!, { state: "current" });
         const changes = yield* service.subscribeChanges;
         if (damage === "deleted file" || damage === "missing symlink target") {
@@ -484,7 +488,11 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const rejected = yield* changes.pipe(Stream.runHead);
         assert.deepStrictEqual(Option.getOrThrow(rejected).memoryHub, hub);
         assert.strictEqual(Option.getOrThrow(rejected).memoryHubVersion, 7);
-        assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 7 });
+        assert.deepStrictEqual(yield* snapshot.read, {
+          provenance: null,
+          settings: hub,
+          version: 7,
+        });
         assert.strictEqual((yield* snapshot.readPublication!).state, "last_valid");
         // Rejected input must remain for repair; migrations cannot rewrite it.
         if (damage === "deleted file" || damage === "missing symlink target") {
@@ -502,6 +510,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         assert.strictEqual(Option.getOrThrow(repaired).memoryHubVersion, 8);
         assert.deepStrictEqual(yield* snapshot.readPublication!, { state: "current" });
         assert.deepStrictEqual(yield* snapshot.read, {
+          provenance: null,
           settings: { mode: "disabled" },
           version: 8,
         });
@@ -531,6 +540,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         yield* TestClock.adjust(100);
         yield* changes.pipe(Stream.runHead);
         assert.deepStrictEqual(yield* snapshot.read, {
+          provenance: null,
           settings: { mode: "disabled" },
           version: 7,
         });
@@ -543,7 +553,11 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         yield* notify(config.settingsPath);
         yield* TestClock.adjust(100);
         yield* repairedChanges.pipe(Stream.runHead);
-        assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 8 });
+        assert.deepStrictEqual(yield* snapshot.read, {
+          provenance: null,
+          settings: hub,
+          version: 8,
+        });
       }),
     ),
   );
@@ -560,6 +574,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         else yield* fs.writeFileString(config.settingsPath, "{}");
         yield* service.start;
         assert.deepStrictEqual(yield* snapshot.read, {
+          provenance: null,
           settings: { mode: "disabled" },
           version: 0,
         });
@@ -2816,6 +2831,7 @@ it.effect(
           const publicService = yield* ServerSettingsModule.ServerSettingsService;
           assert.isFalse(Object.hasOwn(yield* publicService.getSettings, "_memoryHubTransition"));
           assert.deepStrictEqual(yield* recovered.applyMemoryHubTransition(input, Effect.void), {
+            provenance: null,
             settings,
             version: 1,
           });
@@ -2910,6 +2926,7 @@ it.effect(
         yield* service.start;
         yield* service.ready;
         assert.deepStrictEqual(yield* snapshot.read, {
+          provenance: null,
           settings: { mode: "disabled" },
           version: 0,
         });
@@ -2937,13 +2954,18 @@ it.effect(
         // Cleanup is still gated and the write semaphore is held. SQL reads must
         // see the rename's epoch without waiting for either of those resources.
         assert.deepStrictEqual(yield* sql.withTransaction(snapshot.read), {
+          provenance: null,
           settings: hub,
           version: 1,
         });
         yield* Deferred.succeed(releaseCleanup, undefined);
         yield* Fiber.join(writer);
         yield* service.updateSettings({ standingInstructions: "synthetic snapshot preservation" });
-        assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 1 });
+        assert.deepStrictEqual(yield* snapshot.read, {
+          provenance: null,
+          settings: hub,
+          version: 1,
+        });
         yield* transitions.applyMemoryHubTransition(
           {
             requestId: MemoryOperationId.make("00000000-0000-4000-8000-000000000087"),
@@ -2953,6 +2975,7 @@ it.effect(
           Effect.void,
         );
         assert.deepStrictEqual(yield* sql.withTransaction(snapshot.read), {
+          provenance: null,
           settings: { mode: "disabled" },
           version: 2,
         });

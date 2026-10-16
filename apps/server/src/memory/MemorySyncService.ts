@@ -92,6 +92,7 @@ export class MemorySyncService extends Context.Service<
   MemorySyncService,
   {
     readonly start: Effect.Effect<void, Error>;
+    readonly initializeDefaultHub: Effect.Effect<void, Hub.MemoryHubAdministrationError | Error>;
     readonly syncOnce: Effect.Effect<void, Error>;
     readonly shutdown: Effect.Effect<void>;
     readonly scheduleConflictResolution: Effect.Effect<void, Error>;
@@ -2166,11 +2167,21 @@ const make = Effect.gen(function* () {
             : Effect.fail(new M.MemoryHubError({ code: "bootstrap_required" })),
         ),
       ),
+    initializeDefaultHub: Effect.gen(function* () {
+      const admin = yield* Effect.serviceOption(Hub.MemoryHubAdministrator);
+      if (Option.isNone(admin)) return yield* new M.MemoryHubError({ code: "route_unavailable" });
+      yield* admin.value.initializeDefaultHub;
+      yield* guardedSync;
+    }),
     getHubSettings: (_input, permit) =>
       permit.pipe(
         Effect.andThen(readSettings),
         Effect.flatMap((s) =>
-          Hub.readSettingsView(store, { settings: s.memoryHub, version: s.memoryHubVersion }),
+          Hub.readSettingsView(store, {
+            settings: s.memoryHub,
+            version: s.memoryHubVersion,
+            provenance: s.memoryHubProvenance,
+          }),
         ),
       ),
     updateHubSettings: (input, permit) =>

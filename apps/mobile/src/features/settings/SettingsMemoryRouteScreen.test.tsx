@@ -615,6 +615,16 @@ describe("native sharing workflow", () => {
     );
     await view.render();
   }
+  it("shows automatically initialized memory as on and usable without an enable action", async () => {
+    await start();
+    expect(view.container.textContent).toContain("This device is the hub");
+    expect(view.container.textContent).toContain("Memory is on by default.");
+    expect(view.container.textContent).not.toContain("Memory off");
+    expect(view.container.textContent).not.toContain("Make this device the hub");
+    expect(view.container.textContent).not.toContain("Turn on memory to");
+    await view.click("Remember something");
+    expect(view.container.querySelector('[aria-label="Memory text"]')).not.toBeNull();
+  });
   it.each(["focus", "active"] as const)(
     "refreshes hub, owner and sync on %s and keeps saved memories read-only after remote disable",
     async (event) => {

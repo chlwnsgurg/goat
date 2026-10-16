@@ -2,9 +2,11 @@
 
 Save useful facts and instructions for later conversations, and share them between your devices. Manage memory in **Settings → Memory** on web, desktop, or mobile, choosing the device whose memory you want to manage.
 
-## Turn on memory
+## Memory is on by default
 
-Memory starts off. To use it on one device, open **Settings → Memory** and choose **Make this device the hub**. You can add other devices later; there is one hub, and every device that shares memory can save and edit memories equally.
+Memory starts on in every new environment, which acts as its own hub. This applies to desktop, WSL, SSH and headless servers, and servers you use through a web browser or mobile. If you have already configured memory or turned it off, your choice is kept across restarts.
+
+To share memory, use **Add device** in the hub’s Memory settings. Every device that shares memory can save and edit memories equally. If memory is off, choose **Make this device the hub** to turn it back on, or add the device from another hub.
 
 ## Save and find memories
 

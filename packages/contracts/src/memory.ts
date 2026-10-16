@@ -1782,11 +1782,28 @@ export const MEMORY_ADMINISTRATION_MCP_TOOLS = ["memory_hub_disable"] as const;
 export const MemoryHubSettingsGetInput = struct({});
 export type MemoryHubSettingsGetInput = typeof MemoryHubSettingsGetInput.Type;
 
+export const MemoryHubProvenance = struct({
+  source: Schema.Literal("auto-initialized"),
+  memorySpaceId: MemorySpaceId,
+});
+export type MemoryHubProvenance = typeof MemoryHubProvenance.Type;
+const hubProvenance = Schema.NullOr(MemoryHubProvenance).pipe(
+  Schema.withDecodingDefault(Effect.succeed(null)),
+);
+
 /** Persisted settings receipts exclude the live roster. */
 export const MemoryHubSettingsSnapshot = struct({
   settings: MemoryHubSettings,
   version: NonNegativeInt,
-});
+  provenance: hubProvenance,
+}).check(
+  Schema.makeFilter(
+    (view) =>
+      view.provenance === null ||
+      (view.settings.mode === "hub" &&
+        view.settings.memorySpaceId === view.provenance.memorySpaceId),
+  ),
+);
 export type MemoryHubSettingsSnapshot = typeof MemoryHubSettingsSnapshot.Type;
 export const MemoryHubMemberView = struct({
   environmentId: EnvironmentId,
@@ -1798,10 +1815,14 @@ export type MemoryHubMemberView = typeof MemoryHubMemberView.Type;
 export const MemoryHubSettingsView = struct({
   settings: MemoryHubSettings,
   version: NonNegativeInt,
+  provenance: hubProvenance,
   members: array(MemoryHubMemberView, MEMORY_HUB_MAX_MEMBERS),
 }).check(
   Schema.makeFilter(
     (view) =>
+      (view.provenance === null ||
+        (view.settings.mode === "hub" &&
+          view.settings.memorySpaceId === view.provenance.memorySpaceId)) &&
       ((view.settings.mode === "hub" && view.settings.memorySpaceId !== null) ||
         view.members.length === 0) &&
       unique(view.members.map((member) => member.environmentId)),

@@ -99,6 +99,7 @@ import Migration0079 from "./Migrations/079_MemoryRevertResults.ts";
 import Migration0077 from "./Migrations/077_MemoryReportLifecycle.ts";
 import Migration0080 from "./Migrations/080_HandoffLookupIndex.ts";
 import Migration0081 from "./Migrations/081_MemoryLastReadySpace.ts";
+import Migration0082 from "./Migrations/082_MemoryHubAdministered.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -196,6 +197,7 @@ export const migrationEntries = [
   [79, "MemoryRevertResults", Migration0079],
   [80, "HandoffLookupIndex", Migration0080],
   [81, "MemoryLastReadySpace", Migration0081],
+  [82, "MemoryHubAdministered", Migration0082],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

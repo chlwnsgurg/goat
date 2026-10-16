@@ -747,6 +747,7 @@ export type PersistedAdminAction =
   | Exclude<M.MemoryHubSettingsUpdateInput, { action: "installCredential" }>
   | Omit<Extract<M.MemoryHubSettingsUpdateInput, { action: "installCredential" }>, "credential">;
 const AdminRecordSchema = Schema.Struct({
+  initialization: Schema.optionalKey(Schema.Literal("auto-initialized")),
   requestId: M.MemoryOperationId,
   requestDigest: digest,
   expectedVersion: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -764,6 +765,7 @@ const AdminRecordSchema = Schema.Struct({
 );
 export type AdminRecord = typeof AdminRecordSchema.Type;
 const AdminReplaySchema = Schema.Struct({
+  initialization: Schema.optionalKey(Schema.Literal("auto-initialized")),
   requestId: M.MemoryOperationId,
   requestDigest: digest,
   expectedVersion: Schema.Int,
@@ -1110,6 +1112,7 @@ export class MemoryStore extends Context.Service<
       next: { credentialDigest: string } | "revoked";
       now: number;
     }) => InTx<HubMember, MemoryStorageError | MemoryStoreConflict | MemoryCapacityError>;
+    readonly hasHubAdministrationTx: () => InTx<boolean, MemoryStorageError>;
     readonly readActivatedHubAdminTx: () => InTx<AdminRecord | undefined, MemoryStorageError>;
     readonly readPendingHubAdmins: (
       limit: number,
@@ -9029,6 +9032,10 @@ const make = Effect.gen(function* () {
   )(function* (input) {
     yield* Transaction;
     const record = yield* stored("hub-admin-codec", adminDecode(input.record, strict));
+    yield* stored(
+      "hub-admin-provenance",
+      sql`INSERT INTO memory_hub_administration_state(singleton,administered) VALUES(1,1) ON CONFLICT(singleton) DO UPDATE SET administered=1`,
+    );
     const json = yield* stored("hub-admin-codec", adminCodec.encode(record));
     if (new TextEncoder().encode(json).length > M.MEMORY_PAGE_MAX_UTF8_BYTES)
       return yield* new MemoryStoreConflict({ code: "payload_too_large" });
@@ -9037,6 +9044,7 @@ const make = Effect.gen(function* () {
       if (
         old.requestDigest !== record.requestDigest ||
         old.expectedVersion !== record.expectedVersion ||
+        old.initialization !== record.initialization ||
         old.actionDigest !== hashText(yield* adminActionCodec.encode(record.action)) ||
         old.secretName !== record.secretName
       )
@@ -9048,6 +9056,7 @@ const make = Effect.gen(function* () {
       if (
         old.requestDigest !== record.requestDigest ||
         old.expectedVersion !== record.expectedVersion ||
+        old.initialization !== record.initialization ||
         (yield* adminActionCodec.encode(old.action)) !==
           (yield* adminActionCodec.encode(record.action)) ||
         old.secretName !== record.secretName
@@ -11772,6 +11781,17 @@ const make = Effect.gen(function* () {
     writeHubAdminTx: (input) => withHubBudget(writeHubAdminTx(input)),
     activateHubMemberTx: (input) => withHubBudget(activateHubMemberTx(input)),
     readPendingHubAdmins,
+    hasHubAdministrationTx: () =>
+      Effect.gen(function* () {
+        yield* Transaction;
+        const rows = yield* stored(
+          "hub-admin-provenance",
+          sql<{
+            administered: number;
+          }>`SELECT administered FROM memory_hub_administration_state WHERE singleton=1`,
+        );
+        return rows[0]?.administered === 1;
+      }),
     readActivatedHubAdminTx,
     readProcessing,
     readLocalProcessingStatus,

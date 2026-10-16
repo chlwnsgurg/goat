@@ -1402,3 +1402,10 @@ describe("managed memory settings", () => {
       ).toThrow();
   });
 });
+
+it("keeps process-neutral memory disabled and reserves automatic provenance from settings patches", () => {
+  const decoded = decodeServerSettings({});
+  expect(decoded.memoryHub).toEqual({ mode: "disabled" });
+  expect(decoded.memoryHubProvenance).toBeNull();
+  expect(() => decodeServerSettingsPatch({ memoryHubProvenance: null })).toThrow();
+});

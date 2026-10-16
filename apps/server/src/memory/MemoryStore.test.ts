@@ -28,6 +28,8 @@ import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointA
 import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import usageMigration from "../persistence/Migrations/078_MemoryUsageCounters.ts";
 import revertMigration from "../persistence/Migrations/079_MemoryRevertResults.ts";
+import readyMigration from "../persistence/Migrations/081_MemoryLastReadySpace.ts";
+import adminMigration from "../persistence/Migrations/082_MemoryHubAdministered.ts";
 import * as Store from "./MemoryStore.ts";
 import { CheckpointAccountingError } from "./MemoryCheckpointAccounting.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
@@ -129,6 +131,8 @@ const setup = Layer.effectDiscard(
     Effect.andThen(reportMigration),
     Effect.andThen(usageMigration),
     Effect.andThen(revertMigration),
+    Effect.andThen(readyMigration),
+    Effect.andThen(adminMigration),
     Effect.andThen(searchMigration),
   ),
 ).pipe(Layer.provideMerge(database));
@@ -3000,6 +3004,8 @@ describe("MemoryStore transient source relay", () => {
                 Effect.andThen(reportMigration),
                 Effect.andThen(usageMigration),
                 Effect.andThen(revertMigration),
+                Effect.andThen(readyMigration),
+                Effect.andThen(adminMigration),
                 Effect.andThen(searchMigration),
               ),
             ).pipe(Layer.provideMerge(db)),
@@ -4786,7 +4792,7 @@ it.effect(
       const ready: Store.AdminRecord = {
         ...first,
         stage: "ready",
-        result: { view: { settings: { mode: "disabled" }, version: 1 } },
+        result: { view: { provenance: null, settings: { mode: "disabled" }, version: 1 } },
       };
       yield* store.transact(store.writeHubAdminTx({ record: ready, expectedStage: "activated" }));
       const terminal = yield* store.transact(
@@ -4955,7 +4961,7 @@ it.effect(
         const ready: Store.AdminRecord = {
           ...record,
           stage: "ready",
-          result: { view: { settings: { mode: "disabled" }, version: 1 } },
+          result: { view: { provenance: null, settings: { mode: "disabled" }, version: 1 } },
         };
         yield* store.transact(store.writeHubAdminTx({ record: ready, expectedStage: "activated" }));
         if (n === 0)
@@ -7539,6 +7545,7 @@ it.effect("recovery skips completed installCredential admin before work decoding
     };
     const result = {
       view: {
+        provenance: null,
         settings: {
           mode: "member" as const,
           hubEnvironmentId: env,
