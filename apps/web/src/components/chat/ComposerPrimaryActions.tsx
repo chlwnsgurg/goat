@@ -346,7 +346,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       {stageBackdropVariant ? (
         // The art clips itself so the button can extend its touch overlay past the circle.
         <span
-          className="pointer-events-none absolute inset-0 -z-10 overflow-hidden rounded-full brightness-[0.86]"
+          className="pointer-events-none absolute inset-0 -z-10 overflow-hidden rounded-full brightness-90"
           aria-hidden="true"
         >
           <StageBackdropButtonArt variant={stageBackdropVariant} />
