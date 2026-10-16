@@ -7,7 +7,7 @@ import {
   MemoryMutationReceipt,
   type MemoryForgetInput,
   MemorySourcePage,
-  type MemoryUpsertInput,
+  MemoryUpsertInput,
   MemoryHistoryPage,
   MemoryRevertResult,
   type MemoryRevertResolutionInput,
@@ -29,6 +29,7 @@ import { AsyncResult } from "effect/reactivity";
 import * as Schema from "effect/Schema";
 import { SettingsMemoryRouteScreen, MemoryEnvironmentEntry } from "./SettingsMemoryRouteScreen";
 
+const encodeUpsert = Schema.encodeSync(MemoryUpsertInput);
 let h: NativeMemoryHarness;
 let view: ReturnType<typeof renderNative>;
 afterEach(async () => {
@@ -1041,11 +1042,15 @@ it("uses the bound project for native list, search and creation, and resets on r
     input: { scope, mode: "fts" },
   });
   await view.click("Remember something");
-  expect(view.container.textContent).toContain("Save to: Project");
+  expect(view.container.textContent).toContain("Save to: Synthetic project");
+  expect(view.container.textContent?.match(/Save to:/g)).toHaveLength(1);
   await view.type("Memory text", "Synthetic project memory");
   await view.click("Save memory");
-  expect(h.calls.findLast((call) => call.method === WS_METHODS.memoryUpsert)).toMatchObject({
-    input: { scope, payload: { text: "Synthetic project memory" } },
+  const request = h.calls.findLast((call) => call.method === WS_METHODS.memoryUpsert)!
+    .input as MemoryUpsertInput;
+  expect(encodeUpsert(MemoryUpsertInput.make(request))).toMatchObject({
+    scope,
+    payload: { text: "Synthetic project memory" },
   });
   h.projects.splice(0);
   await view.rerender(
@@ -2180,3 +2185,29 @@ it.each([
     ).toHaveLength(0);
   },
 );
+
+it.each([false, true])("keeps native legacy revert with incomplete page=%s", async (incomplete) => {
+  await mount(undefined, (harness) => {
+    Object.assign(
+      harness.registry.get(harness.configs(nativeEnv))!.environment.capabilities.memory!,
+      { resolutionInputs: false },
+    );
+    harness.responses.set(WS_METHODS.memoryHistory, (input) => {
+      expect(input).not.toHaveProperty("resolutionInputsFor");
+      return { ...revertHistory(), nextCursor: incomplete ? "more" : null };
+    });
+  });
+  await view.click("Open memory: Synthetic memory body");
+  if (incomplete) {
+    expect(view.container.textContent).toContain("Load complete history before reverting");
+    expect(view.container.textContent).not.toContain("Restore original 1");
+  } else {
+    await view.click("Restore original 1");
+    await view.click("Revert resolution");
+    expect(h.calls.find((call) => call.method === WS_METHODS.memoryRevertResolution)).toMatchObject(
+      {
+        input: { restoredRevisionId: originalId },
+      },
+    );
+  }
+});

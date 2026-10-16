@@ -24,7 +24,6 @@ import {
   type MemorySyncStatus,
   type MemoryReportDelivery,
   type MemoryScope,
-  type ScopedProjectRef,
 } from "@goat/contracts";
 import {
   memoryBrowseInput,
@@ -50,8 +49,7 @@ import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useEnvironment, useEnvironments } from "../../state/environments";
-import { useProjects, useThreadShells } from "../../state/entities";
-import { MemoryScopePicker } from "./MemoryScopePicker";
+import { useProjects } from "../../state/entities";
 import {
   readEnvironmentScope,
   readPreparedConnection,
@@ -374,20 +372,8 @@ function MemoryRecords({
   );
   const [selection, setSelection] = useState<string | null>("user");
   const [scope, setScope] = useState<MemoryScope | null>({ kind: "user" });
-  const [threadId, setThreadId] = useState<string | null>(null);
-  const threads = useThreadShells(selection === "thread").filter(
-    (thread) => thread.environmentId === environmentId,
-  );
-  const thread = threads.find((thread) => thread.id === threadId);
   const selectedProject = projects.find((project) => `project:${project.id}` === selection);
-  const browseScope: MemoryScope | null =
-    selection === "thread"
-      ? thread
-        ? { kind: "thread", thread: { environmentId, threadId: thread.id } }
-        : null
-      : selection?.startsWith("project:") && !selectedProject
-        ? null
-        : scope;
+  const browseScope = selection?.startsWith("project:") && !selectedProject ? null : scope;
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   useEffect(
@@ -438,7 +424,7 @@ function MemoryRecords({
           description={
             error ? (
               <span role="alert">{error}</span>
-            ) : !scope && selection !== "thread" ? (
+            ) : !scope ? (
               "Loading project memory scope"
             ) : !canGetBinding && projects.length > 0 ? (
               "Project scope requires memory write permission to look up its shared key."
@@ -449,13 +435,7 @@ function MemoryRecords({
               value={selection}
               onValueChange={(value) => {
                 if (value === "user") void choose(null);
-                else if (value === "thread") {
-                  generation.current++;
-                  setSelection("thread");
-                  setThreadId(null);
-                  setError(null);
-                  clearMemorySelection();
-                } else {
+                else {
                   const project = projects.find((item) => `project:${item.id}` === value);
                   if (project && canGetBinding) void choose(project);
                 }
@@ -463,16 +443,11 @@ function MemoryRecords({
             >
               <SelectTrigger aria-label="Memory scope">
                 <SelectValue placeholder="Choose memory scope">
-                  {selection === "thread"
-                    ? "Thread"
-                    : selection === "user"
-                      ? "User"
-                      : projects.find((project) => `project:${project.id}` === selection)?.title}
+                  {selection === "user" ? "User" : selectedProject?.title}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup>
                 <SelectItem value="user">User</SelectItem>
-                <SelectItem value="thread">Thread</SelectItem>
                 {projects.map((project) => (
                   <SelectItem
                     key={project.id}
@@ -486,20 +461,6 @@ function MemoryRecords({
             </Select>
           }
         />
-        {selection === "thread" ? (
-          <SettingsRow
-            title="Thread"
-            control={
-              <MemoryScopePicker
-                items={threads}
-                value={thread?.id ?? null}
-                onChange={setThreadId}
-                label="Memory thread"
-                disabled={false}
-              />
-            }
-          />
-        ) : null}
       </SettingsSection>
       {browseScope ? (
         <ScopedMemoryRecords
@@ -508,9 +469,7 @@ function MemoryRecords({
           environmentId={environmentId}
           memorySpaceId={memorySpaceId}
           scope={browseScope}
-          {...(selectedProject
-            ? { project: { environmentId, projectId: selectedProject.id } }
-            : {})}
+          scopeLabel={selectedProject?.title ?? memoryScopeLabel(browseScope)}
         />
       ) : null}
     </>
@@ -523,14 +482,14 @@ function ScopedMemoryRecords({
   memorySpaceId,
   memoryEnabled,
   scope,
-  project,
+  scopeLabel,
 }: {
   target: MemorySettingsSearch;
   environmentId: EnvironmentId;
   memorySpaceId: MemorySpaceId;
   memoryEnabled: boolean;
   scope: MemoryScope;
-  project?: ScopedProjectRef;
+  scopeLabel?: string;
 }) {
   const [queryInput, setQueryInput] = useState("");
   const [query, setQuery] = useState("");
@@ -599,10 +558,10 @@ function ScopedMemoryRecords({
           }
         />
         {adding && canWrite ? (
-          <SettingsRow title={`New memory · ${memoryScopeLabel(scope)}`}>
+          <SettingsRow title="New memory">
             <MemoryEditor
               scope={scope}
-              {...(project ? { project } : {})}
+              scopeLabel={scopeLabel ?? memoryScopeLabel(scope)}
               environmentId={environmentId}
               memorySpaceId={memorySpaceId}
               onClose={() => {
@@ -1085,6 +1044,9 @@ export function MemoryRevertControl({
   const canWrite = useAtomValue(memoryEnvironment.revertResolution.permissionAtom(environmentId));
   const connection = Option.getOrNull(usePreparedConnection(environmentId));
   const revert = useAtomCommand(memoryEnvironment.revertResolution, { reportFailure: false });
+  const supportsInputs =
+    environments.find((environment) => environment.environmentId === environmentId)?.serverConfig
+      ?.environment.capabilities.memory?.resolutionInputs === true;
   const [originalCursor, setOriginalCursor] = useState<string | undefined>();
   const originals = useEnvironmentQuery(
     memoryEnvironment.history({
@@ -1092,18 +1054,20 @@ export function MemoryRevertControl({
       input: {
         memorySpaceId: item.memorySpaceId,
         memoryId: item.memoryId,
-        resolutionInputsFor: entry.resolution.resolutionId,
+        ...(supportsInputs ? { resolutionInputsFor: entry.resolution.resolutionId } : {}),
         limit: 20,
         ...(originalCursor ? { cursor: originalCursor } : {}),
       },
     }),
   );
   const originalPage = originals.data ? Option.getOrNull(originals.data) : null;
-  const revertHistory = {
-    ...history,
-    revisions: originalPage?.revisions ?? [],
-    restorableRevisionIds: originalPage?.restorableRevisionIds ?? [],
-  };
+  const revertHistory = supportsInputs
+    ? {
+        ...history,
+        revisions: originalPage?.revisions ?? [],
+        restorableRevisionIds: originalPage?.restorableRevisionIds ?? [],
+      }
+    : history;
   const refreshOriginals = originals.refresh;
   const previousHistory = useRef(history);
   useEffect(() => {
@@ -1127,6 +1091,7 @@ export function MemoryRevertControl({
     item,
     entry,
     history: revertHistory,
+    requireCompleteHistory: !supportsInputs,
     now: openedAt,
     ...(selected ? { restoredRevisionId: selected } : {}),
   });
@@ -1162,6 +1127,7 @@ export function MemoryRevertControl({
       item,
       entry,
       history: revertHistory,
+      requireCompleteHistory: !supportsInputs,
       restoredRevisionId: selected,
       now: Date.now(),
     });
@@ -1201,7 +1167,9 @@ export function MemoryRevertControl({
         </p>
       ) : null}
       {display.reason ? <p>{display.reason}</p> : null}
-      {originals.error ? <p role="alert">Could not load retained originals.</p> : null}
+      {supportsInputs && originals.error ? (
+        <p role="alert">Could not load retained originals.</p>
+      ) : null}
       {originalCursor ? (
         <Button
           size="sm"
@@ -1216,7 +1184,7 @@ export function MemoryRevertControl({
           First originals page
         </Button>
       ) : null}
-      {originalPage?.nextCursor ? (
+      {supportsInputs && originalPage?.nextCursor ? (
         <Button
           size="sm"
           variant="ghost"
@@ -1460,14 +1428,14 @@ function MemoryEditor({
   memorySpaceId,
   item,
   scope = DEFAULT_MEMORY_SCOPE,
-  project,
+  scopeLabel,
   onClose,
 }: {
   environmentId: EnvironmentId;
   memorySpaceId: MemorySpaceId;
   item?: Extract<MemoryItem, { status: "active" }>;
   scope?: MemoryScope;
-  project?: ScopedProjectRef;
+  scopeLabel?: string;
   onClose: () => void;
 }) {
   const [id] = useState(() => item?.memoryId ?? MemoryId.make(randomUUID()));
@@ -1527,7 +1495,6 @@ function MemoryEditor({
             operationId: intentId,
             expectedHeads: item ? [item.revision.revisionId] : [],
             scope: item?.scope ?? scope,
-            ...(!item && project ? { project } : {}),
             assertionKind: item?.revision.assertionKind ?? "fact",
             payload: {
               text,
@@ -1548,7 +1515,7 @@ function MemoryEditor({
           setError("Memory update failed. Retry the same request or close the editor and reload.");
       }}
     >
-      <p>Save to: {memoryScopeLabel(item?.scope ?? scope)}</p>
+      <p>Save to: {scopeLabel ?? memoryScopeLabel(item?.scope ?? scope)}</p>
       <Textarea
         aria-label="Memory text"
         value={text ?? ""}

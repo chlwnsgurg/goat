@@ -761,6 +761,10 @@ function ScopedMemoryBrowser({
         params={params}
         memorySpaceId={memorySpaceId}
         scope={scope}
+        scopeLabel={
+          projects.find((project) => project.id === params.project?.projectId)?.title ??
+          memoryScopeLabel(scope)
+        }
         onClose={() => {
           setCreating(false);
           registry.refresh(atom);
@@ -1316,13 +1320,15 @@ function MemoryRevertControl({
   const allowed = useAtomValue(memory.revertResolution.permissionAtom(environmentId));
   const revert = useAtomCommand(memory.revertResolution);
   const { savedConnectionsById } = useSavedRemoteConnections();
+  const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
+  const supportsInputs = config?.environment.capabilities.memory?.resolutionInputs === true;
   const [originalCursor, setOriginalCursor] = useState<string | undefined>();
   const originalsAtom = memory.history({
     environmentId,
     input: {
       memorySpaceId: item.memorySpaceId,
       memoryId: item.memoryId,
-      resolutionInputsFor: entry.resolution.resolutionId,
+      ...(supportsInputs ? { resolutionInputsFor: entry.resolution.resolutionId } : {}),
       limit: 20,
       ...(originalCursor ? { cursor: originalCursor } : {}),
     },
@@ -1331,11 +1337,13 @@ function MemoryRevertControl({
   const originalPage = AsyncResult.isSuccess(originalsResult)
     ? Option.getOrNull(originalsResult.value)
     : null;
-  const revertHistory = {
-    ...history,
-    revisions: originalPage?.revisions ?? [],
-    restorableRevisionIds: originalPage?.restorableRevisionIds ?? [],
-  };
+  const revertHistory = supportsInputs
+    ? {
+        ...history,
+        revisions: originalPage?.revisions ?? [],
+        restorableRevisionIds: originalPage?.restorableRevisionIds ?? [],
+      }
+    : history;
   const previousHistory = useRef(history);
   useEffect(() => {
     if (previousHistory.current !== history) registry.refresh(originalsAtom);
@@ -1352,6 +1360,7 @@ function MemoryRevertControl({
     item,
     entry,
     history: revertHistory,
+    requireCompleteHistory: !supportsInputs,
     now: openedAt,
     ...(selected ? { restoredRevisionId: selected } : {}),
   });
@@ -1383,7 +1392,7 @@ function MemoryRevertControl({
     if (
       !current ||
       !page ||
-      !liveOriginals ||
+      (supportsInputs && !liveOriginals) ||
       !resolution ||
       current.memoryId !== item.memoryId ||
       current.memorySpaceId !== item.memorySpaceId ||
@@ -1394,11 +1403,15 @@ function MemoryRevertControl({
       !presentMemoryRevert({
         item: current,
         entry: resolution,
-        history: {
-          ...page,
-          revisions: liveOriginals.revisions,
-          restorableRevisionIds: liveOriginals.restorableRevisionIds ?? [],
-        },
+        history:
+          supportsInputs && liveOriginals
+            ? {
+                ...page,
+                revisions: liveOriginals.revisions,
+                restorableRevisionIds: liveOriginals.restorableRevisionIds ?? [],
+              }
+            : page,
+        requireCompleteHistory: !supportsInputs,
         now: Date.now(),
         restoredRevisionId: selected,
       }).canRevert
@@ -1439,7 +1452,7 @@ function MemoryRevertControl({
       <Copy>{display.windowLabel}</Copy>
       {display.timeNotice ? <Copy>{display.timeNotice}</Copy> : null}
       {display.reason ? <Copy>{display.reason}</Copy> : null}
-      {AsyncResult.isFailure(originalsResult) ? (
+      {supportsInputs && AsyncResult.isFailure(originalsResult) ? (
         <Copy>Could not load retained originals.</Copy>
       ) : null}
       {originalCursor ? (
@@ -1453,7 +1466,7 @@ function MemoryRevertControl({
           }}
         />
       ) : null}
-      {originalPage?.nextCursor ? (
+      {supportsInputs && originalPage?.nextCursor ? (
         <Action
           label="Next originals page"
           disabled={pending}
@@ -1576,12 +1589,14 @@ function MemoryEditor({
   params,
   memorySpaceId,
   scope,
+  scopeLabel,
   item,
   onClose,
 }: {
   readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
   readonly memorySpaceId: MemorySpaceId;
   readonly scope: MemoryScope;
+  readonly scopeLabel?: string;
   readonly item?: Extract<MemoryItem, { status: "active" }>;
   readonly onClose: () => void;
 }) {
@@ -1667,7 +1682,7 @@ function MemoryEditor({
   return (
     <ScreenScrollView contentInsetAdjustmentBehavior="automatic">
       <Action label="Close editor" onPress={onClose} />
-      <Copy>Save to: {memoryScopeLabel(scope)}</Copy>
+      <Copy>Save to: {scopeLabel ?? memoryScopeLabel(scope)}</Copy>
       {text === null ? (
         <Copy>The draft is no longer available. Close and reopen this memory.</Copy>
       ) : (

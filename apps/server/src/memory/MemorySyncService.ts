@@ -318,6 +318,23 @@ const make = Effect.gen(function* () {
     };
   });
   type Route = NonNullable<Effect.Success<ReturnType<typeof route>>>;
+  // Persist once per ready binding, independently of sync timestamps and status reads.
+  let rememberedReadyEpoch: number | undefined;
+  const rememberReadySpace = Effect.fnUntraced(function* (r: Pick<Route, "space" | "settings">) {
+    if (!r.space || rememberedReadyEpoch === r.settings.memoryHubVersion) return;
+    yield* store.transact(
+      Effect.gen(function* () {
+        yield* ensureEpoch(r.settings.memoryHubVersion);
+        yield* sql`INSERT INTO memory_last_ready_space(singleton,space) VALUES (1,${r.space})
+          ON CONFLICT(singleton) DO UPDATE SET space=excluded.space WHERE space!=excluded.space`.pipe(
+          Effect.mapError(
+            (cause) => new Store.MemoryStorageError({ stage: "last-ready-space", cause }),
+          ),
+        );
+      }),
+    );
+    rememberedReadyEpoch = r.settings.memoryHubVersion;
+  });
   // At most three descriptor-recoverable classes and one probe fiber per committed epoch.
   const recoveries = new Map<
     Store.MemoryHoldClass,
@@ -1327,6 +1344,7 @@ const make = Effect.gen(function* () {
     const result = yield* Effect.result(
       Effect.gen(function* () {
         const complete = yield* bootstrap(r, budget);
+        if (complete) yield* rememberReadySpace(r);
         if (complete && budget.pages < 10) yield* pullTail(r, budget);
         return complete;
       }),
@@ -2192,10 +2210,7 @@ const make = Effect.gen(function* () {
           "includeRetainedLocalSpaceId" in input && input.includeRetainedLocalSpaceId;
         const retained = includeRetained
           ? yield* sql<{ space: string }>`
-          SELECT space FROM (
-            SELECT space,last_success_at AS ready_at FROM memory_sync_cursors WHERE bootstrap_state='ready'
-            UNION ALL SELECT space,NULL AS ready_at FROM memory_compaction_state WHERE published=1
-          ) ORDER BY ready_at DESC,space LIMIT 1`.pipe(
+          SELECT space FROM memory_last_ready_space WHERE singleton=1`.pipe(
               Effect.mapError(
                 (cause) => new Store.MemoryStorageError({ stage: "retained-local-space", cause }),
               ),
@@ -2204,6 +2219,7 @@ const make = Effect.gen(function* () {
         const retainedLocalSpaceId = retained[0] ? M.MemorySpaceId.make(retained[0].space) : null;
         const hubId = s.memoryHub.mode === "member" ? s.memoryHub.hubEnvironmentId : local;
         const bootstrap = space ? (yield* runtime.readBootstrap(space, hubId)).state : "unbound";
+        if (bootstrap === "ready") yield* rememberReadySpace({ space, settings: s });
         const persisted = yield* runtime.readProcessing(space, space ? hubId : null);
         const storage = space
           ? yield* quota.readStorageStatus({ memorySpaceId: space, environmentId: local })
@@ -2216,7 +2232,9 @@ const make = Effect.gen(function* () {
         const success = lastSuccess?.epoch === epoch ? lastSuccess.at : null;
         return {
           memorySpaceId: space,
-          ...(includeRetained ? { retainedLocalSpaceId } : {}),
+          ...(includeRetained
+            ? { retainedLocalSpaceId: bootstrap === "ready" ? space : retainedLocalSpaceId }
+            : {}),
           state:
             s.memoryHub.mode === "disabled"
               ? "disabled"

@@ -14,9 +14,11 @@ import {
   MemoryResolutionPayload,
   type MemoryHistoryPage,
   MemoryRevertResult,
+  MemoryUpsertInput,
 } from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
+const encodeUpsert = Schema.encodeSync(MemoryUpsertInput);
 const state = vi.hoisted(() => ({
   requests: [] as { label: string; input: unknown }[],
   allowed: true,
@@ -32,7 +34,11 @@ const state = vi.hoisted(() => ({
     environmentId: string;
     label: string;
     connection: { phase: string };
-    serverConfig: { environment: { capabilities: { memory: { protocolVersion: number } } } };
+    serverConfig: {
+      environment: {
+        capabilities: { memory: { protocolVersion: number; resolutionInputs?: boolean } };
+      };
+    };
   }[],
   result: null as unknown,
   navigate: vi.fn(),
@@ -373,6 +379,7 @@ beforeEach(() => {
   state.calls.mockClear();
   state.environment = null;
   state.environments = [
+    "remote-owner",
     "active-device",
     "pending-device",
     "device-a",
@@ -382,7 +389,9 @@ beforeEach(() => {
     environmentId,
     label: environmentId.replace("-device", " device"),
     connection: { phase: "connected" },
-    serverConfig: { environment: { capabilities: { memory: { protocolVersion: 1 } } } },
+    serverConfig: {
+      environment: { capabilities: { memory: { protocolVersion: 1, resolutionInputs: true } } },
+    },
   }));
   state.result = { _tag: "Failure" };
   state.responses.clear();
@@ -826,7 +835,9 @@ async function supportedScreen(withDetails = true) {
     return get(atom);
   });
   state.environment = {
-    serverConfig: { environment: { capabilities: { memory: { protocolVersion: 1 } } } },
+    serverConfig: {
+      environment: { capabilities: { memory: { protocolVersion: 1, resolutionInputs: true } } },
+    },
   };
   state.queries.set("read", Option.some(activeItem));
   if (!state.responses.has("syncStatus"))
@@ -1712,7 +1723,9 @@ it("browses, searches and creates in an explicitly bound project, then returns t
   });
   expect(container.textContent).toContain("Continue to the next page");
   await click("Remember something");
-  expect(container.textContent).toContain("Save to: Project");
+  expect(container.textContent).toContain("Save to: Synthetic project");
+  expect(container.textContent?.match(/Save to:/g)).toHaveLength(1);
+  expect(container.textContent).not.toContain("New memory · Project");
   const textarea = container.querySelector<HTMLTextAreaElement>('[aria-label="Memory text"]')!;
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
@@ -1727,8 +1740,10 @@ it("browses, searches and creates in an explicitly bound project, then returns t
       .closest("form")!
       .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
   );
-  expect(state.calls.mock.calls.at(-1)?.[0]).toMatchObject({
-    input: { scope, payload: { text: "Synthetic project memory" } },
+  const request = state.calls.mock.calls.at(-1)?.[0].input;
+  expect(encodeUpsert(MemoryUpsertInput.make(request))).toMatchObject({
+    scope,
+    payload: { text: "Synthetic project memory" },
   });
   state.projects = [];
   await render();
@@ -1741,39 +1756,35 @@ it("browses, searches and creates in an explicitly bound project, then returns t
   expect(container.querySelector('[aria-label="Memory text"]')).toBeNull();
 });
 
-it("keeps thread scope available for listing, search and new memories", async () => {
+it("offers User and projects without a context-free Thread option in Settings", async () => {
   state.threads = [{ id: "thread-a", environmentId: "remote-owner", title: "Thread A" }];
-  state.queries.set("list", Option.some({ items: [], nextCursor: null }));
-  state.queries.set("search", Option.some({ items: [], nextCursor: null }));
   await supportedScreen(false);
-  await selectMemoryScope("thread");
-  const picker = container.querySelectorAll<HTMLSelectElement>("#memory-browse-scope select")[1]!;
-  await act(async () => {
-    picker.value = "thread-a";
-    picker.dispatchEvent(new Event("change", { bubbles: true }));
-  });
-  const scope = { kind: "thread", thread: { environmentId: "remote-owner", threadId: "thread-a" } };
-  expect(state.requests.at(-1)).toMatchObject({ label: "list", input: { scope } });
-  await searchRecords();
-  expect(state.requests.at(-1)).toMatchObject({ label: "search", input: { scope, mode: "fts" } });
-  await click("Remember something");
-  expect(container.textContent).toContain("Save to: Thread");
-  const textarea = container.querySelector<HTMLTextAreaElement>('[aria-label="Memory text"]')!;
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
-      textarea,
-      "Synthetic thread memory",
-    );
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-  state.responses.set("upsert", success({ outcome: "accepted" }));
-  await act(async () =>
-    textarea
-      .closest("form")!
-      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
-  );
-  expect(state.calls.mock.calls.at(-1)?.[0]).toMatchObject({ input: { scope } });
+  const picker = container.querySelector<HTMLSelectElement>("#memory-browse-scope select")!;
+  expect([...picker.options].map((option) => option.value).filter(Boolean)).toEqual(["user"]);
+  expect(state.threadReads.mock.calls.every(([enabled]) => enabled === false)).toBe(true);
 });
+
+it.each([false, true])(
+  "keeps legacy history revert with incomplete page=%s",
+  async (incomplete) => {
+    for (const environment of state.environments)
+      delete environment.serverConfig.environment.capabilities.memory.resolutionInputs;
+    await renderRevert({ ...retained, nextCursor: incomplete ? "more" : null });
+    expect(
+      state.requests.some((request) => "resolutionInputsFor" in (request.input as object)),
+    ).toBe(false);
+    if (incomplete) {
+      expect(container.textContent).toContain("Load complete history before reverting");
+      expect(container.querySelector('[aria-label="Revert confirmation"]')).toBeNull();
+    } else {
+      await chooseOriginal();
+      await click("Revert resolution");
+      expect(state.calls).toHaveBeenCalledWith(
+        expect.objectContaining({ input: expect.objectContaining({ restoredRevisionId: id(3) }) }),
+      );
+    }
+  },
+);
 
 it("does not silently browse user memory when a project binding lookup fails", async () => {
   state.projects = [

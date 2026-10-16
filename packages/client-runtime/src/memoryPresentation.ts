@@ -134,6 +134,8 @@ export function presentMemoryRevert(input: {
   readonly now: number;
   /** Omit while choosing an original; once selected, validate only that input. */
   readonly restoredRevisionId?: MemoryRevisionId;
+  /** Legacy servers cannot fetch originals independently of the complete history. */
+  readonly requireCompleteHistory?: boolean;
 }) {
   const { item, entry, history, now, restoredRevisionId } = input;
   const resolution = entry.resolution;
@@ -161,13 +163,15 @@ export function presentMemoryRevert(input: {
             ? "A revert cannot be reverted"
             : item.status !== "active" || item.revision.revisionId !== resolution.resultRevisionId
               ? "Check the current memory before reverting"
-              : restoredRevisionId !== undefined
-                ? restorableRevisionIds.includes(restoredRevisionId)
-                  ? null
-                  : "Selected original unavailable"
-                : restorableRevisionIds.length === 0
-                  ? "Retained originals unavailable"
-                  : null;
+              : input.requireCompleteHistory && history.nextCursor !== null
+                ? "Load complete history before reverting"
+                : restoredRevisionId !== undefined
+                  ? restorableRevisionIds.includes(restoredRevisionId)
+                    ? null
+                    : "Selected original unavailable"
+                  : restorableRevisionIds.length === 0
+                    ? "Retained originals unavailable"
+                    : null;
   return {
     canRevert: reason === null,
     notice:

@@ -38,6 +38,7 @@ import * as Secrets from "../auth/ServerSecretStore.ts";
 import * as Events from "../orchestration-v2/EventSink.ts";
 import * as RuntimeIdentity from "../runtimeIdentity.ts";
 import migration from "../persistence/Migrations/071_Memory.ts";
+import lastReadyMigration from "../persistence/Migrations/080_MemoryLastReadySpace.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
@@ -84,6 +85,7 @@ const setup = Layer.effectDiscard(
     yield* reportMigration;
     yield* usageMigration;
     yield* revertMigration;
+    yield* lastReadyMigration;
     const sql = yield* SqlClient.SqlClient;
     yield* sql`CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY,event_id TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT,occurred_at TEXT,application_event_version INTEGER,aggregate_kind TEXT)`;
     yield* sql`CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT PRIMARY KEY,deleted_at TEXT)`;
@@ -2083,11 +2085,16 @@ it.effect("status selects disabled and bootstrapping without requiring a bound r
           yield* sync.syncOnce;
           assert.strictEqual((yield* status()).state, "online");
           assert.strictEqual((yield* status()).lastSuccessfulSyncAtUtc, timestamp);
-          yield* changeHub(3, { mode: "disabled" });
+          const latestSpace = M.MemorySpaceId.make(id(999));
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES (${latestSpace},${remote},0,'ready')`;
+          yield* changeHub(3, { ...member, memorySpaceId: latestSpace });
+          assert.strictEqual((yield* status()).retainedLocalSpaceId, latestSpace);
+          yield* changeHub(4, { mode: "disabled" });
           const disabled = yield* status();
           assert.strictEqual(disabled.state, "disabled");
           assert.isNull(disabled.memorySpaceId);
-          assert.strictEqual(disabled.retainedLocalSpaceId, space);
+          assert.strictEqual(disabled.retainedLocalSpaceId, latestSpace);
           const restarted = yield* Effect.scoped(
             Effect.gen(function* () {
               const fresh = yield* Sync.MemorySyncService;
@@ -2101,7 +2108,7 @@ it.effect("status selects disabled and bootstrapping without requiring a bound r
             ),
           );
           assert.strictEqual(restarted.state, "disabled");
-          assert.strictEqual(restarted.retainedLocalSpaceId, space);
+          assert.strictEqual(restarted.retainedLocalSpaceId, latestSpace);
           assert.strictEqual(disabled.lastSuccessfulSyncAtUtc, null);
           assert.strictEqual(disabled.failureCode, undefined);
         }).pipe(
