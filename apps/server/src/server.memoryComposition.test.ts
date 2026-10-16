@@ -36,7 +36,7 @@ it.effect(
         Fixture.scope(["settings:write"]),
       );
       expect(result.result.isError).not.toBe(true);
-      expect(result.body).toEqual({ provenance: null, settings: { mode: "disabled" }, version: 4 });
+      expect(result.body).toEqual({ settings: { mode: "disabled" }, version: 4 });
     }).pipe(
       Effect.provide(
         layerMemoryToolkits.pipe(
@@ -47,7 +47,6 @@ it.effect(
                 permit.pipe(
                   Effect.as({
                     view: {
-                      provenance: null,
                       members: [],
                       settings: { mode: "disabled" },
                       version: input.expectedVersion + 1,
@@ -80,7 +79,7 @@ it.effect("disable forwards CAS and the live permit to Sync and returns a noncre
           });
           calls++;
           return {
-            view: { provenance: null, members: [], settings: { mode: "disabled" }, version: 8 },
+            view: { members: [], settings: { mode: "disabled" }, version: 8 },
             credential: null,
           };
         }),
@@ -98,7 +97,6 @@ it.effect("disable forwards CAS and the live permit to Sync and returns a noncre
       ).toBe("unavailable");
       expect(calls).toBe(0);
       expect(yield* service.disableHub(input, Effect.void)).toEqual({
-        provenance: null,
         settings: { mode: "disabled" },
         version: 8,
       });
