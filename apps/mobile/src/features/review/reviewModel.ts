@@ -1,12 +1,12 @@
 import { parsePatchFiles } from "@pierre/diffs/utils/parsePatchFiles";
 import type { ChangeTypes, FileDiffMetadata } from "@pierre/diffs/types";
 import type { ThreadCheckpointSummary } from "@goat/client-runtime/state/thread-checkpoints";
-import type { ReviewDiffPreviewSource } from "@goat/contracts";
+import type { ReviewDiffPreviewSource, ReviewDiffPreviewSourceKind } from "@goat/contracts";
 import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
 import * as Order from "effect/Order";
 
-export type ReviewSectionKind = "turn" | "working-tree" | "branch-range";
+export type ReviewSectionKind = "turn" | ReviewDiffPreviewSourceKind;
 
 const CHANGES_SECTION_ID = "git:branch-range";
 const CHANGES_TITLE = "Changes";
@@ -122,6 +122,8 @@ const readyCheckpointOrder = Order.make<ThreadCheckpointSummary>(
 );
 
 function gitSubtitle(section: ReviewDiffPreviewSource): string | null {
+  if (section.kind === "staged") return "HEAD → index";
+  if (section.kind === "unstaged") return "Index → working tree";
   if (section.kind === "working-tree") {
     return UNCOMMITTED_SUBTITLE;
   }

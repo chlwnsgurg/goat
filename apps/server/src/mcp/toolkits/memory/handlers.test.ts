@@ -15,6 +15,7 @@ import { Tool } from "effect/ai";
 import * as MemoryService from "../../../memory/MemoryService.ts";
 import { decideMemoryOperation } from "../../../memory/MemoryDecider.ts";
 import { scanMemoryValue } from "../../../memory/MemorySecretScanner.ts";
+import { assertUsageCounters } from "../../../memory/MemoryUsageScan.testkit.ts";
 import * as Store from "../../../memory/MemoryStore.ts";
 import { MemoryToolkit } from "./tools.ts";
 import { memoryError } from "./handlers.ts";
@@ -36,6 +37,7 @@ it.effect(
     Effect.gen(function* () {
       const created = yield* Fixture.call("memory_upsert", Fixture.upsert());
       expect((yield* decodeReceipt(created.body)).outcome).toBe("accepted");
+      yield* assertUsageCounters;
       const service = yield* MemoryService.MemoryService;
       yield* service.upsert(
         { ...Fixture.upsert(21), memoryId: M.MemoryId.make(Fixture.id(20)) },

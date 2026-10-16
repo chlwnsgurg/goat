@@ -204,6 +204,7 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     "worktree-status",
   ),
   preview_status: tool(["Get", "Getting", "Got", "preview browser status"], "browser", "browser"),
+  preview_logs: tool(["Read", "Reading", "Read", "preview browser logs"], "browser", "browser"),
   preview_open: tool(
     ["Open", "Opening", "Opened", "a page in the preview browser"],
     "browser",
@@ -211,6 +212,21 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
   ),
   preview_navigate: tool(
     ["Navigate", "Navigating", "Navigated", "the preview browser"],
+    "browser",
+    "browser",
+  ),
+  preview_back: tool(
+    ["Go back in", "Going back in", "Went back in", "the preview browser"],
+    "browser",
+    "browser",
+  ),
+  preview_forward: tool(
+    ["Go forward in", "Going forward in", "Went forward in", "the preview browser"],
+    "browser",
+    "browser",
+  ),
+  preview_reload: tool(
+    ["Reload", "Reloading", "Reloaded", "the preview browser"],
     "browser",
     "browser",
   ),

@@ -7,6 +7,7 @@ import {
   type PreviewAutomationDragInput,
   type PreviewAutomationEvaluateInput,
   type PreviewAutomationHoverInput,
+  type PreviewAutomationReloadInput,
   type PreviewAutomationNetworkEntry,
   type PreviewAutomationPressInput,
   type PreviewAutomationScrollInput,
@@ -25,7 +26,10 @@ import { BrowserControlInterrupted } from "./SessionControl.ts";
 const MAX_EVALUATION_BYTES = 64_000;
 const MAX_VISIBLE_TEXT_LENGTH = 20_000;
 const MAX_SCREENSHOT_WIDTH = 1280;
-const WAIT_POLL_MS = 100;
+const MAX_FULL_PAGE_WIDTH = 3840;
+const MAX_FULL_PAGE_HEIGHT = 16_384;
+const MAX_FULL_PAGE_BYTES = 8 * 1024 * 1024;
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 export const DIAGNOSTIC_BUFFER_LIMIT = 200;
 
 export class ServerBrowserOperationError extends Error {
@@ -64,6 +68,50 @@ export const toOperationError = (cause: unknown): ServerBrowserOperationError =>
 };
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+
+/** Real Chromium history, including same-document entries whose response is null. */
+export const navigateHistory = async (
+  page: Page,
+  cdp: CDPSession,
+  operation: "back" | "forward" | "reload",
+  input: PreviewAutomationReloadInput,
+  timeout: number,
+  assertControl: () => void,
+) => {
+  const options = {
+    timeout: input.timeoutMs ?? timeout,
+    waitUntil:
+      input.readiness === "domContentLoaded" ? ("domcontentloaded" as const) : ("load" as const),
+  };
+  if (operation === "reload" && input.ignoreCache !== true) {
+    assertControl();
+    invalidateRefs(page);
+    await page.reload(options);
+    return;
+  }
+  let entryId: number | undefined;
+  if (operation !== "reload") {
+    const history = await cdp.send("Page.getNavigationHistory");
+    const index = history.currentIndex + (operation === "back" ? -1 : 1);
+    entryId = history.entries[index]?.id;
+    if (entryId === undefined) {
+      throw new ServerBrowserOperationError(
+        "PreviewAutomationExecutionError",
+        `No ${operation} history entry exists for this browser tab.`,
+      );
+    }
+  }
+  assertControl();
+  invalidateRefs(page);
+  // Install the waiter before sending CDP: an acknowledgement alone does not
+  // prove that Electron's guest page actually committed a navigation.
+  await Promise.all([
+    page.waitForNavigation(options),
+    operation === "reload"
+      ? cdp.send("Page.reload", { ignoreCache: true })
+      : cdp.send("Page.navigateToHistoryEntry", { entryId: entryId! }),
+  ]);
+};
 
 const pageRefs = new WeakMap<Page, { generation: string; refs: Map<string, string> }>();
 // A compact runtime namespace prevents old refs from aliasing after a server restart.
@@ -175,10 +223,66 @@ export const captureViewport = async (
   return data;
 };
 
+// Bounds, PNG checks, and scale retries adapted from Emanuele-web04/synara @ 566efb1b1.
+// Copyright (c) 2026 Emanuele Di Pietro. MIT license; see the repository LICENSE.
+/** Captures at CSS resolution or lower without changing viewport, scroll, or emulation. */
+const captureFullPage = async (cdp: CDPSession) => {
+  const { cssContentSize } = await cdp.send("Page.getLayoutMetrics");
+  if (!Number.isFinite(cssContentSize.width) || !Number.isFinite(cssContentSize.height)) {
+    throw new ServerBrowserOperationError(
+      "PreviewAutomationExecutionError",
+      "The browser did not report valid document dimensions for a full-page screenshot.",
+    );
+  }
+  const width = Math.min(MAX_FULL_PAGE_WIDTH, Math.max(1, Math.ceil(cssContentSize.width)));
+  const height = Math.min(MAX_FULL_PAGE_HEIGHT, Math.max(1, Math.ceil(cssContentSize.height)));
+  const clipped = width < cssContentSize.width || height < cssContentSize.height;
+  // CSS clips and image pixels differ across native and emulated Retina tabs. Bound
+  // the actual PNG to the CSS clip so Retina captures cannot exceed CSS resolution.
+  for (const scale of [1, 0.75, 0.5, 0.25]) {
+    const { data } = await cdp.send("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+      captureBeyondViewport: true,
+      clip: { x: 0, y: 0, width, height, scale },
+    });
+    const byteLength = Buffer.byteLength(data, "base64");
+    if (byteLength > MAX_FULL_PAGE_BYTES) continue;
+    const header = Buffer.from(data.slice(0, 32), "base64");
+    if (
+      header.length < 24 ||
+      !header.subarray(0, 8).equals(PNG_SIGNATURE) ||
+      header.subarray(12, 16).toString("ascii") !== "IHDR"
+    ) {
+      throw new ServerBrowserOperationError(
+        "PreviewAutomationExecutionError",
+        "The browser returned an invalid full-page PNG. Try another snapshot.",
+      );
+    }
+    const imageWidth = header.readUInt32BE(16);
+    const imageHeight = header.readUInt32BE(20);
+    if (imageWidth < 1 || imageHeight < 1 || imageWidth > width || imageHeight > height) continue;
+    return {
+      mimeType: "image/png" as const,
+      data,
+      width: imageWidth,
+      height: imageHeight,
+      fullPage: true,
+      clipped,
+      byteLength,
+    };
+  }
+  throw new ServerBrowserOperationError(
+    "PreviewAutomationExecutionError",
+    "The full-page screenshot exceeds the 3840 × 16384 pixel or 8 MiB limit, even at reduced scale. Use a viewport snapshot instead.",
+  );
+};
+
 export const snapshot = async (input: {
   readonly page: Page;
   readonly cdp: CDPSession;
   readonly renderScale: number;
+  readonly fullPage?: boolean | undefined;
   readonly consoleEntries: ReadonlyArray<PreviewAutomationConsoleEntry>;
   readonly networkEntries: ReadonlyArray<PreviewAutomationNetworkEntry>;
   readonly actionTimeline: PreviewAutomationSnapshot["actionTimeline"];
@@ -188,7 +292,15 @@ export const snapshot = async (input: {
   const state = refsFor(input.page);
   invalidateRefs(input.page);
   const generation = state.generation;
-  const [page, tree, data] = await Promise.all([
+  const capture = input.fullPage
+    ? captureFullPage(input.cdp)
+    : captureViewport(input.page, input.cdp, { format: "png", scale }).then((data) => ({
+        mimeType: "image/png" as const,
+        data,
+        width: Math.round(viewport.width * input.renderScale * scale),
+        height: Math.round(viewport.height * input.renderScale * scale),
+      }));
+  const [page, tree, screenshot] = await Promise.all([
     input.page.evaluate(SNAPSHOT_SCRIPT) as Promise<
       Pick<
         PreviewAutomationSnapshot,
@@ -196,8 +308,12 @@ export const snapshot = async (input: {
       >
     >,
     input.page.ariaSnapshot({ mode: "ai", boxes: true, timeout: DEFAULT_TIMEOUT_MS }),
-    captureViewport(input.page, input.cdp, { format: "png", scale }),
-  ]);
+    capture,
+  ]).catch(async (cause: unknown) => {
+    // A failed semantic read must still drain CDP before the caller resumes live streams.
+    await capture.catch(constVoid);
+    throw cause;
+  });
   if (state.generation !== generation) {
     throw new ServerBrowserOperationError(
       "PreviewAutomationExecutionError",
@@ -217,12 +333,7 @@ export const snapshot = async (input: {
     consoleEntries: [...input.consoleEntries],
     networkEntries: [...input.networkEntries],
     actionTimeline: [...input.actionTimeline],
-    screenshot: {
-      mimeType: "image/png",
-      data,
-      width: Math.round(viewport.width * input.renderScale * scale),
-      height: Math.round(viewport.height * input.renderScale * scale),
-    },
+    screenshot,
   };
 };
 
@@ -464,34 +575,115 @@ export const evaluate = async (
   return value;
 };
 
-export const waitFor = async (page: Page, input: PreviewAutomationWaitForInput) => {
+/** Native Playwright waits share one deadline; recheck the conjunction on the current document. */
+export const waitFor = async (
+  page: Page,
+  input: PreviewAutomationWaitForInput,
+  signal?: AbortSignal,
+) => {
+  signal?.throwIfAborted();
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
-  const locator = targetLocator(page, input);
-  const { text, urlIncludes } = input;
-  const checks: Array<() => Promise<boolean>> = [];
-  // Like the desktop host: the selector must match an element, visible or not.
-  if (locator !== null) checks.push(async () => (await locator.count()) > 0);
-  if (text !== undefined) {
-    // A navigation can destroy the context mid-check; that counts as not yet.
-    checks.push(() =>
-      page
-        .evaluate(`(document.body?.innerText ?? "").includes(${JSON.stringify(text)})`)
-        .then((found) => found === true)
-        .catch(() => false),
+  const target = targetLocator(page, input);
+  // Legacy presence checks accepted multiple matches, including hidden elements.
+  const locator = input.state === undefined ? target?.first() : target;
+  const state = input.state ?? "attached";
+  const loadState =
+    input.loadState === "domContentLoaded"
+      ? "domcontentloaded"
+      : input.loadState === "networkIdle"
+        ? "networkidle"
+        : input.loadState;
+  const documentCondition = `(() => (
+    ${input.text === undefined ? "true" : `(document.body?.innerText ?? "").includes(${JSON.stringify(input.text)})`}
+    && ${input.urlIncludes === undefined ? "true" : `location.href.includes(${JSON.stringify(input.urlIncludes)})`}
+  ))()`;
+  const conditions = [
+    ...(locator ? [`locator:${state}`] : []),
+    ...(input.text === undefined ? [] : ["text"]),
+    ...(input.urlIncludes === undefined ? [] : ["url"]),
+    ...(input.loadState === undefined ? [] : [`load:${input.loadState}`]),
+  ];
+  const timeout = () =>
+    new ServerBrowserOperationError(
+      "PreviewAutomationTimeoutError",
+      `Waited ${timeoutMs}ms without all conditions holding: ${conditions.join(", ")}.`,
     );
-  }
-  if (urlIncludes !== undefined) checks.push(async () => page.url().includes(urlIncludes));
-  for (;;) {
-    const results = await Promise.all(checks.map((check) => check()));
-    if (results.every(Boolean)) return;
-    if (Date.now() >= deadline) {
-      throw new ServerBrowserOperationError(
-        "PreviewAutomationTimeoutError",
-        `Waited ${timeoutMs}ms without every condition holding.`,
-      );
+  let stopped = false;
+  const remaining = () => {
+    signal?.throwIfAborted();
+    if (stopped || Date.now() >= deadline) throw timeout();
+    return Math.max(1, deadline - Date.now());
+  };
+  let documentVersion = 0;
+  const navigated = (frame: import("playwright-core").Frame) => {
+    if (frame === page.mainFrame()) documentVersion++;
+  };
+  page.on("framenavigated", navigated);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
+  const interrupted = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(timeout()), timeoutMs);
+    abort = () => reject(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+  const wait = async () => {
+    for (;;) {
+      remaining();
+      await Promise.all([
+        locator?.waitFor({ state, timeout: remaining() }),
+        ...(input.text === undefined && input.urlIncludes === undefined
+          ? []
+          : [
+              page
+                .waitForFunction(documentCondition, undefined, { timeout: remaining() })
+                .then((handle) => handle.dispose()),
+            ]),
+      ]);
+      remaining();
+      const version = documentVersion;
+      // Wait after URL/text resolve so an old document's completed load cannot satisfy a new one.
+      if (loadState !== undefined) await page.waitForLoadState(loadState, { timeout: remaining() });
+      remaining();
+      const [locatorMatches, documentMatches] = await Promise.all([
+        locator === null || locator === undefined
+          ? true
+          : state === "visible"
+            ? locator.isVisible()
+            : state === "hidden"
+              ? locator.isHidden()
+              : locator.count().then((count) => (state === "detached" ? count === 0 : count > 0)),
+        input.text === undefined && input.urlIncludes === undefined
+          ? true
+          : page.evaluate(documentCondition).catch((cause: unknown) => {
+              // Navigation can destroy the old execution context. Retry only that transition.
+              if (
+                cause instanceof Error &&
+                /execution context was destroyed|cannot find context/i.test(cause.message)
+              )
+                return false;
+              throw cause;
+            }),
+      ]);
+      remaining();
+      // Revalidate snapshot refs after a navigation even if the native locator happened to settle.
+      if (target) targetLocator(page, input);
+      if (version === documentVersion && locatorMatches && documentMatches === true) return;
     }
-    await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS));
+  };
+  try {
+    await Promise.race([wait(), interrupted]);
+  } catch (cause) {
+    signal?.throwIfAborted();
+    if (cause instanceof Error && cause.name === "TimeoutError") throw timeout();
+    throw cause;
+  } finally {
+    // Playwright's read-only wait has no AbortSignal API. It may settle until its deadline,
+    // but cannot start another check or hold the control queue after takeover/timeout.
+    stopped = true;
+    clearTimeout(timer);
+    if (abort) signal?.removeEventListener("abort", abort);
+    page.off("framenavigated", navigated);
   }
 };
 

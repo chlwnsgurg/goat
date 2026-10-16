@@ -1,4 +1,8 @@
-import { MemoryProviderCapabilities, MemoryTaskGrantCeilingField } from "./memory.ts";
+import {
+  MemoryCurrentAccess,
+  MemoryProviderCapabilities,
+  MemoryTaskGrantCeilingField,
+} from "./memory.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -627,6 +631,7 @@ export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_pr
 
 export const OrchestrationV2Run = Schema.Struct({
   memoryGrantCeiling: MemoryTaskGrantCeilingField,
+  currentMemoryAccess: Schema.optionalKey(MemoryCurrentAccess),
   id: RunId,
   threadId: ThreadId,
   ordinal: PositiveInt,
@@ -839,6 +844,7 @@ export type OrchestrationV2SubagentWorkflow = typeof OrchestrationV2SubagentWork
 
 export const OrchestrationV2Subagent = Schema.Struct({
   memoryGrantCeiling: MemoryTaskGrantCeilingField,
+  currentMemoryAccess: Schema.optionalKey(MemoryCurrentAccess),
   id: NodeId,
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),

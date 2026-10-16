@@ -7,6 +7,13 @@ export function resolveFilePreviewPath(path: string | null, cwd: string): string
   return path === "." || workspaceRelativeFilePath(path, cwd) === "." ? null : path;
 }
 
+/** Outside folders become the tree root; workspace folders are revealed in the project tree. */
+export function resolveFileExplorerTarget(cwd: string, path: string | null, isDirectory: boolean) {
+  return path !== null && isDirectory && isAbsolutePath(path)
+    ? { cwd: path, selectedPath: null }
+    : { cwd, selectedPath: path };
+}
+
 export const isMarkdownPreviewFile = (path: string): boolean => /\.(?:md|mdx)$/i.test(path);
 
 /** Describe existing failure codes without exposing the underlying platform cause. */

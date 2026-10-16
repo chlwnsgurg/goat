@@ -22,6 +22,7 @@ import * as Path from "effect/Path";
 import type * as Scope from "effect/Scope";
 import { TestClock } from "effect/testing";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import * as NodeEvents from "node:events";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
@@ -168,37 +169,32 @@ describe("previewWindowOpenAction", () => {
     );
   });
 
-  it("keeps a form POST with a body on the in-place path", () => {
-    // A new tab can only reopen the URL as a GET, which would drop the body.
+  it("keeps a form POST in the original native child", () => {
+    // Reopening the URL as a GET would drop the body and destroy the opener.
     const postBody = { data: [], contentType: "application/x-www-form-urlencoded" };
     expect(
       PreviewManager.previewWindowOpenAction({
         ...details({ disposition: "foreground-tab" }),
         postBody,
       }),
-    ).toBe("navigate");
+    ).toBe("popup");
   });
 
   it("does not hand a window to schemes that cannot be hardened", () => {
-    // A popup skips the `will-attach-webview` hardening, so it only gets a window
-    // when its preferences can be overridden. Chromium copies the guest's
-    // preferences for `about:blank` and forbids overriding them.
     for (const url of [
       "javascript:alert(1)",
       "file:///etc/passwd",
       "vscode://vscode-remote/ssh-remote+box/tmp",
       "not a url",
     ]) {
-      expect(PreviewManager.previewWindowOpenAction(details({ url }))).toBe("navigate");
+      expect(PreviewManager.previewWindowOpenAction(details({ url }))).toBe("deny");
     }
   });
 
-  it("denies a blank window instead of blanking the opener", () => {
-    // MSAL opens `about:blank` first and falls back to a redirect on `null`;
-    // loading the blank page into the tab would destroy that fallback.
+  it("keeps blank children alive for a later sign-in redirect", () => {
     for (const url of ["about:blank", ""]) {
       for (const disposition of ["new-window", "foreground-tab"] as const) {
-        expect(PreviewManager.previewWindowOpenAction(details({ url, disposition }))).toBe("deny");
+        expect(PreviewManager.previewWindowOpenAction(details({ url, disposition }))).toBe("popup");
       }
     }
   });
@@ -619,9 +615,7 @@ describe("PreviewManager", () => {
         expect(
           handler({ url: "https://github.com/issues/1", disposition: "foreground-tab" }),
         ).toEqual({ action: "deny" });
-        expect(handler({ url: "about:blank", disposition: "new-window" })).toEqual({
-          action: "deny",
-        });
+        expect(handler({ url: "about:blank", disposition: "new-window" }).action).toBe("allow");
         handler({ url: "https://github.com/issues/2", disposition: "background-tab" });
         yield* settle(() => opened.length === 2);
 
@@ -632,6 +626,67 @@ describe("PreviewManager", () => {
         ]);
       }),
     ),
+  );
+
+  effectIt.effect(
+    "retains blank, POST and nested noopener journeys through the installed handler",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          const preview = makeFaviconWebContents();
+          fromId.mockReturnValue(preview.webContents);
+          yield* manager.createTab("tab_popup_journeys");
+          yield* manager.registerWebview("tab_popup_journeys", 42);
+          const handler = vi.mocked(
+            (preview.webContents as Electron.WebContents).setWindowOpenHandler,
+          ).mock.lastCall![0];
+          for (const details of [
+            { url: "about:blank", disposition: "new-window" as const },
+            {
+              url: "https://provider.example/post",
+              disposition: "foreground-tab" as const,
+              postBody: { data: [], contentType: "application/x-www-form-urlencoded" },
+            },
+          ]) {
+            const decision = handler({
+              frameName: "",
+              features: "",
+              referrer: { url: "", policy: "default" },
+              ...details,
+            });
+            expect(decision.action).toBe("allow");
+            expect(decision.createWindow).toBeUndefined();
+            expect(decision.overrideBrowserWindowOptions?.webPreferences?.session).toBe(
+              (preview.webContents as Electron.WebContents).session,
+            );
+            const popup = makeFaviconWebContents({ id: 43 });
+            const window = Object.assign(new NodeEvents.EventEmitter(), {
+              webContents: popup.webContents,
+              isDestroyed: () => false,
+              destroy: vi.fn(),
+            });
+            preview.listeners.get("did-create-window")!(window as never);
+            const nestedHandler = vi.mocked(
+              (popup.webContents as Electron.WebContents).setWindowOpenHandler,
+            ).mock.lastCall![0];
+            // A nested target=_blank/noopener link stays in the native family,
+            // even though the root Manager routes ordinary links to preview tabs.
+            const nested = nestedHandler({
+              frameName: "",
+              features: "",
+              referrer: { url: "", policy: "default" },
+              url: "https://provider.example/consent",
+              disposition: "foreground-tab",
+            });
+            expect(nested.action).toBe("allow");
+            expect(nested.overrideBrowserWindowOptions?.webPreferences?.session).toBe(
+              (popup.webContents as Electron.WebContents).session,
+            );
+            window.emit("closed");
+          }
+          expect(preview.loadURL).not.toHaveBeenCalled();
+        }),
+      ),
   );
 
   effectIt.effect("keeps preview shortcuts out of the host window", () =>
@@ -691,6 +746,48 @@ describe("PreviewManager", () => {
         expect(sendInputEvent).not.toHaveBeenCalled();
       }),
     ),
+  );
+
+  effectIt.effect(
+    "keeps the source guest registered and closes its popup family with the tab",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          const preview = makeFaviconWebContents();
+          fromId.mockReturnValue(preview.webContents);
+          yield* manager.createTab("tab_popup_owner");
+          yield* manager.registerWebview("tab_popup_owner", 42);
+          const states: Array<number | null> = [];
+          yield* manager.subscribeStateChanges((_id, state) =>
+            Effect.sync(() => void states.push(state.webContentsId)),
+          );
+          const handler = vi.mocked(
+            (preview.webContents as Electron.WebContents).setWindowOpenHandler,
+          ).mock.lastCall![0];
+          expect(
+            handler({ url: "", disposition: "new-window" } as Electron.HandlerDetails).action,
+          ).toBe("allow");
+          const popup = makeFaviconWebContents({ id: 43 });
+          const destroy = vi.fn();
+          preview.listeners.get("did-create-window")!(
+            Object.assign(new NodeEvents.EventEmitter(), {
+              webContents: popup.webContents,
+              isDestroyed: () => false,
+              destroy,
+            }) as never,
+          );
+          // A popup cannot publish a replacement/empty tab and remount the opener.
+          expect(states).toEqual([]);
+          expect(preview.loadURL).not.toHaveBeenCalled();
+          yield* manager.registerWebview("tab_popup_owner", 42);
+          expect(destroy).not.toHaveBeenCalled();
+          yield* manager.closeTab("tab_popup_owner");
+          expect(destroy).toHaveBeenCalledOnce();
+          expect(states.at(-1)).toBe(null);
+          expect(states.slice(0, -1).every((id) => id === 42)).toBe(true);
+          expect(handler({ url: "about:blank" } as Electron.HandlerDetails).action).toBe("deny");
+        }),
+      ),
   );
 
   effectIt.effect.each([
@@ -804,7 +901,20 @@ describe("PreviewManager", () => {
         yield* manager.registerWebview("tab_editing", 42);
 
         const popup = makeFaviconWebContents({ id: 43 });
-        preview.listeners.get("did-create-window")!({ webContents: popup.webContents } as never);
+        const handler = vi.mocked(
+          (preview.webContents as Electron.WebContents).setWindowOpenHandler,
+        ).mock.lastCall![0];
+        expect(
+          handler({ url: "about:blank", disposition: "new-window" } as Electron.HandlerDetails)
+            .action,
+        ).toBe("allow");
+        preview.listeners.get("did-create-window")!(
+          Object.assign(new NodeEvents.EventEmitter(), {
+            webContents: popup.webContents,
+            isDestroyed: () => false,
+            destroy: vi.fn(),
+          }) as never,
+        );
         expect(
           (popup.webContents as Electron.WebContents).setIgnoreMenuShortcuts,
         ).toHaveBeenCalledWith(true);

@@ -19,7 +19,11 @@ import * as Stream from "effect/Stream";
 import type * as Types from "effect/Types";
 import { AiError, McpProtocol, McpSchema, McpServer, Tool, type Toolkit } from "effect/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
-import { OrchestratorMcpFailure, PreviewAutomationError } from "@goat/contracts";
+import {
+  OrchestratorMcpFailure,
+  PreviewAutomationError,
+  type PreviewAutomationSnapshot,
+} from "@goat/contracts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
@@ -517,14 +521,10 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
             Effect.gen(function* () {
               const snapshot = encodedResult as SnapshotMetadata & {
                 readonly url: string;
-                readonly screenshot: {
-                  readonly mimeType: "image/png";
-                  readonly data: string;
-                  readonly width: number;
-                  readonly height: number;
-                };
+                readonly screenshot: PreviewAutomationSnapshot["screenshot"];
               };
               const { screenshot, ...page } = snapshot;
+              const { data: _data, ...screenshotMetadata } = screenshot;
               const png = new Uint8Array(Buffer.from(screenshot.data, "base64"));
               const screenshotPath =
                 payload?.save === true ? yield* saveScreenshot(snapshot.url, png) : undefined;
@@ -536,6 +536,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                 const saved = {
                   url: cutText(snapshot.url, MAX_SNAPSHOT_IDENTIFIER_CHARS),
                   screenshotPath,
+                  ...(screenshot.fullPage ? { screenshot: screenshotMetadata } : {}),
                 };
                 return new McpSchema.CallToolResult({
                   isError: false,
@@ -545,11 +546,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
               }
               const metadata = {
                 ...page,
-                screenshot: {
-                  mimeType: screenshot.mimeType,
-                  width: screenshot.width,
-                  height: screenshot.height,
-                },
+                screenshot: screenshotMetadata,
                 ...(screenshotPath === undefined ? {} : { screenshotPath }),
               };
               const bounded = boundSnapshotMetadata(metadata);

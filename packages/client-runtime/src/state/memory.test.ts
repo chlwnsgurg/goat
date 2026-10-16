@@ -1,6 +1,8 @@
+import { createMemoryImportRecoveryStore } from "../memoryImportRecovery.ts";
 import {
   EnvironmentId,
   MemorySpaceId,
+  MemoryOperationId,
   MemoryId,
   MemoryItem,
   MemoryPage,
@@ -37,6 +39,7 @@ import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
 import type { PreparedConnection } from "../connection/model.ts";
 import type { RpcSession } from "../rpc/session.ts";
+import { requestMemoryQuery } from "../rpc/client.ts";
 import {
   createMemoryEnvironmentAtoms,
   createMemoryTombstoneLedger,
@@ -83,7 +86,9 @@ const unrelated = MemoryId.make("00000000-0000-4000-8000-000000000003");
 const target = { environmentId: env, input: { memorySpaceId: space } };
 const readTarget = { environmentId: env, input: { memorySpaceId: space, memoryId: id } };
 const config = {
-  environment: { capabilities: { memory: { protocolVersion: 1, importProvider: true } } },
+  environment: {
+    capabilities: { memory: { protocolVersion: 1, importProvider: true, hubDiagnostics: true } },
+  },
 } as ServerConfig;
 function sessionScopes(scopes: ReadonlyArray<AuthEnvironmentScope>): AuthSessionState {
   return {
@@ -216,7 +221,19 @@ const harness = Effect.fn(function* (
       responded.add(method);
       return Deferred.await(reply).pipe(Effect.as(value));
     });
+  const historyInputs: unknown[] = [];
+  let diagnosticRequests = 0;
   const rpc = {
+    [WS_METHODS.memoryHubDiagnostics]: () =>
+      Effect.sync(() => {
+        diagnosticRequests++;
+        return {};
+      }),
+    [WS_METHODS.memoryHubReconcile]: () =>
+      Effect.sync(() => {
+        diagnosticRequests++;
+        return { version: 1, rearmedClasses: [] };
+      }),
     [WS_METHODS.memoryChanges]: () => {
       subscriptions++;
       return Stream.fromQueue(queue).pipe(
@@ -236,13 +253,19 @@ const harness = Effect.fn(function* (
       }),
     [WS_METHODS.memoryList]: () => respondOnce("list", pageValue),
     [WS_METHODS.memorySearch]: () => respondOnce("search", pageValue),
-    [WS_METHODS.memoryHistory]: () => respondOnce("history", historyValue),
+    [WS_METHODS.memoryHistory]: (input: unknown) => {
+      historyInputs.push(input);
+      return respondOnce("history", historyValue);
+    },
     [WS_METHODS.memoryReadSource]: () => respondOnce("source", sourcePage),
     [WS_METHODS.memoryImportProvider]: () =>
       Effect.succeed(decodeImport({ action: "discover", sources: [] })),
   };
   const active = yield* SubscriptionRef.make(
-    Option.some({ client: rpc, initialConfig: Effect.succeed(config) } as unknown as RpcSession),
+    Option.some({
+      client: rpc,
+      initialConfig: Effect.sync(() => registry.get(configs(env)) ?? config),
+    } as unknown as RpcSession),
   );
   const supervisor = {
     target: { environmentId: env, label: "Selected tunnel" },
@@ -278,13 +301,10 @@ const harness = Effect.fn(function* (
     ]),
   );
   const clock = yield* Clock.Clock;
+  const environments = { run, followStream, entries } as unknown as EnvironmentRegistry["Service"];
   const runtime = Atom.runtime(
     Layer.merge(
-      Layer.succeed(EnvironmentRegistry, {
-        run,
-        followStream,
-        entries,
-      } as unknown as EnvironmentRegistry["Service"]),
+      Layer.succeed(EnvironmentRegistry, environments),
       Layer.succeed(Clock.Clock, clock),
     ),
   );
@@ -314,6 +334,7 @@ const harness = Effect.fn(function* (
     Boolean,
   );
   return {
+    diagnosticRequests: () => diagnosticRequests,
     registry,
     entries,
     memory,
@@ -322,8 +343,10 @@ const harness = Effect.fn(function* (
     otherQueue,
     rpc,
     runtime,
+    environments,
     ledger,
     recreate: () => createMemoryEnvironmentAtoms(runtime, ledger),
+    historyInputs,
     readCount: () => readCount,
     reads,
     readFinalized,
@@ -396,6 +419,112 @@ describe("shared memory client", () => {
           expect(h.registry.get(h.memory.importProvider.permissionAtom(other, request.input))).toBe(
             false,
           );
+        }),
+      ),
+  );
+
+  it.effect("never dispatches hub diagnostics or reconcile without the advertised capability", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness();
+        h.registry.set(
+          grants(env),
+          AsyncResult.success(sessionScopes(["memory:read", "settings:write"])),
+        );
+        const reconcile = { memorySpaceId: space, environmentId: env, expectedVersion: 1 };
+        for (const memory of [
+          { protocolVersion: 1 },
+          { protocolVersion: 1, hubDiagnostics: false },
+        ]) {
+          h.registry.set(configs(env), {
+            environment: { capabilities: { memory } },
+          } as ServerConfig);
+          expect(h.registry.get(h.memory.hubDiagnostics.permissionAtom(env))).toBe(false);
+          expect(h.registry.get(h.memory.hubReconcile.permissionAtom(env))).toBe(false);
+          expect(
+            (yield* Effect.promise(() =>
+              h.memory.hubDiagnostics.run(h.registry, { environmentId: env, input: {} }),
+            ))._tag,
+          ).toBe("Failure");
+          expect(
+            (yield* Effect.promise(() =>
+              h.memory.hubReconcile.run(h.registry, { environmentId: env, input: reconcile }),
+            ))._tag,
+          ).toBe("Failure");
+        }
+        expect(h.diagnosticRequests()).toBe(0);
+        h.registry.set(configs(env), config);
+        expect(
+          (yield* Effect.promise(() =>
+            h.memory.hubDiagnostics.run(h.registry, { environmentId: env, input: {} }),
+          ))._tag,
+        ).toBe("Success");
+        expect(
+          (yield* Effect.promise(() =>
+            h.memory.hubReconcile.run(h.registry, { environmentId: env, input: reconcile }),
+          ))._tag,
+        ).toBe("Success");
+        expect(h.diagnosticRequests()).toBe(2);
+      }),
+    ),
+  );
+
+  it.effect("hub reconcile follows live Settings permission on the exact destination", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness();
+        const input = { memorySpaceId: space, environmentId: env, expectedVersion: 1 };
+        for (const [scopes, expected] of [
+          [["memory:write"], false],
+          [["settings:write"], true],
+          [[], false],
+        ] as const) {
+          h.registry.set(grants(env), AsyncResult.success(sessionScopes(scopes)));
+          expect(h.registry.get(h.memory.hubReconcile.permissionAtom(env, input))).toBe(expected);
+          expect(h.registry.get(h.memory.hubReconcile.permissionAtom(other, input))).toBe(false);
+        }
+        expect(
+          (yield* Effect.promise(() =>
+            h.memory.hubReconcile.run(h.registry, { environmentId: env, input }),
+          ))._tag,
+        ).toBe("Failure");
+      }),
+    ),
+  );
+
+  it.effect(
+    "import workflow uses the guarded command and rechecks the live destination grants",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* harness();
+          const recovery = createMemoryImportRecoveryStore(
+            { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+            () => 1000,
+          );
+          const workflow = h.memory.createImportWorkflow(h.registry, {
+            fence: { environmentId: env, memorySpaceId: space, session: "connection" },
+            recovery,
+            operationId: () => MemoryOperationId.make("00000000-0000-4000-8000-000000000008"),
+          });
+          const phases: string[] = [];
+          const unsubscribe = workflow.subscribe(() => phases.push(workflow.getSnapshot().phase));
+          const result = yield* Effect.promise(() => workflow.discover("codex"));
+          expect(phases).toEqual(["discovering", "discovered"]);
+          expect(workflow.getSnapshot()).toBe(workflow.getState());
+          unsubscribe();
+          expect(result).toEqual({ action: "discover", sources: [] });
+          expect(h.destinations).toEqual([env]);
+          h.registry.set(grants(env), AsyncResult.success(sessionScopes(["memory:write"])));
+          yield* Effect.promise(() =>
+            expect(workflow.discover("codex")).rejects.toThrow("unavailable"),
+          );
+          expect(h.destinations).toEqual([env]);
+          workflow.invalidate({ environmentId: other, memorySpaceId: space, session: "other" });
+          yield* Effect.promise(() =>
+            expect(workflow.discover("codex")).rejects.toThrow("unavailable"),
+          );
+          expect(h.destinations).toEqual([env]);
         }),
       ),
   );
@@ -1729,4 +1858,85 @@ it.effect(
         expect(h.readCount()).toBe(1);
       }),
     ),
+);
+
+it.effect.each([
+  { advertised: undefined, dispatched: undefined },
+  { advertised: false, dispatched: false },
+  { advertised: true, dispatched: true },
+  { advertised: true, dispatched: undefined },
+])(
+  "history gates refused opt-in on atom and dispatch capabilities: %s",
+  ({ advertised: supported, dispatched }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness();
+        h.registry.set(configs(env), {
+          ...config,
+          environment: {
+            ...config.environment,
+            capabilities: {
+              memory: {
+                protocolVersion: 1,
+                ...(supported === undefined ? {} : { refusedReverts: supported }),
+              },
+            },
+          },
+        } as ServerConfig);
+        yield* SubscriptionRef.set(
+          h.active,
+          Option.some({
+            client: h.rpc,
+            initialConfig: Effect.succeed({
+              ...config,
+              environment: {
+                ...config.environment,
+                capabilities: {
+                  memory: {
+                    protocolVersion: 1,
+                    ...(dispatched === undefined ? {} : { refusedReverts: dispatched }),
+                  },
+                },
+              },
+            } as ServerConfig),
+          } as unknown as RpcSession),
+        );
+        const exposure = h.memory.exposureAtom(target);
+        h.registry.mount(exposure);
+        yield* Queue.offer(h.queue, signal("reset"));
+        yield* waitFor(h.registry, exposure, (state) => state.ready);
+        const body = hasBody(
+          h.memory.history({
+            ...readTarget,
+            input: { ...readTarget.input, limit: 10, includeRefusedReverts: true },
+          }),
+        );
+        h.registry.mount(body);
+        yield* Deferred.succeed(h.reply, item);
+        yield* waitFor(h.registry, body, Boolean);
+        expect(h.historyInputs).toEqual([
+          {
+            ...readTarget.input,
+            limit: 10,
+            ...(supported && dispatched ? { includeRefusedReverts: true } : {}),
+          },
+        ]);
+      }),
+    ),
+);
+
+// Direct helper callers bypass atom opt-in and still use the selected session gate.
+it.effect("direct history helper strips caller opt-in for an unsupported session", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* harness();
+      yield* Deferred.succeed(h.reply, item);
+      const input = { ...readTarget.input, limit: 10, includeRefusedReverts: true as const };
+      yield* requestMemoryQuery(h.runtime, h.registry, env, WS_METHODS.memoryHistory, input).pipe(
+        Effect.provideService(EnvironmentRegistry, h.environments),
+      );
+      expect(h.historyInputs).toEqual([{ ...readTarget.input, limit: 10 }]);
+      expect(input.includeRefusedReverts).toBe(true);
+    }),
+  ),
 );

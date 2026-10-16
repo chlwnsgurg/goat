@@ -210,7 +210,9 @@ function Sidebar({
 }: React.ComponentProps<"div"> & {
   side?: "left" | "right";
   /** `framed` sits beside the destination rail: offset by --destination-rail-width, drawn as a
-   * rounded panel below the titlebar strip so the strip reads as window frame. */
+   * panel below the titlebar strip so the strip reads as window frame. Its top and left edges
+   * belong to the shell's content frame (`workspace-content-frame`); the panel draws only its
+   * right edge, starting at the titlebar hairline. */
   variant?: "sidebar" | "floating" | "inset" | "framed";
   collapsible?: "offcanvas" | "icon" | "none";
   resizable?: boolean | SidebarResizableOptions;
@@ -329,7 +331,12 @@ function Sidebar({
             // Adjust the padding for floating and inset variants.
             variant === "floating" || variant === "inset"
               ? "p-2 group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4))+2px)]"
-              : "group-data-[collapsible=icon]:w-(--sidebar-width-icon) group-data-[side=left]:border-r group-data-[side=right]:border-l",
+              : variant === "framed"
+                ? // The divider starts at the titlebar hairline so the titlebar strip stays one
+                  // surface. It inherits the container's themed border colour and stays above the
+                  // stage artwork, which can reach below the strip.
+                  "group-data-[collapsible=icon]:w-(--sidebar-width-icon) after:pointer-events-none after:absolute after:top-[calc(var(--workspace-topbar-height)-1px)] after:right-0 after:bottom-0 after:z-10 after:border-r after:border-inherit"
+                : "group-data-[collapsible=icon]:w-(--sidebar-width-icon) group-data-[side=left]:border-r group-data-[side=right]:border-l",
             className,
           )}
           data-slot="sidebar-container"
@@ -340,8 +347,8 @@ function Sidebar({
               "flex h-full w-full flex-col",
               variant === "framed"
                 ? // The panel surface starts under the titlebar strip; the strip shows the frame.
-                  // Its top edge lands on the titlebar hairline, so the corner curves out of it.
-                  "relative isolate bg-transparent before:absolute before:inset-x-0 before:top-[calc(var(--workspace-topbar-height)-1px)] before:bottom-0 before:-z-10 before:rounded-tl-xl before:border-t before:border-l before:border-chrome-divider before:bg-sidebar"
+                  // Its corner matches the content frame that outlines it.
+                  "relative isolate bg-transparent before:absolute before:inset-x-0 before:top-[calc(var(--workspace-topbar-height)-1px)] before:bottom-0 before:-z-10 before:rounded-tl-xl before:bg-sidebar"
                 : "bg-sidebar surface-grain group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:shadow-sm/5",
             )}
             data-sidebar="sidebar"
@@ -537,6 +544,8 @@ function SidebarRail({
             className={cn(
               /* disable pointer events only when offcanvas sidebar is collapsed, that's when the rail sits over the native scrollbar on windows and linux. icon mode stays fully clickable. */
               "-translate-x-1/2 group-data-[side=left]:-right-4 absolute inset-y-0 z-20 hidden w-4 after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] hover:after:bg-sidebar-border group-data-[side=right]:left-0 sm:flex [[data-collapsible=offcanvas][data-state=collapsed]_&]:pointer-events-none",
+              // A framed sidebar's edge starts at the titlebar hairline; so does its hover line.
+              "group-data-[variant=framed]:after:top-[calc(var(--workspace-topbar-height)-1px)]",
               "[[data-panel-animations=true]_&]:transition-all [[data-panel-animations=true]_&]:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:ease-out",
               "in-data-[side=left]:cursor-w-resize in-data-[side=right]:cursor-e-resize",
               "[[data-side=left][data-state=collapsed]_&]:cursor-e-resize [[data-side=right][data-state=collapsed]_&]:cursor-w-resize",

@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - Stands in for an Electron debugger.
 import { describe, expect, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import { DesktopBrowserEvent } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -34,12 +35,15 @@ const makeDebuggee = () => {
     getURL: () => "http://localhost/",
     getTitle: () => "Page",
     getUserAgent: () => "Electron",
+    reload: vi.fn(),
+    reloadIgnoringCache: vi.fn(),
   };
   return {
     tab: {
       webContents: webContents as unknown as Electron.WebContents,
       debugger: debuggee as unknown as Electron.Debugger,
     },
+    webContents,
     emit: (method: string, params: unknown) => emitter.emit("message", {}, method, params, ""),
     release: () => pending.splice(0).forEach((resolve) => resolve()),
   };
@@ -54,6 +58,46 @@ const takeEvents = (host: DesktopBrowserHost.DesktopBrowserHost["Service"], coun
   );
 
 describe("DesktopBrowserHost", () => {
+  it.effect.each([false, true])(
+    "reloads the exact adopted guest (ignoreCache: %s)",
+    (ignoreCache) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* DesktopBrowserHost.make;
+          const guest = makeDebuggee();
+          const other = makeDebuggee();
+          host.attach(key, guest.tab);
+          host.attach({ ...key, tabId: "other-tab" }, other.tab);
+          const reader = yield* host.events.pipe(
+            Stream.map((line) => decodeEvent(new TextDecoder().decode(line))),
+            Stream.filter((event) => event.type === "cdp"),
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.forkScoped,
+          );
+          yield* Effect.yieldNow;
+          yield* host.handleCommandLine(
+            encodeJson({
+              type: "cdp",
+              ...key,
+              message: encodeJson({
+                id: 1,
+                method: "Page.reload",
+                params: { ignoreCache },
+                sessionId: "goat-preview-page",
+              }),
+            }),
+          );
+          const [reply] = yield* Fiber.join(reader);
+          expect(JSON.parse(reply!.message)).toMatchObject({ id: 1, result: {} });
+          expect(guest.webContents.reload).toHaveBeenCalledTimes(ignoreCache ? 0 : 1);
+          expect(guest.webContents.reloadIgnoringCache).toHaveBeenCalledTimes(ignoreCache ? 1 : 0);
+          expect(other.webContents.reload).not.toHaveBeenCalled();
+          expect(other.webContents.reloadIgnoringCache).not.toHaveBeenCalled();
+        }),
+      ),
+  );
+
   it.effect("announces tabs already attached to a backend that starts later", () =>
     Effect.gen(function* () {
       const host = yield* DesktopBrowserHost.make;

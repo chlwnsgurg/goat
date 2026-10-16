@@ -1223,7 +1223,9 @@ function EnvironmentTasks({
                     ? ` · ${formatNextScheduledTaskRun(task.nextRunAt, now)}`
                     : ""}
               </Text>
-              <Text className="text-sm text-foreground-muted">{scheduledMemoryAccess(task)}</Text>
+              {scheduledMemoryAccess(task) ? (
+                <Text className="text-sm text-foreground-muted">{scheduledMemoryAccess(task)}</Text>
+              ) : null}
               {task.lastRunError ? (
                 <Text className="text-sm text-danger-foreground" numberOfLines={2}>
                   Last run failed: {task.lastRunError}
