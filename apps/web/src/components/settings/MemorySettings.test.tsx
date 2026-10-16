@@ -805,7 +805,6 @@ const success = (value: unknown) => ({
       : value,
 });
 const hubView = (version: number, space = id(1)) => ({
-  provenance: { source: "auto-initialized", memorySpaceId: space },
   version,
   members: [] as {
     environmentId: string;
@@ -2749,7 +2748,7 @@ it("shows automatically initialized memory as on and usable without an enable ac
   state.queries.set("list", Option.some({ items: [], nextCursor: null }));
   await supportedScreen(false);
   expect(container.textContent).toContain("This device is the hub");
-  expect(container.textContent).toContain("Memory is on by default.");
+  expect(container.textContent).toContain("Memory is on.");
   expect(container.textContent).not.toContain("Memory off");
   expect(container.textContent).not.toContain("Make this device the hub");
   expect(container.textContent).not.toContain("Turn on memory to");

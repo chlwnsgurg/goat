@@ -1,3 +1,4 @@
+import { type MemoryHubSettingsSnapshot } from "./MemoryHubSettings.ts";
 import { checkUsage } from "./MemoryUsageScan.testkit.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
@@ -570,17 +571,14 @@ const adminDependencies = Secrets.layer.pipe(
 );
 const adminFixture = Effect.gen(function* () {
   yield* seed;
-  const view = yield* Ref.make<M.MemoryHubSettingsSnapshot>({
+  const view = yield* Ref.make<MemoryHubSettingsSnapshot>({
     provenance: null,
     settings: { mode: "hub", memorySpaceId: space },
     version: 0,
   });
   const failApply = yield* Ref.make(false);
   const applied = yield* Ref.make(
-    new Map<
-      M.MemoryOperationId,
-      { digest: string; result: { view: M.MemoryHubSettingsSnapshot } }
-    >(),
+    new Map<M.MemoryOperationId, { digest: string; result: { view: MemoryHubSettingsSnapshot } }>(),
   );
   const lock = yield* Semaphore.make(1);
   const backend: Hub.MemoryHubAdminSettings["Service"] = {
@@ -697,7 +695,6 @@ describe("MemoryHubAdministrator", () => {
       assert.strictEqual(target(readded.view).credentialVersion, 5);
       assert.deepStrictEqual(
         (yield* Hub.readSettingsView(store, {
-          provenance: null,
           settings: { mode: "disabled" },
           version: 4,
         })).members,

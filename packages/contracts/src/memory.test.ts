@@ -2284,24 +2284,60 @@ it("opts into retained local space without changing legacy sync status requests"
   rejects(M.MemorySyncStatusInput, { includeRetainedLocalSpaceId: null });
 });
 
-const decodeHubSnapshot = Schema.decodeUnknownSync(M.MemoryHubSettingsSnapshot);
-const decodeHubView = Schema.decodeUnknownSync(M.MemoryHubSettingsView);
-it("automatically initialized hub provenance decodes old receipts as unknown and rejects a mismatched space", () => {
-  const decode = decodeHubSnapshot;
-  expect(decode({ settings: { mode: "disabled" }, version: 0 }).provenance).toBeNull();
-  const settings = { mode: "hub", memorySpaceId: id(1) };
-  const provenance = { source: "auto-initialized", memorySpaceId: id(1) };
-  expect(decode({ settings, version: 1, provenance }).provenance).toEqual(provenance);
+// Frozen outer response shapes from origin/dev before automatic hub initialization.
+// Nested settings/member/credential contracts are unchanged by this feature.
+const legacyHubSnapshot = Schema.Struct({
+  settings: M.MemoryHubSettings,
+  version: M.NonNegativeInt,
+});
+const legacyHubView = Schema.Struct({
+  ...legacyHubSnapshot.fields,
+  members: Schema.Array(M.MemoryHubMemberView),
+});
+const legacyHubUpdate = Schema.Struct({
+  view: legacyHubView,
+  credential: Schema.NullOr(M.MemoryHubCredentialResult),
+});
+const legacyHubDisable = legacyHubSnapshot.check(
+  Schema.makeFilter((view) => view.settings.mode === "disabled"),
+);
+const compatible = <A, I>(
+  current: Schema.Codec<A, I>,
+  legacy: Schema.Codec<A, I>,
+  response: unknown,
+) => {
+  const strict = { onExcessProperty: "error" } as const;
+  const oldResponse = Schema.encodeSync(legacy)(Schema.decodeUnknownSync(legacy)(response, strict));
+  // A new client can read an old server's response with exactly the same encoded keys.
+  const decoded = Schema.decodeUnknownSync(current)(oldResponse, strict);
+  const newResponse = Schema.encodeSync(current)(decoded);
+  expect(newResponse).toEqual(oldResponse);
+  // An installed old client can read the new server's response without extra properties.
+  expect(Schema.decodeUnknownSync(legacy)(newResponse, strict)).toEqual(decoded);
+};
+it.each([
+  { mode: "disabled" },
+  { mode: "hub", memorySpaceId: id() },
+  { mode: "hub", memorySpaceId: null },
+  {
+    mode: "member",
+    hubEnvironmentId: "remote",
+    endpoint: "https://fixture.example",
+    memorySpaceId: id(),
+    secretName: "fixture",
+  },
+])("keeps settings-get and settings-update compatible in both directions for $mode", (settings) => {
+  const view = { settings, version: 1, members: [] };
+  compatible(M.MemoryHubSettingsView, legacyHubView, view);
+  compatible(M.MemoryHubSettingsUpdateResult, legacyHubUpdate, { view, credential: null });
+});
+it("keeps disable compatible in both directions without even null provenance", () => {
+  const response = { settings: { mode: "disabled" }, version: 1 };
+  compatible(M.MemoryHubDisableResult, legacyHubDisable, response);
   expect(() =>
-    decode({ settings, version: 1, provenance: { ...provenance, memorySpaceId: id(2) } }),
+    Schema.decodeUnknownSync(legacyHubDisable)(
+      { ...response, provenance: null },
+      { onExcessProperty: "error" },
+    ),
   ).toThrow();
-  expect(() =>
-    decode({ settings, version: 1, provenance: { ...provenance, source: "manual" } }),
-  ).toThrow();
-  const view = decodeHubView({
-    settings,
-    version: 1,
-    members: [],
-  });
-  expect(view.provenance).toBeNull();
 });

@@ -424,13 +424,7 @@ export function MemoryAdministration({
                 ? `Shares memory with ${name(hub.settings.hubEnvironmentId)}`
                 : "Memory off"}
         </Copy>
-        {hub?.settings.mode === "hub" ? (
-          <Copy>
-            {hub.provenance?.source === "auto-initialized"
-              ? "Memory is on by default."
-              : "Memory is on."}
-          </Copy>
-        ) : null}
+        {hub?.settings.mode === "hub" ? <Copy>Memory is on.</Copy> : null}
         {sync && hub && hub.settings.mode !== "disabled" ? (
           <Copy>{presentMemorySync(sync).label}</Copy>
         ) : null}

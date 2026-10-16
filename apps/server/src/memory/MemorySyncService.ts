@@ -2180,7 +2180,6 @@ const make = Effect.gen(function* () {
           Hub.readSettingsView(store, {
             settings: s.memoryHub,
             version: s.memoryHubVersion,
-            provenance: s.memoryHubProvenance,
           }),
         ),
       ),

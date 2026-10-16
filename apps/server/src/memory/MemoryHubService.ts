@@ -1,3 +1,4 @@
+import { MemoryHubSettingsSnapshot } from "./MemoryHubSettings.ts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- server-owned checkpoint identifiers.
 import * as NodeCrypto from "node:crypto";
 import * as M from "@goat/contracts";
@@ -368,20 +369,20 @@ export const readSettingsView = (
       snapshot.settings.mode === "hub" && snapshot.settings.memorySpaceId !== null
         ? yield* store.readHubMembers(snapshot.settings.memorySpaceId)
         : [];
-    return { ...snapshot, members };
+    return { settings: snapshot.settings, version: snapshot.version, members };
   });
 
 export type MemoryHubAdministrationError = MemoryHubServiceError | Secrets.SecretStoreError;
 type AdminPermit = Effect.Effect<void, M.MemoryHubForbiddenError>;
 const decodeMemorySpaceId = Schema.decodeUnknownEffect(M.MemorySpaceId);
-type SafeAdminResult = { readonly view: M.MemoryHubSettingsSnapshot };
+type SafeAdminResult = { readonly view: MemoryHubSettingsSnapshot };
 
 /** L3 binds the existing settings admin lock and dedicated idempotent settings CAS. */
 export class MemoryHubAdminSettings extends Context.Service<
   MemoryHubAdminSettings,
   {
     readonly withLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
-    readonly read: Effect.Effect<M.MemoryHubSettingsSnapshot, M.MemoryHubError>;
+    readonly read: Effect.Effect<MemoryHubSettingsSnapshot, M.MemoryHubError>;
     readonly readPublication: Effect.Effect<M.MemoryHubPublication>;
     readonly readPreviousHubRequestId: Effect.Effect<M.MemoryOperationId | null, M.MemoryHubError>;
     readonly readPreviousHubSpace: Effect.Effect<M.MemorySpaceId | null, M.MemoryHubError>;

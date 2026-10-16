@@ -4,6 +4,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
+import * as Cause from "effect/Cause";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -18,6 +20,11 @@ import * as Hub from "./MemoryHubService.ts";
 import * as Service from "./MemoryService.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as Resolver from "../project/RepositoryIdentityResolver.ts";
+
+const decodeHubView = Schema.decodeUnknownEffect(M.MemoryHubSettingsView);
+const decodeClientSettings = Schema.decodeUnknownEffect(M.ServerSettings);
+const encodeClientSettings = Schema.encodeEffect(M.ServerSettings);
+const isStoreConflict = Schema.is(Store.MemoryStoreConflict);
 
 const environmentId = M.EnvironmentId.make("environment-fixture");
 const dependencies = Store.layer.pipe(
@@ -57,6 +64,18 @@ it.effect(
           assert.strictEqual(view.version, 1);
           assert.isNotNull(view.provenance);
           const space = view.provenance!.memorySpaceId;
+          const wire = yield* Hub.readSettingsView(store, view);
+          assert.deepStrictEqual(Object.keys(wire).sort(), ["members", "settings", "version"]);
+          yield* decodeHubView(wire, {
+            onExcessProperty: "error",
+          });
+          const clientSettings = Settings.redactServerSettingsForClient(
+            yield* (yield* Settings.ServerSettingsService).getSettings,
+          );
+          assert.isFalse(Object.hasOwn(clientSettings, "memoryHubProvenance"));
+          yield* decodeClientSettings(yield* encodeClientSettings(clientSettings), {
+            onExcessProperty: "error",
+          });
           yield* Effect.gen(function* () {
             const service = yield* Service.MemoryService;
             const memoryId = M.MemoryId.make("00000000-0000-4000-8000-000000000020");
@@ -117,7 +136,7 @@ it.effect(
             yield* store.readHubMember(first.space, environmentId),
             first.member,
           );
-          const manual = yield* admin.update(
+          yield* admin.update(
             {
               requestId: id(3),
               expectedVersion: 1,
@@ -126,7 +145,7 @@ it.effect(
             },
             Effect.void,
           );
-          assert.isNull(manual.view.provenance);
+          assert.isNull((yield* (yield* Settings.MemoryHubAdminSettings).read).provenance);
           assert.strictEqual(yield* admin.initializeDefaultHub, "preserved");
         }),
       );
@@ -324,6 +343,91 @@ it.effect("a user disable queued during initialization wins and remains off afte
   }).pipe(Effect.provide(dependencies)),
 );
 
+it.effect(
+  "an observable version-zero disable is refused after initialization and a fresh retry survives restart",
+  () =>
+    Effect.gen(function* () {
+      yield* settingsSession(
+        Effect.gen(function* () {
+          yield* (yield* Settings.ServerSettingsService).start;
+          const backend = yield* Settings.MemoryHubAdminSettings;
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const submitted = yield* Deferred.make<void>();
+          const initializing = yield* Hub.makeAdministrator.pipe(
+            Effect.provideService(Hub.MemoryHubAdminSettings, {
+              ...backend,
+              apply: (record, permit) =>
+                Deferred.succeed(entered, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(backend.apply(record, permit)),
+                ),
+            }),
+          );
+          const initialization = yield* initializing.initializeDefaultHub.pipe(Effect.forkScoped);
+          yield* Deferred.await(entered);
+          const observable = yield* Hub.readSettingsView(
+            yield* Store.MemoryStore,
+            yield* backend.read,
+          );
+          assert.strictEqual(observable.version, 0);
+          assert.strictEqual(observable.settings.mode, "disabled");
+          const manual = yield* Hub.makeAdministrator.pipe(
+            Effect.provideService(Hub.MemoryHubAdminSettings, {
+              ...backend,
+              withLock: (effect) =>
+                Deferred.succeed(submitted, undefined).pipe(
+                  Effect.andThen(backend.withLock(effect)),
+                ),
+            }),
+          );
+          const request = {
+            requestId: id(80),
+            expectedVersion: observable.version,
+            action: "configure" as const,
+            settings: { mode: "disabled" as const },
+          };
+          const disabling = yield* manual
+            .update(request, Effect.void)
+            .pipe(Effect.exit, Effect.forkScoped);
+          yield* Deferred.await(submitted);
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(initialization);
+          const refused = yield* Fiber.join(disabling);
+          assert.isTrue(Exit.isFailure(refused));
+          if (Exit.isFailure(refused)) {
+            const error = Cause.squash(refused.cause);
+            assert.isTrue(isStoreConflict(error));
+            if (isStoreConflict(error)) assert.strictEqual(error.code, "revision_changed");
+          }
+          const current = yield* backend.read;
+          assert.strictEqual(current.version, 1);
+          assert.strictEqual(current.settings.mode, "hub");
+          const retried = yield* manual.update(
+            { ...request, requestId: id(81), expectedVersion: current.version },
+            Effect.void,
+          );
+          assert.strictEqual(retried.view.settings.mode, "disabled");
+          assert.strictEqual(retried.view.version, 2);
+          assert.deepStrictEqual(Object.keys(retried.view).sort(), [
+            "members",
+            "settings",
+            "version",
+          ]);
+        }),
+      );
+      yield* settingsSession(
+        Effect.gen(function* () {
+          assert.strictEqual(yield* (yield* start).initializeDefaultHub, "preserved");
+          const restarted = yield* (yield* Settings.MemoryHubAdminSettings).read;
+          assert.strictEqual(restarted.settings.mode, "disabled");
+          assert.strictEqual(restarted.version, 2);
+          assert.isNull(restarted.provenance);
+        }),
+      );
+    }).pipe(Effect.provide(dependencies)),
+);
+
 it.effect("a malformed fresh settings file fails closed without administration", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -353,7 +457,7 @@ it.effect(
           yield* admin.initializeDefaultHub;
           const initial = yield* (yield* Settings.MemoryHubAdminSettings).read;
           const memberId = M.EnvironmentId.make("other-fixture");
-          const provision = yield* admin.update(
+          yield* admin.update(
             {
               requestId: id(30),
               expectedVersion: 1,
@@ -362,8 +466,11 @@ it.effect(
             },
             Effect.void,
           );
-          assert.deepStrictEqual(provision.view.provenance, initial.provenance);
-          const acknowledged = yield* admin.update(
+          assert.deepStrictEqual(
+            (yield* (yield* Settings.MemoryHubAdminSettings).read).provenance,
+            initial.provenance,
+          );
+          yield* admin.update(
             {
               requestId: id(31),
               expectedVersion: 2,
@@ -372,7 +479,10 @@ it.effect(
             },
             Effect.void,
           );
-          assert.deepStrictEqual(acknowledged.view.provenance, initial.provenance);
+          assert.deepStrictEqual(
+            (yield* (yield* Settings.MemoryHubAdminSettings).read).provenance,
+            initial.provenance,
+          );
           const installed = yield* admin.update(
             {
               requestId: id(32),
@@ -385,7 +495,7 @@ it.effect(
             },
             Effect.void,
           );
-          assert.isNull(installed.view.provenance);
+          assert.isNull((yield* (yield* Settings.MemoryHubAdminSettings).read).provenance);
           assert.strictEqual(installed.view.settings.mode, "member");
           assert.strictEqual(yield* admin.initializeDefaultHub, "preserved");
         }),

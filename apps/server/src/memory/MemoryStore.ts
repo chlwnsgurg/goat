@@ -1,3 +1,4 @@
+import { MemoryHubSettingsSnapshot } from "./MemoryHubSettings.ts";
 import { checkpointBound, CHECKPOINT_PAGE_OVERHEAD } from "./MemoryCheckpointBound.ts";
 import { refreshCheckpointAccounting } from "./MemoryCheckpointAccounting.ts";
 import {
@@ -756,7 +757,7 @@ const AdminRecordSchema = Schema.Struct({
   secretName: Schema.NullOr(
     Schema.String.check(Schema.makeFilter((v) => /^[a-z0-9-]{1,128}$/.test(v))),
   ),
-  result: Schema.NullOr(Schema.Struct({ view: M.MemoryHubSettingsSnapshot })),
+  result: Schema.NullOr(Schema.Struct({ view: MemoryHubSettingsSnapshot })),
   memberVersion: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
 }).check(
   Schema.makeFilter(

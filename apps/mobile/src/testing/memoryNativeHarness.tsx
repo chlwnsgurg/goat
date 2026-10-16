@@ -500,7 +500,6 @@ export function createNativeMemoryHarness() {
     [
       WS_METHODS.memoryHubSettingsGet,
       () => ({
-        provenance: { source: "auto-initialized", memorySpaceId: nativeSpace },
         settings: { mode: "hub", memorySpaceId: nativeSpace },
         members: [],
         version: 1,

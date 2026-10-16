@@ -11,7 +11,7 @@
  * @module ServerSettings
  */
 import {
-  DEFAULT_SERVER_SETTINGS,
+  DEFAULT_SERVER_SETTINGS as CLIENT_DEFAULT_SERVER_SETTINGS,
   MemoryOwnerSourceReadPolicy,
   MEMORY_HUB_MAX_MEMBERS,
   type MemoryHubDisableInput,
@@ -25,11 +25,9 @@ import {
   type MemoryOwnerRemoval,
   type EnvironmentId,
   MemoryHubSettings,
-  MemoryHubProvenance,
   MemorySpaceId,
   MemoryHubError,
   type MemoryHubForbiddenError,
-  type MemoryHubSettingsSnapshot,
   MemoryOperationId,
   ModelSelection,
   ProjectId,
@@ -43,7 +41,7 @@ import {
   ProviderInstanceId,
   resolveProviderInstanceEnabled,
   ResponseStreamingMode,
-  ServerSettings,
+  ServerSettings as ClientServerSettings,
   ServerSettingsError,
   type ServerSettingsPatch,
 } from "@goat/contracts";
@@ -94,6 +92,22 @@ export {
   resolveReviewGuideModelSelection,
   resolveSourceControlWriterModelSelection,
 } from "@goat/shared/serverSettings";
+
+import { MemoryHubProvenance, MemoryHubSettingsSnapshot } from "./memory/MemoryHubSettings.ts";
+
+const ServerSettings = Schema.Struct({
+  ...ClientServerSettings.fields,
+  memoryHubProvenance: Schema.NullOr(MemoryHubProvenance).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+});
+type ServerSettings = ClientServerSettings & {
+  readonly memoryHubProvenance?: MemoryHubProvenance | null;
+};
+const DEFAULT_SERVER_SETTINGS: ServerSettings = {
+  ...CLIENT_DEFAULT_SERVER_SETTINGS,
+  memoryHubProvenance: null,
+};
 
 const MemoryHubTransitionMarker = Schema.Struct({
   requestId: MemoryOperationId,
@@ -169,7 +183,10 @@ const foldProviderInstanceEnabledFlags = (settings: ServerSettings): ServerSetti
 const normalizeServerSettings = (
   settings: ServerSettings,
 ): Effect.Effect<ServerSettings, ServerSettingsError> =>
-  encodeServerSettings(settings).pipe(
+  encodeServerSettings({
+    ...settings,
+    memoryHubProvenance: settings.memoryHubProvenance ?? null,
+  }).pipe(
     Effect.flatMap(decodeServerSettings),
     Effect.map(foldProviderInstanceEnabledFlags),
     Effect.map((next) => ({ ...next, defaultTheme: normalizeThemePreference(next.defaultTheme) })),
@@ -184,8 +201,12 @@ const normalizeServerSettings = (
     ),
   );
 
-export function redactServerSettingsForClient(settings: ServerSettings): ServerSettings {
-  return mapSettingsSecrets(settings, (secret) =>
+export function redactServerSettingsForClient(
+  settings: ClientServerSettings,
+): ClientServerSettings {
+  // Persistence-only origin must not reach settings snapshots or streams.
+  const { memoryHubProvenance: _provenance, ...clientSettings } = settings as ServerSettings;
+  return mapSettingsSecrets(clientSettings, (secret) =>
     secret.sensitive
       ? { value: "", redacted: secret.redacted || secret.value.length > 0 }
       : { value: secret.value, redacted: false },
@@ -718,7 +739,7 @@ const hubAdministrationSettings = (
     Effect.map((current) => ({
       settings: current.memoryHub,
       version: current.memoryHubVersion,
-      provenance: current.memoryHubProvenance,
+      provenance: current.memoryHubProvenance ?? null,
     })),
     Effect.mapError(() => new MemoryHubError({ code: "storage_failed" })),
   ),
@@ -769,7 +790,7 @@ const hubAdministrationSettings = (
               ? { source: "auto-initialized", memorySpaceId: settings.memorySpaceId }
               : action.action === "configure" || action.action === "installCredential"
                 ? null
-                : current.memoryHubProvenance,
+                : (current.memoryHubProvenance ?? null),
         },
         permit,
       ).pipe(
@@ -888,7 +909,7 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
               Ref.set(hubMarkerRef, {
                 requestId: input.requestId,
                 version: next.memoryHubVersion,
-                provenance: next.memoryHubProvenance,
+                provenance: next.memoryHubProvenance ?? null,
                 ...(next.memoryHub.mode === "hub" && next.memoryHub.memorySpaceId !== null
                   ? { previousHubSpace: next.memoryHub.memorySpaceId }
                   : previous?.previousHubSpace
@@ -901,7 +922,7 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
         Effect.map((next) => ({
           settings: next.memoryHub,
           version: next.memoryHubVersion,
-          provenance: next.memoryHubProvenance,
+          provenance: next.memoryHubProvenance ?? null,
         })),
       );
 
@@ -955,7 +976,7 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
           Effect.map((current) => ({
             settings: current.memoryHub,
             version: current.memoryHubVersion,
-            provenance: current.memoryHubProvenance,
+            provenance: current.memoryHubProvenance ?? null,
           })),
         ),
       },
@@ -1362,7 +1383,7 @@ const make = Effect.gen(function* () {
     Ref.set(committedHubRef, {
       settings: settings.memoryHub,
       version: settings.memoryHubVersion,
-      provenance: settings.memoryHubProvenance,
+      provenance: settings.memoryHubProvenance ?? null,
       publication: { state: "current" as const },
     });
   const retainCommittedHub = (code: "invalid_settings" | "settings_unavailable") =>
@@ -1553,7 +1574,7 @@ const make = Effect.gen(function* () {
     });
 
   const loadSettingsFromDisk = Effect.gen(function* () {
-    let settings = DEFAULT_SERVER_SETTINGS;
+    let settings: ServerSettings = DEFAULT_SERVER_SETTINGS;
     let legacyProviders: Readonly<Record<string, unknown>> | undefined;
     let legacySourceControl: Parameters<typeof migrateLegacySourceControlSettings>[1] = {};
     // A file that failed to decode must stay on disk for the user to repair;
@@ -2000,7 +2021,7 @@ const make = Effect.gen(function* () {
       return {
         settings: next.memoryHub,
         version: next.memoryHubVersion,
-        provenance: next.memoryHubProvenance,
+        provenance: next.memoryHubProvenance ?? null,
       };
     });
 

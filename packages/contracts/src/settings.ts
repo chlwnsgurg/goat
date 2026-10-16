@@ -1,6 +1,5 @@
 import {
   MemoryHubSettings,
-  MemoryHubProvenance,
   MemoryOwnerSourceReadPolicy,
   DEFAULT_MEMORY_OWNER_SOURCE_READ_POLICY,
 } from "./memory.ts";
@@ -1256,9 +1255,6 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_MEMORY_OWNER_SOURCE_READ_POLICY)),
   ),
   enableAgentMemoryAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  memoryHubProvenance: Schema.NullOr(MemoryHubProvenance).pipe(
-    Schema.withDecodingDefault(Effect.succeed(null)),
-  ),
   memoryHubVersion: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
   memoryHub: MemoryHubSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed({ mode: "disabled" as const })),

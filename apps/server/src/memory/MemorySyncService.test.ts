@@ -5267,7 +5267,8 @@ it.effect.each(["bootstrap", "exchange"] as const)(
           if (configured.settings.mode !== "hub" || !configured.settings.memorySpaceId)
             throw new Error("fixture hub configure");
           const allocated = configured.settings.memorySpaceId;
-          assert.deepStrictEqual(configured.provenance, {
+          assert.isFalse(Object.hasOwn(configured, "provenance"));
+          assert.deepStrictEqual((yield* backend.read).provenance, {
             source: "auto-initialized",
             memorySpaceId: allocated,
           });
