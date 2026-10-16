@@ -6,9 +6,11 @@ shared provider settings.
 
 ## Claude Cloud
 
-Add **Claude Cloud** in **Settings > Providers** and select the ID of a local Claude
-instance signed in with a claude.ai account. The cloud provider uses that instance's
-login and executable. API keys and router connections are not supported.
+Claude Cloud appears automatically in **Settings > Providers**. Sign in to Claude with a
+claude.ai account, either from the Claude Cloud card or the Claude provider card. The cloud
+provider uses that account and executable; API keys and router connections are not supported.
+Turn Claude Cloud off with its toggle. Reset the cloud card to follow Claude's enabled state
+again. For another account, add a custom Claude Cloud instance and choose its Claude source.
 
 Claude Cloud starts from your project folder and its current GitHub branch.
 Local changes and commits that have not been pushed may be included. You do not
@@ -28,6 +30,10 @@ Follow-up messages go to the same cloud session. An accepted follow-up confirms
 message delivery, not completed work. Stop the session on Claude's website;
 Claude Cloud has no supported CLI cancellation command. Your local files and
 checkpoints are not changed by cloud work.
+
+If Claude Cloud is not ready, run `goat provider diagnose --driver claudeCloud` on the
+environment's machine. It lists what blocks it, such as a missing claude.ai login or an
+API-key variable in the environment, and the next step for each.
 
 ## Separate accounts or configurations
 

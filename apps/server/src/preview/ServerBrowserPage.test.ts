@@ -102,6 +102,69 @@ describe.skipIf(!chromiumInstalled)("server browser element refs", () => {
       networkEntries: [],
       actionTimeline: [],
     });
+
+  it("captures a full document without changing viewport, scroll, or responsive layout", async () => {
+    await page.setViewportSize({ width: 800, height: 600 });
+    await page.setContent(
+      "<style>body{margin:0} main{height:2900px} footer{height:100px;background:rgb(255,0,0)}</style><main>Long page</main><footer></footer>",
+    );
+    await page.evaluate("scrollTo(0, 450)");
+    const result = await ServerBrowserPage.snapshot({
+      page,
+      cdp,
+      renderScale: 1,
+      fullPage: true,
+      consoleEntries: [],
+      networkEntries: [],
+      actionTimeline: [],
+    });
+    expect(result.screenshot).toMatchObject({ width: 800, height: 3000, clipped: false });
+    const bottomPixel = await page.evaluate(`(async () => {
+      const image = new Image();
+      image.src = "data:image/png;base64,${result.screenshot.data}";
+      await image.decode();
+      const canvas = document.createElement("canvas");
+      canvas.width = image.width; canvas.height = image.height;
+      const context = canvas.getContext("2d");
+      context.drawImage(image, 0, 0);
+      return Array.from(context.getImageData(10, 2990, 1, 1).data);
+    })()`);
+    expect(bottomPixel).toEqual([255, 0, 0, 255]);
+    expect(page.viewportSize()).toEqual({ width: 800, height: 600 });
+    expect(
+      await page.evaluate("({x: scrollX, y: scrollY, width: innerWidth, height: innerHeight})"),
+    ).toEqual({ x: 0, y: 450, width: 800, height: 600 });
+    const viewport = await takeSnapshot();
+    expect(viewport.screenshot).toMatchObject({ width: 800, height: 600 });
+  });
+
+  it("captures CSS pixels from a real Retina document", async () => {
+    const retina = await browser.newContext({
+      viewport: { width: 800, height: 600 },
+      deviceScaleFactor: 2,
+    });
+    try {
+      const retinaPage = await retina.newPage();
+      await retinaPage.setContent("<style>body{margin:0;height:3000px}</style>Retina");
+      const result = await ServerBrowserPage.snapshot({
+        page: retinaPage,
+        cdp: await retina.newCDPSession(retinaPage),
+        renderScale: 2,
+        fullPage: true,
+        consoleEntries: [],
+        networkEntries: [],
+        actionTimeline: [],
+      });
+      expect(result.screenshot).toMatchObject({ width: 800, height: 3000, clipped: false });
+      const image = Buffer.from(result.screenshot.data, "base64");
+      expect(image.readUInt32BE(16)).toBe(800);
+      expect(image.readUInt32BE(20)).toBe(3000);
+      expect(result.screenshot.byteLength).toBe(image.length);
+      expect(result.screenshot.byteLength).toBeLessThanOrEqual(8 * 1024 * 1024);
+    } finally {
+      await retina.close();
+    }
+  });
   const locators = (tree: unknown) => {
     expect(typeof tree).toBe("string");
     return Array.from(
@@ -330,6 +393,145 @@ describe.skipIf(!chromiumInstalled)("server browser element refs", () => {
     expect([...identity.brands, ...identity.full].join()).not.toContain("Headless");
     expect(secChUa).toContain('"Google Chrome"');
     expect(secChUa).not.toContain("Headless");
+  });
+
+  it.each(["hidden", "detached"] as const)("waits for an element to become %s", async (state) => {
+    await page.setContent('<div id="dialog">Dialog</div>');
+    const waiting = ServerBrowserPage.waitFor(page, {
+      locator: "#dialog",
+      state,
+      timeoutMs: 1_000,
+    });
+    let finished = false;
+    void waiting.then(() => {
+      finished = true;
+    });
+    await page.evaluate("document.body.innerText");
+    expect(finished).toBe(false);
+    await page.evaluate(state === "hidden" ? 'dialog.style.display = "none"' : "dialog.remove()");
+    await waiting;
+    expect(await page.locator("#dialog").count()).toBe(state === "hidden" ? 1 : 0);
+    expect(await page.locator("#dialog").isVisible()).toBe(false);
+  });
+
+  it("keeps legacy attachment waits for hidden and repeated matches", async () => {
+    await page.setContent('<div class="match" hidden>one</div><div class="match" hidden>two</div>');
+    await ServerBrowserPage.waitFor(page, { selector: ".match", timeoutMs: 1_000 });
+  });
+
+  it("requires all conditions to hold together, including same-document URL changes", async () => {
+    await page.route("https://wait.test/", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<div id="ready">Ready</div>',
+      }),
+    );
+    await page.goto("https://wait.test/");
+    const waiting = ServerBrowserPage.waitFor(page, {
+      locator: "#ready",
+      state: "visible",
+      text: "Done",
+      urlIncludes: "#done",
+      timeoutMs: 1_000,
+    });
+    await page.evaluate(
+      'ready.hidden = true; document.body.append("Done"); history.pushState({}, "", "#done")',
+    );
+    let finished = false;
+    void waiting.then(() => {
+      finished = true;
+    });
+    // A round trip after every other condition holds must not finish a hidden-target wait.
+    await page.evaluate("document.body.innerText");
+    expect(finished).toBe(false);
+    await page.evaluate("ready.hidden = false");
+    await waiting;
+    expect(page.url()).toBe("https://wait.test/#done");
+  });
+
+  it("follows a replacement document instead of accepting the old document's load", async () => {
+    const routed = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    await page.route("https://wait.test/**", async (route) => {
+      if (route.request().resourceType() === "image") {
+        routed.resolve();
+        await release.promise;
+      }
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<p>New document</p><img src="/slow.png">',
+      });
+    });
+    const waiting = ServerBrowserPage.waitFor(page, {
+      text: "New document",
+      urlIncludes: "wait.test",
+      loadState: "load",
+      timeoutMs: 1_000,
+    });
+    let finished = false;
+    void waiting.then(() => {
+      finished = true;
+    });
+    try {
+      await page.goto("https://wait.test/", { waitUntil: "domcontentloaded" });
+      await routed.promise;
+      expect(await page.evaluate("document.readyState")).toBe("interactive");
+      expect(finished).toBe(false);
+      release.resolve();
+      await waiting;
+      expect(await page.evaluate("document.readyState")).toBe("complete");
+    } finally {
+      release.resolve();
+    }
+  });
+
+  it("times out at the requested load milestone", async () => {
+    const requested = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    await page.route("https://wait.test/**", async (route) => {
+      if (route.request().resourceType() === "image") {
+        requested.resolve();
+        await release.promise;
+      }
+      await route.fulfill({ contentType: "text/html", body: '<img src="/slow.png">' });
+    });
+    try {
+      await page.goto("https://wait.test/", { waitUntil: "domcontentloaded" });
+      await requested.promise;
+      await ServerBrowserPage.waitFor(page, { loadState: "domContentLoaded", timeoutMs: 1_000 });
+      await expect(
+        ServerBrowserPage.waitFor(page, { loadState: "load", timeoutMs: 100 }),
+      ).rejects.toMatchObject({ tag: "PreviewAutomationTimeoutError" });
+    } finally {
+      release.resolve();
+    }
+  });
+
+  it("only waits for network idle when explicitly requested, with a bounded deadline", async () => {
+    const requested = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    await page.route("https://wait.test/**", async (route) => {
+      if (route.request().resourceType() === "fetch") {
+        requested.resolve();
+        await release.promise;
+      }
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<p>Ready</p><script>fetch("/busy")</script>',
+      });
+    });
+    try {
+      await page.goto("https://wait.test/");
+      await requested.promise;
+      await ServerBrowserPage.waitFor(page, { text: "Ready", timeoutMs: 1_000 });
+      await expect(
+        ServerBrowserPage.waitFor(page, { loadState: "networkIdle", timeoutMs: 100 }),
+      ).rejects.toMatchObject({ tag: "PreviewAutomationTimeoutError" });
+      release.resolve();
+      await ServerBrowserPage.waitFor(page, { loadState: "networkIdle", timeoutMs: 1_000 });
+    } finally {
+      release.resolve();
+    }
   });
 
   it("stops an evaluation at its deadline so the page answers the next one", async () => {

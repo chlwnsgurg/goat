@@ -31,6 +31,8 @@ import * as MemoryMaintenance from "./memory/MemoryFtsMaintenance.ts";
 import * as MemorySync from "./memory/MemorySyncService.ts";
 import * as MemoryOwnerSourceReadPolicyBinding from "./memory/MemoryOwnerSourceReadPolicyBinding.ts";
 import * as MemorySyncRuntimeLive from "./memory/MemorySyncRuntimeLive.ts";
+import * as MemoryReportWorker from "./memory/MemoryReportWorker.ts";
+import * as MemoryReportAdapter from "./memory/MemoryReportAdapter.ts";
 import * as MemoryWorker from "./memory/MemoryWorker.ts";
 import * as MemoryHub from "./memory/MemoryHubService.ts";
 import * as MemoryCompactor from "./memory/MemoryCompactor.ts";
@@ -109,6 +111,7 @@ import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSess
 import * as OpenCodeRuntime from "@goat/provider-opencode/server/OpenCodeRuntime";
 import * as OpenCodeServerLedger from "@goat/provider-opencode/server/OpenCodeServerLedger";
 import * as ProviderHostLive from "./provider/ProviderHostLive.ts";
+import * as ProviderDiagnosisService from "./provider/ProviderDiagnosisService.ts";
 import * as AcpRegistrySupport from "@goat/provider-acp-registry/server/AcpRegistrySupport";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
@@ -573,12 +576,17 @@ export const layerMemorySourceReadService = Layer.unwrap(
   }),
 ).pipe(Layer.provide(layerMemorySourceReadBinding));
 const layerMemoryService = layerMemorySourceReadService.pipe(
+  Layer.provide(layerServerSettings),
   Layer.provideMerge(layerMemoryQuota),
   Layer.provide(ServerEnvironment.layerIdentity),
   Layer.provide(layerRepositoryIdentityResolver),
   Layer.provide(layerPersistence),
 );
-const layerMemoryWorker = MemoryWorker.layer.pipe(
+const layerMemoryWorker = Layer.mergeAll(
+  MemoryWorker.layer,
+  MemoryReportWorker.layer.pipe(Layer.provide(MemoryReportAdapter.layer)),
+).pipe(
+  Layer.provide(ServerEnvironment.layerIdentity),
   Layer.provideMerge(layerMemoryService),
   Layer.provide(MemoryMaintenance.layer.pipe(Layer.provide(layerMemoryQuota))),
   Layer.provide(RuntimeLayer.layerEventSink),
@@ -589,6 +597,8 @@ const layerMemoryStarted = Layer.effectDiscard(
   Effect.gen(function* () {
     const worker = yield* MemoryWorker.MemoryWorker;
     yield* worker.start();
+    const reports = yield* MemoryReportWorker.MemoryReportWorker;
+    yield* reports.start();
   }),
 ).pipe(Layer.provideMerge(layerMemoryWorker));
 
@@ -1195,7 +1205,13 @@ const layerMakeRoutes = Layer.mergeAll(
   // delegation targets through the same live adapter facade the V2
   // orchestrator uses, so MCP capability reporting can never drift from
   // what dispatch can actually serve.
-  Layer.mergeAll(McpHttpServer.layer, layerMemoryToolkits).pipe(
+  Layer.mergeAll(
+    McpHttpServer.layer,
+    layerMemoryToolkits,
+    McpHttpServer.layerProviderToolkit.pipe(
+      Layer.provide(ProviderDiagnosisService.layer.pipe(Layer.provide(ProviderHostLive.layer))),
+    ),
+  ).pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),

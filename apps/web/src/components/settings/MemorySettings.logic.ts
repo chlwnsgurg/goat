@@ -13,7 +13,10 @@ import {
   type MemoryForgetInput,
 } from "@goat/contracts";
 import * as Schema from "effect/Schema";
-import { presentMemoryOwnerPolicy } from "@goat/client-runtime/memory-presentation";
+import {
+  isMemoryReportRetryCandidate,
+  presentMemoryOwnerPolicy,
+} from "@goat/client-runtime/memory-presentation";
 
 function decoded<A>(schema: Schema.ConstraintDecoder<A>, value: unknown): A | undefined {
   try {
@@ -77,4 +80,25 @@ export function memoryOwnerDesiredIds(
 ) {
   const desired = presentMemoryOwnerPolicy(view).desiredRequesterEnvironmentIds;
   return allowed ? [...new Set([...desired, id])] : desired.filter((value) => value !== id);
+}
+
+/** Revalidate a selection against the current page and exact delivery owner at submission. */
+export function memoryReportRetryIntent(
+  environmentId: EnvironmentId,
+  memorySpaceId: MemorySpaceId,
+  reports: readonly import("@goat/contracts").MemoryReportDelivery[],
+  selected: readonly string[],
+) {
+  const reportIds = [
+    ...new Set(
+      reports
+        .filter(
+          (report) =>
+            selected.includes(report.reportId) &&
+            isMemoryReportRetryCandidate(report, environmentId),
+        )
+        .map((report) => report.reportId),
+    ),
+  ].slice(0, 32);
+  return reportIds.length > 0 ? { environmentId, memorySpaceId, reportIds } : null;
 }

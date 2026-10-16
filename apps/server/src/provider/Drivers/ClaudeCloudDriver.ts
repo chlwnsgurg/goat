@@ -1,6 +1,5 @@
 import {
   ClaudeCloudSettings,
-  ClaudeSettings,
   ProviderDriverKind,
   ProviderInstanceId,
   TextGenerationError,
@@ -19,26 +18,18 @@ import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import type { ProviderDriver } from "@goat/provider-core/server/driver";
 import { ProviderDriverError } from "@goat/provider-core/server/errors";
 import { makeManagedServerProvider } from "@goat/provider-core/server/managedProvider";
-import { mergeProviderInstanceEnvironment } from "@goat/provider-core/server/instanceEnvironment";
-import { expandHomePath } from "@goat/provider-core/server/pathExpansion";
 import { withInstanceIdentity } from "@goat/provider-core/server/instanceIdentity";
 import {
   ClaudeCloudCli,
   ClaudeCloudError,
   makeClaudeCloudAdapter,
 } from "@goat/provider-claude-cloud/server";
-import { makeClaudeEnvironment, resolveClaudeHomePath } from "./ClaudeHome.ts";
-import {
-  resolveClaudeSdkExecutablePath,
-  isWindowsClaudeLauncherShimPath,
-} from "./ClaudeExecutable.ts";
+import { resolveClaudeCloudLogin } from "./ClaudeCloudLogin.ts";
 import * as PullRequests from "../../pullRequest/PullRequestService.ts";
 import * as Projection from "../../orchestration-v2/ProjectionStore.ts";
 
 const DRIVER = ProviderDriverKind.make("claudeCloud");
 const decodeSettings = Schema.decodeSync(ClaudeCloudSettings);
-const decodeSiblingSettings = Schema.decodeUnknownEffect(ClaudeSettings);
-const isCloudError = Schema.is(ClaudeCloudError);
 export type ClaudeCloudDriverEnv =
   | ProviderHost.ProviderHost
   | Path.Path
@@ -47,14 +38,13 @@ export type ClaudeCloudDriverEnv =
   | PtyAdapter.PtyAdapter
   | PullRequests.PullRequestService
   | Projection.ProjectionStoreV2;
-const fail = (detail: string) => Effect.fail(new ClaudeCloudError({ detail, outcome: "rejected" }));
 
 export const ClaudeCloudDriver: ProviderDriver<ClaudeCloudSettings, ClaudeCloudDriverEnv> = {
   driverKind: DRIVER,
   metadata: {
     displayName: "Claude Cloud",
     supportsMultipleInstances: true,
-    hasDefaultInstance: false,
+    hasDefaultInstance: true,
   },
   configSchema: ClaudeCloudSettings,
   defaultConfig: () => decodeSettings({}),
@@ -77,67 +67,12 @@ export const ClaudeCloudDriver: ProviderDriver<ClaudeCloudSettings, ClaudeCloudD
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(PtyAdapter.PtyAdapter, pty),
       );
-      const resolveLogin = Effect.gen(function* () {
-        const settings = yield* host.settings.get;
-        const id = config.sourceInstanceId;
-        const entry = settings.providerInstances[id];
-        if (!entry && id !== ProviderInstanceId.make("claudeAgent"))
-          return yield* fail("The selected sibling Claude instance no longer exists.");
-        if (entry && entry.driver !== ProviderDriverKind.make("claudeAgent"))
-          return yield* fail("Claude Cloud must use a Claude sibling instance.");
-        const sibling = yield* decodeSiblingSettings(entry?.config ?? {});
-        const merged = yield* mergeProviderInstanceEnvironment(
-          entry?.environment,
-          processEnvironment,
-        );
-        const environment = yield* makeClaudeEnvironment(sibling, merged);
-        const forbidden = [
-          "CCR_FORCE_BUNDLE",
-          "ANTHROPIC_API_KEY",
-          "ANTHROPIC_AUTH_TOKEN",
-          "ANTHROPIC_BASE_URL",
-          "CLAUDE_CODE_USE_BEDROCK",
-          "CLAUDE_CODE_USE_VERTEX",
-          "CLAUDE_CODE_USE_FOUNDRY",
-          "GIT_DIR",
-          "GIT_WORK_TREE",
-          "GIT_COMMON_DIR",
-          "GIT_OBJECT_DIRECTORY",
-          "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-          "GIT_INDEX_FILE",
-          "GIT_CONFIG_PARAMETERS",
-          "GIT_CONFIG_COUNT",
-        ];
-        if (
-          forbidden.some((key) => environment[key]?.trim()) ||
-          Object.entries(environment).some(([key, value]) => key.startsWith("GIT_") && value)
-        )
-          return yield* fail(
-            "The sibling has bundle, Git routing or third-party/API-key routing variables. Use a Claude instance configured for claude.ai cloud login.",
-          );
-        const binary = yield* resolveClaudeSdkExecutablePath(
-          expandHomePath(sibling.binaryPath, homeDirectory),
-          environment,
-        );
-        if (isWindowsClaudeLauncherShimPath(binary) || /\.(?:js|mjs|cjs)$/i.test(binary))
-          return yield* fail(
-            "Claude Cloud requires the native Claude executable for PTY launch. Update or select the sibling's native binary.",
-          );
-        const home = yield* resolveClaudeHomePath(sibling, environment);
-        return { binary, environment, binding: `claudeCloud:${id}:${home}:${binary}` };
-      }).pipe(
+      const resolveLogin = resolveClaudeCloudLogin(config.sourceInstanceId).pipe(
+        Effect.provideService(ProviderHost.ProviderHost, host),
         Effect.provideService(Path.Path, path),
+        Effect.provideService(HostProcess.Environment, processEnvironment),
         Effect.provideService(HostProcess.HomeDirectory, homeDirectory),
         Effect.provideService(HostProcess.Platform, platform),
-        Effect.mapError((cause) =>
-          isCloudError(cause)
-            ? cause
-            : new ClaudeCloudError({
-                detail: "Could not resolve the sibling Claude configuration.",
-                outcome: "rejected",
-                cause,
-              }),
-        ),
       );
       const stamp = withInstanceIdentity({
         instanceId,
@@ -149,6 +84,7 @@ export const ClaudeCloudDriver: ProviderDriver<ClaudeCloudSettings, ClaudeCloudD
       const base = (status: ServerProvider["status"], message?: string): ServerProvider =>
         stamp({
           executionLocation: "cloud",
+          authSourceInstanceId: ProviderInstanceId.make(config.sourceInstanceId),
           enabled,
           installed: false,
           version: null,

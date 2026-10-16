@@ -1,16 +1,21 @@
 import { LEGACY_PROJECT_FILE_NAME } from "@goat/contracts/legacyT3Names";
-import { EnvironmentId } from "@goat/contracts";
+import { EnvironmentId, ProjectWriteFileError } from "@goat/contracts";
+import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { act, StrictMode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-const { writeFile, confirmFile, readScope, getUnsavedFile } = vi.hoisted(() => ({
-  writeFile: vi.fn(),
-  confirmFile: vi.fn(),
-  readScope: vi.fn(),
-  getUnsavedFile: vi.fn(),
-}));
+const { writeFile, confirmFile, readScope, getUnsavedFile, getFile, reloadFile, getSaveSession } =
+  vi.hoisted(() => ({
+    writeFile: vi.fn(),
+    confirmFile: vi.fn(),
+    readScope: vi.fn(),
+    getUnsavedFile: vi.fn(),
+    getFile: vi.fn(),
+    reloadFile: vi.fn(),
+    getSaveSession: vi.fn(),
+  }));
 vi.mock("~/state/projects", () => ({ projectEnvironment: { writeFile: {} } }));
 vi.mock("~/state/session", () => ({
   readEnvironmentScope: readScope,
@@ -20,8 +25,12 @@ vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => writeFile }))
 vi.mock("./projectFilesQueryState", () => ({
   confirmProjectFileQueryData: confirmFile,
   getUnsavedProjectFileQueryData: getUnsavedFile,
+  getProjectFileData: getFile,
+  reloadProjectFileData: reloadFile,
+  getProjectFileSaveSession: getSaveSession,
 }));
 
+import { FileSaveSession } from "./fileSaveCoordinator";
 import { setMarkdownTaskChecked } from "./filePreviewMode";
 import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
 
@@ -35,13 +44,18 @@ const defaultProps = {
 };
 let renderer: ReactTestRenderer | null;
 
-function ChangeSource(_props: { onChange: (contents: string) => void }) {
+function ChangeSource(_props: {
+  onChange: (contents: string) => void;
+  coordinator: ReturnType<typeof useFileSaveCoordinator>;
+}) {
   return null;
 }
 
 function FileSurface(props: Parameters<typeof useFileSaveCoordinator>[0]) {
   const coordinator = useFileSaveCoordinator(props);
-  return <ChangeSource onChange={(contents) => coordinator.change(contents)} />;
+  return (
+    <ChangeSource coordinator={coordinator} onChange={(contents) => coordinator.change(contents)} />
+  );
 }
 
 function mount(props = defaultProps) {
@@ -60,12 +74,23 @@ function changeHandler(): (contents: string) => void {
 
 beforeEach(() => {
   renderer = null;
+  const sessions = new Map<string, FileSaveSession>();
+  getSaveSession.mockReset().mockImplementation((...identity) => {
+    const key = JSON.stringify(identity);
+    if (!sessions.has(key)) sessions.set(key, new FileSaveSession());
+    return sessions.get(key)!;
+  });
   vi.useFakeTimers();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   writeFile.mockReset().mockResolvedValue(AsyncResult.success(undefined));
   confirmFile.mockReset();
   readScope.mockReset().mockReturnValue(true);
   getUnsavedFile.mockReset().mockReturnValue(null);
+  getFile.mockReset().mockReturnValue(null);
+  reloadFile.mockReset().mockImplementation(async (...identity) => {
+    getSaveSession(...identity).discard();
+    return AsyncResult.success({});
+  });
   onPendingChange.mockReset();
 });
 
@@ -76,6 +101,203 @@ afterEach(async () => {
 });
 
 describe("file-save React lifecycle", () => {
+  it.each(["changed_on_disk", "deleted_on_disk"] as const)(
+    "keeps the draft and pauses %s until explicit overwrite",
+    async (failure) => {
+      getFile.mockReturnValue({
+        version: "loaded-version",
+        textFormat: { encoding: "utf-8", bom: true, lineEnding: "crlf" },
+      });
+      writeFile.mockResolvedValueOnce(
+        AsyncResult.failure(
+          Cause.fail(
+            new ProjectWriteFileError({ cwd: "/workspace", relativePath: "file.txt", failure }),
+          ),
+        ),
+      );
+      mount();
+      changeHandler()("draft");
+      await act(async () => vi.advanceTimersByTimeAsync(500));
+      expect(writeFile.mock.calls[0]![0].input).toMatchObject({
+        expectedVersion: "loaded-version",
+        textFormat: { bom: true, lineEnding: "crlf" },
+      });
+      expect(confirmFile).not.toHaveBeenCalled();
+      changeHandler()("newer draft");
+      await act(async () => vi.advanceTimersByTimeAsync(500));
+      expect(writeFile).toHaveBeenCalledTimes(1);
+      await act(async () => renderer!.root.findByType(ChangeSource).props.coordinator.overwrite());
+      expect(writeFile.mock.calls[1]![0].input).toEqual({
+        cwd: "/workspace",
+        relativePath: "file.txt",
+        contents: "newer draft",
+        textFormat: { encoding: "utf-8", bom: true, lineEnding: "crlf" },
+      });
+    },
+  );
+
+  it("reloads a conflict without persisting the dirty draft on close", async () => {
+    writeFile.mockResolvedValue(
+      AsyncResult.failure(
+        Cause.fail(
+          new ProjectWriteFileError({
+            cwd: "/workspace",
+            relativePath: "file.txt",
+            failure: "changed_on_disk",
+          }),
+        ),
+      ),
+    );
+    mount();
+    changeHandler()("draft");
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    await act(async () => renderer!.root.findByType(ChangeSource).props.coordinator.reload());
+    expect(reloadFile).toHaveBeenCalledExactlyOnceWith(environmentId, "/workspace", "file.txt");
+    await act(async () => renderer!.unmount());
+    renderer = null;
+    expect(writeFile).toHaveBeenCalledTimes(1);
+    expect(onPendingChange).toHaveBeenLastCalledWith("file.txt", false);
+  });
+
+  it("discards a delayed reload's draft across source/Markdown view switches", async () => {
+    getFile.mockReturnValue({ version: "loaded" });
+    getUnsavedFile.mockReturnValue({ contents: "stale draft" });
+    writeFile.mockResolvedValueOnce(
+      AsyncResult.failure(
+        Cause.fail(
+          new ProjectWriteFileError({
+            cwd: "/workspace",
+            relativePath: "file.txt",
+            failure: "changed_on_disk",
+          }),
+        ),
+      ),
+    );
+    mount();
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(writeFile).toHaveBeenCalledTimes(1);
+    let finishReload!: () => void;
+    reloadFile.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishReload = () => {
+            getUnsavedFile.mockReturnValue(null);
+            getFile.mockReturnValue({ version: "reloaded" });
+            getSaveSession(environmentId, "/workspace", "file.txt").discard();
+            resolve(AsyncResult.success({}));
+          };
+        }),
+    );
+    let reloading!: Promise<void>;
+    act(() => {
+      reloading = renderer!.root.findByType(ChangeSource).props.coordinator.reload();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() =>
+      renderer!.update(
+        <StrictMode>
+          <FileSurface key="markdown" {...defaultProps} />
+        </StrictMode>,
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      finishReload();
+      await reloading;
+    });
+    await act(async () => vi.runAllTimersAsync());
+    expect(writeFile).toHaveBeenCalledTimes(1);
+    changeHandler()("explicit post-reload edit");
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(writeFile.mock.calls[1]![0].input).toMatchObject({
+      contents: "explicit post-reload edit",
+      expectedVersion: "reloaded",
+    });
+  });
+
+  it("retains a conflict across view switches until explicit overwrite", async () => {
+    getFile.mockReturnValue({ version: "loaded" });
+    getUnsavedFile.mockReturnValue({ contents: "draft" });
+    writeFile.mockResolvedValueOnce(
+      AsyncResult.failure(
+        Cause.fail(
+          new ProjectWriteFileError({
+            cwd: "/workspace",
+            relativePath: "file.txt",
+            failure: "changed_on_disk",
+          }),
+        ),
+      ),
+    );
+    mount();
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    act(() =>
+      renderer!.update(
+        <StrictMode>
+          <FileSurface key="markdown" {...defaultProps} />
+        </StrictMode>,
+      ),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(writeFile).toHaveBeenCalledTimes(1);
+    expect(renderer!.root.findByType(ChangeSource).props.coordinator.status).toBe("changed");
+    await act(async () => renderer!.root.findByType(ChangeSource).props.coordinator.overwrite());
+    expect(writeFile.mock.calls[1]![0].input).not.toHaveProperty("expectedVersion");
+  });
+
+  it("resolves the next view's expected version after the pending save confirms", async () => {
+    getFile.mockReturnValue({ version: "loaded" });
+    const saved = AsyncResult.success({ relativePath: "file.txt", version: "first-written" });
+    let finishWrite!: (value: typeof saved) => void;
+    writeFile.mockReturnValueOnce(
+      new Promise<typeof saved>((resolve) => {
+        finishWrite = resolve;
+      }),
+    );
+    writeFile.mockImplementation(async ({ input }) =>
+      input.expectedVersion === "first-written"
+        ? AsyncResult.success({ relativePath: "file.txt", version: "second-written" })
+        : AsyncResult.failure(
+            Cause.fail(
+              new ProjectWriteFileError({
+                cwd: "/workspace",
+                relativePath: "file.txt",
+                failure: "changed_on_disk",
+              }),
+            ),
+          ),
+    );
+    confirmFile.mockImplementation((_env, _cwd, _path, contents, written) => {
+      getFile.mockReturnValue({ version: written.version });
+      return contents === "second edit";
+    });
+    mount();
+    changeHandler()("first edit");
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    act(() =>
+      renderer!.update(
+        <StrictMode>
+          <FileSurface key="markdown" {...defaultProps} />
+        </StrictMode>,
+      ),
+    );
+    changeHandler()("second edit");
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    await act(async () => {
+      finishWrite(saved);
+    });
+    expect(writeFile).toHaveBeenCalledTimes(2);
+    expect(writeFile.mock.calls[1]![0].input).toMatchObject({
+      contents: "second edit",
+      expectedVersion: "first-written",
+    });
+    expect(renderer!.root.findByType(ChangeSource).props.coordinator.status).toBe("saved");
+  });
+
   it("persists editor model changes after StrictMode setup replay", async () => {
     mount();
     changeHandler()("AUDIT7907NATIVE\n");
@@ -90,6 +312,7 @@ describe("file-save React lifecycle", () => {
       "/workspace",
       "file.txt",
       "AUDIT7907NATIVE\n",
+      undefined,
     );
     expect(onPendingChange).toHaveBeenLastCalledWith("file.txt", false);
   });

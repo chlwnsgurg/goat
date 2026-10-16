@@ -34,6 +34,7 @@ jobs:
             test-desktop,
             test-contracts,
             test-client-runtime,
+            test-mobile-memory,
             test-shared,
             test-memory-growth,
             build,
@@ -135,6 +136,21 @@ jobs:
         if: matrix.task == 'test-shared'
         run: vp run --filter @goat/shared test
 
+      - name: Test mobile memory
+        if: matrix.task == 'test-mobile-memory'
+        run: >-
+          vp test run --config vite.config.ts
+          apps/mobile/src/features/settings/SettingsMemoryRouteScreen.test.tsx
+          apps/mobile/src/persistence/memory-import-recovery.test.ts
+          apps/mobile/src/features/settings/MemorySyncDiagnostics.test.tsx
+          apps/mobile/src/features/settings/SettingsMemoryRouteScreen.logic.test.ts
+          apps/mobile/src/features/settings/scheduledTaskPresentation.test.ts
+          apps/mobile/src/features/goat-bot/GoatBotScreen.memory.test.tsx
+          apps/mobile/src/features/threads/ThreadHeader.memory.test.tsx
+          apps/mobile/src/features/threads/SubagentRow.memory.test.tsx
+          apps/mobile/src/features/threads/useThreadHeaderOptions.test.tsx
+          apps/mobile/src/features/keyboard/commandPaletteItems.test.ts
+
       # Advisory until GOAT_SCREENSHOT_GATE is "enforce". The script reads the live
       # PR, so re-running only this job picks up a new screenshot or waiver label.
       # See docs/operations/pr-screenshot-gate.md.
@@ -154,7 +170,7 @@ jobs:
         working-directory: apps/server
         env:
           GOAT_MEMORY_GROWTH: "1"
-        run: vp test run src/memory/MemoryImport.growth.test.ts
+        run: vp test run src/memory/MemoryImport.growth.test.ts src/memory/MemoryReceive.growth.test.ts
 
       # Upstream merges must not bring back 0.0.x or split the four release manifests.
       - name: Check release version

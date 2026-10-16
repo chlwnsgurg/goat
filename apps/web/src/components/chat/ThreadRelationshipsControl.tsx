@@ -1,4 +1,4 @@
-import { presentMemoryRunAccess } from "@goat/client-runtime/memory-presentation";
+import { MemoryRunAccessLabel } from "../settings/MemoryRunAccessLabel";
 import { useAtomValue } from "@effect/atom-react";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
@@ -44,13 +44,13 @@ import {
   BotIcon,
   CornerLeftUpIcon,
   GitForkIcon,
-  LoaderCircleIcon,
   EllipsisIcon as MoreHorizontalIcon,
   PlusIcon,
   RocketIcon,
   SquareIcon,
   UnplugIcon,
 } from "~/components/solar";
+import { Spinner } from "~/components/ui/spinner";
 import { useMemo, useState, type ReactNode } from "react";
 
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
@@ -300,10 +300,19 @@ export function ThreadRelationshipsPanel(props: {
   );
   const projection = useThreadProjection(ref)?.projection ?? null;
   const providers = useServerConfigs().get(props.environmentId)?.providers;
-  const runtimeSubagents = useMemo(
-    () => projectedSubagentsToRuntime(projection?.subagents ?? []),
-    [projection?.subagents],
-  );
+  const runtimeSubagents = useMemo(() => {
+    const records = new Map(
+      (projection?.subagents ?? []).map((record) => [String(record.id), record]),
+    );
+    return projectedSubagentsToRuntime(projection?.subagents ?? []).map((agent) => {
+      const record = records.get(agent.id);
+      return {
+        ...agent,
+        memoryGrantCeiling: record?.memoryGrantCeiling,
+        currentMemoryAccess: record?.currentMemoryAccess,
+      };
+    });
+  }, [projection?.subagents]);
   const subagentsByThreadId = useMemo(() => {
     const byId = new Map(runtimeSubagents.map((agent) => [agent.id, agent]));
     return new Map(
@@ -317,6 +326,7 @@ export function ThreadRelationshipsPanel(props: {
             threadId: subagent.threadId,
             runId: subagent.runId,
             memoryGrantCeiling: subagent.memoryGrantCeiling,
+            currentMemoryAccess: subagent.currentMemoryAccess,
             nativeTaskRef: subagent.nativeTaskRef,
             nativeStatus: subagent.status,
             driver: subagent.driver,
@@ -762,16 +772,7 @@ export function ThreadRelationshipsPanel(props: {
                     header={
                       <div>
                         {relationshipLink}
-                        {agent.memoryGrantCeiling && agent.memoryGrantCeiling !== "none" ? (
-                          <span className="text-xs text-muted-foreground">
-                            Memory:{" "}
-                            {
-                              presentMemoryRunAccess({
-                                memoryGrantCeiling: agent.memoryGrantCeiling,
-                              }).savedCeiling
-                            }
-                          </span>
-                        ) : null}
+                        <MemoryRunAccessLabel {...agent} />
                       </div>
                     }
                   />
@@ -819,7 +820,7 @@ export function ThreadRelationshipsPanel(props: {
                               onClick={() => void merge()}
                             >
                               {busyAction === "merge" ? (
-                                <LoaderCircleIcon className="size-3 animate-spin" />
+                                <Spinner size="xs" />
                               ) : (
                                 <PullRequestGlyph.merged className="size-3" />
                               )}
@@ -841,15 +842,7 @@ export function ThreadRelationshipsPanel(props: {
                   ) : (
                     relationshipLink
                   )}
-                  {agent?.memoryGrantCeiling && agent.memoryGrantCeiling !== "none" ? (
-                    <span className="text-xs text-muted-foreground">
-                      Memory:{" "}
-                      {
-                        presentMemoryRunAccess({ memoryGrantCeiling: agent.memoryGrantCeiling })
-                          .savedCeiling
-                      }
-                    </span>
-                  ) : null}
+                  {agent ? <MemoryRunAccessLabel {...agent} /> : null}
                   {canStop && agent ? (
                     <div className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100">
                       <Tooltip>
@@ -867,7 +860,7 @@ export function ThreadRelationshipsPanel(props: {
                           }
                         >
                           {stoppingId === threadId ? (
-                            <LoaderCircleIcon aria-hidden className="size-3 animate-spin" />
+                            <Spinner size="xs" aria-hidden />
                           ) : (
                             <SquareIcon aria-hidden className="size-3 fill-current" />
                           )}

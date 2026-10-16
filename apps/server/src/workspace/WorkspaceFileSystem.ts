@@ -1,4 +1,29 @@
 // @effect-diagnostics nodeBuiltinImport:off
+/*
+ * Adapted from Emanuele-web04/synara @ 566efb1b1, workspace text format detection
+ * and preservation in Layers/WorkspaceFileSystem.ts (MIT).
+ *
+ * Copyright (c) 2026 T3 Tools Inc.
+ * Copyright (c) 2026 Emanuele Di Pietro
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 /**
  * WorkspaceFileSystem - Effect service contract for workspace file mutations.
  *
@@ -18,6 +43,7 @@ import type {
   FilesystemGetMetadataResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
+  ProjectTextFormat,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
 } from "@goat/contracts";
@@ -33,6 +59,16 @@ import * as Schema from "effect/Schema";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 import { fileHeaderMimeType } from "./fileHeaderMimeType.ts";
+import {
+  atomicWorkspaceWrite,
+  workspaceFileVersion,
+  WorkspaceFileChangedOnDiskError,
+  WorkspaceFileDeletedOnDiskError,
+  isAtomicWriteOperationError,
+  isWorkspaceFileChangedOnDiskError,
+  isWorkspaceFileDeletedOnDiskError,
+  isAtomicWritePathEscapeError,
+} from "./atomicWorkspaceWrite.ts";
 
 const PROJECT_READ_FILE_MAX_BYTES = 1024 * 1024;
 
@@ -101,11 +137,19 @@ export class WorkspaceBinaryFileError extends Schema.TaggedError<WorkspaceBinary
   }
 }
 
+export class WorkspaceUnsupportedTextFormatError extends Schema.TaggedError<WorkspaceUnsupportedTextFormatError>()(
+  "WorkspaceUnsupportedTextFormatError",
+  {},
+) {}
+
 export const WorkspaceFileSystemError = Schema.Union([
   WorkspaceFileSystemOperationError,
   WorkspaceFilePathEscapeError,
   WorkspacePathNotFileError,
   WorkspaceBinaryFileError,
+  WorkspaceFileChangedOnDiskError,
+  WorkspaceFileDeletedOnDiskError,
+  WorkspaceUnsupportedTextFormatError,
 ]);
 export type WorkspaceFileSystemError = typeof WorkspaceFileSystemError.Type;
 
@@ -334,11 +378,38 @@ export const make = Effect.gen(function* () {
             });
           }
 
+          let contents: string;
+          let encoding: ProjectTextFormat["encoding"] = "utf-8";
+          try {
+            contents = new TextDecoder("utf-8", { fatal: true }).decode(fileBytes);
+          } catch {
+            contents = new TextDecoder("utf-8").decode(fileBytes);
+            encoding = "unsupported";
+          }
+          const crlf = /\r\n/.test(contents);
+          const lf = /(?<!\r)\n/.test(contents);
+          const cr = /\r(?!\n)/.test(contents);
+          const textFormat: ProjectTextFormat = {
+            encoding,
+            bom: fileBytes[0] === 0xef && fileBytes[1] === 0xbb && fileBytes[2] === 0xbf,
+            lineEnding:
+              Number(crlf) + Number(lf) + Number(cr) > 1
+                ? "mixed"
+                : crlf
+                  ? "crlf"
+                  : cr
+                    ? "cr"
+                    : "lf",
+          };
           return {
             relativePath: target.relativePath,
-            contents: new TextDecoder("utf-8").decode(fileBytes),
+            contents,
+            textFormat,
+            ...(stat.size === bytesRead && stat.size <= PROJECT_READ_FILE_MAX_BYTES
+              ? { version: workspaceFileVersion(fileBytes) }
+              : {}),
             byteLength: stat.size,
-            truncated: stat.size > PROJECT_READ_FILE_MAX_BYTES,
+            truncated: stat.size > PROJECT_READ_FILE_MAX_BYTES || bytesRead < stat.size,
           };
         }),
       (handle) =>
@@ -365,34 +436,55 @@ export const make = Effect.gen(function* () {
       relativePath: input.relativePath,
     });
 
-    yield* fileSystem.makeDirectory(path.dirname(target.absolutePath), { recursive: true }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new WorkspaceFileSystemOperationError({
+    const format = input.textFormat;
+    if (format && (format.encoding !== "utf-8" || format.lineEnding === "mixed")) {
+      return yield* new WorkspaceUnsupportedTextFormatError({});
+    }
+    const normalized = format ? input.contents.replace(/\r\n|\r/g, "\n") : input.contents;
+    const contents = format
+      ? (format.bom ? "\ufeff" : "") +
+        (format.lineEnding === "lf"
+          ? normalized
+          : normalized.replaceAll("\n", format.lineEnding === "crlf" ? "\r\n" : "\r"))
+      : normalized;
+    const bytes = new TextEncoder().encode(contents);
+    const platform = yield* HostProcess.Platform;
+    yield* Effect.tryPromise({
+      try: () =>
+        atomicWorkspaceWrite({
+          workspaceRoot: input.cwd,
+          absolutePath: target.absolutePath,
+          contents: bytes,
+          ...(input.expectedVersion !== undefined
+            ? { expectedVersion: input.expectedVersion }
+            : {}),
+          platform,
+        }),
+      catch: (cause) => {
+        if (isWorkspaceFileChangedOnDiskError(cause) || isWorkspaceFileDeletedOnDiskError(cause))
+          return cause;
+        if (isAtomicWritePathEscapeError(cause)) {
+          return new WorkspaceFilePathEscapeError({
             workspaceRoot: input.cwd,
             relativePath: input.relativePath,
-            resolvedPath: target.absolutePath,
-            operationPath: path.dirname(target.absolutePath),
-            operation: "make-directory",
-            cause,
-          }),
-      ),
-    );
-    yield* fileSystem.writeFileString(target.absolutePath, input.contents).pipe(
-      Effect.mapError(
-        (cause) =>
-          new WorkspaceFileSystemOperationError({
-            workspaceRoot: input.cwd,
-            relativePath: input.relativePath,
-            resolvedPath: target.absolutePath,
-            operationPath: target.absolutePath,
-            operation: "write-file",
-            cause,
-          }),
-      ),
-    );
+            resolvedWorkspaceRoot: cause.resolvedWorkspaceRoot,
+            resolvedPath: cause.resolvedPath,
+          });
+        }
+        return new WorkspaceFileSystemOperationError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          resolvedPath: target.absolutePath,
+          operationPath: isAtomicWriteOperationError(cause)
+            ? cause.operationPath
+            : target.absolutePath,
+          operation: isAtomicWriteOperationError(cause) ? cause.operation : "write-file",
+          cause,
+        });
+      },
+    });
     yield* workspaceEntries.refresh(input.cwd);
-    return { relativePath: target.relativePath };
+    return { relativePath: target.relativePath, version: workspaceFileVersion(bytes) };
   });
 
   return WorkspaceFileSystem.of({ getMetadata, readFile, writeFile });

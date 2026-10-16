@@ -56,6 +56,10 @@ export const PREVIEW_AUTOMATION_SERVER_OPERATIONS = [
   "hover",
   "select",
   "drag",
+  "back",
+  "forward",
+  "reload",
+  "logs",
 ] as const;
 export const PreviewAutomationOperation = Schema.Literals(PREVIEW_AUTOMATION_SERVER_OPERATIONS);
 export type PreviewAutomationOperation = typeof PreviewAutomationOperation.Type;
@@ -74,6 +78,17 @@ const PreviewAutomationTabTargetFields = {
 
 export const PreviewAutomationTabTargetInput = Schema.Struct(PreviewAutomationTabTargetFields);
 export type PreviewAutomationTabTargetInput = typeof PreviewAutomationTabTargetInput.Type;
+
+export const PreviewAutomationSnapshotInput = Schema.Struct({
+  ...PreviewAutomationTabTargetFields,
+  fullPage: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Capture the document from its top-left instead of the viewport. Defaults to false. Full-page captures are clipped to 3840 × 16384 CSS pixels and scaled to at most 3840 × 16384 image pixels and 8 MiB; screenshot.clipped reports omitted document content.",
+    }),
+  ),
+});
+export type PreviewAutomationSnapshotInput = typeof PreviewAutomationSnapshotInput.Type;
 
 /** `human`: a person controls the tab now; `agent`: an agent session opened it; `unclaimed`: neither. */
 export const PreviewAutomationTabOwner = Schema.Literals(["agent", "human", "unclaimed"]);
@@ -273,6 +288,24 @@ export const PreviewAutomationNavigateInput = Schema.Struct({
       "Navigates the active browser tab. Provide exactly one of url or target; for most public pages use url.",
   });
 export type PreviewAutomationNavigateInput = typeof PreviewAutomationNavigateInput.Type;
+
+export const PreviewAutomationHistoryInput = Schema.Struct({
+  ...PreviewAutomationTabTargetFields,
+  readiness: Schema.optional(Schema.Literals(["load", "domContentLoaded"])).annotate({
+    description:
+      "Readiness milestone after navigation commits: load (default) or domContentLoaded for an interactive document.",
+  }),
+  timeoutMs: OptionalTimeoutMs,
+});
+export type PreviewAutomationHistoryInput = typeof PreviewAutomationHistoryInput.Type;
+
+export const PreviewAutomationReloadInput = Schema.Struct({
+  ...PreviewAutomationHistoryInput.fields,
+  ignoreCache: Schema.optional(Schema.Boolean).annotate({
+    description: "Bypass Chromium's HTTP cache for this reload. Defaults to false.",
+  }),
+});
+export type PreviewAutomationReloadInput = typeof PreviewAutomationReloadInput.Type;
 
 export const PreviewAutomationResizeInput = Schema.Struct({
   ...PreviewAutomationTabTargetFields,
@@ -649,6 +682,16 @@ export const PreviewAutomationWaitForInput = Schema.Struct({
     description:
       "Playwright selector that must match an element, for example role=button[name='Send'].",
   }),
+  state: Schema.optional(Schema.Literals(["attached", "visible", "hidden", "detached"])).annotate({
+    description:
+      "Locator state to wait for. Requires locator or selector. Defaults to attached (presence, even when hidden). Hidden also matches a detached element.",
+  }),
+  loadState: Schema.optional(Schema.Literals(["load", "domContentLoaded", "networkIdle"])).annotate(
+    {
+      description:
+        "Optional load milestone for the current document. networkIdle explicitly waits for 500ms without network connections and may time out on busy pages. All conditions share timeoutMs; no load wait by default.",
+    },
+  ),
   text: Schema.optional(
     TrimmedNonEmptyString.annotate({
       description: "Case-sensitive substring that must appear in visible document text.",
@@ -668,11 +711,19 @@ export const PreviewAutomationWaitForInput = Schema.Struct({
       if (input.selector !== undefined && input.locator !== undefined) {
         return "Provide at most one of selector or locator.";
       }
+      if (
+        input.state !== undefined &&
+        input.selector === undefined &&
+        input.locator === undefined
+      ) {
+        return "Provide locator or selector when specifying state.";
+      }
       return (
         input.selector !== undefined ||
         input.locator !== undefined ||
         input.text !== undefined ||
         input.urlIncludes !== undefined ||
+        input.loadState !== undefined ||
         "Provide at least one wait condition."
       );
     }),
@@ -710,8 +761,90 @@ export const PreviewAutomationNetworkEntry = Schema.Struct({
   failed: Schema.Boolean,
   errorText: Schema.optional(Schema.String),
   timestamp: Schema.String,
+  requestId: Schema.optional(Schema.String),
+  phase: Schema.optional(Schema.Literals(["request", "response", "finished", "failed"])),
+  durationMs: Schema.optional(Schema.Number),
 });
 export type PreviewAutomationNetworkEntry = typeof PreviewAutomationNetworkEntry.Type;
+
+export const PreviewAutomationPageError = Schema.Struct({
+  message: Schema.String,
+  stack: Schema.optional(Schema.String),
+  timestamp: Schema.String,
+});
+export type PreviewAutomationPageError = typeof PreviewAutomationPageError.Type;
+
+const DiagnosticFilter = Schema.String.check(Schema.isMaxLength(256));
+export const PreviewAutomationLogsInput = Schema.Struct({
+  ...PreviewAutomationTabTargetFields,
+  limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))).annotate(
+    {
+      description:
+        "Maximum entries per stream, newest first. Defaults to 50; maximum 100. A shared byte budget may return fewer.",
+    },
+  ),
+  includeConsole: Schema.optional(Schema.Boolean).annotate({
+    description: "Include console entries. Defaults to true.",
+  }),
+  includeErrors: Schema.optional(Schema.Boolean).annotate({
+    description: "Include uncaught page errors and stacks. Defaults to true.",
+  }),
+  includeNetwork: Schema.optional(Schema.Boolean).annotate({
+    description: "Include network metadata. Defaults to true.",
+  }),
+  consoleLevels: Schema.optional(
+    Schema.Array(Schema.String.check(Schema.isMaxLength(32))).check(Schema.isMaxLength(20)),
+  ).annotate({
+    description:
+      "Exact Playwright console levels to include, such as log, info, warning, error or debug. Omit for all levels.",
+  }),
+  text: Schema.optional(DiagnosticFilter).annotate({
+    description:
+      "Case-insensitive substring of console text or page error message/stack, after URL redaction.",
+  }),
+  url: Schema.optional(DiagnosticFilter).annotate({
+    description:
+      "Case-insensitive substring of the redacted network URL; query values cannot be searched.",
+  }),
+  method: Schema.optional(Schema.String.check(Schema.isMaxLength(32))).annotate({
+    description: "Exact HTTP method, case-insensitive, such as GET or POST.",
+  }),
+  status: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 })),
+  ).annotate({
+    description:
+      "Exact HTTP response status (100 through 599). Request/failure entries without a response do not match.",
+  }),
+  failed: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Filter transport failures; HTTP 4xx/5xx responses are not failed requests. Omit for both.",
+  }),
+}).annotate({
+  description:
+    "Read retained diagnostics, newest first. All streams default to included; limit defaults to 50 per stream (maximum 100), subject to a shared 24 KB entry budget. Filters are case-insensitive substrings except exact console levels, HTTP status, method and failed. URL filtering uses redacted URLs. text filters console text and error message/stack. Reads do not clear buffers.",
+});
+export type PreviewAutomationLogsInput = typeof PreviewAutomationLogsInput.Type;
+
+const DiagnosticCounts = {
+  droppedCount: Schema.Int.annotate({
+    description: "Entries evicted from this tab's bounded buffer, before filtering.",
+  }),
+  omittedCount: Schema.Int.annotate({
+    description: "Retained matching entries omitted by the limit or shared byte budget.",
+  }),
+};
+export const PreviewAutomationLogs = Schema.Struct({
+  console: Schema.Struct({
+    entries: Schema.Array(PreviewAutomationConsoleEntry),
+    ...DiagnosticCounts,
+  }),
+  errors: Schema.Struct({ entries: Schema.Array(PreviewAutomationPageError), ...DiagnosticCounts }),
+  network: Schema.Struct({
+    entries: Schema.Array(PreviewAutomationNetworkEntry),
+    ...DiagnosticCounts,
+  }),
+});
+export type PreviewAutomationLogs = typeof PreviewAutomationLogs.Type;
 
 export const PreviewAutomationActionEvent = Schema.Struct({
   id: Schema.String,
@@ -738,6 +871,9 @@ export const PreviewAutomationSnapshot = Schema.Struct({
     data: Schema.String,
     width: Schema.Int,
     height: Schema.Int,
+    fullPage: Schema.optional(Schema.Boolean),
+    clipped: Schema.optional(Schema.Boolean),
+    byteLength: Schema.optional(Schema.Int),
   }),
 });
 export type PreviewAutomationSnapshot = typeof PreviewAutomationSnapshot.Type;

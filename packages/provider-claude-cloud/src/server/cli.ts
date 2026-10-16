@@ -74,112 +74,127 @@ export class ClaudeCloudCli extends Context.Service<
   }
 >()("@goat/provider-claude-cloud/server/cli/ClaudeCloudCli") {}
 
-const make = Effect.gen(function* () {
+const run = Effect.fn("ClaudeCloudCli.run")(function* (
+  login: ClaudeCloudLogin,
+  cwd: string,
+  args: string[],
+) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const pty = yield* PtyAdapter.PtyAdapter;
-  const run = Effect.fn("ClaudeCloudCli.run")(function* (
-    login: ClaudeCloudLogin,
-    cwd: string,
-    args: string[],
-  ) {
-    yield* checkLogin(login);
-    return yield* Effect.scoped(
-      Effect.gen(function* () {
-        const child = yield* spawner
-          .spawn(
-            ChildProcess.make(login.binary, args, {
-              cwd,
-              env: login.environment,
-              shell: false,
-              stdin: "ignore",
-            }),
-          )
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ClaudeCloudError({
-                  detail:
-                    "Could not spawn the sibling Claude CLI. No follow-up was delivered; check its binary and the environment-owned control directory.",
-                  outcome: "rejected",
-                  cause,
-                }),
-            ),
-          );
-        const [code, stdout, stderr] = yield* Effect.all(
-          [
-            child.exitCode,
-            collectUint8StreamText({ stream: child.stdout, maxBytes: LIMIT }),
-            collectUint8StreamText({ stream: child.stderr, maxBytes: LIMIT }),
-          ],
-          { concurrency: "unbounded" },
-        );
-        if (stdout.truncated || stderr.truncated || stdout.invalidUtf8 || stderr.invalidUtf8) {
-          return yield* new ClaudeCloudError({
-            detail:
-              "Claude returned an incomplete response. Delivery is uncertain; check the cloud session.",
-            outcome: "uncertain",
-          });
-        }
-        return { code: Number(code), stdout: stdout.text };
-      }),
-    ).pipe(
-      Effect.timeout("30 seconds"),
-      Effect.mapError((cause) =>
-        isClaudeCloudError(cause)
-          ? cause
-          : new ClaudeCloudError({
-              detail:
-                "Claude CLI did not return a readable response. Check the sibling login and cloud session before retrying.",
-              outcome: "uncertain",
-              cause,
-            }),
-      ),
-    );
-  });
-
-  return ClaudeCloudCli.of({
-    readiness: Effect.fn("ClaudeCloudCli.readiness")(
-      function* (login, cwd) {
-        const version = yield* run(login, cwd, ["--version"]);
-        const help = yield* run(login, cwd, ["--help"]);
-        const auth = yield* run(login, cwd, ["auth", "status"]);
-        const account = yield* parseAuthEffect(auth.stdout).pipe(
+  yield* checkLogin(login);
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const child = yield* spawner
+        .spawn(
+          ChildProcess.make(login.binary, args, {
+            cwd,
+            env: login.environment,
+            shell: false,
+            stdin: "ignore",
+          }),
+        )
+        .pipe(
           Effect.mapError(
             (cause) =>
               new ClaudeCloudError({
                 detail:
-                  "Claude auth status did not return valid JSON. Update the sibling Claude CLI and sign in on this environment.",
+                  "Could not spawn the sibling Claude CLI. No follow-up was delivered; check its binary and the environment-owned control directory.",
                 outcome: "rejected",
                 cause,
               }),
           ),
         );
-        if (auth.code !== 0 || !account.loggedIn || account.authMethod !== "claude.ai") {
-          return yield* new ClaudeCloudError({
+      const [code, stdout, stderr] = yield* Effect.all(
+        [
+          child.exitCode,
+          collectUint8StreamText({ stream: child.stdout, maxBytes: LIMIT }),
+          collectUint8StreamText({ stream: child.stderr, maxBytes: LIMIT }),
+        ],
+        { concurrency: "unbounded" },
+      );
+      if (stdout.truncated || stderr.truncated || stdout.invalidUtf8 || stderr.invalidUtf8) {
+        return yield* new ClaudeCloudError({
+          detail:
+            "Claude returned an incomplete response. Delivery is uncertain; check the cloud session.",
+          outcome: "uncertain",
+        });
+      }
+      return { code: Number(code), stdout: stdout.text };
+    }),
+  ).pipe(
+    Effect.timeout("30 seconds"),
+    Effect.mapError((cause) =>
+      isClaudeCloudError(cause)
+        ? cause
+        : new ClaudeCloudError({
             detail:
-              "Claude Cloud needs a claude.ai login in the selected sibling's configuration. Run claude auth login --claudeai on this environment's machine.",
-            outcome: "rejected",
-          });
-        }
-        if (version.code !== 0 || help.code !== 0 || !/--cloud(?:\s|\[)/.test(help.stdout)) {
-          return yield* new ClaudeCloudError({
-            detail: "The sibling Claude CLI does not advertise cloud sessions. Update that CLI.",
-            outcome: "rejected",
-          });
-        }
-        return { version: parseGenericCliVersion(version.stdout) };
-      },
-      Effect.mapError((cause) =>
-        cause.outcome === "rejected"
-          ? cause
-          : new ClaudeCloudError({
-              detail:
-                "Could not read the sibling Claude CLI readiness. No cloud prompt was sent; check its configuration.",
-              outcome: "rejected",
-              cause,
-            }),
-      ),
+              "Claude CLI did not return a readable response. Check the sibling login and cloud session before retrying.",
+            outcome: "uncertain",
+            cause,
+          }),
     ),
+  );
+});
+
+/**
+ * Read-only readiness: `auth status` first, then `--version` and `--help`. Never starts a session.
+ * Failures carry a `reason` so provider diagnosis can name the next step.
+ */
+export const probeReadiness = Effect.fn("ClaudeCloudCli.readiness")(
+  function* (login: ClaudeCloudLogin, cwd: string) {
+    const auth = yield* run(login, cwd, ["auth", "status"]);
+    const account = yield* parseAuthEffect(auth.stdout).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ClaudeCloudError({
+            detail:
+              "Claude auth status did not return valid JSON. Update the sibling Claude CLI and sign in on this environment.",
+            outcome: "rejected",
+            cause,
+          }),
+      ),
+    );
+    if (auth.code !== 0 || !account.loggedIn || account.authMethod !== "claude.ai") {
+      const signedIn = auth.code === 0 && account.loggedIn;
+      return yield* new ClaudeCloudError({
+        detail:
+          "Claude Cloud needs a claude.ai login in the selected sibling's configuration. Run claude auth login --claudeai on this environment's machine.",
+        outcome: "rejected",
+        reason: signedIn ? "wrong_sign_in" : "not_signed_in",
+        ...(signedIn ? { authMethod: account.authMethod } : {}),
+      });
+    }
+    const version = yield* run(login, cwd, ["--version"]);
+    const help = yield* run(login, cwd, ["--help"]);
+    if (version.code !== 0 || help.code !== 0 || !/--cloud(?:\s|\[)/.test(help.stdout)) {
+      return yield* new ClaudeCloudError({
+        detail: "The sibling Claude CLI does not advertise cloud sessions. Update that CLI.",
+        outcome: "rejected",
+        reason: "cloud_unsupported",
+      });
+    }
+    return { version: parseGenericCliVersion(version.stdout) };
+  },
+  Effect.mapError((cause) =>
+    cause.outcome === "rejected"
+      ? cause
+      : new ClaudeCloudError({
+          detail:
+            "Could not read the sibling Claude CLI readiness. No cloud prompt was sent; check its configuration.",
+          outcome: "rejected",
+          cause,
+        }),
+  ),
+);
+
+const make = Effect.gen(function* () {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const pty = yield* PtyAdapter.PtyAdapter;
+  const provideSpawner = <A, E>(
+    effect: Effect.Effect<A, E, ChildProcessSpawner.ChildProcessSpawner>,
+  ) => Effect.provideService(effect, ChildProcessSpawner.ChildProcessSpawner, spawner);
+
+  return ClaudeCloudCli.of({
+    readiness: (login, cwd) => provideSpawner(probeReadiness(login, cwd)),
     start: Effect.fn("ClaudeCloudCli.start")(function* (login, cwd, prompt) {
       yield* checkLogin(login);
       // --cloud accepts IDs and URLs as well as descriptions. Never reinterpret a create as attach.
@@ -367,14 +382,9 @@ const make = Effect.gen(function* () {
           outcome: "rejected",
         });
       // --print is a flag; its prompt is positional after the parser's end-of-options marker.
-      const response = yield* run(login, cwd, [
-        "--print",
-        `--cloud=${taskId}`,
-        "--output-format",
-        "json",
-        "--",
-        message,
-      ]);
+      const response = yield* provideSpawner(
+        run(login, cwd, ["--print", `--cloud=${taskId}`, "--output-format", "json", "--", message]),
+      );
       const receipt = yield* Effect.try({
         try: () => readSendReceipt(response.stdout, taskId, login.environment),
         catch: (cause) =>

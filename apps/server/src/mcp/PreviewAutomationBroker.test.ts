@@ -929,110 +929,110 @@ it.effect("prefers a focused host over unrelated extra capabilities for a new se
   ),
 );
 
-it.effect("does not route new operations to legacy hosts that did not advertise support", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const broker = yield* makeBroker;
-      const legacyEvents = yield* broker.connect(makeHost());
-      yield* Stream.runDrain(legacyEvents).pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
+it.effect.each(["resize", "back", "forward", "reload", "logs"] as const)(
+  "does not route %s to legacy hosts that did not advertise support",
+  (operation) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const legacyEvents = yield* broker.connect(makeHost());
+        yield* Stream.runDrain(legacyEvents).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
 
-      const error = yield* broker
-        .invoke<void>({ scope, operation: "resize", input: { mode: "fill" } })
-        .pipe(Effect.flip);
+        const error = yield* broker.invoke<void>({ scope, operation, input: {} }).pipe(Effect.flip);
 
-      expect(error).toBeInstanceOf(PreviewAutomationNoAvailableHostError);
-      expect(error).toMatchObject({ operation: "resize", environmentId: scope.environmentId });
-    }),
-  ),
+        expect(error).toBeInstanceOf(PreviewAutomationNoAvailableHostError);
+        expect(error).toMatchObject({ operation, environmentId: scope.environmentId });
+      }),
+    ),
 );
 
-it.effect("routes resize to a capable host instead of a newer legacy connection", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const broker = yield* makeBroker;
-      const capableRequests = requestsFrom(
-        yield* broker.connect(
-          makeHost({ clientId: "client-capable", supportedOperations: ["resize"] }),
-        ),
-      );
-      const legacyRequests = requestsFrom(
-        yield* broker.connect(makeHost({ clientId: "client-legacy" })),
-      );
-      yield* Stream.runForEach(capableRequests, (request) =>
-        broker.respond({
-          clientId: "client-capable",
-          connectionId: request.connectionId,
-          requestId: request.requestId,
-          ok: true,
-          result: "capable",
-        }),
-      ).pipe(Effect.forkScoped);
-      yield* Stream.runForEach(legacyRequests, (request) =>
-        broker.respond({
-          clientId: "client-legacy",
-          connectionId: request.connectionId,
-          requestId: request.requestId,
-          ok: true,
-          result: "legacy",
-        }),
-      ).pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
+it.effect.each(["resize", "logs"] as const)(
+  "routes %s to a capable host instead of a newer legacy connection",
+  (operation) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const capableRequests = requestsFrom(
+          yield* broker.connect(
+            makeHost({ clientId: "client-capable", supportedOperations: [operation] }),
+          ),
+        );
+        const legacyRequests = requestsFrom(
+          yield* broker.connect(makeHost({ clientId: "client-legacy" })),
+        );
+        yield* Stream.runForEach(capableRequests, (request) =>
+          broker.respond({
+            clientId: "client-capable",
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: "capable",
+          }),
+        ).pipe(Effect.forkScoped);
+        yield* Stream.runForEach(legacyRequests, (request) =>
+          broker.respond({
+            clientId: "client-legacy",
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: "legacy",
+          }),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
 
-      expect(
-        yield* broker.invoke<string>({ scope, operation: "resize", input: { mode: "fill" } }),
-      ).toBe("capable");
-    }),
-  ),
+        expect(yield* broker.invoke<string>({ scope, operation, input: {} })).toBe("capable");
+      }),
+    ),
 );
 
-it.effect("does not move a live legacy assignment to another runtime for resize", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const broker = yield* makeBroker;
-      const legacyRequests = requestsFrom(
-        yield* broker.connect(makeHost({ clientId: "client-legacy" })),
-      );
-      yield* Stream.runForEach(legacyRequests, (request) =>
-        broker.respond({
-          clientId: "client-legacy",
-          connectionId: request.connectionId,
-          requestId: request.requestId,
-          ok: true,
-          result: "legacy",
-        }),
-      ).pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
+it.effect.each(["resize", "back", "forward", "reload", "logs"] as const)(
+  "does not move a live legacy assignment to another runtime for %s",
+  (operation) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const legacyRequests = requestsFrom(
+          yield* broker.connect(makeHost({ clientId: "client-legacy" })),
+        );
+        yield* Stream.runForEach(legacyRequests, (request) =>
+          broker.respond({
+            clientId: "client-legacy",
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: "legacy",
+          }),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
 
-      expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
-        "legacy",
-      );
+        expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
+          "legacy",
+        );
 
-      const capableRequests = requestsFrom(
-        yield* broker.connect(
-          makeHost({ clientId: "client-capable", supportedOperations: ["resize"] }),
-        ),
-      );
-      yield* Stream.runForEach(capableRequests, (request) =>
-        broker.respond({
-          clientId: "client-capable",
-          connectionId: request.connectionId,
-          requestId: request.requestId,
-          ok: true,
-          result: "capable",
-        }),
-      ).pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
+        const capableRequests = requestsFrom(
+          yield* broker.connect(
+            makeHost({ clientId: "client-capable", supportedOperations: [operation] }),
+          ),
+        );
+        yield* Stream.runForEach(capableRequests, (request) =>
+          broker.respond({
+            clientId: "client-capable",
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: "capable",
+          }),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
 
-      const error = yield* broker
-        .invoke<void>({ scope, operation: "resize", input: { mode: "fill" } })
-        .pipe(Effect.flip);
-      expect(error).toBeInstanceOf(PreviewAutomationNoAvailableHostError);
-      expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
-        "legacy",
-      );
-    }),
-  ),
+        const error = yield* broker.invoke<void>({ scope, operation, input: {} }).pipe(Effect.flip);
+        expect(error).toBeInstanceOf(PreviewAutomationNoAvailableHostError);
+        expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
+          "legacy",
+        );
+      }),
+    ),
 );
 
 it.effect("ignores stale focus updates for a different environment", () =>

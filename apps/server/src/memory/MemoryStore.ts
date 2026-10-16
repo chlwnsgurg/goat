@@ -11,6 +11,8 @@ import * as NodeUtil from "node:util";
 import * as NodeCrypto from "node:crypto";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
 import * as M from "@goat/contracts";
+import { MemoryRevertSlot, revertSlotFromReceipt } from "./MemoryRevertSlot.ts";
+import { reportMetadataBytes } from "./MemoryReportAccounting.ts";
 import type { ImportStorePorts, ImportItem } from "./imports/MemoryImportTypes.ts";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
@@ -837,6 +839,7 @@ export type MemoryUsage = {
   readonly workItems: number;
   readonly workBytes: number;
   readonly reportItems: number;
+  readonly reportBytes: number;
   readonly logRows: number;
   readonly logBytes: number;
 };
@@ -883,7 +886,7 @@ export class MemoryStore extends Context.Service<
   {
     readonly transact: <A, E, R>(
       effect: Effect.Effect<A, E, R>,
-      options?: { requireOuter: boolean },
+      options?: { requireOuter?: boolean; finalGuard?: Effect.Effect<void, E> },
     ) => Effect.Effect<A, E | MemoryStorageError, Exclude<R, Transaction>>;
     readonly readThreadLineage: (
       thread: M.ScopedThreadRef,
@@ -1296,6 +1299,15 @@ export class MemoryStore extends Context.Service<
       memorySpaceId: M.MemorySpaceId;
       entry: Extract<M.MemoryHubEntry, { kind: "metadata" }>;
     }) => InTx<void>;
+    readonly normalizeForeignReportIntentsTx: (
+      localEnvironmentId: M.EnvironmentId,
+      after?: string | null,
+    ) => InTx<{ examined: number; nextCursor: string | null }>;
+    readonly reconcileOperationReportTx: (input: {
+      operation: M.MemoryOperation;
+      receipt: M.MemoryHubReceipt;
+      localEnvironmentId: M.EnvironmentId;
+    }) => InTx<void>;
     readonly reconcileResolutionReportTx: (input: {
       record: M.MemoryCompactReceipt;
       localEnvironmentId: M.EnvironmentId;
@@ -1316,6 +1328,35 @@ export class MemoryStore extends Context.Service<
       maxItems: number;
       maxBytes: number;
     }) => Effect.Effect<MemoryAggregate["revisions"], MemoryStorageError | MemoryStoreConflict>;
+    readonly readAccess: (
+      space: M.MemorySpaceId,
+      id: M.MemoryId,
+    ) => Effect.Effect<
+      {
+        item: M.MemoryItem | undefined;
+        identity: M.MemoryIdentityRecord | undefined;
+      },
+      MemoryStorageError
+    >;
+    readonly historyPage: (
+      input: M.MemoryHistoryInput,
+      item: M.MemoryItem,
+      owner: M.EnvironmentId,
+    ) => Effect.Effect<
+      {
+        page: M.MemoryHistoryPage;
+        consumed: MemoryAggregate["revisions"];
+      },
+      MemoryStorageError | MemoryStoreConflict
+    >;
+    readonly recordRevertResultTx: (input: {
+      space: M.MemorySpaceId;
+      memoryId: M.MemoryId;
+      resolutionId: M.MemoryResolutionId;
+      operationId: M.MemoryOperationId;
+      slot: MemoryRevertSlot;
+      settlement?: boolean;
+    }) => InTx<void>;
     readonly loadAggregate: (
       space: M.MemorySpaceId,
       id: M.MemoryId,
@@ -1654,6 +1695,53 @@ export class MemoryStore extends Context.Service<
     readonly persistResolutionTicket: (
       ticket: M.MemoryResolutionLease,
     ) => Effect.Effect<void, MemoryStorageError>;
+    readonly readReportTarget: (reportId: string) => Effect.Effect<
+      {
+        memorySpaceId: M.MemorySpaceId;
+        memoryId: M.MemoryId;
+        deliveryEnvironmentId: M.EnvironmentId;
+      } | null,
+      MemoryStorageError
+    >;
+    readonly nextReportWakeAt: (
+      now: number,
+      owner: M.EnvironmentId,
+    ) => Effect.Effect<number | null, MemoryStorageError>;
+    readonly acquireReports: (input: {
+      owner: M.EnvironmentId;
+      now: number;
+      until: number;
+      limit: number;
+    }) => Effect.Effect<ReadonlyArray<M.MemoryReportDelivery>, MemoryStorageError>;
+    readonly acknowledgeClaimedReport: (input: {
+      delivery: M.MemoryReportDelivery;
+      owner: M.EnvironmentId;
+      claimUntil: number;
+    }) => Effect.Effect<boolean, MemoryStorageError | MemoryStoreConflict | MemoryCapacityError>;
+    readonly deferClaimedReport: (input: {
+      reportId: string;
+      owner: M.EnvironmentId;
+      claimUntil: number;
+      failureCode: M.MemoryFailureCode;
+      nextAttemptAt: number;
+    }) => Effect.Effect<boolean, MemoryStorageError>;
+    readonly normalizeExpiredReports: (
+      now: number,
+      owner?: M.EnvironmentId,
+    ) => Effect.Effect<void, MemoryStorageError>;
+    readonly resetReportAttemptsTx: (
+      input: M.MemoryResetReportAttemptsInput,
+      now: number,
+    ) => InTx<M.MemoryResetReportAttemptsResult>;
+    readonly purgeDeliveredReportDetailsTx: (input: {
+      memorySpaceId?: M.MemorySpaceId;
+      environmentId?: M.EnvironmentId;
+      now: number;
+      limit: number;
+    }) => InTx<{ removedRows: number; reclaimedLogicalBytes: number }>;
+    readonly nextReportMaintenanceAt: (
+      owner: M.EnvironmentId,
+    ) => Effect.Effect<number | null, MemoryStorageError>;
     readonly pendingReports: (
       limit: number,
     ) => Effect.Effect<ReadonlyArray<M.MemoryReportDelivery>, MemoryStorageError>;
@@ -1683,6 +1771,18 @@ export class MemoryStore extends Context.Service<
   }
 >()("goat/memory/MemoryStore") {}
 
+type HistoryRevisionRow = {
+  revision_id: string;
+  operation_id: string;
+  parents_json: string;
+  scope_json: string;
+  assertion_kind: string;
+  provenance_json: string;
+  payload_ref: string | null;
+  created_at: number;
+  body_json: string | null;
+};
+
 // All JSON goes through Effect codecs, including values reconstructed from SQL rows.
 const codec = <S extends Schema.Constraint>(schema: S) => {
   const json = Schema.fromJsonString(schema);
@@ -1706,6 +1806,8 @@ const decodeLocalIntent = Schema.decodeUnknownEffect(LocalMemoryIntent);
 const localMetadataCodec = codec(LocalIntentMetadata);
 const decodeTicket = Schema.decodeUnknownEffect(M.MemoryResolutionLease);
 const decodeReport = Schema.decodeUnknownEffect(M.MemoryReportDelivery);
+const decodeRevertResult = Schema.decodeUnknownEffect(M.MemoryRevertResult);
+const revertSlotCodec = codec(MemoryRevertSlot);
 const threadCodec = codec(M.ScopedThreadRef);
 const decodeCheckpoint = Schema.decodeUnknownEffect(M.MemoryHubCheckpointPage);
 const checkpointCodec = {
@@ -1946,7 +2048,6 @@ const decodeTombstone = Schema.decodeUnknownEffect(M.MemoryTombstone);
 const decodeConflict = Schema.decodeUnknownEffect(M.MemoryConflict);
 const decodeRevision = Schema.decodeUnknownEffect(M.MemoryRevision);
 const isSqlError = Schema.is(SqlError);
-const isStorageError = Schema.is(MemoryStorageError);
 const decodeMemoryId = Schema.decodeUnknownEffect(M.MemoryId);
 const decodeMemorySpaceId = Schema.decodeUnknownEffect(M.MemorySpaceId);
 const decodeAssertionKind = Schema.decodeUnknownEffect(M.MemoryAssertionKind);
@@ -2011,12 +2112,12 @@ const make = Effect.gen(function* () {
   const wake = PubSub.publish(wakes, undefined).pipe(Effect.asVoid);
   const transact = <A, E, R>(
     effect: Effect.Effect<A, E, R>,
-    options?: { requireOuter: boolean },
+    options?: { requireOuter?: boolean; finalGuard?: Effect.Effect<void, E> },
   ): Effect.Effect<A, E | MemoryStorageError, Exclude<R, Transaction>> =>
     Effect.gen(function* () {
       const existing = yield* Effect.serviceOption(Transaction);
       if (Option.isSome(existing)) {
-        if (options?.requireOuter)
+        if (options?.requireOuter || options?.finalGuard)
           return yield* new MemoryStorageError({ stage: "nested-admission", cause: undefined });
         return yield* Effect.provideService(effect, Transaction, existing.value);
       }
@@ -2038,6 +2139,8 @@ const make = Effect.gen(function* () {
                       Effect.provideService(SqlClient.SqlClient, sql),
                     ),
                   );
+                  // SQL-free authority check after every accounting statement, before COMMIT.
+                  if (options?.finalGuard) yield* options.finalGuard;
                   return result;
                 }),
               )
@@ -2449,6 +2552,393 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const readAccess = Effect.fn("MemoryStore.readAccess")(function* (
+    space: M.MemorySpaceId,
+    id: M.MemoryId,
+  ) {
+    const current = yield* readItem(space, id);
+    const rows = yield* stored(
+      "read-identity",
+      sql<{
+        identity_json: string;
+      }>`SELECT identity_json FROM memory_identity_ledger WHERE space=${space} AND memory_id=${id}`,
+    );
+    return {
+      item: current?.item,
+      identity: rows[0] ? yield* identityCodec.decode(rows[0].identity_json, strict) : undefined,
+    };
+  });
+  const recordRevertResultTx: MemoryStore["Service"]["recordRevertResultTx"] = Effect.fn(
+    "MemoryStore.recordRevertResultTx",
+  )(function* (input) {
+    yield* Transaction;
+    // Compare and swap the observed slot. An older refusal cannot settle a newer
+    // attempt. Any authoritative acceptance wins, then stays sticky forever.
+    const rows = yield* stored(
+      "revert-slot-read",
+      sql<{ revert_operation_id: string | null; revert_result_json: string | null }>`
+      SELECT revert_operation_id,revert_result_json FROM memory_resolutions WHERE space=${input.space} AND memory_id=${input.memoryId} AND resolution_id=${input.resolutionId}`,
+    );
+    const old = rows[0];
+    if (!old) return;
+    const previous = old.revert_result_json
+      ? yield* revertSlotCodec.decode(old.revert_result_json, strict)
+      : undefined;
+    if (
+      previous?.status === "accepted" ||
+      (input.settlement &&
+        input.slot.status !== "accepted" &&
+        old.revert_operation_id !== input.operationId)
+    )
+      return;
+    yield* stored(
+      "revert-slot-cas",
+      sql`UPDATE memory_resolutions SET revert_operation_id=${input.operationId},revert_result_json=${yield* revertSlotCodec.encode(input.slot)}
+      WHERE space=${input.space} AND memory_id=${input.memoryId} AND resolution_id=${input.resolutionId}
+      AND revert_operation_id IS ${old.revert_operation_id} AND revert_result_json IS ${old.revert_result_json}`,
+    );
+  });
+  const settleRevertResultTx = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    memoryId: M.MemoryId,
+    resolutionId: M.MemoryResolutionId,
+    receipt: M.MemoryHubReceipt,
+    revisionId: M.MemoryRevisionId | null,
+  ) {
+    const slot = revertSlotFromReceipt(receipt, revisionId);
+    if (slot)
+      yield* recordRevertResultTx({
+        space,
+        memoryId,
+        resolutionId,
+        operationId: receipt.operationId,
+        slot,
+        settlement: true,
+      });
+  });
+  const decodeHistoryRevision = (
+    row: HistoryRevisionRow,
+    space: M.MemorySpaceId,
+    id: M.MemoryId,
+    visible: boolean,
+  ) =>
+    Effect.gen(function* () {
+      const revision = yield* stored(
+        "revision-codec",
+        decodeRevision(
+          {
+            memorySpaceId: space,
+            memoryId: id,
+            revisionId: row.revision_id,
+            operationId: row.operation_id,
+            parents: yield* headsCodec.decode(row.parents_json),
+            scope: yield* scopeCodec.decode(row.scope_json),
+            assertionKind: row.assertion_kind,
+            provenance: yield* provenanceCodec.decode(row.provenance_json),
+            payloadRef: row.payload_ref ?? row.revision_id,
+            createdAtUtc: yield* importTime(row.created_at),
+          },
+          strict,
+        ),
+      );
+      return {
+        revision,
+        payload:
+          row.body_json && visible
+            ? yield* stored("payload-codec", payloadCodec.decode(row.body_json, strict))
+            : null,
+      };
+    });
+
+  const readHistoryRevision = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    id: M.MemoryId,
+    revisionId: M.MemoryRevisionId,
+    visible: boolean,
+  ) {
+    const rows = yield* stored(
+      "history-revision-exact",
+      sql<HistoryRevisionRow>`SELECT r.*,CASE WHEN ${visible ? 1 : 0} THEN p.body_json ELSE NULL END AS body_json
+      FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref
+      WHERE r.space=${space} AND r.revision_id=${revisionId} AND r.memory_id=${id} LIMIT 1`,
+    );
+    return rows[0] ? yield* decodeHistoryRevision(rows[0], space, id, visible) : undefined;
+  });
+
+  const historyPage: MemoryStore["Service"]["historyPage"] = Effect.fn("MemoryStore.historyPage")(
+    function* (input, item, owner) {
+      const space = input.memorySpaceId;
+      const id = input.memoryId;
+      const visible = item.localAvailability.exposure === "visible";
+      const parsed = input.cursor ? /^h1:([0-4]):(0|[1-9][0-9]*)$/.exec(input.cursor) : undefined;
+      if (input.cursor && (!parsed || !Number.isSafeInteger(Number(parsed[2]))))
+        return yield* new MemoryStoreConflict({ code: "invalid_cursor" });
+      let category = parsed ? Number(parsed[1]) : 0;
+      let after = parsed ? Number(parsed[2]) : 0;
+      let budget = input.limit;
+      let bytes = 2048;
+      let tombstoneResult: M.MemoryTombstone | null = null;
+      const page: M.MemoryHistoryPage = {
+        memoryId: id,
+        revisions: [],
+        resolutions: [],
+        reports: [],
+        revertResults: [],
+        tombstone: null,
+        localAvailability: item.localAvailability,
+        nextCursor: null,
+      };
+      const revisions: M.MemoryHistoryPage["revisions"][number][] = [];
+      const resolutions: M.MemoryHistoryPage["resolutions"][number][] = [];
+      const reports: M.MemoryReportDelivery[] = [];
+      const revertResults: M.MemoryRevertResult[] = [];
+      const consumed: MemoryAggregate["revisions"][number][] = [];
+      const fit = (value: unknown) => {
+        const size = new TextEncoder().encode(JSON.stringify(value)).length + 1;
+        if (bytes + size > M.MEMORY_PAGE_MAX_UTF8_BYTES) return false;
+        bytes += size;
+        return true;
+      };
+      // Select keys first, sharing one candidate budget even for null/hidden slots.
+      // Existing equality indexes include rowid; no OFFSET, corpus scan or temp sort.
+      while (budget > 0 && category < 5) {
+        const keys = yield* stored(
+          "history-keys",
+          category === 0
+            ? sql<{
+                key: number;
+              }>`SELECT rowid AS key FROM memory_revisions WHERE space=${space} AND memory_id=${id} AND rowid>${after} ORDER BY rowid LIMIT ${budget}`
+            : category === 1 || category === 3
+              ? sql<{
+                  key: number;
+                }>`SELECT rowid AS key FROM memory_resolutions WHERE space=${space} AND memory_id=${id} AND rowid>${after} ORDER BY rowid LIMIT ${budget}`
+              : category === 2
+                ? sql<{
+                    key: number;
+                  }>`SELECT rowid AS key FROM memory_report_outbox WHERE space=${space} AND memory_id=${id} AND rowid>${after} ORDER BY rowid LIMIT ${budget}`
+                : sql<{
+                    key: number;
+                  }>`SELECT rowid AS key FROM memory_tombstones WHERE space=${space} AND memory_id=${id} AND rowid>${after} ORDER BY rowid LIMIT ${budget}`,
+        );
+        const requested = budget;
+        for (const { key } of keys) {
+          let output: unknown;
+          let pair: M.MemoryHistoryPage["revisions"][number] | undefined;
+          let resolutionPair: M.MemoryHistoryPage["resolutions"][number] | undefined;
+          let report: M.MemoryReportDelivery | undefined;
+          let result: M.MemoryRevertResult | undefined;
+          let tombstone: M.MemoryTombstone | null = null;
+          if (category === 0) {
+            const rows = yield* stored(
+              "history-revision",
+              sql<HistoryRevisionRow>`SELECT r.*,CASE WHEN ${visible ? 1 : 0} THEN p.body_json ELSE NULL END AS body_json
+            FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref
+            WHERE r.rowid=${key} AND r.space=${space} AND r.memory_id=${id} LIMIT 1`,
+            );
+            if (rows[0]) output = pair = yield* decodeHistoryRevision(rows[0], space, id, visible);
+          } else if (category === 1 || category === 3) {
+            const rows = yield* stored(
+              "history-resolution",
+              sql<{
+                resolution_json: string;
+                revert_operation_id: string | null;
+                revert_result_json: string | null;
+              }>`
+            SELECT resolution_json,revert_operation_id,revert_result_json FROM memory_resolutions WHERE rowid=${key} AND space=${space} AND memory_id=${id} LIMIT 1`,
+            );
+            const row = rows[0];
+            if (row) {
+              if (category === 1) {
+                const resolution = yield* resolutionCodec.decode(row.resolution_json, strict);
+                const revision = visible
+                  ? yield* readHistoryRevision(space, id, resolution.resultRevisionId, false)
+                  : undefined;
+                const op = revision
+                  ? yield* readOperation(space, revision.revision.operationId)
+                  : undefined;
+                output = resolutionPair = {
+                  resolution,
+                  payload: visible && op?.kind === "resolve" ? op.resolutionPayload : null,
+                };
+              } else if (row.revert_result_json && row.revert_operation_id) {
+                const resolution = yield* resolutionCodec.decode(row.resolution_json, strict);
+                const slot = yield* revertSlotCodec.decode(row.revert_result_json, strict);
+                // Older clients cannot decode the refused arm. Only expose it on opt-in.
+                if (slot.status !== "refused" || input.includeRefusedReverts === true) {
+                  const common = {
+                    operationId: row.revert_operation_id,
+                    memoryId: id,
+                    resolutionId: resolution.resolutionId,
+                    revertDeadlineUtc: resolution.revertDeadlineUtc,
+                  };
+                  output = result = yield* stored(
+                    "history-revert-codec",
+                    decodeRevertResult(
+                      slot.status === "accepted"
+                        ? {
+                            ...common,
+                            status: slot.status,
+                            receipt: {
+                              operationId: row.revert_operation_id,
+                              memoryId: id,
+                              outcome: "accepted",
+                              revisionId: slot.revisionId,
+                              pendingSync: false,
+                            },
+                            localAvailability: item.localAvailability,
+                          }
+                        : slot.status === "refused"
+                          ? { ...common, ...slot }
+                          : { ...common, status: slot.status },
+                      strict,
+                    ),
+                  );
+                }
+              }
+            }
+          } else if (category === 2) {
+            yield* stored(
+              "history-report-normalize",
+              sql`UPDATE memory_report_outbox SET state='failed',failure_code=coalesce(failure_code,'unavailable'),claimed_by=NULL,claimed_until=NULL
+            WHERE rowid=${key} AND space=${space} AND memory_id=${id} AND resolving_environment_id=${owner} AND state!='delivered' AND automatic_attempts=10
+              AND (state!='failed' OR claimed_by IS NOT NULL OR claimed_until IS NOT NULL) AND (claimed_until IS NULL OR claimed_until<=${yield* Clock.currentTimeMillis})`,
+            );
+            const rows = yield* stored(
+              "history-report",
+              sql<{
+                report_id: string;
+                automatic_attempts: number;
+                attempts_known: number;
+                operation_id: string;
+                outcome: string;
+                resolving_environment_id: string;
+                resolution_id: string | null;
+                state: string;
+                failure_code: string | null;
+                report_thread_json: string | null;
+                delivered_sequence: number | null;
+              }>`
+            SELECT report_id,automatic_attempts,attempts_known,operation_id,outcome,resolving_environment_id,resolution_id,state,failure_code,report_thread_json,delivered_sequence FROM memory_report_outbox WHERE rowid=${key} AND space=${space} AND memory_id=${id} LIMIT 1`,
+            );
+            const row = rows[0];
+            if (row)
+              output = report = yield* stored(
+                "history-report-codec",
+                decodeReport(
+                  {
+                    reportId: row.report_id,
+                    ...(row.attempts_known === 1
+                      ? { automaticAttempts: row.automatic_attempts }
+                      : {}),
+                    operationId: row.operation_id,
+                    outcome: row.outcome,
+                    resolvingEnvironmentId: row.resolving_environment_id,
+                    resolutionId: row.resolution_id,
+                    state: row.state,
+                    ...(row.failure_code ? { failureCode: row.failure_code } : {}),
+                    reportThread: row.report_thread_json
+                      ? yield* threadCodec.decode(row.report_thread_json, strict)
+                      : null,
+                    sequence: row.delivered_sequence,
+                  },
+                  strict,
+                ),
+              );
+          } else {
+            const rows = yield* stored(
+              "history-tombstone",
+              sql<{
+                delete_operation_id: string;
+                deleting_environment_id: string;
+                deleted_at: number;
+                suppressed_source_keys_json: string;
+                suppressed_content_json: string;
+                source_exclusions_json: string;
+              }>`SELECT delete_operation_id,deleting_environment_id,deleted_at,suppressed_source_keys_json,suppressed_content_json,source_exclusions_json FROM memory_tombstones WHERE rowid=${key} AND space=${space} AND memory_id=${id} LIMIT 1`,
+            );
+            const t = rows[0];
+            tombstone = yield* Effect.gen(function* () {
+              return t
+                ? yield* stored(
+                    "tombstone-codec",
+                    Effect.gen(function* () {
+                      return yield* decodeTombstone(
+                        {
+                          memorySpaceId: space,
+                          memoryId: id,
+                          deleteOperationId: t.delete_operation_id,
+                          deletingEnvironmentId: t.deleting_environment_id,
+                          deletedAtUtc: yield* importTime(t.deleted_at),
+                          suppressedSourceKeys: yield* sourceKeysCodec.decode(
+                            t.suppressed_source_keys_json,
+                          ),
+                          suppressedContent: yield* contentCodec.decode(t.suppressed_content_json),
+                          sourceExclusions: yield* exclusionsCodec.decode(t.source_exclusions_json),
+                        },
+                        strict,
+                      );
+                    }),
+                  )
+                : null;
+            });
+            output = tombstone;
+          }
+          if (output && !fit(output)) {
+            if (bytes === 2048)
+              return yield* new MemoryStoreConflict({ code: "payload_too_large" });
+            return {
+              page: {
+                ...page,
+                revisions,
+                resolutions,
+                reports,
+                revertResults,
+                tombstone: tombstoneResult,
+                nextCursor: `h1:${category}:${after}`,
+              },
+              consumed,
+            };
+          }
+          if (pair) {
+            revisions.push(pair);
+            if (pair.payload) consumed.push(pair);
+          }
+          if (resolutionPair) {
+            resolutions.push(resolutionPair);
+            if (resolutionPair.payload)
+              for (const revisionId of new Set([
+                resolutionPair.resolution.resultRevisionId,
+                ...resolutionPair.resolution.inputRevisionIds,
+              ])) {
+                const inputPair = yield* readHistoryRevision(space, id, revisionId, true);
+                if (inputPair) consumed.push(inputPair);
+              }
+          }
+          if (report) reports.push(report);
+          if (result) revertResults.push(result);
+          if (tombstone) tombstoneResult = tombstone;
+          after = key;
+          budget--;
+        }
+        if (keys.length < requested) {
+          category++;
+          after = 0;
+        }
+      }
+      return {
+        page: {
+          ...page,
+          revisions,
+          resolutions,
+          reports,
+          revertResults,
+          tombstone: tombstoneResult,
+          nextCursor: category < 5 ? `h1:${category}:${after}` : null,
+        },
+        consumed,
+      };
+    },
+  );
   const loadAggregate = Effect.fn("MemoryStore.loadAggregate")(function* (
     space: M.MemorySpaceId,
     id: M.MemoryId,
@@ -2470,39 +2960,7 @@ const make = Effect.gen(function* () {
       SELECT r.*,p.body_json FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${space} AND r.memory_id=${id}`,
     );
     const revisions = yield* Effect.forEach(revisionRows, (row) =>
-      Effect.gen(function* () {
-        const revision = yield* stored(
-          "revision-codec",
-          decodeRevision(
-            {
-              memorySpaceId: space,
-              memoryId: id,
-              revisionId: row.revision_id,
-              operationId: row.operation_id,
-              parents: yield* headsCodec.decode(row.parents_json),
-              scope: yield* scopeCodec.decode(row.scope_json),
-              assertionKind: row.assertion_kind,
-              provenance: yield* provenanceCodec.decode(row.provenance_json),
-              payloadRef: row.payload_ref ?? row.revision_id,
-              createdAtUtc: yield* importTime(row.created_at),
-            },
-            strict,
-          ),
-        );
-        return {
-          revision,
-          payload:
-            row.body_json && item?.item.status !== "forgotten"
-              ? yield* stored("payload-codec", payloadCodec.decode(row.body_json, strict))
-              : null,
-        };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isStorageError(cause)
-            ? cause
-            : new MemoryStorageError({ stage: "revision-codec", cause }),
-        ),
-      ),
+      decodeHistoryRevision(row, space, id, item?.item.status !== "forgotten"),
     );
     const tombstones = yield* stored(
       "tombstone",
@@ -2832,6 +3290,11 @@ const make = Effect.gen(function* () {
       yield* stored(
         "purge",
         sql`DELETE FROM memory_payloads WHERE space=${space} AND memory_id=${current}`,
+      );
+      yield* stored(
+        "forget-revert-slot",
+        sql`UPDATE memory_resolutions SET revert_result_json='{"status":"forgotten"}'
+        WHERE space=${space} AND memory_id=${current} AND json_extract(revert_result_json,'$.status')='pending'`,
       );
       yield* stored(
         "purge-revert",
@@ -3265,19 +3728,32 @@ const make = Effect.gen(function* () {
             claimedBy: null,
             claimedUntil: null,
           });
-        if (!reconnect && accepted && (op.kind === "resolve" || op.kind === "revert")) {
+        if (
+          !reconnect &&
+          accepted &&
+          decision.admission.kind === "localIntent" &&
+          (op.kind === "resolve" || op.kind === "revert")
+        ) {
           const resolutionId =
             op.kind === "resolve" ? op.resolution.resolutionId : op.revertsResolutionId;
           const reportId = resolutionReportId(op.memorySpaceId, op.operationId, resolutionId);
           yield* stored(
             "report-intent",
-            sql`INSERT INTO memory_report_outbox (report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,created_at) VALUES (${reportId},${op.memorySpaceId},${op.memoryId},${op.operationId},${resolutionId},${op.kind === "resolve" ? op.operationId : null},${op.originEnvironmentId},${op.kind === "resolve" ? "resolved" : "reverted"},'pending',${Date.parse(op.revision.createdAtUtc)}) ON CONFLICT(report_id) DO NOTHING`,
+            sql`INSERT INTO memory_report_outbox (report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,created_at,report_kind,attempts_known) VALUES (${reportId},${op.memorySpaceId},${op.memoryId},${op.operationId},${resolutionId},${op.kind === "resolve" ? op.operationId : null},${op.originEnvironmentId},${op.kind === "resolve" ? "resolved" : "reverted"},'pending',${Date.parse(op.revision.createdAtUtc)},${op.kind === "resolve" ? "resolve" : "revert"},1) ON CONFLICT(report_id) DO NOTHING`,
           );
         }
         if (decision.pending && accepted && op.kind !== "forget" && !tombstones.length)
           yield* stored(
             "park-approved",
             sql`INSERT INTO memory_inbox_pending (space,pending_key,record_kind,operation_id,memory_id,operation_digest,missing_parents_json,reason,hub_sequence,metadata_json,payload_ref) VALUES (${op.memorySpaceId},${`operation:${op.operationId}`},'operation',${op.operationId},${op.memoryId},${decision.operationDigest},${yield* headsCodec.encode(decision.pending.missingParents)},${decision.pending.reason},${"hubSequence" in outcome ? outcome.hubSequence : null},${eventMetadata},${op.revision.payloadRef}) ON CONFLICT(space,pending_key) DO UPDATE SET missing_parents_json=excluded.missing_parents_json,reason=excluded.reason`,
+          );
+        if (op.kind === "revert" && "hubSequence" in outcome)
+          yield* settleRevertResultTx(
+            op.memorySpaceId,
+            op.memoryId,
+            op.revertsResolutionId,
+            outcome,
+            op.revision.revisionId,
           );
         if (accepted && op.kind === "revert")
           yield* stored(
@@ -3904,6 +4380,14 @@ const make = Effect.gen(function* () {
           yield* stored("import-settlement-space", decodeMemorySpaceId(work.space)),
           result,
         );
+        if (work.metadata.kind === "revert" && work.metadata.revertsResolutionId)
+          yield* settleRevertResultTx(
+            yield* stored("revert-space", decodeMemorySpaceId(work.space)),
+            result.memoryId,
+            work.metadata.revertsResolutionId,
+            result,
+            work.metadata.revision?.revisionId ?? null,
+          );
         yield* finishWork(id, result.outcome === "rejected" ? "failed" : "completed", result);
         if (
           result.outcome === "rejected" &&
@@ -5126,6 +5610,217 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const normalizeExpiredReports = Effect.fn("MemoryStore.normalizeExpiredReports")(function* (
+    now: number,
+    owner?: M.EnvironmentId,
+  ) {
+    yield* stored(
+      "report-exhausted",
+      sql`UPDATE memory_report_outbox SET state='failed',failure_code=coalesce(failure_code,'unavailable'),claimed_by=NULL,claimed_until=NULL
+      WHERE state!='delivered' AND automatic_attempts=10 AND (state!='failed' OR claimed_by IS NOT NULL OR claimed_until IS NOT NULL) AND (claimed_until IS NULL OR claimed_until<=${now}) AND (${owner ?? null} IS NULL OR resolving_environment_id=${owner ?? null})`,
+    );
+  });
+  const readReportTarget = Effect.fn("MemoryStore.readReportTarget")(function* (reportId: string) {
+    const rows = yield* stored(
+      "report-target",
+      sql<{ space: string; memory_id: string; owner: string }>`
+      SELECT space,memory_id,resolving_environment_id AS owner FROM memory_report_outbox WHERE report_id=${reportId}
+      UNION SELECT space,memory_id,json_extract(record_json,'$.resolvingEnvironmentId') AS owner FROM memory_import_keys WHERE key_kind='report_delivered' AND key=${reportId}`,
+    );
+    if (rows.length !== 1) return null;
+    const row = rows[0]!;
+    return yield* stored(
+      "report-target-codec",
+      Schema.decodeUnknownEffect(
+        Schema.Struct({
+          memorySpaceId: M.MemorySpaceId,
+          memoryId: M.MemoryId,
+          deliveryEnvironmentId: M.EnvironmentId,
+        }),
+      )(
+        { memorySpaceId: row.space, memoryId: row.memory_id, deliveryEnvironmentId: row.owner },
+        strict,
+      ),
+    );
+  });
+  const nextReportWakeAt = Effect.fn("MemoryStore.nextReportWakeAt")(function* (
+    now: number,
+    owner: M.EnvironmentId,
+  ) {
+    const rows = yield* stored(
+      "report-wake",
+      sql<{
+        wake: number | null;
+      }>`SELECT min(max(${now},next_attempt_at,coalesce(claimed_until,0))) AS wake FROM memory_report_outbox r
+      WHERE resolving_environment_id=${owner} AND state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure') AND ((report_kind='resolve' AND outcome='resolved') OR (report_kind='revert' AND outcome='reverted') OR (report_kind='conflict_failure' AND outcome='failed')) AND (automatic_attempts<10 OR (automatic_attempts=10 AND claimed_until>${now}))
+      AND NOT EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=r.space AND g.key_kind='report_delivered' AND g.key=r.report_id)`,
+    );
+    return rows[0]?.wake ?? null;
+  });
+  const acquireReports: MemoryStore["Service"]["acquireReports"] = Effect.fn(
+    "MemoryStore.acquireReports",
+  )(function* (input) {
+    if (input.until <= input.now) return [];
+    return yield* transact(
+      Effect.gen(function* () {
+        yield* normalizeExpiredReports(input.now, input.owner);
+        const rows = yield* stored(
+          "report-acquire",
+          sql<{
+            report_id: string;
+          }>`UPDATE memory_report_outbox SET claimed_by=${input.owner},claimed_until=${input.until},automatic_attempts=automatic_attempts+1,attempts_known=1
+        WHERE report_id IN (SELECT report_id FROM memory_report_outbox r WHERE resolving_environment_id=${input.owner}
+          AND state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure') AND ((report_kind='resolve' AND outcome='resolved') OR (report_kind='revert' AND outcome='reverted') OR (report_kind='conflict_failure' AND outcome='failed')) AND automatic_attempts<10
+          AND next_attempt_at<=${input.now} AND (claimed_until IS NULL OR claimed_until<=${input.now})
+          AND NOT EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=r.space AND g.key_kind='report_delivered' AND g.key=r.report_id)
+          ORDER BY next_attempt_at,created_at,report_id LIMIT ${Math.max(0, Math.min(32, Math.floor(input.limit)))}) RETURNING report_id`,
+        );
+        if (rows.length) yield* markRunnable;
+        const claimed = new Set(rows.map((r) => r.report_id));
+        // Read only the claimed rows, never materialize the backlog before applying LIMIT.
+        return yield* Effect.forEach([...claimed], (reportId) => readReportDelivery(reportId));
+      }),
+    );
+  });
+  const readReportDelivery = Effect.fnUntraced(function* (reportId: string) {
+    const rows = yield* stored(
+      "report-delivery",
+      sql<{
+        report_id: string;
+        operation_id: string;
+        outcome: string;
+        resolving_environment_id: string;
+        resolution_id: string | null;
+        state: string;
+        failure_code: string | null;
+        automatic_attempts: number;
+        report_thread_json: string | null;
+        delivered_sequence: number | null;
+      }>`SELECT report_id,operation_id,outcome,resolving_environment_id,resolution_id,state,failure_code,automatic_attempts,report_thread_json,delivered_sequence FROM memory_report_outbox WHERE report_id=${reportId}`,
+    );
+    const r = rows[0]!;
+    return yield* stored(
+      "report-delivery-codec",
+      decodeReport(
+        {
+          reportId: r.report_id,
+          operationId: r.operation_id,
+          outcome: r.outcome,
+          resolvingEnvironmentId: r.resolving_environment_id,
+          resolutionId: r.resolution_id,
+          state: r.state,
+          ...(r.failure_code ? { failureCode: r.failure_code } : {}),
+          automaticAttempts: r.automatic_attempts,
+          reportThread: r.report_thread_json
+            ? yield* threadCodec.decode(r.report_thread_json, strict)
+            : null,
+          sequence: r.delivered_sequence,
+        },
+        strict,
+      ),
+    );
+  });
+  const acknowledgeClaimedReport: MemoryStore["Service"]["acknowledgeClaimedReport"] = Effect.fn(
+    "MemoryStore.acknowledgeClaimedReport",
+  )(function* (input) {
+    return yield* transact(
+      withHubBudget(
+        Effect.gen(function* () {
+          const d = yield* stored("report-ack-codec", decodeReport(input.delivery, strict));
+          if (
+            d.state !== "delivered" ||
+            !d.reportThread ||
+            d.sequence === null ||
+            d.reportThread.environmentId !== input.owner
+          )
+            return false;
+          const now = yield* Clock.currentTimeMillis;
+          const rows = yield* stored(
+            "report-ack-cas",
+            sql`SELECT 1 FROM memory_report_outbox WHERE report_id=${d.reportId} AND claimed_by=${input.owner} AND claimed_until=${input.claimUntil} AND claimed_until>${now} AND resolving_environment_id=${input.owner} AND state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure') AND ((report_kind='resolve' AND outcome='resolved') OR (report_kind='revert' AND outcome='reverted') OR (report_kind='conflict_failure' AND outcome='failed'))`,
+          );
+          if (!rows.length) return false;
+          yield* acknowledgeReport(d);
+          yield* markRunnable;
+          return true;
+        }),
+      ),
+    );
+  });
+  const deferClaimedReport: MemoryStore["Service"]["deferClaimedReport"] = Effect.fn(
+    "MemoryStore.deferClaimedReport",
+  )(function* (input) {
+    return yield* transact(
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis;
+        const code = yield* stored(
+          "report-failure-codec",
+          decodeFailureCode(input.failureCode, strict),
+        );
+        const rows = yield* stored(
+          "report-defer-cas",
+          sql`UPDATE memory_report_outbox SET state='failed',failure_code=${code},claimed_by=NULL,claimed_until=NULL,next_attempt_at=${Math.max(now + 30_000, Math.min(now + 600_000, input.nextAttemptAt))}
+        WHERE report_id=${input.reportId} AND resolving_environment_id=${input.owner} AND claimed_by=${input.owner} AND claimed_until=${input.claimUntil} AND claimed_until>${now} AND state!='delivered'
+        AND NOT EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=memory_report_outbox.space AND g.key_kind='report_delivered' AND g.key=memory_report_outbox.report_id) RETURNING report_id`,
+        );
+        if (rows.length) yield* markRunnable;
+        return rows.length === 1;
+      }),
+    );
+  });
+  const resetReportAttemptsTx: MemoryStore["Service"]["resetReportAttemptsTx"] = Effect.fn(
+    "MemoryStore.resetReportAttemptsTx",
+  )(function* (input, now) {
+    yield* Transaction;
+    yield* normalizeExpiredReports(now, input.environmentId);
+    let resetCount = 0;
+    for (const reportId of input.reportIds) {
+      const rows = yield* stored(
+        "report-reset",
+        sql`UPDATE memory_report_outbox SET automatic_attempts=0 WHERE report_id=${reportId} AND space=${input.memorySpaceId} AND resolving_environment_id=${input.environmentId} AND state='failed' AND automatic_attempts=10 AND claimed_by IS NULL AND claimed_until IS NULL AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure') AND ((report_kind='resolve' AND outcome='resolved') OR (report_kind='revert' AND outcome='reverted') OR (report_kind='conflict_failure' AND outcome='failed'))
+        AND NOT EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=memory_report_outbox.space AND g.key_kind='report_delivered' AND g.key=memory_report_outbox.report_id) RETURNING report_id`,
+      );
+      resetCount += rows.length;
+    }
+    if (resetCount) yield* markRunnable;
+    return { resetCount, unchangedCount: input.reportIds.length - resetCount };
+  });
+  const purgeDeliveredReportDetailsTx: MemoryStore["Service"]["purgeDeliveredReportDetailsTx"] =
+    Effect.fn("MemoryStore.purgeDeliveredReportDetailsTx")(function* (input) {
+      yield* Transaction;
+      const rows = yield* stored(
+        "report-purge",
+        sql.unsafe<{ report_id: string; bytes: number }>(
+          `SELECT report_id,${reportMetadataBytes()} AS bytes FROM memory_report_outbox r WHERE ${input.memorySpaceId ? "space=?" : "1=1"} ${input.environmentId ? "AND resolving_environment_id=?" : ""} AND state='delivered' AND delivered_at<=? AND EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=r.space AND g.key_kind='report_delivered' AND g.key=r.report_id) ORDER BY delivered_at,report_id LIMIT ?`,
+          [
+            ...(input.memorySpaceId ? [input.memorySpaceId] : []),
+            ...(input.environmentId ? [input.environmentId] : []),
+            input.now - M.MEMORY_REPORT_DETAIL_RETENTION_MS,
+            Math.max(0, Math.min(256, input.limit)),
+          ],
+        ),
+      );
+      for (const r of rows)
+        yield* stored(
+          "report-purge-delete",
+          sql`DELETE FROM memory_report_outbox WHERE report_id=${r.report_id}`,
+        );
+      return {
+        removedRows: rows.length,
+        reclaimedLogicalBytes: rows.reduce((n, r) => n + r.bytes, 0),
+      };
+    });
+  const nextReportMaintenanceAt = Effect.fn("MemoryStore.nextReportMaintenanceAt")(function* (
+    owner: M.EnvironmentId,
+  ) {
+    const rows = yield* stored(
+      "report-maintenance",
+      sql<{
+        at: number | null;
+      }>`SELECT min(delivered_at)+${M.MEMORY_REPORT_DETAIL_RETENTION_MS} AS at FROM memory_report_outbox r WHERE resolving_environment_id=${owner} AND state='delivered' AND EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=r.space AND g.key_kind='report_delivered' AND g.key=r.report_id)`,
+    );
+    return rows[0]?.at ?? null;
+  });
   const pendingReports = Effect.fn("MemoryStore.pendingReports")(function* (limit: number) {
     const rows = yield* stored(
       "reports",
@@ -5246,9 +5941,14 @@ const make = Effect.gen(function* () {
         yield* stored(
           "generation-failure-intent",
           sql`INSERT INTO memory_report_outbox
-        (report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,failure_code,created_at)
-        VALUES (${reportId},${current.space},${current.memoryId},${metadata.operationId},NULL,${metadata.operationId},${environment},'failed','pending',${code},${input.now})
+        (report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,failure_code,created_at,report_kind,report_approved,attempts_known)
+        VALUES (${reportId},${current.space},${current.memoryId},${metadata.operationId},NULL,${metadata.operationId},${environment},'failed','pending',${code},${input.now},${current.kind},1,1)
         ON CONFLICT(report_id) DO NOTHING`,
+        );
+        // Keep the safe failure on its existing work even if report admission refused it.
+        yield* stored(
+          "generation-failure-code",
+          sql`UPDATE memory_outbox SET failure_code=${code} WHERE id=${current.id}`,
         );
         if (input.retryAt !== null) yield* retryWork(current, input.retryAt);
         else yield* finishWork(current.id, "failed");
@@ -5408,14 +6108,6 @@ const make = Effect.gen(function* () {
               "checkpoint-fence",
               sql`UPDATE memory_identity_ledger SET fence_json=${yield* fenceCodec.encode(fence)} WHERE space=${input.memorySpaceId} AND memory_id=${fence.memoryId}`,
             );
-          for (const compact of page.compactReceipts) {
-            yield* persistCompactReceipt(compact);
-            if (input.localEnvironmentId)
-              yield* reconcileResolutionReportTx({
-                record: compact,
-                localEnvironmentId: input.localEnvironmentId,
-              });
-          }
           for (const conflict of page.conflicts)
             yield* stored(
               "checkpoint-conflict",
@@ -5482,6 +6174,17 @@ const make = Effect.gen(function* () {
                 .flatMap((record) => record.heads)
                 .find((record) => record.memoryId === item.memoryId)?.heads ?? [];
             yield* putItem(item, heads, checkpointWatermark);
+          }
+        }
+        // Every resolution must exist before receipt settlement, independent of page boundaries.
+        for (const page of pages) {
+          for (const compact of page.compactReceipts) {
+            yield* persistCompactReceipt(compact);
+            if (input.localEnvironmentId)
+              yield* reconcileResolutionReportTx({
+                record: compact,
+                localEnvironmentId: input.localEnvironmentId,
+              });
           }
         }
         yield* persistImportLineageTx(pages.flatMap((page) => page.importLineage));
@@ -5839,151 +6542,64 @@ const make = Effect.gen(function* () {
     space: M.MemorySpaceId,
     scope: M.MemoryScope,
   ) {
-    const scoped = yield* stored(
-      "usage-scope",
-      sql<{
-        count: number;
-      }>`SELECT count(*) AS count FROM memory_items WHERE space=${space} AND scope_key=${scopeKey(scope)} AND status!='forgotten'`,
+    const rows = yield* stored(
+      "usage-counters",
+      sql<{ space: string; dimension: string; scope_key: string; value: number }>`
+      SELECT space,dimension,scope_key,value FROM memory_quota_counters
+      WHERE (space=${space} OR space='_usage_environment')
+        AND dimension IN ('usage_items','usage_summaries','usage_live_bytes','usage_payload_bytes','usage_identities','usage_identity_bytes','usage_reserved_keys','usage_reserved_receipts','usage_keys','usage_key_bytes','usage_lineage_bytes','usage_work_items','usage_work_bytes','usage_log_rows','usage_log_bytes','usage_receipts','usage_receipt_bytes') AND scope_key IN ('',${scopeKey(scope)})`,
     );
-    const summaryCount = yield* stored(
-      "usage-summaries",
-      sql<{
-        count: number;
-      }>`SELECT count(*) AS count FROM memory_items i WHERE space=${space} AND scope_key=${scopeKey(scope)} AND status!='forgotten' AND EXISTS (SELECT 1 FROM memory_revisions r JOIN json_each(i.heads_json) h WHERE r.space=i.space AND r.revision_id=h.value AND json_extract(r.provenance_json,'$.sourceThread') IS NOT NULL)`,
+    const get = (dimension: string, environment = false, scoped = false) =>
+      rows.find(
+        (r) =>
+          r.space === (environment ? "_usage_environment" : space) &&
+          r.dimension === `usage_${dimension}` &&
+          r.scope_key === (scoped ? scopeKey(scope) : ""),
+      )?.value ?? 0;
+    const extra = yield* stored(
+      "usage-existing-counters",
+      sql<{ space: string; dimension: string; value: number }>`
+      SELECT space,dimension,value FROM memory_quota_counters WHERE scope_key='' AND
+      ((space=${space} AND dimension IN ('import_metadata','report_items','report_bytes')) OR
+       (space='_hub_global' AND dimension='hub_private_metadata'))`,
     );
-    const local = yield* stored(
-      "usage-local",
-      sql<{ count: number }>`SELECT count(*) AS count FROM memory_items WHERE status!='forgotten'`,
-    );
-    const live = yield* stored(
-      "usage-live",
-      sql<{
-        count: number;
-      }>`SELECT count(*) AS count FROM memory_items WHERE space=${space} AND status!='forgotten'`,
-    );
-    const identities = yield* stored(
-      "usage-identities",
-      sql<{
-        count: number;
-        bytes: number;
-        reserved_receipts: number;
-        reserved_keys: number;
-      }>`SELECT count(*) AS count,coalesce(sum(reserve_bytes),0) AS bytes,coalesce(sum(CASE WHEN NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=memory_identity_ledger.space AND t.memory_id=memory_identity_ledger.memory_id) THEN 1 ELSE 0 END),0) AS reserved_receipts,coalesce(sum(reserve_keys),0) AS reserved_keys FROM memory_identity_ledger WHERE space=${space}`,
-    );
-    const payloads = yield* stored(
-      "usage-payloads",
-      sql<{
-        live: number;
-        history: number;
-        all_bytes: number;
-      }>`SELECT coalesce(sum(CASE WHEN EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND i.memory_id=p.memory_id AND v.payload_ref=p.payload_ref) THEN length(CAST(p.body_json AS BLOB)) ELSE 0 END),0) AS live,coalesce(sum(CASE WHEN NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND i.memory_id=p.memory_id AND v.payload_ref=p.payload_ref) THEN length(CAST(p.body_json AS BLOB)) ELSE 0 END),0) AS history,coalesce(sum(length(CAST(p.body_json AS BLOB))),0) AS all_bytes FROM memory_payloads p WHERE p.space=${space}`,
-    );
-    const receipts = yield* stored(
-      "usage-receipts",
-      sql<{
-        count: number;
-        bytes: number;
-      }>`SELECT count(*) AS count,coalesce(sum(bytes),0) AS bytes FROM (
-        SELECT operation_id,coalesce(length(compact_blob),length(CAST(compact_json AS BLOB))) AS bytes FROM memory_compact_receipts WHERE space=${space}
-        UNION ALL SELECT operation_id,${M.MEMORY_COMPACT_RECEIPT_MAX_BYTES} AS bytes FROM memory_events e WHERE memory_space_id=${space}
-          AND NOT EXISTS (SELECT 1 FROM memory_compact_receipts c WHERE c.space=e.memory_space_id AND c.operation_id=e.operation_id))`,
-    );
-    const keys = yield* stored(
-      "usage-keys",
-      sql<{
-        count: number;
-        bytes: number;
-      }>`SELECT count(*) AS count,coalesce(sum(length(CAST(record_json AS BLOB))),0) AS bytes FROM memory_import_keys WHERE space=${space}`,
-    );
-    const work = yield* stored(
-      "usage-work",
-      sql<{
-        count: number;
-        bytes: number;
-      }>`SELECT count(*) AS count,coalesce(sum(length(CAST(metadata_json AS BLOB))),0) AS bytes FROM memory_outbox WHERE space=${space} AND status IN ('pending','retry','running')`,
-    );
-    const reports = yield* stored(
-      "usage-reports",
-      sql<{
-        count: number;
-      }>`SELECT count(*) AS count FROM memory_report_outbox WHERE space=${space} AND state!='delivered'`,
-    );
-    const log = yield* stored(
-      "usage-log",
-      sql<{
-        count: number;
-        bytes: number;
-      }>`SELECT count(*) AS count,coalesce(sum(length(CAST(metadata_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0) AS bytes FROM memory_events WHERE memory_space_id=${space}`,
-    );
-    const environment = yield* stored(
-      "usage-environment",
-      sql<{
-        live: number;
-        history: number;
-        ids: number;
-        receipts: number;
-        permanent: number;
-        receipt_bytes: number;
-      }>`SELECT
-      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p WHERE EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND i.memory_id=p.memory_id AND v.payload_ref=p.payload_ref)) AS live,
-      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p WHERE NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND i.memory_id=p.memory_id AND v.payload_ref=p.payload_ref)) AS history,
-      (SELECT count(*) FROM memory_identity_ledger) AS ids,
-      (SELECT count(*) FROM (SELECT memory_space_id AS space,operation_id FROM memory_events UNION SELECT space,operation_id FROM memory_compact_receipts))+(SELECT count(*) FROM memory_identity_ledger l WHERE NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=l.space AND t.memory_id=l.memory_id)) AS receipts,
-      (SELECT coalesce(sum(reserve_bytes),0) FROM memory_identity_ledger)+(SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_keys)+(SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_lineage) AS permanent,
-      (SELECT coalesce(sum(coalesce(length(compact_blob),length(CAST(compact_json AS BLOB)))),0) FROM memory_compact_receipts)+
-      (SELECT count(*)*${M.MEMORY_COMPACT_RECEIPT_MAX_BYTES} FROM memory_events e WHERE NOT EXISTS (SELECT 1 FROM memory_compact_receipts c WHERE c.space=e.memory_space_id AND c.operation_id=e.operation_id))+
-      (SELECT count(*)*${M.MEMORY_COMPACT_RECEIPT_MAX_BYTES} FROM memory_identity_ledger l WHERE NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=l.space AND t.memory_id=l.memory_id)) AS receipt_bytes`,
-    );
-    const lineage = yield* stored(
-      "usage-lineage",
-      sql<{ bytes: number }>`
-      SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) AS bytes FROM memory_import_lineage WHERE space=${space}`,
-    );
-    const importUsage = yield* stored(
-      "usage-import",
-      sql<{
-        value: number;
-      }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='import_metadata' AND scope_key=''`,
-    );
-    const importMetadata = importUsage[0]?.value ?? 0;
+    const existing = (dimension: string) =>
+      extra.find((r) => r.dimension === dimension)?.value ?? 0;
+    const permanent = (environment = false) =>
+      get("identity_bytes", environment) +
+      get("key_bytes", environment) +
+      get("lineage_bytes", environment) +
+      get("receipt_bytes", environment) +
+      get("reserved_receipts", environment) * M.MEMORY_COMPACT_RECEIPT_MAX_BYTES;
     return {
-      scopeItems: scoped[0]!.count,
-      scopeSummaries: summaryCount[0]!.count,
-      scopeExplicit: scoped[0]!.count - summaryCount[0]!.count,
-      environmentItems: local[0]!.count,
-      environmentLiveBytes: environment[0]!.live,
-      environmentHistoryBytes: environment[0]!.history,
-      environmentLifetimeIds: environment[0]!.ids,
-      environmentReceipts: environment[0]!.receipts,
-      environmentPermanentBytes:
-        environment[0]!.permanent +
-        environment[0]!.receipt_bytes +
-        ((yield* globalHubCounters()).find((row) => row.dimension === "hub_private_metadata")
-          ?.value ?? 0),
-      spaceItems: live[0]!.count,
-      lifetimeIds: identities[0]!.count,
-      permanentBytes:
-        importMetadata +
-        identities[0]!.bytes +
-        lineage[0]!.bytes +
-        keys[0]!.bytes +
-        receipts[0]!.bytes +
-        identities[0]!.reserved_receipts * M.MEMORY_COMPACT_RECEIPT_MAX_BYTES,
-      receipts: receipts[0]!.count + identities[0]!.reserved_receipts,
-      liveBytes: payloads[0]!.live,
-      historyBytes: payloads[0]!.history,
+      scopeItems: get("items", false, true),
+      scopeSummaries: get("summaries", false, true),
+      scopeExplicit: get("items", false, true) - get("summaries", false, true),
+      environmentItems: get("items", true),
+      environmentLiveBytes: get("live_bytes", true),
+      environmentHistoryBytes: get("payload_bytes", true) - get("live_bytes", true),
+      environmentLifetimeIds: get("identities", true),
+      environmentReceipts: get("receipts", true) + get("reserved_receipts", true),
+      environmentPermanentBytes: permanent(true) + existing("hub_private_metadata"),
+      spaceItems: get("items"),
+      lifetimeIds: get("identities"),
+      permanentBytes: permanent() + existing("import_metadata"),
+      receipts: get("receipts") + get("reserved_receipts"),
+      liveBytes: get("live_bytes"),
+      historyBytes: get("payload_bytes") - get("live_bytes"),
       logicalBytes:
-        importMetadata +
-        payloads[0]!.all_bytes +
-        log[0]!.bytes +
-        keys[0]!.bytes +
-        lineage[0]!.bytes,
-      keys: keys[0]!.count + identities[0]!.reserved_keys,
-      workItems: work[0]!.count,
-      workBytes: work[0]!.bytes,
-      reportItems: reports[0]!.count,
-      logRows: log[0]!.count,
-      logBytes: log[0]!.bytes,
+        existing("import_metadata") +
+        get("payload_bytes") +
+        get("log_bytes") +
+        get("key_bytes") +
+        get("lineage_bytes"),
+      keys: get("keys") + get("reserved_keys"),
+      workItems: get("work_items"),
+      workBytes: get("work_bytes"),
+      reportItems: existing("report_items"),
+      reportBytes: existing("report_bytes"),
+      logRows: get("log_rows"),
+      logBytes: get("log_bytes"),
     };
   });
   const readImportRegistrationTx: ImportStorePorts["readImportRegistrationTx"] = Effect.fnUntraced(
@@ -6958,7 +7574,8 @@ const make = Effect.gen(function* () {
       (SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_keys)+
       (SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_lineage)+
       (SELECT coalesce(sum(reserve_bytes),0) FROM memory_identity_ledger)+
-      (SELECT coalesce(sum(value),0) FROM memory_quota_counters WHERE space='_hub_global' AND dimension='import_metadata' AND scope_key='') AS bytes`,
+      (SELECT coalesce(sum(value),0) FROM memory_quota_counters WHERE space='_hub_global' AND dimension='import_metadata' AND scope_key='')+
+      (SELECT coalesce(sum(value),0) FROM memory_quota_counters WHERE dimension='report_all_bytes' AND scope_key='') AS bytes`,
     );
     return rows[0]!.bytes;
   });
@@ -6980,6 +7597,14 @@ const make = Effect.gen(function* () {
           },
         });
         const record = yield* compactCodec.decode(json, strict);
+        if (record.operationKind === "revert" && record.revertsResolutionId)
+          yield* settleRevertResultTx(
+            record.memorySpaceId,
+            record.receipt.memoryId,
+            record.revertsResolutionId,
+            record.receipt,
+            record.revisionId,
+          );
         const existing = yield* stored(
           "compact-existing",
           sql<{
@@ -7269,6 +7894,13 @@ const make = Effect.gen(function* () {
           "revert-stage",
           sql`INSERT INTO memory_revert_intents (space,operation_id,memory_id,resolution_id,restored_revision_id,expected_heads_json,request_digest,submission_metadata_json,payload_ref,created_at) VALUES (${op.memorySpaceId},${op.operationId},${op.memoryId},${op.revertsResolutionId},${op.restoredRevisionId},${yield* headsCodec.encode(op.expectedHeads)},${input.requestDigest},${metadata},${op.revision.payloadRef},${now})`,
         );
+        yield* recordRevertResultTx({
+          space: op.memorySpaceId,
+          memoryId: op.memoryId,
+          resolutionId: op.revertsResolutionId,
+          operationId: op.operationId,
+          slot: { status: "pending" },
+        });
         yield* enqueueWork({
           id: `revert:${op.memorySpaceId}:${op.operationId}`,
           space: op.memorySpaceId,
@@ -7390,33 +8022,31 @@ const make = Effect.gen(function* () {
       ? yield* pullRetryCodec.decode(rows[0].pull_retry_json, strict)
       : emptyPullRetry;
   });
-  // Discovery is a snapshot of presence, not rearm authority. Outbox work belongs to
+  // Discovery observes presence, not rearm authority. Outbox work belongs to
   // the space; only pull retry is scoped to the current hub binding.
   const readPersistedHoldClasses: MemoryStore["Service"]["readPersistedHoldClasses"] = Effect.fn(
     "MemoryStore.readPersistedHoldClasses",
   )(function* (input) {
-    return yield* transact(
-      Effect.gen(function* () {
-        const pull = yield* readPullRetry(input);
-        const classes: MemoryHoldClass[] = [];
-        for (const holdClass of HoldClass.literals) {
-          const held = yield* stored(
-            "persisted-hold-discovery",
-            sql`SELECT 1 FROM memory_outbox INDEXED BY memory_outbox_held_class
+    // Observational probes need no write transaction or checkpoint accounting.
+    // Rearm authority and mutations are checked separately inside transact.
+    const pull = yield* readPullRetry(input);
+    const classes: MemoryHoldClass[] = [];
+    for (const holdClass of HoldClass.literals) {
+      const held = yield* stored(
+        "persisted-hold-discovery",
+        sql`SELECT 1 FROM memory_outbox INDEXED BY memory_outbox_held_class
               WHERE space=${input.memorySpaceId} AND hold_class=${holdClass}
                 AND hold_class IS NOT NULL AND next_attempt_at=9007199254740991
                 AND kind IN ('sync','revert_intent','claim','resolve')
                 AND status IN ('pending','retry','running') LIMIT 1`,
-          );
-          if (
-            held.length ||
-            (pull.nextAttemptAt === Number.MAX_SAFE_INTEGER && pull.holdClass === holdClass)
-          )
-            classes.push(holdClass);
-        }
-        return classes;
-      }),
-    );
+      );
+      if (
+        held.length ||
+        (pull.nextAttemptAt === Number.MAX_SAFE_INTEGER && pull.holdClass === holdClass)
+      )
+        classes.push(holdClass);
+    }
+    return classes;
   });
   const writePullRetryTx: MemoryStore["Service"]["writePullRetryTx"] = Effect.fn(
     "MemoryStore.writePullRetryTx",
@@ -7936,10 +8566,11 @@ const make = Effect.gen(function* () {
       );
       yield* stored(
         "conflict-failure-report",
-        sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,failure_code,created_at)
-        SELECT ${reportId},${row.ticket.memorySpaceId},${row.ticket.memoryId},${row.ticket.attemptId},NULL,${row.ticket.attemptId},${row.ticket.holderEnvironmentId},'failed','pending',${input.failureCode},${input.now}
+        sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,failure_code,created_at,report_kind,report_approved,attempts_known)
+        SELECT ${reportId},${row.ticket.memorySpaceId},${row.ticket.memoryId},${row.ticket.attemptId},NULL,${row.ticket.attemptId},${row.ticket.holderEnvironmentId},'failed','pending',${input.failureCode},${input.now},'conflict_failure',1,1
         WHERE NOT EXISTS (SELECT 1 FROM memory_import_keys WHERE space=${row.ticket.memorySpaceId} AND key_kind='report_delivered' AND key=${reportId}) ON CONFLICT(report_id) DO NOTHING`,
       );
+      yield* markRunnable;
     }
     return next;
   });
@@ -10010,21 +10641,13 @@ const make = Effect.gen(function* () {
       removedRows++;
       reclaimedLogicalBytes += work.bytes;
     }
-    const deliveredReports = yield* stored(
-      "hub-compact-delivered-report",
-      sql<{
-        report_id: string;
-        bytes: number;
-      }>`SELECT report_id,coalesce(length(CAST(report_thread_json AS BLOB)),0)+length(CAST(operation_id AS BLOB))+32 AS bytes FROM memory_report_outbox r WHERE space=${input.memorySpaceId} AND state='delivered' AND delivered_at<=${input.now - M.MEMORY_LOG_RETENTION_MS} AND EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=r.space AND g.key_kind='report_delivered' AND g.key=r.report_id) ORDER BY delivered_at,report_id LIMIT ${Math.max(0, limit - removedRows)}`,
-    );
-    for (const report of deliveredReports) {
-      yield* stored(
-        "hub-compact-delivered-report-delete",
-        sql`DELETE FROM memory_report_outbox WHERE report_id=${report.report_id}`,
-      );
-      removedRows++;
-      reclaimedLogicalBytes += report.bytes;
-    }
+    const purgedReports = yield* purgeDeliveredReportDetailsTx({
+      memorySpaceId: input.memorySpaceId,
+      now: input.now,
+      limit: Math.max(0, limit - removedRows),
+    });
+    removedRows += purgedReports.removedRows;
+    reclaimedLogicalBytes += purgedReports.reclaimedLogicalBytes;
     const status: M.MemoryCompactionStatus = {
       lastRunAtUtc: M.MemoryUtcTimestamp.make(DateTime.formatIso(DateTime.makeUnsafe(input.now))),
       removedRows,
@@ -10124,6 +10747,13 @@ const make = Effect.gen(function* () {
         allocationStatus: "unavailable",
       });
     }
+    tables.push({
+      table: "memory_report_outbox",
+      rowCount: usage.reportRows,
+      logicalBytes: usage.reportMetadataBytes,
+      allocatedBytes: null,
+      allocationStatus: "unavailable",
+    });
     return {
       tables,
       tailRows: row.tail_rows,
@@ -10131,6 +10761,7 @@ const make = Effect.gen(function* () {
       permanentMetadataBytes: tables
         .filter(
           (table) =>
+            table.table === "memory_report_outbox" ||
             table.table === "memory_import_lineage" ||
             table.table === "memory_hub_members" ||
             table.table === "memory_hub_leases" ||
@@ -10214,7 +10845,7 @@ const make = Effect.gen(function* () {
     const details = yield* stored(
       "hub-reclaimable-details",
       sql<{ report_bytes: number; event_bytes: number; judgment_bytes: number }>`SELECT
-      (SELECT coalesce(sum(coalesce(length(CAST(report_thread_json AS BLOB)),0)+length(CAST(operation_id AS BLOB))+32),0) FROM memory_report_outbox x WHERE space=${space} AND state='delivered' AND delivered_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=x.space AND g.key_kind='report_delivered' AND g.key=x.report_id)) AS report_bytes,
+      (SELECT coalesce(sum(${sql.unsafe(reportMetadataBytes("x."))}),0) FROM memory_report_outbox x WHERE space=${space} AND state='delivered' AND delivered_at<=${now - M.MEMORY_REPORT_DETAIL_RETENTION_MS} AND EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=x.space AND g.key_kind='report_delivered' AND g.key=x.report_id)) AS report_bytes,
       (SELECT coalesce(sum(length(CAST(e.metadata_json AS BLOB))+length(CAST(e.receipt_json AS BLOB))),0) FROM memory_events e JOIN memory_compact_receipts c ON c.space=e.memory_space_id AND c.operation_id=e.operation_id JOIN memory_hub_retention r ON r.space=c.space WHERE e.memory_space_id=${space} AND c.hub_sequence<=r.retention_floor AND e.created_at<=${now - M.MEMORY_LOG_RETENTION_MS}
         AND EXISTS(SELECT 1 FROM memory_inbox_pending b,json_each(b.metadata_json,'$.compactReceipts') j WHERE b.space=c.space AND b.checkpoint_id='hub:'||r.checkpoint_id AND json_extract(j.value,'$.receipt.operationId')=e.operation_id)
         AND NOT EXISTS(SELECT 1 FROM memory_outbox w WHERE w.space=c.space AND json_extract(w.metadata_json,'$.operationId')=e.operation_id AND w.status IN ('pending','running','retry'))
@@ -10256,7 +10887,21 @@ const make = Effect.gen(function* () {
         count: number;
       }>`SELECT coalesce(json_array_length(handles_json),0) AS count FROM memory_hub_retention WHERE space=${space}`,
     );
-    return { liveHandles: rows[0]?.count ?? 0 };
+    const reports = yield* stored(
+      "hub-report-counters",
+      sql<{
+        dimension: string;
+        value: number;
+      }>`SELECT dimension,value FROM memory_quota_counters WHERE space=${space} AND scope_key='' AND dimension IN ('report_all_rows','report_all_bytes','report_items','report_bytes')`,
+    );
+    const counters = new Map(reports.map((r) => [r.dimension, r.value]));
+    return {
+      liveHandles: rows[0]?.count ?? 0,
+      reportItems: counters.get("report_items") ?? 0,
+      reportBytes: counters.get("report_bytes") ?? 0,
+      reportRows: counters.get("report_all_rows") ?? 0,
+      reportMetadataBytes: counters.get("report_all_bytes") ?? 0,
+    };
   });
   const reserveHubCheckpointTx: MemoryStore["Service"]["reserveHubCheckpointTx"] = Effect.fn(
     "MemoryStore.reserveHubCheckpointTx",
@@ -10750,6 +11395,174 @@ const make = Effect.gen(function* () {
         sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${input.memorySpaceId},'hubReceipt',${entry.receipt.operationId},${entry.memoryId},${yield* hubEntryCodec.encode(entry)}) ON CONFLICT(space,key_kind,key) DO NOTHING`,
       );
   });
+  // Canonical operation settlement retains shared evidence independently of local delivery.
+  const reconcileOperationReportTx: MemoryStore["Service"]["reconcileOperationReportTx"] =
+    Effect.fn("MemoryStore.reconcileOperationReportTx")(function* (input) {
+      yield* Transaction;
+      const { operation: op, receipt } = input;
+      if (
+        (op.kind !== "resolve" && op.kind !== "revert") ||
+        receipt.hubSequence === null ||
+        !["accepted", "conflicted"].includes(receipt.outcome)
+      )
+        return;
+      if (
+        receipt.operationId !== op.operationId ||
+        receipt.memoryId !== op.memoryId ||
+        receipt.operationDigest !== hashText(M.encodeMemoryOperation(op)) ||
+        !M.validateMemoryResolutionApproval(
+          op.kind,
+          op.kind === "resolve" ? op.resolution.resolutionId : op.revertsResolutionId,
+          receipt,
+        )
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      const existing = yield* stored(
+        "operation-report-compact",
+        sql<{
+          compact_json: string;
+        }>`SELECT compact_json FROM memory_compact_receipts WHERE space=${op.memorySpaceId} AND operation_id=${op.operationId}`,
+      );
+      const resolutionId =
+        op.kind === "resolve" ? op.resolution.resolutionId : op.revertsResolutionId;
+      const record: M.MemoryCompactReceipt = existing[0]
+        ? yield* compactCodec.decode(existing[0].compact_json, strict)
+        : {
+            memorySpaceId: op.memorySpaceId,
+            originEnvironmentId: op.originEnvironmentId,
+            operationKind: op.kind,
+            receipt,
+            revisionId: op.revision.revisionId,
+            resolutionId,
+            revertsResolutionId: op.kind === "revert" ? resolutionId : null,
+            attemptId: op.kind === "resolve" ? op.operationId : null,
+            fencingToken: op.kind === "resolve" ? op.fencingToken : null,
+            reportGuard: {
+              reportId: resolutionReportId(op.memorySpaceId, op.operationId, resolutionId),
+              resolvingEnvironmentId: op.originEnvironmentId,
+              resolutionId,
+              outcome: op.kind === "resolve" ? "resolved" : "reverted",
+            },
+          };
+      if (
+        record.operationKind !== op.kind ||
+        record.originEnvironmentId !== op.originEnvironmentId ||
+        record.resolutionId !== resolutionId ||
+        record.revisionId !== op.revision.revisionId ||
+        (yield* receiptCodec.encode(record.receipt)) !== (yield* receiptCodec.encode(receipt))
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      // Operation envelopes do not carry the original claim attempt ID. Use this
+      // validated projection for delivery, but let canonical checkpoint receipts own
+      // permanent compact metadata (including their immutable attempt identity).
+      yield* reconcileResolutionReportTx({ record, localEnvironmentId: input.localEnvironmentId });
+    });
+  // Page the PK before inspecting ownership/evidence: ambiguous rows cannot starve later spaces.
+  const normalizeForeignReportIntentsTx: MemoryStore["Service"]["normalizeForeignReportIntentsTx"] =
+    Effect.fn("MemoryStore.normalizeForeignReportIntentsTx")(function* (
+      localEnvironmentId,
+      after = null,
+    ) {
+      yield* Transaction;
+      const page = yield* stored(
+        "foreign-report-page",
+        after === null
+          ? sql<{
+              report_id: string;
+              resolving_environment_id: string;
+              state: string;
+            }>`SELECT report_id,resolving_environment_id,state FROM memory_report_outbox ORDER BY report_id LIMIT 256`
+          : sql<{
+              report_id: string;
+              resolving_environment_id: string;
+              state: string;
+            }>`SELECT report_id,resolving_environment_id,state FROM memory_report_outbox WHERE report_id>${after} ORDER BY report_id LIMIT 256`,
+      );
+      for (const candidate of page) {
+        if (
+          candidate.resolving_environment_id === localEnvironmentId ||
+          candidate.state === "delivered"
+        )
+          continue;
+        const rows = yield* stored(
+          "foreign-report-evidence",
+          sql<{
+            compact_json: string;
+          }>`SELECT c.compact_json FROM memory_report_outbox r JOIN memory_compact_receipts c ON c.space=r.space AND c.operation_id=r.operation_id WHERE r.report_id=${candidate.report_id}`,
+        );
+        for (const row of rows) {
+          const record = yield* compactCodec
+            .decode(row.compact_json, strict)
+            .pipe(Effect.catch(() => Effect.succeed(undefined)));
+          if (
+            record?.reportGuard &&
+            record.reportGuard.reportId === candidate.report_id &&
+            record.reportGuard.reportId ===
+              resolutionReportId(
+                record.memorySpaceId,
+                record.receipt.operationId,
+                record.reportGuard.resolutionId,
+              )
+          )
+            yield* reconcileResolutionReportTx({ record, localEnvironmentId });
+        }
+        // Older body-bearing receives may not have a compact checkpoint receipt yet.
+        // Their canonical event metadata and approved receipt are sufficient without
+        // loading payloads or inventing a missing claim attempt identity.
+        const events = yield* stored(
+          "foreign-report-events",
+          sql<{
+            report_id: string;
+            metadata_json: string;
+            receipt_json: string;
+            operation_digest: string;
+          }>`SELECT r.report_id,e.metadata_json,e.receipt_json,e.operation_digest FROM memory_report_outbox r JOIN memory_events e ON e.memory_space_id=r.space AND e.operation_id=r.operation_id WHERE r.report_id=${candidate.report_id}`,
+        );
+        for (const row of events) {
+          const metadata = yield* metadataCodec
+            .decode(row.metadata_json, strict)
+            .pipe(Effect.orElseSucceed(() => undefined));
+          const approval = yield* receiptCodec
+            .decode(row.receipt_json, strict)
+            .pipe(Effect.orElseSucceed(() => undefined));
+          if (
+            !metadata ||
+            !approval ||
+            !("hubSequence" in approval) ||
+            approval.hubSequence === null ||
+            !["accepted", "conflicted"].includes(approval.outcome) ||
+            metadata.originEnvironmentId === localEnvironmentId ||
+            approval.operationId !== metadata.operationId ||
+            approval.memoryId !== metadata.memoryId ||
+            approval.operationDigest !== row.operation_digest
+          )
+            continue;
+          const resolutionId =
+            metadata.kind === "resolve"
+              ? metadata.resolution?.resolutionId
+              : metadata.kind === "revert"
+                ? metadata.revertsResolutionId
+                : undefined;
+          if (
+            !resolutionId ||
+            !M.validateMemoryResolutionApproval(metadata.kind, resolutionId, approval) ||
+            (metadata.kind === "resolve" &&
+              metadata.resolution?.resolvingEnvironmentId !== metadata.originEnvironmentId) ||
+            row.report_id !==
+              resolutionReportId(metadata.memorySpaceId, metadata.operationId, resolutionId)
+          )
+            continue;
+          yield* stored(
+            "foreign-report-event-intent",
+            sql`DELETE FROM memory_report_outbox WHERE report_id=${row.report_id} AND space=${metadata.memorySpaceId} AND memory_id=${metadata.memoryId} AND operation_id=${metadata.operationId} AND resolution_id=${resolutionId} AND resolving_environment_id=${metadata.originEnvironmentId} AND outcome=${metadata.kind === "resolve" ? "resolved" : "reverted"} AND state!='delivered'`,
+          );
+        }
+      }
+      return {
+        examined: page.length,
+        nextCursor: page.length === 256 ? page[255]!.report_id : null,
+      };
+    });
   const reconcileResolutionReportTx: MemoryStore["Service"]["reconcileResolutionReportTx"] =
     Effect.fn("MemoryStore.reconcileResolutionReportTx")(function* (input) {
       yield* Transaction;
@@ -10766,8 +11579,26 @@ const make = Effect.gen(function* () {
       );
       if (guard.reportId !== reportId)
         return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      if (
+        record.receipt.hubSequence === null ||
+        !["accepted", "conflicted"].includes(record.receipt.outcome) ||
+        !(
+          (record.operationKind === "resolve" && guard.outcome === "resolved") ||
+          (record.operationKind === "revert" && guard.outcome === "reverted")
+        ) ||
+        record.originEnvironmentId !== guard.resolvingEnvironmentId
+      )
+        return { reportId, deliverable: false };
       const deliverable = guard.resolvingEnvironmentId === input.localEnvironmentId;
-      if (!deliverable) return { reportId, deliverable };
+      if (!deliverable) {
+        // Only the exact canonical foreign delivery intent is disposable. Shared receipt
+        // and delivered guards remain authoritative; unknown/contradictory rows stay put.
+        yield* stored(
+          "foreign-report-intent",
+          sql`DELETE FROM memory_report_outbox WHERE report_id=${reportId} AND space=${record.memorySpaceId} AND memory_id=${record.receipt.memoryId} AND operation_id=${record.receipt.operationId} AND resolution_id=${guard.resolutionId} AND resolving_environment_id=${guard.resolvingEnvironmentId} AND outcome=${guard.outcome} AND state!='delivered'`,
+        );
+        return { reportId, deliverable };
+      }
       const delivered = yield* stored(
         "report-delivered-guard",
         sql`SELECT 1 FROM memory_import_keys WHERE space=${record.memorySpaceId} AND key_kind='report_delivered' AND key=${reportId}`,
@@ -10775,11 +11606,19 @@ const make = Effect.gen(function* () {
       if (delivered.length) return { reportId, deliverable: false };
       yield* stored(
         "report-reconcile",
-        sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,created_at) VALUES (${reportId},${record.memorySpaceId},${record.receipt.memoryId},${record.receipt.operationId},${guard.resolutionId},${record.attemptId},${guard.resolvingEnvironmentId},${guard.outcome},'pending',${record.receipt.resolutionApproval ? Date.parse(record.receipt.resolutionApproval.appliedAtUtc) : 0}) ON CONFLICT(report_id) DO NOTHING`,
+        sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,created_at,report_kind,report_approved,attempts_known) VALUES (${reportId},${record.memorySpaceId},${record.receipt.memoryId},${record.receipt.operationId},${guard.resolutionId},${record.attemptId},${guard.resolvingEnvironmentId},${guard.outcome},'pending',${record.receipt.resolutionApproval ? Date.parse(record.receipt.resolutionApproval.appliedAtUtc) : 0},${record.operationKind === "resolve" ? "resolve" : "revert"},1,1) ON CONFLICT(report_id) DO UPDATE SET report_approved=1,report_kind=excluded.report_kind WHERE memory_report_outbox.space=excluded.space AND memory_report_outbox.memory_id=excluded.memory_id AND memory_report_outbox.operation_id=excluded.operation_id AND memory_report_outbox.resolving_environment_id=excluded.resolving_environment_id AND memory_report_outbox.resolution_id=excluded.resolution_id AND memory_report_outbox.outcome=excluded.outcome`,
       );
-      return { reportId, deliverable };
+      const retained = yield* stored(
+        "report-admission",
+        sql`SELECT 1 FROM memory_report_outbox WHERE report_id=${reportId} AND report_approved=1`,
+      );
+      if (retained.length) yield* markRunnable;
+      return { reportId, deliverable: retained.length === 1 };
     });
   return MemoryStore.of({
+    readAccess,
+    historyPage,
+    recordRevertResultTx,
     prepareHubCheckpointTx: (input) => withHubBudget(prepareHubCheckpointTx(input)),
     prepareHubProducerCheckpointTx: (input) => withHubBudget(prepareHubProducerCheckpointTx(input)),
     readHubCheckpointPageTx,
@@ -10822,6 +11661,8 @@ const make = Effect.gen(function* () {
     reserveHubCheckpointTx: (input) => withHubBudget(reserveHubCheckpointTx(input)),
     settleMetadataEntryTx,
     reconcileResolutionReportTx,
+    reconcileOperationReportTx,
+    normalizeForeignReportIntentsTx,
     acquireSyncWorkTx,
     retrySyncWorkTx,
     readWorkHold,
@@ -10954,6 +11795,15 @@ const make = Effect.gen(function* () {
     retryClaimCandidate,
     completeClaimCandidate,
     persistResolutionTicket,
+    readReportTarget,
+    nextReportWakeAt,
+    acquireReports,
+    acknowledgeClaimedReport,
+    deferClaimedReport,
+    normalizeExpiredReports,
+    resetReportAttemptsTx,
+    purgeDeliveredReportDetailsTx,
+    nextReportMaintenanceAt,
     pendingReports,
     claimReport,
     acknowledgeReport,

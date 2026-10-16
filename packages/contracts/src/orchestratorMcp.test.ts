@@ -287,6 +287,36 @@ it("advertises host only for delegation targets, not create_threads", () => {
   ).toThrow();
 });
 
+it.each(["", " \n\t"])("explains how to fix a blank pending response reason (%j)", (reason) => {
+  expect(() =>
+    decodePendingRequestRespondInput({
+      requestId: "request",
+      answers: { q: "Yes" },
+      reason,
+    }),
+  ).toThrow("Send reason with 1–2000 characters including non-whitespace text");
+});
+
+it("keeps single select, multi select, free text and provider-specific answer values unchanged", () => {
+  const args = {
+    requestId: "request",
+    reason: "The user chose these settings.",
+    answers: {
+      color: "Blue",
+      features: ["Fast", "Quiet"],
+      notes: "  exact text\n",
+      count: 2,
+      enabled: true,
+    },
+  };
+  expect(decodePendingRequestRespondInput(args)).toEqual(args);
+  const jsonSchema = JSON.stringify(
+    Schema.toJsonSchemaDocument(OrchestratorMcpPendingRequestRespondInput),
+  );
+  expect(jsonSchema).toContain("Answers keyed by question id");
+  expect(jsonSchema).toContain("Required provenance shown to the user");
+});
+
 it("decodes pending tools and optional legacy result fields", () => {
   const args = {
     threadId: "thread",

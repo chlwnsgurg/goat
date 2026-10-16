@@ -44,3 +44,22 @@ describe("native memory destinations and owner edits", () => {
     });
   });
 });
+
+it("keeps explicit project and thread scopes and supports returning to user scope", () => {
+  const params = {
+    environmentId: owner,
+    project: { environmentId: owner, projectId: "synthetic-project" as never },
+    thread: { environmentId: owner, threadId: "synthetic-thread" as never },
+  };
+  const projectKey = { kind: "explicit" as const, sharedProjectId: "synthetic-shared-project" };
+  expect(memoryScopeForSelection("project", params, projectKey)).toEqual({
+    kind: "project",
+    projectKey,
+  });
+  expect(memoryScopeForSelection("thread", params, projectKey)).toEqual({
+    kind: "thread",
+    thread: params.thread,
+    projectKey,
+  });
+  expect(memoryScopeForSelection("user", params, projectKey)).toEqual({ kind: "user" });
+});

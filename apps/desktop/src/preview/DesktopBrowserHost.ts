@@ -30,7 +30,7 @@ const decodeCommand = Schema.decodeUnknownOption(Schema.fromJsonString(DesktopBr
 const lineEncoder = new TextEncoder();
 /** CDP commands through which an agent clicks, types, or navigates the page. */
 const AGENT_INPUT_COMMAND =
-  /"method":"(?:Input\.|Page\.navigate"|Runtime\.(?:evaluate|callFunctionOn)")/;
+  /"method":"(?:Input\.|Page\.(?:navigate|navigateToHistoryEntry|reload)"|Runtime\.(?:evaluate|callFunctionOn)")/;
 /** How long after an agent's input a download still counts as the agent's. */
 const AGENT_DOWNLOAD_WINDOW_MS = 5_000;
 
@@ -113,10 +113,18 @@ export const make = Effect.gen(function* () {
     const { webContents, debugger: debuggee } = tab.debuggee;
     const relay: CdpRelayConnection = createCdpRelayConnection(
       {
-        send: (method, params, sessionId) =>
-          sessionId === undefined
+        send: async (method, params, sessionId) => {
+          if (method === "Page.reload" && sessionId === undefined) {
+            // Embedded guests can acknowledge CDP reload without navigating.
+            // Keep Playwright's CDP lifecycle waiter, but drive the exact guest.
+            if (params.ignoreCache === true) webContents.reloadIgnoringCache();
+            else webContents.reload();
+            return {};
+          }
+          return sessionId === undefined
             ? debuggee.sendCommand(method, params)
-            : debuggee.sendCommand(method, params, sessionId),
+            : debuggee.sendCommand(method, params, sessionId);
+        },
         targetId: () =>
           debuggee
             .sendCommand("Target.getTargetInfo")

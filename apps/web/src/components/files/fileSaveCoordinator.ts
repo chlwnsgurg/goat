@@ -3,7 +3,8 @@ import type { AtomCommandResult } from "@goat/client-runtime/state/runtime";
 export interface FileSaveCoordinatorOptions<A, E> {
   readonly debounceMs: number;
   readonly canPersist?: () => boolean;
-  readonly persist: (contents: string) => Promise<AtomCommandResult<A, E>>;
+  /** Null cancels a queued write whose draft was discarded. */
+  readonly persist: (contents: string) => Promise<AtomCommandResult<A, E> | null>;
   readonly onPendingChange: (pending: boolean) => void;
   /** Return false when another editor has newer unsaved contents. */
   readonly onConfirmed: (contents: string) => boolean | void;
@@ -27,6 +28,18 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
     this.lastChangeAt = Date.now();
     this.options.onPendingChange(true);
     this.schedule(this.options.debounceMs);
+  }
+
+  retry(): void {
+    if (this.disposed) return;
+    this.clearTimer();
+    void this.persistLatest();
+  }
+
+  discard(): void {
+    this.clearTimer();
+    this.confirmedRevision = this.latestRevision;
+    this.options.onPendingChange(false);
   }
 
   dispose(): void {
@@ -59,6 +72,10 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
     const contents = this.latestContents;
     const revision = this.latestRevision;
     const result = await this.options.persist(contents);
+    if (result === null) {
+      this.saving = false;
+      return;
+    }
     const succeeded = result._tag === "Success";
     let confirmed = false;
     if (succeeded) {
@@ -81,5 +98,76 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
     } else {
       this.schedule(remainingDebounce);
     }
+  }
+}
+
+export type FileSaveStatus =
+  | "saved"
+  | "unsaved"
+  | "saving"
+  | "failed"
+  | "changed"
+  | "deleted"
+  | "reloading"
+  | "reloadFailed";
+
+/** File-owned state survives replacement of source and Markdown editors. */
+export class FileSaveSession {
+  status: FileSaveStatus = "saved";
+  overwrite = false;
+  generation = 0;
+  readonly coordinators = new Set<FileSaveCoordinator>();
+  private pending = Promise.resolve();
+  private readonly listeners = new Set<() => void>();
+
+  readonly subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  };
+  readonly getStatus = () => this.status;
+
+  get blocked() {
+    return (
+      this.status === "changed" ||
+      this.status === "deleted" ||
+      this.status === "reloading" ||
+      this.status === "reloadFailed"
+    );
+  }
+
+  requestOverwrite(): boolean {
+    if (!this.blocked || this.status === "reloading") return false;
+    this.overwrite = true;
+    this.setStatus("unsaved");
+    return true;
+  }
+
+  takeOverwrite(): boolean {
+    const overwrite = this.overwrite;
+    this.overwrite = false;
+    return overwrite;
+  }
+
+  setStatus(status: FileSaveStatus): void {
+    this.status = status;
+    for (const listener of this.listeners) listener();
+  }
+
+  enqueue<A>(run: () => Promise<A>): Promise<A> {
+    const next = this.pending.then(run);
+    this.pending = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  discard(): void {
+    this.generation += 1;
+    this.overwrite = false;
+    for (const coordinator of this.coordinators) coordinator.discard();
+    this.setStatus("saved");
   }
 }

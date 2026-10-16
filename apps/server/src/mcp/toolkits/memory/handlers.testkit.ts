@@ -12,6 +12,9 @@ import searchMigration from "../../../persistence/Migrations/073_MemorySearchCou
 import hubMigration from "../../../persistence/Migrations/072_MemoryHubSync.ts";
 import lineageMigration from "../../../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../../../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
+import reportMigration from "../../../persistence/Migrations/077_MemoryReportLifecycle.ts";
+import usageMigration from "../../../persistence/Migrations/078_MemoryUsageCounters.ts";
+import revertMigration from "../../../persistence/Migrations/079_MemoryRevertResults.ts";
 import * as RepositoryResolver from "../../../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as Store from "../../../memory/MemoryStore.ts";
@@ -37,6 +40,9 @@ const database = Layer.effectDiscard(
     Effect.andThen(searchMigration),
     Effect.andThen(lineageMigration),
     Effect.andThen(checkpointMigration),
+    Effect.andThen(reportMigration),
+    Effect.andThen(usageMigration),
+    Effect.andThen(revertMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storage = Store.layer.pipe(Layer.provideMerge(database));
@@ -46,6 +52,14 @@ const makeCore = <E, R>(
   environmentLayer = identity,
 ) =>
   serviceLayer.pipe(
+    Layer.provide(
+      Layer.succeed(Settings.MemoryHubCommittedSettings, {
+        read: Effect.succeed({
+          settings: { mode: "hub" as const, memorySpaceId: space },
+          version: 1,
+        }),
+      }),
+    ),
     Layer.provideMerge(
       Quota.layer.pipe(Layer.provideMerge(Store.layer.pipe(Layer.provideMerge(databaseLayer)))),
     ),

@@ -2422,6 +2422,13 @@ describe("WP4 task ceiling propagation codecs", () => {
       updatedAt: now,
     };
     expect(decodeOrchestrationV2Subagent(child)).toMatchObject({ memoryGrantCeiling: "none" });
+    expect(decodeOrchestrationV2Subagent(child)).not.toHaveProperty("currentMemoryAccess");
+    const assessment = { access: "none", reason: "environment_off" } as const;
+    expect(
+      encodeOrchestrationV2SubagentJson(
+        decodeOrchestrationV2Subagent({ ...child, currentMemoryAccess: assessment }),
+      ),
+    ).toHaveProperty("currentMemoryAccess", assessment);
     expect(
       encodeOrchestrationV2SubagentJson(decodeOrchestrationV2Subagent(child)),
     ).not.toHaveProperty("memoryGrantCeiling");
@@ -2463,6 +2470,11 @@ it("round-trips usage-limit run ancestry and omits absent ancestry on the wire",
   expect(encodeMemoryRun(decodeMemoryRun(legacy))).not.toHaveProperty(
     "usageLimitContinuationOfRunId",
   );
+  expect(encodeMemoryRun(decodeMemoryRun(legacy))).not.toHaveProperty("currentMemoryAccess");
+  const assessment = { access: "read", reason: "read_only_destination" } as const;
+  expect(
+    encodeMemoryRun(decodeMemoryRun({ ...legacy, currentMemoryAccess: assessment })),
+  ).toHaveProperty("currentMemoryAccess", assessment);
   const continuation = { ...legacy, usageLimitContinuationOfRunId: "run-original" };
   expect(encodeMemoryRun(decodeMemoryRun(continuation))).toEqual(continuation);
 });
