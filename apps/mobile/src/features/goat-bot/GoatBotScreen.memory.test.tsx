@@ -18,6 +18,7 @@ vi.mock("react-native-keyboard-controller", () => ({
 vi.mock("../../native/NativeScrollViewMarker", () => ({ NativeScrollViewMarker: () => null }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ bottom: 0 }) }));
 vi.mock("./useMobileGoatBotSession", () => ({ useMobileGoatBotSession: () => ({}) }));
+vi.mock("./GoatBotAvatar", () => ({ GoatBotAvatar: () => null }));
 import { GoatBotTimelineRow } from "./GoatBotScreen";
 let h: NativeMemoryHarness;
 let view: ReturnType<typeof renderNative>;
