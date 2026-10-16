@@ -41,6 +41,8 @@ export const protocolExecutable = (
     drain?: boolean;
     /** Build commit time answered by `__ssh-helper commit-time`; unstamped when absent. */
     commitTime?: number;
+    /** The CLI lists memory scopes in `auth session issue --help`; builds before memory do not. */
+    memoryScopes?: boolean;
   },
   state: string,
 ) => {
@@ -133,6 +135,9 @@ fs.writeFileSync(path.join(test, "accepted-ready-" + record.pid), "ready");
   const req = http.get("http://127.0.0.1:" + args[2] + "/", res => {
 res.resume(); res.on("end", () => process.exit(res.statusCode === 200 ? 0 : 1));
   }); req.on("error", () => process.exit(1));
+} else if (args[0] === "auth" && args.includes("--help")) {
+  console.log("  --scope choice  Authorization scope to grant. (choices: " +
+    (${JSON.stringify(signals.memoryScopes ?? true)} ? "memory:read, memory:write, " : "") + "orchestration:read, orchestration:operate)");
 } else if (args[0] === "auth") {
   event("auth", { args });
   if (fs.existsSync(path.join(test, "pairing-fail"))) process.exit(2);
@@ -222,6 +227,8 @@ export const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* 
   drain?: boolean;
   /** Commit time of the installed old build; unstamped when absent. */
   commitTime?: number;
+  /** The installed old build can issue memory scopes (default true, as for current builds). */
+  memoryScopes?: boolean;
   candidateSignals?: { ssh: number; orchestration: number; drain?: boolean; commitTime?: number };
 }) {
   const fs = yield* FileSystem.FileSystem;
@@ -471,6 +478,7 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
     secondary = false,
     options: SshTunnel.RemoteGoatRunnerOptions = {},
     prepared?: SshTunnel.PreparedRemoteRuntime,
+    session: Partial<SshTunnel.RemoteMcpClientSessionOptions> = {},
   ) => {
     const inputRunner = { ...runner, ...options, keepExistingRunner: secondary };
     const action =
@@ -499,7 +507,7 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
             )
           : SshTunnel.issueRemoteMcpClientSession(
               uploadTarget,
-              { label: "fixture", ttl: "1h", runtimeModeCeiling: null },
+              { label: "fixture", ttl: "1h", runtimeModeCeiling: null, ...session },
               {},
               inputRunner,
               prepared,

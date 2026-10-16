@@ -55,6 +55,10 @@ if [ "$1" = __ssh-helper ] && [ "$2" = protocol ]; then
   esac
   exit 0
 fi
+# An older CLI lists its scope choices without memory scopes.
+case " $* " in
+  *" --help "*) printf '  --scope choice  (choices: ${rejectMemory ? "" : "memory:read, memory:write, "}orchestration:read)\\n'; exit 0 ;;
+esac
 if [ -f "$HOME/call-1.args" ]; then
   ARGS="$HOME/call-2.args"
 else
@@ -120,7 +124,7 @@ JSON
     );
     // Await shell completion without blocking the worker or imposing a wall-clock
     // cutoff on the protocol and hash checks when the full suite is busy.
-    return Effect.callback<string, Error>((resume) => {
+    return Effect.callback<string, Error & { readonly stdout?: string }>((resume) => {
       const child = NodeChildProcess.execFile(
         remoteShell,
         [],
@@ -129,7 +133,10 @@ JSON
           env: { HOME: home, PATH: process.env.PATH, LC_ALL: "C" },
           encoding: "utf8",
         },
-        (error, stdout) => resume(error === null ? Effect.succeed(stdout) : Effect.fail(error)),
+        (error, stdout) =>
+          resume(
+            error === null ? Effect.succeed(stdout) : Effect.fail(Object.assign(error, { stdout })),
+          ),
       );
       child.stdin?.end(script);
       return Effect.sync(() => {
@@ -240,6 +247,13 @@ JSON
           ]).pipe(Effect.result);
           expect(result._tag).toBe("Failure");
           expect(() => receivedArgs(2)).toThrow();
+          if (rejectMemory && Result.isFailure(result)) {
+            // The CLI cannot issue memory scopes: the script names it and issues nothing.
+            expect("stdout" in result.failure ? result.failure.stdout : "").toContain(
+              `GOAT_SESSION_ERROR=memory_scopes_unsupported runtime=${archiveVersion}`,
+            );
+            expect(() => receivedArgs(1)).toThrow();
+          }
         }
       }),
   );

@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ProviderInstanceId } from "@goat/contracts";
 import { describe, expect, it, vi } from "@effect/vitest";
 import * as SshConfig from "@goat/ssh/config";
+import { SshPairingError } from "@goat/ssh/errors";
 import * as SshTunnel from "@goat/ssh/tunnel";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -120,5 +121,79 @@ describe("SSH dispatch pending runtime", () => {
           discover.mockRestore();
         }
       }),
+  );
+});
+
+describe("SSH dispatch memory session refusal", () => {
+  it.effect("reports the remote runtime that cannot grant memory instead of an SSH failure", () =>
+    Effect.gen(function* () {
+      const refusal = new SshPairingError({
+        reason: "memory-scopes-unsupported",
+        message:
+          "GOAT 0.1.0-dev.637a98351 on build-box cannot grant memory access to tasks. It will be replaced with GOAT 0.1.0-dev.37d2df283 when its current work finishes.",
+        stdout: "GOAT_SESSION_ERROR=memory_scopes_unsupported runtime=0.1.0-dev.637a98351\n",
+      });
+      const manager = SshTunnel.SshEnvironmentManager.of({
+        ensureEnvironment: () =>
+          Effect.succeed({
+            target,
+            httpBaseUrl: "http://127.0.0.1:9/",
+            wsBaseUrl: "ws://127.0.0.1:9/",
+            pairingToken: null,
+            remotePort: 3774,
+          }),
+        disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
+        revalidateTunnels: () => Effect.void,
+        issueMcpClientSession: () => Effect.fail(refusal),
+        runRemoteScript: () =>
+          Effect.succeed({
+            stdout:
+              "T3B\t1\nHOME\t/home/agent\nOS\tLinux\nPATH\t/home/agent/repo\nREAL\t/home/agent/repo\n",
+            stderr: "",
+          }),
+      });
+      const discover = vi
+        .spyOn(SshConfig, "discoverSshHosts")
+        .mockReturnValue(Effect.succeed([{ ...target, source: "ssh-config" }]));
+      const managerLayer = vi
+        .spyOn(SshTunnel.SshEnvironmentManager, "layer")
+        .mockReturnValue(Layer.succeed(SshTunnel.SshEnvironmentManager, manager));
+      const remoteFetch = vi.fn(() => Promise.reject(new Error("Unexpected MCP")));
+      vi.stubGlobal("fetch", remoteFetch);
+      try {
+        const failed = yield* Effect.gen(function* () {
+          const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+          return yield* dispatch
+            .launchThread<never, never>(
+              {
+                host: target.alias,
+                cwd: "/home/agent/repo",
+                workspace: { type: "cwd" },
+                title: "memory",
+                runtimeMode: "approval-required",
+                callerRuntimeMode: "approval-required",
+                memoryGrantCeiling: "read",
+              },
+              Effect.void,
+            )
+            .pipe(Effect.flip);
+        }).pipe(
+          Effect.provide(
+            SshRemoteDispatch.layer.pipe(
+              Layer.provide(ServerConfig.layerTest("/fixture", { prefix: "goat-memory-test-" })),
+              Layer.provide(FetchHttpClient.layer),
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        );
+        expect(failed.reason).toBe("remote_refused");
+        expect(failed.message).toBe(refusal.message);
+        expect(remoteFetch).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+        managerLayer.mockRestore();
+        discover.mockRestore();
+      }
+    }),
   );
 });

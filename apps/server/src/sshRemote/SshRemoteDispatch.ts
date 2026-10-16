@@ -24,7 +24,7 @@ import * as NetService from "@goat/shared/Net";
 import { targetConnectionKey } from "@goat/ssh/command";
 import * as SshAuth from "@goat/ssh/auth";
 import { discoverSshHosts } from "@goat/ssh/config";
-import { SshPasswordPromptError } from "@goat/ssh/errors";
+import { SshPairingError, SshPasswordPromptError } from "@goat/ssh/errors";
 import * as SshTunnel from "@goat/ssh/tunnel";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
@@ -607,12 +607,20 @@ const make = Effect.gen(function* () {
               : ["memory:read", "memory:write"],
       }),
     ).pipe(
+      // The remote answered and refused; its message names the runtime and what happens next.
+      Effect.mapError((error) =>
+        error instanceof SshPairingError && error.reason === "memory-scopes-unsupported"
+          ? failure("remote_refused", error.message)
+          : error,
+      ),
       approvals
         ? Effect.mapError((error) =>
-            failure(
-              "remote_refused",
-              `${target.alias} could not issue a GOAT session that may answer approvals: ${describe(error)}. Update GOAT there, or let the user answer in that thread.`,
-            ),
+            error instanceof SshRemoteDispatchError
+              ? error
+              : failure(
+                  "remote_refused",
+                  `${target.alias} could not issue a GOAT session that may answer approvals: ${describe(error)}. Update GOAT there, or let the user answer in that thread.`,
+                ),
           )
         : sshFailed(target.alias),
     );
@@ -1011,11 +1019,7 @@ const make = Effect.gen(function* () {
     if ("type" in bootstrap)
       return yield* failure(
         "host_unavailable",
-        pendingRuntimeMessage(
-          input.target.alias,
-          bootstrap.pending.reason,
-          bootstrap.pending.detail,
-        ),
+        pendingRuntimeMessage(input.target.alias, bootstrap.pending),
       );
     const session = yield* sessionFor(input.target, input.runtimeMode);
     if (!session.ceilingApplied)
@@ -1122,7 +1126,7 @@ const make = Effect.gen(function* () {
     if ("type" in bootstrap)
       return yield* failure(
         "host_unavailable",
-        pendingRuntimeMessage(target.alias, bootstrap.pending.reason, bootstrap.pending.detail),
+        pendingRuntimeMessage(target.alias, bootstrap.pending),
       );
     connected.add(target.alias);
     const versionNote = remoteVersionNote(
@@ -1359,7 +1363,7 @@ const make = Effect.gen(function* () {
     if ("type" in bootstrap)
       return yield* failure(
         "host_unavailable",
-        pendingRuntimeMessage(target.alias, bootstrap.pending.reason, bootstrap.pending.detail),
+        pendingRuntimeMessage(target.alias, bootstrap.pending),
       );
     connected.add(target.alias);
     // Right before the request: the caller may have lost authority during SSH.
@@ -1515,14 +1519,17 @@ export const layer = Layer.effect(SshRemoteDispatch, make).pipe(
 
 function pendingRuntimeMessage(
   alias: string,
-  reason: "busy" | "unknown" | "contended",
-  detail?: "recovery-stale",
+  pending: import("@goat/contracts").SshRuntimePendingReplacement,
 ) {
-  if (detail === "recovery-stale")
+  if (pending.detail === "recovery-stale")
     return `${alias}'s recovery is locked. Remove ~/.goat/ssh-launch/replacement.recovery on the remote host after checking that no GOAT client is replacing this runtime.`;
-  return reason === "contended"
-    ? `Another client is replacing ${alias}'s GOAT runtime; retry later`
-    : reason === "unknown"
-      ? `${alias}'s GOAT runtime is waiting for a verified idle response before replacement; retry later`
-      : `${alias}'s GOAT runtime is being replaced when its current work finishes; retry later`;
+  if (pending.reason === "contended")
+    return `Another client is replacing ${alias}'s GOAT runtime; retry later`;
+  const why =
+    pending.replacement === "capability"
+      ? `GOAT ${pending.liveVersion} cannot grant memory access to tasks, so `
+      : "";
+  return pending.reason === "unknown"
+    ? `${why}${alias}'s GOAT runtime is waiting for a verified idle response before replacement; retry later`
+    : `${why}${alias}'s GOAT runtime is being replaced when its current work finishes; retry later`;
 }
