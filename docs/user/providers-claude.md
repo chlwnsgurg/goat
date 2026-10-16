@@ -14,7 +14,8 @@ again. For another account, add a custom Claude Cloud instance and choose its Cl
 
 Claude Cloud starts from your project folder and its current GitHub branch.
 Local changes and commits that have not been pushed may be included. You do not
-need to publish the branch before starting.
+need to publish the branch before starting. New files that Git does not track yet
+may be left out; add them to Git first if the task needs them.
 
 If Claude Code has not trusted the project folder, open it once with `claude` on
 the environment's machine, using the same account and config as your selected

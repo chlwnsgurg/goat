@@ -665,7 +665,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
     });
   });
 
-  it("pre-approves only read-only goat tools in a read-only sandbox", () => {
+  it("uses the explicit goat approval policy in a read-only sandbox", () => {
     const threadId = ThreadId.make("thread-claude-mcp-read-only");
     const mcpSession = mcpSessionFor(threadId);
     const overrides = ClaudeAdapterV2.claudeMcpQueryOverrides({
@@ -685,7 +685,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
     assert.isFalse(overrides.allowedTools?.includes(ClaudeAdapterV2.CLAUDE_GOAT_MCP_TOOL_WILDCARD));
   });
 
-  it("pre-approves only read-only goat tools in a read-only sandbox without an allowlist", () => {
+  it("uses the explicit goat approval policy in a read-only sandbox without an allowlist", () => {
     const threadId = ThreadId.make("thread-claude-mcp-read-only-no-allowlist");
     const mcpSession = mcpSessionFor(threadId);
     const overrides = ClaudeAdapterV2.claudeMcpQueryOverrides({
@@ -754,7 +754,41 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
     assert.equal(rotatedKey, initialKey);
   });
 
-  it("matches the read-only allowlist to the orchestrator toolkit annotations", () => {
+  it("preserves the explicit goat preapproval policy independently of read-only metadata", () => {
+    const overrides = ClaudeAdapterV2.claudeMcpQueryOverrides({
+      mcpSession: mcpSessionFor(ThreadId.make("thread-claude-mcp-approval-policy")),
+      readOnlySandbox: true,
+    });
+    assert.deepEqual(overrides.allowedTools, [
+      "mcp__goat__orchestrator_capabilities",
+      "mcp__goat__list_scheduled_tasks",
+      "mcp__goat__goat_thread_list",
+      "mcp__goat__goat_thread_wait",
+      "mcp__goat__goat_thread_status",
+      "mcp__goat__goat_thread_watch_list",
+      "mcp__goat__goat_pending_request_list",
+      "mcp__goat__goat_pending_request_read",
+      "mcp__goat__goat_thread_configuration",
+      "mcp__goat__goat_thread_transfers",
+      "mcp__goat__goat_worktree_status",
+      "mcp__goat__goat_worktree_list",
+      "mcp__goat__goat_worktree_inventory",
+      "mcp__goat__goat_project_list",
+      "mcp__goat__goat_project_read",
+      "mcp__goat__goat_thread_search",
+      "mcp__goat__goat_preview_list",
+      "mcp__goat__goat_environment_read",
+      "mcp__goat__goat_host_status",
+      "mcp__goat__goat_provider_diagnose",
+      "mcp__goat__goat_queue_list",
+      "mcp__goat__goat_queue_read",
+      "mcp__goat__html_preview",
+      "mcp__goat__html_render",
+    ]);
+    assert.isFalse(overrides.allowedTools?.includes("mcp__goat__goat_thread_read"));
+  });
+
+  it("tracks read-only metadata separately from automatic approval exceptions", () => {
     const readOnlyToolNames = [
       ...Object.values(OrchestratorToolkit.tools),
       ...Object.values(ThreadToolkit.tools),
@@ -771,8 +805,13 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       .sort();
 
     assert.deepEqual(
-      [...ClaudeAdapterV2.CLAUDE_READ_ONLY_GOAT_MCP_ALLOWED_TOOLS].sort(),
       readOnlyToolNames,
+      [
+        ...ClaudeAdapterV2.CLAUDE_READ_ONLY_GOAT_MCP_ALLOWED_TOOLS.filter(
+          (name) => name !== "mcp__goat__html_render",
+        ),
+        "mcp__goat__goat_thread_read",
+      ].sort(),
     );
   });
 });

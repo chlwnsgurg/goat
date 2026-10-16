@@ -187,6 +187,19 @@ it("gives every entry a unique path, legacy name and resolvable schema reference
   }
 });
 
+it("preserves the memory injection guidance in registry and published descriptions", () => {
+  const descriptions = {
+    memory_search:
+      "Search memory (default scope: user). fts is phrase search; use mode substring for partial text. Pass nextCursor unchanged with the same query and scope, even when items is empty. If indexCoverage is partial/unavailable, do not conclude a memory is absent.",
+    memory_upsert:
+      "Create or update memory with an explicit memory:write grant. Read-only sessions cannot write. Keep one current assertion per item; correct an existing memory by updating it, not creating another. Do not store progress reports, tool output, or execution summaries.",
+  };
+  expect(agentSurfaceRegistry["memory.search"].description).toBe(descriptions.memory_search);
+  expect(agentSurfaceRegistry["memory.upsert"].description).toBe(descriptions.memory_upsert);
+  expect(Tool.getDescription(MemoryToolkit.tools.memory_search)).toBe(descriptions.memory_search);
+  expect(Tool.getDescription(MemoryToolkit.tools.memory_upsert)).toBe(descriptions.memory_upsert);
+});
+
 it.effect(
   "assembles exactly the registry, with effect hints from each real handler declaration",
   () =>

@@ -425,7 +425,7 @@ export const agentSurfaceRegistry = {
     toolkit: "memory",
     summary: "Search memory.",
     description:
-      "Search memory. Return the service cursor unchanged; pass it to the next request with the same query and scope.",
+      "Search memory (default scope: user). fts is phrase search; use mode substring for partial text. Pass nextCursor unchanged with the same query and scope, even when items is empty. If indexCoverage is partial/unavailable, do not conclude a memory is absent.",
     effect: "read",
     hostRoutable: false,
     requires: "either",
@@ -511,7 +511,7 @@ export const agentSurfaceRegistry = {
     toolkit: "memory",
     summary: "Create or update memory with an explicit memory:write grant.",
     description:
-      "Create or update memory with an explicit memory:write grant. Read-only sessions cannot write.",
+      "Create or update memory with an explicit memory:write grant. Read-only sessions cannot write. Keep one current assertion per item; correct an existing memory by updating it, not creating another. Do not store progress reports, tool output, or execution summaries.",
     effect: "write",
     hostRoutable: false,
     requires: "either",
