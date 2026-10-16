@@ -1922,6 +1922,7 @@ const ServerSettingsPatchCodec = Schema.Unknown.check(
       !Predicate.isObject(raw) ||
       (!Object.hasOwn(raw, "memoryHub") &&
         !Object.hasOwn(raw, "memoryHubVersion") &&
+        !Object.hasOwn(raw, "memoryHubProvenance") &&
         !Object.hasOwn(raw, "memoryOwnerSourceReadPolicy") &&
         !Object.hasOwn(raw, "memoryOwnerSourceReadPolicyVersion")),
   ),

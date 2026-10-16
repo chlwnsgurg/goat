@@ -99,6 +99,7 @@ const coreFor = (environmentIdentity = identity, quotaLayer = quota) =>
     Layer.provide(
       Layer.succeed(Settings.MemoryHubCommittedSettings, {
         read: Effect.succeed({
+          provenance: null,
           settings: { mode: "hub" as const, memorySpaceId: space },
           version: 1,
         }),
@@ -2136,7 +2137,10 @@ it.effect.each([
             assert.isEmpty(
               yield* sql`SELECT name FROM sqlite_master WHERE name='memory_last_ready_space'`,
             );
-            assert.deepStrictEqual(yield* runMigrations(), [[81, "MemoryLastReadySpace"]]);
+            assert.deepStrictEqual(yield* runMigrations(), [
+              [81, "MemoryLastReadySpace"],
+              [82, "MemoryHubAdministered"],
+            ]);
             const adapter = yield* statusRuntime;
             const result = yield* Effect.scoped(
               Effect.gen(function* () {
@@ -4456,6 +4460,7 @@ it.effect.each(["pull", "ack"] as const)(
           Layer.provide(
             Layer.succeed(Settings.MemoryHubCommittedSettings, {
               read: Effect.succeed({
+                provenance: null,
                 settings: { mode: "hub" as const, memorySpaceId: space },
                 version: 1,
               }),
@@ -5190,7 +5195,7 @@ it.effect.each(["stale-candidate", "ticket-write-failure"] as const)(
 );
 
 it.effect.each(["bootstrap", "exchange"] as const)(
-  "first null-space hub configure bootstraps its own replica without HTTP: %s",
+  "automatic hub initialization bootstraps its own replica without HTTP: %s",
   (phase) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -5212,7 +5217,7 @@ it.effect.each(["bootstrap", "exchange"] as const)(
             }),
           ),
         );
-        const selfHub = Hub.layer.pipe(
+        const selfHub = Layer.merge(Hub.layer, Hub.administratorLayer).pipe(
           Layer.provideMerge(Hub.activityLayer),
           Layer.provide(
             Layer.effect(
@@ -5249,27 +5254,26 @@ it.effect.each(["bootstrap", "exchange"] as const)(
         );
         const context = yield* Layer.build(app);
         yield* Effect.gen(function* () {
-          const admin = yield* Hub.makeAdministrator;
-          const configured = yield* admin.update(
-            {
-              requestId: M.MemoryOperationId.make(id(98000)),
-              expectedVersion: 0,
-              action: "configure",
-              settings: { mode: "hub", memorySpaceId: null },
-            },
-            Effect.void,
-          );
-          if (configured.view.settings.mode !== "hub" || !configured.view.settings.memorySpaceId)
-            throw new Error("fixture hub configure");
-          const allocated = configured.view.settings.memorySpaceId;
-          const store = yield* Store.MemoryStore;
+          yield* (yield* Settings.ServerSettingsService).start;
+          const admin = yield* Hub.MemoryHubAdministrator;
           const sync = yield* Sync.MemorySyncService;
-          assert.strictEqual(
-            (yield* store.readBootstrap({ memorySpaceId: allocated, hubEnvironmentId: local }))
-              .state,
-            "unbound",
-          );
+          const backend = yield* Hub.MemoryHubAdminSettings;
+          assert.deepStrictEqual(yield* backend.readPublication, { state: "current" });
           yield* sync.start;
+          assert.deepStrictEqual(yield* backend.readPublication, { state: "current" });
+          yield* sync.initializeDefaultHub;
+          yield* sync.initializeDefaultHub;
+          const configured = yield* sync.getHubSettings({}, Effect.void);
+          if (configured.settings.mode !== "hub" || !configured.settings.memorySpaceId)
+            throw new Error("fixture hub configure");
+          const allocated = configured.settings.memorySpaceId;
+          assert.isFalse(Object.hasOwn(configured, "provenance"));
+          assert.deepStrictEqual((yield* backend.read).provenance, {
+            source: "auto-initialized",
+            memorySpaceId: allocated,
+          });
+          assert.strictEqual(configured.version, 1);
+          const store = yield* Store.MemoryStore;
           assert.deepStrictEqual(yield* sync.readLocalReadiness(), {
             memorySpaceId: allocated,
             bootstrap: "ready",
@@ -5305,7 +5309,7 @@ it.effect.each(["bootstrap", "exchange"] as const)(
           const provisioned = yield* admin.update(
             {
               requestId: M.MemoryOperationId.make(id(98003)),
-              expectedVersion: configured.view.version,
+              expectedVersion: configured.version,
               action: "provisionMember",
               environmentId: remote,
             },
@@ -5336,6 +5340,7 @@ it.effect.each(["bootstrap", "exchange"] as const)(
             Layer.provide(
               Layer.succeed(Settings.MemoryHubCommittedSettings, {
                 read: Effect.succeed({
+                  provenance: null,
                   settings: { mode: "hub" as const, memorySpaceId: space },
                   version: 1,
                 }),

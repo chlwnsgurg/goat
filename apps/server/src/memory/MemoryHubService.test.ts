@@ -1,3 +1,4 @@
+import { type MemoryHubSettingsSnapshot } from "./MemoryHubSettings.ts";
 import { checkUsage } from "./MemoryUsageScan.testkit.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
@@ -29,6 +30,8 @@ import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointA
 import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import usageMigration from "../persistence/Migrations/078_MemoryUsageCounters.ts";
 import revertMigration from "../persistence/Migrations/079_MemoryRevertResults.ts";
+import readyMigration from "../persistence/Migrations/081_MemoryLastReadySpace.ts";
+import adminMigration from "../persistence/Migrations/082_MemoryHubAdministered.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Store from "./MemoryStore.ts";
@@ -57,6 +60,8 @@ const database = Layer.effectDiscard(
     Effect.andThen(reportMigration),
     Effect.andThen(usageMigration),
     Effect.andThen(revertMigration),
+    Effect.andThen(readyMigration),
+    Effect.andThen(adminMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storeLayer = Store.layer.pipe(Layer.provideMerge(database));
@@ -64,6 +69,7 @@ const core = Service.layer.pipe(
   Layer.provide(
     Layer.succeed(Settings.MemoryHubCommittedSettings, {
       read: Effect.succeed({
+        provenance: null,
         settings: { mode: "hub" as const, memorySpaceId: space },
         version: 1,
       }),
@@ -565,21 +571,20 @@ const adminDependencies = Secrets.layer.pipe(
 );
 const adminFixture = Effect.gen(function* () {
   yield* seed;
-  const view = yield* Ref.make<M.MemoryHubSettingsSnapshot>({
+  const view = yield* Ref.make<MemoryHubSettingsSnapshot>({
+    provenance: null,
     settings: { mode: "hub", memorySpaceId: space },
     version: 0,
   });
   const failApply = yield* Ref.make(false);
   const applied = yield* Ref.make(
-    new Map<
-      M.MemoryOperationId,
-      { digest: string; result: { view: M.MemoryHubSettingsSnapshot } }
-    >(),
+    new Map<M.MemoryOperationId, { digest: string; result: { view: MemoryHubSettingsSnapshot } }>(),
   );
   const lock = yield* Semaphore.make(1);
   const backend: Hub.MemoryHubAdminSettings["Service"] = {
     withLock: (effect) => lock.withPermit(effect),
     read: Ref.get(view),
+    readPublication: Effect.succeed({ state: "current" }),
     readPreviousHubRequestId: Effect.succeed(null),
     readPreviousHubSpace: Effect.succeed(space),
     apply: (record, permit) =>
@@ -689,8 +694,10 @@ describe("MemoryHubAdministrator", () => {
       assert.strictEqual(target(readded.view).status, "pending_ack");
       assert.strictEqual(target(readded.view).credentialVersion, 5);
       assert.deepStrictEqual(
-        (yield* Hub.readSettingsView(store, { settings: { mode: "disabled" }, version: 4 }))
-          .members,
+        (yield* Hub.readSettingsView(store, {
+          settings: { mode: "disabled" },
+          version: 4,
+        })).members,
         [],
       );
     }).pipe(Effect.provide(adminDependencies)),
@@ -1365,7 +1372,7 @@ describe("MemoryHubAdministrator", () => {
             const ready: Store.AdminRecord = {
               ...record,
               stage: "ready",
-              result: { view: { settings: { mode: "disabled" }, version: 1 } },
+              result: { view: { provenance: null, settings: { mode: "disabled" }, version: 1 } },
             };
             yield* store.writeHubAdminTx({ record: ready, expectedStage: "activated" });
             if (n === 0)

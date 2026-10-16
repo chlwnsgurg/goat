@@ -499,7 +499,11 @@ export function createNativeMemoryHarness() {
   const responses = new Map<string, (input: unknown) => unknown>([
     [
       WS_METHODS.memoryHubSettingsGet,
-      () => ({ settings: { mode: "hub", memorySpaceId: nativeSpace }, members: [], version: 1 }),
+      () => ({
+        settings: { mode: "hub", memorySpaceId: nativeSpace },
+        members: [],
+        version: 1,
+      }),
     ],
     [WS_METHODS.memoryOwnerSourceReadPolicyGet, () => nativeOwnerPolicy],
     [WS_METHODS.memorySyncStatus, () => nativeSyncStatus],

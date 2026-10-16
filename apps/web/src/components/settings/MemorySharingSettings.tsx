@@ -393,7 +393,7 @@ export function MemoryAdministration({
             !hub
               ? "Sharing settings are not loaded yet."
               : hub.settings.mode === "hub"
-                ? "Devices you add here share memory with it."
+                ? "Memory is on. Devices you add here share memory with it."
                 : hub?.settings.mode === "member"
                   ? `Shares memory with ${name(hub.settings.hubEnvironmentId)}.`
                   : "Memory is off on this device. Make this device the hub, or add it from the hub's Memory settings."

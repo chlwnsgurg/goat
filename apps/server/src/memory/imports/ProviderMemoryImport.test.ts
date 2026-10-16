@@ -1114,6 +1114,7 @@ const serviceLive = (
     Layer.provide(
       Layer.succeed(Settings.MemoryHubCommittedSettings, {
         read: Effect.succeed({
+          provenance: null,
           settings: { mode: "hub" as const, memorySpaceId: space },
           version: 1,
         }),

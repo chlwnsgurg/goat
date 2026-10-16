@@ -25,6 +25,7 @@ const store = Store.layer.pipe(Layer.provideMerge(database));
 const serviceLive = (
   serviceLayer = Service.layer,
   readSettings: Settings.MemoryHubCommittedSettings["Service"]["read"] = Effect.succeed({
+    provenance: null,
     settings: { mode: "hub" as const, memorySpaceId: space },
     version: 1,
   }),

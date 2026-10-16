@@ -719,13 +719,30 @@ const layerRegisteredMemoryHub = layerMemoryHubRoutes.pipe(
   HttpRouter.provideRequest(layerMemoryHub),
   Layer.provideMerge(layerMemoryHub),
 );
-export const layerMemorySyncStarted = Layer.effectDiscard(
+export const layerMemoryDefaultStarted = Layer.effectDiscard(
   Effect.gen(function* () {
     const sync = yield* MemorySync.MemorySyncService;
-    const binding = yield* Effect.serviceOption(MemorySourceReadBinding);
-    if (Option.isSome(binding)) yield* binding.value.bind(sync);
-    yield* sync.start;
+    const settings = yield* ServerSettings.ServerSettingsService;
+    yield* Effect.andThen(settings.ready, sync.initializeDefaultHub).pipe(
+      Effect.catch(() =>
+        Effect.logWarning("memory initialization unavailable", {
+          code: "memory_default_unavailable",
+        }),
+      ),
+      Effect.forkScoped,
+    );
   }),
+);
+export const layerMemorySyncStarted = Layer.merge(
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const sync = yield* MemorySync.MemorySyncService;
+      const binding = yield* Effect.serviceOption(MemorySourceReadBinding);
+      if (Option.isSome(binding)) yield* binding.value.bind(sync);
+      yield* sync.start;
+    }),
+  ),
+  layerMemoryDefaultStarted,
 ).pipe(Layer.provideMerge(MemorySync.layer));
 
 /** Shared production runtime composition, including the single committed policy adapter. */

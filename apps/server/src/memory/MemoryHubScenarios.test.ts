@@ -344,6 +344,7 @@ describe("Memory hub assembled HTTP scenarios", () => {
         Settings.MemoryHubCommittedSettings.use((settings) => settings.read),
       );
       assert.deepStrictEqual(snapshot, {
+        provenance: null,
         settings: { mode: "disabled" },
         version: s.before.memoryHubVersion + 1,
       });
@@ -367,7 +368,11 @@ describe("Memory hub assembled HTTP scenarios", () => {
       const view = yield* s.run(
         store.transact(Settings.MemoryHubCommittedSettings.use((settings) => settings.read)),
       );
-      assert.deepStrictEqual(view, { settings: { mode: "disabled" }, version: enabledVersion + 1 });
+      assert.deepStrictEqual(view, {
+        provenance: null,
+        settings: { mode: "disabled" },
+        version: enabledVersion + 1,
+      });
       assert.strictEqual(
         view.version,
         (yield* s.run(Settings.ServerSettingsService.use((settings) => settings.getSettings)))

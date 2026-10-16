@@ -420,7 +420,9 @@ export function assertNoMemoryHubSettingsPatch(patch: unknown): void {
   if (
     patch !== null &&
     typeof patch === "object" &&
-    (Object.hasOwn(patch, "memoryHub") || Object.hasOwn(patch, "memoryHubVersion"))
+    (Object.hasOwn(patch, "memoryHub") ||
+      Object.hasOwn(patch, "memoryHubVersion") ||
+      Object.hasOwn(patch, "memoryHubProvenance"))
   ) {
     throw new Error("Memory hub settings require a dedicated transition.");
   }

@@ -2743,3 +2743,15 @@ it("storage generation notification stops selection without deleting recovery", 
   expect(container.textContent).toContain("Destination changed. Choose a scope and preview again.");
   expect((await store.load(destination))?.operationId).toBe(operationId);
 });
+
+it("shows automatically initialized memory as on and usable without an enable action", async () => {
+  state.queries.set("list", Option.some({ items: [], nextCursor: null }));
+  await supportedScreen(false);
+  expect(container.textContent).toContain("This device is the hub");
+  expect(container.textContent).toContain("Memory is on.");
+  expect(container.textContent).not.toContain("Memory off");
+  expect(container.textContent).not.toContain("Make this device the hub");
+  expect(container.textContent).not.toContain("Turn on memory to");
+  await click("Remember something");
+  expect(container.querySelector('[aria-label="Memory text"]')).not.toBeNull();
+});

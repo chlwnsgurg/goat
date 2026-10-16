@@ -15,6 +15,8 @@ import checkpointMigration from "../../../persistence/Migrations/076_MemoryCheck
 import reportMigration from "../../../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import usageMigration from "../../../persistence/Migrations/078_MemoryUsageCounters.ts";
 import revertMigration from "../../../persistence/Migrations/079_MemoryRevertResults.ts";
+import readyMigration from "../../../persistence/Migrations/081_MemoryLastReadySpace.ts";
+import administeredMigration from "../../../persistence/Migrations/082_MemoryHubAdministered.ts";
 import * as RepositoryResolver from "../../../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as Store from "../../../memory/MemoryStore.ts";
@@ -43,6 +45,8 @@ const database = Layer.effectDiscard(
     Effect.andThen(reportMigration),
     Effect.andThen(usageMigration),
     Effect.andThen(revertMigration),
+    Effect.andThen(readyMigration),
+    Effect.andThen(administeredMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storage = Store.layer.pipe(Layer.provideMerge(database));
@@ -55,6 +59,7 @@ const makeCore = <E, R>(
     Layer.provide(
       Layer.succeed(Settings.MemoryHubCommittedSettings, {
         read: Effect.succeed({
+          provenance: null,
           settings: { mode: "hub" as const, memorySpaceId: space },
           version: 1,
         }),
