@@ -57,10 +57,10 @@ describe("generate mobile Uniwind themes", () => {
         `--color-channel-nightly: ${dark ? "oklch(78.5% 0.115 274.713)" : "oklch(51.1% 0.262 276.966)"};`,
       );
       expect(body).toContain(
-        `--color-channel-dev-surface: ${dark ? "oklch(70.7% 0.165 254.624 / 16%)" : "oklch(48.8% 0.243 264.376 / 10%)"};`,
+        `--color-channel-dev-surface: ${dark ? "oklch(70.7% 0.165 254.624 / 10%)" : "oklch(48.8% 0.243 264.376 / 10%)"};`,
       );
       expect(body).toContain(
-        `--color-channel-nightly-surface: ${dark ? "oklch(78.5% 0.115 274.713 / 16%)" : "oklch(51.1% 0.262 276.966 / 10%)"};`,
+        `--color-channel-nightly-surface: ${dark ? "oklch(78.5% 0.115 274.713 / 10%)" : "oklch(51.1% 0.262 276.966 / 10%)"};`,
       );
     }
   });
