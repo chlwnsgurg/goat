@@ -14,6 +14,10 @@ import { formatSubagentDisplayTitle } from "@goat/client-runtime/state/subagent-
 import { isLiveSubagentTurnItem } from "@goat/client-runtime/state/subagentRuntime";
 import { extractToolActivityPresentation } from "@goat/client-runtime/work-log/tool-presentation";
 import {
+  fileChangeGroupLineCounts,
+  type WorkLogLineCounts,
+} from "@goat/client-runtime/work-log/line-counts";
+import {
   turnItemDetailRevision,
   turnItemHasDetail,
   turnItemNeedsDetailFetch,
@@ -215,6 +219,8 @@ type ThreadFeedEntryContent =
       readonly toolIcon?: WorkLogPresentationEntry["toolIcon"];
       readonly summaryToolIcon?: "browser" | "device" | "t3-code" | "pull-request";
       readonly hasFailure: boolean;
+      /** Total lines added and removed, for a settled group of edits that all reported counts. */
+      readonly lineCounts?: WorkLogLineCounts;
       readonly live: boolean;
       readonly shimmer: boolean;
       /** First sentence of the latest thought, shown above the live status line. */
@@ -1591,6 +1597,13 @@ function appendToolGroupRows(
         toolGroupAction(singleActivity.workEntry) !== "edit"
       ? resolveWorkEntryToolPresentation(singleActivity.workEntry, "completed")?.icon
       : undefined;
+  const summaryKind = toolGroupSummaryKind(
+    (live ? [latestActivity] : activities).map((activity) => activity.workEntry),
+  );
+  const lineCounts =
+    !live && summaryKind === "edit"
+      ? fileChangeGroupLineCounts(activities.map((activity) => activity.projectedItem.item))
+      : undefined;
   result.push({
     type: "work-toggle",
     id: shimmer ? LIVE_ACTIVITY_ROW_ID : `${live ? "work-live" : "work-toggle"}:${groupId}`,
@@ -1600,12 +1613,11 @@ function appendToolGroupRows(
     hiddenCount: activities.length,
     expanded,
     summary,
-    summaryKind: toolGroupSummaryKind(
-      (live ? [latestActivity] : activities).map((activity) => activity.workEntry),
-    ),
+    summaryKind,
     ...(groupToolSurface ? { toolSurface: groupToolSurface } : {}),
     ...(groupToolIcon ? { toolIcon: groupToolIcon } : {}),
     ...(summaryToolIcon ? { summaryToolIcon } : {}),
+    ...(lineCounts ? { lineCounts } : {}),
     ...(thought ? { thought } : {}),
     hasFailure: (() => {
       const lastToolLike = activities.findLast((activity) => activity.toolLike);
