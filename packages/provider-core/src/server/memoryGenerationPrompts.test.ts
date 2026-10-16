@@ -162,4 +162,32 @@ describe("memory generation prompts", () => {
       expect((yield* Effect.exit(buildMemorySummaryPrompt(exact)))._tag).toBe("Failure");
     }),
   );
+  it.effect("partitions messages when summary guidance takes the combined prompt over budget", () =>
+    Effect.gen(function* () {
+      const empty = {
+        ...summary,
+        messages: [
+          { messageId: M.MessageId.make("boundary1"), text: "", completed: true },
+          { messageId: M.MessageId.make("boundary2"), text: "", completed: true },
+        ],
+      };
+      const rendered = yield* buildMemorySummaryPrompt(empty);
+      const available =
+        MEMORY_GENERATION_PROMPT_MAX_UTF8_BYTES - new TextEncoder().encode(rendered.prompt).length;
+      const messages = empty.messages.map((message, index) => ({
+        ...message,
+        text: "x".repeat(index === 0 ? Math.floor(available / 2) : Math.ceil(available / 2) + 1),
+      }));
+      const chunks = yield* partitionMemorySummary({ ...summary, messages });
+      expect(chunks).toHaveLength(2);
+      expect(chunks.flatMap((chunk) => chunk.input.messages)).toEqual(messages);
+      for (const chunk of chunks) {
+        const result = yield* buildMemorySummaryPrompt(chunk.input);
+        expect(result.outputSchema).toBe(M.GenerateMemorySummaryResult);
+        expect(new TextEncoder().encode(result.prompt).length).toBeLessThanOrEqual(
+          MEMORY_GENERATION_PROMPT_MAX_UTF8_BYTES,
+        );
+      }
+    }),
+  );
 });
