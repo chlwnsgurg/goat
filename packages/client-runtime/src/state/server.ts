@@ -1370,6 +1370,14 @@ export function createServerEnvironmentAtoms<R, E>(
     }),
     // Off the config lane: answering a card must not queue behind settings
     // edits. One answer per card at a time.
+    openHandoff: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:handoff:open",
+      tag: WS_METHODS.handoffsOpen,
+    }),
+    respondHandoff: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:handoff:respond",
+      tag: WS_METHODS.handoffsRespond,
+    }),
     answerSecretRequest: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:secrets:answer-request",
       tag: WS_METHODS.secretsAnswerRequest,

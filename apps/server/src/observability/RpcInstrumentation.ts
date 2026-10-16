@@ -103,6 +103,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.scheduledTasksGetWebhookDelivery]: "scheduledTasks",
   [WS_METHODS.remoteLaunchesList]: "remoteLaunches",
   [WS_METHODS.secretsAnswerRequest]: "secrets",
+  [WS_METHODS.handoffsOpen]: "handoffs",
+  [WS_METHODS.handoffsRespond]: "handoffs",
   [CHANNEL_GATEWAY_WS_METHODS.ensureBot]: "channel",
   [CHANNEL_GATEWAY_WS_METHODS.getBotStatus]: "channel",
   [CHANNEL_GATEWAY_WS_METHODS.ingest]: "channel",

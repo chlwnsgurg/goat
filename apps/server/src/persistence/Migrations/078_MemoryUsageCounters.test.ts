@@ -51,6 +51,7 @@ it.effect(
       assert.deepStrictEqual(yield* runMigrations(), [
         [78, "MemoryUsageCounters"],
         [79, "MemoryRevertResults"],
+        [80, "HandoffLookupIndex"],
       ]);
       yield* assertUsageCounters;
       assert.deepStrictEqual(yield* runMigrations(), []);

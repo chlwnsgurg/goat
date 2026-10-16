@@ -1,3 +1,4 @@
+import { Handoff, HandoffJson, HandoffActor, HandoffState } from "./handoff.ts";
 import {
   MemoryCurrentAccess,
   MemoryProviderCapabilities,
@@ -1604,9 +1605,15 @@ const OrchestrationV2SecretRequestFields = {
   reason: Schema.String,
   placeholder: Schema.optional(Schema.String),
   secretStatus: OrchestrationV2SecretRequestStatus,
+  handoff: Schema.optional(Handoff),
 } as const;
 
 export const OrchestrationV2TurnItem = Schema.Union([
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
+    type: Schema.Literal("human_handoff"),
+    handoff: Handoff,
+  }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("notification"),
@@ -2399,6 +2406,11 @@ const OrchestrationV2TurnItemJsonBaseFields = {
 export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
+    type: Schema.Literal("human_handoff"),
+    handoff: HandoffJson,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("notification"),
     ...OrchestrationV2Notification.fields,
   }),
@@ -2577,6 +2589,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     ...OrchestrationV2SecretRequestFields,
+    handoff: Schema.optional(HandoffJson),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -3355,6 +3368,22 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  */
 const OrchestrationV2InternalCommand = Schema.Union([
   Schema.Struct({
+    type: Schema.Literal("handoff.create"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    nodeId: NodeId,
+    handoff: Handoff,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("handoff.transition"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    handoffId: TurnItemId,
+    state: HandoffState,
+    actor: HandoffActor,
+  }),
+  Schema.Struct({
     type: Schema.Literal("delegated_task.remote.register"),
     memoryGrantCeiling: MemoryTaskGrantCeilingField,
     ...OrchestrationV2CreationFields,
@@ -3479,6 +3508,8 @@ const OrchestrationV2InternalCommand = Schema.Union([
    */
   Schema.Struct({
     type: Schema.Literal("secret_request.record"),
+    actor: Schema.optional(HandoffActor),
+    environmentId: Schema.optional(EnvironmentId),
     commandId: CommandId,
     threadId: ThreadId,
     runId: RunId,

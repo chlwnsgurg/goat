@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import {
   SECRET_REQUEST_DEFAULT_PLACEHOLDER,
   SECRET_REQUEST_PRIVACY_NOTE,
@@ -59,6 +60,24 @@ function PendingSecretRequestForm(props: {
   readonly item: SecretRequestItem;
 }) {
   const { item } = props;
+  const canAnswer = useAtomValue(
+    serverEnvironment.answerSecretRequest.permissionAtom(props.environmentId),
+  );
+  const open = useAtomCommand(serverEnvironment.openHandoff, {
+    label: "open secret handoff",
+    reportFailure: false,
+    reportDefect: false,
+  });
+  const opened = useRef(false);
+  const markOpened = () => {
+    if (!opened.current && item.handoff?.state === "pending" && canAnswer) {
+      opened.current = true;
+      void open({
+        environmentId: props.environmentId,
+        input: { threadId: item.threadId, handoffId: item.id },
+      });
+    }
+  };
   const inputId = useId();
   const errorId = useId();
   const privacyId = useId();
@@ -108,6 +127,7 @@ function PendingSecretRequestForm(props: {
       data-v2-item-type={item.type}
       className="flex min-w-0 flex-col gap-3 rounded-xl border border-border/60 bg-card p-4"
       onSubmit={onSubmit}
+      onFocusCapture={markOpened}
       autoComplete="off"
       // A click anywhere on the card targets its field, so a paste that
       // follows lands here rather than with the composer.
@@ -141,13 +161,13 @@ function PendingSecretRequestForm(props: {
             data-bwignore
             placeholder={item.placeholder ?? SECRET_REQUEST_DEFAULT_PLACEHOLDER}
             value={secret}
-            disabled={submitting}
+            disabled={!canAnswer || submitting}
             aria-invalid={error !== null || undefined}
             aria-describedby={error !== null ? `${privacyId} ${errorId}` : privacyId}
             onChange={(event) => setSecret(event.currentTarget.value)}
           />
         </div>
-        <Button type="submit" disabled={submitting || secret.trim().length === 0}>
+        <Button type="submit" disabled={!canAnswer || submitting || secret.trim().length === 0}>
           Save securely
         </Button>
       </div>
@@ -168,7 +188,7 @@ function PendingSecretRequestForm(props: {
           type="button"
           size="xs"
           variant="ghost-muted"
-          disabled={submitting}
+          disabled={!canAnswer || submitting}
           onClick={() => void send({ type: "decline" })}
         >
           Decline

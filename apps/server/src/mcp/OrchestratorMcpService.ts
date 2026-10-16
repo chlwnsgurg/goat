@@ -925,6 +925,8 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
       return `Forked to thread ${item.targetThreadId}.`;
     case "thread_created":
       return `Created thread ${item.targetThreadId} with ${item.targetProviderInstanceId} (${item.targetModel}).`;
+    case "human_handoff":
+      return `${item.handoff.title}: ${item.handoff.state} (${item.handoff.target.path})`;
     case "secret_request":
       return `Asked the user for ${item.label}: ${item.secretStatus}.`;
     case "subagent":
@@ -2296,13 +2298,14 @@ const make = Effect.gen(function* () {
         const key = yield* requestKey(input.clientRequestId);
         // Turn item ids are global; scope the key to this thread. A retry with
         // the same clientRequestId finds this card, answered or not.
-        const turnItemId = TurnItemId.make(
+        let turnItemId = TurnItemId.make(
           `turn-item:secret-request:${stablePart(threadId)}:${stablePart(key)}`,
         );
         const record = (secretStatus: "pending" | "cancelled") =>
           threadManagement
             .dispatch({
               type: "secret_request.record",
+              environmentId: threadScope.environmentId,
               commandId: stableCommandId({
                 scope,
                 requestKey: key,
@@ -2325,16 +2328,25 @@ const make = Effect.gen(function* () {
                 ),
               ),
             );
-        yield* record("pending");
-        // Only this call can hand the agent its ref, so the card must not
-        // outlive it: a timeout, a failed wait or an aborted call closes it as
-        // cancelled. If even that fails, the server still refuses an answer
-        // once the run ends, and an unused value expires.
-        const closeCard = record("cancelled").pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("Could not close a secret request card", { error: error.message }),
-          ),
-        );
+        const recorded = yield* record("pending");
+        const recordedCard = recorded.storedEvents.find(
+          (stored) =>
+            stored.event.type === "turn-item.updated" &&
+            stored.event.payload.type === "secret_request",
+        )?.event;
+        const ownsCard =
+          recordedCard?.type === "turn-item.updated" && recordedCard.payload.id === turnItemId;
+        if (recordedCard?.type === "turn-item.updated") turnItemId = recordedCard.payload.id;
+        // The creating call owns cancellation; retries of its request ID do not.
+        const closeCard = ownsCard
+          ? record("cancelled").pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("Could not close a secret request card", {
+                  error: error.message,
+                }),
+              ),
+            )
+          : Effect.void;
 
         // The user answers the card (secrets.answerRequest), or it ends with
         // the run; poll it like a delegated task.
