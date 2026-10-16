@@ -7202,7 +7202,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   data-chat-composer-transition-actions="true"
                   className={cn(
                     composerRoundActionClassName,
-                    "bg-message-action text-message-action-foreground hover:bg-message-action-hover disabled:opacity-64",
+                    "bg-composer-send text-message-action-foreground hover:bg-message-action disabled:opacity-64",
                   )}
                   disabled={collapsedComposerPrimaryActionDisabled}
                   aria-label={collapsedComposerPrimaryActionLabel}

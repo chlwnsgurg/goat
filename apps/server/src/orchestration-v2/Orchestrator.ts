@@ -1,3 +1,5 @@
+import { HandoffError, isHandoffPending } from "@goat/contracts";
+import { itemHandoff, transitionHandoff } from "./handoffState.ts";
 import * as RuntimeAdmission from "../runtimeAdmission.ts";
 import type {
   OrchestrationV2SearchThreadInput,
@@ -572,6 +574,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "delegated_task.completion-delivery.dispose":
     case "thread.created.record":
       return command.parentThreadId;
+    case "handoff.create":
+    case "handoff.transition":
     case "secret_request.record":
     case "channel.timeline.record":
       return command.threadId;
@@ -7784,6 +7788,139 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  const dispatchHandoff = Effect.fn("orchestrationV2.dispatch.handoff")(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "handoff.create" | "handoff.transition" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const projection = yield* Effect.gen(function* () {
+      if (command.type === "handoff.create")
+        return yield* projectionStore.getThreadRecords(command.threadId, ["runs", "turnItems"], {
+          turnItemTypes: ["human_handoff", "secret_request"],
+          messageRoles: [],
+        });
+      const item = yield* projectionStore.getTurnItem({
+        threadId: command.threadId,
+        itemId: command.handoffId,
+      });
+      const records = yield* projectionStore.getThreadRecords(command.threadId, ["runs"], {
+        runIds: item?.runId == null ? [] : [item.runId],
+      });
+      return { ...records, turnItems: item === null ? [] : [item] };
+    }).pipe(
+      Effect.mapError(
+        (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+      ),
+    );
+    const now = yield* DateTime.now;
+    const decide = Effect.gen(function* () {
+      if (command.type === "handoff.create") {
+        const existing = projection.turnItems.find((item) => item.id === command.handoff.handoffId);
+        if (existing) return existing;
+        const run = projection.runs.find((run) => run.id === command.runId);
+        if (
+          !run ||
+          run.rootNodeId !== command.nodeId ||
+          command.handoff.requestedBy.threadId !== command.threadId ||
+          run.providerInstanceId !== command.handoff.requestedBy.providerInstanceId ||
+          command.handoff.state !== "pending"
+        )
+          return yield* new HandoffError({ reason: "invalid_request" });
+        const pending = projection.turnItems.flatMap((item) => {
+          const handoff = itemHandoff(item);
+          return handoff && isHandoffPending(handoff.state) ? [handoff] : [];
+        });
+        if (
+          pending.some(
+            (handoff) =>
+              handoff.kind === command.handoff.kind &&
+              handoff.target.environmentId === command.handoff.target.environmentId &&
+              handoff.target.path === command.handoff.target.path &&
+              handoff.dedupeKey === command.handoff.dedupeKey,
+          )
+        )
+          return yield* new HandoffError({ reason: "conflict" });
+        if (pending.length >= 3) return yield* new HandoffError({ reason: "limit_reached" });
+        return {
+          id: command.handoff.handoffId,
+          threadId: command.threadId,
+          runId: run.id,
+          nodeId: command.nodeId,
+          providerThreadId: run.providerThreadId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: yield* nextTurnItemOrdinal(projection),
+          status: "waiting" as const,
+          title: command.handoff.title,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+          type: "human_handoff" as const,
+          handoff: command.handoff,
+        };
+      }
+      const existing = projection.turnItems.find((item) => item.id === command.handoffId);
+      const record = existing && itemHandoff(existing);
+      if (!existing || !record) return yield* new HandoffError({ reason: "not_found" });
+      const run = projection.runs.find((run) => run.id === existing.runId);
+      const ended =
+        run === undefined ||
+        ["completed", "failed", "cancelled", "interrupted"].includes(run.status);
+      const handoff = yield* transitionHandoff(record, command.state, command.actor, now, ended);
+      // Secret completion is only recorded after SecretRequests stores the value.
+      if (existing.type === "secret_request" && handoff.state === "completed")
+        return yield* new HandoffError({ reason: "conflict" });
+      const pending = isHandoffPending(handoff.state);
+      return {
+        ...existing,
+        handoff,
+        status: pending
+          ? ("waiting" as const)
+          : handoff.state === "completed"
+            ? ("completed" as const)
+            : ("cancelled" as const),
+        completedAt: pending ? null : now,
+        updatedAt: now,
+        ...(existing.type === "secret_request"
+          ? {
+              secretStatus: pending
+                ? ("pending" as const)
+                : handoff.state === "declined"
+                  ? ("declined" as const)
+                  : ("cancelled" as const),
+            }
+          : {}),
+      };
+    });
+    const item = yield* decide.pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause,
+          }),
+      ),
+    );
+    const existing = projection.turnItems.find((candidate) => candidate.id === item.id);
+    if (existing && itemHandoff(existing)?.state === itemHandoff(item)?.state) return;
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "turn-item.updated",
+      threadId: command.threadId,
+      ...(item.runId === null ? {} : { runId: item.runId }),
+      ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+      providerInstanceId: itemHandoff(item)!.requestedBy.providerInstanceId,
+      occurredAt: now,
+      payload: item,
+    });
+  });
+
   /**
    * Records or updates the card for a secret an agent asked the user for. The
    * item carries the request and its status only; the value goes straight to
@@ -7798,7 +7935,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .getThreadRecords(
           command.threadId,
           ["runs", "nodes", "turnItems", "attempts", "providerTurns"],
-          { turnItemTypes: ["secret_request"], messageRoles: [] },
+          { turnItemTypes: ["secret_request", "human_handoff"], messageRoles: [] },
         )
         .pipe(
           Effect.mapError(
@@ -7813,6 +7950,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Node ${command.nodeId} is not the root of run ${command.runId}.`,
         });
       }
+      // Each blocking caller owns its one-use ref; only the stable request item ID deduplicates.
       const existing = projection.turnItems.find((item) => item.id === command.turnItemId);
       if (existing !== undefined && existing.type !== "secret_request") {
         return yield* new OrchestratorDispatchError({
@@ -7829,12 +7967,61 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       const now = yield* DateTime.now;
+      if (!existing && command.secretStatus === "pending") {
+        const outstanding = projection.turnItems.filter((item) => {
+          const handoff = itemHandoff(item);
+          return handoff
+            ? isHandoffPending(handoff.state)
+            : item.type === "secret_request" && item.secretStatus === "pending";
+        });
+        if (outstanding.length >= 3)
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: new HandoffError({ reason: "limit_reached" }),
+          });
+      }
       // A request is answered once, and a retry finds its card as it was
       // asked: either one records the card unchanged.
       const unchanged =
         existing !== undefined &&
         (existing.secretStatus !== "pending" || command.secretStatus === "pending");
       const pending = command.secretStatus === "pending";
+      const previousHandoff = existing?.handoff;
+      const expired =
+        previousHandoff?.expiresAt != null &&
+        DateTime.toEpochMillis(previousHandoff.expiresAt) <= DateTime.toEpochMillis(now);
+      const handoff =
+        previousHandoff ??
+        (command.environmentId === undefined
+          ? undefined
+          : {
+              handoffId: command.turnItemId,
+              kind: "secret" as const,
+              title: command.label,
+              reason: command.reason,
+              requestedBy: {
+                threadId: command.threadId,
+                providerInstanceId: run.providerInstanceId,
+                path: "handoff.create",
+              },
+              target: { environmentId: command.environmentId, path: "secret.consume" },
+              dedupeKey: command.label,
+              state: "pending" as const,
+              expiresAt: DateTime.add(now, { hours: 1 }),
+              createdAt: now,
+              actor: { type: "agent" as const, threadId: command.threadId },
+            });
+      const runEnded = ["completed", "failed", "cancelled", "interrupted"].includes(run.status);
+      const closed = expired || runEnded;
+      const handoffState = expired
+        ? ("expired" as const)
+        : runEnded
+          ? ("cancelled" as const)
+          : command.secretStatus === "saved"
+            ? ("completed" as const)
+            : command.secretStatus;
+
       const turnItem: OrchestrationV2TurnItem = unchanged
         ? existing
         : {
@@ -7847,20 +8034,45 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             nativeItemRef: null,
             parentItemId: null,
             ordinal: existing?.ordinal ?? (yield* nextTurnItemOrdinal(projection)),
-            status: pending
-              ? "waiting"
-              : command.secretStatus === "saved"
-                ? "completed"
-                : "cancelled",
+            status:
+              pending && !closed
+                ? "waiting"
+                : command.secretStatus === "saved" && !closed
+                  ? "completed"
+                  : "cancelled",
             title: command.label,
             startedAt: existing?.startedAt ?? now,
-            completedAt: pending ? null : now,
+            completedAt: pending && !closed ? null : now,
             updatedAt: now,
             type: "secret_request",
             label: command.label,
             reason: command.reason,
             ...(command.placeholder === undefined ? {} : { placeholder: command.placeholder }),
-            secretStatus: command.secretStatus,
+            secretStatus: closed ? "cancelled" : command.secretStatus,
+            ...(handoff === undefined
+              ? {}
+              : {
+                  handoff: {
+                    ...handoff,
+                    state: handoffState,
+                    actor: closed
+                      ? { type: "server" as const }
+                      : (command.actor ??
+                        (command.secretStatus === "cancelled"
+                          ? { type: "agent" as const, threadId: command.threadId }
+                          : pending
+                            ? handoff.actor
+                            : { type: "server" as const })),
+                    ...(!pending || closed
+                      ? {
+                          resolvedAt: now,
+                          ...(!closed && command.actor?.type === "client"
+                            ? { resolvedBy: command.actor.label }
+                            : {}),
+                        }
+                      : {}),
+                  },
+                }),
           };
       yield* emit(
         events,
@@ -12166,6 +12378,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.created.record":
         yield* dispatchCreatedThreadRecord(command, events);
         break;
+      case "handoff.create":
+      case "handoff.transition":
+        yield* dispatchHandoff(command, events);
+        break;
       case "secret_request.record":
         yield* dispatchSecretRequestRecord(command, events);
         break;
@@ -12263,6 +12479,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // stop that finds nothing running, has nothing to record. That is
         // its expected outcome, not a failure.
         planned.events.length > 0 ||
+        command.type === "handoff.create" ||
+        command.type === "handoff.transition" ||
+        command.type === "secret_request.record" ||
         command.type === "thread.background-work.settle" ||
         command.type === "thread.stop" ||
         command.type === "delegated_task.remote.progress" ||

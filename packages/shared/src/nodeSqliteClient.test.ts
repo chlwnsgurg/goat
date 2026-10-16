@@ -26,11 +26,45 @@ const startedWorkers = vi.hoisted((): Array<NodeWorkerThreads.Worker> => []);
 const silentWorkers = vi.hoisted(() => ({ on: false, readyOnTerminate: false }));
 // When set, workers throw this at startup, like a checkpoint worker on SQLite before 3.51.
 const failingWorkers = vi.hoisted(() => ({ message: undefined as string | undefined }));
+const workerRecovery = vi.hoisted(() => ({
+  config: undefined as
+    | {
+        point: "statement" | "initialize";
+        codes: Array<number>;
+        repeat?: boolean;
+      }
+    | undefined,
+  onFailure: undefined as ((errcode: number) => void) | undefined,
+}));
 
 vi.mock("node:worker_threads", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeWorkerThreads>();
   class RecordedWorker extends actual.Worker {
     constructor(...args: ConstructorParameters<typeof actual.Worker>) {
+      const config = workerRecovery.config;
+      if (config !== undefined && typeof args[0] === "string") {
+        // Inject at the native SQLite boundary in the real worker. Successful
+        // attempts keep using its actual connection and prepared statements.
+        args[0] =
+          `(() => {
+          const sqlite = require("node:sqlite");
+          const config = ${JSON.stringify(config)};
+          let attempts = 0;
+          const prototype = config.point === "statement" ? sqlite.StatementSync.prototype : sqlite.DatabaseSync.prototype;
+          const method = config.point === "statement" ? "all" : "prepare";
+          const original = prototype[method];
+          prototype[method] = function(...args) {
+            const matches = config.point === "statement"
+              ? this.sourceSQL.includes("recovery_value")
+              : /^(PRAGMA journal_mode|SELECT sqlite_version\\(\\) AS version)$/.test(args[0]);
+            if (matches) {
+              const code = config.codes[attempts++] ?? (config.repeat ? config.codes.at(-1) : undefined);
+              if (code !== undefined) throw Object.assign(new Error("injected SQLite failure " + code), { errcode: code });
+            }
+            return original.apply(this, args);
+          };
+        })();\n` + args[0];
+      }
       super(
         ...((silentWorkers.on
           ? ["setInterval(() => {}, 1 << 30);", { eval: true }]
@@ -39,6 +73,12 @@ vi.mock("node:worker_threads", async (importOriginal) => {
             : args) as ConstructorParameters<typeof actual.Worker>),
       );
       startedWorkers.push(this);
+      if (config !== undefined) {
+        this.on("message", (reply) => {
+          const code = reply?.type === "unavailable" ? reply.errcode : reply?.error?.errcode;
+          if (typeof code === "number") workerRecovery.onFailure?.(code);
+        });
+      }
     }
     override terminate() {
       // A "ready" already queued when termination starts reaches the parent before "exit".
@@ -144,6 +184,259 @@ layer("NodeSqliteClient", (it) => {
 // Recovery can fail before SQLite calls its busy handler. Inject only that
 // native boundary error; successful attempts still execute against a real DB.
 const recoveryBusy = () => Object.assign(new Error("database is locked"), { errcode: 261 });
+
+const withWorkerRecovery = <A, E, R>(
+  config: NonNullable<typeof workerRecovery.config>,
+  use: (
+    failures: Array<number>,
+    attempted: (index?: number) => Effect.Effect<void>,
+  ) => Effect.Effect<A, E, R>,
+) =>
+  Effect.suspend(() => {
+    const failures: Array<number> = [];
+    const milestones = Array.from({ length: config.repeat ? 501 : config.codes.length }, () =>
+      Deferred.makeUnsafe<void>(),
+    );
+    return Effect.acquireUseRelease(
+      Effect.sync(() => {
+        workerRecovery.config = config;
+        workerRecovery.onFailure = (code) => {
+          const milestone = milestones[failures.length];
+          failures.push(code);
+          if (milestone !== undefined) Deferred.doneUnsafe(milestone, Effect.void);
+        };
+      }),
+      () => use(failures, (index = 0) => Deferred.await(milestones[index]!)),
+      () =>
+        Effect.sync(() => {
+          workerRecovery.config = undefined;
+          workerRecovery.onFailure = undefined;
+        }),
+    );
+  });
+
+it.effect("waits for reader statement recovery with each request's result mode", () =>
+  Effect.gen(function* () {
+    const operations = [
+      {
+        run: (sql: SqlClient.SqlClient) => sql`SELECT 42 AS recovery_value`,
+        expected: [{ recovery_value: 42 }],
+      },
+      {
+        run: (sql: SqlClient.SqlClient) => sql`SELECT 42 AS recovery_value`.raw,
+        expected: [{ recovery_value: 42 }],
+      },
+      {
+        run: (sql: SqlClient.SqlClient) => sql`SELECT 42 AS recovery_value`.values,
+        expected: [[42]],
+      },
+      {
+        run: (sql: SqlClient.SqlClient) => sql`SELECT 42 AS recovery_value`.valuesUnprepared,
+        expected: [[42]],
+      },
+      {
+        run: (sql: SqlClient.SqlClient) => sql`SELECT 42 AS recovery_value`.unprepared,
+        expected: [{ recovery_value: 42 }],
+      },
+    ];
+    for (const operation of operations) {
+      yield* withWorkerRecovery({ point: "statement", codes: [261] }, (failures, attempted) =>
+        withReaderClient((sql) =>
+          Effect.gen(function* () {
+            const fiber = yield* operation.run(sql).pipe(SqliteClient.readOnly, Effect.forkChild);
+            yield* attempted();
+            yield* TestClock.adjust("10 millis");
+            assert.deepEqual(yield* Fiber.join(fiber), operation.expected);
+            assert.deepEqual(failures, [261]);
+            assert.deepEqual(yield* sql`SELECT 42 AS recovery_value`.pipe(SqliteClient.readOnly), [
+              { recovery_value: 42 },
+            ]);
+          }),
+        ),
+      );
+    }
+  }),
+);
+
+it.effect("serializes a reader's recovery wait against another transaction and result mode", () =>
+  withWorkerRecovery({ point: "statement", codes: [261] }, (_, attempted) =>
+    withReaderClient((sql) =>
+      Effect.gen(function* () {
+        const select = sql`SELECT 42 AS recovery_value`;
+        const entered = yield* Deferred.make<void>();
+        const values = yield* select.values.pipe(SqliteClient.readOnly, Effect.forkChild);
+        yield* attempted();
+        const transaction = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* Deferred.succeed(entered, undefined);
+              return yield* select;
+            }),
+          )
+          .pipe(SqliteClient.readOnly, Effect.forkChild({ startImmediately: true }));
+        assert.equal(yield* Deferred.isDone(entered), false);
+        yield* TestClock.adjust("10 millis");
+        assert.deepEqual(yield* Fiber.join(values), [[42]]);
+        assert.deepEqual(yield* Fiber.join(transaction), [{ recovery_value: 42 }]);
+      }),
+    ),
+  ),
+);
+
+it.effect("bounds reader recovery retries and preserves the final lock error", () =>
+  withWorkerRecovery({ point: "statement", codes: [261], repeat: true }, (failures, attempted) =>
+    withReaderClient((sql) =>
+      Effect.gen(function* () {
+        const fiber = yield* sql`SELECT 42 AS recovery_value`.pipe(
+          SqliteClient.readOnly,
+          Effect.flip,
+          Effect.forkChild,
+        );
+        for (let i = 0; i < 500; i++) {
+          yield* attempted(i);
+          yield* TestClock.adjust("10 millis");
+        }
+        const error = yield* Fiber.join(fiber);
+        assert.lengthOf(failures, 501);
+        assert.equal(error.reason._tag, "LockTimeoutError");
+        assert.propertyVal(error.reason.cause, "errcode", 261);
+        assert.propertyVal(error.reason.cause, "message", "injected SQLite failure 261");
+        // A statement failure does not permanently disable the reader.
+        const readonlyError = yield* sql`INSERT INTO entries VALUES ('forbidden')`.pipe(
+          SqliteClient.readOnly,
+          Effect.flip,
+        );
+        assert.propertyVal(readonlyError.reason.cause, "errcode", 8);
+      }),
+    ),
+  ),
+);
+
+it.effect("keeps the reader snapshot and never replays the transaction body during recovery", () =>
+  withWorkerRecovery({ point: "statement", codes: [261] }, (_, attempted) =>
+    withReaderClient((sql) =>
+      Effect.gen(function* () {
+        let bodies = 0;
+        const reader = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              bodies++;
+              assert.equal(yield* countEntries(sql), 1);
+              return yield* sql`SELECT COUNT(*) AS recovery_value FROM entries`;
+            }),
+          )
+          .pipe(SqliteClient.readOnly, Effect.forkChild);
+        yield* attempted();
+        yield* sql`INSERT INTO entries VALUES ('committed during recovery')`;
+        yield* TestClock.adjust("10 millis");
+        assert.deepEqual(yield* Fiber.join(reader), [{ recovery_value: 1 }]);
+        assert.equal(bodies, 1);
+        assert.equal(yield* countEntries(sql), 2);
+      }),
+    ),
+  ),
+);
+
+it.effect("stops reader recovery retry on a changed error and never retries other codes", () =>
+  Effect.gen(function* () {
+    for (const codes of [[261, 517], [5], [517], [6], [19]]) {
+      yield* withWorkerRecovery(
+        { point: "statement", codes, repeat: true },
+        (failures, attempted) =>
+          withReaderClient((sql) =>
+            Effect.gen(function* () {
+              const fiber = yield* sql`SELECT 42 AS recovery_value`.pipe(
+                SqliteClient.readOnly,
+                Effect.flip,
+                Effect.forkChild,
+              );
+              yield* attempted();
+              if (codes.length === 2) yield* TestClock.adjust("10 millis");
+              const error = yield* Fiber.join(fiber);
+              assert.deepEqual(failures, codes);
+              assert.propertyVal(error.reason.cause, "errcode", codes.at(-1));
+            }),
+          ),
+      );
+    }
+  }),
+);
+
+it.effect("releases reader requests and connection permits when recovery is interrupted", () =>
+  withWorkerRecovery({ point: "statement", codes: [261] }, (_, attempted) =>
+    withReaderClient((sql) =>
+      Effect.gen(function* () {
+        const select = sql`SELECT 42 AS recovery_value`;
+        const values = yield* sql
+          .withTransaction(select.values)
+          .pipe(SqliteClient.readOnly, Effect.forkChild);
+        yield* attempted();
+        const waiter = yield* select.pipe(
+          SqliteClient.readOnly,
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Fiber.interrupt(waiter);
+        yield* Fiber.interrupt(values);
+        assert.deepEqual(yield* select.pipe(SqliteClient.readOnly), [{ recovery_value: 42 }]);
+        assert.deepEqual(yield* sql.withTransaction(select).pipe(SqliteClient.readOnly), [
+          { recovery_value: 42 },
+        ]);
+      }),
+    ),
+  ),
+);
+
+it.effect("keeps concurrent reader acquires on one startup through WAL recovery", () => {
+  const { warnings, layer: logs } = captureWarnings();
+  return withWorkerRecovery({ point: "initialize", codes: [261] }, (failures, attempted) =>
+    withReaderClient((sql) =>
+      Effect.gen(function* () {
+        const before = startedWorkers.length;
+        const first = yield* countEntries(sql).pipe(SqliteClient.readOnly, Effect.forkChild);
+        yield* attempted();
+        const second = yield* countEntries(sql).pipe(
+          SqliteClient.readOnly,
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* TestClock.adjust("10 millis");
+        assert.equal(yield* Fiber.join(first), 1);
+        assert.equal(yield* Fiber.join(second), 1);
+        assert.deepEqual(failures, [261]);
+        assert.equal(startedWorkers.length, before + 1);
+        const error = yield* sql`INSERT INTO entries VALUES ('forbidden')`.pipe(
+          SqliteClient.readOnly,
+          Effect.flip,
+        );
+        assert.propertyVal(error.reason.cause, "errcode", 8);
+        assert.lengthOf(warnings, 0);
+      }),
+    ),
+  ).pipe(Effect.provide(logs));
+});
+
+it.effect("falls back to the writer only after reader startup recovery is exhausted", () => {
+  const { warnings, layer: logs } = captureWarnings();
+  return withWorkerRecovery(
+    { point: "initialize", codes: [261], repeat: true },
+    (failures, attempted) =>
+      withReaderClient((sql) =>
+        Effect.gen(function* () {
+          const first = yield* countEntries(sql).pipe(SqliteClient.readOnly, Effect.forkChild);
+          for (let i = 0; i < 500; i++) {
+            yield* attempted(i);
+            yield* TestClock.adjust("10 millis");
+          }
+          assert.equal(yield* Fiber.join(first), 1);
+          assert.lengthOf(failures, 501);
+          assert.lengthOf(warnings, 1);
+          const before = startedWorkers.length;
+          yield* sql`INSERT INTO entries VALUES ('fallback')`.pipe(SqliteClient.readOnly);
+          assert.equal(yield* countEntries(sql).pipe(SqliteClient.readOnly), 2);
+          assert.equal(startedWorkers.length, before);
+        }),
+      ),
+  ).pipe(Effect.provide(logs));
+});
 
 it.effect("waits for WAL recovery when executing writer statements", () =>
   Effect.gen(function* () {
@@ -653,7 +946,7 @@ it.effect(
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.effect("pipelines reader requests before replies without leaking values mode", () =>
+it.effect("serializes reader requests through their replies without leaking values mode", () =>
   withReaderClient((sql) =>
     Effect.gen(function* () {
       // Finish startup before holding requests at the worker transport boundary.
@@ -672,12 +965,9 @@ it.effect("pipelines reader requests before replies without leaking values mode"
         const objects = yield* Effect.forkChild(select.pipe(SqliteClient.readOnly), {
           startImmediately: true,
         });
-        // Routing awaits the already-resolved startup Promise even for a warm
-        // reader. Let its microtasks run before checking outstanding requests.
-        yield* Effect.yieldNow;
-        // Neither request has reached the real worker, so no reply can release
-        // a statement lease. Both must already have crossed the permit boundary.
-        assert.lengthOf(requests, 2);
+        // A pending reply holds the connection so a retry cannot be overtaken
+        // by another request or a transaction on the same worker.
+        assert.lengthOf(requests, 1);
         postMessage.mockRestore();
         for (const request of requests) request();
         assert.deepEqual(yield* Fiber.join(values), [["first"]]);
@@ -1185,6 +1475,112 @@ const checkpointWorkerReply = (worker: NodeWorkerThreads.Worker) =>
         worker.postMessage("barrier");
       }),
   );
+
+it.effect("recovers checkpoint worker startup before handing checkpoints off", () => {
+  const { warnings, layer: logs } = captureWarnings();
+  return withWorkerRecovery({ point: "initialize", codes: [261] }, (failures, attempted) =>
+    Effect.gen(function* () {
+      const client = yield* withCheckpointClient((sql) =>
+        Effect.gen(function* () {
+          const worker = startedWorkers.at(-1)!;
+          yield* checkpointWorkerReply(worker);
+          const rows = yield* sql`PRAGMA wal_autocheckpoint`;
+          assert.equal(rows[0]?.wal_autocheckpoint, 10_000);
+        }),
+      ).pipe(Effect.forkChild);
+      yield* attempted();
+      yield* TestClock.adjust("10 millis");
+      yield* Fiber.join(client);
+      assert.deepEqual(failures, [261]);
+      assert.lengthOf(warnings, 0);
+    }),
+  ).pipe(Effect.provide(logs));
+});
+
+it.effect("hands checkpoints back after worker startup recovery is exhausted", () => {
+  const { warnings, layer: logs } = captureWarnings();
+  return withWorkerRecovery(
+    { point: "initialize", codes: [261], repeat: true },
+    (failures, attempted) =>
+      Effect.gen(function* () {
+        const client = yield* withCheckpointClient((sql) =>
+          Effect.gen(function* () {
+            const worker = startedWorkers.at(-1)!;
+            if (worker.threadId !== -1) {
+              yield* Effect.promise(() => new Promise((resolve) => worker.once("exit", resolve)));
+            }
+            const rows = yield* sql`PRAGMA wal_autocheckpoint`;
+            assert.equal(rows[0]?.wal_autocheckpoint, 1000);
+          }),
+        ).pipe(Effect.forkChild);
+        for (let i = 0; i < 500; i++) {
+          yield* attempted(i);
+          yield* TestClock.adjust("10 millis");
+        }
+        yield* Fiber.join(client);
+        assert.lengthOf(failures, 501);
+        assert.lengthOf(warnings, 1);
+      }),
+  ).pipe(Effect.provide(logs));
+});
+
+it.effect("stops worker startup recovery when the error changes", () =>
+  Effect.gen(function* () {
+    for (const checkpoint of [false, true]) {
+      yield* withWorkerRecovery(
+        { point: "initialize", codes: [261, 517], repeat: true },
+        (failures, attempted) =>
+          Effect.gen(function* () {
+            const use = (sql: SqlClient.SqlClient) =>
+              Effect.gen(function* () {
+                // Reader fallback is writable; checkpoint fallback restores SQLite's default.
+                if (checkpoint) {
+                  const worker = startedWorkers.at(-1)!;
+                  if (worker.threadId !== -1) {
+                    yield* Effect.promise(
+                      () => new Promise((resolve) => worker.once("exit", resolve)),
+                    );
+                  }
+                  const rows = yield* sql`PRAGMA wal_autocheckpoint`;
+                  assert.equal(rows[0]?.wal_autocheckpoint, 1000);
+                } else {
+                  yield* sql`INSERT INTO entries VALUES ('fallback')`.pipe(SqliteClient.readOnly);
+                }
+              });
+            const client = yield* (
+              checkpoint ? withCheckpointClient(use) : withReaderClient(use)
+            ).pipe(Effect.forkChild);
+            yield* attempted();
+            yield* TestClock.adjust("10 millis");
+            yield* Fiber.join(client);
+            assert.deepEqual(failures, [261, 517]);
+          }),
+      );
+    }
+  }).pipe(Effect.provide(Logger.layer([Logger.make(() => {})]))),
+);
+
+it.effect("closes workers when their startup recovery scope is interrupted", () =>
+  Effect.gen(function* () {
+    for (const checkpoint of [false, true]) {
+      yield* withWorkerRecovery(
+        { point: "initialize", codes: [261], repeat: true },
+        (_, attempted) =>
+          Effect.gen(function* () {
+            const client = yield* (
+              checkpoint
+                ? withCheckpointClient(() => Effect.never)
+                : withReaderClient((sql) => countEntries(sql).pipe(SqliteClient.readOnly))
+            ).pipe(Effect.forkChild);
+            yield* attempted();
+            const worker = startedWorkers.at(-1)!;
+            yield* Fiber.interrupt(client);
+            assert.equal(worker.threadId, -1);
+          }),
+      );
+    }
+  }),
+);
 
 it.live("checkpoints the WAL on the worker instead of the writer", () =>
   withCheckpointClient((sql, filename) =>

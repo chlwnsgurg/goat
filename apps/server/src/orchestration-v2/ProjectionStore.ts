@@ -1458,7 +1458,8 @@ function buildVisibleTurnItems(input: {
 function secretRequestAsPendingInput(
   item: OrchestrationV2TurnItem | null,
 ): OrchestrationV2ThreadProjection["runtimeRequests"][number] | null {
-  if (item?.type !== "secret_request" || item.nodeId === null) return null;
+  if ((item?.type !== "secret_request" && item?.type !== "human_handoff") || item.nodeId === null)
+    return null;
   return {
     id: RuntimeRequestId.make(item.id),
     nodeId: item.nodeId,
@@ -1513,10 +1514,11 @@ export function threadShellFromProjection(
       projection.turnItems
         .filter(
           (item) =>
-            item.type === "secret_request" &&
             item.status === "waiting" &&
-            item.runId !== null &&
-            liveRunIds.has(item.runId),
+            (item.type === "human_handoff" ||
+              (item.type === "secret_request" &&
+                item.runId !== null &&
+                liveRunIds.has(item.runId))),
         )
         .toSorted(
           (left, right) =>
@@ -5567,7 +5569,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   LIMIT 1
                 )
               ) AS pending_request_payload_json,
-              (
+              COALESCE((
                 SELECT secret.payload_json
                 -- Keep runs outermost so completed history is never scanned for a pending secret.
                 FROM orchestration_v2_projection_runs r
@@ -5579,7 +5581,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND secret.type = 'secret_request' AND secret.status = 'waiting'
                 ORDER BY secret.updated_at DESC, secret.turn_item_id DESC
                 LIMIT 1
-              ) AS pending_secret_request_payload_json,
+              ), (
+                SELECT handoff.payload_json
+                FROM orchestration_v2_projection_turn_items handoff
+                WHERE handoff.thread_id = t.thread_id
+                  AND handoff.type IN ('human_handoff', 'secret_request')
+                  AND handoff.type = 'human_handoff' AND handoff.status = 'waiting'
+                ORDER BY handoff.updated_at DESC, handoff.turn_item_id DESC
+                LIMIT 1
+              )) AS pending_secret_request_payload_json,
               (
                 SELECT message.updated_at
                 FROM orchestration_v2_projection_messages message

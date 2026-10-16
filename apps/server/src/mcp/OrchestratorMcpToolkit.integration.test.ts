@@ -1660,31 +1660,42 @@ describe("orchestrator MCP toolkit", () => {
             // returns a one-use ref, never the value, which a signed webhook
             // task then consumes.
             const secretRequests = yield* SecretRequests.SecretRequests;
-            const secretFiber = yield* invoke("request_secret", {
+            const beforeSecrets = yield* orchestrator.getThreadEventSequence(parentThreadId);
+            const secretInput = {
               label: "GitHub webhook secret",
               reason: "Signs release webhooks. Enter the same value in GitHub's webhook settings.",
               placeholder: "Paste the webhook secret",
+            };
+            const secretFiber = yield* invoke("request_secret", {
+              ...secretInput,
               clientRequestId: "release-webhook-secret",
             }).pipe(Effect.forkChild);
-            // Polled without the helper's short budget: under load the tool's
-            // own reads come first.
-            const asked = yield* Effect.gen(function* () {
-              while (true) {
-                const projection = yield* orchestrator.getThreadProjection(parentThreadId);
-                if (
-                  projection.turnItems.some(
-                    (item) => item.type === "secret_request" && item.secretStatus === "pending",
-                  )
-                ) {
-                  return projection;
-                }
-                yield* Effect.sleep("5 millis");
-              }
-            });
-            const card = asked.turnItems.find((item) => item.type === "secret_request");
-            if (card?.type !== "secret_request") {
-              return yield* Effect.die(new Error("Secret request card missing."));
-            }
+            const independentFiber = yield* invoke("request_secret", {
+              ...secretInput,
+              clientRequestId: "independent-webhook-secret",
+            }).pipe(Effect.forkChild);
+            // Await both persisted cards, without sleeping or polling the projection.
+            const cards = yield* orchestrator
+              .streamStoredEventsFrom({
+                threadId: parentThreadId,
+                afterSequence: beforeSecrets,
+                eventType: "turn-item.updated",
+              })
+              .pipe(
+                Stream.map((stored) => stored.event),
+                Stream.filter((event) => event.type === "turn-item.updated"),
+                Stream.map((event) => event.payload),
+                Stream.filter(
+                  (item) => item.type === "secret_request" && item.secretStatus === "pending",
+                ),
+                Stream.take(2),
+                Stream.runCollect,
+              );
+            const [card, independentCard] = cards;
+            if (!card || !independentCard)
+              return yield* Effect.die(new Error("Secret request cards missing."));
+            expect(card.id).not.toBe(independentCard.id);
+            const asked = yield* orchestrator.getThreadProjection(parentThreadId);
             expect(card).toMatchObject({
               label: "GitHub webhook secret",
               placeholder: "Paste the webhook secret",
@@ -1720,6 +1731,18 @@ describe("orchestrator MCP toolkit", () => {
               turnItemId: card.id,
               answer: { type: "save", secret: "github-webhook-secret" },
             });
+            yield* secretRequests.answer({
+              threadId: parentThreadId,
+              turnItemId: independentCard.id,
+              answer: { type: "save", secret: "github-webhook-secret" },
+            });
+            const independentCall = yield* Fiber.join(independentFiber);
+            expect(independentCall.isError).toBe(false);
+            const independentResult = independentCall.structuredContent as {
+              status: string;
+              secretRef?: string;
+            };
+            expect(independentResult.status).toBe("saved");
             const secretCall = yield* Fiber.join(secretFiber);
             expect(secretCall.isError).toBe(false);
             const secretResult = secretCall.structuredContent as {
@@ -1750,7 +1773,14 @@ describe("orchestrator MCP toolkit", () => {
               (yield* orchestrator.getThreadProjection(parentThreadId)).turnItems.filter(
                 (item) => item.type === "secret_request",
               ),
-            ).toHaveLength(1);
+            ).toHaveLength(2);
+            expect(independentResult.secretRef).not.toBe(secretResult.secretRef);
+            expect(
+              yield* secretRequests.consume({
+                ref: independentResult.secretRef as never,
+                projectId,
+              }),
+            ).toBe("github-webhook-secret");
 
             // The ref is the secret for exactly one consumer.
             expect(
