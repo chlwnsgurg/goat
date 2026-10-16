@@ -7,7 +7,6 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import * as CursorCloudSdk from "./sdk.ts";
 
 const PRODUCTION_BACKEND = "https://api2.cursor.sh";
 const Credentials = Schema.fromJsonString(
@@ -32,24 +31,25 @@ function usable(value: StoredSdkCredentials | undefined, now: number) {
   );
 }
 
+/**
+ * Cursor Cloud uses exactly the account of its selected Cursor provider: that provider's
+ * CURSOR_API_KEY (instance settings over the server environment, as the local provider
+ * resolves it), else its GOAT sign-in. Other logins on the machine are never consulted.
+ */
 export const resolveKey = Effect.fn("CursorCloud.resolveKey")(function* (input: {
   readonly instanceId: ProviderInstanceId;
   readonly configuredKey?: string;
   readonly sibling: Effect.Effect<StoredSdkCredentials | undefined, ProviderSetupError>;
-  readonly fallback: Effect.Effect<StoredSdkCredentials | undefined, ProviderSetupError>;
 }) {
   const configuredKey = input.configuredKey?.trim();
   if (configuredKey) return configuredKey;
   const now = yield* Clock.currentTimeMillis;
   const sibling = yield* input.sibling;
   if (usable(sibling, now)) return sibling!.apiKey;
-  const fallback = yield* input.fallback;
-  if (usable(fallback, now)) return fallback!.apiKey;
   return yield* new ProviderSetupError({
     instanceId: input.instanceId,
     operation: "credentials",
-    detail:
-      "Sign in with the selected Cursor provider, or complete Cursor SDK browser sign-in on this environment.",
+    detail: "Sign in with the selected Cursor provider, or add CURSOR_API_KEY to its settings.",
   });
 });
 
@@ -58,7 +58,6 @@ export const makeCursorCloudCredentials = Effect.fn("makeCursorCloudCredentials"
   siblingId: ProviderInstanceId,
 ) {
   const host = yield* ProviderHost.ProviderHost;
-  const sdk = yield* CursorCloudSdk.CursorCloudSdk;
   const credentials = yield* host.credentials("cursor", siblingId);
   const failure = (cause: unknown) =>
     new ProviderSetupError({
@@ -90,9 +89,9 @@ export const makeCursorCloudCredentials = Effect.fn("makeCursorCloudCredentials"
         detail: "Cursor Cloud currently supports the production Cursor backend only.",
       });
     }
-    const configuredKey = sibling?.environment?.findLast(
-      (item) => item.name === "CURSOR_API_KEY",
-    )?.value;
+    const configuredKey =
+      sibling?.environment?.findLast((item) => item.name === "CURSOR_API_KEY")?.value ??
+      process.env.CURSOR_API_KEY;
     const stored = credentials.get.pipe(
       Effect.mapError(failure),
       Effect.flatMap((bytes) =>
@@ -107,7 +106,6 @@ export const makeCursorCloudCredentials = Effect.fn("makeCursorCloudCredentials"
       instanceId,
       ...(configuredKey ? { configuredKey } : {}),
       sibling: stored,
-      fallback: sdk.readLogin.pipe(Effect.mapError(failure)),
     });
   });
   const useSibling = () =>
