@@ -339,6 +339,7 @@ import {
   MemoryRevertControl,
 } from "./MemorySettings";
 import { validateMemorySettingsSearch } from "./MemorySettings.logic";
+import { settingsContentScopeKey } from "./settingsScopeNavigation";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const item = Schema.decodeUnknownSync(MemoryItem)({
   memorySpaceId: id(1),
@@ -364,6 +365,7 @@ beforeEach(() => {
   document.body.append(container);
   root = createRoot(container);
   window.localStorage.clear();
+  state.navigate.mockReset();
   state.threadReads.mockClear();
   state.projects = [];
   state.threads = [];
@@ -822,7 +824,7 @@ const ownerView = (version: number, requester: string) => ({
     removals: [],
   },
 });
-async function supportedScreen(withDetails = true) {
+async function supportedScreen(withDetails = true, followNavigation = false) {
   const { AtomRegistry } = await import("effect/reactivity");
   const registry = AtomRegistry.make();
   const get = registry.get.bind(registry);
@@ -844,18 +846,36 @@ async function supportedScreen(withDetails = true) {
     state.responses.set("syncStatus", success({ state: "online", memorySpaceId: id(1) }));
   state.responses.set("hubSettingsGet", success(hubView(2)));
   state.responses.set("ownerSourceReadPolicyGet", success(ownerView(2, "device-a")));
-  const target = validateMemorySettingsSearch({
+  let target = validateMemorySettingsSearch({
     environmentId: "remote-owner",
     ...(withDetails ? { memorySpaceId: id(1), memoryId: id(2) } : {}),
   });
+  let routeSearch = withDetails ? target : validateMemorySettingsSearch({});
+  const renderContent = () =>
+    root.render(
+      <RegistryContext value={registry}>
+        <div
+          key={settingsContentScopeKey(
+            "/settings/memory",
+            routeSearch,
+            EnvironmentId.make("remote-owner"),
+          )}
+        >
+          <MemorySettings target={target} />
+        </div>
+      </RegistryContext>,
+    );
+  if (followNavigation)
+    state.navigate.mockImplementation(({ search }) => {
+      routeSearch = validateMemorySettingsSearch(search);
+      target = routeSearch;
+      renderContent();
+      return Promise.resolve();
+    });
   const render = () =>
     act(async () => {
       notifyFixture();
-      root.render(
-        <RegistryContext value={registry}>
-          <MemorySettings target={target} />
-        </RegistryContext>,
-      );
+      renderContent();
     });
   await render();
   return { render, registry };
@@ -1755,6 +1775,40 @@ it("browses, searches and creates in an explicitly bound project, then returns t
   });
   expect(container.querySelector('[aria-label="Memory text"]')).toBeNull();
 });
+
+it.each([false, true])(
+  "retains the first project selection through navigation and late options/binding (explicit destination: %s)",
+  async (explicitDestination) => {
+    const project = {
+      id: "synthetic-project",
+      title: "Synthetic project",
+      environmentId: "remote-owner",
+      repositoryIdentity: null,
+    };
+    state.projects = [project];
+    const pending = await deferredResult();
+    state.executors.set("projectBindingGet", () => pending.promise);
+    const { render } = await supportedScreen(explicitDestination, true);
+    await selectMemoryScope("project:synthetic-project");
+    state.projects = [{ ...project, title: "Resolved project" }];
+    await render();
+    expect(container.querySelector<HTMLSelectElement>("#memory-browse-scope select")?.value).toBe(
+      "project:synthetic-project",
+    );
+    expect(container.querySelector('[aria-label="Search memories"]')).toBeNull();
+    const scope = {
+      kind: "project",
+      projectKey: { kind: "explicit", sharedProjectId: "synthetic-shared" },
+    };
+    await act(async () =>
+      pending.resolve(success({ projectKey: scope.projectKey, repositoryKey: null })),
+    );
+    expect(state.requests.at(-1)).toMatchObject({ label: "list", input: { scope } });
+    await click("Remember something");
+    expect(container.textContent).toContain("Save to: Resolved project");
+    expect(container.textContent).not.toContain("Save to: User");
+  },
+);
 
 it("offers User and projects without a context-free Thread option in Settings", async () => {
   state.threads = [{ id: "thread-a", environmentId: "remote-owner", title: "Thread A" }];

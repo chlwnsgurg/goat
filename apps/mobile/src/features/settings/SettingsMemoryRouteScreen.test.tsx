@@ -1066,6 +1066,49 @@ it("uses the bound project for native list, search and creation, and resets on r
   expect(view.container.querySelector('[aria-label="Memory text"]')).toBeNull();
 });
 
+it("retains native project selection while project options and the binding resolve", async () => {
+  const project = {
+    id: "synthetic-project",
+    title: "Synthetic project",
+    environmentId: nativeEnv,
+    repositoryIdentity: null,
+  };
+  await mount(undefined, (harness) => harness.projects.push(project));
+  const pending = h.deferred<unknown>();
+  h.responses.set(WS_METHODS.memoryProjectBindingGet, () => pending.response);
+  await view.click("Memory scope");
+  await view.click("Synthetic project");
+  await h.waitForCall(WS_METHODS.memoryProjectBindingGet);
+  h.projects.splice(0, 1, { ...project, title: "Resolved project" });
+  await view.rerender(
+    <SettingsMemoryRouteScreen
+      route={{ params: { environmentId: nativeEnv, memorySpaceId: nativeSpace } }}
+    />,
+  );
+  expect(view.container.textContent).toContain("Memory scope: Resolved project");
+  expect(view.container.textContent).toContain("Loading project memory scope");
+  expect(view.container.textContent).not.toContain("Remember something");
+  const scope = {
+    kind: "project",
+    projectKey: { kind: "explicit", sharedProjectId: "synthetic-shared" },
+  };
+  await act(async () => {
+    await pending.succeed({
+      memorySpaceId: nativeSpace,
+      project: { environmentId: nativeEnv, projectId: project.id },
+      projectKey: scope.projectKey,
+      repositoryKey: null,
+      version: 1,
+    });
+  });
+  expect(h.calls.findLast((call) => call.method === WS_METHODS.memoryList)).toMatchObject({
+    input: { scope },
+  });
+  await view.click("Remember something");
+  expect(view.container.textContent).toContain("Save to: Resolved project");
+  expect(view.container.textContent).not.toContain("Save to: User");
+});
+
 it("bounds native previews and explains incomplete indexed search results", async () => {
   await mount(undefined, (harness) => {
     const item = decodeItem({

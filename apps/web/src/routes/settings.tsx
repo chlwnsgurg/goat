@@ -20,6 +20,7 @@ import { SETTINGS_DEVICE_ONLY_PATHS } from "../components/settings/SettingsScope
 import { SettingsPageContainer } from "../components/settings/settingsLayout";
 import {
   retainSettingsScope,
+  settingsContentScopeKey,
   validateSettingsRouteSearch,
 } from "../components/settings/settingsScopeNavigation";
 import {
@@ -116,10 +117,11 @@ function SettingsContentLayout() {
   const navigateToMainApp = useNavigateToMainApp();
   useEscapeToGoBack(navigateToMainApp);
   const { search, environment } = useSettingsScope();
-  const contentScopeKey =
-    location.pathname === "/settings/diagnostics" || location.pathname === "/settings/providers"
-      ? environment?.environmentId
-      : JSON.stringify(search);
+  const contentScopeKey = settingsContentScopeKey(
+    location.pathname,
+    search,
+    environment?.environmentId,
+  );
   const [restoreSignal, setRestoreSignal] = useState(0);
 
   return (

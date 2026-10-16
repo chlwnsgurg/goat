@@ -385,7 +385,11 @@ function MemoryRecords({
   function clearMemorySelection() {
     void navigate({
       to: "/settings/memory",
-      search: validateMemorySettingsSearch({ environmentId, memorySpaceId }),
+      // Keep an implicit space implicit: adding its resolved ID changes the parent's key.
+      search: validateMemorySettingsSearch({
+        environmentId,
+        memorySpaceId: props.target.memorySpaceId,
+      }),
       hash: "",
     });
   }
