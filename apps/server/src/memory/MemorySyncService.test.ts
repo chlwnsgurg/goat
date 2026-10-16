@@ -2070,7 +2070,14 @@ const statusRuntime = Effect.gen(function* () {
   });
 });
 
-it.effect.each(["single", "multiple", "no-sync-time"] as const)(
+it.effect.each([
+  "single",
+  "multiple",
+  "no-sync-time",
+  "empty-newer-sync",
+  "memory-activity",
+  "tied-memory-activity",
+] as const)(
   "080 upgrade recovers a retained ready space with sharing already disabled: %s",
   (candidates) =>
     Effect.scoped(
@@ -2098,10 +2105,32 @@ it.effect.each(["single", "multiple", "no-sync-time"] as const)(
             yield* ready;
             yield* commit(operation(98010));
             if (candidates !== "single") {
-              // A larger UUID and later insertion cannot displace the last successful ready space.
+              // Later empty cursors must not hide a space with retained memories.
               yield* sql`UPDATE memory_sync_cursors SET last_success_at=200 WHERE space=${space}`;
               yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state,last_success_at) VALUES (${id(999)},${remote},0,'ready',100),(${id(998)},${remote},0,'staging',300)`;
-              if (candidates === "no-sync-time")
+              if (candidates === "empty-newer-sync")
+                yield* sql`UPDATE memory_sync_cursors SET last_success_at=300 WHERE space=${id(999)}`;
+              if (
+                candidates === "multiple" ||
+                candidates === "memory-activity" ||
+                candidates === "tied-memory-activity"
+              ) {
+                const other = operation(98011);
+                if (other.kind !== "upsert") throw new Error("fixture");
+                const otherSpace = M.MemorySpaceId.make(id(999));
+                yield* commit({
+                  ...other,
+                  memorySpaceId: otherSpace,
+                  revision: { ...other.revision, memorySpaceId: otherSpace },
+                });
+              }
+              if (candidates === "memory-activity")
+                yield* sql`UPDATE memory_revisions SET created_at=300 WHERE space=${space}`;
+              if (
+                candidates === "no-sync-time" ||
+                candidates === "memory-activity" ||
+                candidates === "tied-memory-activity"
+              )
                 yield* sql`UPDATE memory_sync_cursors SET last_success_at=NULL`;
             }
             assert.isEmpty(
@@ -2122,10 +2151,7 @@ it.effect.each(["single", "multiple", "no-sync-time"] as const)(
               ),
             );
             assert.strictEqual(result.state, "disabled");
-            assert.strictEqual(
-              result.retainedLocalSpaceId,
-              candidates === "no-sync-time" ? id(999) : space,
-            );
+            assert.strictEqual(result.retainedLocalSpaceId, space);
           }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(79)))),
         );
         // Close the SQLite connection and rebuild the service, preserving only the upgraded file.
@@ -2133,7 +2159,7 @@ it.effect.each(["single", "multiple", "no-sync-time"] as const)(
           Effect.gen(function* () {
             const sql = yield* SqlClient.SqlClient;
             assert.deepStrictEqual(yield* runMigrations(), []);
-            const expected = candidates === "no-sync-time" ? id(999) : space;
+            const expected = space;
             assert.deepStrictEqual(yield* sql`SELECT space FROM memory_last_ready_space`, [
               { space: expected },
             ]);
@@ -2153,10 +2179,75 @@ it.effect.each(["single", "multiple", "no-sync-time"] as const)(
               ),
             );
             assert.strictEqual(result.retainedLocalSpaceId, expected);
-            assert.lengthOf(yield* sql`SELECT memory_id FROM memory_items WHERE space=${space}`, 1);
+            const service = yield* Service.MemoryService;
+            const listed = yield* service.list(
+              {
+                memorySpaceId: result.retainedLocalSpaceId!,
+                scope: { kind: "user" },
+                limit: 20,
+                includeQuarantined: false,
+              },
+              Effect.void,
+            );
+            assert.lengthOf(listed.items, 1);
+            const item = listed.items[0];
+            if (item?.status !== "active") throw new Error("retained memory missing");
+            assert.strictEqual(item.payload.text, "synthetic fact 98010");
           }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(80)))),
         );
       }).pipe(Effect.provide(NodeServices.layer)),
+    ),
+);
+
+it.effect.each(["unbound", "staging"] as const)(
+  "repeated retained status reads without ready candidates do not transact: %s",
+  (bootstrap) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        if (bootstrap === "staging")
+          yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES (${space},${remote},0,'staging')`;
+        const store = yield* Store.MemoryStore;
+        const adapter = yield* statusRuntime;
+        let transactions = 0;
+        const observed = Store.MemoryStore.of({
+          ...store,
+          transact: (effect, options) =>
+            Effect.suspend(() => {
+              transactions++;
+              return store.transact(effect, options);
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const sync = yield* Sync.MemorySyncService;
+            for (let i = 0; i < 3; i++) {
+              const result = yield* sync.syncStatus(
+                { includeRetainedLocalSpaceId: true },
+                Effect.void,
+              );
+              assert.strictEqual(result.retainedLocalSpaceId, null);
+            }
+            assert.strictEqual(transactions, 0);
+            // A later ready candidate must still be recoverable after the read-only misses.
+            yield* sql`DELETE FROM memory_sync_cursors`;
+            yield* ready;
+            const recovered = yield* sync.syncStatus(
+              { includeRetainedLocalSpaceId: true },
+              Effect.void,
+            );
+            assert.strictEqual(recovered.retainedLocalSpaceId, space);
+            assert.strictEqual(transactions, 1);
+          }).pipe(
+            Effect.provide(
+              Layer.fresh(Sync.layer).pipe(
+                Layer.provide(Layer.succeed(Store.MemoryStore, observed)),
+                Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, adapter)),
+              ),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(fixture(peer(), undefined, true))),
     ),
 );
 

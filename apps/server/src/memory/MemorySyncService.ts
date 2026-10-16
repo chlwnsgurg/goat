@@ -341,15 +341,22 @@ const make = Effect.gen(function* () {
     }>`SELECT space FROM memory_last_ready_space WHERE singleton=1`;
     const rows = yield* read;
     if (rows[0]) return M.MemorySpaceId.make(rows[0].space);
-    // Legacy cursors have no ready timestamp. Recover once using the last successful sync,
-    // then cursor insertion order when no timestamp exists. Never replace a saved destination.
+    const candidates =
+      yield* sql`SELECT 1 FROM memory_sync_cursors WHERE bootstrap_state='ready' LIMIT 1`;
+    if (!candidates[0]) return null;
+    // Legacy cursors have no ready timestamp. Prefer retained memories, then successful sync
+    // and memory activity, with a stable space-id tie-break. Never replace a saved destination.
     return yield* store.transact(
       Effect.gen(function* () {
         yield* sql`INSERT INTO memory_last_ready_space(singleton,space)
-          SELECT 1,space FROM memory_sync_cursors
-          WHERE bootstrap_state='ready'
+          SELECT 1,c.space FROM memory_sync_cursors AS c
+          WHERE c.bootstrap_state='ready'
             AND NOT EXISTS (SELECT 1 FROM memory_last_ready_space WHERE singleton=1)
-          GROUP BY space ORDER BY max(last_success_at) DESC,max(rowid) DESC LIMIT 1`;
+          GROUP BY c.space ORDER BY
+            EXISTS (SELECT 1 FROM memory_items AS i WHERE i.space=c.space AND i.status!='forgotten') DESC,
+            max(c.last_success_at) DESC,
+            (SELECT max(r.created_at) FROM memory_revisions AS r WHERE r.space=c.space) DESC,
+            c.space ASC LIMIT 1`;
         const recovered = yield* read;
         return recovered[0] ? M.MemorySpaceId.make(recovered[0].space) : null;
       }),
