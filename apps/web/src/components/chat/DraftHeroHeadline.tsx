@@ -310,7 +310,7 @@ export function DraftHeroHeadline({
             // aria-label here would replace the title with an action phrase
             // mid-sentence and baffle screen-reader users.
             <ComboboxTrigger
-              render={<InlineButton tone="pickerAccent" />}
+              render={<InlineButton tone="pickerMuted" />}
               data-draft-project-trigger=""
               className="pointer-events-auto max-w-64 align-baseline"
             />
