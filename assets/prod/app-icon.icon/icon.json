@@ -1,31 +1,37 @@
 {
   "fill": {
-    "solid": "display-p3:0.00000,0.00000,0.00000,1.00000"
+    "solid": "srgb:0.09412,0.09412,0.10588,1.00000"
   },
   "groups": [
     {
       "layers": [
         {
+          "glass": false,
           "image-name": "text.svg",
-          "name": "Text",
+          "name": "GOAT",
           "position": {
             "scale": 8.5,
-            "translation-in-points": [0, 0]
+            "translation-in-points": [
+              0,
+              0
+            ]
           }
         }
       ],
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.5
+        "opacity": 0
       },
       "translucency": {
-        "enabled": true,
-        "value": 0.5
+        "enabled": false,
+        "value": 0
       }
     }
   ],
   "supported-platforms": {
-    "circles": ["watchOS"],
+    "circles": [
+      "watchOS"
+    ],
     "squares": "shared"
   }
 }
