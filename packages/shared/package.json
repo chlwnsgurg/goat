@@ -47,6 +47,14 @@
       "types": "./src/themePalettes.ts",
       "import": "./src/themePalettes.ts"
     },
+    "./goatMark": {
+      "types": "./src/goatMark.ts",
+      "import": "./src/goatMark.ts"
+    },
+    "./brandChannels": {
+      "types": "./src/brandChannels.ts",
+      "import": "./src/brandChannels.ts"
+    },
     "./themePreview": {
       "types": "./src/themePreview.ts",
       "import": "./src/themePreview.ts"
