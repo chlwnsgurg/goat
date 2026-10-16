@@ -6,12 +6,23 @@ import type {
 import {
   createEnvironmentPresentationAtoms,
   createEnvironmentSummaryAtoms,
+  createEnvironmentShellSyncAtom,
 } from "@goat/client-runtime/state/presentation";
 import type { EnvironmentId } from "@goat/contracts";
 import { Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
 import { serverEnvironment } from "./server";
+import { environmentShell } from "./shell";
+
+const environmentShellSyncAtom = createEnvironmentShellSyncAtom(environmentShell.stateValueAtom);
+const emptyShellSyncAtom = Atom.make(null);
+
+export function useEnvironmentShellSync(environmentId: EnvironmentId | null) {
+  return useAtomValue(
+    environmentId === null ? emptyShellSyncAtom : environmentShellSyncAtom(environmentId),
+  );
+}
 
 export const environmentPresentations = createEnvironmentPresentationAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,

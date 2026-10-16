@@ -33,6 +33,7 @@ import {
   WsRpcGroup as WsBaseRpcGroup,
   WsMemoryCoreRpcGroup,
   WsMemoryAdministrationRpcGroup,
+  WsMemoryImportRpcGroup,
 } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -43,9 +44,9 @@ import { captureMemoryGrantCeiling } from "../memory/MemoryAccess.ts";
 
 import { DESKTOP_BOOTSTRAP_SUBJECT } from "./PairingGrantStore.ts";
 
-export const AuthorizedWsRpcGroup = WsBaseRpcGroup.merge(WsMemoryCoreRpcGroup).merge(
-  WsMemoryAdministrationRpcGroup,
-);
+export const AuthorizedWsRpcGroup = WsBaseRpcGroup.merge(WsMemoryCoreRpcGroup)
+  .merge(WsMemoryAdministrationRpcGroup)
+  .merge(WsMemoryImportRpcGroup);
 
 const WsRpcGroup = WsBaseRpcGroup;
 
@@ -249,6 +250,7 @@ export const RPC_REQUIRED_SCOPES = {
 } as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
 
 export const MEMORY_RPC_REQUIRED_SCOPES = {
+  [WS_METHODS.memoryImportProvider]: "memory:write",
   [WS_METHODS.memoryProjectBindingGet]: "memory:write",
   [WS_METHODS.memoryProjectBindingUpdate]: "memory:write",
   [WS_METHODS.memoryChanges]: "memory:read",
@@ -256,6 +258,9 @@ export const MEMORY_RPC_REQUIRED_SCOPES = {
   [WS_METHODS.memoryList]: "memory:read",
   [WS_METHODS.memoryRead]: "memory:read",
   [WS_METHODS.memoryHistory]: "memory:read",
+  [WS_METHODS.memoryResetReportAttempts]: "settings:write",
+  [WS_METHODS.memoryHubReconcile]: "settings:write",
+  [WS_METHODS.memoryHubDiagnostics]: "memory:read",
   [WS_METHODS.memorySyncStatus]: "memory:read",
   [WS_METHODS.memoryUpsert]: "memory:write",
   [WS_METHODS.memoryForget]: "memory:write",
@@ -267,7 +272,11 @@ export const MEMORY_RPC_REQUIRED_SCOPES = {
   [WS_METHODS.memoryOwnerSourceReadPolicyUpdate]: "settings:write",
 } as const satisfies Readonly<
   Record<
-    RpcGroup.Rpcs<typeof WsMemoryCoreRpcGroup | typeof WsMemoryAdministrationRpcGroup>["_tag"],
+    RpcGroup.Rpcs<
+      | typeof WsMemoryCoreRpcGroup
+      | typeof WsMemoryAdministrationRpcGroup
+      | typeof WsMemoryImportRpcGroup
+    >["_tag"],
     AuthEnvironmentScope
   >
 >;

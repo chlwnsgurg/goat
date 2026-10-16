@@ -3,12 +3,14 @@ import { View } from "react-native";
 import Animated, {
   cancelAnimation,
   Easing,
+  ReduceMotion,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
   withTiming,
 } from "react-native-reanimated";
 
+import { useVisibleAnimation } from "../../lib/use-visible-animation";
 import type { RemoteClientConnectionState } from "../../lib/connection";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { themeColorWithAlpha, type MobileThemeVariables } from "../../lib/mobileTheme";
@@ -56,23 +58,21 @@ function usePulseAnimation(pulse: boolean) {
   const pulseProgress = useSharedValue(0);
 
   useEffect(() => {
+    cancelAnimation(pulseProgress);
+    // oxlint-disable-next-line react/immutability -- Reanimated shared values intentionally mutate on the UI thread.
+    pulseProgress.value = 0;
     if (pulse) {
       pulseProgress.value = withRepeat(
         withTiming(1, {
           duration: 1100,
+          reduceMotion: ReduceMotion.System,
           easing: Easing.out(Easing.cubic),
         }),
         -1,
         false,
       );
-      return;
+      return () => cancelAnimation(pulseProgress);
     }
-
-    cancelAnimation(pulseProgress);
-    pulseProgress.value = withTiming(0, {
-      duration: 180,
-      easing: Easing.out(Easing.quad),
-    });
   }, [pulse, pulseProgress]);
 
   return pulseProgress;
@@ -83,7 +83,8 @@ export function ConnectionStatusDot(props: {
   readonly pulse: boolean;
   readonly size?: number;
 }) {
-  const pulseProgress = usePulseAnimation(props.pulse);
+  const animationVisible = useVisibleAnimation();
+  const pulseProgress = usePulseAnimation(props.pulse && animationVisible);
   const { themeAppearance, themeVariables } = useAppearancePreferences();
   const tone = statusDotTone(props.state, themeVariables, themeAppearance === "dark");
   const dotSize = props.size ?? 10;

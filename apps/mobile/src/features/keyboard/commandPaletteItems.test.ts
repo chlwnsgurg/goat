@@ -74,3 +74,18 @@ describe("nextPaletteIndex", () => {
     expect(nextPaletteIndex(0, 1, 0)).toBe(0);
   });
 });
+
+// Memory uses the existing palette/keybinding path; aliases never perform mutations.
+import { memoryPaletteItem } from "./commandPaletteItems";
+it("finds memory management aliases and opens only when selected", () => {
+  let opens = 0;
+  const item = memoryPaletteItem(() => {
+    opens++;
+  });
+  for (const alias of ["forget", "conflict", "revert", "sync", "import"]) {
+    expect(filterCommandPaletteItems([item], `>${alias}`, new Set())).toEqual([item]);
+  }
+  expect(opens).toBe(0);
+  item.run();
+  expect(opens).toBe(1);
+});

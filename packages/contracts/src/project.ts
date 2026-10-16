@@ -441,11 +441,20 @@ export const ProjectReadFileInput = Schema.Struct({
 });
 export type ProjectReadFileInput = typeof ProjectReadFileInput.Type;
 
+export const ProjectTextFormat = Schema.Struct({
+  encoding: Schema.Literals(["utf-8", "unsupported"]),
+  bom: Schema.Boolean,
+  lineEnding: Schema.Literals(["lf", "crlf", "cr", "mixed"]),
+});
+export type ProjectTextFormat = typeof ProjectTextFormat.Type;
+
 export const ProjectReadFileResult = Schema.Struct({
   relativePath: TrimmedNonEmptyString,
   contents: Schema.String,
   byteLength: NonNegativeInt,
   truncated: Schema.Boolean,
+  version: Schema.optionalKey(TrimmedNonEmptyString),
+  textFormat: Schema.optionalKey(ProjectTextFormat),
 });
 export type ProjectReadFileResult = typeof ProjectReadFileResult.Type;
 
@@ -454,6 +463,9 @@ export const ProjectFileFailure = Schema.Literals([
   "resolved_path_outside_root",
   "path_not_file",
   "binary_file",
+  "changed_on_disk",
+  "deleted_on_disk",
+  "unsupported_text_format",
   "operation_failed",
 ]);
 export type ProjectFileFailure = typeof ProjectFileFailure.Type;
@@ -510,11 +522,14 @@ export const ProjectWriteFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
   contents: Schema.String,
+  expectedVersion: Schema.optionalKey(TrimmedNonEmptyString),
+  textFormat: Schema.optionalKey(ProjectTextFormat),
 });
 export type ProjectWriteFileInput = typeof ProjectWriteFileInput.Type;
 
 export const ProjectWriteFileResult = Schema.Struct({
   relativePath: TrimmedNonEmptyString,
+  version: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type ProjectWriteFileResult = typeof ProjectWriteFileResult.Type;
 

@@ -1,3 +1,4 @@
+import { ProviderMemoryImportRuntime } from "./memory/imports/MemoryImportTypes.ts";
 import * as MemoryService from "./memory/MemoryService.ts";
 import * as MemorySyncService from "./memory/MemorySyncService.ts";
 import { memoryError } from "./mcp/toolkits/memory/handlers.ts";
@@ -113,8 +114,10 @@ import {
   WsChannelRpcGroup,
   WsCoreRpcGroup,
   MemoryMutationReceipt,
+  MemoryImportRpcError,
   WsMemoryCoreRpcGroup,
   WsMemoryAdministrationRpcGroup,
+  WsMemoryImportRpcGroup,
 } from "@goat/contracts";
 import { resolveServerBackgroundActivitySettings } from "@goat/shared/backgroundActivitySettings";
 import {
@@ -559,6 +562,12 @@ function projectFileFailureContext(
       };
     case "WorkspacePathNotFileError":
       return { failure: "path_not_file", resolvedPath: error.resolvedPath };
+    case "WorkspaceFileChangedOnDiskError":
+      return { failure: "changed_on_disk" };
+    case "WorkspaceFileDeletedOnDiskError":
+      return { failure: "deleted_on_disk" };
+    case "WorkspaceUnsupportedTextFormatError":
+      return { failure: "unsupported_text_format" };
     case "WorkspaceBinaryFileError":
       return { failure: "binary_file", resolvedPath: error.resolvedPath };
     default:
@@ -569,6 +578,48 @@ function projectFileFailureContext(
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
+/** SQL-free live scope reads can safely run again after a source wait or inside a transaction. */
+export const memorySessionPermit = <E>(
+  liveScopes: Effect.Effect<ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>, E>,
+  capturedScopes: ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>,
+  required: ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>,
+) =>
+  liveScopes.pipe(
+    Effect.flatMap((live) =>
+      required.every((scope) => capturedScopes.includes(scope) && live.includes(scope))
+        ? Effect.void
+        : Effect.fail(new MemoryService.MemoryAccessError({ code: "unavailable" })),
+    ),
+    Effect.mapError(() => new MemoryService.MemoryAccessError({ code: "unavailable" })),
+  );
+
+const isMemoryImportRpcError = Schema.is(MemoryImportRpcError);
+
+/** Shared by the installed websocket route and the transport integration harness. */
+export const makeMemoryImportHandlers = <E>(
+  liveScopes: Effect.Effect<ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>, E>,
+  capturedScopes: ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>,
+) =>
+  Effect.gen(function* () {
+    const permit = memorySessionPermit(liveScopes, capturedScopes, [
+      "memory:write",
+      "filesystem:read",
+    ]);
+    const memory = yield* MemoryService.MemoryService;
+    const runtime = yield* Effect.serviceOption(ProviderMemoryImportRuntime);
+    return WsMemoryImportRpcGroup.middleware(RpcInstrumentation).of({
+      [WS_METHODS.memoryImportProvider]: (input) =>
+        (runtime._tag === "Some"
+          ? memory
+              .importProvider(input, permit)
+              .pipe(Effect.provideService(ProviderMemoryImportRuntime, runtime.value))
+          : Effect.fail(new MemoryService.MemoryAccessError({ code: "unavailable" }))
+        ).pipe(
+          Effect.mapError((error) => (isMemoryImportRpcError(error) ? error : memoryError(error))),
+        ),
+    });
+  });
+
 const decodeMemoryMutationReceipt = Schema.decodeUnknownEffect(MemoryMutationReceipt);
 const ServerWsRpcGroup = RpcAuthorization.AuthorizedWsRpcGroup.middleware(RpcInstrumentation);
 // Handlers register per part of the group; see WsChannelRpcGroup.
@@ -1399,14 +1450,15 @@ const layerWsRpc = (
       const memoryPermit = (
         required: ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>,
       ) =>
-        sessions.readActiveScopes(currentSessionId).pipe(
-          Effect.flatMap((live) =>
-            required.every((scope) => currentSession.scopes.includes(scope) && live.includes(scope))
-              ? Effect.void
-              : Effect.fail(new MemoryService.MemoryAccessError({ code: "unavailable" })),
-          ),
-          Effect.mapError(() => new MemoryService.MemoryAccessError({ code: "unavailable" })),
+        memorySessionPermit(
+          sessions.readActiveScopes(currentSessionId),
+          currentSession.scopes,
+          required,
         );
+      const importHandlers = yield* makeMemoryImportHandlers(
+        sessions.readActiveScopes(currentSessionId),
+        currentSession.scopes,
+      );
       const memoryRead = memoryPermit(["memory:read"]);
       const memoryWrite = memoryPermit(["memory:write"]);
       const memorySource = memoryPermit(["memory:read", "orchestration:read"]);
@@ -1427,6 +1479,8 @@ const layerWsRpc = (
           memory.read(input, memoryRead).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryHistory]: (input) =>
           memory.history(input, memoryRead).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryHubDiagnostics]: (input) =>
+          memorySync.hubDiagnostics(input, memoryRead).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memorySyncStatus]: (input) =>
           memorySync.syncStatus(input, memoryRead).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryUpsert]: (input) =>
@@ -1449,6 +1503,10 @@ const layerWsRpc = (
           memorySync.updateHubSettings(input, memorySettings).pipe(Effect.mapError(memoryError)),
       });
       const ownerHandlers = WsMemoryAdministrationRpcGroup.middleware(RpcInstrumentation).of({
+        [WS_METHODS.memoryHubReconcile]: (input) =>
+          memorySync.reconcileHub(input, memorySettings).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryResetReportAttempts]: (input) =>
+          memory.resetReportAttempts(input, memorySettings).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryOwnerSourceReadPolicyGet]: () => ownerPolicy.get(ownerSettings),
         [WS_METHODS.memoryOwnerSourceReadPolicyUpdate]: (input) =>
           ownerPolicy.update(input, ownerSettings).pipe(Effect.mapError(memoryError)),
@@ -3385,6 +3443,7 @@ const layerWsRpc = (
           ),
       });
       return Layer.mergeAll(
+        WsMemoryImportRpcGroup.middleware(RpcInstrumentation).toLayer(importHandlers),
         WsMemoryCoreRpcGroup.middleware(RpcInstrumentation).toLayer(memoryHandlers),
         WsMemoryAdministrationRpcGroup.middleware(RpcInstrumentation).toLayer(ownerHandlers),
         ServerWsCoreRpcGroup.toLayer(handlers),

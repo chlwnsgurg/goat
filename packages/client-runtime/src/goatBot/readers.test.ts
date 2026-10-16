@@ -9,6 +9,7 @@ import {
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
+import { buildGoatBotTimeline } from "./rows.ts";
 import { goatBotItemReaders, presentTaskChip } from "./readers.ts";
 
 const chip = (overrides: Partial<ChannelTaskChip> = {}): ChannelTaskChip => ({
@@ -174,5 +175,69 @@ describe("goatBotItemReaders", () => {
     });
     expect(goatBotItemReaders.taskCard(plain)).toBeNull();
     expect(goatBotItemReaders.taskCard(unknownStatus)).toBeNull();
+  });
+});
+
+// Exercise the real codec → reader → row chain used by both renderers.
+describe("memory report navigation", () => {
+  const memory = {
+    environmentId: "delivery-owner",
+    memorySpaceId: "00000000-0000-4000-8000-000000000001",
+    memoryId: "00000000-0000-4000-8000-000000000002",
+    resolutionId: "00000000-0000-4000-8000-000000000003",
+  };
+  const decode = Schema.decodeUnknownSync(OrchestrationV2TurnItemJson);
+  const reportItem = (reference: unknown) =>
+    decode({
+      id: "report",
+      threadId: "bot",
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: "completed",
+      title: null,
+      startedAt: "2026-10-12T12:00:00.000Z",
+      completedAt: "2026-10-12T12:00:00.000Z",
+      updatedAt: "2026-10-12T12:00:00.000Z",
+      type: "assistant_message",
+      messageId: "report",
+      text: "Memory resolved",
+      streaming: false,
+      channel: {
+        conversationId: "conv",
+        originKind: "goat",
+        kind: "result",
+        ...(reference === undefined ? {} : { memory: reference }),
+      },
+    });
+  const timeline = (reference: unknown) => {
+    const item = reportItem(reference);
+    return buildGoatBotTimeline({
+      visibleTurnItems: [
+        {
+          position: 0,
+          visibility: "local",
+          sourceThreadId: item.threadId,
+          sourceItemId: item.id,
+          item,
+        },
+      ],
+      pendingInputs: [],
+      readers: goatBotItemReaders,
+    }).filter((row) => row.kind === "bot");
+  };
+  it("carries the exact delivery owner, space, memory and resolution into a report row", () => {
+    expect(timeline(memory)[0]).toMatchObject({ kind: "bot", text: "Memory resolved", memory });
+  });
+  it("keeps old metadata as plain safe text without a navigation action", () => {
+    expect(timeline(undefined)[0]).not.toHaveProperty("memory");
+    expect(timeline(undefined)[0]?.text).toBe("Memory resolved");
+  });
+  it("does not create navigation from malformed metadata", () => {
+    expect(timeline({ ...memory, memoryId: "malformed" })[0]).not.toHaveProperty("memory");
   });
 });

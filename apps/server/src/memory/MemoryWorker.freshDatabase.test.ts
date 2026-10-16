@@ -48,24 +48,27 @@ const live = (hub = false, configured = false) =>
     Layer.provide(identity),
     Layer.provide(NodeServices.layer),
     Layer.provide(
-      Settings.layerTest({
-        ...(hub
-          ? {
-              memoryHub: {
-                mode: "hub",
-                memorySpaceId: M.MemorySpaceId.make("00000000-0000-4000-8000-000000000001"),
-              },
-            }
-          : {}),
-        ...(configured
-          ? {
-              defaultModelSelection: {
-                instanceId: M.ProviderInstanceId.make("fixture"),
-                model: "fixture",
-              },
-            }
-          : {}),
-      }),
+      Settings.layerTest(
+        {
+          ...(hub
+            ? {
+                memoryHub: {
+                  mode: "hub",
+                  memorySpaceId: M.MemorySpaceId.make("00000000-0000-4000-8000-000000000001"),
+                },
+              }
+            : {}),
+          ...(configured
+            ? {
+                defaultModelSelection: {
+                  instanceId: M.ProviderInstanceId.make("fixture"),
+                  model: "fixture",
+                },
+              }
+            : {}),
+        },
+        "memoryHub",
+      ),
     ),
     Layer.provide(Layer.succeed(RuntimeIdentity.RuntimeIdentity, { instanceId: "fresh-worker" })),
     Layer.provide(Layer.mock(Events.EventSinkV2)({ stream: () => Stream.empty })),
@@ -147,4 +150,63 @@ it.effect.each(["catch-up", "maintenance"] as const)(
       ),
     );
   },
+);
+
+it.effect("r3 disabled maintenance continues report pages and waits after a complete pass", () =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(0);
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const worker = yield* Worker.MemoryWorker;
+    const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    const seed = (n: number) =>
+      Effect.gen(function* () {
+        const space = M.MemorySpaceId.make(uuid((n % 2) + 1));
+        const operationId = M.MemoryOperationId.make(uuid(n + 100));
+        const resolutionId = M.MemoryResolutionId.make(uuid(9));
+        const memoryId = M.MemoryId.make(uuid(8));
+        const foreign = M.EnvironmentId.make("foreign");
+        const reportId = Store.resolutionReportId(space, operationId, resolutionId);
+        yield* store.persistCompactReceipt({
+          memorySpaceId: space,
+          originEnvironmentId: foreign,
+          operationKind: "revert",
+          receipt: {
+            operationId,
+            memoryId,
+            operationDigest: "a".repeat(64),
+            outcome: "accepted",
+            hubSequence: n + 1,
+          },
+          revisionId: M.MemoryRevisionId.make(uuid(n + 1000)),
+          resolutionId,
+          revertsResolutionId: resolutionId,
+          attemptId: null,
+          fencingToken: null,
+          reportGuard: {
+            reportId,
+            resolvingEnvironmentId: foreign,
+            resolutionId,
+            outcome: "reverted",
+          },
+        });
+        yield* sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,resolving_environment_id,outcome,state,created_at) VALUES (${reportId},${space},${memoryId},${operationId},${resolutionId},${foreign},'reverted','pending',0)`;
+      });
+    for (let n = 0; n < 258; n++) yield* seed(n);
+    const count = Effect.map(
+      sql<{ count: number }>`SELECT count(*) AS count FROM memory_report_outbox`,
+      (rows) => rows[0]!.count,
+    );
+    yield* worker.sweepDue();
+    assert.strictEqual(yield* count, 2);
+    yield* worker.sweepDue();
+    assert.strictEqual(yield* count, 0);
+    yield* seed(300);
+    yield* worker.sweepDue();
+    assert.strictEqual(yield* count, 1);
+    yield* TestClock.setTime(60_000);
+    yield* worker.sweepDue();
+    assert.strictEqual(yield* count, 0);
+    assert.strictEqual((yield* sql`SELECT 1 FROM memory_compact_receipts`).length, 259);
+  }).pipe(Effect.scoped, Effect.provide(live())),
 );

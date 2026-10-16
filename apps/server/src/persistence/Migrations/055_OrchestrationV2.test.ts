@@ -13,7 +13,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 74 }, (_, index) => index + 1),
+        Array.from({ length: 79 }, (_, index) => index + 1),
       );
     }),
   );
@@ -46,6 +46,11 @@ layer("055_OrchestrationV2", (it) => {
         [72, "MemoryHubSync"],
         [73, "MemorySearchCounters"],
         [74, "MemoryTaskGrantCeiling"],
+        [75, "MemoryImportLineage"],
+        [76, "MemoryCheckpointAccounting"],
+        [77, "MemoryReportLifecycle"],
+        [78, "MemoryUsageCounters"],
+        [79, "MemoryRevertResults"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -86,6 +91,11 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 72, name: "MemoryHubSync" },
         { migration_id: 73, name: "MemorySearchCounters" },
         { migration_id: 74, name: "MemoryTaskGrantCeiling" },
+        { migration_id: 75, name: "MemoryImportLineage" },
+        { migration_id: 76, name: "MemoryCheckpointAccounting" },
+        { migration_id: 77, name: "MemoryReportLifecycle" },
+        { migration_id: 78, name: "MemoryUsageCounters" },
+        { migration_id: 79, name: "MemoryRevertResults" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`

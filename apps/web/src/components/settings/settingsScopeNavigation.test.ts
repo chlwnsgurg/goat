@@ -11,6 +11,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { resolveSettingsScope } from "./settingsScope";
 import { retainSettingsScope, validateSettingsRouteSearch } from "./settingsScopeNavigation";
 
+import { validateMemorySettingsSearch } from "./MemorySettings.logic";
 import { validateScheduledTasksSearch } from "./scheduledTasksSettings.logic";
 
 const checkoutSearch = {
@@ -48,6 +49,11 @@ function createSettingsRouter(initialEntry = "/settings/general") {
         : {}),
     }),
   });
+  const memory = createRoute({
+    getParentRoute: () => settings,
+    path: "memory",
+    validateSearch: validateMemorySettingsSearch,
+  });
   const scheduledTasks = createRoute({
     getParentRoute: () => settings,
     path: "scheduled-tasks",
@@ -67,6 +73,7 @@ function createSettingsRouter(initialEntry = "/settings/general") {
   return createRouter({
     routeTree: root.addChildren([
       settings.addChildren([
+        memory,
         general,
         projects,
         integrations,
@@ -294,4 +301,26 @@ describe("scheduled task scope navigation", () => {
     await router.navigate({ to: "/settings/scheduled-tasks" });
     expect(router.state.matches.at(-1)?.search).toEqual(checkoutSearch);
   });
+});
+
+it("pins memory report destinations, clears inherited filters, and drops record ids on exit", async () => {
+  const router = createSettingsRouter();
+  await router.load();
+  await router.navigate({ to: "/settings/general", search: checkoutSearch });
+  await router.navigate({
+    to: "/settings/memory",
+    search: validateMemorySettingsSearch({
+      environmentId: "foreign-owner",
+      memorySpaceId: "00000000-0000-4000-8000-000000000001",
+      memoryId: "00000000-0000-4000-8000-000000000002",
+    }),
+  });
+  expect(router.state.location.search).toMatchObject({
+    environmentId: "foreign-owner",
+    machine: "foreign-owner",
+  });
+  expect(router.state.location.search.project).toBeUndefined();
+  expect(router.state.location.search.checkout).toBeUndefined();
+  await router.navigate({ to: "/settings/general" });
+  expect(router.state.location.search).toEqual({ machine: "foreign-owner" });
 });

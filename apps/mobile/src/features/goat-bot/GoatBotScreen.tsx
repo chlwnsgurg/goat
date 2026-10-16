@@ -1,8 +1,12 @@
-import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
+import { MemoryReportLink } from "../settings/SettingsMemoryRouteScreen";
+import { LegendList } from "@legendapp/list/react-native";
 import type { EnvironmentThreadShell } from "@goat/client-runtime/state/shell";
 import type { GoatBotRow } from "@goat/client-runtime/goatBot";
-import { memo, useCallback, useEffect, useState } from "react";
-import { KeyboardAvoidingView, Platform, Pressable, Text, TextInput, View } from "react-native";
+import { memo, useCallback, useState } from "react";
+import { Platform, Pressable, Text, TextInput, View } from "react-native";
+import { KeyboardAvoidingView, useKeyboardState } from "react-native-keyboard-controller";
+import { NativeScrollViewMarker } from "../../native/NativeScrollViewMarker";
+import { useReplying } from "./useReplying";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useHomeThreadSelection } from "../home/home-thread-navigation";
@@ -90,7 +94,7 @@ function GoatBotTaskCard(props: {
   );
 }
 
-const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
+export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
   readonly row: GoatBotRow;
   readonly canSend: boolean;
   readonly onSend: (answer: string) => boolean;
@@ -167,6 +171,7 @@ const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
           {row.text}
         </Text>
       </View>
+      {row.memory ? <MemoryReportLink reference={row.memory} /> : null}
       {row.options.length > 0 ? (
         <View
           accessibilityLabel="Suggested answers"
@@ -189,21 +194,6 @@ const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
   );
 });
 
-/** One expiry timer; the replying dots never animate or continuously repaint. */
-function useReplying(since: string | null, visible: boolean) {
-  const [expiredFor, setExpiredFor] = useState<string | null>(null);
-  const started = since === null ? Number.NaN : Date.parse(since);
-  useEffect(() => {
-    if (!visible || since === null || Number.isNaN(started)) return;
-    const timer = setTimeout(
-      () => setExpiredFor(since),
-      Math.max(0, started + 90_000 - Date.now()),
-    );
-    return () => clearTimeout(timer);
-  }, [since, started, visible]);
-  return visible && since !== null && !Number.isNaN(started) && expiredFor !== since;
-}
-
 export function GoatBotScreen(props: {
   readonly visible: boolean;
   readonly onSelectThread?: (thread: ThreadSelection) => void;
@@ -212,6 +202,10 @@ export function GoatBotScreen(props: {
   const selectThread = useHomeThreadSelection();
   const onSelectThread = props.onSelectThread ?? selectThread;
   const insets = useSafeAreaInsets();
+  const keyboardVisible = useKeyboardState((state) => state.isVisible);
+  const bottomInset = keyboardVisible ? 8 : Math.max(8, insets.bottom);
+  const topInset = Platform.OS === "ios" ? insets.top : 0;
+  const hasBanner = session.availability !== "ready";
   const [text, setText] = useState("");
   const [inputHeight, setInputHeight] = useState(40);
   const replying = useReplying(session.replyingSince, props.visible);
@@ -234,12 +228,13 @@ export function GoatBotScreen(props: {
     }
   };
   return (
-    <KeyboardAvoidingView
-      className="flex-1 bg-screen"
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
-      {session.availability !== "ready" ? (
-        <View accessibilityRole="alert" className="gap-2 border-b border-border px-4 py-3">
+    <KeyboardAvoidingView className="flex-1 bg-screen" automaticOffset behavior="height">
+      {hasBanner ? (
+        <View
+          accessibilityRole="alert"
+          className="gap-2 border-b border-border px-4 py-3"
+          style={{ paddingTop: topInset + 12 }}
+        >
           <Text className="text-sm text-foreground-muted">
             {session.availability === "home_offline"
               ? `GOAT Bot runs on ${session.homeLabel}. It will continue when that computer connects.`
@@ -258,36 +253,39 @@ export function GoatBotScreen(props: {
           ) : null}
         </View>
       ) : null}
-      <KeyboardAwareLegendList
-        style={{ flex: 1 }}
-        data={session.rows}
-        keyExtractor={rowKey}
-        renderItem={renderItem}
-        maintainScrollAtEnd
-        alignItemsAtEnd
-        keyboardShouldPersistTaps="handled"
-        contentInsetAdjustmentBehavior="automatic"
-        contentContainerStyle={{ padding: 16 }}
-        ListEmptyComponent={
-          <Text className="py-6 text-center text-foreground-muted">
-            Ask GOAT Bot for anything. It answers here and starts work in its own threads.
-          </Text>
-        }
-        ListFooterComponent={
-          replying ? (
-            <Text
-              accessibilityRole="text"
-              accessibilityLabel="GOAT Bot is replying"
-              className="self-start rounded-2xl bg-card px-4 py-2 text-foreground-muted"
-            >
-              ● ● ●
+      <NativeScrollViewMarker style={{ flex: 1 }}>
+        <LegendList
+          style={{ flex: 1 }}
+          data={session.rows}
+          keyExtractor={rowKey}
+          renderItem={renderItem}
+          maintainScrollAtEnd
+          alignItemsAtEnd
+          keyboardShouldPersistTaps="handled"
+          contentInsetAdjustmentBehavior="never"
+          contentInset={{ top: hasBanner ? 0 : topInset }}
+          contentContainerStyle={{ padding: 16 }}
+          ListEmptyComponent={
+            <Text className="py-6 text-center text-foreground-muted">
+              Ask GOAT Bot for anything. It answers here and starts work in its own threads.
             </Text>
-          ) : null
-        }
-      />
+          }
+          ListFooterComponent={
+            replying ? (
+              <Text
+                accessibilityRole="text"
+                accessibilityLabel="GOAT Bot is replying"
+                className="self-start rounded-2xl bg-card px-4 py-2 text-foreground-muted"
+              >
+                ● ● ●
+              </Text>
+            ) : null
+          }
+        />
+      </NativeScrollViewMarker>
       <View
         className="flex-row items-end gap-2 border-t border-border px-4 pt-2"
-        style={{ paddingBottom: Math.max(8, insets.bottom) }}
+        style={{ paddingBottom: bottomInset }}
       >
         <TextInput
           accessibilityLabel="Message GOAT Bot"

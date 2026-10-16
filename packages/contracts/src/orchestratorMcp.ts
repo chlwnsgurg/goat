@@ -30,7 +30,6 @@ import {
   RuntimeMode,
   ProviderUserInputAnswers,
   UserInputRespondedBy,
-  UserInputResponseReason,
   ProviderApprovalDecision,
 } from "./providerPolicy.ts";
 import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
@@ -447,13 +446,29 @@ export type OrchestratorMcpPendingRequestReadResult =
   typeof OrchestratorMcpPendingRequestReadResult.Type;
 /** Single-shot approval answers; session-wide grants stay with the user. */
 export const OrchestratorMcpApprovalDecision = Schema.Literals(["accept", "decline"]);
+const pendingResponseReasonError = {
+  message:
+    "Send reason with 1–2000 characters including non-whitespace text; it is shown to the user as response provenance.",
+};
 export const OrchestratorMcpPendingRequestRespondInput = Schema.Struct({
   threadId: Schema.optional(ThreadId),
   host: Schema.optional(OrchestratorMcpHost),
   requestId: RuntimeRequestId,
-  answers: Schema.optional(ProviderUserInputAnswers),
+  answers: Schema.optional(
+    ProviderUserInputAnswers.annotate({
+      description:
+        'Answers keyed by question id from goat_pending_request_read, not header or option id. Use a string for single select or free text, and an array of strings for multiSelect. Select an option.value when present, otherwise its label. Custom text is allowed unless allowCustomAnswer is false. Example: {"color":"Blue","features":["Fast","Quiet"],"notes":"Keep the existing API"}. Omit decision when sending answers.',
+    }),
+  ),
   decision: Schema.optional(OrchestratorMcpApprovalDecision),
-  reason: UserInputResponseReason,
+  reason: Schema.String.check(
+    Schema.isMinLength(1, pendingResponseReasonError),
+    Schema.isMaxLength(2000, pendingResponseReasonError),
+    Schema.isPattern(/\S/, pendingResponseReasonError),
+  ).annotate({
+    description:
+      'Required provenance shown to the user: explain why you chose these answers or this decision. Send 1–2000 characters including non-whitespace text, e.g. "The user requested the existing API."',
+  }),
   respondedBy: Schema.optional(UserInputRespondedBy),
 });
 export type OrchestratorMcpPendingRequestRespondInput =

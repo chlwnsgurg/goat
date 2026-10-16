@@ -187,13 +187,15 @@ it.effect("applies scope middleware to SSH workspace RPCs", () =>
   }),
 );
 
-describe("staged memory RPC", () => {
-  it("declares seventeen memory methods with typed inputs and authorization middleware", () => {
-    expect(WsMemoryRpcGroup.requests.size).toBe(17);
-    expect(WsMemoryCoreRpcGroup.requests.size).toBe(14);
+describe("memory RPC groups", () => {
+  it("declares twenty memory methods with typed inputs and authorization middleware", () => {
+    expect(WsMemoryRpcGroup.requests.size).toBe(20);
+    expect(WsMemoryCoreRpcGroup.requests.size).toBe(15);
     expect(WsMemoryImportRpcGroup.requests.size).toBe(1);
-    expect(WsMemoryAdministrationRpcGroup.requests.size).toBe(2);
+    expect(WsMemoryAdministrationRpcGroup.requests.size).toBe(4);
     expect([...WsMemoryAdministrationRpcGroup.requests.keys()]).toEqual([
+      "memory.hub.reconcile",
+      "memory.resetReportAttempts",
       "memory.ownerSourceReadPolicy.get",
       "memory.ownerSourceReadPolicy.update",
     ]);
@@ -205,7 +207,7 @@ describe("staged memory RPC", () => {
     }
     expect(WsMemoryRpcGroup.requests.has("memory.changes")).toBe(true);
   });
-  it("keeps memory out of live group until handlers exist", () => {
+  it("keeps the non-memory base group composable", () => {
     expect([...WsRpcGroup.requests.keys()].filter((key) => key.startsWith("memory."))).toEqual([]);
   });
   it("rejects upsert provenance and arbitrary import paths", () => {
@@ -255,10 +257,10 @@ describe("staged memory RPC", () => {
     ).toThrow();
   });
 });
-it("declares fourteen core methods and one staged import", () => {
+it("declares fifteen core methods and one staged import", () => {
   expect([...WsMemoryCoreRpcGroup.requests.keys()]).not.toContain("memory.importProvider");
   expect([...WsMemoryImportRpcGroup.requests.keys()]).toEqual(["memory.importProvider"]);
-  expect(WsMemoryCoreRpcGroup.requests.size).toBe(14);
+  expect(WsMemoryCoreRpcGroup.requests.size).toBe(15);
 });
 it("memory changes is a typed authorized stream", () => {
   const rpc = WsMemoryCoreRpcGroup.requests.get("memory.changes")!;
@@ -307,4 +309,16 @@ it("binding commands have exact input result and errors", () => {
       binding: {},
     }),
   ).toThrow();
+});
+
+it("import transport retains both typed import refusal and authorization errors", () => {
+  const rpc = WsMemoryImportRpcGroup.requests.get("memory.importProvider")!;
+  for (const issue of ["source_unreadable", "source_changed", "operation_id_reused"] as const) {
+    expect(
+      Schema.decodeUnknownSync(rpc.errorSchema)({ _tag: "MemoryImportRpcError", issue }),
+    ).toEqual(new Memory.MemoryImportRpcError({ issue }));
+  }
+  expect(
+    Schema.decodeUnknownSync(rpc.errorSchema)({ _tag: "MemoryRpcError", code: "unavailable" }),
+  ).toEqual(new Memory.MemoryRpcError({ code: "unavailable" }));
 });

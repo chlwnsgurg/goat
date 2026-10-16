@@ -398,9 +398,9 @@ describe("Memory hub assembled HTTP scenarios", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect(
-    "joins a real checkpoint, pushes a fork, claims and applies one canonical resolution",
-    () =>
+  it.effect.each([false, true] as const)(
+    "joins a real checkpoint, pushes a fork, claims and applies one canonical resolution (shared alias bodies: %s)",
+    (shared) =>
       Effect.gen(function* () {
         const s = yield* scenario;
         yield* s.initialize;
@@ -430,16 +430,45 @@ describe("Memory hub assembled HTTP scenarios", () => {
           revision: { ...sourceBase.revision, memoryId: sourceId },
         };
         assert.strictEqual((yield* s.push([source])).receipts[0]!.outcome, "accepted");
-        const first = operation(10, s.hubEnv);
+        const firstBase = operation(10, s.hubEnv);
+        const first = {
+          ...firstBase,
+          payload: {
+            ...firstBase.payload,
+            derivedFromMemoryRevisions: [source.revision.revisionId],
+          },
+        };
         assert.strictEqual((yield* s.push([first])).receipts[0]!.hubSequence, 2);
         const sibling = (n: number) => {
           const op = operation(n, s.hubEnv);
           return {
             ...op,
             expectedHeads: [first.revision.revisionId],
-            revision: { ...op.revision, parents: [first.revision.revisionId] },
+            revision: {
+              ...op.revision,
+              parents: [first.revision.revisionId],
+              ...(shared
+                ? {
+                    payloadRef: first.revision.payloadRef,
+                    provenance: {
+                      environmentId: s.hubEnv,
+                      importSource: {
+                        sourceId: M.MemoryImportSourceId.make(id(9000)),
+                        format: "codex" as const,
+                        parserVersion: "synthetic-v1",
+                        sourceLocator: "memory.md",
+                        sourceItemKey: `alias-${n}`,
+                        sourceFingerprint: "a".repeat(64),
+                        contentFingerprint: "b".repeat(64),
+                        sourceAliases: [],
+                        acceptedContentFingerprints: [],
+                      },
+                    },
+                  }
+                : {}),
+            },
             payload: {
-              ...op.payload,
+              ...(shared ? first.payload : op.payload),
               derivedFromMemoryRevisions: [source.revision.revisionId],
             },
           };
@@ -496,7 +525,10 @@ describe("Memory hub assembled HTTP scenarios", () => {
             memorySpaceId: space,
             memoryId,
             inputRevisionIds: aggregate.heads,
-            inputPayloadRefs: aggregate.heads,
+            inputPayloadRefs: aggregate.heads.map(
+              (id) =>
+                aggregate.revisions.find((r) => r.revision.revisionId === id)!.revision.payloadRef,
+            ),
             judgmentRef: resolutionId,
             requestedModelSelection: claim.frozenDefaultModelSelection,
             effectiveProvider: M.ProviderDriverKind.make("codex"),
@@ -812,7 +844,11 @@ describe("Memory hub assembled HTTP scenarios", () => {
       );
       const enabled = yield* descriptor;
       assert.strictEqual(enabled.capabilities.memoryHubProtocolVersion, 1);
-      assert.strictEqual(enabled.capabilities.memory, undefined);
+      assert.deepStrictEqual(enabled.capabilities.memory, {
+        protocolVersion: 1,
+        refusedReverts: true,
+        hubDiagnostics: true,
+      });
       yield* s.configure("disabled");
       const disabled = yield* descriptor;
       assert.strictEqual(disabled.environmentId, enabled.environmentId);

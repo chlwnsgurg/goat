@@ -1,4 +1,5 @@
 import { scopedThreadKey } from "@goat/client-runtime/environment";
+import { shellSyncMessage } from "@goat/client-runtime/state/presentation";
 import type { ScopedThreadRef } from "@goat/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
@@ -8,6 +9,8 @@ import { GoatBotThreadView } from "./goatBot/GoatBotThreadView";
 import { resolveDraftPromotionNavigationTarget, threadHasStarted } from "./ChatView.logic";
 import { waitForDraftHeroTransition } from "./chat/draftHeroTransition";
 import { SidebarInset } from "./ui/sidebar";
+import { Button } from "./ui/button";
+import { useEnvironmentShellSync } from "../state/presentation";
 import {
   finalizePromotedDraftThreadByRef,
   markPromotedDraftThreadByRef,
@@ -68,6 +71,8 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   const serverThreadRef: ScopedThreadRef | null =
     target.kind === "server" ? target.threadRef : (draftSession?.promotedTo ?? inferredThreadRef);
   const serverThread = useThreadShell(serverThreadRef);
+  const sync = useEnvironmentShellSync(serverThreadRef?.environmentId ?? null);
+  const syncMessage = shellSyncMessage(sync);
   const backgroundSubmissionPending = useBackgroundDraftSubmissionPending(
     target.kind === "draft" ? serverThreadRef : null,
   );
@@ -211,6 +216,19 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
 
   return (
     <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh">
+      {target.kind === "server" && syncMessage !== null && (
+        <div
+          role="status"
+          className="flex shrink-0 items-center justify-between gap-3 border-b border-warning/30 bg-warning-surface px-4 py-2 text-sm text-warning-foreground"
+        >
+          <span>{syncMessage}</span>
+          {(sync === "error" || sync === "stale") && (
+            <Button variant="outline" size="sm" onClick={shell.refresh}>
+              Retry sync
+            </Button>
+          )}
+        </div>
+      )}
       {view}
     </SidebarInset>
   );

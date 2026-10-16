@@ -1,3 +1,4 @@
+import * as Settings from "../serverSettings.ts";
 import { assert, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Renderer from "@goat/provider-core/server/memoryContext";
@@ -63,6 +64,14 @@ const fixture = (
     getEnvironmentId: Effect.succeed(environmentId),
   });
   const serviceBase = Service.layer.pipe(
+    Layer.provide(
+      Layer.succeed(Settings.MemoryHubCommittedSettings, {
+        read: Effect.succeed({
+          settings: { mode: "hub" as const, memorySpaceId: space },
+          version: 1,
+        }),
+      }),
+    ),
     Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(store))),
     Layer.provideMerge(identity),
     Layer.provide(

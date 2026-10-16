@@ -23,6 +23,7 @@ import type {
   ScheduledTaskWebhookDeliverySummary,
   ThreadId,
 } from "@goat/contracts";
+import { MemoryRunAccessLabel } from "./MemoryRunAccessLabel";
 import { DEFAULT_WEBHOOK_PROMPT } from "@goat/client-runtime/scheduled-task-webhook";
 import {
   MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
@@ -463,6 +464,7 @@ function ScheduledTaskRow({
           {task.lastRunStatus !== "never" ? (
             <Badge variant={statusVariant(task.lastRunStatus)}>{task.lastRunStatus}</Badge>
           ) : null}
+          <MemoryRunAccessLabel {...task} />
           {task.lastRunError ? <span className="text-destructive">{task.lastRunError}</span> : null}
         </div>
       }

@@ -168,7 +168,10 @@ const entryEqual = (a: ProviderInstanceConfig, b: ProviderInstanceConfig): boole
  * decoded config's flag (which carries the driver schema's default for
  * built-ins and forks alike), then enabled by default.
  */
-const resolveEntryEnabled = (entry: ProviderInstanceConfig, typedConfig: unknown): boolean => {
+export const resolveEntryEnabled = (
+  entry: ProviderInstanceConfig,
+  typedConfig: unknown,
+): boolean => {
   const rawConfigEnabled = providerInstanceConfigEnabledFlag(entry.config);
   if (entry.enabled === false || rawConfigEnabled === false) {
     return false;

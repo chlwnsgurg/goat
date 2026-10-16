@@ -3,6 +3,18 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./memory-import-recovery": {
+      "types": "./src/memoryImportRecovery.ts",
+      "default": "./src/memoryImportRecovery.ts"
+    },
+    "./memory-import-workflow": {
+      "types": "./src/memoryImportWorkflow.ts",
+      "default": "./src/memoryImportWorkflow.ts"
+    },
+    "./memory-presentation": {
+      "types": "./src/memoryPresentation.ts",
+      "default": "./src/memoryPresentation.ts"
+    },
     "./state/memory": {
       "types": "./src/state/memory.ts",
       "default": "./src/state/memory.ts"
@@ -458,6 +470,10 @@
     "./pull-request-markdown": {
       "types": "./src/pullRequestMarkdown.ts",
       "default": "./src/pullRequestMarkdown.ts"
+    },
+    "./memory-device-flow": {
+      "types": "./src/memoryDeviceFlow.ts",
+      "default": "./src/memoryDeviceFlow.ts"
     }
   },
   "scripts": {

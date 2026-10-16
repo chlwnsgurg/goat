@@ -26,6 +26,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import { exceededDispatchModeLimit } from "../orchestration-v2/DispatchModeLimit.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
 import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
+import { withHostFanOutDeadline } from "./hostFanOutDeadline.ts";
 import {
   dispatchFailure,
   newCommandId,
@@ -314,6 +315,7 @@ const make = Effect.gen(function* () {
                       })),
                     }),
               ),
+              withHostFanOutDeadline(host),
               Effect.result,
               Effect.map((result) => ({ host, result })),
             ),
@@ -431,9 +433,9 @@ const make = Effect.gen(function* () {
         scope,
         Effect.gen(function* () {
           yield* requireRemoteThread(input);
-          if ((input.answers === undefined) === (input.decision === undefined))
+          if (input.answers !== undefined && input.decision !== undefined)
             return yield* invalid(
-              "Pass answers to answer a question, or decision to answer an approval.",
+              "Send only answers for a user-input question, or only decision ('accept' or 'decline') for an approval; omit the other field.",
             );
           if (input.decision !== undefined && !canApprove(scope)) return yield* approvalDenied();
           const identity = yield* responseIdentity(input);
@@ -493,11 +495,56 @@ const make = Effect.gen(function* () {
                 }),
               );
           }
-          const { projection, request } = yield* readRequest(scope, input);
+          const { projection, request, questions } = yield* readRequest(scope, input);
           if (input.decision !== undefined && !isApproval(request))
             return yield* invalid("This request is a question; answer it with answers.");
           if (input.answers !== undefined && request.kind !== "user_input")
             return yield* invalid("This request is an approval; answer it with decision.");
+          if (request.kind === "user_input") {
+            const expectedIds = questions.map((question) => question.id);
+            const expected = expectedIds.join(", ");
+            if (input.answers === undefined)
+              return yield* invalid(
+                `Send answers keyed by question id${expected === "" ? "" : `. Expected question ids: ${expected}`}.`,
+              );
+            const answers = input.answers;
+            // A request recorded without its questions cannot be checked; pass answers through.
+            if (
+              questions.length > 0 &&
+              (Object.keys(answers).some((id) => !expectedIds.includes(id)) ||
+                questions.some(
+                  (question) => question.required !== false && !Object.hasOwn(answers, question.id),
+                ))
+            )
+              return yield* invalid(
+                `Send answers using the question ids from goat_pending_request_read, including every required question. Expected question ids: ${expected}.`,
+              );
+            for (const question of questions) {
+              if (question.allowCustomAnswer !== false || !Object.hasOwn(answers, question.id))
+                continue;
+              const answer = answers[question.id];
+              const values =
+                typeof answer === "string" ? [answer] : Array.isArray(answer) ? answer : [];
+              if (
+                values.length === 0 ||
+                (question.multiSelect !== true && values.length !== 1) ||
+                values.some(
+                  (value) =>
+                    !question.options.some(
+                      (option) =>
+                        value === (option.value ?? option.label) || value === option.label,
+                    ),
+                )
+              )
+                return yield* invalid(
+                  `Send answers["${question.id}"] as ${question.multiSelect === true ? "an array of allowed option strings" : "one allowed option string"}. Allowed options: ${question.options.map((option) => `"${option.value ?? option.label}"`).join(", ")}.`,
+                );
+            }
+          } else if (input.decision === undefined) {
+            return yield* invalid(
+              "Send decision ('accept' or 'decline') for this approval; omit answers.",
+            );
+          }
           const result = yield* threads
             .dispatch({
               type: "runtime-request.respond",

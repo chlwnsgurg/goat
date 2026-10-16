@@ -4,16 +4,16 @@ import {
   Fragment,
   type UIEvent,
   useCallback,
-  useEffect,
   useLayoutEffect,
   useRef,
-  useState,
+  useSyncExternalStore,
 } from "react";
 
 import { usePrimarySettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 import { formatShortTimestamp } from "~/timestampFormat";
 
+import { MemorySettingsEntry } from "../settings/MemorySettings";
 import { Button } from "../ui/button";
 import { GoatBotAvatar } from "./GoatBotAvatar";
 import { GoatBotTaskChip } from "./GoatBotTaskChip";
@@ -118,6 +118,13 @@ export function GoatBotTimeline({
                           </blockquote>
                         ) : null}
                         {row.text}
+                        {row.memory ? (
+                          <MemorySettingsEntry
+                            environmentId={row.memory.environmentId}
+                            reference={row.memory}
+                            label="View memory details"
+                          />
+                        ) : null}
                       </div>
                     </div>
                     <span className="shrink-0 pb-0.5 text-xs text-muted-foreground">
@@ -183,15 +190,17 @@ export function GoatBotTimeline({
 
 /** True from when GOAT Bot starts reading until its reply lands or the limit passes. */
 function useReplying(since: string | null): boolean {
-  const startedMs = since === null ? Number.NaN : Date.parse(since);
-  const [expiredFor, setExpiredFor] = useState<string | null>(null);
-  useEffect(() => {
-    if (since === null || Number.isNaN(startedMs)) return;
-    const remaining = Math.max(0, startedMs + REPLYING_LIMIT_MS - Date.now());
-    const timer = setTimeout(() => setExpiredFor(since), remaining);
-    return () => clearTimeout(timer);
-  }, [since, startedMs]);
-  return since !== null && !Number.isNaN(startedMs) && expiredFor !== since;
+  const deadlineMs = (since === null ? Number.NaN : Date.parse(since)) + REPLYING_LIMIT_MS;
+  const getSnapshot = useCallback(() => Date.now() < deadlineMs, [deadlineMs]);
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      const remaining = deadlineMs - Date.now();
+      const timer = remaining > 0 ? setTimeout(onChange, remaining) : undefined;
+      return () => clearTimeout(timer);
+    },
+    [deadlineMs],
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, () => false);
 }
 
 function BotSlot({ first }: { readonly first: boolean }) {

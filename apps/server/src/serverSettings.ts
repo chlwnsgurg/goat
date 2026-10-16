@@ -27,9 +27,8 @@ import {
   MemoryHubSettings,
   MemorySpaceId,
   MemoryHubError,
-  type MemoryHubSettingsUpdateResult,
   type MemoryHubForbiddenError,
-  type MemoryHubSettingsView,
+  type MemoryHubSettingsSnapshot,
   MemoryOperationId,
   ModelSelection,
   ProjectId,
@@ -290,14 +289,17 @@ export class MemoryHubSettingsTransitions extends Context.Service<
     readonly applyMemoryHubTransition: <E, R>(
       input: MemoryHubTransition,
       permit: Effect.Effect<void, E, R>,
-    ) => Effect.Effect<MemoryHubSettingsView, E | ServerSettingsError | MemoryHubError, R>;
+    ) => Effect.Effect<MemoryHubSettingsSnapshot, E | ServerSettingsError | MemoryHubError, R>;
   }
 >()("goat/serverSettings/MemoryHubSettingsTransitions") {}
 
 /** Current committed hub epoch. SQL transactions must use this instead of the full cache. */
 export class MemoryHubCommittedSettings extends Context.Service<
   MemoryHubCommittedSettings,
-  { readonly read: Effect.Effect<MemoryHubSettingsView> }
+  {
+    readonly read: Effect.Effect<MemoryHubSettingsSnapshot>;
+    readonly readPublication?: Effect.Effect<import("@goat/contracts").MemoryHubPublication>;
+  }
 >()("goat/serverSettings/MemoryHubCommittedSettings") {}
 
 /** SQL-free committed policy. An unready producer denies even the default-on setting. */
@@ -669,14 +671,14 @@ export class MemoryHubAdminSettings extends Context.Service<
   MemoryHubAdminSettings,
   {
     readonly withLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
-    readonly read: Effect.Effect<MemoryHubSettingsView, MemoryHubError>;
+    readonly read: Effect.Effect<MemoryHubSettingsSnapshot, MemoryHubError>;
     readonly readPreviousHubRequestId: Effect.Effect<MemoryOperationId | null, MemoryHubError>;
     readonly readPreviousHubSpace: Effect.Effect<MemorySpaceId | null, MemoryHubError>;
     readonly apply: (
       record: MemoryStore.AdminRecord,
       permit: Effect.Effect<void, MemoryHubForbiddenError>,
     ) => Effect.Effect<
-      Omit<MemoryHubSettingsUpdateResult, "credential">,
+      { readonly view: MemoryHubSettingsSnapshot },
       MemoryHubError | MemoryHubForbiddenError
     >;
   }
@@ -906,6 +908,7 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
         writeSemaphore.withPermits(1)(getSettings.pipe(Effect.flatMap(use))),
       committedProviderPolicy: providerPolicy.service,
       committedHubSettings: {
+        readPublication: Effect.succeed({ state: "current" as const }),
         read: Ref.get(currentSettingsRef).pipe(
           Effect.map((current) => ({
             settings: current.memoryHub,
@@ -1301,12 +1304,30 @@ const make = Effect.gen(function* () {
   const providerPolicy = yield* makeMemoryProviderPolicy;
   const ownerPublication = yield* makeOwnerPolicyPublication;
   const ownerIdentity = yield* Effect.serviceOption(ServerEnvironment.ServerEnvironmentIdentity);
-  const committedHubRef = yield* Ref.make<MemoryHubSettingsView>({
+  const committedHubRef = yield* Ref.make<
+    MemoryHubSettingsSnapshot & { publication: import("@goat/contracts").MemoryHubPublication }
+  >({
     settings: DEFAULT_SERVER_SETTINGS.memoryHub,
     version: DEFAULT_SERVER_SETTINGS.memoryHubVersion,
+    publication: { state: "unavailable" },
   });
   const publishCommittedHub = (settings: Pick<ServerSettings, "memoryHub" | "memoryHubVersion">) =>
-    Ref.set(committedHubRef, { settings: settings.memoryHub, version: settings.memoryHubVersion });
+    Ref.set(committedHubRef, {
+      settings: settings.memoryHub,
+      version: settings.memoryHubVersion,
+      publication: { state: "current" as const },
+    });
+  const retainCommittedHub = (code: "invalid_settings" | "settings_unavailable") =>
+    Ref.update(committedHubRef, (current) => ({
+      ...current,
+      publication: {
+        state:
+          current.publication.state === "unavailable"
+            ? ("unavailable" as const)
+            : ("last_valid" as const),
+        code,
+      },
+    }));
   const cacheKey = "settings" as const;
   const changesPubSub = yield* PubSub.unbounded<ServerSettings>();
   const startedRef = yield* Ref.make(false);
@@ -1318,6 +1339,7 @@ const make = Effect.gen(function* () {
     PubSub.publish(changesPubSub, settings).pipe(Effect.asVoid);
 
   const readConfigExists = fs.exists(settingsPath).pipe(
+    Effect.tapError(() => retainCommittedHub("settings_unavailable")),
     Effect.mapError(
       (cause) =>
         new ServerSettingsError({
@@ -1329,6 +1351,7 @@ const make = Effect.gen(function* () {
   );
 
   const readRawConfig = fs.readFileString(settingsPath).pipe(
+    Effect.tapError(() => retainCommittedHub("settings_unavailable")),
     Effect.mapError(
       (cause) =>
         new ServerSettingsError({
@@ -1339,7 +1362,7 @@ const make = Effect.gen(function* () {
     ),
   );
 
-  const hasCommittedHubEpoch = (view: MemoryHubSettingsView) =>
+  const hasCommittedHubEpoch = (view: MemoryHubSettingsSnapshot) =>
     view.version !== 0 || view.settings.mode !== "disabled";
 
   const publishExternalHub = (raw: string) =>
@@ -1354,6 +1377,7 @@ const make = Effect.gen(function* () {
         Exit.isFailure(legacy) ||
         (projection.value.memoryHubVersion === undefined && hasCommittedHubEpoch(current))
       ) {
+        yield* retainCommittedHub("invalid_settings");
         yield* Effect.logWarning(
           "invalid external settings projection, retaining committed memory hub",
           {
@@ -1376,6 +1400,7 @@ const make = Effect.gen(function* () {
     if (yield* readConfigExists) {
       return yield* publishExternalHub(yield* readRawConfig);
     }
+    yield* retainCommittedHub("settings_unavailable");
     // Deletion, editor replacement and a dangling symlink are indistinguishable.
     // Keep the epoch; resetting an established hub requires an explicit valid version.
     if (hasCommittedHubEpoch(yield* Ref.get(committedHubRef))) {
@@ -1505,6 +1530,10 @@ const make = Effect.gen(function* () {
     }
 
     if (!settingsExists) {
+      const current = yield* Ref.get(committedHubRef);
+      if (current.publication.state === "unavailable" && !hasCommittedHubEpoch(current))
+        yield* publishCommittedHub(DEFAULT_SERVER_SETTINGS);
+      else yield* retainCommittedHub("settings_unavailable");
       if (!(yield* providerPolicy.service.read).policyReady)
         yield* providerPolicy.publish(DEFAULT_SERVER_SETTINGS.enableAgentMemoryAccess);
       else settingsFileTrusted = false;
@@ -2057,7 +2086,12 @@ const make = Effect.gen(function* () {
       applyHubLocked,
     ),
     committedProviderPolicy: providerPolicy.service,
-    committedHubSettings: { read: Ref.get(committedHubRef) },
+    committedHubSettings: {
+      read: Ref.get(committedHubRef).pipe(
+        Effect.map(({ settings, version }) => ({ settings, version })),
+      ),
+      readPublication: Ref.get(committedHubRef).pipe(Effect.map((s) => s.publication)),
+    },
     withSettingsSnapshot,
     get streamChanges() {
       return materializeChanges(Stream.fromPubSub(changesPubSub));

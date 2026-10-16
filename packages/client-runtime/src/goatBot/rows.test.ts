@@ -1,6 +1,8 @@
 import {
   EnvironmentId,
   MessageId,
+  MemoryId,
+  MemorySpaceId,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2TurnItem,
   ThreadId,
@@ -371,5 +373,29 @@ describe("goatBotReplyingSince", () => {
         readers: readers(),
       }),
     ).toBeNull();
+  });
+});
+
+describe("memory report rows", () => {
+  it("preserves a report target when later messages retire question options", () => {
+    const memory = {
+      environmentId: EnvironmentId.make("remote-owner"),
+      memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000001"),
+      memoryId: MemoryId.make("00000000-0000-4000-8000-000000000002"),
+    };
+    const result = content(
+      buildGoatBotTimeline({
+        visibleTurnItems: rowsOf([
+          bot("b", "2026-10-12T12:00:00Z", "Report"),
+          user("u", "2026-10-12T12:00:01Z", "Thanks"),
+        ]),
+        pendingInputs: [],
+        readers: readers({
+          b: { tone: "result", readAt: null, requestKey: null, options: ["Yes"], memory },
+        }),
+      }),
+    );
+    expect(result[0]).toMatchObject({ kind: "bot", memory, options: [] });
+    expect(result[1]).not.toHaveProperty("memory");
   });
 });

@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useCommitOnBlur } from "../../hooks/useCommitOnBlur";
 import { BranchNamingMode, DEFAULT_SERVER_SETTINGS } from "@goat/contracts";
 
 import { Input } from "../ui/input";
@@ -20,15 +20,28 @@ const MODES = {
 } satisfies Record<BranchNamingMode, string>;
 
 export function BranchNamingSettings() {
-  const settings = useScopedSettings();
   const { targets } = useSettingsScope();
   const scopeKey = targets.map((target) => `${target.environmentId}:${target.projectId}`).join(",");
-  const prefixEdited = useRef(false);
-  const instructionsEdited = useRef(false);
+  return <BranchNamingFields key={scopeKey} />;
+}
+
+function BranchNamingFields() {
+  const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const modeMixed = useScopedSettingsMixed(["branchNamingMode"]);
   const prefixMixed = useScopedSettingsMixed(["branchNamePrefix"]);
   const instructionsMixed = useScopedSettingsMixed(["branchNameInstructions"]);
+
+  const prefixInput = useCommitOnBlur(
+    prefixMixed ? "" : settings.branchNamePrefix,
+    (value) => updateSettings({ branchNamePrefix: value.trim() }),
+    { commitUnchanged: prefixMixed },
+  );
+  const instructionsInput = useCommitOnBlur(
+    instructionsMixed ? "" : settings.branchNameInstructions,
+    (value) => updateSettings({ branchNameInstructions: value.trim() }),
+    { multiline: true, commitUnchanged: instructionsMixed },
+  );
 
   return (
     <>
@@ -95,21 +108,11 @@ export function BranchNamingSettings() {
           }
           control={
             <Input
-              key={`${scopeKey}:${prefixMixed}:${settings.branchNamePrefix}`}
+              {...prefixInput}
               aria-label="Branch prefix"
               autoCapitalize="none"
               spellCheck={false}
-              onChange={() => {
-                prefixEdited.current = true;
-              }}
               placeholder={prefixMixed ? "Mixed" : "No prefix"}
-              defaultValue={prefixMixed ? "" : settings.branchNamePrefix}
-              onBlur={(event) => {
-                const value = event.target.value.trim();
-                if (prefixEdited.current && (prefixMixed || value !== settings.branchNamePrefix))
-                  updateSettings({ branchNamePrefix: value });
-                prefixEdited.current = false;
-              }}
             />
           }
         />
@@ -131,27 +134,14 @@ export function BranchNamingSettings() {
         >
           <div className="mt-3 max-w-2xl pb-3.5">
             <Textarea
-              key={`${scopeKey}:${instructionsMixed}:${settings.branchNameInstructions}`}
+              {...instructionsInput}
               aria-label="Branch naming instructions"
-              onChange={() => {
-                instructionsEdited.current = true;
-              }}
               rows={4}
-              defaultValue={instructionsMixed ? "" : settings.branchNameInstructions}
               placeholder={
                 instructionsMixed
                   ? "Mixed. Enter instructions to apply to all selected targets."
                   : "Use julius/ followed by the issue ID and a short description."
               }
-              onBlur={(event) => {
-                const value = event.target.value.trim();
-                if (
-                  instructionsEdited.current &&
-                  (instructionsMixed || value !== settings.branchNameInstructions)
-                )
-                  updateSettings({ branchNameInstructions: value });
-                instructionsEdited.current = false;
-              }}
             />
           </div>
         </SettingsRow>

@@ -313,6 +313,42 @@ describe("scoped settings writes", () => {
     });
   });
 
+  it("waits for client persistence and reports failure without hiding server success", async () => {
+    let rejectClient!: (error: Error) => void;
+    const clientWrite = new Promise<void>((_, reject) => {
+      rejectClient = reject;
+    });
+    let settled = false;
+    const pending = persistScopedSettingsPatch(
+      planScopedSettingsPatch(named, environments, {
+        diffIgnoreWhitespace: false,
+        enableProviderUpdateChecks: false,
+      }),
+      vi.fn().mockResolvedValue({ _tag: "Success" }),
+      () => clientWrite,
+    ).then((result) => {
+      settled = true;
+      return result;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    rejectClient(new Error("disk full"));
+    const result = await pending;
+    expect(result.clientSaveFailed).toBe(true);
+    expect(result.failedEnvironments).toEqual([]);
+    expect(result.savedEnvironmentCount).toBe(1);
+  });
+
+  it("reports a client-only save failure", async () => {
+    const result = await persistScopedSettingsPatch(
+      planScopedSettingsPatch(named, environments, { diffIgnoreWhitespace: false }),
+      vi.fn(),
+      vi.fn().mockRejectedValue(new Error("storage unavailable")),
+    );
+    expect(result.clientSaveFailed).toBe(true);
+    expect(result.savedEnvironmentCount).toBe(0);
+  });
+
   it("persists client keys locally at any scope alongside server keys", async () => {
     const persistServer = vi.fn().mockResolvedValue({ _tag: "Success" });
     const persistClient = vi.fn();

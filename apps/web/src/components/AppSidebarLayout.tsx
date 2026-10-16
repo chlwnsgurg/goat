@@ -11,6 +11,7 @@ import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 
 import { isElectron } from "../env";
 import { getLocalStorageItem, removeLocalStorageItem } from "../hooks/useLocalStorage";
+import { useIsMobile } from "../hooks/useMediaQuery";
 import {
   isRichTextBoldShortcut,
   resolveShortcutCommand,
@@ -41,6 +42,8 @@ import {
   SidebarCollapsedBrand,
 } from "./sidebar/SidebarChrome";
 import { MainAppLocationTracker } from "./sidebar/mainAppLocation";
+import { DestinationRail, DestinationRailVisibleContext } from "./sidebar/DestinationRail";
+import { DESTINATION_RAIL_WIDTH_PX } from "./sidebar/destinationRail.logic";
 import { useSidebarActivityToggle } from "./sidebar/SidebarViewToggles";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
 import { useProjects } from "../state/entities";
@@ -87,8 +90,11 @@ function readInitialThreadSidebarWidth(): number {
 
 export function SidebarControl({
   onCollapsedBrandWidthChange,
+  overRail = false,
 }: {
   onCollapsedBrandWidthChange: (width: number) => void;
+  /** The destination rail's frame sits under the trigger instead of the sidebar artwork. */
+  overRail?: boolean;
 }) {
   const usagePageOpen = useLocation({ select: (location) => location.pathname === "/usage" });
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -99,6 +105,7 @@ export function SidebarControl({
   const stageBackdropVariant = useSidebarStageBackdropVariant(
     environmentIdentificationMode === "artwork",
   );
+  const overArtwork = isSidebarVisible && stageBackdropVariant !== null && !overRail;
   const shortcutLabel = shortcutLabelForCommand(keybindings, "sidebar.toggle", {
     context: { usagePageOpen },
   });
@@ -161,10 +168,10 @@ export function SidebarControl({
             <SidebarTrigger
               // Over the stage artwork the trigger is a control on imagery, like the media
               // viewer's arrows; that variant positions itself, so the layout is reset here.
-              variant={isSidebarVisible && stageBackdropVariant ? "media-navigation" : "ghost"}
+              variant={overArtwork ? "media-navigation" : "ghost"}
               className={cn(
                 "pointer-events-auto",
-                isSidebarVisible && stageBackdropVariant && "relative top-auto translate-y-0",
+                overArtwork && "relative top-auto translate-y-0",
               )}
               aria-label="Toggle main sidebar"
             />
@@ -253,6 +260,14 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const panelAnimationsSuppressed = usePanelNavigationSuppression(pathname);
   const routePanelAnimationsActive = panelAnimationsActive && !panelAnimationsSuppressed;
   const isOnSettings = pathname === "/settings" || pathname.startsWith("/settings/");
+  const isMobile = useIsMobile();
+  const isOnWelcome = pathname === "/welcome";
+  // The rail replaces the footer shortcuts beside either thread sidebar and on Settings; the
+  // phone-width sheet keeps its own navigation. Wait for the sidebar choice to hydrate so the
+  // frame does not jump.
+  const railVisible = !isMobile && !isOnWelcome && (isOnSettings || projectsSidebar !== null);
+  const dividerVisible = !isMobile && !isOnWelcome;
+  const railWidth = railVisible ? DESTINATION_RAIL_WIDTH_PX : 0;
   const isMacosDesktop = isElectron && isMacPlatform(navigator.platform);
   const [sidebarWidth, setSidebarWidth] = useState(readInitialThreadSidebarWidth);
   // Subscribed rather than read once: the clamp must track live window size,
@@ -262,14 +277,17 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const [brandWidth, setBrandWidth] = useState(0);
   const [collapsedBrandWidth, setCollapsedBrandWidth] = useState(0);
   const sidebarMinimumWidth = resolveThreadSidebarMinimumWidth(brandWidth);
-  const sidebarMaximumWidth = resolveThreadSidebarMaximumWidth(viewportWidth, sidebarMinimumWidth);
+  const sidebarMaximumWidth = resolveThreadSidebarMaximumWidth(
+    viewportWidth - railWidth,
+    sidebarMinimumWidth,
+  );
   const resetSidebarWidth = () => {
     try {
       removeLocalStorageItem(THREAD_SIDEBAR_WIDTH_STORAGE_KEY);
     } catch (error) {
       console.error("Could not clear persisted thread sidebar width.", error);
     }
-    setSidebarWidth(resolveInitialThreadSidebarWidth(null, viewportWidth));
+    setSidebarWidth(resolveInitialThreadSidebarWidth(null, viewportWidth - railWidth));
   };
   const [isWindowFullscreen, setIsWindowFullscreen] = useState(() => {
     const getWindowFullscreenState = window.desktopBridge?.getWindowFullscreenState;
@@ -286,7 +304,14 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
     "--workspace-collapsed-brand-inline-size": `${collapsedBrandWidth}px`,
     "--sidebar-width": `${clampThreadSidebarWidth(sidebarWidth, sidebarMinimumWidth, sidebarMaximumWidth)}px`,
     "--panel-animation-duration": `${panelAnimationDurationMs}ms`,
+    "--destination-rail-width": `${railWidth}px`,
     ...windowControlsInsetStyle,
+    // Sidebar and page headers start after the rail, so their titlebar inset shrinks by it.
+    ...(railVisible
+      ? {
+          "--workspace-titlebar-content-left": `max(0.75rem, calc(var(--workspace-controls-left) + var(--workspace-titlebar-control-size) + var(--workspace-titlebar-control-gap) - ${railWidth}px))`,
+        }
+      : {}),
   } as CSSProperties;
 
   useEffect(() => {
@@ -334,40 +359,61 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         defaultOpen
         style={sidebarProviderStyle}
       >
-        <SidebarBrandWidthProbe onWidthChange={setBrandWidth} />
-        <ProjectProjectionRetention />
-        <Sidebar
-          side="left"
-          collapsible="offcanvas"
-          data-app-sidebar=""
-          role="navigation"
-          aria-label={isOnSettings ? "Settings" : "Threads"}
-          resizable={{
-            maxWidth: sidebarMaximumWidth,
-            minWidth: sidebarMinimumWidth,
-            shouldAcceptWidth: ({ currentWidth, nextWidth, wrapper }) =>
-              nextWidth <= currentWidth ||
-              wrapper.clientWidth - nextWidth >= THREAD_MAIN_CONTENT_MIN_WIDTH,
-            storageKey: THREAD_SIDEBAR_WIDTH_STORAGE_KEY,
-            onResize: setSidebarWidth,
-          }}
-          // The narrow-window sidebar is a sheet, portaled outside the provider's styles.
-          style={windowControlsInsetStyle}
-        >
-          {isOnSettings ? (
-            <>
-              <SidebarChromeHeader isElectron={isElectron} />
-              <SettingsSidebarNav pathname={pathname} />
-            </>
-          ) : projectsSidebar === null ? null : projectsSidebar ? (
-            <LegacyThreadSidebar />
-          ) : (
-            <ThreadSidebar />
-          )}
-          <SidebarRail onDoubleClick={resetSidebarWidth} />
-        </Sidebar>
-        {children}
-        <SidebarControl onCollapsedBrandWidthChange={setCollapsedBrandWidth} />
+        <DestinationRailVisibleContext value={railVisible}>
+          <SidebarBrandWidthProbe onWidthChange={setBrandWidth} />
+          <ProjectProjectionRetention />
+          {railVisible ? <DestinationRail /> : null}
+          <Sidebar
+            side="left"
+            variant={railVisible ? "framed" : "sidebar"}
+            collapsible="offcanvas"
+            data-app-sidebar=""
+            role="navigation"
+            aria-label={isOnSettings ? "Settings" : "Threads"}
+            resizable={{
+              maxWidth: sidebarMaximumWidth,
+              minWidth: sidebarMinimumWidth,
+              shouldAcceptWidth: ({ currentWidth, nextWidth, wrapper }) =>
+                nextWidth <= currentWidth ||
+                wrapper.clientWidth - railWidth - nextWidth >= THREAD_MAIN_CONTENT_MIN_WIDTH,
+              storageKey: THREAD_SIDEBAR_WIDTH_STORAGE_KEY,
+              onResize: setSidebarWidth,
+            }}
+            // The narrow-window sidebar is a sheet, portaled outside the provider's styles.
+            style={windowControlsInsetStyle}
+          >
+            {isOnSettings ? (
+              <>
+                <SidebarChromeHeader isElectron={isElectron} />
+                <SettingsSidebarNav pathname={pathname} />
+              </>
+            ) : projectsSidebar === null ? null : projectsSidebar ? (
+              <LegacyThreadSidebar />
+            ) : (
+              <ThreadSidebar />
+            )}
+            <SidebarRail onDoubleClick={resetSidebarWidth} />
+          </Sidebar>
+          {children}
+        </DestinationRailVisibleContext>
+        {/* Both sit on the headers' own bottom border pixel, so pages that already draw one still
+            show a single line. Beside the rail, the line becomes the content frame's top edge and
+            curves into its left edge, leaving the titlebar strip and the rail as one surface. */}
+        {dividerVisible && railVisible ? (
+          <div
+            aria-hidden
+            className="workspace-content-frame pointer-events-none fixed top-[calc(var(--workspace-topbar-height)-1px)] right-0 bottom-0 left-(--destination-rail-width) z-30"
+          />
+        ) : dividerVisible ? (
+          <div
+            aria-hidden
+            className="pointer-events-none fixed inset-x-0 top-[calc(var(--workspace-topbar-height)-1px)] z-30 h-px bg-sidebar-border"
+          />
+        ) : null}
+        <SidebarControl
+          onCollapsedBrandWidthChange={setCollapsedBrandWidth}
+          overRail={railVisible}
+        />
         <NavigationHistoryShortcuts />
         <MainAppLocationTracker />
       </SidebarProvider>

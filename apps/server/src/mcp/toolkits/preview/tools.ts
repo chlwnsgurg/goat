@@ -7,11 +7,15 @@ import {
   PreviewAutomationError,
   PreviewAutomationEvaluateInput,
   PreviewAutomationHoverInput,
+  PreviewAutomationHistoryInput,
+  PreviewAutomationLogs,
+  PreviewAutomationLogsInput,
   PreviewAutomationNavigateInput,
   PreviewAutomationOpenInput,
   PreviewAutomationPressInput,
   PreviewAutomationRecordingArtifact,
   PreviewAutomationRecordingStatus,
+  PreviewAutomationReloadInput,
   PreviewAutomationResizeInput,
   PreviewAutomationResizeResult,
   PreviewAutomationScrollInput,
@@ -20,6 +24,7 @@ import {
   PreviewAutomationSetColorSchemeInput,
   PreviewAutomationSetColorSchemeResult,
   PreviewAutomationSnapshot,
+  PreviewAutomationSnapshotInput,
   PreviewAutomationStatus,
   PreviewAutomationTabTargetInput,
   PreviewAutomationTypeInput,
@@ -110,6 +115,39 @@ const PreviewNavigateTool = safeBrowserTool(
   }).annotate(Tool.Title, "Navigate browser preview"),
 );
 
+const PreviewBackTool = safeBrowserTool(
+  Tool.make("preview_back", {
+    description:
+      "Go back one entry in the exact collaborative browser tab's history. Pass tabId to select a tab. Refuses when no back entry exists. Waits for navigation and returns observed URL/status; take a fresh snapshot afterward. Environment-hosted tabs, including desktop-backed tabs.",
+    parameters: PreviewAutomationHistoryInput,
+    success: PreviewAutomationStatus,
+    failure: PreviewToolFailure,
+    dependencies,
+  }).annotate(Tool.Title, "Go back in browser preview"),
+);
+
+const PreviewForwardTool = safeBrowserTool(
+  Tool.make("preview_forward", {
+    description:
+      "Go forward one entry in the exact collaborative browser tab's history. Pass tabId to select a tab. Refuses when no forward entry exists. Waits for navigation and returns observed URL/status; take a fresh snapshot afterward. Environment-hosted tabs, including desktop-backed tabs.",
+    parameters: PreviewAutomationHistoryInput,
+    success: PreviewAutomationStatus,
+    failure: PreviewToolFailure,
+    dependencies,
+  }).annotate(Tool.Title, "Go forward in browser preview"),
+);
+
+const PreviewReloadTool = safeBrowserTool(
+  Tool.make("preview_reload", {
+    description:
+      "Reload the exact collaborative browser tab selected by tabId, or the current tab. Cache bypass is opt-in with ignoreCache:true. Waits for navigation and returns observed URL/status. Reload may repeat page requests; take a fresh snapshot afterward. Environment-hosted tabs, including desktop-backed tabs.",
+    parameters: PreviewAutomationReloadInput,
+    success: PreviewAutomationStatus,
+    failure: PreviewToolFailure,
+    dependencies,
+  }).annotate(Tool.Title, "Reload browser preview"),
+);
+
 const PreviewResizeTool = safeBrowserTool(
   Tool.make("preview_resize", {
     description:
@@ -143,9 +181,9 @@ const PreviewSetAppearanceTool = safeBrowserTool(
 export const PreviewSnapshotTool = safeBrowserTool(
   Tool.make("preview_snapshot", {
     description:
-      "Inspect a page before interacting. Pass tabId to inspect a specific tab, including one the user opened (see preview_status tabs), even while they control it; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Returns page state, semantic elements, diagnostics, action history, and screenshot dimensions. Server snapshots include an accessibilityTree with refs; pass locator=aria-ref=<ref> to target one exact element, including inside frames. Refresh refs after navigation, another snapshot, or human takeover. The text is capped near 20 KB and lists what it omitted; use preview_evaluate to read more. Set includeImage=true only when you need to see the page; the image stays in tool history. Set save=true to write the PNG to disk and get back only the url and screenshotPath. Embed that path in your reply as ![alt](screenshotPath) so the user sees it. This is the only way to show the user a screenshot; the image in the tool result is not saved anywhere.",
+      "Inspect a page before interacting. Pass tabId to inspect a specific tab, including one the user opened (see preview_status tabs), even while they control it; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Returns page state, semantic elements, diagnostics, action history, and screenshot dimensions. Server snapshots include an accessibilityTree with refs; pass locator=aria-ref=<ref> to target one exact element, including inside frames. Refresh refs after navigation, another snapshot, or human takeover. The text is capped near 20 KB and lists what it omitted; use preview_evaluate to read more. Set includeImage=true only when you need to see the page; the image stays in tool history. Set fullPage=true for a bounded document capture with clipping metadata; viewport is the default. Set save=true to write the PNG to disk and get screenshotPath. Saved captures omit the page dump unless includeImage=true; full-page saves retain dimensions and clipping metadata. Embed that path in your reply as ![alt](screenshotPath) so the user sees it. This is the only way to show the user a screenshot; the image in the tool result is not saved anywhere.",
     parameters: Schema.Struct({
-      ...PreviewAutomationTabTargetInput.fields,
+      ...PreviewAutomationSnapshotInput.fields,
       includeImage: Schema.optional(
         Schema.Boolean.annotate({
           description:
@@ -155,7 +193,7 @@ export const PreviewSnapshotTool = safeBrowserTool(
       save: Schema.optional(
         Schema.Boolean.annotate({
           description:
-            "Write the screenshot PNG to disk and return its absolute path as screenshotPath. Unless includeImage=true, return only the url and screenshotPath. Defaults to false.",
+            "Write the screenshot PNG to disk and return its absolute path as screenshotPath. Unless includeImage=true, omit the page dump and return url, screenshotPath, and any full-page capture metadata. Defaults to false.",
         }),
       ),
     }),
@@ -163,6 +201,17 @@ export const PreviewSnapshotTool = safeBrowserTool(
     failure: PreviewToolFailure,
     dependencies,
   }).annotate(Tool.Title, "Inspect browser page"),
+);
+
+const PreviewLogsTool = readonlyBrowserTool(
+  Tool.make("preview_logs", {
+    description:
+      "Read bounded per-tab console messages, uncaught page errors with stacks, and network metadata, newest first. Network records show the latest request/response/finished/failed phase per request, with elapsed duration when its start was observed. Defaults to 50 entries per stream (maximum 100) within a shared 24 KB entry budget; droppedCount counts buffer evictions before filtering and omittedCount counts retained matches excluded by limits. Filter consoleLevels/text or network url/method/status/failed; includeConsole/includeErrors/includeNetwork default to true. URL credentials and URL query values are redacted, and fragments are dropped. In free-form text, URL tokens start with scheme:// and stop at whitespace, quotes, angle brackets, or closing brackets/parentheses. Within the output limits, other free-form console/error text is returned as the page produced it and is not scrubbed for secrets. Headers and bodies are never collected. Works on server-hosted tabs, including desktop-rendered server tabs, and can observe another agent's or a human-controlled tab. Does not collect DOM/ARIA, take screenshots, clear logs, or invalidate snapshot refs. Native desktop-only hosts may not support it.",
+    parameters: PreviewAutomationLogsInput,
+    success: PreviewAutomationLogs,
+    failure: PreviewToolFailure,
+    dependencies,
+  }).annotate(Tool.Title, "Read browser diagnostics"),
 );
 
 const PreviewClickTool = browserTool(
@@ -282,7 +331,7 @@ const PreviewEvaluateTool = browserTool(
 const PreviewWaitForTool = readonlyBrowserTool(
   Tool.make("preview_wait_for", {
     description:
-      "Wait in the tab selected by tabId, or this agent session's current tab when omitted, until all supplied locator, selector, text, and URL conditions match.",
+      "Wait in the tab selected by tabId, or this agent session's current tab when omitted, until every supplied condition holds together. Locator/selector state defaults to attached; use visible, hidden (also matches absence), or detached for transitions. Add loadState=load or domContentLoaded for document readiness; networkIdle is opt-in and can time out on busy pages. Text is a case-sensitive visible-text substring; urlIncludes also handles same-document navigation. All conditions share one timeoutMs (default 15000, maximum 60000). Human takeover interrupts waits on your own tab; observing a human-driven tab remains allowed. A completed wait proves the conditions, not application success.",
     parameters: PreviewAutomationWaitForInput,
     success: PreviewActionResult,
     failure: PreviewToolFailure,
@@ -317,9 +366,13 @@ export const PreviewToolkit = Toolkit.make(
   PreviewStatusTool,
   PreviewOpenTool,
   PreviewNavigateTool,
+  PreviewBackTool,
+  PreviewForwardTool,
+  PreviewReloadTool,
   PreviewResizeTool,
   PreviewSetAppearanceTool,
   PreviewSnapshotTool,
+  PreviewLogsTool,
   PreviewClickTool,
   PreviewTypeTool,
   PreviewHoverTool,
@@ -335,10 +388,14 @@ export const PreviewToolkit = Toolkit.make(
 );
 
 export const PreviewStandardToolkit = Toolkit.make(
+  PreviewLogsTool,
   PreviewDialogTool,
   PreviewStatusTool,
   PreviewOpenTool,
   PreviewNavigateTool,
+  PreviewBackTool,
+  PreviewForwardTool,
+  PreviewReloadTool,
   PreviewResizeTool,
   PreviewSetAppearanceTool,
   PreviewClickTool,

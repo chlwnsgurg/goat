@@ -138,8 +138,11 @@ describe("client settings hydration", () => {
     persistenceMocks.getClientSettings.mockRejectedValue(failure);
 
     const hydration = ensureClientSettingsHydrated();
-    persistClientSettingsPatch({ wordWrap: false });
-    await expect(hydration).rejects.toBe(failure);
+    const patch = persistClientSettingsPatch({ wordWrap: false });
+    await Promise.all([
+      expect(hydration).rejects.toBe(failure),
+      expect(patch).rejects.toBe(failure),
+    ]);
     expect(persistenceMocks.setClientSettings).not.toHaveBeenCalled();
 
     persistenceMocks.getClientSettings.mockResolvedValue(savedSettings);
@@ -180,15 +183,22 @@ describe("client settings hydration", () => {
       });
 
     const completion = persistClientSettingsUpdate(complete, persist);
-    persistClientSettingsPatch({ wordWrap: false }, persist);
+    const olderPatch = persistClientSettingsPatch({ wordWrap: false }, persist);
+    expect(getClientSettings()).toBe(DEFAULT_CLIENT_SETTINGS);
     finishRead(savedSettings);
     await completionWriteStarted;
-    persistClientSettingsPatch({ wordWrap: true }, persist);
+    const newerPatch = persistClientSettingsPatch({ wordWrap: true }, persist);
+    expect(getClientSettings().wordWrap).toBe(true);
     const finalWrite = persistClientSettingsUpdate((current) => current, persist);
 
     finishCompletionWrite();
-    await completion;
-    await finalWrite;
+    await Promise.all([completion, olderPatch, newerPatch, finalWrite]);
+    expect(persist.mock.calls.map(([settings]) => settings.wordWrap)).toEqual([
+      true,
+      false,
+      true,
+      true,
+    ]);
 
     const expected = { ...savedSettings, onboardingCompletedAt, wordWrap: true };
     expect(getClientSettings()).toEqual(expected);
@@ -197,6 +207,73 @@ describe("client settings hydration", () => {
 });
 
 describe("persistClientSettingsPatch", () => {
+  it("publishes immediately and rolls back only failed keys before the next write", async () => {
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+    const failure = new Error("disk full");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let rejectWrite!: (error: Error) => void;
+    persistenceMocks.setClientSettings.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        rejectWrite = reject;
+      }),
+    );
+
+    const failed = persistClientSettingsPatch({ wordWrap: false });
+    expect(getClientSettings().wordWrap).toBe(false);
+    await Promise.resolve();
+    const later = persistClientSettingsPatch({ snapShotFlash: false });
+    expect(getClientSettings()).toMatchObject({ wordWrap: false, snapShotFlash: false });
+    expect(persistenceMocks.setClientSettings).toHaveBeenCalledTimes(1);
+
+    const rejection = expect(failed).rejects.toBe(failure);
+    rejectWrite(failure);
+    await rejection;
+    await later;
+    expect(getClientSettings()).toEqual({ ...DEFAULT_CLIENT_SETTINGS, snapShotFlash: false });
+    expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith(getClientSettings());
+  });
+
+  it("does not roll back a newer value for a key from a failed patch", async () => {
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+    const failure = new Error("disk full");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let rejectWrite!: (error: Error) => void;
+    persistenceMocks.setClientSettings.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        rejectWrite = reject;
+      }),
+    );
+    const failed = persistClientSettingsPatch({ fontSizeTerminal: 16, wordWrap: false });
+    await Promise.resolve();
+    const later = persistClientSettingsPatch({ fontSizeTerminal: 18 });
+    expect(getClientSettings().fontSizeTerminal).toBe(18);
+    const rejection = expect(failed).rejects.toBe(failure);
+    rejectWrite(failure);
+    await rejection;
+    await later;
+    expect(getClientSettings()).toEqual({ ...DEFAULT_CLIENT_SETTINGS, fontSizeTerminal: 18 });
+    expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith(getClientSettings());
+  });
+
+  it("rejects failed patches, keeps the saved snapshot, and continues queued writes", async () => {
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+    const failure = new Error("disk full");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    persistenceMocks.setClientSettings.mockRejectedValueOnce(failure);
+
+    const failed = persistClientSettingsPatch({ wordWrap: false });
+    const later = persistClientSettingsPatch({ snapShotFlash: false });
+    await expect(failed).rejects.toBe(failure);
+    await later;
+    expect(getClientSettings()).toEqual({ ...DEFAULT_CLIENT_SETTINGS, snapShotFlash: false });
+    expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith({
+      ...DEFAULT_CLIENT_SETTINGS,
+      snapShotFlash: false,
+    });
+    await persistClientSettingsPatch({ wordWrap: false });
+    expect(getClientSettings()).toMatchObject({ wordWrap: false, snapShotFlash: false });
+  });
+
   it("waits for settings writes in request order", async () => {
     __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
     let finishFirst!: () => void;
@@ -264,7 +341,7 @@ describe("persistClientSettingsUpdate", () => {
     expect(getClientSettings()).toBe(DEFAULT_CLIENT_SETTINGS);
   });
 
-  it("preserves an optimistic write made while an awaited update persists", async () => {
+  it("preserves a patch queued while an awaited update persists", async () => {
     let finishFirstPersistence!: () => void;
     let durableSettings = DEFAULT_CLIENT_SETTINGS;
     const firstPersistence = new Promise<void>((resolve) => {
@@ -306,7 +383,7 @@ describe("persistClientSettingsUpdate", () => {
     expect(getClientSettings().browserProfiles).toContainEqual(importedProfile);
   });
 
-  it("orders an awaited update after an older optimistic write", async () => {
+  it("orders an awaited update after an older patch", async () => {
     let finishOldWrite!: () => void;
     let durableSettings = DEFAULT_CLIENT_SETTINGS;
     const oldWrite = new Promise<void>((resolve) => {

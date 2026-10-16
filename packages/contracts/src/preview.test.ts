@@ -18,6 +18,7 @@ import {
   PreviewAutomationResizeInput,
   PreviewAutomationResizeResult,
   PreviewAutomationStatus,
+  PreviewAutomationLogsInput,
 } from "./previewAutomation.ts";
 
 const decodePreviewEvent = Schema.decodeUnknownSync(PreviewEvent);
@@ -32,6 +33,34 @@ const decodeResizeResult = Schema.decodeUnknownSync(PreviewAutomationResizeResul
 const decodeAutomationHost = Schema.decodeUnknownSync(PreviewAutomationHost);
 const decodeAutomationError = Schema.decodeUnknownSync(PreviewAutomationError);
 const decodeAutomationStatus = Schema.decodeUnknownSync(PreviewAutomationStatus);
+
+describe("PreviewAutomationLogsInput", () => {
+  const decode = Schema.decodeUnknownSync(PreviewAutomationLogsInput);
+  it("accepts combined filters and rejects unbounded inputs", () => {
+    const input = {
+      limit: 100,
+      consoleLevels: ["warning", "error"],
+      text: "failure",
+      url: "/api",
+      status: 503,
+      failed: false,
+      method: "POST",
+      includeConsole: false,
+    };
+    expect(decode(input)).toEqual(input);
+    for (const invalid of [
+      { limit: 0 },
+      { limit: 101 },
+      { limit: 1.5 },
+      { status: 99 },
+      { status: 600 },
+      { text: "x".repeat(257) },
+      { consoleLevels: Array.from({ length: 21 }, () => "error") },
+    ]) {
+      expect(() => decode(invalid)).toThrow();
+    }
+  });
+});
 
 describe("PreviewAutomationOpenInput", () => {
   it("accepts the inline preview visibility flag", () => {

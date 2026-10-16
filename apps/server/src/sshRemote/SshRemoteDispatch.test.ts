@@ -721,6 +721,40 @@ describe("SshRemoteDispatch.callHostTool", () => {
     }),
   );
 
+  it.effect("names an older remote that lacks the tool, in the form status fallback matches", () =>
+    Effect.gen(function* () {
+      const statusCall = Effect.gen(function* () {
+        const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+        return yield* dispatch.callHostTool(
+          {
+            host,
+            tool: "goat_thread_status",
+            arguments: { threadId: "thread-1" },
+            timeoutMs: 5_000,
+            writes: false,
+          },
+          Effect.succeed("full-access" as const),
+        );
+      });
+      const { result } = yield* withRemote(
+        {
+          answer: (request) =>
+            initialize(request) ?? { rpcError: "Tool 'goat_thread_status' not found" },
+        },
+        statusCall,
+      );
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: {
+          reason: "remote_refused",
+          message: expect.stringContaining(
+            `GOAT on ${host} ${SshRemoteDispatch.REMOTE_THREAD_STATUS_UNSUPPORTED}; it runs an older build`,
+          ),
+        },
+      });
+    }),
+  );
+
   it.effect("signs in anew once when the remote rejects the cached session", () =>
     Effect.gen(function* () {
       let rejected = false;

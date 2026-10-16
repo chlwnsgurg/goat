@@ -124,6 +124,8 @@ export const MEMORY_IMPORT_MAX_LIVE_BODY_BYTES = 67108864;
 export const MEMORY_IMPORT_MAX_SOURCE_ITEMS = 50000;
 export const MEMORY_IMPORT_MAX_ALIASES = 100000;
 export const MEMORY_IMPORT_MAX_CONTENT_DIGESTS = 100000;
+export const MEMORY_IMPORT_LINEAGE_MAX_RECORDS_PER_MEMORY = 1000;
+export const MEMORY_IMPORT_LINEAGE_MAX_BYTES = 33554432;
 export const MEMORY_IMPORT_KEY_MAX_UTF8_BYTES = 512;
 export const MEMORY_IMPORT_DIGEST_MAX_UTF8_BYTES = 64;
 export const MEMORY_REVERT_WINDOW_MS = 2592000000;
@@ -437,7 +439,14 @@ export const MemoryRevision = struct({
   provenance: MemoryProvenance,
   createdAtUtc: MemoryUtcTimestamp,
 }).check(
-  Schema.makeFilter((v) => v.payloadRef === v.revisionId && !v.parents.includes(v.revisionId)),
+  // Imported exact-copy aliases share the parent's payload. The Store verifies
+  // parent ownership, scope and exact payload equality before canonical storage.
+  Schema.makeFilter(
+    (v) =>
+      !v.parents.includes(v.revisionId) &&
+      (v.payloadRef === v.revisionId ||
+        (v.provenance.importSource !== undefined && v.parents.length === 1)),
+  ),
 );
 export type MemoryRevision = typeof MemoryRevision.Type;
 
@@ -474,7 +483,7 @@ export const MemoryResolution = struct({
   memorySpaceId: MemorySpaceId,
   memoryId: MemoryId,
   inputRevisionIds: distinct(MemoryRevisionId, 100, 2),
-  inputPayloadRefs: distinct(MemoryRevisionId, 100, 2),
+  inputPayloadRefs: array(MemoryRevisionId, 100, 2),
   judgmentRef: MemoryResolutionId,
   requestedModelSelection: MemoryModelSelection,
   effectiveProvider: ProviderDriverKind,
@@ -488,7 +497,7 @@ export const MemoryResolution = struct({
 }).check(
   Schema.makeFilter(
     (v) =>
-      same(v.inputRevisionIds, v.inputPayloadRefs) &&
+      v.inputRevisionIds.length === v.inputPayloadRefs.length &&
       v.judgmentRef === v.resolutionId &&
       Date.parse(v.revertDeadlineUtc) >= Date.parse(v.appliedAtUtc),
   ),
@@ -791,6 +800,8 @@ export const MemoryCapacityDimension = Schema.Literals([
   "derived_cache",
   "fts_indexed_text",
   "fts_admission_brake",
+  "import_lineage_records",
+  "import_lineage_bytes",
 ]);
 export type MemoryCapacityDimension = typeof MemoryCapacityDimension.Type;
 
@@ -958,6 +969,7 @@ export const MemoryStorageTable = Schema.Literals([
   "memory_inbox_pending",
   "memory_sync_cursors",
   "memory_import_receipts",
+  "memory_import_noop_results",
   "memory_report_outbox",
   "memory_items_fts",
   "memory_project_bindings",
@@ -973,6 +985,7 @@ export const MemoryStorageTable = Schema.Literals([
   "memory_hub_leases",
   "memory_hub_source_reads",
   "memory_hub_retention",
+  "memory_import_lineage",
 ]);
 export type MemoryStorageTable = typeof MemoryStorageTable.Type;
 
@@ -1098,6 +1111,34 @@ export const MemoryStorageStatus = struct({
   warnings: distinct(MemoryStorageBlockedReason),
 }).check(Schema.makeFilter((v) => v.retentionFloor <= v.checkpointSequence));
 export type MemoryStorageStatus = typeof MemoryStorageStatus.Type;
+
+/** Published by the committed settings owner; never inferred from connectivity. */
+export const MemoryHubPublication = struct({
+  state: Schema.Literals(["unknown", "current", "last_valid", "unavailable"]),
+  code: Schema.optionalKey(Schema.Literals(["invalid_settings", "settings_unavailable"])),
+});
+export type MemoryHubPublication = typeof MemoryHubPublication.Type;
+export const MemoryHubDiagnostics = struct({
+  version: NonNegativeInt,
+  publication: MemoryHubPublication,
+  readiness: Schema.Literals(["disabled", "unbound", "staging", "ready"]),
+  connection: Schema.Literals(["disabled", "unknown", "connected", "unreachable"]),
+  recoverableHolds: distinct(Schema.Literals(["protocol", "availability"]), 2),
+  permanentHolds: distinct(Schema.Literals(["identity", "authorization"]), 2),
+  reconcile: Schema.Literals(["unavailable", "permanent_hold", "available", "not_needed"]),
+});
+export type MemoryHubDiagnostics = typeof MemoryHubDiagnostics.Type;
+export const MemoryHubReconcileInput = struct({
+  memorySpaceId: MemorySpaceId,
+  environmentId: EnvironmentId,
+  expectedVersion: NonNegativeInt,
+});
+export type MemoryHubReconcileInput = typeof MemoryHubReconcileInput.Type;
+export const MemoryHubReconcileResult = struct({
+  version: NonNegativeInt,
+  rearmedClasses: distinct(Schema.Literals(["protocol", "availability"]), 2),
+});
+export type MemoryHubReconcileResult = typeof MemoryHubReconcileResult.Type;
 
 export const MemorySyncStatus = struct({
   memorySpaceId: Schema.NullOr(MemorySpaceId),
@@ -1227,6 +1268,7 @@ export const MemoryMutationReceipt = struct({
 export type MemoryMutationReceipt = typeof MemoryMutationReceipt.Type;
 
 export const MemoryRevertStatus = Schema.Literals([
+  "refused",
   "pending",
   "accepted",
   "revision_changed",
@@ -1236,6 +1278,14 @@ export const MemoryRevertStatus = Schema.Literals([
 export type MemoryRevertStatus = typeof MemoryRevertStatus.Type;
 
 const revertArms = Schema.Union([
+  struct({
+    operationId: MemoryOperationId,
+    memoryId: MemoryId,
+    resolutionId: MemoryResolutionId,
+    revertDeadlineUtc: MemoryUtcTimestamp,
+    status: Schema.Literal("refused"),
+    failureCode: MemoryFailureCode,
+  }),
   struct({
     operationId: MemoryOperationId,
     memoryId: MemoryId,
@@ -1303,6 +1353,7 @@ export const MemoryReportDelivery = struct({
   resolutionId: Schema.NullOr(MemoryResolutionId),
   state: Schema.Literals(["pending", "delivered", "failed"]),
   failureCode: Schema.optionalKey(MemoryFailureCode),
+  automaticAttempts: Schema.optionalKey(NonNegativeInt.check(Schema.isLessThanOrEqualTo(10))),
   reportThread: Schema.NullOr(ScopedThreadRef),
   sequence: Schema.NullOr(NonNegativeInt),
 }).check(
@@ -1339,6 +1390,7 @@ const resolutionPair = struct({
   payload: Schema.NullOr(MemoryResolutionPayload),
 });
 
+/** Live keyset traversal: restart from the first page to observe new changes behind the cursor. */
 export const MemoryHistoryPage = bounded(
   struct({
     memoryId: MemoryId,
@@ -1390,6 +1442,23 @@ const paging = { limit, cursor: Schema.optionalKey(canonical) };
 /** Server-owned task metadata. Missing legacy values never acquire managed defaults. */
 export const MemoryTaskGrantCeiling = Schema.Literals(["none", "read", "read_write"]);
 export type MemoryTaskGrantCeiling = typeof MemoryTaskGrantCeiling.Type;
+/**
+ * Response-time destination assessment, never evidence of a past issued grant.
+ * Consumers refresh after policy changes; absent destination inputs leave this omitted.
+ */
+export const MemoryCurrentAccess = Schema.Struct({
+  access: MemoryTaskGrantCeiling,
+  reason: Schema.Literals([
+    "policy_unready",
+    "environment_off",
+    "legacy_none",
+    "ceiling",
+    "read_only_destination",
+    "dispatch_scope",
+  ]),
+});
+export type MemoryCurrentAccess = typeof MemoryCurrentAccess.Type;
+
 export const MemoryTaskGrantCeilingField = MemoryTaskGrantCeiling.pipe(
   Schema.withDecodingDefault(Effect.succeed("none")),
   // Keep older in-process producers assignable; missing and none are omitted on encode and decode to none.
@@ -1504,7 +1573,25 @@ export type MemoryListInput = typeof MemoryListInput.Type;
 export const MemoryReadInput = struct({ ...space, memoryId: MemoryId });
 export type MemoryReadInput = typeof MemoryReadInput.Type;
 
-export const MemoryHistoryInput = struct({ ...space, ...paging, memoryId: MemoryId });
+export const MemoryResetReportAttemptsInput = struct({
+  ...space,
+  environmentId: EnvironmentId,
+  reportIds: distinct(digest, 32, 1),
+});
+export type MemoryResetReportAttemptsInput = typeof MemoryResetReportAttemptsInput.Type;
+export const MemoryResetReportAttemptsResult = struct({
+  resetCount: NonNegativeInt.check(Schema.isLessThanOrEqualTo(32)),
+  unchangedCount: NonNegativeInt.check(Schema.isLessThanOrEqualTo(32)),
+}).check(Schema.makeFilter((v) => v.resetCount + v.unchangedCount <= 32));
+export type MemoryResetReportAttemptsResult = typeof MemoryResetReportAttemptsResult.Type;
+
+export const MemoryHistoryInput = struct({
+  ...space,
+  ...paging,
+  memoryId: MemoryId,
+  /** Send only when the environment advertises memory.refusedReverts. */
+  includeRefusedReverts: Schema.optionalKey(Schema.Literal(true)),
+});
 export type MemoryHistoryInput = typeof MemoryHistoryInput.Type;
 
 export const MemorySyncStatusInput = struct({});
@@ -1681,13 +1768,34 @@ export const MEMORY_ADMINISTRATION_MCP_TOOLS = ["memory_hub_disable"] as const;
 export const MemoryHubSettingsGetInput = struct({});
 export type MemoryHubSettingsGetInput = typeof MemoryHubSettingsGetInput.Type;
 
-export const MemoryHubSettingsView = struct({
+/** Persisted settings receipts exclude the live roster. */
+export const MemoryHubSettingsSnapshot = struct({
   settings: MemoryHubSettings,
   version: NonNegativeInt,
 });
+export type MemoryHubSettingsSnapshot = typeof MemoryHubSettingsSnapshot.Type;
+export const MemoryHubMemberView = struct({
+  environmentId: EnvironmentId,
+  credentialVersion: PositiveInt,
+  status: Schema.Literals(["pending_ack", "active"]),
+  joinedAt: Schema.NullOr(NonNegativeInt),
+});
+export type MemoryHubMemberView = typeof MemoryHubMemberView.Type;
+export const MemoryHubSettingsView = struct({
+  settings: MemoryHubSettings,
+  version: NonNegativeInt,
+  members: array(MemoryHubMemberView, MEMORY_HUB_MAX_MEMBERS),
+}).check(
+  Schema.makeFilter(
+    (view) =>
+      ((view.settings.mode === "hub" && view.settings.memorySpaceId !== null) ||
+        view.members.length === 0) &&
+      unique(view.members.map((member) => member.environmentId)),
+  ),
+);
 export type MemoryHubSettingsView = typeof MemoryHubSettingsView.Type;
-/** The narrow disable tool cannot return provisioning credentials or an enabled mode. */
-export const MemoryHubDisableResult = MemoryHubSettingsView.check(
+/** The narrow disable tool cannot return a roster, credentials or an enabled mode. */
+export const MemoryHubDisableResult = MemoryHubSettingsSnapshot.check(
   Schema.makeFilter((view) => view.settings.mode === "disabled"),
 );
 export type MemoryHubDisableResult = typeof MemoryHubDisableResult.Type;
@@ -2329,6 +2437,48 @@ export const MemorySuppressionRecord = Schema.Union([
 ]);
 export type MemorySuppressionRecord = typeof MemorySuppressionRecord.Type;
 
+/** Body-free lifetime evidence; unlike suppression, live lineage has no delete operation. */
+export const MemoryImportLineageRecord = Schema.Union([
+  struct({
+    memorySpaceId: MemorySpaceId,
+    memoryId: MemoryId,
+    kind: Schema.Literal("sourceKey"),
+    sourceKey: MemorySourceKey,
+  }),
+  struct({
+    memorySpaceId: MemorySpaceId,
+    memoryId: MemoryId,
+    kind: Schema.Literal("content"),
+    content: MemoryContentSuppression,
+  }),
+]);
+export type MemoryImportLineageRecord = typeof MemoryImportLineageRecord.Type;
+
+// Explicit tuples make duplicate identity independent of JSON property insertion order.
+const importProjectKey = (v: MemoryProjectKey) =>
+  v.kind === "repository" ? [v.kind, v.groupingKey] : [v.kind, v.sharedProjectId];
+const importScopeKey = (v: MemoryScope) =>
+  v.kind === "user"
+    ? [v.kind]
+    : v.kind === "project"
+      ? [v.kind, importProjectKey(v.projectKey)]
+      : [
+          v.kind,
+          v.thread.environmentId,
+          v.thread.threadId,
+          v.projectKey === undefined ? null : importProjectKey(v.projectKey),
+        ];
+/** Shared canonical key for ledger union, duplicate validation and checkpoint pagination. */
+export const memoryImportLineageRecordKey = (v: MemoryImportLineageRecord): string =>
+  JSON.stringify([
+    v.memorySpaceId,
+    v.memoryId,
+    v.kind,
+    v.kind === "sourceKey"
+      ? [v.sourceKey.environmentId, v.sourceKey.sourceId, v.sourceKey.sourceItemKey]
+      : [importScopeKey(v.content.scope), v.content.assertionKind, v.content.contentFingerprint],
+  ]);
+
 export const MemoryHubCheckpointPage = bounded(
   struct({
     memorySpaceId: MemorySpaceId,
@@ -2345,6 +2495,7 @@ export const MemoryHubCheckpointPage = bounded(
     identities: array(MemoryIdentityRecord),
     fences: array(MemoryFenceRecord),
     suppressions: array(MemorySuppressionRecord),
+    importLineage: array(MemoryImportLineageRecord),
     nextCursor: Schema.NullOr(canonical),
     bootstrapComplete: Schema.Boolean,
   }).check(
@@ -2358,7 +2509,8 @@ export const MemoryHubCheckpointPage = bounded(
         v.compactReceipts.length +
         v.identities.length +
         v.fences.length +
-        v.suppressions.length;
+        v.suppressions.length +
+        v.importLineage.length;
       return (
         count <= 100 &&
         (count > 0 || v.bootstrapComplete) &&
@@ -2668,6 +2820,7 @@ export function validateMemoryCheckpointRecords(
     resolutions = pages.flatMap((p) => p.resolutions),
     tombstones = pages.flatMap((p) => p.tombstones),
     suppressions = pages.flatMap((p) => p.suppressions),
+    importLineage = pages.flatMap((p) => p.importLineage),
     conflicts = pages.flatMap((p) => p.conflicts),
     items = pages.flatMap((p) => p.items);
   const identitiesById = uniqueIndex(identities, (v) => v.memoryId);
@@ -2678,6 +2831,7 @@ export function validateMemoryCheckpointRecords(
   const tombstonesById = uniqueIndex(tombstones, (v) => v.memoryId);
   const conflictsById = uniqueIndex(conflicts, (v) => v.conflictId);
   const itemsById = uniqueIndex(items, (v) => v.memoryId);
+  const lineageRows = uniqueIndex(importLineage, memoryImportLineageRecordKey);
   const suppressionRows = uniqueIndex(suppressions, (v) => JSON.stringify(v));
   // Rejected attempts may share a resolution id; only committed results own that key.
   const resolveReceiptsById = uniqueIndex(
@@ -2698,6 +2852,7 @@ export function validateMemoryCheckpointRecords(
     !conflictsById ||
     !itemsById ||
     !suppressionRows ||
+    !lineageRows ||
     !resolveReceiptsById
   )
     return false;
@@ -2714,6 +2869,7 @@ export function validateMemoryCheckpointRecords(
     ...resolutions.map((r) => r.resolution),
     ...tombstones,
     ...suppressions,
+    ...importLineage,
     ...conflicts,
     ...items,
   ];
@@ -2723,6 +2879,14 @@ export function validateMemoryCheckpointRecords(
         v.memorySpaceId === first.memorySpaceId &&
         identity(v.memoryId) !== undefined &&
         fence(v.memoryId) !== undefined,
+    )
+  )
+    return false;
+  if (
+    !importLineage.every(
+      (v) =>
+        v.kind !== "content" ||
+        same(importScopeKey(v.content.scope), importScopeKey(identity(v.memoryId)!.scope)),
     )
   )
     return false;

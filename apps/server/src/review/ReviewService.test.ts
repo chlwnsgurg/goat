@@ -1,6 +1,8 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
@@ -10,11 +12,13 @@ import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as VcsDriver from "../vcs/VcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as ReviewService from "./ReviewService.ts";
 
 function layer(input: {
   readonly workspaceRoot: string;
+  readonly handle?: VcsDriverRegistry.VcsDriverHandle;
   readonly baseDir: string;
   readonly detectCalls?: Array<{ readonly cwd: string }>;
   readonly worktreesDirectory?: string;
@@ -50,7 +54,7 @@ function layer(input: {
         detect: (request) =>
           Effect.sync(() => {
             input.detectCalls?.push({ cwd: request.cwd });
-            return null;
+            return input.handle ?? null;
           }),
       }),
     ),
@@ -67,6 +71,60 @@ function layer(input: {
 }
 
 describe("ReviewService", () => {
+  it.effect("declines index scopes before dispatching to another VCS driver", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "goat-review-workspace-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-review-base-" });
+      const driver = yield* VcsDriver.VcsDriver;
+      const observedAt = yield* DateTime.now;
+      for (const kind of ["jj", "unknown"] as const) {
+        for (const scope of ["staged", "unstaged"] as const) {
+          const error = yield* Effect.gen(function* () {
+            const review = yield* ReviewService.ReviewService;
+            return yield* review.getDiffPreview({ cwd: workspaceRoot, scope }).pipe(Effect.flip);
+          }).pipe(
+            Effect.provide(
+              layer({
+                workspaceRoot,
+                baseDir,
+                handle: {
+                  kind,
+                  driver,
+                  repository: {
+                    kind,
+                    rootPath: workspaceRoot,
+                    metadataPath: null,
+                    freshness: { source: "live-local", observedAt, expiresAt: Option.none() },
+                  },
+                },
+              }),
+            ),
+          );
+          assert.equal(error._tag, "VcsUnsupportedOperationError");
+          assert.include(error.message, "Git index");
+        }
+      }
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.mock(VcsDriver.VcsDriver)({
+            capabilities: {
+              kind: "jj",
+              supportsWorktrees: false,
+              supportsBookmarks: true,
+              supportsAtomicSnapshot: true,
+              supportsPushDefaultRemote: false,
+              ignoreClassifier: "native",
+            },
+            getDiffPreview: () => Effect.die("non-Git index scopes must not be dispatched"),
+          }),
+          NodeServices.layer,
+        ),
+      ),
+    ),
+  );
+
   it.effect("rejects diff preview cwd outside the configured workspace roots", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

@@ -2,9 +2,26 @@
 import * as NodeUtil from "node:util";
 import * as Schema from "effect/Schema";
 
+/** Why readiness or login resolution refused, for callers that explain the next step. */
+export const ClaudeCloudReason = Schema.Literals([
+  "sibling_missing",
+  "sibling_invalid",
+  "forbidden_environment",
+  "executable_unsupported",
+  "not_signed_in",
+  "wrong_sign_in",
+  "cloud_unsupported",
+]);
+export type ClaudeCloudReason = typeof ClaudeCloudReason.Type;
+
 export class ClaudeCloudError extends Schema.TaggedError<ClaudeCloudError>()("ClaudeCloudError", {
   detail: Schema.String,
   outcome: Schema.Literals(["rejected", "uncertain"]),
+  reason: Schema.optional(ClaudeCloudReason),
+  /** Names, never values, of the variables behind `forbidden_environment`. */
+  variables: Schema.optional(Schema.Array(Schema.String)),
+  /** The sign-in method Claude reported, for `wrong_sign_in`. */
+  authMethod: Schema.optional(Schema.String),
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message() {

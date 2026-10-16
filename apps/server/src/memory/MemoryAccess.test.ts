@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import {
   captureMemoryGrantCeiling,
+  currentMemoryAccess,
   effectiveMemoryGrant,
   memoryAccessPermit,
 } from "./MemoryAccess.ts";
@@ -152,4 +153,49 @@ describe("memory authority intersection", () => {
       );
     }),
   );
+});
+
+// Expected outcomes describe the policy intersection, independently of the runtime wrapper.
+it("explains current permission without widening saved or legacy ceilings", () => {
+  const base = { policyReady: true, enableAgentMemoryAccess: true, readOnly: false };
+  for (const [input, expected] of [
+    [{ memoryGrantCeiling: undefined }, { access: "none", reason: "legacy_none" }],
+    [{ memoryGrantCeiling: "none" }, { access: "none", reason: "ceiling" }],
+    [{ memoryGrantCeiling: "read" }, { access: "read", reason: "ceiling" }],
+    [{ memoryGrantCeiling: "read_write" }, { access: "read_write", reason: "ceiling" }],
+    [
+      { memoryGrantCeiling: "read_write", readOnly: true },
+      { access: "read", reason: "read_only_destination" },
+    ],
+    [
+      { memoryGrantCeiling: "read_write", dispatchScopes: [] },
+      { access: "none", reason: "dispatch_scope" },
+    ],
+    [
+      { memoryGrantCeiling: "read_write", dispatchScopes: ["memory:read"] },
+      { access: "read", reason: "dispatch_scope" },
+    ],
+    [
+      { memoryGrantCeiling: "read_write", enableAgentMemoryAccess: false },
+      { access: "none", reason: "environment_off" },
+    ],
+    [
+      { memoryGrantCeiling: "read_write", policyReady: false },
+      { access: "none", reason: "policy_unready" },
+    ],
+  ] as const) {
+    const actual = currentMemoryAccess({ ...base, ...input });
+    expect(actual).toEqual(expected);
+    expect(effectiveMemoryGrant({ ...base, ...input })).toBe(expected.access);
+  }
+  for (const memoryGrantCeiling of [undefined, "none", "read", "read_write"] as const) {
+    const off = currentMemoryAccess({
+      ...base,
+      memoryGrantCeiling,
+      enableAgentMemoryAccess: false,
+    });
+    expect(off.access).toBe("none");
+    const on = currentMemoryAccess({ ...base, memoryGrantCeiling });
+    expect(on.access).toBe(memoryGrantCeiling ?? "none");
+  }
 });

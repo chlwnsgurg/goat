@@ -36,26 +36,43 @@ export function memoryAccessPermit(
 }
 
 /** A captured ceiling can only narrow destination policy and authenticated dispatch scopes. */
-export function effectiveMemoryGrant(input: {
+export function currentMemoryAccess(input: {
   readonly enableAgentMemoryAccess: boolean;
   readonly policyReady: boolean;
   readonly readOnly: boolean;
   // Null is an ordinary user start; undefined is legacy task metadata and denies.
   readonly memoryGrantCeiling: M.MemoryTaskGrantCeiling | null | undefined;
   readonly dispatchScopes?: ReadonlyArray<M.AuthEnvironmentScope>;
-}): M.MemoryTaskGrantCeiling {
-  if (!input.policyReady || !input.enableAgentMemoryAccess) return "none";
+}): M.MemoryCurrentAccess {
+  if (!input.policyReady) return { access: "none", reason: "policy_unready" };
+  if (!input.enableAgentMemoryAccess) return { access: "none", reason: "environment_off" };
+  if (input.memoryGrantCeiling === undefined) return { access: "none", reason: "legacy_none" };
   const ceiling =
     input.memoryGrantCeiling === null ? "read_write" : (input.memoryGrantCeiling ?? "none");
   const canRead =
     ceiling !== "none" &&
     (input.dispatchScopes === undefined || input.dispatchScopes.includes("memory:read"));
-  if (!canRead) return "none";
+  if (!canRead)
+    return { access: "none", reason: ceiling === "none" ? "ceiling" : "dispatch_scope" };
   const canWrite =
     ceiling === "read_write" &&
     !input.readOnly &&
     (input.dispatchScopes === undefined || input.dispatchScopes.includes("memory:write"));
-  return canWrite ? "read_write" : "read";
+  return {
+    access: canWrite ? "read_write" : "read",
+    reason:
+      ceiling === "read_write" && !canWrite
+        ? input.readOnly
+          ? "read_only_destination"
+          : "dispatch_scope"
+        : "ceiling",
+  };
+}
+
+export function effectiveMemoryGrant(
+  input: Parameters<typeof currentMemoryAccess>[0],
+): M.MemoryTaskGrantCeiling {
+  return currentMemoryAccess(input).access;
 }
 
 /** Capture actual memory grants, never infer them from orchestration or runtime mode. */
