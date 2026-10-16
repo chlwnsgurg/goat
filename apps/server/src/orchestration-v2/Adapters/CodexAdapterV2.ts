@@ -11,6 +11,7 @@ import {
   mcpToolPresentation,
   type McpToolPresentation,
 } from "../../provider/CodexToolPresentation.ts";
+import { codexCommandActions } from "../../provider/CodexCommandActions.ts";
 import {
   makeCodexTurnTokenUsageState,
   getCodexTurnAccumulator,
@@ -55,6 +56,7 @@ import type {
   OrchestrationV2ExecutionNode,
   ModelSelection,
   OrchestrationV2PlanArtifact,
+  OrchestrationV2CommandAction,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderFailure,
   OrchestrationV2ProviderRetry,
@@ -1204,6 +1206,7 @@ interface ActiveCodexProviderRetry {
 interface TrackedRunningCommandItem {
   readonly id: string;
   readonly command: string;
+  readonly commandActions: ReadonlyArray<OrchestrationV2CommandAction>;
   readonly aggregatedOutput?: string;
   readonly processId?: string;
 }
@@ -2559,6 +2562,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 updatedAt: completedAt,
                 type: "command_execution",
                 input: tracked.command,
+                commandActions: tracked.commandActions,
                 ...(tracked.aggregatedOutput === undefined
                   ? {}
                   : { output: tracked.aggregatedOutput }),
@@ -3810,6 +3814,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               updatedAt,
               type: "command_execution",
               input: item.command,
+              commandActions: codexCommandActions(item.commandActions),
               ...(item.aggregatedOutput === null || item.aggregatedOutput === undefined
                 ? {}
                 : { output: item.aggregatedOutput }),
@@ -4974,6 +4979,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 yield* trackRunningCommandItem(payload.turnId, {
                   id: payload.item.id,
                   command: payload.item.command,
+                  commandActions: codexCommandActions(payload.item.commandActions),
                   ...(payload.item.aggregatedOutput === null ||
                   payload.item.aggregatedOutput === undefined
                     ? {}

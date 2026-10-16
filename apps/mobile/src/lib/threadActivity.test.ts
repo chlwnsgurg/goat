@@ -2793,3 +2793,30 @@ it("renders question notification summaries with the existing message icon", () 
   expect(activity.icon).toBe("message");
   expect(activity.getFullDetail()).toContain(item.detail);
 });
+
+it("shows commands that only inspect files as reads and listings", () => {
+  const read: OrchestrationV2TurnItem = {
+    ...command(),
+    id: TurnItemId.make("read-command"),
+    input: "/bin/zsh -lc 'nl -ba src/env.ts'",
+    commandActions: [{ type: "read", path: "/Users/dev/repo/src/env.ts" }],
+  };
+  const listing: OrchestrationV2TurnItem = {
+    ...command("2026-06-20T00:00:03.000Z"),
+    id: TurnItemId.make("list-command"),
+    ordinal: 2,
+    input: "ls apps",
+    commandActions: [{ type: "list", path: "apps" }],
+  };
+  const activities = buildThreadFeed([projected(read, 0), projected(listing, 1)]).flatMap(
+    (entry) => (entry.type === "activity-group" ? entry.activities : []),
+  );
+
+  expect(activities.map((activity) => workEntryRowLabel(activity.workEntry))).toEqual([
+    "Read env.ts",
+    "Listed apps",
+  ]);
+  expect(activities.map((activity) => activity.icon)).toEqual(["eye", "folder"]);
+  // Expanded, the row shows the command it ran.
+  expect(workEntryRowLabel(activities[0]!.workEntry, true)).toBe("nl -ba src/env.ts");
+});

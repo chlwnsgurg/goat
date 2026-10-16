@@ -28,6 +28,7 @@ import {
 } from "@goat/client-runtime/work-log/command-label";
 import {
   contextCompactionLabel,
+  formatCommandActionsLabel,
   liveThoughtLine,
   toolItemForDisplay,
   workEntryDisplayIndicatesToolFailure,
@@ -36,6 +37,7 @@ import {
   resolveWorkEntryToolPresentation,
   summarizeToolGroup,
   toolGroupSummaryKind,
+  workEntryCommandActions,
   type ToolGroupSummaryKind,
   type WorkLogPresentationEntry,
   type WorkLogToolLifecycleStatus,
@@ -108,6 +110,7 @@ export interface ThreadFeedActivity {
     | "command"
     | "edit"
     | "eye"
+    | "folder"
     | "globe"
     | "search"
     | "hammer"
@@ -265,12 +268,32 @@ function compactWorkEntryText(value: string): string {
   return value.replace(/\s+/gu, " ").trim();
 }
 
+/** Absolute paths (Codex resolves reads against the cwd) shrink to the file name. */
+function compactCommandActionPath(path: string): string {
+  return /^(?:\/|[A-Za-z]:[\\/])/u.test(path)
+    ? (path.split(/[\\/]/u).findLast((part) => part.length > 0) ?? path)
+    : path;
+}
+
+function commandActionsRowLabel(entry: WorkLogPresentationEntry): string | null {
+  const commandActions = workEntryCommandActions(entry);
+  return commandActions
+    ? formatCommandActionsLabel(commandActions, {
+        active: entry.toolLifecycleStatus === "inProgress",
+        formatPath: compactCommandActionPath,
+      })
+    : null;
+}
+
 /** Expanded work rows keep their detail while compact rows show a stable one-line label. */
 export function workEntryRowLabel(entry: WorkLogPresentationEntry, expanded = false): string {
   if (expanded && entry.itemType === "reasoning")
     return entry.toolLifecycleStatus === "inProgress" ? "Thinking" : "Thought";
   const presentation = resolveWorkEntryToolPresentation(entry);
   if (presentation) return presentation.displayName;
+  // Expanded, an inspecting command shows the command it ran.
+  const commandActionsLabel = expanded ? null : commandActionsRowLabel(entry);
+  if (commandActionsLabel) return commandActionsLabel;
   if (entry.command?.trim()) return compactWorkEntryText(commandDisplayText(entry.command));
   const action = toolGroupAction(entry);
   const isToolRead = action === "read" && entry.itemType === "dynamic_tool";
@@ -542,6 +565,12 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     }
     if (classified === "search") return "search";
   }
+  if (item.type === "command_execution" && item.commandActions?.length) {
+    const kinds = new Set(item.commandActions.map((action) => action.type));
+    if (kinds.size === 1 && kinds.has("read")) return "eye";
+    if (kinds.size === 1 && kinds.has("list")) return "folder";
+    return "search";
+  }
   switch (item.type) {
     case "reasoning":
       return "agent";
@@ -613,7 +642,9 @@ function itemSummary(
     case "reasoning":
       return "Thinking";
     case "command_execution":
-      return "Command";
+      return item.commandActions?.length
+        ? formatCommandActionsLabel(item.commandActions, { formatPath: compactCommandActionPath })
+        : "Command";
     case "file_change":
       return item.changes !== undefined && item.changes.length > 1
         ? `Changed ${item.changes.length} files`
@@ -875,6 +906,8 @@ function singleToolCallLabel(activity: ThreadFeedActivity, expanded: boolean): s
       : compactWorkEntryText(activity.workEntry.detail ?? "") || "Thought";
   const presentation = resolveWorkEntryToolPresentation(activity.workEntry, "completed");
   if (presentation) return presentation.displayName;
+  const commandActionsLabel = expanded ? null : commandActionsRowLabel(activity.workEntry);
+  if (commandActionsLabel) return commandActionsLabel;
   const command = activity.workEntry.command?.trim();
   return command || activity.summary;
 }

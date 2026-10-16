@@ -417,6 +417,8 @@ function workRowSymbolName(icon: ThreadFeedActivity["icon"]): WorkContentIcon {
       return { ios: "square.and.pencil", android: "edit" };
     case "eye":
       return { ios: "eye", android: "visibility" };
+    case "folder":
+      return { ios: "folder", android: "folder" };
     case "globe":
       return { ios: "globe", android: "public" };
     case "search":
@@ -1677,6 +1679,8 @@ function toolGroupSummarySymbolName(kind: ToolGroupSummaryKind): AppSymbolName {
       return "arrow.triangle.pull";
     case "read":
       return { ios: "eye", android: "visibility" };
+    case "list":
+      return { ios: "folder", android: "folder" };
     case "edit":
       return { ios: "square.and.pencil", android: "edit" };
     case "thread-create":

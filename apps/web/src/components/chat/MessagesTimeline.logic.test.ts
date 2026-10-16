@@ -168,6 +168,45 @@ describe("work entry labels", () => {
     expect(workEntryDisplayLabel(browserEntry, undefined)).toBe(label);
   });
 
+  it("names the file a read command opened instead of the command", () => {
+    const item: OrchestrationV2TurnItem = {
+      id: TurnItemId.make("read-command"),
+      threadId: ThreadId.make("thread"),
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "running",
+      title: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: DateTime.makeUnsafe("2026-09-01T12:00:00Z"),
+      type: "command_execution",
+      input: "/bin/zsh -lc \"sed -n '1,80p' apps/web/src/main.tsx\"",
+      commandActions: [{ type: "read", path: "/repo/apps/web/src/main.tsx" }],
+    };
+    const readEntry: WorkLogEntry = {
+      ...entry,
+      itemType: "command_execution",
+      command: item.input,
+      structuredPayload: item,
+      toolLifecycleStatus: "inProgress",
+    };
+    expect(liveWorkEntryLabel(readEntry, "/repo", true)).toBe("Reading repo/apps/web/src/main.tsx");
+    expect(workEntryDisplayLabel({ ...readEntry, toolLifecycleStatus: "completed" }, "/repo")).toBe(
+      "Read repo/apps/web/src/main.tsx",
+    );
+    expect(
+      workEntryDisplayLabel(
+        { ...readEntry, structuredPayload: { ...item, commandActions: [] } },
+        "/repo",
+      ),
+    ).toBe("sed -n '1,80p' apps/web/src/main.tsx");
+  });
+
   it.each([
     ["inProgress", true, "Reading thread"],
     ["completed", false, "Read thread"],

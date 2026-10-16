@@ -7,6 +7,7 @@ import { GOAT_MCP_TOOL_NAMES } from "@goat/shared/goatMcpToolPresentation";
 import {
   commandDetailRepeatsCommand,
   extractCommandOutputText,
+  formatCommandActionsLabel,
   liveThoughtLine,
   resolveViewedImageAsset,
   resolveWorkEntryToolPresentation,
@@ -1079,5 +1080,96 @@ describe("liveThoughtLine", () => {
       "This is really not fine in snake_case_names.",
     );
     expect(liveThoughtLine("   ")).toBe("");
+  });
+});
+
+describe("commands that only inspect files", () => {
+  const entry = (
+    id: string,
+    input: string,
+    commandActions: Extract<
+      OrchestrationV2TurnItem,
+      { type: "command_execution" }
+    >["commandActions"],
+  ): WorkLogPresentationEntry => ({
+    id,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    label: "Ran command",
+    tone: "tool",
+    command: input,
+    itemType: "command_execution",
+    toolLifecycleStatus: "completed",
+    structuredPayload: commandItem({ input, ...(commandActions ? { commandActions } : {}) }),
+  });
+
+  it("takes the row kind from the command's actions and keeps real commands as commands", () => {
+    expect(toolGroupAction(entry("r", "cat a.ts", [{ type: "read", path: "a.ts" }]))).toBe("read");
+    expect(toolGroupAction(entry("l", "ls src", [{ type: "list", path: "src" }]))).toBe("list");
+    expect(toolGroupAction(entry("s", "rg foo", [{ type: "search", query: "foo" }]))).toBe(
+      "code-search",
+    );
+    expect(
+      toolGroupAction(
+        entry("m", "rg foo && cat a.ts", [
+          { type: "search", query: "foo" },
+          { type: "read", path: "a.ts" },
+        ]),
+      ),
+    ).toBe("code-search");
+    expect(toolGroupAction(entry("c", "vp test run", []))).toBe("command");
+    expect(toolGroupAction(entry("u", "vp test run", undefined))).toBe("command");
+  });
+
+  it("labels each kind with its file or query", () => {
+    expect(formatCommandActionsLabel([{ type: "read", path: "src/a.ts" }])).toBe("Read src/a.ts");
+    expect(
+      formatCommandActionsLabel([
+        { type: "read", path: "a.ts" },
+        { type: "read", path: "b.ts" },
+      ]),
+    ).toBe("Read a.ts +1 more");
+    expect(formatCommandActionsLabel([{ type: "list", path: "apps/web" }])).toBe("Listed apps/web");
+    expect(formatCommandActionsLabel([{ type: "list", path: "." }])).toBe("Listed files");
+    expect(
+      formatCommandActionsLabel([{ type: "list", path: "provider" }], {
+        formatPath: (path) => `repo/${path}`,
+      }),
+    ).toBe("Listed provider");
+    expect(
+      formatCommandActionsLabel([{ type: "search", query: "useEffect", path: "apps/web/src" }]),
+    ).toBe("Searched useEffect in src");
+    expect(
+      formatCommandActionsLabel(
+        [
+          { type: "search", query: "foo", path: "src" },
+          { type: "read", path: "/repo/src/a.ts" },
+        ],
+        { active: true, formatPath: (path) => path.replace("/repo/", "") },
+      ),
+    ).toBe("Searching foo in src, reading src/a.ts");
+  });
+
+  it("summarizes reads by distinct file and merges exploration kinds", () => {
+    const reads = [
+      entry("r1", "cat a.ts", [{ type: "read", path: "a.ts" }]),
+      entry("r2", "sed -n 1,40p a.ts", [{ type: "read", path: "a.ts" }]),
+      entry("r3", "cat b.ts c.ts", [
+        { type: "read", path: "b.ts" },
+        { type: "read", path: "c.ts" },
+      ]),
+    ];
+    expect(summarizeToolGroup(reads).summary).toBe("Read 3 files");
+    expect(toolGroupSummaryKind(reads)).toBe("read");
+    expect(
+      summarizeToolGroup([
+        ...reads,
+        entry("l1", "ls", [{ type: "list" }]),
+        entry("s1", "rg foo", [{ type: "search", query: "foo" }]),
+        entry("c1", "vp test run", []),
+      ]).summary,
+    ).toBe("Explored 3 files, 1 search, 1 list and ran 1 command");
+    expect(
+      toolGroupSummaryKind([...reads, entry("s2", "rg foo", [{ type: "search", query: "foo" }])]),
+    ).toBe("code-search");
   });
 });

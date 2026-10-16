@@ -11,12 +11,14 @@ import {
   commandProgramName,
 } from "@goat/client-runtime/work-log/command-label";
 import {
+  formatCommandActionsLabel,
   liveActivityToolStatus,
   normalizeCompactToolLabel,
   resolveWorkEntryToolPresentation,
   summarizeToolGroup,
   toolGroupAction,
   toolGroupSummaryKind,
+  workEntryCommandActions,
   type ToolGroupSummaryKind,
 } from "@goat/client-runtime/work-log/presentation";
 export {
@@ -139,6 +141,12 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string
   }
   const toolPresentation = resolveWorkEntryToolPresentation(entry);
   if (toolPresentation) return toolPresentation.displayName;
+  const commandActions = workEntryCommandActions(entry);
+  if (commandActions) {
+    return formatCommandActionsLabel(commandActions, {
+      formatPath: (path) => formatWorkspaceRelativePath(path, workspaceRoot),
+    });
+  }
   if (entry.command?.trim()) return commandDisplayText(entry.command);
   const action = toolGroupAction(entry);
   if (action === "code-search" || action === "search") {
@@ -258,6 +266,13 @@ export function liveWorkEntryLabel(
     toolLifecycleStatus: status,
   });
   if (toolPresentation) return toolPresentation.displayName;
+  const commandActions = workEntryCommandActions(entry);
+  if (commandActions) {
+    return formatCommandActionsLabel(commandActions, {
+      active: status === "inProgress",
+      formatPath: (path) => formatWorkspaceRelativePath(path, workspaceRoot),
+    });
+  }
   const command = entry.command?.trim();
   if (command) {
     const verb =
