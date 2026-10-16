@@ -105,6 +105,10 @@ export async function renderGoatIconOutputs(
         },
         null,
         2,
+        // Keep short primitive arrays on one line, the way the repository formatter writes them.
+      ).replace(
+        /\[\s+([^[\]{}]*?)\s+\]/g,
+        (_match, items: string) => `[${items.split(/,\s*/).join(", ")}]`,
       ),
     );
     const universal = await sharp(Buffer.from(goatMarkCanvasSvg(CANVAS, MARK_FRACTION, color)))
