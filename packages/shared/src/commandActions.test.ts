@@ -88,6 +88,7 @@ describe("parseCommandActions", () => {
     "fd -e log -x rm",
     "rg --pre ./run.sh foo",
     "tree -o out.txt",
+    "tree -oout.txt",
     "rg foo | xargs rm",
     "ls | tee listing.txt",
     "rg foo | sort -oout.txt",
@@ -118,5 +119,14 @@ describe("parseCommandActions", () => {
   it("drops more actions than a row can show", () => {
     const files = Array.from({ length: 17 }, (_, index) => `f${index}.ts`).join(" ");
     expect(parseCommandActions(`cat ${files}`)).toEqual([]);
+  });
+
+  it("keeps commands plain when their actions exceed the wire bounds", () => {
+    expect(parseCommandActions(`rg ${"x".repeat(1_025)} src`)).toEqual([]);
+    expect(parseCommandActions("ls ''")).toEqual([]);
+    expect(parseCommandActions("cat valid.ts && ls ''")).toEqual([]);
+    expect(parseCommandActions(`rg ${"x".repeat(1_024)} src`)).toEqual([
+      { type: "search", query: "x".repeat(1_024), path: "src" },
+    ]);
   });
 });

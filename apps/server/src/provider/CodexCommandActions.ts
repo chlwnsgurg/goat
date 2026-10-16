@@ -2,16 +2,12 @@ import {
   ORCHESTRATION_V2_MAX_COMMAND_ACTIONS,
   type OrchestrationV2CommandAction,
 } from "@goat/contracts";
+import { isCommandActions } from "@goat/shared/commandActions";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 
 type CodexCommandAction =
   | CodexSchema.V2ItemStartedNotification__CommandAction
   | CodexSchema.V2ItemCompletedNotification__CommandAction;
-
-function bounded(value: string | null | undefined, maxLength: number): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed && trimmed.length <= maxLength ? trimmed : undefined;
-}
 
 /**
  * Codex parses each exec command into read, list, and search steps. One
@@ -26,19 +22,18 @@ export function codexCommandActions(
   for (const action of actions) {
     switch (action.type) {
       case "read": {
-        const path = bounded(action.path, 4_096);
-        if (path === undefined) return [];
+        const path = action.path.trim();
         mapped.push({ type: "read", path });
         break;
       }
       case "listFiles": {
-        const path = bounded(action.path, 4_096);
+        const path = action.path?.trim();
         mapped.push({ type: "list", ...(path === undefined ? {} : { path }) });
         break;
       }
       case "search": {
-        const query = bounded(action.query, 1_024);
-        const path = bounded(action.path, 4_096);
+        const query = action.query?.trim();
+        const path = action.path?.trim();
         mapped.push({
           type: "search",
           ...(query === undefined ? {} : { query }),
@@ -50,5 +45,5 @@ export function codexCommandActions(
         return [];
     }
   }
-  return mapped;
+  return isCommandActions(mapped) ? mapped : [];
 }

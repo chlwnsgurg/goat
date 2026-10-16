@@ -28,7 +28,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import { AgentScope } from "@goat/shared/AgentScope";
-import { parseCommandActions } from "@goat/shared/commandActions";
+import { isCommandActions, parseCommandActions } from "@goat/shared/commandActions";
 import { getModelSelectionStringOptionValue, modelSelectionsEqual } from "@goat/shared/model";
 import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
 import * as EventSink from "./EventSink.ts";
@@ -307,12 +307,16 @@ function compactUndefined<T extends Record<string, unknown>>(record: T): T {
 /**
  * Providers that report only a raw shell command get a conservative read,
  * list, or search classification once, as the item arrives. Items a provider
- * already classified (Codex) keep that classification.
+ * already classified (Codex) keep that classification if it fits the wire.
  */
 function withCommandActions(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
-  if (item.type !== "command_execution" || item.commandActions !== undefined) return item;
-  const commandActions = parseCommandActions(item.input);
-  return commandActions.length === 0 ? item : { ...item, commandActions };
+  if (item.type !== "command_execution") return item;
+  const commandActions = item.commandActions ?? parseCommandActions(item.input);
+  // Classification is optional; invalid metadata must never fail the provider run.
+  if (!isCommandActions(commandActions)) return { ...item, commandActions: [] };
+  return item.commandActions !== undefined || commandActions.length === 0
+    ? item
+    : { ...item, commandActions };
 }
 
 const decodeDomainEvent = Schema.decodeUnknownEffect(OrchestrationV2DomainEvent);

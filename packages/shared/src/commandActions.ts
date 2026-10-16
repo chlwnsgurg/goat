@@ -1,4 +1,15 @@
-import type { OrchestrationV2CommandAction } from "@goat/contracts";
+import {
+  ORCHESTRATION_V2_MAX_COMMAND_ACTIONS,
+  OrchestrationV2CommandAction,
+} from "@goat/contracts";
+import * as Schema from "effect/Schema";
+
+/** Checks optional classification metadata before it can invalidate a provider event. */
+export const isCommandActions = Schema.is(
+  Schema.Array(OrchestrationV2CommandAction).check(
+    Schema.isMaxLength(ORCHESTRATION_V2_MAX_COMMAND_ACTIONS),
+  ),
+);
 
 /**
  * Conservative shell-command classifier for providers that only report the
@@ -11,7 +22,6 @@ import type { OrchestrationV2CommandAction } from "@goat/contracts";
  */
 
 const MAX_COMMAND_LENGTH = 4_096;
-const MAX_ACTIONS = 16;
 const SHELLS = new Set(["sh", "bash", "zsh"]);
 
 type Token = { readonly kind: "word"; readonly value: string } | { readonly kind: "and" | "pipe" };
@@ -354,7 +364,7 @@ function classifySimpleCommand(words: readonly string[]): OrchestrationV2Command
     }
     case "tree": {
       const { operands, flags } = splitArgs(args, TREE_FLAGS);
-      return flags.has("-o") ? null : list(operands);
+      return [...flags.keys()].some((flag) => flag.startsWith("-o")) ? null : list(operands);
     }
     case "rg":
     case "ripgrep": {
@@ -499,7 +509,7 @@ function parse(command: string, depth: number): OrchestrationV2CommandAction[] {
       actions.push(located);
     }
   }
-  return actions.length > MAX_ACTIONS ? [] : actions;
+  return actions;
 }
 
 /**
@@ -508,5 +518,6 @@ function parse(command: string, depth: number): OrchestrationV2CommandAction[] {
  */
 export function parseCommandActions(command: string): OrchestrationV2CommandAction[] {
   if (command.length === 0 || command.length > MAX_COMMAND_LENGTH) return [];
-  return parse(command, 0);
+  const actions = parse(command, 0);
+  return isCommandActions(actions) ? actions : [];
 }

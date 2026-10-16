@@ -27,12 +27,45 @@ describe("codexCommandActions", () => {
     expect(codexCommandActions([])).toEqual([]);
   });
 
-  it("drops values the wire cannot carry", () => {
+  it("keeps commands plain when any action field cannot fit the wire", () => {
     expect(
-      codexCommandActions([{ type: "search", command: "rg", query: "x".repeat(2_000), path: " " }]),
-    ).toEqual([{ type: "search" }]);
+      codexCommandActions([
+        { type: "search", command: "rg", query: "x".repeat(1_025), path: "src" },
+      ]),
+    ).toEqual([]);
     expect(codexCommandActions([{ type: "read", command: "cat", name: "", path: "  " }])).toEqual(
       [],
     );
+    expect(
+      codexCommandActions([
+        { type: "read", command: "cat", name: "file", path: "x".repeat(4_097) },
+      ]),
+    ).toEqual([]);
+    expect(
+      codexCommandActions([{ type: "listFiles", command: "ls", path: "x".repeat(4_097) }]),
+    ).toEqual([]);
+    expect(
+      codexCommandActions([
+        { type: "search", command: "rg", query: "foo", path: "x".repeat(4_097) },
+      ]),
+    ).toEqual([]);
+    expect(codexCommandActions([{ type: "listFiles", command: "ls ''", path: "" }])).toEqual([]);
+    expect(
+      codexCommandActions(
+        Array.from({ length: 17 }, () => ({ type: "listFiles", command: "ls", path: null })),
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps values at the wire limits and omits absent optional fields", () => {
+    expect(
+      codexCommandActions([
+        { type: "search", command: "rg", query: "x".repeat(1_024), path: "p".repeat(4_096) },
+        { type: "search", command: "rg -f patterns", query: null, path: null },
+      ]),
+    ).toEqual([
+      { type: "search", query: "x".repeat(1_024), path: "p".repeat(4_096) },
+      { type: "search" },
+    ]);
   });
 });
