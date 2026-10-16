@@ -51,6 +51,10 @@ import {
 } from "@goat/client-runtime/work-log/presentation";
 import { resolveWorkGroupScrollAnchor } from "@goat/client-runtime/work-log/scroll-anchor";
 import {
+  fileChangeLineCounts,
+  type WorkLogLineCounts,
+} from "@goat/client-runtime/work-log/line-counts";
+import {
   turnItemHasDetail,
   turnItemNeedsDetailFetch,
 } from "@goat/client-runtime/work-log/item-detail";
@@ -180,6 +184,7 @@ import { ProposedPlanCard } from "./ProposedPlanCard";
 import { HtmlRenderFrame } from "./HtmlRenderFrame";
 import { McpAppFrame } from "./McpAppFrame";
 import { ChangedFilesCard } from "./ChangedFilesTree";
+import { DiffStatLabel } from "./DiffStatLabel";
 import { useFileContextMenuHandler } from "../../fileContextMenu";
 import { useProject, useThreadShell } from "../../state/entities";
 import {
@@ -4234,6 +4239,7 @@ function WorkGroupToggleTimelineRow({
       iconName={row.summaryToolIcon ?? row.toolSurface ?? toolGroupSummaryIconName(row.summaryKind)}
       toolIcon={row.toolIcon}
       failed={row.hasFailure}
+      lineCounts={row.lineCounts}
       expanded={row.expanded}
       createdAt={row.createdAt}
       timestampFormat={ctx.timestampFormat}
@@ -4248,15 +4254,19 @@ function WorkGroupHeader(props: {
   toolIcon?: ToolActivityIcon | undefined;
   failed?: boolean | undefined;
   active?: boolean | undefined;
+  lineCounts?: WorkLogLineCounts | undefined;
   expanded: boolean;
   createdAt: string;
   timestampFormat: TimestampFormat;
   onToggle: () => void;
 }) {
+  const accessibleLabel = props.lineCounts
+    ? `${props.label}, ${lineCountsAccessibleText(props.lineCounts)}`
+    : props.label;
   return (
     <WorkLogButton
       ref={props.active && !props.failed ? observeVisibleAnimation : undefined}
-      aria-label={props.failed ? `${props.label}, tool call failed` : props.label}
+      aria-label={props.failed ? `${accessibleLabel}, tool call failed` : accessibleLabel}
       aria-expanded={props.expanded}
       onClick={props.onToggle}
       icon={
@@ -4268,13 +4278,38 @@ function WorkGroupHeader(props: {
         />
       }
       label={
-        <span className={cn("block truncate", props.active && !props.failed && "live-tool-shine")}>
-          {props.label}
-        </span>
+        props.lineCounts ? (
+          <span className="flex min-w-0 items-baseline gap-1.5">
+            <span className="min-w-0 truncate">{props.label}</span>
+            <WorkLogLineCountsLabel counts={props.lineCounts} />
+          </span>
+        ) : (
+          <span
+            className={cn("block truncate", props.active && !props.failed && "live-tool-shine")}
+          >
+            {props.label}
+          </span>
+        )
       }
       trailing={
         <TimelineRowTimestamp createdAt={props.createdAt} timestampFormat={props.timestampFormat} />
       }
+    />
+  );
+}
+
+function lineCountsAccessibleText(counts: WorkLogLineCounts): string {
+  return `${counts.additions} ${counts.additions === 1 ? "line" : "lines"} added, ${counts.deletions} removed`;
+}
+
+/** Added and removed line counts beside an edit's file name. */
+function WorkLogLineCountsLabel({ counts }: { counts: WorkLogLineCounts }) {
+  return (
+    <DiffStatLabel
+      additions={counts.additions}
+      deletions={counts.deletions}
+      layout="inline"
+      className="shrink-0 text-xs"
     />
   );
 }
@@ -5630,6 +5665,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
     workEntry.questionAnswer && hasQuestionAnswer(workEntry.questionAnswer)
       ? getQuestionAnswerPreview(workEntry.questionAnswer)
       : null;
+  const lineCounts = fileChangeLineCounts(workEntry.structuredPayload);
   const viewedImagePath = workEntryViewedImagePath(workEntry);
   const payload = workEntry.structuredPayload;
   const skill =
@@ -5712,7 +5748,11 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         ? "text-secondary-label/85"
         : "text-foreground/80";
   const threadLabel = isReasoning ? null : threadReadLabel(previewText, threadTarget);
-  const accessiblePreview = [threadLabel?.text ?? previewText, answerPreview]
+  const accessiblePreview = [
+    threadLabel?.text ?? previewText,
+    answerPreview,
+    lineCounts ? lineCountsAccessibleText(lineCounts) : null,
+  ]
     .filter(Boolean)
     .join(": ");
   const accessibleDisplayText = showFailedIndicator
@@ -5757,7 +5797,11 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         <div className="min-w-0 flex-1 overflow-hidden">
           <p className="flex min-w-0 w-full items-baseline gap-1.5 text-work-log">
             <span
-              className={cn(answerPreview ? "min-w-0" : "min-w-0 flex-1", "truncate", headingClass)}
+              className={cn(
+                answerPreview || lineCounts ? "min-w-0" : "min-w-0 flex-1",
+                "truncate",
+                headingClass,
+              )}
             >
               {isReasoning && !expanded ? (
                 <ReactMarkdown
@@ -5795,6 +5839,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
                 {answerPreview}
               </span>
             ) : null}
+            {lineCounts ? <WorkLogLineCountsLabel counts={lineCounts} /> : null}
           </p>
         </div>
       }

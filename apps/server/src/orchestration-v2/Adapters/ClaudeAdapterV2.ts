@@ -158,6 +158,7 @@ import { makeProviderFailure, makeProviderRetryTurnItem } from "@goat/provider-c
 import { turnScopedSelectionTransition } from "@goat/provider-core/server/selectionTransition";
 import { providerMessageTextWithAttachmentPaths } from "@goat/provider-core/server/attachmentPrompt";
 import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
+import { claudeFileChangeLineCounts } from "../fileChangeLineCounts.ts";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
@@ -4598,6 +4599,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     type: "file_change",
                     fileName: fileNameFromClaudeTool(input.toolName, input.toolInput),
                     ...(outputText.length === 0 ? {} : { diffStr: outputText }),
+                    ...(input.status !== "failed" &&
+                    input.output.type === "structured_tool_use_result"
+                      ? claudeFileChangeLineCounts(input.output.value)
+                      : undefined),
                   }
                 : itemType === "web_search"
                   ? {

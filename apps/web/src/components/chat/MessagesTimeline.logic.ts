@@ -61,6 +61,10 @@ import { compactDynamicToolOutput } from "@goat/shared/toolOutput";
 import { htmlRenderReferencesEqual, type HtmlRenderReference } from "@goat/shared/htmlRender";
 import { mcpAppReferencesEqual, type McpAppReference } from "@goat/shared/mcpApp";
 import { dynamicToolTitle } from "@goat/shared/toolActivity";
+import {
+  fileChangeGroupLineCounts,
+  type WorkLogLineCounts,
+} from "@goat/client-runtime/work-log/line-counts";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 import {
   collectToolFilePaths,
@@ -570,6 +574,8 @@ type MessagesTimelineRowContent =
       toolIcon?: WorkLogEntry["toolIcon"];
       summaryToolIcon?: "browser" | "device" | "t3-code" | "pull-request";
       hasFailure: boolean;
+      /** Total lines added and removed, for a group of edits that all reported counts. */
+      lineCounts?: WorkLogLineCounts;
     }
   | {
       kind: "turn-fold";
@@ -1743,10 +1749,11 @@ export function deriveMessagesTimelineRows(input: {
             createdAt: timelineEntry.createdAt,
             groupedEntries: visibleGroupedEntries,
             isExpandedToolGroup: false,
-            displayLabel:
-              toolGroupAction(singleEntry) === "edit"
-                ? summarizeToolGroup(visibleGroupedEntries).summary
-                : singleToolCallLabel(singleEntry),
+            // A lone edit names its file like an edit inside a group; the row
+            // resolves that path against the workspace root.
+            ...(toolGroupAction(singleEntry) === "edit"
+              ? {}
+              : { displayLabel: singleToolCallLabel(singleEntry) }),
           });
         } else {
           const groupId = workGroupId(timelineEntry.id);
@@ -1778,6 +1785,12 @@ export function deriveMessagesTimelineRows(input: {
           const summaryToolIcon = usesSingleToolCallLabel
             ? resolveWorkEntryToolPresentation(singleEntry, "completed")?.icon
             : undefined;
+          const lineCounts =
+            summaryKind === "edit"
+              ? fileChangeGroupLineCounts(
+                  visibleGroupedEntries.map((entry) => entry.structuredPayload),
+                )
+              : undefined;
           nextRows.push({
             kind: "work-toggle",
             id: `work-toggle:${timelineEntry.id}`,
@@ -1795,6 +1808,7 @@ export function deriveMessagesTimelineRows(input: {
             ...(groupToolSurface ? { toolSurface: groupToolSurface } : {}),
             ...(groupToolIcon ? { toolIcon: groupToolIcon } : {}),
             ...(summaryToolIcon ? { summaryToolIcon } : {}),
+            ...(lineCounts ? { lineCounts } : {}),
             hasFailure:
               latestToolEntry !== undefined &&
               workEntryDisplayIndicatesToolFailure(latestToolEntry),
@@ -2338,7 +2352,9 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.summaryKind === bw.summaryKind &&
         a.toolSurface === bw.toolSurface &&
         Equal.equals(a.toolIcon, bw.toolIcon) &&
-        a.hasFailure === bw.hasFailure
+        a.hasFailure === bw.hasFailure &&
+        a.lineCounts?.additions === bw.lineCounts?.additions &&
+        a.lineCounts?.deletions === bw.lineCounts?.deletions
       );
     }
 

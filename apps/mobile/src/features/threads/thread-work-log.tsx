@@ -85,6 +85,11 @@ import {
   workEntryViewedImagePath,
 } from "@goat/client-runtime/work-log/presentation";
 import { resolveWorkGroupScrollAnchor } from "@goat/client-runtime/work-log/scroll-anchor";
+import {
+  fileChangeLineCounts,
+  type WorkLogLineCounts,
+} from "@goat/client-runtime/work-log/line-counts";
+import { PullRequestDiffStats } from "../pull-requests/PullRequestPresentation";
 import { notificationChildThreadId } from "@goat/client-runtime/state/thread-execution";
 import type { MarkdownImageRenderer } from "../../native/SelectableMarkdownText";
 import type { FilePreviewSource } from "../../components/FilePreviewModal";
@@ -1048,6 +1053,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
   const failed = row.status === "failure";
   const toolIcon = row.workEntry.toolIcon ?? row.workEntry.toolSource?.icon;
   const icon = reasoning ? "brain" : (toolPresentation?.icon ?? workRowSymbolName(row.icon));
+  const lineCounts = fileChangeLineCounts(row.projectedItem.item);
 
   return (
     <Animated.View
@@ -1059,7 +1065,13 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
         accessibilityRole={
           notifiedSubagentThreadId !== undefined ? "link" : canExpand ? "button" : undefined
         }
-        accessibilityLabel={failed ? `${accessiblePreview}, tool call failed` : accessiblePreview}
+        accessibilityLabel={
+          lineCounts
+            ? `${accessiblePreview}, ${lineCountsAccessibilityText(lineCounts)}${failed ? ", tool call failed" : ""}`
+            : failed
+              ? `${accessiblePreview}, tool call failed`
+              : accessiblePreview
+        }
         accessibilityHint={
           notifiedSubagentThreadId !== undefined
             ? "Opens this agent's thread. Long press to copy."
@@ -1148,6 +1160,15 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
             <Text className="pr-1 font-goat-medium text-3xs text-adaptive-emerald-600-400">
               Copied
             </Text>
+          ) : null}
+          {lineCounts ? (
+            <View className="pr-1">
+              <PullRequestDiffStats
+                additions={lineCounts.additions}
+                deletions={lineCounts.deletions}
+                compact
+              />
+            </View>
           ) : null}
           {failed && toolIcon !== undefined ? (
             <View
@@ -1304,9 +1325,13 @@ export function ThreadWorkGroupToggle(props: {
   readonly hasFailure: boolean;
   readonly shimmer: boolean;
   readonly thought?: string | undefined;
+  readonly lineCounts?: WorkLogLineCounts | undefined;
   readonly onToggle: () => void;
 }) {
-  const statusLabel = props.hasFailure ? `${props.summary}, tool call failed` : props.summary;
+  const summaryLabel = props.lineCounts
+    ? `${props.summary}, ${lineCountsAccessibilityText(props.lineCounts)}`
+    : props.summary;
+  const statusLabel = props.hasFailure ? `${summaryLabel}, tool call failed` : summaryLabel;
   const accessibilityLabel = props.thought ? `${props.thought} ${statusLabel}` : statusLabel;
   const icon =
     props.summaryToolIcon ??
@@ -1372,6 +1397,13 @@ export function ThreadWorkGroupToggle(props: {
               />
             </WorkLogIconSlot>
             <WorkLogLabel key={props.rowSizing.textSizeKey}>{props.summary}</WorkLogLabel>
+            {props.lineCounts ? (
+              <PullRequestDiffStats
+                additions={props.lineCounts.additions}
+                deletions={props.lineCounts.deletions}
+                compact
+              />
+            ) : null}
           </>
         )}
         <ThreadDisclosureChevron
@@ -1383,6 +1415,10 @@ export function ThreadWorkGroupToggle(props: {
       </WorkLogPressable>
     </WorkLogBlock>
   );
+}
+
+function lineCountsAccessibilityText(counts: WorkLogLineCounts): string {
+  return `${counts.additions} ${counts.additions === 1 ? "line" : "lines"} added, ${counts.deletions} removed`;
 }
 
 /**

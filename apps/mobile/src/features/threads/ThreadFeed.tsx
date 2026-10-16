@@ -1140,6 +1140,7 @@ function renderFeedEntry(
         toolIcon={entry.toolIcon}
         summaryToolIcon={entry.summaryToolIcon}
         hasFailure={entry.hasFailure}
+        lineCounts={entry.lineCounts}
         shimmer={entry.shimmer}
         thought={entry.thought}
         onToggle={() => props.onToggleWorkGroup(entry.groupId, entry.id)}

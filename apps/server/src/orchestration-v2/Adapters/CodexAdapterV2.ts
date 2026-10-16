@@ -154,6 +154,7 @@ import {
 } from "@goat/provider-core/server/subagentProjection";
 import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
+import { codexFileChangeLineCounts } from "../fileChangeLineCounts.ts";
 
 const CODEX_PROVIDER = ProviderDriverKind.make("codex");
 export const CODEX_DRIVER_KIND = CODEX_PROVIDER;
@@ -3835,6 +3836,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const updatedAt = yield* DateTime.now;
             const status = codexItemStatus(item.status);
             const completedAt = status.completed ? updatedAt : null;
+            const lineCounts = codexFileChangeLineCounts(item.changes);
             const nodeId = idAllocator.derive.nodeFromProviderItem({
               driver: CODEX_PROVIDER,
               nativeItemId: item.id,
@@ -3879,6 +3881,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               type: "file_change",
               fileName: firstChange.path,
               diffStr: firstChange.diff,
+              ...lineCounts,
+              // One apply_patch can touch several files; keep each so the row
+              // names them all and its counts match what it lists.
+              changes: item.changes.map((change) =>
+                change.kind.type === "update" && change.kind.move_path
+                  ? { operation: "move", path: change.kind.move_path, oldPath: change.path }
+                  : { operation: change.kind.type, path: change.path },
+              ),
             };
             return { node, turnItem };
           });
