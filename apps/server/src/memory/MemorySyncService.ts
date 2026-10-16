@@ -318,23 +318,47 @@ const make = Effect.gen(function* () {
     };
   });
   type Route = NonNullable<Effect.Success<ReturnType<typeof route>>>;
-  // Persist once per ready binding, independently of sync timestamps and status reads.
+  const writeLastReadySpace = (space: M.MemorySpaceId) =>
+    sql`INSERT INTO memory_last_ready_space(singleton,space) VALUES (1,${space})
+      ON CONFLICT(singleton) DO UPDATE SET space=excluded.space WHERE space!=excluded.space`.pipe(
+      Effect.mapError(
+        (cause) => new Store.MemoryStorageError({ stage: "last-ready-space", cause }),
+      ),
+    );
+  // Already-ready bindings from before 080 are also observed by sync, without a status read.
   let rememberedReadyEpoch: number | undefined;
   const rememberReadySpace = Effect.fnUntraced(function* (r: Pick<Route, "space" | "settings">) {
     if (!r.space || rememberedReadyEpoch === r.settings.memoryHubVersion) return;
     yield* store.transact(
-      Effect.gen(function* () {
-        yield* ensureEpoch(r.settings.memoryHubVersion);
-        yield* sql`INSERT INTO memory_last_ready_space(singleton,space) VALUES (1,${r.space})
-          ON CONFLICT(singleton) DO UPDATE SET space=excluded.space WHERE space!=excluded.space`.pipe(
-          Effect.mapError(
-            (cause) => new Store.MemoryStorageError({ stage: "last-ready-space", cause }),
-          ),
-        );
-      }),
+      ensureEpoch(r.settings.memoryHubVersion).pipe(Effect.andThen(writeLastReadySpace(r.space))),
+      { finalGuard: ensureEpoch(r.settings.memoryHubVersion) },
     );
     rememberedReadyEpoch = r.settings.memoryHubVersion;
   });
+  const readRetainedSpace = Effect.gen(function* () {
+    const read = sql<{
+      space: string;
+    }>`SELECT space FROM memory_last_ready_space WHERE singleton=1`;
+    const rows = yield* read;
+    if (rows[0]) return M.MemorySpaceId.make(rows[0].space);
+    // Legacy cursors have no ready timestamp. Recover once using the last successful sync,
+    // then cursor insertion order when no timestamp exists. Never replace a saved destination.
+    return yield* store.transact(
+      Effect.gen(function* () {
+        yield* sql`INSERT INTO memory_last_ready_space(singleton,space)
+          SELECT 1,space FROM memory_sync_cursors
+          WHERE bootstrap_state='ready'
+            AND NOT EXISTS (SELECT 1 FROM memory_last_ready_space WHERE singleton=1)
+          GROUP BY space ORDER BY max(last_success_at) DESC,max(rowid) DESC LIMIT 1`;
+        const recovered = yield* read;
+        return recovered[0] ? M.MemorySpaceId.make(recovered[0].space) : null;
+      }),
+    );
+  }).pipe(
+    Effect.mapError(
+      (cause) => new Store.MemoryStorageError({ stage: "retained-local-space", cause }),
+    ),
+  );
   // At most three descriptor-recoverable classes and one probe fiber per committed epoch.
   const recoveries = new Map<
     Store.MemoryHoldClass,
@@ -1223,7 +1247,10 @@ const make = Effect.gen(function* () {
   ) {
     if (!r.space) return yield* new M.MemoryHubError({ code: "bootstrap_required" });
     let state = yield* runtime.readBootstrap(r.space, r.hubId);
-    if (state.state === "ready") return true;
+    if (state.state === "ready") {
+      yield* rememberReadySpace(r);
+      return true;
+    }
     if (state.state === "unbound") {
       const input: M.MemoryHubJoinInput = {
         protocolVersion: 1,
@@ -1289,6 +1316,7 @@ const make = Effect.gen(function* () {
       const installed = yield* store
         .transact(
           Effect.gen(function* () {
+            yield* ensureEpoch(r.settings.memoryHubVersion);
             const stage = {
               memorySpaceId: r.space!,
               hubEnvironmentId: r.hubId,
@@ -1297,13 +1325,15 @@ const make = Effect.gen(function* () {
               expectedCheckpointSequence: state.checkpointSequence,
             };
             yield* store.installCheckpointPage({ ...stage, page });
-            if (page.bootstrapComplete)
+            if (page.bootstrapComplete) {
               yield* store.completeCheckpoint({
                 ...stage,
                 localEnvironmentId: local,
                 pageCount: state.pageCount + 1,
               });
-            else
+              // The ready transition and browsing destination commit or roll back together.
+              yield* writeLastReadySpace(r.space!);
+            } else
               yield* store.advanceBootstrapTx({
                 memorySpaceId: r.space!,
                 hubEnvironmentId: r.hubId,
@@ -1315,6 +1345,7 @@ const make = Effect.gen(function* () {
                 nextCursor: page.nextCursor,
               });
           }),
+          { finalGuard: ensureEpoch(r.settings.memoryHubVersion) },
         )
         .pipe(
           Effect.as(true),
@@ -1344,7 +1375,6 @@ const make = Effect.gen(function* () {
     const result = yield* Effect.result(
       Effect.gen(function* () {
         const complete = yield* bootstrap(r, budget);
-        if (complete) yield* rememberReadySpace(r);
         if (complete && budget.pages < 10) yield* pullTail(r, budget);
         return complete;
       }),
@@ -2208,15 +2238,7 @@ const make = Effect.gen(function* () {
         const space = s.memoryHub.mode === "disabled" ? null : s.memoryHub.memorySpaceId;
         const includeRetained =
           "includeRetainedLocalSpaceId" in input && input.includeRetainedLocalSpaceId;
-        const retained = includeRetained
-          ? yield* sql<{ space: string }>`
-          SELECT space FROM memory_last_ready_space WHERE singleton=1`.pipe(
-              Effect.mapError(
-                (cause) => new Store.MemoryStorageError({ stage: "retained-local-space", cause }),
-              ),
-            )
-          : [];
-        const retainedLocalSpaceId = retained[0] ? M.MemorySpaceId.make(retained[0].space) : null;
+        const retainedLocalSpaceId = includeRetained ? yield* readRetainedSpace : null;
         const hubId = s.memoryHub.mode === "member" ? s.memoryHub.hubEnvironmentId : local;
         const bootstrap = space ? (yield* runtime.readBootstrap(space, hubId)).state : "unbound";
         if (bootstrap === "ready") yield* rememberReadySpace({ space, settings: s });
