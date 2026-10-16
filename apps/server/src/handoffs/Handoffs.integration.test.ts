@@ -420,6 +420,22 @@ it.effect(
           sessions = full;
 
           assert.deepEqual(opened.handoff.actor, { type: "client", label: "Test tablet" });
+          const scheduled = yield* service.create({ ...input, args: { scheduled: true } });
+          const scheduledAddress = { threadId, handoffId: scheduled.handoffId };
+          // Expiry must not decode resolved history, even during its authoritative transition.
+          for (let index = 0; index < 12; index++) {
+            const id = `h:resolved:${index}`;
+            yield* create(orchestrator, id);
+            yield* transition(orchestrator, id, "completed");
+          }
+          yield* worker.drain();
+          const history = yield* sql<{ turn_item_id: string; payload_json: string }>`
+            SELECT turn_item_id, payload_json FROM orchestration_v2_projection_turn_items
+            WHERE thread_id = ${threadId} AND type IN ('human_handoff', 'secret_request') AND status = 'completed'
+          `;
+          assert.equal(history.length, 12);
+          yield* sql`UPDATE orchestration_v2_projection_turn_items SET payload_json = '{}'
+            WHERE thread_id = ${threadId} AND type IN ('human_handoff', 'secret_request') AND status = 'completed'`;
           yield* TestClock.adjust("15 minutes");
           const lateOpen = yield* service.open(address, sessionId).pipe(Effect.result);
           assert.equal(lateOpen._tag, "Failure");
@@ -429,6 +445,12 @@ it.effect(
               "expired",
             );
           yield* service.sweep;
+          assert.equal((yield* service.read(scheduledAddress)).state, "expired");
+          // A second sweep also ignores the resolved history and is idempotent.
+          yield* service.sweep;
+          for (const row of history)
+            yield* sql`UPDATE orchestration_v2_projection_turn_items
+              SET payload_json = ${row.payload_json} WHERE turn_item_id = ${row.turn_item_id}`;
           yield* worker.drain();
           assert.equal((yield* service.read(address)).state, "expired");
           assert.isNull((yield* service.open(address, sessionId)).human);

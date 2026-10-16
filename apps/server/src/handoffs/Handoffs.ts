@@ -16,6 +16,7 @@ import {
   type HandoffSummary,
   type NodeId,
   type RunId,
+  OrchestrationV2RunStatus,
 } from "@goat/contracts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- AEAD encrypts human-only instructions outside the event log.
 import * as NodeCrypto from "node:crypto";
@@ -38,6 +39,10 @@ const PrivatePayload = Schema.fromJsonString(
 );
 const encodePrivatePayload = Schema.encodeEffect(PrivatePayload);
 const decodePrivatePayload = Schema.decodeUnknownEffect(PrivatePayload);
+const decodeHandoff = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.toCodecJson(Handoff)),
+);
+const decodeRunStatus = Schema.decodeUnknownEffect(Schema.NullOr(OrchestrationV2RunStatus));
 const decodeAddress = Schema.decodeUnknownEffect(
   Schema.Struct({ threadId: Handoff.fields.requestedBy.fields.threadId, handoffId: TurnItemId }),
 );
@@ -100,14 +105,16 @@ const make = Effect.gen(function* () {
     .pipe(Effect.mapError(unavailable));
   const lock = yield* Semaphore.make(1);
   const read = Effect.fn("Handoffs.read")(function* (input: HandoffReadInput) {
-    const records = yield* threads
-      .getThreadRecords(input.threadId, ["turnItems"], {
-        turnItemTypes: ["human_handoff", "secret_request"],
-        messageRoles: [],
-      })
-      .pipe(Effect.mapError(unavailable));
-    const item = records.turnItems.find((item) => item.id === input.handoffId);
-    const handoff = item && itemHandoff(item);
+    const rows = yield* sql<{ handoff_json: string | null }>`
+      SELECT json_extract(payload_json, '$.handoff') AS handoff_json
+      FROM orchestration_v2_projection_turn_items
+      WHERE thread_id = ${input.threadId} AND turn_item_id = ${input.handoffId}
+        AND type IN ('human_handoff', 'secret_request')
+    `.pipe(Effect.mapError(unavailable));
+    const handoff =
+      rows[0]?.handoff_json == null
+        ? undefined
+        : yield* decodeHandoff(rows[0].handoff_json).pipe(Effect.mapError(unavailable));
     if (!handoff) return yield* new HandoffError({ reason: "not_found" });
     return handoff;
   });
@@ -189,7 +196,7 @@ const make = Effect.gen(function* () {
   });
   const create: Handoffs["Service"]["create"] = (input) =>
     Effect.gen(function* () {
-      yield* sweepUnlocked;
+      yield* expirePending(input.requestedBy.threadId);
       // Serializes private-payload ownership, including duplicate calls with different request IDs.
       const records = yield* threads
         .getThreadRecords(input.requestedBy.threadId, ["turnItems"], {
@@ -272,37 +279,42 @@ const make = Effect.gen(function* () {
       return handoffSummary(handoff);
     }).pipe(lock.withPermits(1));
 
-  const sweepUnlocked = Effect.gen(function* () {
-    // Narrow indexed projection read; no full thread snapshots on the scheduler's hot path.
+  const expirePending = Effect.fn("Handoffs.expirePending")(function* (threadId?: string) {
+    // Batch pending cards with their owning run; resolved payloads are never decoded.
     const rows = yield* sql<{
       thread_id: string;
       turn_item_id: string;
-    }>`SELECT thread_id, turn_item_id FROM orchestration_v2_projection_turn_items WHERE type IN ('human_handoff', 'secret_request') AND status = 'waiting'`.pipe(
-      Effect.mapError(unavailable),
-    );
+      handoff_json: string | null;
+      run_status: string | null;
+    }>`SELECT item.thread_id, item.turn_item_id,
+        json_extract(item.payload_json, '$.handoff') AS handoff_json,
+        run.status AS run_status
+      FROM orchestration_v2_projection_turn_items AS item
+      LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = item.run_id
+      WHERE item.type IN ('human_handoff', 'secret_request') AND item.status = 'waiting'
+        ${threadId === undefined ? sql`` : sql`AND item.thread_id = ${threadId}`}
+    `.pipe(Effect.mapError(unavailable));
+    const now = yield* DateTime.now;
     for (const row of rows) {
-      const input = yield* decodeAddress({
-        threadId: row.thread_id,
-        handoffId: row.turn_item_id,
-      }).pipe(Effect.mapError(unavailable));
-      const now = yield* DateTime.now;
-      const request = yield* threads
-        .getThreadRecords(input.threadId, ["turnItems", "runs"], {
-          turnItemTypes: ["human_handoff", "secret_request"],
-          messageRoles: [],
-        })
-        .pipe(Effect.mapError(unavailable));
-      const item = request.turnItems.find((item) => item.id === input.handoffId);
-      const handoff = item && itemHandoff(item);
-      if (!handoff) continue;
-      const run = request.runs.find((run) => run.id === item?.runId);
+      if (row.handoff_json === null) continue;
+      const handoff = yield* decodeHandoff(row.handoff_json).pipe(Effect.mapError(unavailable));
+      const runStatus = yield* decodeRunStatus(row.run_status).pipe(Effect.mapError(unavailable));
       if (
         (handoff.expiresAt !== null &&
           DateTime.toEpochMillis(handoff.expiresAt) <= DateTime.toEpochMillis(now)) ||
-        (handoff.kind === "approval" && (!run || ThreadManagement.isTerminalRunStatus(run.status)))
-      )
+        (handoff.kind === "approval" &&
+          (runStatus === null || ThreadManagement.isTerminalRunStatus(runStatus)))
+      ) {
+        const input = yield* decodeAddress({
+          threadId: row.thread_id,
+          handoffId: row.turn_item_id,
+        }).pipe(Effect.mapError(unavailable));
         yield* transition(input, "expired", { type: "server" });
+      }
     }
+  });
+  const sweepUnlocked = Effect.gen(function* () {
+    yield* expirePending();
     if (store.directory !== undefined) {
       // Reconcile orphan writes and failed deletions after crashes. A single service lock
       // keeps a sweep from removing an in-flight create's unpublished payload.

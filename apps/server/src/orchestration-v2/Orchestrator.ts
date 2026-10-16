@@ -7795,16 +7795,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     >,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) {
-    const projection = yield* projectionStore
-      .getThreadRecords(command.threadId, ["runs", "turnItems"], {
-        turnItemTypes: ["human_handoff", "secret_request"],
-        messageRoles: [],
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-        ),
-      );
+    const projection = yield* Effect.gen(function* () {
+      if (command.type === "handoff.create")
+        return yield* projectionStore.getThreadRecords(command.threadId, ["runs", "turnItems"], {
+          turnItemTypes: ["human_handoff", "secret_request"],
+          messageRoles: [],
+        });
+      const item = yield* projectionStore.getTurnItem({
+        threadId: command.threadId,
+        itemId: command.handoffId,
+      });
+      const records = yield* projectionStore.getThreadRecords(command.threadId, ["runs"], {
+        runIds: item?.runId == null ? [] : [item.runId],
+      });
+      return { ...records, turnItems: item === null ? [] : [item] };
+    }).pipe(
+      Effect.mapError(
+        (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+      ),
+    );
     const now = yield* DateTime.now;
     const decide = Effect.gen(function* () {
       if (command.type === "handoff.create") {
@@ -7941,18 +7950,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Node ${command.nodeId} is not the root of run ${command.runId}.`,
         });
       }
-      const existing =
-        projection.turnItems.find((item) => item.id === command.turnItemId) ??
-        (command.secretStatus === "pending"
-          ? projection.turnItems.find(
-              (item) =>
-                item.type === "secret_request" &&
-                item.secretStatus === "pending" &&
-                item.runId === command.runId &&
-                item.label === command.label &&
-                item.reason === command.reason,
-            )
-          : undefined);
+      // Each blocking caller owns its one-use ref; only the stable request item ID deduplicates.
+      const existing = projection.turnItems.find((item) => item.id === command.turnItemId);
       if (existing !== undefined && existing.type !== "secret_request") {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,

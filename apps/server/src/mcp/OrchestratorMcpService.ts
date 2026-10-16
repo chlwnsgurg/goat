@@ -2337,8 +2337,7 @@ const make = Effect.gen(function* () {
         const ownsCard =
           recordedCard?.type === "turn-item.updated" && recordedCard.payload.id === turnItemId;
         if (recordedCard?.type === "turn-item.updated") turnItemId = recordedCard.payload.id;
-        // The creating call owns cancellation. A second caller sharing this
-        // pending handoff must not close it when only its own wait expires.
+        // The creating call owns cancellation; retries of its request ID do not.
         const closeCard = ownsCard
           ? record("cancelled").pipe(
               Effect.catch((error) =>
