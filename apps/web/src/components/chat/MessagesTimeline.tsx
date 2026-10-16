@@ -139,6 +139,7 @@ import {
   CircleAlertIcon,
   DownloadIcon,
   EyeIcon,
+  FolderIcon,
   GitForkIcon,
   GlobeIcon,
   type IconComponent,
@@ -4206,6 +4207,8 @@ function toolGroupSummaryIconName(
       return "pull-request";
     case "read":
       return "eye";
+    case "list":
+      return "folder";
     case "edit":
       return "square-pen";
     case "command":
@@ -5122,6 +5125,7 @@ type WorkEntryIconName =
   | "code"
   | "device"
   | "eye"
+  | "folder"
   | "globe"
   | "hammer"
   | "message-circle"
@@ -5310,6 +5314,8 @@ function WorkEntryIcon({ name, className }: { name: WorkEntryIconName; className
       return <CircleAlertIcon className={className} aria-hidden />;
     case "eye":
       return <EyeIcon className={className} aria-hidden />;
+    case "folder":
+      return <FolderIcon className={className} aria-hidden />;
     case "globe":
       return <GlobeIcon className={className} aria-hidden />;
     case "hammer":
@@ -5683,8 +5689,9 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       : undefined;
   // Reads and skills expand to plain text instead of the item inspector. A
   // skill's heading already names it, so only its arguments are left to show.
+  // Commands that read files keep the inspector so their command and output stay visible.
   const plainOutput =
-    toolGroupAction(workEntry) === "read"
+    toolGroupAction(workEntry) === "read" && workEntry.itemType !== "command_execution"
       ? workEntryReadOutput(workEntry, workspaceRoot)
       : skill
         ? (skill.args ?? null)

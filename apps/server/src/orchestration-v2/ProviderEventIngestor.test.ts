@@ -14,6 +14,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2CommandAction,
   ProviderDriverKind,
   ProviderInstanceId,
   PlanId,
@@ -1656,6 +1657,145 @@ layer("ProviderEventIngestorV2", (it) => {
       assert.deepEqual(
         projectedSmall,
         small.type === "file_change" ? { ...small, additions: 1, deletions: 1 } : small,
+      );
+    }),
+  );
+
+  it.effect("classifies raw shell commands once and keeps a provider's own classification", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+      });
+      const command = (
+        id: string,
+        ordinal: number,
+        input: string,
+        commandActions?: ReadonlyArray<OrchestrationV2CommandAction>,
+      ): OrchestrationV2TurnItem => ({
+        id: TurnItemId.make(id),
+        threadId: threadEvent.threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal,
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "command_execution",
+        input,
+        ...(commandActions === undefined ? {} : { commandActions }),
+      });
+      const rawRead = command(
+        "turn-item:raw-read",
+        1,
+        "cd apps/web && sed -n '1,40p' src/main.tsx",
+      );
+      const realCommand = command("turn-item:real-command", 2, "vp test run src/a.test.ts");
+      const providerPlain = command("turn-item:provider-plain", 3, "cat notes.md", []);
+
+      yield* eventSink.write({ events: [threadEvent] });
+      for (const turnItem of [rawRead, realCommand, providerPlain]) {
+        yield* ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId: threadEvent.threadId,
+          event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem },
+        });
+      }
+
+      const projected = (item: OrchestrationV2TurnItem) =>
+        projectionStore
+          .getTurnItem({ threadId: threadEvent.threadId, itemId: item.id })
+          .pipe(
+            Effect.map((stored) =>
+              stored?.type === "command_execution" ? stored.commandActions : null,
+            ),
+          );
+      assert.deepEqual(yield* projected(rawRead), [
+        { type: "read", path: "apps/web/src/main.tsx" },
+      ]);
+      assert.equal(yield* projected(realCommand), undefined);
+      assert.deepEqual(yield* projected(providerPlain), []);
+    }),
+  );
+
+  it.effect.each([
+    ["oversized raw query", `rg ${"x".repeat(1_025)} src`, undefined],
+    ["empty raw listing path", "ls ''", undefined],
+    ["oversized provider query", "cat notes.md", [{ type: "search", query: "x".repeat(1_025) }]],
+    ["empty provider query", "cat notes.md", [{ type: "search", query: "" }]],
+    ["empty provider read path", "cat notes.md", [{ type: "read", path: "" }]],
+    ["empty provider listing path", "cat notes.md", [{ type: "list", path: "" }]],
+    ["oversized provider read path", "cat notes.md", [{ type: "read", path: "p".repeat(4_097) }]],
+    [
+      "oversized provider listing path",
+      "cat notes.md",
+      [{ type: "list", path: "p".repeat(4_097) }],
+    ],
+    [
+      "oversized provider search path",
+      "cat notes.md",
+      [{ type: "search", path: "p".repeat(4_097) }],
+    ],
+    [
+      "too many provider actions",
+      "cat notes.md",
+      Array.from({ length: 17 }, () => ({ type: "list" as const })),
+    ],
+  ] as const)("stores the original command for %s", ([_label, input, commandActions]) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+      });
+      const turnItem: OrchestrationV2TurnItem = {
+        id: TurnItemId.make("turn-item:invalid-command-actions"),
+        threadId: threadEvent.threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "command_execution",
+        input,
+        ...(commandActions === undefined ? {} : { commandActions }),
+      };
+      yield* eventSink.write({ events: [threadEvent] });
+      const events = yield* ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+        event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem },
+      });
+      assert.equal(events.length, 1);
+      assert.deepEqual(
+        yield* projectionStore.getTurnItem({ threadId: threadEvent.threadId, itemId: turnItem.id }),
+        commandActions === undefined ? turnItem : { ...turnItem, commandActions: [] },
       );
     }),
   );

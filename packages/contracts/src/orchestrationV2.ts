@@ -1496,6 +1496,37 @@ export const OrchestrationV2FileChangeDetail = Schema.Struct({
 });
 export type OrchestrationV2FileChangeDetail = typeof OrchestrationV2FileChangeDetail.Type;
 
+const OrchestrationV2CommandActionPath = TrimmedNonEmptyString.check(Schema.isMaxLength(4_096));
+
+/**
+ * What a shell command does when it only inspects the workspace: read a file,
+ * list files, or search. Clients show these as their own rows instead of a
+ * terminal row; anything else stays a plain command.
+ */
+export const OrchestrationV2CommandAction = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("read"), path: OrchestrationV2CommandActionPath }),
+  Schema.Struct({
+    type: Schema.Literal("list"),
+    path: Schema.optional(OrchestrationV2CommandActionPath),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("search"),
+    query: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(1_024))),
+    path: Schema.optional(OrchestrationV2CommandActionPath),
+  }),
+]);
+export type OrchestrationV2CommandAction = typeof OrchestrationV2CommandAction.Type;
+
+export const ORCHESTRATION_V2_MAX_COMMAND_ACTIONS = 16;
+
+/**
+ * Present once the command was classified. Empty means a plain command, so
+ * the server does not classify it again with a weaker parser.
+ */
+const OrchestrationV2CommandActions = Schema.Array(OrchestrationV2CommandAction).check(
+  Schema.isMaxLength(ORCHESTRATION_V2_MAX_COMMAND_ACTIONS),
+);
+
 export const OrchestrationV2ProviderFailureClass = Schema.Literals([
   "usage_limit",
   "provider_error",
@@ -1684,6 +1715,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("command_execution"),
     input: Schema.String,
+    commandActions: Schema.optional(OrchestrationV2CommandActions),
     output: Schema.optional(Schema.String),
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
     outputOmitted: Schema.optional(Schema.Boolean),
@@ -2479,6 +2511,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("command_execution"),
     input: Schema.String,
+    commandActions: Schema.optional(OrchestrationV2CommandActions),
     output: Schema.optional(Schema.String),
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
     outputOmitted: Schema.optional(Schema.Boolean),

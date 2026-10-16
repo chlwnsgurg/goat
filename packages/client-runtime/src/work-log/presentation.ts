@@ -5,6 +5,7 @@ import {
   type ToolActivitySource,
   type ToolActivitySurface,
   type ToolActivityIcon,
+  type OrchestrationV2CommandAction,
   type OrchestrationV2TurnItem,
   type ThreadId,
 } from "@goat/contracts";
@@ -18,7 +19,11 @@ import { resolveMediaSource } from "@goat/client-runtime/media-source";
 import { parseChangeRequestUrl } from "@goat/shared/changeRequestUrl";
 import { isWorkspaceImagePreviewPath } from "@goat/shared/filePreview";
 import { formatTokens } from "@goat/shared/usageFormat";
-import { classifyToolActivity } from "@goat/shared/toolActivity";
+import {
+  classifyToolActivity,
+  formatReadToolLabel,
+  formatSearchToolLabel,
+} from "@goat/shared/toolActivity";
 import { toolOutputIndicatesFailure } from "@goat/shared/toolOutput";
 
 import {
@@ -91,6 +96,7 @@ export type ToolGroupAction =
   | "watch-pr"
   | "unwatch-pr"
   | "read"
+  | "list"
   | "edit"
   | "command"
   | "thread-create"
@@ -112,6 +118,83 @@ export type ToolGroupSummaryKind =
 
 export function normalizeCompactToolLabel(value: string): string {
   return value.replace(/\s+(?:complete|completed)\s*$/i, "").trim();
+}
+
+/** The read, list, and search steps of a command row that only inspects files. */
+export function workEntryCommandActions(
+  entry: Pick<WorkLogPresentationEntry, "structuredPayload">,
+): ReadonlyArray<OrchestrationV2CommandAction> | null {
+  const item = entry.structuredPayload;
+  return item?.type === "command_execution" && item.commandActions?.length
+    ? item.commandActions
+    : null;
+}
+
+function commandActionsGroupAction(
+  actions: ReadonlyArray<OrchestrationV2CommandAction>,
+): ToolGroupAction {
+  if (actions.every((action) => action.type === "read")) return "read";
+  if (actions.every((action) => action.type === "list")) return "list";
+  return "code-search";
+}
+
+function commandActionPhrase(
+  run: ReadonlyArray<OrchestrationV2CommandAction>,
+  formatPath: (path: string) => string,
+  active: boolean,
+): string {
+  const first = run[0]!;
+  // Providers report list and search paths as short display names; only read paths are full.
+  const targets = [
+    ...new Set(
+      run.flatMap((action) => {
+        const path = action.path?.trim();
+        if (!path || path === "." || path === "./") return [];
+        return [action.type === "read" ? formatPath(path) : path];
+      }),
+    ),
+  ];
+  const more = (count: number) => (count > 0 ? ` +${count} more` : "");
+  switch (first.type) {
+    case "read": {
+      const label = formatReadToolLabel(targets[0] ?? "", Math.max(0, targets.length - 1));
+      return active ? label.replace(/^Read\b/u, "Reading") : label;
+    }
+    case "list":
+      return `${active ? "Listing" : "Listed"} ${targets[0] ?? "files"}${more(targets.length - 1)}`;
+    case "search": {
+      const label =
+        formatSearchToolLabel({ input: { query: first.query, path: first.path } }) ??
+        "Searched files";
+      return `${active ? label.replace(/^Searched\b/u, "Searching") : label}${more(run.length - 1)}`;
+    }
+  }
+}
+
+/**
+ * One-line label for a command that only inspects files, such as
+ * "Read a.ts +1 more" or "Searched foo in src, read a.ts". Consecutive steps
+ * of one kind share a phrase.
+ */
+export function formatCommandActionsLabel(
+  actions: ReadonlyArray<OrchestrationV2CommandAction>,
+  options: { readonly active?: boolean; readonly formatPath?: (path: string) => string } = {},
+): string {
+  const formatPath = options.formatPath ?? ((path: string) => path);
+  const phrases: string[] = [];
+  for (let start = 0; start < actions.length;) {
+    let end = start + 1;
+    while (end < actions.length && actions[end]!.type === actions[start]!.type) end += 1;
+    phrases.push(
+      commandActionPhrase(actions.slice(start, end), formatPath, options.active === true),
+    );
+    start = end;
+  }
+  return [...new Set(phrases)]
+    .map((phrase, index) =>
+      index === 0 ? phrase : phrase.charAt(0).toLowerCase() + phrase.slice(1),
+    )
+    .join(", ");
 }
 
 /** Structured identity is authoritative, including when it identifies a foreign server. */
@@ -427,6 +510,8 @@ function workLogEntryIsLocalCodeSearch(entry: WorkLogPresentationEntry): boolean
 
 export function toolGroupAction(entry: WorkLogPresentationEntry): ToolGroupAction {
   if (entry.itemType === "thread_created") return "thread-create";
+  const commandActions = workEntryCommandActions(entry);
+  if (commandActions) return commandActionsGroupAction(commandActions);
   const presentation = resolveWorkEntryToolPresentation(entry);
   if (presentation?.action !== undefined) return presentation.action;
   if (presentation?.icon === "browser") return "browser";
@@ -527,6 +612,17 @@ function toolGroupActionCount(
   action: ToolGroupAction,
   entries: ReadonlyArray<WorkLogPresentationEntry>,
 ): number {
+  if (action === "read") {
+    // One command can read several files, and agents often reread a file.
+    const commandReadPaths = new Set<string>();
+    let otherReads = 0;
+    for (const entry of entries) {
+      const actions = workEntryCommandActions(entry);
+      if (actions === null) otherReads += 1;
+      else for (const commandAction of actions) commandReadPaths.add(commandAction.path ?? "");
+    }
+    return otherReads + commandReadPaths.size;
+  }
   if (action !== "edit") return entries.length;
   const changedFiles = new Set<string>();
   let editsWithoutFileDetails = 0;
@@ -556,6 +652,8 @@ function toolGroupActionLabel(action: ToolGroupAction, count: number): string {
         : `Checked linked pull requests ${count} times`;
     case "read":
       return `Read ${count} ${count === 1 ? "file" : "files"}`;
+    case "list":
+      return `Listed files ${count} ${count === 1 ? "time" : "times"}`;
     case "edit":
       return `Changed ${count} ${count === 1 ? "file" : "files"}`;
     case "command":
@@ -575,6 +673,26 @@ function toolGroupActionLabel(action: ToolGroupAction, count: number): string {
     case "update":
       return `Received ${count} ${count === 1 ? "update" : "updates"}`;
   }
+}
+
+/** Reads, listings, and searches read as one exploration step, as in Codex. */
+const EXPLORE_ACTIONS: ReadonlySet<ToolGroupAction> = new Set(["read", "list", "code-search"]);
+
+function exploreSummaryLabel(
+  groups: ReadonlyArray<{
+    readonly action: ToolGroupAction;
+    readonly entries: ReadonlyArray<WorkLogPresentationEntry>;
+  }>,
+): string {
+  const order = ["read", "code-search", "list"];
+  const sorted = [...groups].sort((a, b) => order.indexOf(a.action) - order.indexOf(b.action));
+  const parts = sorted.map(({ action, entries }) => {
+    const count = toolGroupActionCount(action, entries);
+    if (action === "read") return `${count} ${count === 1 ? "file" : "files"}`;
+    if (action === "list") return `${count} ${count === 1 ? "list" : "lists"}`;
+    return `${count} ${count === 1 ? "search" : "searches"}`;
+  });
+  return `Explored ${parts.join(", ")}`;
 }
 
 function goatToolSummaryCall(entry: WorkLogPresentationEntry): GoatToolSummaryCall {
@@ -679,20 +797,43 @@ export function summarizeToolGroup(entries: ReadonlyArray<WorkLogPresentationEnt
     if (group) group.entries.push(entry);
     else groups.set(key, { action, goatAction, entries: [entry] });
   }
-  const summaries = [...groups].map(([action, group], index) => ({
-    index,
-    count: group.entries.length,
-    priority: summaryActionPriority(action),
-    ...(group.goatAction
-      ? summarizeGoatToolCalls(group.goatAction, group.entries.map(goatToolSummaryCall))
-      : {
-          label: toolGroupActionLabel(
-            group.action,
-            toolGroupActionCount(group.action, group.entries),
-          ),
-          failedCount: group.entries.filter(workEntryDisplayIndicatesToolFailure).length,
-        }),
-  }));
+  // Two or more exploration kinds share one "Explored …" phrase so they never
+  // crowd a real command or edit out of the two-category summary.
+  const exploreGroups = [...groups.values()].filter(
+    (group) => group.goatAction === null && EXPLORE_ACTIONS.has(group.action),
+  );
+  const mergeExplore = exploreGroups.length > 1;
+  const summaries = [...groups].flatMap(([action, group], index) => {
+    if (mergeExplore && exploreGroups.includes(group)) {
+      if (group !== exploreGroups[0]) return [];
+      const exploreEntries = exploreGroups.flatMap((explore) => explore.entries);
+      return [
+        {
+          index,
+          count: exploreEntries.length,
+          priority: summaryActionPriority(action),
+          label: exploreSummaryLabel(exploreGroups),
+          failedCount: exploreEntries.filter(workEntryDisplayIndicatesToolFailure).length,
+        },
+      ];
+    }
+    return [
+      {
+        index,
+        count: group.entries.length,
+        priority: summaryActionPriority(action),
+        ...(group.goatAction
+          ? summarizeGoatToolCalls(group.goatAction, group.entries.map(goatToolSummaryCall))
+          : {
+              label: toolGroupActionLabel(
+                group.action,
+                toolGroupActionCount(group.action, group.entries),
+              ),
+              failedCount: group.entries.filter(workEntryDisplayIndicatesToolFailure).length,
+            }),
+      },
+    ];
+  });
   const selected = [...summaries]
     .sort((a, b) => a.priority - b.priority || a.index - b.index)
     .slice(0, 2)
@@ -744,6 +885,9 @@ export function toolGroupSummaryKind(
   )
     return "pull-request";
   const actions = new Set(entries.map(toolGroupAction));
+  if (actions.size > 1 && [...actions].every((action) => EXPLORE_ACTIONS.has(action))) {
+    return "code-search";
+  }
   if (actions.size !== 1) return "mixed";
   const action = actions.values().next().value!;
   if (action !== "other") return action;

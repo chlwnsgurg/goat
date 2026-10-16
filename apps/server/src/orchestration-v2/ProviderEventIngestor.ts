@@ -8,6 +8,7 @@ import {
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
+  type OrchestrationV2TurnItem,
   type ModelSelection,
   type RuntimeMode,
   type ProviderInteractionMode,
@@ -27,6 +28,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import { AgentScope } from "@goat/shared/AgentScope";
+import { isCommandActions, parseCommandActions } from "@goat/shared/commandActions";
 import { getModelSelectionStringOptionValue, modelSelectionsEqual } from "@goat/shared/model";
 import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
 import * as EventSink from "./EventSink.ts";
@@ -300,6 +302,21 @@ export class ProviderEventIngestorV2 extends Context.Service<
 
 function compactUndefined<T extends Record<string, unknown>>(record: T): T {
   return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined)) as T;
+}
+
+/**
+ * Providers that report only a raw shell command get a conservative read,
+ * list, or search classification once, as the item arrives. Items a provider
+ * already classified (Codex) keep that classification if it fits the wire.
+ */
+function withCommandActions(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
+  if (item.type !== "command_execution") return item;
+  const commandActions = item.commandActions ?? parseCommandActions(item.input);
+  // Classification is optional; invalid metadata must never fail the provider run.
+  if (!isCommandActions(commandActions)) return { ...item, commandActions: [] };
+  return item.commandActions !== undefined || commandActions.length === 0
+    ? item
+    : { ...item, commandActions };
 }
 
 const decodeDomainEvent = Schema.decodeUnknownEffect(OrchestrationV2DomainEvent);
@@ -650,7 +667,9 @@ export const layer: Layer.Layer<
                 type: "turn-item.updated",
                 threadId: input.event.turnItem.threadId,
                 payload: boundFileChangeForStorage(
-                  withFileChangeLineCounts(stripUnservedToolOutputImageBytes(input.event.turnItem)),
+                  withFileChangeLineCounts(
+                    stripUnservedToolOutputImageBytes(withCommandActions(input.event.turnItem)),
+                  ),
                 ),
                 runId: input.event.turnItem.runId,
                 nodeId: input.event.turnItem.nodeId,

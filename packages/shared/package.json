@@ -143,6 +143,10 @@
       "types": "./src/toolActivity.ts",
       "import": "./src/toolActivity.ts"
     },
+    "./commandActions": {
+      "types": "./src/commandActions.ts",
+      "import": "./src/commandActions.ts"
+    },
     "./toolOutput": {
       "types": "./src/toolOutput.ts",
       "import": "./src/toolOutput.ts"
