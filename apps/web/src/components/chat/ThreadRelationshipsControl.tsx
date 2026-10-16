@@ -112,11 +112,13 @@ export function ThreadLineageRowList(props: {
         button, so keyboard users reach and scroll the region through the rows
         themselves and the container needs no extra tab stop of its own. An
         expanded workflow asks for a taller window, so it raises the bound while
-        its tree is open.
+        its tree is open. Rows truncate their own labels, so the list only ever
+        scrolls vertically; a vertical overflow would otherwise let the x axis
+        scroll too and paint a horizontal bar under the last row.
       */}
       <ul
         aria-label="Related threads"
-        className="m-0 max-h-[13.5rem] list-none overflow-y-auto overscroll-contain p-0 has-data-workflow-expanded:max-h-[min(28rem,55dvh)]"
+        className="scrollbar-on-hover m-0 max-h-[13.5rem] list-none overflow-x-hidden overflow-y-auto overscroll-contain p-0 has-data-workflow-expanded:max-h-[min(28rem,55dvh)]"
       >
         {props.children}
       </ul>

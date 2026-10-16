@@ -252,6 +252,23 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --color-update-surface: var(--update-surface);
   --color-success-foreground: var(--success-foreground);
   --color-success: var(--success);
+  /* Pull request lifecycle tones. Each state's hue is folded into the muted text around it, so
+     PR glyphs and counts read as quiet metadata and pick up every theme's text tint. */
+  --color-pr-open: color-mix(
+    in oklab,
+    var(--success-foreground) 55%,
+    var(--contrast-muted-foreground)
+  );
+  --color-pr-closed: color-mix(
+    in oklab,
+    var(--error-foreground) 55%,
+    var(--contrast-muted-foreground)
+  );
+  --color-pr-merged: color-mix(
+    in oklab,
+    var(--merged-foreground) 55%,
+    var(--contrast-muted-foreground)
+  );
   --color-diff-addition: var(--diff-addition);
   --color-diff-deletion: var(--diff-deletion);
   --color-diff-addition-foreground: var(--diff-addition-foreground);
@@ -288,6 +305,11 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --color-message-action: var(--message-action);
   --color-message-action-foreground: var(--message-action-foreground);
   --color-message-action-hover: var(--message-action-hover);
+  /* The composer's send and stop buttons: the theme's action and destructive colors taken a step
+     deeper, so the two buttons a user reaches for most stay solid on every palette. Hover lifts
+     them back to the plain theme color. */
+  --color-composer-send: color-mix(in oklab, var(--message-action) 86%, black);
+  --color-composer-stop: color-mix(in oklab, var(--destructive) 86%, black);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--contrast-sidebar-foreground);
   --color-sidebar-muted-foreground: var(--contrast-sidebar-muted-foreground);
@@ -1193,6 +1215,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --info-foreground: var(--color-blue-700);
   --success: var(--color-emerald-500);
   --success-foreground: var(--color-emerald-700);
+  --merged-foreground: var(--color-violet-700);
   --warning: var(--color-amber-500);
   --warning-foreground: var(--color-amber-700);
   --warning-surface: color-mix(in srgb, var(--warning) 8%, transparent);
@@ -1246,6 +1269,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
     --input: --alpha(var(--color-white) / 8%);
     --info-foreground: var(--color-blue-400);
     --success-foreground: var(--color-emerald-400);
+    --merged-foreground: var(--color-violet-400);
     --warning-foreground: var(--color-amber-400);
     --warning-surface: color-mix(in srgb, var(--warning) 16%, transparent);
     --update-foreground: var(--color-blue-400);
@@ -1828,9 +1852,15 @@ code {
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: var(--app-scrollbar-width);
+  /* Without a height, horizontal scrollbars fall back to the platform's thick default. */
+  height: var(--app-scrollbar-width);
 }
 
 ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 
@@ -1841,6 +1871,19 @@ code {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--app-scrollbar-thumb-hover);
+}
+
+/* For small scroll regions nested inside a card or panel: the thumb stays hidden until the pointer
+   or keyboard focus is inside, so a bounded list does not wear a permanent gray rail. This uses the
+   standard properties because Chromium does not repaint ::-webkit-scrollbar-thumb when only the
+   parent's :hover changes; setting them also opts the element out of the global webkit rules. */
+@utility scrollbar-on-hover {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+
+  &:is(:hover, :focus-within) {
+    scrollbar-color: var(--app-scrollbar-thumb) transparent;
+  }
 }
 
 /* Chat markdown rendering */
