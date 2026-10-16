@@ -13,20 +13,55 @@ describe("countUnifiedDiffLines", () => {
       "index 1111111..2222222 100644",
       "--- a/src/a.ts",
       "+++ b/src/a.ts",
-      "@@ -1,3 +1,3 @@",
+      "@@ -1,2 +1,3 @@",
       " keep",
       "-old",
       "+new",
       "+added",
       "--- a/src/b.ts",
       "+++ b/src/b.ts",
-      "@@ -4,2 +4,1 @@",
+      "@@ -4,2 +4,0 @@",
       "--- a removed line that looks like a header",
       "-gone",
       "\\ No newline at end of file",
       "",
     ].join("\n");
     expect(countUnifiedDiffLines(patch)).toEqual({ additions: 2, deletions: 3 });
+  });
+
+  it.each(["@@ -1,1 +1,1 @@", "@@ -1 +1 @@"])(
+    "counts header-like changes inside a hunk with header %s",
+    (header) => {
+      const patch = [
+        "diff --git a/example.txt b/example.txt",
+        "--- a/example.txt",
+        "+++ b/example.txt",
+        header,
+        "--- old",
+        "+++ new",
+        "",
+      ].join("\n");
+      expect(countUnifiedDiffLines(patch)).toEqual({ additions: 1, deletions: 1 });
+    },
+  );
+
+  it("distinguishes header-like changes from the next file's headers", () => {
+    const patch = [
+      "diff --git a/first.txt b/first.txt",
+      "--- a/first.txt",
+      "+++ b/first.txt",
+      "@@ -1,2 +1,2 @@",
+      " keep",
+      "--- old",
+      "+++ new",
+      "diff --git a/second.txt b/second.txt",
+      "--- a/second.txt",
+      "+++ b/second.txt",
+      "@@ -0,0 +1 @@",
+      "+added",
+      "",
+    ].join("\n");
+    expect(countUnifiedDiffLines(patch)).toEqual({ additions: 2, deletions: 1 });
   });
 
   it("reports nothing for text that is not a diff", () => {

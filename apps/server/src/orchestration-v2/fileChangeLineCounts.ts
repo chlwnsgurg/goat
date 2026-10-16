@@ -26,6 +26,8 @@ export function countUnifiedDiffLines(diff: string): FileChangeLineCounts | unde
   let additions = 0;
   let deletions = 0;
   let sawHunk = false;
+  let oldLinesRemaining = 0;
+  let newLinesRemaining = 0;
   let start = 0;
   while (start <= diff.length) {
     const newline = diff.indexOf("\n", start);
@@ -33,9 +35,16 @@ export function countUnifiedDiffLines(diff: string): FileChangeLineCounts | unde
     const first = diff.charCodeAt(start);
     if (diff.startsWith("@@", start)) {
       sawHunk = true;
+      const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(diff.slice(start, end));
+      oldLinesRemaining = hunk ? Number(hunk[1] ?? 1) : 0;
+      newLinesRemaining = hunk ? Number(hunk[2] ?? 1) : 0;
     } else if (sawHunk && first === 0x2d /* - */) {
       const isFileHeader =
-        diff.startsWith("--- ", start) && newline !== -1 && diff.startsWith("+++ ", newline + 1);
+        oldLinesRemaining === 0 &&
+        newLinesRemaining === 0 &&
+        diff.startsWith("--- ", start) &&
+        newline !== -1 &&
+        diff.startsWith("+++ ", newline + 1);
       if (isFileHeader) {
         // Skip the matching "+++ " line too.
         const headerEnd = diff.indexOf("\n", newline + 1);
@@ -43,8 +52,13 @@ export function countUnifiedDiffLines(diff: string): FileChangeLineCounts | unde
         continue;
       }
       deletions += 1;
+      oldLinesRemaining = Math.max(0, oldLinesRemaining - 1);
     } else if (sawHunk && first === 0x2b /* + */) {
       additions += 1;
+      newLinesRemaining = Math.max(0, newLinesRemaining - 1);
+    } else if (sawHunk && first === 0x20 /* space */) {
+      oldLinesRemaining = Math.max(0, oldLinesRemaining - 1);
+      newLinesRemaining = Math.max(0, newLinesRemaining - 1);
     }
     if (newline === -1) break;
     start = end + 1;
