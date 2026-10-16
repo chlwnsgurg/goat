@@ -139,8 +139,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(IpcChannels.DISMISS_SNAP_SHOT_ANIMATION_CHANNEL, id),
   acknowledgeSnapShot: (id) => ipcRenderer.invoke(IpcChannels.ACKNOWLEDGE_SNAP_SHOT_CHANNEL, id),
   getConnectionCatalog: () => ipcRenderer.invoke(IpcChannels.GET_CONNECTION_CATALOG_CHANNEL),
-  setConnectionCatalog: (catalog) =>
-    ipcRenderer.invoke(IpcChannels.SET_CONNECTION_CATALOG_CHANNEL, catalog),
+  setConnectionCatalog: (catalog, expectedCatalog) =>
+    ipcRenderer.invoke(IpcChannels.SET_CONNECTION_CATALOG_CHANNEL, { catalog, expectedCatalog }),
   getConnectionCatalogUnreadable: () =>
     ipcRenderer.invoke(IpcChannels.GET_CONNECTION_CATALOG_UNREADABLE_CHANNEL),
   clearConnectionCatalog: () => ipcRenderer.invoke(IpcChannels.CLEAR_CONNECTION_CATALOG_CHANNEL),

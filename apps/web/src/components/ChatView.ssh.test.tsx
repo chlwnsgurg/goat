@@ -2,7 +2,7 @@
 import { act, type ComponentProps } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
-import { beforeEach, afterEach, expect, it, vi } from "vite-plus/test";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { Atom } from "effect/reactivity";
 import * as Option from "effect/Option";
 import * as Cause from "effect/Cause";
@@ -22,6 +22,8 @@ import { createModelSelection } from "@goat/shared/model";
 import { scopeProjectRef } from "@goat/client-runtime/environment";
 import { SshConnectionProfile, SshConnectionTarget } from "@goat/client-runtime/connection";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import type { LegendListRef } from "@legendapp/list/react";
+import type { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { ChatComposer, ChatComposerHandle } from "./chat/ChatComposer";
 const state = vi.hoisted(() => ({
   launch: vi.fn(),
@@ -32,6 +34,13 @@ const state = vi.hoisted(() => ({
   toast: vi.fn(),
   shell: vi.fn(),
   composer: null as ComponentProps<typeof ChatComposer> | null,
+  timeline: null as ComponentProps<typeof MessagesTimeline> | null,
+  mountTimeline: null as (() => void) | null,
+  replaceTimeline: null as (() => void) | null,
+  scrollNode: null as HTMLDivElement | null,
+  list: null as LegendListRef | null,
+  contentLength: 1000,
+  scrollToEnd: vi.fn(),
 }));
 vi.mock("./ui/toast", () => ({
   toastManager: { add: state.toast },
@@ -137,7 +146,58 @@ vi.mock("./ThreadStatusIndicators", () => ({ useLinkedThreadPullRequest: () => n
 vi.mock("./chat/ChatHeader", () => ({ ChatHeader: () => null }));
 vi.mock("./BranchToolbar", () => ({ BranchToolbar: () => null }));
 vi.mock("./chat/ThreadDetailsPanel", () => ({ ThreadDetailsPanel: () => null }));
-vi.mock("./chat/MessagesTimeline", () => ({ MessagesTimeline: () => null }));
+// Keep the real ChatView controller and DOM events; replace only the virtualizer boundary.
+vi.mock("./chat/MessagesTimeline", async () => {
+  const React = await import("react");
+  const { resolveTimelineIsAtEnd } = await import("./chat/MessagesTimeline.logic");
+  return {
+    MessagesTimeline: (props: ComponentProps<typeof MessagesTimeline>) => {
+      state.timeline = props;
+      const [version, setVersion] = React.useState(0);
+      state.mountTimeline = () => setVersion(1);
+      state.replaceTimeline = () => setVersion((current) => current + 1);
+      const attach = React.useCallback(
+        (node: HTMLDivElement | null) => {
+          state.scrollNode = node;
+          const list = node
+            ? ({
+                getScrollableNode: () => node,
+                getState: () => ({
+                  data: [0],
+                  scroll: node.scrollTop,
+                  scrollLength: 400,
+                  contentLength: state.contentLength,
+                  positionAtIndex: () => 0,
+                  sizeAtIndex: () => state.contentLength,
+                }),
+                scrollToItem: () => Promise.resolve(),
+                scrollToEnd: () => {
+                  state.scrollToEnd();
+                  node.scrollTop = state.contentLength - 400;
+                },
+              } as unknown as LegendListRef)
+            : null;
+          state.list = list;
+          props.listRef.current = list;
+          props.onScrollableNodeChange?.(node);
+        },
+        [props.listRef, props.onScrollableNodeChange],
+      );
+      if (!version) return null;
+      return (
+        <div
+          key={version}
+          data-timeline
+          ref={attach}
+          onScroll={() => {
+            const atEnd = resolveTimelineIsAtEnd(props.listRef.current?.getState());
+            if (atEnd !== undefined) props.onIsAtEndChange(atEnd);
+          }}
+        />
+      );
+    },
+  };
+});
 vi.mock("./chat/DraftHeroHeadline", () => ({ DraftHeroHeadline: () => null }));
 vi.mock("./chat/ExpandedImageDialog", () => ({ ExpandedImageDialog: () => null }));
 vi.mock("./PullRequestThreadDialog", () => ({ PullRequestThreadDialog: () => null }));
@@ -171,6 +231,8 @@ vi.mock("./chat/ChatComposer", async () => {
             resetCursorState: () => {},
             focus: () => {},
             focusAtEnd: () => {},
+            restoreAfterTimelineReachedEnd: () => {},
+            collapseForTimelineScrollKey: () => {},
           }) as unknown as ChatComposerHandle,
       );
       return (
@@ -204,6 +266,7 @@ vi.mock("@effect/atom-react", async (original) => {
   };
 });
 import { ThreadRouteView } from "./ThreadRouteView";
+import ChatView from "./ChatView";
 const local = EnvironmentId.make("local"),
   remote = EnvironmentId.make("remote");
 const selection = createModelSelection(ProviderInstanceId.make("codex"), "model");
@@ -303,6 +366,13 @@ beforeEach(() => {
   });
   store().setPrompt(id, "Text");
   store().setModelSelection(id, selection);
+  state.timeline = null;
+  state.mountTimeline = null;
+  state.replaceTimeline = null;
+  state.scrollNode = null;
+  state.list = null;
+  state.contentLength = 1000;
+  state.scrollToEnd.mockReset();
   state.launch.mockReset().mockResolvedValue({ _tag: "Success", value: result });
   state.navigate.mockReset().mockImplementation(async (request) => {
     if (request.to === "/$environmentId/$threadId")
@@ -762,4 +832,156 @@ it("requires a new explicit send after a definitive prelaunch failure", async ()
     await state.composer!.onSend();
   });
   expect(state.launch).toHaveBeenCalledTimes(2);
+});
+
+// Reuse this ChatView integration harness for scroll behavior as well as SSH sends.
+describe("timeline follow navigation", () => {
+  let frames: Map<number, FrameRequestCallback>;
+  let nextFrame: number;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    frames = new Map();
+    nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  // Server-thread routes reuse ChatView; exercise that lifetime without a keyed remount.
+  async function mountReusedView(draftId = id) {
+    const session = store().getDraftSession(draftId)!;
+    await act(() =>
+      root.render(
+        <AppAtomRegistryProvider>
+          <ChatView
+            routeKind="draft"
+            draftId={draftId}
+            environmentId={session.environmentId}
+            threadId={session.threadId}
+          />
+        </AppAtomRegistryProvider>,
+      ),
+    );
+  }
+  async function flushFrame() {
+    const pending = [...frames.values()];
+    frames.clear();
+    await act(() => pending.forEach((callback) => callback(0)));
+  }
+  async function mountList() {
+    await act(() => state.mountTimeline!());
+    state.scrollNode!.scrollTop = 600;
+    await flushFrame();
+  }
+  async function wheel(deltaY: number, offset: number) {
+    await act(() => {
+      state.scrollNode!.dispatchEvent(new WheelEvent("wheel", { deltaY, bubbles: true }));
+      state.scrollNode!.scrollTop = offset;
+      state.scrollNode!.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+  }
+  // Simulate the virtualizer's observable append behavior at its public follow boundary.
+  async function append(growth = 100) {
+    state.contentLength += growth;
+    if (state.timeline!.liveFollowEnabled) {
+      state.scrollNode!.scrollTop = state.contentLength - 400;
+    }
+    await act(() => state.scrollNode!.dispatchEvent(new Event("scroll", { bubbles: true })));
+  }
+  async function clickScrollToEnd() {
+    await wheel(-400, 200);
+    await act(() => vi.advanceTimersByTime(150));
+    const button = container.querySelector<HTMLButtonElement>('button[aria-label="Scroll to end"]');
+    expect(button).not.toBeNull();
+    await act(() => button!.click());
+  }
+
+  it("keeps manual reading position after a timeline mounts later than thirteen frames", async () => {
+    await mount();
+    for (let frame = 0; frame < 20; frame++) await flushFrame();
+    await mountList();
+    await wheel(-200, 400);
+    await append();
+    expect(state.scrollNode!.scrollTop).toBe(400);
+  });
+
+  it("resumes following after a twenty-pixel upward scroll and return to the end", async () => {
+    await mount();
+    await mountList();
+    await wheel(-20, 580);
+    // A small stream chunk keeps both notifications inside the same 40px end band.
+    await append(10);
+    expect(state.scrollNode!.scrollTop).toBe(580);
+    await wheel(30, 610);
+    await append();
+    expect(state.scrollNode!.scrollTop).toBe(710);
+  });
+
+  it("does not resume following on another upward scroll within the end band", async () => {
+    await mount();
+    await mountList();
+    await wheel(-20, 580);
+    await wheel(-10, 570);
+    await append();
+    expect(state.scrollNode!.scrollTop).toBe(570);
+  });
+
+  it("cancels a scheduled scroll to end when later manual navigation wins", async () => {
+    await mount();
+    await mountList();
+    await clickScrollToEnd();
+    const pending = frames.get(nextFrame)!;
+    await wheel(-20, 180);
+    await flushFrame();
+    // Even a callback already dispatched by the browser must respect the generation fence.
+    await act(() => pending(0));
+    expect(state.scrollToEnd).not.toHaveBeenCalled();
+    expect(state.scrollNode!.scrollTop).toBe(180);
+  });
+
+  it("does not scroll a replacement list from a previously scheduled request", async () => {
+    await mount();
+    await mountList();
+    await clickScrollToEnd();
+    await act(() => state.replaceTimeline!());
+    state.scrollNode!.scrollTop = 123;
+    await flushFrame();
+    expect(state.scrollToEnd).not.toHaveBeenCalled();
+    expect(state.scrollNode!.scrollTop).toBe(123);
+  });
+
+  it("cancels a scheduled scroll to end on thread switch", async () => {
+    await mountReusedView();
+    await mountList();
+    await clickScrollToEnd();
+    const pending = frames.get(nextFrame)!;
+    const other = DraftId.make("B");
+    await act(() =>
+      store().setLogicalProjectDraftThreadId("other", scopeProjectRef(local, project.id), other, {
+        threadId: ThreadId.make("B"),
+        envMode: "local",
+      }),
+    );
+    await mountReusedView(other);
+    await act(() => state.mountTimeline!());
+    state.scrollNode!.scrollTop = 123;
+    await flushFrame();
+    await act(() => pending(0));
+    expect(state.scrollToEnd).not.toHaveBeenCalled();
+    expect(state.scrollNode!.scrollTop).toBe(123);
+  });
+
+  it("scrolls to end on the next frame when no later navigation intervenes", async () => {
+    await mount();
+    await mountList();
+    await clickScrollToEnd();
+    expect(state.scrollToEnd).not.toHaveBeenCalled();
+    await flushFrame();
+    expect(state.scrollToEnd).toHaveBeenCalledTimes(1);
+    expect(state.scrollNode!.scrollTop).toBe(600);
+  });
 });

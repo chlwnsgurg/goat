@@ -76,6 +76,11 @@ it("recognises an older remote that has no goat_host_status tool", () => {
     "GOAT on old-mac could not run goat_host_status: GOAT MCP tool call failed: Tool 'goat_host_status' not found";
   expect(isUnsupportedHostStatusMessage(wrapped)).toBe(true);
   expect(isUnsupportedHostStatusMessage('tool "goat_host_status" not found')).toBe(true);
+  expect(
+    isUnsupportedHostStatusMessage(
+      "GOAT on old-mac does not have goat_host_status; it runs 0.1.0 and this machine runs 0.2.0.",
+    ),
+  ).toBe(true);
   expect(isUnsupportedHostStatusMessage("box is unavailable: connection timed out")).toBe(false);
 });
 

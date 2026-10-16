@@ -257,6 +257,7 @@ export function AttachmentFilePreview(props: {
       src={url}
       title={props.name}
       pdf={kind === "pdf"}
+      onRetry={props.file ? undefined : refresh}
       htmlRender={props.htmlRender === true}
       threadRef={props.threadRef}
     />

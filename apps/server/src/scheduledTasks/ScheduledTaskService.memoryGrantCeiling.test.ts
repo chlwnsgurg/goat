@@ -18,6 +18,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
@@ -378,6 +379,37 @@ it.effect(
             }).pipe(Effect.result))._tag === "Failure",
           );
         }
+        const settings = yield* Settings.ServerSettingsService;
+        let observed = 0;
+        const snapshots = yield* tasks.subscribeList().pipe(
+          Stream.take(3),
+          Stream.tap(() =>
+            Effect.gen(function* () {
+              observed++;
+              if (observed < 3)
+                yield* settings.updateSettings({ enableAgentMemoryAccess: observed !== 1 });
+            }),
+          ),
+          Stream.runCollect,
+        );
+        assert.equal(snapshots.length, 3);
+        for (const [index, snapshot] of snapshots.entries()) {
+          for (const task of snapshot.tasks) {
+            assert.deepEqual(
+              task.currentMemoryAccess,
+              index === 1
+                ? { access: "none", reason: "environment_off" }
+                : task.memoryGrantCeiling === "none"
+                  ? { access: "none", reason: "ceiling" }
+                  : undefined,
+            );
+          }
+        }
+        assert.equal(
+          (yield* tasks.setEnabled({ id, enabled: true }, { memoryGrantCeiling: "read" })).task
+            .currentMemoryAccess?.access,
+          undefined,
+        );
         revoked = true;
         const failure = yield* mcp
           .updateScheduledTask(caller(false, ["memory:read", "memory:write"]), {
@@ -417,6 +449,8 @@ it.effect(
         const tasks = yield* Tasks.ScheduledTaskService;
         const sql = yield* SqlClient.SqlClient;
         const listed = (yield* tasks.list()).tasks;
+        for (const task of listed)
+          assert.deepEqual(task.currentMemoryAccess, { access: "none", reason: "environment_off" });
         assert.deepEqual(
           new Map<string, MemoryTaskGrantCeiling>(
             listed.map((t) => [t.id, t.memoryGrantCeiling ?? "none"]),

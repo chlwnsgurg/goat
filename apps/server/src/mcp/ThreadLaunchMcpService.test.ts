@@ -25,6 +25,7 @@ import * as Reports from "../remoteReports/RemoteReportService.ts";
 import * as Watches from "./LaunchWatchService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ServerConfig from "../config.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { newLaunchWatch } from "./launchWatch.ts";
 import { fakeCloudCapabilities } from "../orchestration-v2/testkit/FakeCloudAdapter.ts";
@@ -57,6 +58,7 @@ const caller = {
 function fixture(
   unpublished = false,
   sourceRestriction: OrchestrationV2CloudSourceRestriction = "published-ref",
+  registered?: Layer.Layer<ProviderRegistry.ProviderRegistry>,
 ) {
   const launched: ThreadLaunch.ThreadLaunchInput[] = [];
   const sources: Parameters<CloudSource.CloudTaskSourceService["Service"]["resolve"]>[0][] = [];
@@ -157,7 +159,9 @@ function fixture(
     }),
   );
   return {
-    layer: ThreadLaunchMcp.layer.pipe(Layer.provide(deps)),
+    layer: ThreadLaunchMcp.layer.pipe(
+      Layer.provide(registered === undefined ? deps : Layer.merge(deps, registered)),
+    ),
     launched,
     sources,
     routes: () => routes,
@@ -254,3 +258,37 @@ it.effect("explicit cloud scratch rejects before a Scratch folder or thread can 
     expect(f.launched).toHaveLength(0);
   }).pipe(Effect.provide(f.layer));
 });
+
+const registry = Layer.mock(ProviderRegistry.ProviderRegistry)({
+  getProviders: Effect.succeed([
+    { instanceId, models: [{ slug: "fake" }] },
+  ] as unknown as ReadonlyArray<never>),
+});
+
+it.effect(
+  "a requested model or provider this environment lacks is refused before a thread exists",
+  () => {
+    const f = fixture(false, "published-ref", registry);
+    return Effect.gen(function* () {
+      const service = yield* ThreadLaunchMcp.ThreadLaunchMcpService;
+      const launch = (selection: { instanceId: ProviderInstanceId; model: string }) =>
+        service
+          .launch(
+            scope,
+            { title: "Probe", message: "Hi", modelSelection: selection },
+            { runtimeMode: "full-access", interactionMode: "default" },
+          )
+          .pipe(Effect.flip);
+      const model = yield* launch({ instanceId, model: "nonexistent" });
+      expect(model.code).toBe("invalid_request");
+      expect(model.message).toContain("does not offer model nonexistent");
+      const provider = yield* launch({
+        instanceId: ProviderInstanceId.make("gone"),
+        model: "fake",
+      });
+      expect(provider.code).toBe("invalid_request");
+      expect(provider.message).toContain("no provider instance gone; it has fakeCloud");
+      expect(f.launched).toHaveLength(0);
+    }).pipe(Effect.provide(f.layer));
+  },
+);

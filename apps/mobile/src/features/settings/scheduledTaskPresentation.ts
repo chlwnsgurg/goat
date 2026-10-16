@@ -2,7 +2,17 @@ import { presentMemoryRunAccess } from "@goat/client-runtime/memory-presentation
 
 export function scheduledMemoryAccess(input: Parameters<typeof presentMemoryRunAccess>[0]) {
   const view = presentMemoryRunAccess(input);
-  return view.savedCeiling === "none" ? null : view.savedCeilingLabel;
+  if (input.memoryGrantCeiling === undefined && view.effectiveAccess === "unknown") return null;
+  const labels = { none: "None", read: "Read only", read_write: "Read and write" };
+  const reasons = {
+    policy_unready: "Policy is not ready",
+    environment_off: "Agent memory access is off",
+    legacy_none: "No saved access",
+    ceiling: "Within the saved limit",
+    read_only_destination: "Destination allows reading only",
+    dispatch_scope: "Limited by dispatch permissions",
+  };
+  return `${view.savedCeilingLabel}${view.effectiveAccess === "unknown" ? "" : ` · Allowed now: ${labels[view.effectiveAccess]}${view.effectiveReason ? ` (${reasons[view.effectiveReason]})` : ""}`}`;
 }
 
 const MINUTE = 60_000;

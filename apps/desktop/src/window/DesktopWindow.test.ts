@@ -600,11 +600,17 @@ describe("DesktopWindow", () => {
     assert.equal(fakeWindow.setOpacity.mock.calls.length, 0);
   });
 
-  it("restores bounds only when the window fits within a connected display", () => {
+  it("restores bounds when the window fits within a display or spans contiguous displays", () => {
     const persistedBounds = { x: 2040, y: 80, width: 1320, height: 880 };
+    const spanningHorizontalBounds = { x: 1400, y: 80, width: 1100, height: 780 };
+    const spanningVerticalBounds = { x: 120, y: 760, width: 1100, height: 780 };
     const displays = [
       { x: 0, y: 0, width: 1920, height: 1080 },
       { x: 1920, y: 0, width: 2560, height: 1440 },
+    ];
+    const verticalDisplays = [
+      { x: 0, y: 0, width: 1920, height: 1080 },
+      { x: 0, y: 1080, width: 1920, height: 1080 },
     ];
 
     assert.deepEqual(
@@ -612,7 +618,59 @@ describe("DesktopWindow", () => {
       persistedBounds,
     );
     assert.deepEqual(
-      DesktopWindow.resolveInitialMainWindowBounds(persistedBounds, [displays[0]!]),
+      DesktopWindow.resolveInitialMainWindowBounds(spanningHorizontalBounds, displays),
+      spanningHorizontalBounds,
+    );
+    assert.deepEqual(
+      DesktopWindow.resolveInitialMainWindowBounds(spanningVerticalBounds, verticalDisplays),
+      spanningVerticalBounds,
+    );
+  });
+
+  it("clamps bounds across a gap or dead space between displays while preserving size", () => {
+    const spanningBounds = { x: 1400, y: 80, width: 1100, height: 780 };
+    const gappedDisplays = [
+      { x: 0, y: 0, width: 1920, height: 1080 },
+      { x: 2120, y: 0, width: 1920, height: 1080 },
+    ];
+    assert.deepEqual(DesktopWindow.resolveInitialMainWindowBounds(spanningBounds, gappedDisplays), {
+      x: 820,
+      y: 80,
+      width: 1100,
+      height: 780,
+    });
+
+    const deadSpaceBounds = { x: 1400, y: 300, width: 1320, height: 900 };
+    const staggeredDisplays = [
+      { x: 0, y: 0, width: 1920, height: 1080 },
+      { x: 1920, y: 0, width: 2560, height: 1440 },
+    ];
+    assert.deepEqual(
+      DesktopWindow.resolveInitialMainWindowBounds(deadSpaceBounds, staggeredDisplays),
+      { x: 1920, y: 300, width: 1320, height: 900 },
+    );
+  });
+
+  it("preserves and clamps saved size when an external display is disconnected", () => {
+    const primaryDisplay = { x: 0, y: 0, width: 1920, height: 1080 };
+
+    assert.deepEqual(
+      DesktopWindow.resolveInitialMainWindowBounds({ x: 2040, y: 80, width: 1320, height: 880 }, [
+        primaryDisplay,
+      ]),
+      { x: 600, y: 80, width: 1320, height: 880 },
+    );
+    assert.deepEqual(
+      DesktopWindow.resolveInitialMainWindowBounds({ x: 2040, y: 80, width: 2200, height: 1200 }, [
+        primaryDisplay,
+      ]),
+      { x: 0, y: 0, width: 1920, height: 1080 },
+    );
+    assert.deepEqual(
+      DesktopWindow.resolveInitialMainWindowBounds(
+        { x: 2040, y: 80, width: 1320, height: 880 },
+        [],
+      ),
       DesktopAppSettings.DEFAULT_MAIN_WINDOW_SIZE,
     );
   });
@@ -895,6 +953,39 @@ describe("DesktopWindow", () => {
         assert.equal(createdWindowOptions[0]?.width, 1320);
         assert.equal(createdWindowOptions[0]?.height, 880);
         assert.equal(createdWindowOptions[0]?.x, 120);
+        assert.equal(createdWindowOptions[0]?.y, 80);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("uses persisted bounds when the window spans two connected displays", () =>
+    Effect.gen(function* () {
+      vi.mocked(Electron.screen.getAllDisplays).mockReturnValueOnce([
+        { bounds: { x: 0, y: 0, width: 1920, height: 1080 } } as Electron.Display,
+        { bounds: { x: 1920, y: 0, width: 1920, height: 1080 } } as Electron.Display,
+      ]);
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const createdWindowOptions: Electron.BrowserWindowConstructorOptions[] = [];
+      const layer = layerTest({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        createdWindowOptions,
+        desktopSettings: {
+          ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+          mainWindowBounds: { x: 1400, y: 80, width: 1100, height: 780 },
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        assert.equal(createdWindowOptions[0]?.width, 1100);
+        assert.equal(createdWindowOptions[0]?.height, 780);
+        assert.equal(createdWindowOptions[0]?.x, 1400);
         assert.equal(createdWindowOptions[0]?.y, 80);
       }).pipe(Effect.provide(layer));
     }),

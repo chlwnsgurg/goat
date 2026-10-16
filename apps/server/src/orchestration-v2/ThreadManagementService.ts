@@ -55,6 +55,7 @@ import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimi
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { currentMemoryAccess } from "../memory/MemoryAccess.ts";
 
 /**
  * "steer_when_ready" is how another thread's agent talks to a thread: like steering, whatever
@@ -681,6 +682,129 @@ const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+  const memoryPolicy = yield* Effect.serviceOption(ServerSettings.MemoryProviderCommittedPolicy);
+  const readMemoryPolicy = Option.isSome(memoryPolicy)
+    ? memoryPolicy.value.read
+    : Effect.succeed({ policyReady: false, enableAgentMemoryAccess: false, epoch: 0 });
+  // Evaluate current permission, never reconstruct an earlier run's issued grant.
+  const projectMemoryAccess = <
+    T extends {
+      readonly thread: OrchestrationV2ThreadProjection["thread"];
+      readonly runs?: OrchestrationV2ThreadProjection["runs"];
+      readonly subagents?: OrchestrationV2ThreadProjection["subagents"];
+      readonly messages?: OrchestrationV2ThreadProjection["messages"];
+    },
+  >(
+    projection: T,
+  ) =>
+    Effect.gen(function* () {
+      const policy = yield* readMemoryPolicy;
+      // Only this destination can pass the per-record checks below. Share its
+      // execution judgment lazily within this response, never across requests.
+      const memoryAccessInputs = yield* Effect.cached(
+        Effect.suspend(
+          () =>
+            sessions.memoryAccessInputs?.(
+              projection.thread.id,
+              projection.thread.providerInstanceId,
+            ) ?? Effect.succeed(undefined),
+        ),
+      );
+      const scheduledMessages = new Set(
+        projection.messages
+          ?.filter((message) => message.scheduledTaskId !== undefined)
+          .map((message) => message.id),
+      );
+      const project = <
+        R extends {
+          readonly memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling;
+          readonly currentMemoryAccess?: import("@goat/contracts").MemoryCurrentAccess;
+        },
+      >(
+        record: R,
+        threadId: ThreadId | null,
+        instanceId: ProviderInstanceId,
+        target:
+          | { readonly runId: RunId }
+          | { readonly delegatedTaskId: import("@goat/contracts").NodeId },
+        remote = false,
+        knownTask = true,
+      ) =>
+        Effect.gen(function* () {
+          const { currentMemoryAccess: _previous, ...saved } = record;
+          // Local policy cannot describe a remote destination.
+          if (remote) return saved;
+          const base = currentMemoryAccess({
+            ...policy,
+            readOnly: false,
+            memoryGrantCeiling: record.memoryGrantCeiling,
+          });
+          if (knownTask && base.access === "none") return { ...saved, currentMemoryAccess: base };
+          // Only this thread's current projection is available without extra I/O.
+          // Child destinations remain unknown until their own projection is read.
+          const destination = projection.thread;
+          if (
+            threadId !== destination.id ||
+            destination.deletedAt !== null ||
+            destination.archivedAt !== null ||
+            destination.providerInstanceId !== instanceId
+          )
+            return saved;
+          const inputs = yield* memoryAccessInputs;
+          const matches =
+            inputs !== undefined &&
+            inputs.memoryGrantCeiling === record.memoryGrantCeiling &&
+            ("runId" in target
+              ? inputs.runId === target.runId
+              : inputs.delegatedTaskId === target.delegatedTaskId);
+          return !matches || inputs === undefined
+            ? saved
+            : {
+                ...saved,
+                currentMemoryAccess: {
+                  // Inputs explain the restriction; execution's current policy
+                  // is the authority for the access level itself.
+                  ...currentMemoryAccess({
+                    ...policy,
+                    ...inputs,
+                    readOnly: inputs.readOnly === true,
+                    memoryGrantCeiling: record.memoryGrantCeiling,
+                  }),
+                  access: base.access === "none" ? "none" : inputs.currentMemoryGrant,
+                },
+              };
+        });
+      return {
+        ...projection,
+        ...(projection.runs === undefined
+          ? {}
+          : {
+              runs: yield* Effect.forEach(projection.runs, (run) => {
+                return project(
+                  run,
+                  run.threadId,
+                  run.providerInstanceId,
+                  { runId: run.id },
+                  false,
+                  run.delegatedTaskId !== undefined || scheduledMessages.has(run.userMessageId),
+                );
+              }),
+            }),
+        ...(projection.subagents === undefined
+          ? {}
+          : {
+              subagents: yield* Effect.forEach(projection.subagents, (task) =>
+                project(
+                  task,
+                  task.childThreadId,
+                  task.providerInstanceId,
+                  { delegatedTaskId: task.id },
+                  task.remote !== undefined || task.origin !== "app_owned",
+                ),
+              ),
+            }),
+      };
+    });
 
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =
     (input) =>
@@ -764,6 +888,7 @@ const make = Effect.gen(function* () {
   const getThreadProjection: ThreadManagementServiceShape["getThreadProjection"] = (threadId) =>
     ensureProjectionTranscript(threadId).pipe(
       Effect.andThen(orchestrator.getThreadProjection(threadId)),
+      Effect.flatMap(projectMemoryAccess),
     );
 
   const getCheckpointContext: ThreadManagementServiceShape["getCheckpointContext"] = (threadId) =>
@@ -774,6 +899,11 @@ const make = Effect.gen(function* () {
   const getThreadSnapshot: ThreadManagementServiceShape["getThreadSnapshot"] = (threadId) =>
     ensureProjectionTranscript(threadId).pipe(
       Effect.andThen(orchestrator.getThreadSnapshot(threadId)),
+      Effect.flatMap((snapshot) =>
+        projectMemoryAccess(snapshot.projection).pipe(
+          Effect.map((projection) => ({ ...snapshot, projection })),
+        ),
+      ),
     );
   const getThreadSnapshotWindow: ThreadManagementServiceShape["getThreadSnapshotWindow"] = (
     threadId,
@@ -781,6 +911,11 @@ const make = Effect.gen(function* () {
   ) =>
     ensureProjectionTranscript(threadId).pipe(
       Effect.andThen(orchestrator.getThreadSnapshotWindow(threadId, options)),
+      Effect.flatMap((snapshot) =>
+        projectMemoryAccess(snapshot.projection).pipe(
+          Effect.map((projection) => ({ ...snapshot, projection })),
+        ),
+      ),
     );
 
   // Every path that can start or wake a provider turn funnels through this
@@ -847,7 +982,10 @@ const make = Effect.gen(function* () {
     filter,
   ) =>
     ensureProjectionTranscript(input.threadId)
-      .pipe(Effect.andThen(orchestrator.getThreadRecords(input.threadId, fields, filter)))
+      .pipe(
+        Effect.andThen(orchestrator.getThreadRecords(input.threadId, fields, filter)),
+        Effect.flatMap(projectMemoryAccess),
+      )
       .pipe(
         Effect.mapError(
           (cause) =>
@@ -1642,6 +1780,7 @@ const make = Effect.gen(function* () {
     getThreadRecords: (threadId, fields, filter) =>
       ensureProjectionTranscript(threadId).pipe(
         Effect.andThen(orchestrator.getThreadRecords(threadId, fields, filter)),
+        Effect.flatMap(projectMemoryAccess),
       ),
     getThreadProjection,
     getCheckpointContext,

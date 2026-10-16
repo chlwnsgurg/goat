@@ -1,3 +1,7 @@
+import { MemoryHubDiagnosticsSettings } from "./MemoryHubDiagnosticsSettings";
+import { MemoryImportSettings } from "./MemoryImportSettings";
+import { MemoryAgentAccessSettings } from "./MemoryAgentAccessSettings";
+import { MemoryReportRetrySettings } from "./MemoryReportRetrySettings";
 import { XIcon } from "../solar";
 import { MemoryAdministration } from "./MemorySharingSettings";
 import { randomUUID } from "../../lib/utils";
@@ -20,6 +24,7 @@ import {
   type MemorySyncStatus,
   type MemoryReportDelivery,
   type MemoryScope,
+  type ScopedProjectRef,
 } from "@goat/contracts";
 import {
   memoryBrowseInput,
@@ -37,12 +42,16 @@ import {
   presentMemoryRevertResult,
   presentMemoryReport,
   presentMemorySync,
+  presentMemoryCoverage,
+  presentMemoryStorage,
+  presentMemoryProcessing,
 } from "@goat/client-runtime/memory-presentation";
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useEnvironment, useEnvironments } from "../../state/environments";
-import { useProjects } from "../../state/entities";
+import { useProjects, useThreadShells } from "../../state/entities";
+import { MemoryScopePicker } from "./MemoryScopePicker";
 import {
   readEnvironmentScope,
   readPreparedConnection,
@@ -241,6 +250,15 @@ function MemoryDestinationContent({
 
   return (
     <>
+      <MemoryAgentAccessSettings environmentId={environmentId} />
+      {sync ? <MemoryStatusRows sync={sync} /> : null}
+      {sync ? (
+        <MemoryHubDiagnosticsSettings
+          environmentId={environmentId}
+          sync={sync}
+          onRefresh={refreshBootstrap}
+        />
+      ) : null}
       {canRead && sync?.state === "bootstrapping" && sync.memorySpaceId ? (
         <MemoryBootstrapRefresh
           environmentId={environmentId}
@@ -274,6 +292,13 @@ function MemoryDestinationContent({
             }
           />
         </SettingsSection>
+      ) : null}
+      {memorySpaceId && canRead ? (
+        <MemoryImportSettings
+          key={`import:${memorySpaceId}`}
+          environmentId={environmentId}
+          memorySpaceId={memorySpaceId}
+        />
       ) : null}
       {!memorySpaceId ? (
         <SettingsSection title="Memories" id="memory-records">
@@ -349,6 +374,20 @@ function MemoryRecords({
   );
   const [selection, setSelection] = useState<string | null>("user");
   const [scope, setScope] = useState<MemoryScope | null>({ kind: "user" });
+  const [threadId, setThreadId] = useState<string | null>(null);
+  const threads = useThreadShells(selection === "thread").filter(
+    (thread) => thread.environmentId === environmentId,
+  );
+  const thread = threads.find((thread) => thread.id === threadId);
+  const selectedProject = projects.find((project) => `project:${project.id}` === selection);
+  const browseScope: MemoryScope | null =
+    selection === "thread"
+      ? thread
+        ? { kind: "thread", thread: { environmentId, threadId: thread.id } }
+        : null
+      : selection?.startsWith("project:") && !selectedProject
+        ? null
+        : scope;
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   useEffect(
@@ -357,16 +396,19 @@ function MemoryRecords({
     },
     [],
   );
-  async function choose(project: (typeof projects)[number] | null) {
-    const attempt = ++generation.current;
-    setSelection(project ? `project:${project.id}` : "user");
-    setError(null);
-    setScope(project ? null : { kind: "user" });
+  function clearMemorySelection() {
     void navigate({
       to: "/settings/memory",
       search: validateMemorySettingsSearch({ environmentId, memorySpaceId }),
       hash: "",
     });
+  }
+  async function choose(project: (typeof projects)[number] | null) {
+    const attempt = ++generation.current;
+    setSelection(project ? `project:${project.id}` : "user");
+    setError(null);
+    setScope(project ? null : { kind: "user" });
+    clearMemorySelection();
     if (!project) return;
     const result = await getBinding({
       environmentId,
@@ -390,13 +432,13 @@ function MemoryRecords({
   }
   return (
     <>
-      <SettingsSection title="Memory scope">
+      <SettingsSection title="Memory scope" id="memory-browse-scope">
         <SettingsRow
           title="Scope"
           description={
             error ? (
               <span role="alert">{error}</span>
-            ) : !scope ? (
+            ) : !scope && selection !== "thread" ? (
               "Loading project memory scope"
             ) : !canGetBinding && projects.length > 0 ? (
               "Project scope requires memory write permission to look up its shared key."
@@ -407,7 +449,13 @@ function MemoryRecords({
               value={selection}
               onValueChange={(value) => {
                 if (value === "user") void choose(null);
-                else {
+                else if (value === "thread") {
+                  generation.current++;
+                  setSelection("thread");
+                  setThreadId(null);
+                  setError(null);
+                  clearMemorySelection();
+                } else {
                   const project = projects.find((item) => `project:${item.id}` === value);
                   if (project && canGetBinding) void choose(project);
                 }
@@ -415,13 +463,16 @@ function MemoryRecords({
             >
               <SelectTrigger aria-label="Memory scope">
                 <SelectValue placeholder="Choose memory scope">
-                  {selection === "user"
-                    ? "User"
-                    : projects.find((project) => `project:${project.id}` === selection)?.title}
+                  {selection === "thread"
+                    ? "Thread"
+                    : selection === "user"
+                      ? "User"
+                      : projects.find((project) => `project:${project.id}` === selection)?.title}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup>
                 <SelectItem value="user">User</SelectItem>
+                <SelectItem value="thread">Thread</SelectItem>
                 {projects.map((project) => (
                   <SelectItem
                     key={project.id}
@@ -435,14 +486,31 @@ function MemoryRecords({
             </Select>
           }
         />
+        {selection === "thread" ? (
+          <SettingsRow
+            title="Thread"
+            control={
+              <MemoryScopePicker
+                items={threads}
+                value={thread?.id ?? null}
+                onChange={setThreadId}
+                label="Memory thread"
+                disabled={false}
+              />
+            }
+          />
+        ) : null}
       </SettingsSection>
-      {scope ? (
+      {browseScope ? (
         <ScopedMemoryRecords
-          key={JSON.stringify(scope)}
+          key={JSON.stringify(browseScope)}
           {...props}
           environmentId={environmentId}
           memorySpaceId={memorySpaceId}
-          scope={scope}
+          scope={browseScope}
+          {...(selectedProject
+            ? { project: { environmentId, projectId: selectedProject.id } }
+            : {})}
         />
       ) : null}
     </>
@@ -455,12 +523,14 @@ function ScopedMemoryRecords({
   memorySpaceId,
   memoryEnabled,
   scope,
+  project,
 }: {
   target: MemorySettingsSearch;
   environmentId: EnvironmentId;
   memorySpaceId: MemorySpaceId;
   memoryEnabled: boolean;
   scope: MemoryScope;
+  project?: ScopedProjectRef;
 }) {
   const [queryInput, setQueryInput] = useState("");
   const [query, setQuery] = useState("");
@@ -488,6 +558,9 @@ function ScopedMemoryRecords({
   );
   const value = page.data ? Option.getOrNull(page.data) : null;
   const items = value?.items ?? [];
+  const coverage = value?.indexCoverage
+    ? presentMemoryCoverage(value.indexCoverage, items.length)
+    : null;
   const [listLayout, setListLayout] = useState<{
     items: readonly MemoryItem[];
     height: number;
@@ -529,6 +602,7 @@ function ScopedMemoryRecords({
           <SettingsRow title={`New memory · ${memoryScopeLabel(scope)}`}>
             <MemoryEditor
               scope={scope}
+              {...(project ? { project } : {})}
               environmentId={environmentId}
               memorySpaceId={memorySpaceId}
               onClose={() => {
@@ -600,19 +674,26 @@ function ScopedMemoryRecords({
             }
           />
         ) : null}
-        {notice ? <SettingsRow title={<span role="status">{notice}</span>} /> : null}
-        {value && items.length > 0 && presentMemoryPage(value, Boolean(query)) ? (
-          <SettingsRow
-            title={<span role="status">{presentMemoryPage(value, Boolean(query))}</span>}
-          />
+        {items.length > 0 && coverage && coverage.status !== "available" ? (
+          <SettingsRow title={coverage.label} />
         ) : null}
+        {notice ? <SettingsRow title={<span role="status">{notice}</span>} /> : null}
         {!value && !page.error ? (
           <SettingsRow
             title="Loading memories"
             description="Reconnect this device if records do not appear."
           />
         ) : !value ? null : items.length === 0 ? (
-          <SettingsRow title={presentMemoryPage(value, Boolean(query))} />
+          <SettingsRow
+            title={presentMemoryPage(value, Boolean(query))}
+            description={
+              coverage?.status === "unavailable"
+                ? coverage.label
+                : !query
+                  ? "Memories saved on this device will appear here."
+                  : undefined
+            }
+          />
         ) : (
           <LegendList
             data={items}
@@ -844,7 +925,12 @@ function MemoryDetails({
           {item && item.status !== "forgotten" && value ? (
             <>
               {value.resolutions.length > 0 ? (
-                <h3 className="text-sm font-medium">Resolution history</h3>
+                <div>
+                  <h3 className="text-sm font-medium">Resolution history</h3>
+                  <p className="text-xs leading-normal text-muted-foreground/80">
+                    History updates live. Start at the first page to see new changes.
+                  </p>
+                </div>
               ) : null}
               {value.resolutions.map((entry) => {
                 const display = presentMemoryResolution(entry);
@@ -908,6 +994,12 @@ function MemoryDetails({
               {value.revertResults.map((result) => (
                 <p key={result.operationId}>{presentMemoryRevertResult(result).label}</p>
               ))}
+              <MemoryReportRetrySettings
+                environmentId={environmentId}
+                memorySpaceId={memorySpaceId}
+                reports={value.reports}
+                onSettled={history.refresh}
+              />
               {value.reports.map((report) => (
                 <MemoryReportControl key={report.reportId} report={report} />
               ))}
@@ -1058,7 +1150,14 @@ export function MemoryRevertControl({
     );
   }
   async function submit() {
-    if (!selected || busy || result || !liveDestination() || item.status !== "active") return;
+    if (
+      !selected ||
+      busy ||
+      (result && result.status !== "refused") ||
+      !liveDestination() ||
+      item.status !== "active"
+    )
+      return;
     const eligibility = presentMemoryRevert({
       item,
       entry,
@@ -1096,6 +1195,11 @@ export function MemoryRevertControl({
     <div>
       <p>{display.windowLabel}</p>
       {display.timeNotice ? <p>{display.timeNotice}</p> : null}
+      {display.notice ? (
+        <p className="text-xs leading-normal text-muted-foreground/80" role="status">
+          {display.notice}
+        </p>
+      ) : null}
       {display.reason ? <p>{display.reason}</p> : null}
       {originals.error ? <p role="alert">Could not load retained originals.</p> : null}
       {originalCursor ? (
@@ -1129,7 +1233,7 @@ export function MemoryRevertControl({
       {!canWrite ? <p>Memory write permission is required to revert.</p> : null}
       {result ? <p role="status">{presentMemoryRevertResult(result).label}</p> : null}
       {error ? <p role="alert">{error}</p> : null}
-      {!result && available ? (
+      {(!result || result.status === "refused") && available ? (
         <div role="group" aria-label="Revert confirmation">
           <p>Choose the retained original to restore.</p>
           {display.restorableRevisionIds.map((revisionId) => {
@@ -1325,7 +1429,9 @@ function MemoryReportControl({ report }: { report: MemoryReportDelivery }) {
   return (
     <div>
       <p>{display.label}</p>
-      {display.failureCode ? <p>{display.failureCode}</p> : null}
+      <p className="text-xs leading-normal text-muted-foreground/80">
+        Automatic attempts: {display.automaticAttempts ?? "Unknown"}
+      </p>
       {destination ? (
         <Button
           size="sm"
@@ -1343,9 +1449,6 @@ function MemoryReportControl({ report }: { report: MemoryReportDelivery }) {
           Open report
         </Button>
       ) : null}
-      {report.state === "failed" ? (
-        <p>Manual report retry is not available in this environment version.</p>
-      ) : null}
     </div>
   );
 }
@@ -1357,12 +1460,14 @@ function MemoryEditor({
   memorySpaceId,
   item,
   scope = DEFAULT_MEMORY_SCOPE,
+  project,
   onClose,
 }: {
   environmentId: EnvironmentId;
   memorySpaceId: MemorySpaceId;
   item?: Extract<MemoryItem, { status: "active" }>;
   scope?: MemoryScope;
+  project?: ScopedProjectRef;
   onClose: () => void;
 }) {
   const [id] = useState(() => item?.memoryId ?? MemoryId.make(randomUUID()));
@@ -1422,6 +1527,7 @@ function MemoryEditor({
             operationId: intentId,
             expectedHeads: item ? [item.revision.revisionId] : [],
             scope: item?.scope ?? scope,
+            ...(!item && project ? { project } : {}),
             assertionKind: item?.revision.assertionKind ?? "fact",
             payload: {
               text,
@@ -1552,5 +1658,34 @@ function MemorySourcePage({
         Next original page
       </Button>
     </div>
+  );
+}
+
+/** Producer helpers keep raw storage fields and timestamps out of Settings. */
+function MemoryStatusRows({ sync }: { sync: MemorySyncStatus }) {
+  const storage = presentMemoryStorage(sync.storage);
+  const processing = presentMemoryProcessing(sync.processing);
+  const labels = [
+    processing.checkingLabel,
+    processing.heldLabel,
+    processing.waitingLabel,
+    processing.cleanupLabel,
+    processing.receiveLabel,
+    processing.reportLabel,
+    processing.admissionLabel,
+  ].filter(Boolean);
+  return (
+    <SettingsSection title="Memory status">
+      <SettingsRow title="Hub" description={presentMemorySync(sync).label} />
+      <SettingsRow
+        title="Storage"
+        description={[storage.label, storage.searchLabel, ...storage.reasons].join(". ")}
+      />
+      <SettingsRow title="Coverage" description={processing.coverage.label} />
+      <SettingsRow
+        title="Processing"
+        description={labels.join(". ") || "No pending processing reported"}
+      />
+    </SettingsSection>
   );
 }

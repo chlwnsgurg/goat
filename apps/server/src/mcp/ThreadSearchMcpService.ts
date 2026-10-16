@@ -17,6 +17,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
+import { withHostFanOutDeadline } from "./hostFanOutDeadline.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { readCaller, unavailable } from "./threadAccess.ts";
 
@@ -329,7 +330,7 @@ const make = Effect.gen(function* () {
       (key) =>
         (key === HERE
           ? searchHere(environment(key))
-          : searchOnHost(scope, key, environment(key))
+          : searchOnHost(scope, key, environment(key)).pipe(withHostFanOutDeadline(key))
         ).pipe(
           Effect.result,
           Effect.map((result) => ({ key, result })),

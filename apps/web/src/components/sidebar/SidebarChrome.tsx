@@ -35,7 +35,12 @@ import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { observeResize } from "~/lib/observeResize";
 import { useGoatBotPreferred } from "../goatBot/GoatBotModeButton";
 import { useGoatBotWaitingCount } from "../goatBot/useGoatBotWaitingCount";
-import { SidebarViewToggles } from "./SidebarViewToggles";
+import { useDestinationRailVisible } from "./DestinationRail";
+import {
+  SidebarPriorityCountBadge,
+  SidebarViewToggles,
+  useSidebarPriorityCount,
+} from "./SidebarViewToggles";
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron,
@@ -99,6 +104,7 @@ export function SidebarBrandWidthProbe({
 }: {
   onWidthChange: (width: number) => void;
 }) {
+  const priorityCount = useSidebarPriorityCount();
   const observeWidth = useCallback(
     (probe: HTMLDivElement) => {
       return observeResize(probe, ([entry]) => {
@@ -119,6 +125,7 @@ export function SidebarBrandWidthProbe({
       </div>
       <span className="flex items-center gap-1">
         <span className="size-8 sm:size-7" />
+        <SidebarPriorityCountBadge priorityCount={priorityCount} />
         <span className="size-8 sm:size-7" />
       </span>
     </div>
@@ -279,6 +286,8 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     select: (location) => isSidebarUtilityPage(location.pathname),
   });
   const pullRequestsSupported = usePullRequestsSupported();
+  // The destination rail already carries Settings, Pull requests and Usage.
+  const railVisible = useDestinationRailVisible();
   const closeMobileSidebar = useCallback(() => {
     if (isMobile) {
       setOpenMobile(false);
@@ -317,7 +326,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             <span>Back</span>
           </SidebarMenuButton>
         </SidebarMenuItem>
-      ) : (
+      ) : railVisible ? null : (
         <>
           <SidebarUtilityItem
             icon={<SettingsIcon />}

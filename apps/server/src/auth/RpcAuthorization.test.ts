@@ -616,6 +616,7 @@ it.effect(
         WS_METHODS.memoryHistory,
         WS_METHODS.memoryChanges,
         WS_METHODS.memorySyncStatus,
+        WS_METHODS.memoryHubDiagnostics,
       ];
       const writes = [
         WS_METHODS.memoryUpsert,
@@ -627,10 +628,16 @@ it.effect(
       const settings = [
         WS_METHODS.memoryHubSettingsGet,
         WS_METHODS.memoryHubSettingsUpdate,
+        WS_METHODS.memoryResetReportAttempts,
+        WS_METHODS.memoryHubReconcile,
         WS_METHODS.memoryOwnerSourceReadPolicyGet,
         WS_METHODS.memoryOwnerSourceReadPolicyUpdate,
       ];
       const cases = [
+        {
+          method: WS_METHODS.memoryImportProvider,
+          scopes: ["memory:write", "filesystem:read"] as const,
+        },
         ...reads.map((method) => ({ method, scopes: ["memory:read"] as const })),
         ...writes.map((method) => ({ method, scopes: ["memory:write"] as const })),
         ...settings.map((method) => ({ method, scopes: ["settings:write"] as const })),
@@ -642,7 +649,7 @@ it.effect(
       expect(new Set(cases.map((c) => c.method))).toEqual(
         new Set([...WsRpcGroup.requests.keys()].filter((tag) => tag.startsWith("memory."))),
       );
-      expect(WsRpcGroup.requests.has(WS_METHODS.memoryImportProvider)).toBe(false);
+      expect(WsRpcGroup.requests.has(WS_METHODS.memoryImportProvider)).toBe(true);
       for (const { method, scopes } of cases) {
         let calls = 0;
         const invoke = (grants: ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>) =>

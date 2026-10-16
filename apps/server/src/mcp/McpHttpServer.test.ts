@@ -5,6 +5,7 @@ import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
+  PREVIEW_AUTOMATION_SERVER_OPERATIONS,
   OrchestratorMcpFailure,
   PreviewTabId,
   ProviderInstanceId,
@@ -453,6 +454,55 @@ it.effect("saves the snapshot PNG on request and reports its path", () =>
   ).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("saves full-page captures without replaying images and keeps clipping metadata", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const fullPage = {
+        ...snapshotResult,
+        screenshot: { ...snapshotResult.screenshot, fullPage: true, clipped: true, byteLength: 3 },
+      };
+      const inputs = yield* serveSnapshots("mcp-fullpage-client", fullPage);
+      const saved = yield* callSnapshot({ fullPage: true, save: true });
+      expect(saved.isError).toBe(false);
+      expect(inputs).toEqual([{ fullPage: true }]);
+      expect(saved.content.map((content) => content.type)).toEqual(["text"]);
+      expect(saved.structuredContent).toEqual({
+        url: snapshotResult.url,
+        screenshotPath: expect.any(String),
+        screenshot: {
+          mimeType: "image/png",
+          width: 10,
+          height: 5,
+          fullPage: true,
+          clipped: true,
+          byteLength: 3,
+        },
+      });
+      const metadata = saved.structuredContent as { readonly screenshotPath: string };
+      expect(Buffer.from(yield* fileSystem.readFile(metadata.screenshotPath)).toString()).toBe(
+        "png",
+      );
+      const image = yield* callSnapshot({ fullPage: true, includeImage: true });
+      expect(image.content.map((content) => content.type)).toContain("image");
+      expect(image.structuredContent).toMatchObject({
+        screenshot: { fullPage: true, clipped: true, byteLength: 3 },
+      });
+      expect(image.structuredContent).not.toHaveProperty("screenshot.data");
+    }),
+  ).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("rejects non-boolean fullPage before selecting a browser host", () =>
+  Effect.gen(function* () {
+    for (const fullPage of ["true", 1, null]) {
+      const result = yield* callSnapshot({ fullPage });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({ error: { _tag: "AiError" } });
+    }
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("reports a tagged error when the screenshot cannot be saved", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -838,6 +888,15 @@ it.effect("registers annotated tools and preserves authenticated request context
     Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
       const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      const logsResult = {
+        console: {
+          entries: [{ level: "warning", text: "fixture", timestamp: "2026-10-15T00:00:00.000Z" }],
+          droppedCount: 2,
+          omittedCount: 1,
+        },
+        errors: { entries: [], droppedCount: 0, omittedCount: 0 },
+        network: { entries: [], droppedCount: 0, omittedCount: 0 },
+      };
       const toolIcon = {
         _tag: "website" as const,
         pageUrl: "http://example.test/",
@@ -849,6 +908,7 @@ it.effect("registers annotated tools and preserves authenticated request context
       const events = yield* broker.connect({
         clientId: "mcp-test-client",
         environmentId,
+        supportedOperations: PREVIEW_AUTOMATION_SERVER_OPERATIONS,
       });
       yield* Stream.runForEach(events, (event) => {
         if (event.type === "connected") return Effect.void;
@@ -861,18 +921,20 @@ it.effect("registers annotated tools and preserves authenticated request context
           result:
             event.request.operation === "snapshot"
               ? snapshotResult
-              : event.request.operation === "evaluate"
-                ? ["Connect", "Continue"]
-                : event.request.operation === "press"
-                  ? undefined
-                  : {
-                      available: true,
-                      visible: true,
-                      tabId,
-                      url: "http://example.test/",
-                      title: "Example",
-                      loading: false,
-                    },
+              : event.request.operation === "logs"
+                ? logsResult
+                : event.request.operation === "evaluate"
+                  ? ["Connect", "Continue"]
+                  : event.request.operation === "press"
+                    ? undefined
+                    : {
+                        available: true,
+                        visible: true,
+                        tabId,
+                        url: "http://example.test/",
+                        title: "Example",
+                        loading: false,
+                      },
         });
       }).pipe(Effect.forkScoped);
       yield* Effect.yieldNow;
@@ -912,6 +974,30 @@ it.effect("registers annotated tools and preserves authenticated request context
         available: true,
         tabId,
       });
+
+      const logsTool = server.tools.find(({ tool }) => tool.name === "preview_logs");
+      expect(logsTool?.tool.annotations).toMatchObject({
+        readOnlyHint: true,
+        idempotentHint: true,
+        destructiveHint: false,
+      });
+      const beforeLogs = routedRequests.length;
+      const logs = yield* server
+        .callTool({
+          name: "preview_logs",
+          arguments: { tabId: alternateTabId, consoleLevels: ["warning"] },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(logs.isError).toBe(false);
+      expect(logs.structuredContent).toEqual(logsResult);
+      expect(logs.content.every((content) => content.type === "text")).toBe(true);
+      expect(routedRequests.slice(beforeLogs)).toMatchObject([
+        { operation: "logs", tabId: alternateTabId },
+      ]);
+      expect(routedRequests.length).toBe(beforeLogs + 1);
 
       const malformed = yield* server
         .callTool({ name: "preview_click", arguments: { selector: "" } })

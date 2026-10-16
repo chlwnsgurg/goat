@@ -100,7 +100,7 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
   yield* Effect.acquireRelease(
     Effect.try({
       try: () => {
-        NodeFS.mkdirSync(stateDir, { recursive: true });
+        NodeFS.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
         const db = new NodeSqlite.DatabaseSync(NodePath.join(stateDir, "server-owner.sqlite"));
         try {
           db.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE;");

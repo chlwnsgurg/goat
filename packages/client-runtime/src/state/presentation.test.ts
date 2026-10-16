@@ -7,8 +7,78 @@ import { AVAILABLE_CONNECTION_STATE, PrimaryConnectionTarget } from "../connecti
 import {
   createEnvironmentPresentationAtoms,
   createEnvironmentSummaryAtoms,
+  createEnvironmentShellSyncAtom,
+  shellSyncMessage,
 } from "./presentation.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
+import type { EnvironmentShellState } from "./shell.ts";
+import { v2ShellSnapshot } from "./orchestrationV2TestFixtures.ts";
+
+describe("shell sync presentation", () => {
+  it.each([false, true])(
+    "exposes shell-only failure with cached snapshot=%s and clears it after recovery",
+    (cached) => {
+      const registry = AtomRegistry.make();
+      const shell = Atom.make<EnvironmentShellState>({
+        status: "synchronizing",
+        snapshot: cached ? Option.some(v2ShellSnapshot) : Option.none(),
+        error: Option.none(),
+      });
+      const sync = createEnvironmentShellSyncAtom(() => shell)(FIRST);
+      const stop = registry.subscribe(sync, () => {});
+      try {
+        expect(registry.get(sync)).toBe("synchronizing");
+        registry.set(shell, {
+          ...registry.get(shell),
+          status: cached ? "cached" : "empty",
+          error: Option.some("Permission denied: private-id"),
+        });
+        expect(registry.get(sync)).toBe(cached ? "stale" : "error");
+        expect(shellSyncMessage(registry.get(sync))).toContain("Could not sync environment data");
+        expect(shellSyncMessage(registry.get(sync))).not.toContain("private-id");
+        registry.set(shell, {
+          ...registry.get(shell),
+          status: "synchronizing",
+          error: Option.none(),
+        });
+        expect(registry.get(sync)).toBe("synchronizing");
+        registry.set(shell, {
+          snapshot: Option.some(v2ShellSnapshot),
+          status: "live",
+          error: Option.none(),
+        });
+        expect(shellSyncMessage(registry.get(sync))).toBeNull();
+      } finally {
+        stop();
+        registry.dispose();
+      }
+    },
+  );
+
+  it("does not notify sync consumers for live snapshot updates", () => {
+    const registry = AtomRegistry.make();
+    const shell = Atom.make<EnvironmentShellState>({
+      snapshot: Option.some(v2ShellSnapshot),
+      status: "live",
+      error: Option.none(),
+    });
+    const sync = createEnvironmentShellSyncAtom(() => shell)(FIRST);
+    registry.get(sync);
+    let notifications = 0;
+    const stop = registry.subscribe(sync, () => notifications++);
+    try {
+      registry.set(shell, {
+        ...registry.get(shell),
+        snapshot: Option.some({ ...v2ShellSnapshot, snapshotSequence: 2 }),
+      });
+      expect(registry.get(sync)).toBe("live");
+      expect(notifications).toBe(0);
+    } finally {
+      stop();
+      registry.dispose();
+    }
+  });
+});
 
 const FIRST = EnvironmentId.make("first");
 const SECOND = EnvironmentId.make("second");

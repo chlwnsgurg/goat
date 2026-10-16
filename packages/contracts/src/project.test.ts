@@ -19,6 +19,8 @@ import {
   ProjectSearchEntriesError,
   ProjectSearchEntriesInput,
   ProjectWriteFileError,
+  ProjectReadFileResult,
+  ProjectWriteFileInput,
 } from "./project.ts";
 
 const decodeProjectCreatePayload = Schema.decodeUnknownSync(ProjectCreatePayload);
@@ -26,6 +28,39 @@ const decodeProjectUpdatePayload = Schema.decodeUnknownSync(ProjectUpdatePayload
 const decodeProjectMutation = Schema.decodeUnknownSync(ProjectMutation);
 const decodeSearchEntriesInput = Schema.decodeUnknownSync(ProjectSearchEntriesInput);
 const decodeSearchContentsInput = Schema.decodeUnknownSync(ProjectSearchContentsInput);
+
+const decodeFileRead = Schema.decodeSync(ProjectReadFileResult);
+const decodeFileWrite = Schema.decodeSync(ProjectWriteFileInput);
+const encodeFileWriteError = Schema.encodeSync(ProjectWriteFileError);
+const decodeFileWriteError = Schema.decodeSync(ProjectWriteFileError);
+
+describe("guarded file contracts", () => {
+  it("accepts old reads and writes without guarded-save metadata", () => {
+    expect(
+      decodeFileRead({
+        relativePath: "file",
+        contents: "text",
+        byteLength: 4,
+        truncated: false,
+      }),
+    ).toEqual({ relativePath: "file", contents: "text", byteLength: 4, truncated: false });
+    expect(
+      decodeFileWrite({
+        cwd: "/repo",
+        relativePath: "file",
+        contents: "text",
+      }),
+    ).toEqual({ cwd: "/repo", relativePath: "file", contents: "text" });
+  });
+  it.each(["changed_on_disk", "deleted_on_disk"] as const)(
+    "round-trips typed %s failures over the wire",
+    (failure) => {
+      const error = new ProjectWriteFileError({ cwd: "/repo", relativePath: "file", failure });
+      const encoded = encodeFileWriteError(error);
+      expect(decodeFileWriteError(encoded).failure).toBe(failure);
+    },
+  );
+});
 
 describe("project search inputs", () => {
   it("allows an empty entries query for bounded frecency browsing", () => {

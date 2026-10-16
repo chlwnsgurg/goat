@@ -3,6 +3,7 @@ import {
   type ServerConfig,
   type AuthSessionState,
   MemorySpaceId,
+  MemoryId,
   EnvironmentAuthorizationError,
   EnvironmentId,
   type RelayClientInstallProgressEvent,
@@ -729,6 +730,118 @@ describe("environment RPC", () => {
 
 describe("staged memory RPC", () => {
   const memorySpaceId = MemorySpaceId.make("00000000-0000-4000-8000-000000000001");
+  const memoryId = MemoryId.make("00000000-0000-4000-8000-000000000002");
+  it.effect.each([undefined, false, true])(
+    "dispatch gates caller history opt-in on selected session capability: %s",
+    (supported) =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        const inputs: unknown[] = [];
+        const client = {
+          [WS_METHODS.memoryHistory]: (input: unknown) => {
+            inputs.push(input);
+            return Effect.succeed({});
+          },
+        } as unknown as WsRpcProtocolClient;
+        yield* SubscriptionRef.set(
+          h.activeSession,
+          Option.some({
+            ...session(client),
+            initialConfig: Effect.succeed({
+              environment: {
+                capabilities: {
+                  memory: {
+                    protocolVersion: 1,
+                    ...(supported === undefined ? {} : { refusedReverts: supported }),
+                  },
+                },
+              },
+            } as ServerConfig),
+          }),
+        );
+        for (const optIn of [true, false]) {
+          const input = {
+            memorySpaceId,
+            memoryId,
+            limit: 10,
+            ...(optIn ? { includeRefusedReverts: true as const } : {}),
+          };
+          yield* requestGuarded(WS_METHODS.memoryHistory, input).pipe(
+            Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+            Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+          );
+          expect(inputs.at(-1)).toEqual({
+            memorySpaceId,
+            memoryId,
+            limit: 10,
+            ...(supported && optIn ? { includeRefusedReverts: true } : {}),
+          });
+          expect(input).toEqual({
+            memorySpaceId,
+            memoryId,
+            limit: 10,
+            ...(optIn ? { includeRefusedReverts: true } : {}),
+          });
+        }
+      }),
+  );
+  it.effect.each([undefined, false, true] as const)(
+    "gates retained space and resolution history on the selected session: %s",
+    (supported) =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        const inputs: Array<{ method: string; input: unknown }> = [];
+        const client = {
+          [WS_METHODS.memorySyncStatus]: (input: unknown) => {
+            inputs.push({ method: "sync", input });
+            return Effect.succeed({});
+          },
+          [WS_METHODS.memoryHistory]: (input: unknown) => {
+            inputs.push({ method: "history", input });
+            return Effect.succeed({});
+          },
+        } as unknown as WsRpcProtocolClient;
+        yield* SubscriptionRef.set(
+          h.activeSession,
+          Option.some({
+            ...session(client),
+            initialConfig: Effect.succeed({
+              environment: {
+                capabilities: {
+                  memory: {
+                    protocolVersion: 1,
+                    ...(supported === undefined
+                      ? {}
+                      : { resolutionInputs: supported, retainedLocalSpace: supported }),
+                  },
+                },
+              },
+            } as ServerConfig),
+          }),
+        );
+        const provide = Effect.provideService(
+          EnvironmentSupervisor.EnvironmentSupervisor,
+          h.supervisor,
+        );
+        const permit = Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void });
+        yield* requestGuarded(WS_METHODS.memorySyncStatus, {
+          includeRetainedLocalSpaceId: true,
+        }).pipe(provide, permit);
+        expect(inputs).toEqual([
+          { method: "sync", input: supported ? { includeRetainedLocalSpaceId: true } : {} },
+        ]);
+        const result = yield* requestGuarded(WS_METHODS.memoryHistory, {
+          memorySpaceId,
+          memoryId,
+          limit: 10,
+          resolutionInputsFor: "00000000-0000-4000-8000-000000000007" as never,
+        }).pipe(provide, permit, Effect.exit);
+        expect(Exit.isSuccess(result)).toBe(supported === true);
+        expect(inputs.filter((value) => value.method === "history")).toHaveLength(
+          supported ? 1 : 0,
+        );
+      }),
+  );
   it.effect("denies a raw memory subscription without a read grant", () =>
     Effect.gen(function* () {
       const h = yield* makeHarness();

@@ -22,6 +22,7 @@ import * as ThreadMessageIntake from "../orchestration-v2/ThreadMessageIntake.ts
 import * as Claims from "../orchestration-v2/AttachmentClaims.ts";
 import * as CloudSource from "../orchestration-v2/CloudTaskSourceService.ts";
 import * as ProviderAdapters from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as Project from "../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as RemoteReportService from "../remoteReports/RemoteReportService.ts";
@@ -126,6 +127,36 @@ const make = Effect.gen(function* () {
   const reports = yield* RemoteReportService.RemoteReportService;
   const adapters = yield* ProviderAdapters.ProviderAdapterRegistryV2;
   const sources = yield* CloudSource.CloudTaskSourceService;
+  const providerRegistry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
+  /**
+   * Refuses a provider instance this environment does not have, or a requested
+   * model its provider does not list, before any thread exists. An SSH launch
+   * forwards the caller's model as requested, so the remote checks it here.
+   */
+  const checkModelSelection = Effect.fn("ThreadLaunchMcpService.checkModelSelection")(function* (
+    selection: { readonly instanceId: string; readonly model: string },
+    requested: boolean,
+  ) {
+    if (Option.isNone(providerRegistry)) return;
+    const providers = yield* providerRegistry.value.getProviders;
+    const provider = providers.find((entry) => entry.instanceId === selection.instanceId);
+    if (provider === undefined)
+      return yield* new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: `This GOAT has no provider instance ${selection.instanceId}; it has ${
+          providers.map((entry) => entry.instanceId).join(", ") || "none"
+        }. orchestrator_capabilities lists providers and models.`,
+      });
+    if (
+      requested &&
+      provider.models.length > 0 &&
+      !provider.models.some((model) => model.slug === selection.model)
+    )
+      return yield* new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: `Provider ${selection.instanceId} here does not offer model ${selection.model}. Pick one orchestrator_capabilities lists for it.`,
+      });
+  });
   return ThreadLaunchMcpService.of({
     launch: (scope, input, { runtimeMode, interactionMode }) =>
       Effect.gen(function* () {
@@ -194,6 +225,7 @@ const make = Effect.gen(function* () {
         if (input.scratch === true) {
           const selected = input.modelSelection ?? caller?.modelSelection;
           if (selected !== undefined) {
+            yield* checkModelSelection(selected, input.modelSelection !== undefined);
             const selectedAdapter = yield* adapters
               .get(selected.instanceId)
               .pipe(Effect.mapError(unavailable));
@@ -238,6 +270,7 @@ const make = Effect.gen(function* () {
               "Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.",
           });
         const startsRun = input.message !== undefined || attachments.length > 0;
+        yield* checkModelSelection(modelSelection, input.modelSelection !== undefined);
         const adapter = yield* adapters
           .get(modelSelection.instanceId)
           .pipe(Effect.mapError(unavailable));

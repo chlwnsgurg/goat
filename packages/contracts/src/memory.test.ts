@@ -312,6 +312,7 @@ const checkpoint = {
   identities: [identity],
   fences: [fence],
   suppressions: [],
+  importLineage: [],
   nextCursor: null,
   bootstrapComplete: true,
 };
@@ -1950,4 +1951,335 @@ it("keeps restoration availability bounded to visible revisions in the selected 
       cleanupPending: false,
     },
   });
+});
+
+describe("WP5 lineage checkpoint contracts", () => {
+  const source = {
+    memorySpaceId: id(),
+    memoryId: id(2),
+    kind: "sourceKey",
+    sourceKey: { environmentId: "env", sourceId: id(10), sourceItemKey: "entry" },
+  };
+  const content = {
+    memorySpaceId: id(),
+    memoryId: id(2),
+    kind: "content",
+    content: {
+      scope: { kind: "user" },
+      assertionKind: "inference",
+      contentFingerprint: "a".repeat(64),
+    },
+  };
+  it("round-trips both body-free lineage arms in a v1 checkpoint", () => {
+    for (const row of [source, content]) round(M.MemoryImportLineageRecord, row);
+    const page = round(M.MemoryHubCheckpointPage, {
+      ...checkpoint,
+      importLineage: [source, content],
+    });
+    expect(M.validateMemoryCheckpointRecords([page])).toBe(true);
+    expect(M.MEMORY_PROTOCOL_VERSION).toBe(1);
+    expect(M.MEMORY_IMPORT_LINEAGE_MAX_RECORDS_PER_MEMORY).toBe(1000);
+    expect(M.MEMORY_IMPORT_LINEAGE_MAX_BYTES).toBe(33554432);
+  });
+  it("strictly rejects missing required checkpoint lineage", () => {
+    const { importLineage: _lineage, ...oldPage } = checkpoint;
+    rejects(M.MemoryHubCheckpointPage, oldPage);
+    expect(() => M.MemoryHubCheckpointPage.make(oldPage as never)).toThrow();
+    expect(M.validateMemoryCheckpointRecords([oldPage as never])).toBe(false);
+    rejects(M.MemoryHubCheckpointPage, { ...checkpoint, importLineage: null });
+  });
+  it("rejects unknown lineage kinds, missing arms, mixed arms and suppression fields", () => {
+    for (const bad of [
+      { ...source, kind: "unknown" },
+      { memorySpaceId: id(), memoryId: id(2), kind: "sourceKey" },
+      { memorySpaceId: id(), memoryId: id(2), kind: "content" },
+      { ...source, content: content.content },
+      { ...source, deleteOperationId: id(4) },
+      { ...content, body: "forbidden" },
+      { ...source, sourceKey: { ...source.sourceKey, path: "/private" } },
+    ]) {
+      rejects(M.MemoryImportLineageRecord, bad);
+      expect(() => M.MemoryImportLineageRecord.make(bad as never)).toThrow();
+    }
+  });
+  it("counts lineage in the mixed 100-record page envelope", () => {
+    const rows = Array.from({ length: 97 }, (_, n) => ({
+      ...source,
+      sourceKey: { ...source.sourceKey, sourceItemKey: `key:${n}` },
+    }));
+    round(M.MemoryHubCheckpointPage, { ...checkpoint, importLineage: rows });
+    rejects(M.MemoryHubCheckpointPage, { ...checkpoint, importLineage: [...rows, content] });
+  });
+  it("charges escaped lineage encoding to the existing page byte envelope", () => {
+    const rows = Array.from({ length: 97 }, (_, n) => ({
+      ...source,
+      sourceKey: { ...source.sourceKey, sourceItemKey: `${n}${"\u0001".repeat(500)}` },
+    }));
+    expect(
+      new TextEncoder().encode(JSON.stringify({ ...checkpoint, importLineage: rows })).length,
+    ).toBeGreaterThan(262144);
+    rejects(M.MemoryHubCheckpointPage, { ...checkpoint, importLineage: rows });
+  });
+  it("validates identity, space and content scope across pages and canonical duplicates", () => {
+    const page = (rows: unknown[]) =>
+      decode(M.MemoryHubCheckpointPage, { ...checkpoint, importLineage: rows });
+    for (const rows of [
+      [{ ...source, memoryId: id(99) }],
+      [{ ...source, memorySpaceId: id(99) }],
+      [
+        {
+          ...content,
+          content: {
+            ...content.content,
+            scope: { kind: "project", projectKey: { kind: "repository", groupingKey: "other" } },
+          },
+        },
+      ],
+      [
+        source,
+        {
+          ...source,
+          sourceKey: { sourceItemKey: "entry", sourceId: id(10), environmentId: "env" },
+        },
+      ],
+    ])
+      expect(M.validateMemoryCheckpointRecords([page(rows)])).toBe(false);
+    const first = decode(M.MemoryHubCheckpointPage, {
+      ...checkpoint,
+      importLineage: [source],
+      nextCursor: "next",
+      bootstrapComplete: false,
+    });
+    const second = decode(M.MemoryHubCheckpointPage, {
+      ...checkpoint,
+      pageOrdinal: 1,
+      identities: [],
+      fences: [],
+      compactReceipts: [],
+      importLineage: [content],
+    });
+    expect(M.validateMemoryCheckpointRecords([first, second])).toBe(true);
+    expect(
+      M.validateMemoryCheckpointRecords([first, { ...second, importLineage: first.importLineage }]),
+    ).toBe(false);
+    const typed = decode(M.MemoryImportLineageRecord, source);
+    expect(M.memoryImportLineageRecordKey(typed)).toBe(
+      M.memoryImportLineageRecordKey({
+        ...typed,
+        ...decode(M.MemoryImportLineageRecord, {
+          ...source,
+          sourceKey: { sourceItemKey: "entry", sourceId: id(10), environmentId: "env" },
+        }),
+      }),
+    );
+  });
+  it("keeps canonical lineage keys stable through sorting and multi-page pagination", () => {
+    const rows = Array.from({ length: 151 }, (_, n) =>
+      decode(M.MemoryImportLineageRecord, {
+        ...source,
+        sourceKey: { ...source.sourceKey, sourceItemKey: `key:${n}` },
+      }),
+    );
+    const ordered = [...rows].sort((a, b) =>
+      M.memoryImportLineageRecordKey(a) < M.memoryImportLineageRecordKey(b) ? -1 : 1,
+    );
+    const first = decode(M.MemoryHubCheckpointPage, {
+      ...checkpoint,
+      importLineage: ordered.slice(0, 97),
+      nextCursor: "next",
+      bootstrapComplete: false,
+    });
+    const second = decode(M.MemoryHubCheckpointPage, {
+      ...checkpoint,
+      identities: [],
+      compactReceipts: [],
+      fences: [],
+      pageOrdinal: 1,
+      importLineage: ordered.slice(97),
+    });
+    expect(M.validateMemoryCheckpointRecords([first, second])).toBe(true);
+    expect(
+      [first, second].flatMap((p) => p.importLineage).map(M.memoryImportLineageRecordKey),
+    ).toEqual(ordered.map(M.memoryImportLineageRecordKey));
+    const reordered = decode(M.MemoryImportLineageRecord, {
+      ...content,
+      content: {
+        contentFingerprint: content.content.contentFingerprint,
+        assertionKind: "inference",
+        scope: { kind: "user" },
+      },
+    });
+    expect(M.memoryImportLineageRecordKey(reordered)).toBe(
+      M.memoryImportLineageRecordKey(decode(M.MemoryImportLineageRecord, content)),
+    );
+  });
+  it("appends capacity ordinals and carries lineage capacities through existing import errors/results", () => {
+    const old = [
+      "body",
+      "user_items",
+      "project_items",
+      "thread_summaries",
+      "thread_items",
+      "space_live_items",
+      "environment_live_items",
+      "live_payload_bytes",
+      "history",
+      "import_session_items",
+      "import_session_bytes",
+      "import_live_items",
+      "import_live_bytes",
+      "import_source_items",
+      "import_aliases",
+      "import_digests",
+      "permanent_metadata",
+      "lifetime_ids",
+      "receipts",
+      "log_tail_rows",
+      "log_tail_bytes",
+      "work_items",
+      "work_bytes",
+      "report_items",
+      "report_bytes",
+      "relay_environment",
+      "relay_hub",
+      "members",
+      "checkpoint_handles",
+      "checkpoint_staging",
+      "derived_cache",
+      "fts_indexed_text",
+      "fts_admission_brake",
+    ];
+    expect(M.MemoryCapacityDimension.literals).toEqual([
+      ...old,
+      "import_lineage_records",
+      "import_lineage_bytes",
+    ]);
+    for (const dimension of M.MemoryCapacityDimension.literals) {
+      const capacity = {
+        code: "capacity_exceeded",
+        dimension,
+        current: 1000,
+        limit: 1000,
+        reclaimable: 0,
+      };
+      round(M.MemoryCapacityExceeded, capacity);
+      round(M.MemoryImportRpcError, {
+        _tag: "MemoryImportRpcError",
+        issue: "capacity_exceeded",
+        capacity,
+      });
+      round(M.MemoryImportItemResult, {
+        sourceItemKey: "entry",
+        outcome: "rejected",
+        issue: "capacity_exceeded",
+        capacity,
+        memoryId: null,
+        revisionId: null,
+      });
+      rejects(M.MemoryCapacityExceeded, { ...capacity, current: -1 });
+      rejects(M.MemoryCapacityExceeded, { ...capacity, limit: 0 });
+      rejects(M.MemoryCapacityExceeded, { ...capacity, reclaimable: -1 });
+      rejects(M.MemoryCapacityExceeded, { ...capacity, extra: true });
+    }
+    rejects(M.MemoryCapacityExceeded, {
+      code: "capacity_exceeded",
+      dimension: "unknown",
+      current: 0,
+      limit: 1,
+      reclaimable: 0,
+    });
+  });
+});
+
+it("report retry reset accepts at most 32 distinct exact-owner IDs and rejects excess fields", () => {
+  const valid = {
+    memorySpaceId: id(),
+    environmentId: "fixture",
+    reportIds: Array.from({ length: 32 }, (_, n) => n.toString(16).padStart(64, "0")),
+  };
+  const decode = Schema.decodeUnknownSync(M.MemoryResetReportAttemptsInput);
+  expect(decode(valid).reportIds).toHaveLength(32);
+  for (const invalid of [
+    { ...valid, reportIds: [...valid.reportIds, "f".repeat(64)] },
+    { ...valid, reportIds: [valid.reportIds[0], valid.reportIds[0]] },
+    { ...valid, reportIds: [] },
+    { ...valid, agent: true },
+    { ...valid, environmentId: undefined },
+  ])
+    expect(() => decode(invalid)).toThrow();
+  expect(() =>
+    Schema.decodeUnknownSync(M.MemoryResetReportAttemptsResult)({
+      resetCount: 33,
+      unchangedCount: 0,
+    }),
+  ).toThrow();
+});
+
+it("refused revert results are body-free and history opt-in is explicit", () => {
+  const result = {
+    operationId: id(80),
+    memoryId: id(2),
+    resolutionId: id(7),
+    revertDeadlineUtc: resolution.revertDeadlineUtc,
+    status: "refused",
+    failureCode: "unavailable",
+  };
+  round(M.MemoryRevertResult, result);
+  round(M.MemoryHistoryPage, { ...history, revertResults: [result] });
+  rejects(M.MemoryRevertResult, { ...result, failureCode: "raw-private-error" });
+  rejects(M.MemoryRevertResult, { ...result, body: "private" });
+  rejects(M.MemoryRevertResult, { ...result, failureCode: undefined });
+  round(M.MemoryHistoryInput, { memorySpaceId: id(), memoryId: id(2), limit: 10 });
+  round(M.MemoryHistoryInput, {
+    memorySpaceId: id(),
+    memoryId: id(2),
+    limit: 10,
+    includeRefusedReverts: true,
+  });
+  rejects(M.MemoryHistoryInput, {
+    memorySpaceId: id(),
+    memoryId: id(2),
+    limit: 10,
+    includeRefusedReverts: false,
+  });
+});
+
+it("strictly bounds hub diagnostics and rejects unsafe or duplicated reasons", () => {
+  const diagnostic = {
+    version: 1,
+    publication: { state: "current" },
+    readiness: "ready",
+    connection: "unreachable",
+    recoverableHolds: ["protocol", "availability"],
+    permanentHolds: ["identity", "authorization"],
+    reconcile: "permanent_hold",
+  };
+  const decode = Schema.decodeUnknownSync(M.MemoryHubDiagnostics);
+  expect(decode(diagnostic)).toEqual(diagnostic);
+  for (const invalid of [
+    { ...diagnostic, reason: "raw endpoint or credential" },
+    { ...diagnostic, permanentHolds: ["identity", "identity"] },
+    { ...diagnostic, recoverableHolds: ["authorization"] },
+    { ...diagnostic, publication: { state: "last_valid", code: "raw exception" } },
+    { ...diagnostic, version: -1 },
+  ])
+    expect(() => decode(invalid)).toThrow();
+  const request = { memorySpaceId: id(), environmentId: "fixture", expectedVersion: 1 };
+  expect(Schema.decodeUnknownSync(M.MemoryHubReconcileInput)(request)).toEqual(request);
+  expect(() =>
+    Schema.decodeUnknownSync(M.MemoryHubReconcileInput)({ ...request, releaseAll: true }),
+  ).toThrow();
+  expect(() =>
+    Schema.decodeUnknownSync(M.MemoryHubReconcileResult)({
+      version: 1,
+      rearmedClasses: ["identity"],
+    }),
+  ).toThrow();
+});
+
+it("opts into retained local space without changing legacy sync status requests", () => {
+  round(M.MemorySyncStatusInput, {});
+  round(M.MemorySyncStatusInput, { includeRetainedLocalSpaceId: true });
+  rejects(M.MemorySyncStatusInput, { includeRetainedLocalSpaceId: false });
+  rejects(M.MemorySyncStatusInput, { includeRetainedLocalSpaceId: null });
 });

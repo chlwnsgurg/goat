@@ -584,3 +584,43 @@ it.effect("revalidates source after descriptor preparation and on every retry", 
     assert.deepStrictEqual(outcomes, ["available", "unavailable"]);
   }).pipe(Effect.provide(live)),
 );
+
+it.effect("v1 pull requires the lineage field and rejects the old checkpoint codec", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const client = yield* Client.MemoryHubClient;
+    const page: M.MemoryHubCheckpointPage = {
+      memorySpaceId: space,
+      checkpointSequence: 0,
+      retentionFloor: 0,
+      causalBoundary: { checkpointSequence: 0, boundaryId: "synthetic-boundary" },
+      pageOrdinal: 0,
+      items: [],
+      revisions: [],
+      tombstones: [],
+      conflicts: [],
+      resolutions: [],
+      compactReceipts: [],
+      identities: [],
+      fences: [],
+      suppressions: [],
+      importLineage: [],
+      nextCursor: null,
+      bootstrapComplete: true,
+    };
+    const { importLineage: _lineage, ...oldPage } = page;
+    for (const [checkpoint, valid] of [
+      [page, true],
+      [oldPage, false],
+    ] as const) {
+      const fetch: typeof globalThis.fetch = async (_url, init) =>
+        init?.method === "POST"
+          ? json({ highWatermark: 0, throughSequence: 0, hasMore: false, entries: [], checkpoint })
+          : json(descriptor);
+      const result = yield* Effect.result(
+        client.pull(connection, pull).pipe(Effect.provideService(FetchHttpClient.Fetch, fetch)),
+      );
+      assert.strictEqual(result._tag, valid ? "Success" : "Failure");
+    }
+  }).pipe(Effect.provide(live)),
+);

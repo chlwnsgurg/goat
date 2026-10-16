@@ -1,3 +1,4 @@
+import { ProviderMemoryImportRuntime } from "../memory/imports/MemoryImportTypes.ts";
 import {
   EnvironmentId,
   ORCHESTRATION_PROTOCOL_VERSION,
@@ -194,6 +195,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
+  const importRuntime = yield* Effect.serviceOption(ProviderMemoryImportRuntime);
   const hubRoutes = yield* Effect.serviceOption(MemoryHubHttp.MemoryHubHttpReady);
   const settings = yield* Effect.serviceOption(Settings.ServerSettingsService);
   const identity = yield* ServerEnvironmentIdentity;
@@ -232,7 +234,14 @@ export const make = Effect.gen(function* () {
     orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
     capabilities: {
       // The core and owner memory RPC groups are always installed by ws.ts.
-      memory: { protocolVersion: 1 },
+      memory: {
+        protocolVersion: 1,
+        refusedReverts: true,
+        resolutionInputs: true,
+        retainedLocalSpace: true,
+        hubDiagnostics: true,
+        ...(importRuntime._tag === "Some" ? { importProvider: true } : {}),
+      },
       repositoryIdentity: true,
       connectionProbe: true,
       attachmentUploads: true,

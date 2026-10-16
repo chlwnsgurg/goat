@@ -4,6 +4,7 @@ import {
   AuthMemoryReadScope,
   AuthOrchestrationReadScope,
   MemoryId,
+  ProjectId,
   MemoryOperationId,
   supportsMemoryProtocol,
   type EnvironmentId,
@@ -18,6 +19,7 @@ import {
   type MemoryRevertResolutionInput,
   type MemoryRevertResult,
   type MemoryForgetInput,
+  type MemoryProjectBinding,
 } from "@goat/contracts";
 import {
   presentMemoryItem,
@@ -26,6 +28,10 @@ import {
   presentMemoryRevert,
   memoryLocalSpace,
   presentMemoryReport,
+  presentMemoryStorage,
+  presentMemoryProcessing,
+  isMemoryReportRetryCandidate,
+  presentMemoryReportReset,
   memoryReportTarget,
   MEMORY_FORGET_NOTICE,
 } from "@goat/client-runtime/memory-presentation";
@@ -56,11 +62,16 @@ import { useHomeThreadSelection } from "../home/home-thread-navigation";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsActionRow } from "./components/SettingsActionRow";
+import { MemorySyncDiagnostics } from "./MemorySyncDiagnostics";
+import { MemoryImportSettings } from "./MemoryImportSettings";
+import { MemoryProjectSettings } from "./MemoryProjectSettings";
+import { MemoryProjectPicker } from "./MemoryProjectPicker";
 import { MemoryAdministration } from "./MemorySharingSettings";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SettingsRow } from "./components/SettingsRow";
 import {
   memoryExpectedHeads,
+  memoryScopeForSelection,
   validateMemoryDestination,
   type MemoryScreenParams,
 } from "./SettingsMemoryRouteScreen.logic";
@@ -410,6 +421,9 @@ function MemoryConnected({
         />
       ) : (
         <ScreenScrollView>
+          <MemoryAgentAccess environmentId={environmentId} />
+          {status ? <MemoryStatusRows status={status} /> : null}
+          <MemorySyncDiagnostics environmentId={environmentId} status={status} onRefresh={load} />
           <MemoryAdministration
             environmentId={environmentId}
             onSharingRefresh={() => void load()}
@@ -466,6 +480,7 @@ function MemoryBrowser({
   const [scope, setScope] = useState<MemoryScope | null>({ kind: "user" });
   const [selection, setSelection] = useState("user");
   const [browsing, setBrowsing] = useState(false);
+  const retireImport = useRef<() => Promise<void>>(async () => {});
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   useEffect(
@@ -474,18 +489,37 @@ function MemoryBrowser({
     },
     [],
   );
-  async function choose(project: (typeof projects)[number] | null) {
+  async function choose(project: (typeof projects)[number] | null, thread = false) {
     const attempt = ++generation.current;
+    try {
+      await retireImport.current();
+    } catch {
+      if (generation.current === attempt)
+        setError("Could not clear the previous import. Reopen Settings before changing projects.");
+      return;
+    }
+    if (generation.current !== attempt) return;
     setBrowsing(true);
-    setSelection(project ? `project:${project.id}` : "user");
+    setSelection(thread ? "thread" : project ? `project:${project.id}` : "user");
     setError(null);
-    setScope(project ? null : { kind: "user" });
-    if (!project) return;
+    const projectRef = project
+      ? { environmentId: params.environmentId, projectId: project.id }
+      : thread
+        ? params.project
+        : undefined;
+    setScope(
+      projectRef
+        ? null
+        : thread
+          ? (memoryScopeForSelection("thread", params, null) ?? null)
+          : { kind: "user" },
+    );
+    if (!projectRef) return;
     const result = await getBinding({
       environmentId: params.environmentId,
       input: {
         memorySpaceId,
-        project: { environmentId: params.environmentId, projectId: project.id },
+        project: projectRef,
       },
     });
     if (generation.current !== attempt) return;
@@ -493,16 +527,31 @@ function MemoryBrowser({
       setError("Could not load project memory scope. Choose the project again to retry.");
       return;
     }
-    const next = memoryProjectScope(result.value, project.repositoryIdentity);
-    setScope(next);
+    const next = thread
+      ? memoryScopeForSelection("thread", params, result.value.projectKey)
+      : memoryProjectScope(result.value, project?.repositoryIdentity);
+    setScope(next ?? null);
     if (!next) setError("This project needs a repository or an explicit shared memory key.");
   }
+  const selectedProjectMissing =
+    selection.startsWith("project:") &&
+    !projects.some((project) => `project:${project.id}` === selection);
   const scopePicker = (
     <SettingsSection title="Memory scope">
       <ControlPillMenu
         title="Memory scope"
         actions={[
           { id: "user", title: "User", state: selection === "user" ? "on" : "off" },
+          ...(params.thread
+            ? [
+                {
+                  id: "thread",
+                  title: "Thread",
+                  state: selection === "thread" ? ("on" as const) : ("off" as const),
+                  attributes: { disabled: Boolean(params.project) && !canGetBinding },
+                },
+              ]
+            : []),
           ...projects.map((project) => ({
             id: `project:${project.id}`,
             title: project.title,
@@ -512,6 +561,7 @@ function MemoryBrowser({
         ]}
         onPressAction={({ nativeEvent }) => {
           if (nativeEvent.event === "user") void choose(null);
+          else if (nativeEvent.event === "thread") void choose(null, true);
           else {
             const project = projects.find((item) => `project:${item.id}` === nativeEvent.event);
             if (project && canGetBinding) void choose(project);
@@ -522,9 +572,11 @@ function MemoryBrowser({
           icon="brain"
           label="Memory scope"
           value={
-            selection === "user"
-              ? "User"
-              : projects.find((project) => `project:${project.id}` === selection)?.title
+            selection === "thread"
+              ? "Thread"
+              : selection === "user"
+                ? "User"
+                : projects.find((project) => `project:${project.id}` === selection)?.title
           }
         />
       </ControlPillMenu>
@@ -532,17 +584,40 @@ function MemoryBrowser({
         <Copy>Project scope requires memory write permission to look up its shared key.</Copy>
       ) : null}
       {error ? <Copy>{error}</Copy> : null}
-      {!scope && !error ? <Copy>Loading project memory scope</Copy> : null}
+      {selectedProjectMissing ? (
+        <Copy>Selected project is no longer available. Choose another scope.</Copy>
+      ) : !scope && !error ? (
+        <Copy>Loading project memory scope</Copy>
+      ) : null}
     </SettingsSection>
   );
-  return scope ? (
+  return scope && !selectedProjectMissing ? (
     <ScopedMemoryBrowser
       key={JSON.stringify(scope)}
       {...props}
-      params={browsing ? { ...params, memoryId: undefined, resolutionId: undefined } : params}
+      params={
+        browsing
+          ? {
+              ...params,
+              memoryId: undefined,
+              resolutionId: undefined,
+              project:
+                selection === "thread"
+                  ? params.project
+                  : selection === "user"
+                    ? undefined
+                    : {
+                        environmentId: params.environmentId,
+                        projectId: ProjectId.make(selection.slice("project:".length)),
+                      },
+              thread: selection === "thread" ? params.thread : undefined,
+            }
+          : params
+      }
       memorySpaceId={memorySpaceId}
       scope={scope}
       scopePicker={scopePicker}
+      retireImport={retireImport}
     />
   ) : (
     <ScreenScrollView>{scopePicker}</ScreenScrollView>
@@ -557,6 +632,7 @@ function ScopedMemoryBrowser({
   status,
   scope,
   scopePicker,
+  retireImport,
 }: {
   readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
   readonly memorySpaceId: MemorySpaceId;
@@ -565,6 +641,7 @@ function ScopedMemoryBrowser({
   readonly status: MemorySyncStatus | null;
   readonly scope: MemoryScope;
   readonly scopePicker: React.ReactNode;
+  readonly retireImport: React.RefObject<() => Promise<void>>;
 }) {
   const registry = useContext(RegistryContext);
   const canWrite = useAtomValue(memory.upsert.permissionAtom(params.environmentId));
@@ -573,6 +650,39 @@ function ScopedMemoryBrowser({
   const [cursor, setCursor] = useState<string | undefined>();
   const [selected, setSelected] = useState(params.memoryId);
   const [creating, setCreating] = useState(false);
+  const projects = useProjects().filter(
+    (project) => project.environmentId === params.environmentId,
+  );
+  const [projectRef, setProjectRef] = useState(params.project);
+  const effectiveParams = useMemo(
+    () => ({
+      ...params,
+      project: projectRef,
+      thread: projectRef?.projectId === params.project?.projectId ? params.thread : undefined,
+    }),
+    [params, projectRef],
+  );
+  const [binding, setBinding] = useState<MemoryProjectBinding | null>(null);
+  const acceptBinding = useCallback((value: MemoryProjectBinding | null) => setBinding(value), []);
+  const [scopeKind, setScopeKind] = useState<MemoryScope["kind"] | null>("user");
+  const importScope = useMemo(
+    () =>
+      scopeKind
+        ? memoryScopeForSelection(scopeKind, effectiveParams, binding?.projectKey ?? null)
+        : undefined,
+    [scopeKind, effectiveParams, binding],
+  );
+  const bindingToken = JSON.stringify([projectRef, binding?.version, binding?.projectKey]);
+  const [seenProjects, setSeenProjects] = useState<ReadonlySet<string>>(
+    () => new Set(projects.map((project) => project.id)),
+  );
+  if (projects.some((project) => !seenProjects.has(project.id)))
+    setSeenProjects(new Set([...seenProjects, ...projects.map((project) => project.id)]));
+  const projectExists =
+    !projectRef ||
+    projects.some((project) => project.id === projectRef.projectId) ||
+    (!seenProjects.has(projectRef.projectId) && params.project?.projectId === projectRef.projectId);
+
   const [quarantine, setQuarantine] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const forget = useAtomCommand(memory.forget);
@@ -619,8 +729,8 @@ function ScopedMemoryBrowser({
   const input = memoryBrowseInput({
     memorySpaceId,
     limit: PAGE_SIZE,
-    ...(cursor ? { cursor } : {}),
     scope,
+    ...(cursor ? { cursor } : {}),
   });
   const atom = search
     ? memory.search({
@@ -669,7 +779,99 @@ function ScopedMemoryBrowser({
             onSharingRefresh={() => void onSyncRefresh()}
             sync={status}
           />
+          <MemoryAgentAccess environmentId={params.environmentId} />
+          {status ? <MemoryStatusRows status={status} /> : null}
+          <MemorySyncDiagnostics
+            environmentId={params.environmentId}
+            status={status}
+            onRefresh={onSyncRefresh}
+          />
           {scopePicker}
+          <SettingsSection title="Import scope">
+            <Copy>Select a scope for imports. Existing memories keep their scope.</Copy>
+            {(["user", "project", "thread"] as const).map((kind) => (
+              <SettingsSwitchRow
+                key={kind}
+                label={`Scope: ${kind}`}
+                value={scopeKind === kind}
+                disabled={
+                  kind === "project"
+                    ? !binding?.projectKey || !projectExists
+                    : kind === "thread"
+                      ? !effectiveParams.thread
+                      : false
+                }
+                onValueChange={(value) => {
+                  setScopeKind(value ? kind : null);
+                  setCursor(undefined);
+                }}
+              />
+            ))}
+            {projectRef ? (
+              <Copy>
+                {projects.find((project) => project.id === projectRef.projectId)?.title ??
+                  "Selected project"}
+              </Copy>
+            ) : (
+              <Copy>
+                No project selected. User scope is available; select a project for project scope.
+              </Copy>
+            )}
+            <MemoryProjectPicker
+              environmentId={params.environmentId}
+              label="Choose project…"
+              candidateLabel="Select project: "
+              onSelect={(projectId) => {
+                void (async () => {
+                  await retireImport.current();
+                  setBinding(null);
+                  setScopeKind(null);
+                  setProjectRef({ environmentId: params.environmentId, projectId });
+                })().catch(() =>
+                  setNotice(
+                    "Could not clear the previous import. Reopen Settings before changing projects.",
+                  ),
+                );
+              }}
+            />
+            {projectRef ? (
+              <Action
+                label="Clear selected project"
+                onPress={() => {
+                  void (async () => {
+                    await retireImport.current();
+                    setProjectRef(undefined);
+                    setBinding(null);
+                    setScopeKind(null);
+                  })().catch(() =>
+                    setNotice(
+                      "Could not clear the previous import. Reopen Settings before changing projects.",
+                    ),
+                  );
+                }}
+              />
+            ) : null}
+          </SettingsSection>
+          {projectRef && projectExists ? (
+            <MemoryProjectSettings
+              key={JSON.stringify(projectRef)}
+              environmentId={params.environmentId}
+              memorySpaceId={memorySpaceId}
+              project={projectRef}
+              onBinding={acceptBinding}
+              beforeChange={() => retireImport.current()}
+            />
+          ) : null}
+          {!projectRef || binding ? (
+            <MemoryImportSettings
+              params={effectiveParams}
+              memorySpaceId={memorySpaceId}
+              scope={importScope}
+              bindingToken={bindingToken}
+              enabled={memoryEnabled && projectExists}
+              retireRef={retireImport}
+            />
+          ) : null}
           <SettingsSection title="Memories">
             {!memoryEnabled ? (
               <Copy>Saved memories stay. Turn on memory to save new memories.</Copy>
@@ -708,7 +910,7 @@ function ScopedMemoryBrowser({
           <Action
             label="Remember something"
             onPress={() => setCreating(true)}
-            disabled={!canWrite || !memoryEnabled}
+            disabled={!canWrite || !memoryEnabled || !scope}
           />
         </>
       }
@@ -1068,6 +1270,15 @@ function MemoryDetails({
         {history?.reports.map((report) => (
           <MemoryReport key={report.reportId} report={report} />
         ))}
+        {history ? (
+          <MemoryReportRetry
+            reports={history.reports}
+            environmentId={params.environmentId}
+            memorySpaceId={memorySpaceId}
+            memoryId={memoryId}
+          />
+        ) : null}
+        <Copy>History is live. Return to the first page to see new changes.</Copy>
         <Action
           label="Next history page"
           disabled={!history?.nextCursor}
@@ -1159,7 +1370,7 @@ function MemoryRevertControl({
     return liveDestination() && registry.get(memory.revertResolution.permissionAtom(environmentId));
   }
   async function submit() {
-    if (!selected || busy.current || result || !active()) return;
+    if (!selected || busy.current || (result && result.status !== "refused") || !active()) return;
     const current = readCurrent();
     const page = readHistory();
     const originals = registry.get(originalsAtom);
@@ -1253,10 +1464,11 @@ function MemoryRevertControl({
           }}
         />
       ) : null}
+      {display.notice ? <Copy>{display.notice}</Copy> : null}
       {!allowed ? <Copy>Memory write permission is required to revert.</Copy> : null}
       {error ? <Copy>{error}</Copy> : null}
       {result ? <Copy>{presentMemoryRevertResult(result).label}</Copy> : null}
-      {!result && available ? (
+      {(!result || result.status === "refused") && available ? (
         <>
           <Copy>Choose the retained original to restore.</Copy>
           {display.restorableRevisionIds.map((id) => {
@@ -1356,7 +1568,6 @@ function MemoryReport({ report }: { readonly report: Parameters<typeof presentMe
           }}
         />
       ) : null}
-      <Copy>Manual delivery retry is unavailable on this server.</Copy>
     </View>
   );
 }
@@ -1477,5 +1688,171 @@ function MemoryEditor({
       )}
       {error ? <Copy>{error}</Copy> : null}
     </ScreenScrollView>
+  );
+}
+
+function MemoryStatusRows({ status }: { status: MemorySyncStatus }) {
+  const processing = presentMemoryProcessing(status.processing);
+  const storage = presentMemoryStorage(status.storage);
+  return (
+    <SettingsSection title="Memory status">
+      {[
+        processing.coverage.label,
+        storage.label,
+        storage.searchLabel,
+        ...storage.reasons,
+        processing.checkingLabel,
+        processing.heldLabel,
+        processing.waitingLabel,
+        processing.cleanupLabel,
+        processing.receiveLabel,
+        processing.reportLabel,
+        processing.admissionLabel,
+      ]
+        .filter(Boolean)
+        .map((label) => (
+          <Copy key={label}>{label}</Copy>
+        ))}
+    </SettingsSection>
+  );
+}
+
+function MemoryAgentAccess({ environmentId }: { environmentId: EnvironmentId }) {
+  const registry = useContext(RegistryContext);
+  const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
+  const allowed = useAtomValue(serverEnvironment.updateSettings.permissionAtom(environmentId));
+  const update = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
+  const live = useMemoryLifetime(environmentId);
+  const [busy, setBusy] = useState(false);
+  const pending = useRef(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  return (
+    <SettingsSection title="Agent memory access">
+      <Copy>
+        Allow agents in this environment to use memory. Sharing is managed separately. Turning this
+        on does not increase saved task access.
+      </Copy>
+      <SettingsSwitchRow
+        label="Allow agent memory access"
+        value={config?.settings.enableAgentMemoryAccess ?? false}
+        disabled={!allowed || !config || busy}
+        onValueChange={(value) => {
+          if (
+            pending.current ||
+            !registry.get(serverEnvironment.updateSettings.permissionAtom(environmentId))
+          )
+            return;
+          pending.current = true;
+          setBusy(true);
+          void update({ environmentId, input: { patch: { enableAgentMemoryAccess: value } } })
+            .then((result) => {
+              if (live())
+                setNotice(
+                  result._tag === "Success"
+                    ? "Agent memory access updated."
+                    : "Could not update agent memory access. Try again.",
+                );
+            })
+            .finally(() => {
+              pending.current = false;
+              if (live()) setBusy(false);
+            });
+        }}
+      />
+      {notice ? <Copy>{notice}</Copy> : null}
+    </SettingsSection>
+  );
+}
+
+/** Bounded selection on this Settings history page; final approval and claim checks remain server-owned. */
+function MemoryReportRetry({
+  reports,
+  environmentId,
+  memorySpaceId,
+  memoryId,
+}: {
+  reports: MemoryHistoryPage["reports"];
+  environmentId: EnvironmentId;
+  memorySpaceId: MemorySpaceId;
+  memoryId: MemoryId;
+}) {
+  const registry = useContext(RegistryContext);
+  const allowed = useAtomValue(memory.resetReportAttempts.permissionAtom(environmentId));
+  const reset = useAtomCommand(memory.resetReportAttempts, { reportFailure: false });
+  const live = useMemoryLifetime(environmentId);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const pending = useRef(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const candidates = reports.filter((report) =>
+    isMemoryReportRetryCandidate(report, environmentId),
+  );
+  return (
+    <>
+      {candidates.length ? (
+        <Copy>
+          Select up to 32 exhausted failed reports. Resetting attempts lets the delivery worker try
+          again; it does not generate a new report.
+        </Copy>
+      ) : null}
+      {candidates.map((report, index) => (
+        <SettingsSwitchRow
+          key={report.reportId}
+          label={`Select exhausted report ${index + 1}`}
+          value={selected.has(report.reportId)}
+          disabled={!allowed || busy || (!selected.has(report.reportId) && selected.size >= 32)}
+          onValueChange={(value) =>
+            setSelected((old) => {
+              const next = new Set(old);
+              if (value && next.size < 32) next.add(report.reportId);
+              else next.delete(report.reportId);
+              return next;
+            })
+          }
+        />
+      ))}
+      {candidates.length ? (
+        <Action
+          label="Retry selected reports"
+          disabled={!selected.size || !allowed || busy}
+          onPress={() => {
+            if (
+              pending.current ||
+              !registry.get(memory.resetReportAttempts.permissionAtom(environmentId))
+            )
+              return;
+            const reportIds = candidates
+              .filter((report) => selected.has(report.reportId))
+              .slice(0, 32)
+              .map((report) => report.reportId);
+            if (!reportIds.length) return;
+            pending.current = true;
+            setBusy(true);
+            void reset({ environmentId, input: { memorySpaceId, environmentId, reportIds } })
+              .then((result) => {
+                if (!live()) return;
+                if (result._tag === "Success") {
+                  setNotice(presentMemoryReportReset(result.value).label);
+                  setSelected(new Set());
+                  registry.refresh(
+                    memory.history({
+                      environmentId,
+                      input: { memorySpaceId, memoryId, limit: PAGE_SIZE },
+                    }),
+                  );
+                } else
+                  setNotice(
+                    "Report retry was denied or could not be saved. Review the latest reports.",
+                  );
+              })
+              .finally(() => {
+                pending.current = false;
+                if (live()) setBusy(false);
+              });
+          }}
+        />
+      ) : null}
+      {notice ? <Copy>{notice}</Copy> : null}
+    </>
   );
 }

@@ -66,7 +66,7 @@ describe("memory browsing", () => {
 
   it("distinguishes no memories, no search matches and an unmatched page with more to scan", () => {
     expect(presentMemoryPage(page, false)).toBe("No memories yet.");
-    expect(presentMemoryPage(page, true)).toBe("No matching memories.");
+    expect(presentMemoryPage(page, true)).toBe("No memories found");
     expect(presentMemoryPage({ ...page, nextCursor: "more" }, true)).toBe(
       "No matching memories on this page. Continue to the next page.",
     );
@@ -89,7 +89,7 @@ describe("memory browsing", () => {
           },
           true,
         ),
-      ).toBe("Search index is preparing. Results may be incomplete.");
+      ).toBe("Results are incomplete; memories may still be available");
     },
   );
 

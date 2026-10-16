@@ -7,6 +7,8 @@ import {
   ModelSelection,
   type AuthEnvironmentScope,
   type MemoryTaskGrantCeiling,
+  type RunId,
+  type NodeId,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
@@ -156,6 +158,8 @@ export const ProviderSessionManagerV2Error = Schema.Union([
 export type ProviderSessionManagerV2Error = typeof ProviderSessionManagerV2Error.Type;
 
 export interface ProviderMemoryPrepareInput {
+  readonly runId?: RunId;
+  readonly delegatedTaskId?: NodeId;
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
   /** Explicit null is ordinary; missing legacy task authority is none. */
@@ -173,6 +177,16 @@ export interface McpCredentialRotation {
 }
 
 export interface ProviderSessionManagerV2Shape {
+  /** Positive execution authority with prepare identity; callers also match the run/task projection. */
+  readonly memoryAccessInputs?: (
+    threadId: ThreadId,
+    providerInstanceId: ProviderInstanceId,
+  ) => Effect.Effect<
+    | (ProviderMemoryPrepareInput & {
+        readonly currentMemoryGrant: Exclude<MemoryTaskGrantCeiling, "none">;
+      })
+    | undefined
+  >;
   readonly currentMemoryPolicy?: (threadId: ThreadId) => Effect.Effect<MemorySnapshotPolicy>;
   readonly prepareMcpSession?: (input: ProviderMemoryPrepareInput) => Effect.Effect<void>;
   readonly mcpCredentialRotations?: Stream.Stream<McpCredentialRotation>;
@@ -183,6 +197,8 @@ export interface ProviderSessionManagerV2Shape {
     readonly providerSessionId: ProviderSessionId;
     readonly modelSelection: ModelSelection;
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+    readonly runId?: RunId;
+    readonly delegatedTaskId?: NodeId;
     readonly memoryGrantCeiling?: MemoryTaskGrantCeiling | null;
     readonly readOnly?: boolean;
     readonly dispatchScopes?: ReadonlyArray<AuthEnvironmentScope>;
@@ -394,7 +410,13 @@ export const layerWithOptions = (
         ? yield* memoryPolicy.value.subscribeRotations
         : undefined;
       const credentialRotations = yield* PubSub.unbounded<McpCredentialRotation>();
-      const memoryPrepareInputs = new Map<ThreadId, ProviderMemoryPrepareInput>();
+      const memoryPrepareInputs = new Map<
+        ThreadId,
+        ProviderMemoryPrepareInput & {
+          readonly destinationUsable: boolean;
+          readonly providerSessionId?: ProviderSessionId | undefined;
+        }
+      >();
       // Only an explicit admission may seed the following open. Rotation/reuse
       // metadata alone must not authorize a different admission or provider.
       const pendingMemoryAdmissions = new Map<ThreadId, ProviderMemoryPrepareInput>();
@@ -577,21 +599,39 @@ export const layerWithOptions = (
                 const previousInput = memoryPrepareInputs.get(input.threadId);
                 const admitted =
                   typeof reusePreparedInput === "object" ? reusePreparedInput : previousInput;
+                const {
+                  runId: _previousRun,
+                  delegatedTaskId: _previousTask,
+                  ...admittedAuthority
+                } = admitted ?? input;
                 const preparedInput =
                   reusePreparedInput && admitted?.providerInstanceId === input.providerInstanceId
                     ? {
-                        ...admitted,
+                        // Internal reprepare retains this execution's provenance. An
+                        // explicit admission replaces IDs, including absent IDs.
+                        ...(reusePreparedInput === true ? admitted : admittedAuthority),
+                        ...(input.runId === undefined ? {} : { runId: input.runId }),
+                        ...(input.delegatedTaskId === undefined
+                          ? {}
+                          : { delegatedTaskId: input.delegatedTaskId }),
                         readOnly: admitted.readOnly === true || input.readOnly === true,
                       }
                     : { ...input, readOnly: input.readOnly === true };
                 const { threadId, providerInstanceId } = preparedInput;
-                memoryPrepareInputs.set(threadId, preparedInput);
                 const thread = yield* projectionStore.getThread(threadId).pipe(Effect.option);
                 const usableThread =
                   Option.isSome(thread) &&
                   thread.value.deletedAt === null &&
                   thread.value.archivedAt === null &&
                   thread.value.providerInstanceId === providerInstanceId;
+                memoryPrepareInputs.set(threadId, {
+                  ...preparedInput,
+                  destinationUsable: usableThread,
+                  providerSessionId:
+                    previousInput?.providerInstanceId === providerInstanceId
+                      ? previousInput.providerSessionId
+                      : undefined,
+                });
                 const readOnly = preparedInput.readOnly === true;
                 const threadReadAllowed = usableThread;
                 const committed = Option.isSome(memoryPolicy)
@@ -2430,6 +2470,30 @@ export const layerWithOptions = (
 
       return ProviderSessionManagerV2.of({
         currentMemoryPolicy,
+        memoryAccessInputs: (threadId, providerInstanceId) =>
+          Effect.gen(function* () {
+            const prepared = memoryPrepareInputs.get(threadId);
+            // A valid current projection cannot retroactively admit a denied
+            // prepare. Check its session identity before consulting execution policy.
+            if (
+              prepared?.providerInstanceId !== providerInstanceId ||
+              !prepared.destinationUsable ||
+              prepared.providerSessionId === undefined
+            )
+              return undefined;
+            const entry = (yield* Ref.get(sessions)).get(sessionKey(prepared.providerSessionId));
+            if (
+              entry?.runtime.instanceId !== providerInstanceId ||
+              !entry.attachedThreadIds.has(threadId)
+            )
+              return undefined;
+            // Use execution's current authority, including registry expiry and
+            // revocation, rather than reconstructing it from prepare metadata.
+            const policy = yield* currentMemoryPolicy(threadId);
+            if (policy.grant === "none" || memoryPrepareInputs.get(threadId) !== prepared)
+              return undefined;
+            return { ...prepared, currentMemoryGrant: policy.grant };
+          }),
         mcpCredentialRotations: Option.isSome(admission)
           ? admission.value.rotations
           : Stream.fromPubSub(credentialRotations),
@@ -2480,6 +2544,10 @@ export const layerWithOptions = (
                     {
                       threadId: input.threadId,
                       providerInstanceId: existing.runtime.instanceId,
+                      ...(input.runId === undefined ? {} : { runId: input.runId }),
+                      ...(input.delegatedTaskId === undefined
+                        ? {}
+                        : { delegatedTaskId: input.delegatedTaskId }),
                       ...(input.memoryGrantCeiling === undefined
                         ? {}
                         : { memoryGrantCeiling: input.memoryGrantCeiling }),
@@ -2503,6 +2571,12 @@ export const layerWithOptions = (
                     threadId: input.threadId,
                     providerInstanceId: existing.runtime.instanceId,
                   });
+                  const preparedInput = memoryPrepareInputs.get(input.threadId);
+                  if (preparedInput !== undefined)
+                    memoryPrepareInputs.set(input.threadId, {
+                      ...preparedInput,
+                      providerSessionId: input.providerSessionId,
+                    });
                   yield* touchActivity(input.providerSessionId);
                   return existing.exposedRuntime;
                 }
@@ -2521,6 +2595,10 @@ export const layerWithOptions = (
                   {
                     threadId: input.threadId,
                     providerInstanceId: input.modelSelection.instanceId,
+                    ...(input.runId === undefined ? {} : { runId: input.runId }),
+                    ...(input.delegatedTaskId === undefined
+                      ? {}
+                      : { delegatedTaskId: input.delegatedTaskId }),
                     ...(input.memoryGrantCeiling === undefined
                       ? {}
                       : { memoryGrantCeiling: input.memoryGrantCeiling }),
@@ -2644,6 +2722,12 @@ export const layerWithOptions = (
                   updated.set(key, entry);
                   return updated;
                 });
+                const preparedInput = memoryPrepareInputs.get(input.threadId);
+                if (preparedInput !== undefined)
+                  memoryPrepareInputs.set(input.threadId, {
+                    ...preparedInput,
+                    providerSessionId: input.providerSessionId,
+                  });
                 // The entry now guards the credential via its recorded id, so
                 // the pre-open reservation can be dropped.
                 yield* dropReservation;

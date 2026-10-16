@@ -37,11 +37,11 @@ export function memorySearchInput(input: BrowseInput, query: string): MemorySear
 
 export function presentMemoryPage(page: MemoryPage, searching: boolean) {
   if (searching && page.indexCoverage && page.indexCoverage.status !== "available") {
-    return "Search index is preparing. Results may be incomplete.";
+    return "Results are incomplete; memories may still be available";
   }
   if (page.items.length > 0) return null;
   if (page.nextCursor) return "No matching memories on this page. Continue to the next page.";
-  return searching ? "No matching memories." : "No memories yet.";
+  return searching ? "No memories found" : "No memories yet.";
 }
 
 export function memoryPreview(text: string) {

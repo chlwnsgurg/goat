@@ -88,6 +88,11 @@ describe("V2 preview upgrade", () => {
         [72, "MemoryHubSync"],
         [73, "MemorySearchCounters"],
         [74, "MemoryTaskGrantCeiling"],
+        [75, "MemoryImportLineage"],
+        [76, "MemoryCheckpointAccounting"],
+        [77, "MemoryReportLifecycle"],
+        [78, "MemoryUsageCounters"],
+        [79, "MemoryRevertResults"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -185,6 +190,11 @@ describe("V2 preview upgrade", () => {
         [72, "MemoryHubSync"],
         [73, "MemorySearchCounters"],
         [74, "MemoryTaskGrantCeiling"],
+        [75, "MemoryImportLineage"],
+        [76, "MemoryCheckpointAccounting"],
+        [77, "MemoryReportLifecycle"],
+        [78, "MemoryUsageCounters"],
+        [79, "MemoryRevertResults"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
