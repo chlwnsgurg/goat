@@ -393,39 +393,43 @@ const make = Effect.gen(function* () {
         return { ...target, alreadyLinked };
       }),
     ),
-    unlink_pull_request: writesThread((input) =>
-      Effect.gen(function* () {
-        const thread = yield* requireThread(PullRequestUnlinkFailedError, input.threadId);
-        const project = yield* projectOf(thread, PullRequestUnlinkFailedError);
-        const target = yield* resolveTarget(input, project);
-        if (!threadPullRequestsOf(thread).some((link) => threadPullRequestKeysEqual(link, target)))
+    unlink_pull_request: McpToolAccess.destructive(
+      writesThread((input) =>
+        Effect.gen(function* () {
+          const thread = yield* requireThread(PullRequestUnlinkFailedError, input.threadId);
+          const project = yield* projectOf(thread, PullRequestUnlinkFailedError);
+          const target = yield* resolveTarget(input, project);
+          if (
+            !threadPullRequestsOf(thread).some((link) => threadPullRequestKeysEqual(link, target))
+          )
+            return {
+              host: target.host,
+              repository: target.repository,
+              number: target.number,
+              wasLinked: false,
+            };
+          const wasLinked = yield* engine
+            .dispatch({
+              type: "thread.pull-request.unlink",
+              commandId: yield* commandId("mcp-pr-unlink", thread.id),
+              threadId: thread.id,
+              host: target.host,
+              repository: target.repository,
+              number: target.number,
+            })
+            .pipe(
+              Effect.as(true),
+
+              Effect.catchCause(dispatchFailure(PullRequestUnlinkFailedError)),
+            );
           return {
             host: target.host,
             repository: target.repository,
             number: target.number,
-            wasLinked: false,
+            wasLinked,
           };
-        const wasLinked = yield* engine
-          .dispatch({
-            type: "thread.pull-request.unlink",
-            commandId: yield* commandId("mcp-pr-unlink", thread.id),
-            threadId: thread.id,
-            host: target.host,
-            repository: target.repository,
-            number: target.number,
-          })
-          .pipe(
-            Effect.as(true),
-
-            Effect.catchCause(dispatchFailure(PullRequestUnlinkFailedError)),
-          );
-        return {
-          host: target.host,
-          repository: target.repository,
-          number: target.number,
-          wasLinked,
-        };
-      }),
+        }),
+      ),
     ),
     list_thread_pull_requests: McpToolAccess.reads((input) =>
       requireThread(PullRequestListFailedError, input.threadId).pipe(

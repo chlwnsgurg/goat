@@ -88,18 +88,20 @@ export const layer = McpToolAccess.toLayer(ConnectionToolkit, {
       return { created: result.created, connection: result.connection };
     }),
   ),
-  goat_connection_remove: McpToolAccess.writesEnvironment((input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      const result = yield* invoke(
-        { type: "remove", environmentId: input.environmentId },
-        CATALOG_TIMEOUT_MS,
-      );
-      yield* Effect.logInfo("Removed desktop connection", {
-        caller: callerIdentity(scope),
-        environmentId: input.environmentId,
-      });
-      return { removed: result.removed };
-    }),
+  goat_connection_remove: McpToolAccess.destructive(
+    McpToolAccess.writesEnvironment((input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const result = yield* invoke(
+          { type: "remove", environmentId: input.environmentId },
+          CATALOG_TIMEOUT_MS,
+        );
+        yield* Effect.logInfo("Removed desktop connection", {
+          caller: callerIdentity(scope),
+          environmentId: input.environmentId,
+        });
+        return { removed: result.removed };
+      }),
+    ),
   ),
 });

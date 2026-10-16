@@ -1,3 +1,5 @@
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import {
   OrchestratorMcpFailure,
   RemoteOriginReportInput,
@@ -19,20 +21,16 @@ const shared = {
     RemoteReportService.RemoteReportService,
   ],
 };
-const ReportTool = Tool.make("goat_origin_report", {
+const ReportTool = Tool.make(agentSurfaceRegistry["origin.report"].name, {
   ...shared,
-  description:
-    "Report progress, a result, failure or a need for human input to the origin of this thread. Only available inside a thread launched with an origin binding. The summary is data; a completed report is a claim and does not stop the run. Maximum 4000 characters.",
+  description: agentSurfaceRegistry["origin.report"].description,
   parameters: RemoteOriginReportInput,
   success: RemoteOriginReportResult,
-}).annotate(Tool.Destructive, false);
-const WaitTool = Tool.make("goat_origin_reports_wait", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["origin.report"]));
+const WaitTool = Tool.make(agentSurfaceRegistry["origin.reports_wait"].name, {
   ...shared,
-  description:
-    "Collect one origin correlation's reports using its read key. afterSequence acknowledges only durably imported reports. Returns up to 50 reports; drain hasMore before settling. watchRunId selects an exact run, null selects latest. observedRun lists a live run's pendingRequestIds and a finished run's holds (background tasks, a pending restart continuation); do not settle while a hold remains. knownRun tracks its last observed identity and status, plus pendingRequestIds and holds when echoed back; timeoutMs is 0..600000. A terminal report is not proof of run settlement.",
+  description: agentSurfaceRegistry["origin.reports_wait"].description,
   parameters: RemoteOriginReportsWaitInput,
   success: RemoteOriginReportsWaitResult,
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["origin.reports_wait"]));
 export const RemoteReportToolkit = Toolkit.make(ReportTool, WaitTool);

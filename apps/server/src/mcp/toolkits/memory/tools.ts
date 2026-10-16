@@ -1,3 +1,5 @@
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import * as M from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import * as SchemaAST from "effect/SchemaAST";
@@ -65,9 +67,8 @@ export const memoryInputSchema = (schema: Schema.Top) => {
 };
 
 const failure = Schema.Union([M.MemoryRpcError, M.OrchestratorMcpFailure]);
-const SearchTool = Tool.dynamic("memory_search", {
-  description:
-    "Search memory (default scope: user). fts is phrase search; use mode substring for partial text. Pass nextCursor unchanged with the same query and scope, even when items is empty. If indexCoverage is partial/unavailable, do not conclude a memory is absent.",
+const SearchTool = Tool.dynamic(agentSurfaceRegistry["memory.search"].name, {
+  description: agentSurfaceRegistry["memory.search"].description,
   parameters: memoryInputSchema(M.MemorySearchInput),
   success: M.MemoryPage,
   failure,
@@ -77,12 +78,10 @@ const SearchTool = Tool.dynamic("memory_search", {
   .addDependency(MemoryService.MemoryService)
   .addDependency(MemorySyncService.MemorySyncService)
   .addDependency(ThreadManagementService.ThreadManagementService)
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.OpenWorld, false);
+  .annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["memory.search"]));
 
-const ListTool = Tool.dynamic("memory_list", {
-  description: "List one bounded memory page.",
+const ListTool = Tool.dynamic(agentSurfaceRegistry["memory.list"].name, {
+  description: agentSurfaceRegistry["memory.list"].description,
   parameters: memoryInputSchema(M.MemoryListInput),
   success: M.MemoryPage,
   failure,
@@ -92,12 +91,10 @@ const ListTool = Tool.dynamic("memory_list", {
   .addDependency(MemoryService.MemoryService)
   .addDependency(MemorySyncService.MemorySyncService)
   .addDependency(ThreadManagementService.ThreadManagementService)
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.OpenWorld, false);
+  .annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["memory.list"]));
 
-const ReadTool = Tool.dynamic("memory_read", {
-  description: "Read one memory item.",
+const ReadTool = Tool.dynamic(agentSurfaceRegistry["memory.read"].name, {
+  description: agentSurfaceRegistry["memory.read"].description,
   parameters: memoryInputSchema(M.MemoryReadInput),
   success: M.MemoryItem,
   failure,
@@ -107,12 +104,10 @@ const ReadTool = Tool.dynamic("memory_read", {
   .addDependency(MemoryService.MemoryService)
   .addDependency(MemorySyncService.MemorySyncService)
   .addDependency(ThreadManagementService.ThreadManagementService)
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.OpenWorld, false);
+  .annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["memory.read"]));
 
-const HistoryTool = Tool.dynamic("memory_history", {
-  description: "Read one bounded memory history page.",
+const HistoryTool = Tool.dynamic(agentSurfaceRegistry["memory.history"].name, {
+  description: agentSurfaceRegistry["memory.history"].description,
   parameters: memoryInputSchema(M.MemoryHistoryInput),
   success: M.MemoryHistoryPage,
   failure,
@@ -122,12 +117,10 @@ const HistoryTool = Tool.dynamic("memory_history", {
   .addDependency(MemoryService.MemoryService)
   .addDependency(MemorySyncService.MemorySyncService)
   .addDependency(ThreadManagementService.ThreadManagementService)
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.OpenWorld, false);
+  .annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["memory.history"]));
 
-const SyncStatusTool = Tool.dynamic("memory_sync_status", {
-  description: "Read memory synchronization status, including disabled or unbound state.",
+const SyncStatusTool = Tool.dynamic(agentSurfaceRegistry["memory.sync_status"].name, {
+  description: agentSurfaceRegistry["memory.sync_status"].description,
   parameters: memoryInputSchema(M.MemorySyncStatusInput),
   success: M.MemorySyncStatus,
   failure,
@@ -137,13 +130,10 @@ const SyncStatusTool = Tool.dynamic("memory_sync_status", {
   .addDependency(MemoryService.MemoryService)
   .addDependency(MemorySyncService.MemorySyncService)
   .addDependency(ThreadManagementService.ThreadManagementService)
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.OpenWorld, false);
+  .annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["memory.sync_status"]));
 
-const UpsertTool = Tool.dynamic("memory_upsert", {
-  description:
-    "Create or update memory with an explicit memory:write grant. Read-only sessions cannot write. Keep one current assertion per item; correct an existing memory by updating it, not creating another. Do not store progress reports, tool output, or execution summaries.",
+const UpsertTool = Tool.dynamic(agentSurfaceRegistry["memory.upsert"].name, {
+  description: agentSurfaceRegistry["memory.upsert"].description,
   parameters: memoryInputSchema(M.MemoryUpsertInput),
   success: M.MemoryMutationReceipt,
   failure,
@@ -153,12 +143,10 @@ const UpsertTool = Tool.dynamic("memory_upsert", {
   .addDependency(MemoryService.MemoryService)
   .addDependency(MemorySyncService.MemorySyncService)
   .addDependency(ThreadManagementService.ThreadManagementService)
-  .annotate(Tool.Readonly, false)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.OpenWorld, false);
+  .annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["memory.upsert"]));
 
-const ForgetTool = Tool.dynamic("memory_forget", {
-  description: "Forget memory. Requires memory:write and a session allowed to write.",
+const ForgetTool = Tool.dynamic(agentSurfaceRegistry["memory.forget"].name, {
+  description: agentSurfaceRegistry["memory.forget"].description,
   parameters: memoryInputSchema(M.MemoryForgetInput),
   success: M.MemoryMutationReceipt,
   failure,
@@ -168,12 +156,10 @@ const ForgetTool = Tool.dynamic("memory_forget", {
   .addDependency(MemoryService.MemoryService)
   .addDependency(MemorySyncService.MemorySyncService)
   .addDependency(ThreadManagementService.ThreadManagementService)
-  .annotate(Tool.Readonly, false)
-  .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, false);
+  .annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["memory.forget"]));
 
-const RevertResolutionTool = Tool.dynamic("memory_revert_resolution", {
-  description: "Revert a memory resolution within its deadline. Requires memory:write.",
+const RevertResolutionTool = Tool.dynamic(agentSurfaceRegistry["memory.revert_resolution"].name, {
+  description: agentSurfaceRegistry["memory.revert_resolution"].description,
   parameters: memoryInputSchema(M.MemoryRevertResolutionInput),
   success: M.MemoryRevertResult,
   failure,
@@ -183,13 +169,10 @@ const RevertResolutionTool = Tool.dynamic("memory_revert_resolution", {
   .addDependency(MemoryService.MemoryService)
   .addDependency(MemorySyncService.MemorySyncService)
   .addDependency(ThreadManagementService.ThreadManagementService)
-  .annotate(Tool.Readonly, false)
-  .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, false);
+  .annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["memory.revert_resolution"]));
 
-const ReadSourceTool = Tool.dynamic("memory_read_source", {
-  description:
-    "Read original evidence through its owner. Requires memory:read and independently granted orchestration:read. No arbitrary path or SSH target.",
+const ReadSourceTool = Tool.dynamic(agentSurfaceRegistry["memory.read_source"].name, {
+  description: agentSurfaceRegistry["memory.read_source"].description,
   parameters: memoryInputSchema(M.MemoryReadSourceInput),
   success: M.MemorySourcePage,
   failure,
@@ -199,9 +182,7 @@ const ReadSourceTool = Tool.dynamic("memory_read_source", {
   .addDependency(MemoryService.MemoryService)
   .addDependency(MemorySyncService.MemorySyncService)
   .addDependency(ThreadManagementService.ThreadManagementService)
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.OpenWorld, false);
+  .annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["memory.read_source"]));
 
 export const MemoryToolkit = Toolkit.make(
   SearchTool,

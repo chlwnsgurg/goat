@@ -1,3 +1,5 @@
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import { McpAttachmentInput } from "./input.ts";
 import {
   AttachmentCreateUploadUrlInput,
@@ -30,24 +32,21 @@ const shared = {
     Crypto.Crypto,
   ],
 };
-const AttachmentUploadTool = Tool.make("goat_attachment_prepare_upload", {
+const AttachmentUploadTool = Tool.make(agentSurfaceRegistry["attachment.prepare_upload"].name, {
   ...shared,
-  description:
-    "Create the app's signed upload URL. POST the exact bytes to relativeUrl on this MCP server's HTTP origin, then pass the attachment metadata and returned ID to goat_thread_send_attachments. Upload is separate from sending; provider attachment support is decided by its adapter.",
+  description: agentSurfaceRegistry["attachment.prepare_upload"].description,
   parameters: Schema.Struct({ upload: AttachmentCreateUploadUrlInput }),
   success: AttachmentCreateUploadUrlResult,
-}).annotate(Tool.Destructive, true);
-const AttachmentDiscardTool = Tool.make("goat_attachment_discard", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["attachment.prepare_upload"]));
+const AttachmentDiscardTool = Tool.make(agentSurfaceRegistry["attachment.discard"].name, {
   ...shared,
-  description:
-    "Discard a pending upload. Already-delivered thread attachments are never deleted by this operation.",
+  description: agentSurfaceRegistry["attachment.discard"].description,
   parameters: AttachmentDeleteInput,
   success: Schema.Struct({}),
-}).annotate(Tool.Destructive, true);
-const AttachmentSendTool = Tool.make("goat_thread_send_attachments", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["attachment.discard"]));
+const AttachmentSendTool = Tool.make(agentSurfaceRegistry["thread.send_attachments"].name, {
   ...shared,
-  description:
-    "Send uploaded attachments to this thread or any other thread in this environment. Each call is a new message, without a retry key. Acceptance does not mean the provider can consume the attachment or has finished the turn. The target cannot have broader permission modes than the caller; failures retain claimed files when dispatch outcome is uncertain.",
+  description: agentSurfaceRegistry["thread.send_attachments"].description,
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     message: Schema.optional(Schema.String.check(Schema.isMaxLength(120000))),
@@ -62,9 +61,7 @@ const AttachmentSendTool = Tool.make("goat_thread_send_attachments", {
     runId: RunId,
     status: OrchestrationV2RunStatus,
   }),
-})
-  .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["thread.send_attachments"]));
 export const AttachmentToolkit = Toolkit.make(
   AttachmentUploadTool,
   AttachmentDiscardTool,

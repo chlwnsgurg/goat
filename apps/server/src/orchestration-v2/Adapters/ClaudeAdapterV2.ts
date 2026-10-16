@@ -1196,8 +1196,8 @@ export function makeClaudeQueryOptions(input: {
 
 export const CLAUDE_GOAT_MCP_TOOL_WILDCARD = "mcp__goat__*";
 
-// Must stay in sync with the Tool.Readonly annotations on OrchestratorToolkit;
-// ClaudeAdapterV2.test.ts cross-checks this list against the toolkit.
+// Automatic approval policy is separate from Tool.Readonly metadata.
+// Preserve html_render preapproval; reading another thread still requires approval.
 export const CLAUDE_READ_ONLY_GOAT_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
   "mcp__goat__orchestrator_capabilities",
   "mcp__goat__list_scheduled_tasks",

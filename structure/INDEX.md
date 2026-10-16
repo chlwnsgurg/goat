@@ -36,7 +36,7 @@ The process that commits orchestration, runs providers, and reaches other machin
 | Doc                                                              | Scope                                                                                                                 |
 | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | [`server.md`](server.md)                                         | Process entry, command commit, local/cloud orchestration, human handoffs, checkpoints, providers, and source control. |
-| [`mcp-toolkits.md`](mcp-toolkits.md)                             | The GOAT MCP server, toolkit layout, and which tool names use which prefix.                                           |
+| [`mcp-toolkits.md`](mcp-toolkits.md)                             | The GOAT MCP server, agent surface registry, toolkit layout, and access-derived tool metadata.                        |
 | [`channels.md`](channels.md)                                     | The channel ledger, Slack and MCP ingress, and the GOAT Bot thread clients render.                                    |
 | [`scheduled-tasks.md`](scheduled-tasks.md)                       | Clock and webhook tasks that launch or send through orchestration services.                                           |
 | [`ssh.md`](ssh.md)                                               | OpenSSH host discovery, the remote ~/.goat server, and agent browse and launch.                                       |
@@ -187,6 +187,7 @@ the repository is organised by package. Changing an area requires review of ever
 | `packages/client-runtime/src/rpc/session.ts`                            | [`client-runtime.md`](client-runtime.md)<br>[`web.md`](web.md)                                                                                         |
 | `packages/contracts`                                                    | [`overview.md`](overview.md)<br>[`contracts.md`](contracts.md)<br>[`server.md`](server.md)                                                             |
 | `packages/contracts/package.json`                                       | [`contracts.md`](contracts.md)                                                                                                                         |
+| `packages/contracts/src/agentSurface/`                                  | [`mcp-toolkits.md`](mcp-toolkits.md)                                                                                                                   |
 | `packages/contracts/src/channelCommon.ts`                               | [`contracts.md`](contracts.md)<br>[`channels.md`](channels.md)                                                                                         |
 | `packages/contracts/src/channelGateway.ts`                              | [`contracts.md`](contracts.md)<br>[`mcp-toolkits.md`](mcp-toolkits.md)                                                                                 |
 | `packages/contracts/src/index.ts`                                       | [`contracts.md`](contracts.md)                                                                                                                         |

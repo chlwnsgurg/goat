@@ -196,14 +196,16 @@ export const claimPreviewRecording = Effect.fn("PreviewToolkit.claimRecording")(
 });
 
 const handlers = {
-  preview_dialog: McpToolAccess.actsAsCaller((input) =>
-    invokeTargeted<PreviewAutomationStatus>("dialog", input),
+  preview_dialog: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) => invokeTargeted<PreviewAutomationStatus>("dialog", input)),
   ),
   preview_status: McpToolAccess.readsAsCaller((input) =>
     invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
   ),
-  preview_open: McpToolAccess.actsAsCaller((input) =>
-    invokeTargeted<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),
+  preview_open: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) =>
+      invokeTargeted<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),
+    ),
   ),
   preview_navigate: McpToolAccess.actsAsCaller((input) =>
     invokeTargeted<PreviewAutomationStatus>("navigate", input, input.timeoutMs),
@@ -231,32 +233,38 @@ const handlers = {
   preview_logs: McpToolAccess.readsAsCaller((input) =>
     invokeTargeted<PreviewAutomationLogs>("logs", input),
   ),
-  preview_click: McpToolAccess.actsAsCaller((input) =>
-    invokeTargeted<object>("click", input, input.timeoutMs),
+  preview_click: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) => invokeTargeted<object>("click", input, input.timeoutMs)),
   ),
-  preview_type: McpToolAccess.actsAsCaller((input) =>
-    invokeTargeted<object>("type", input, input.timeoutMs),
+  preview_type: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) => invokeTargeted<object>("type", input, input.timeoutMs)),
   ),
   preview_hover: McpToolAccess.actsAsCaller((input) =>
     invokeTargeted<object>("hover", input, input.timeoutMs),
   ),
-  preview_select: McpToolAccess.actsAsCaller((input) =>
-    invokeTargeted<PreviewAutomationSelectResult>("select", input, input.timeoutMs),
+  preview_select: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) =>
+      invokeTargeted<PreviewAutomationSelectResult>("select", input, input.timeoutMs),
+    ),
   ),
-  preview_drag: McpToolAccess.actsAsCaller((input) =>
-    invokeTargeted<object>("drag", input, input.timeoutMs),
+  preview_drag: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) => invokeTargeted<object>("drag", input, input.timeoutMs)),
   ),
-  preview_upload: McpToolAccess.actsAsCaller((input) =>
-    invokeTargeted<object>("upload", input, input.timeoutMs),
+  preview_upload: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) => invokeTargeted<object>("upload", input, input.timeoutMs)),
   ),
-  preview_press: McpToolAccess.actsAsCaller((input) => invokeTargeted<object>("press", input)),
+  preview_press: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) => invokeTargeted<object>("press", input)),
+  ),
   preview_scroll: McpToolAccess.actsAsCaller((input) => invokeTargeted<object>("scroll", input)),
-  preview_evaluate: McpToolAccess.actsAsCaller(({ tabId, ...input }) =>
-    invoke<unknown>("evaluate", input, undefined, tabId).pipe(
-      Effect.map(({ result, toolIcon }) => ({
-        value: result ?? null,
-        ...(toolIcon ? { toolIcon } : {}),
-      })),
+  preview_evaluate: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller(({ tabId, ...input }) =>
+      invoke<unknown>("evaluate", input, undefined, tabId).pipe(
+        Effect.map(({ result, toolIcon }) => ({
+          value: result ?? null,
+          ...(toolIcon ? { toolIcon } : {}),
+        })),
+      ),
     ),
   ),
   preview_wait_for: McpToolAccess.readsAsCaller((input) =>

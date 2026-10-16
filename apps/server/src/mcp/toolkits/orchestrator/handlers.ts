@@ -44,12 +44,14 @@ const handlers = {
       return yield* service.capabilities(scope);
     }),
   ),
-  delegate_task: McpToolAccess.actsAsCaller((input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.delegateTask(scope, input);
-    }),
+  delegate_task: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* service.delegateTask(scope, input);
+      }),
+    ),
   ),
   task_status: McpToolAccess.actsAsCaller(({ taskId }) =>
     Effect.gen(function* () {
@@ -58,42 +60,48 @@ const handlers = {
       return yield* service.taskStatus(scope, taskId);
     }),
   ),
-  task_cancel: McpToolAccess.actsAsCaller((input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.cancelTask(scope, input);
-    }),
-  ),
-  goat_workflow_stop: McpToolAccess.writesThreads(
-    (input) => [input.threadId],
-    (input) =>
-      Effect.gen(function* () {
-        const { threads } = yield* readCaller();
-        return yield* threads.stopWorkflow(input).pipe(
-          Effect.as({}),
-          Effect.mapError(
-            (cause) =>
-              new OrchestratorMcpFailure({
-                code:
-                  cause.reason === "unavailable" || cause.reason === "stop-failed"
-                    ? "orchestration_error"
-                    : "invalid_request",
-                message: cause.message,
-              }),
-          ),
-        );
-      }),
-  ),
-  schedule_task: McpToolAccess.startsThreads(
-    // A scheduled task runs with the caller's own modes.
-    () => ({}),
-    (input) =>
+  task_cancel: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) =>
       Effect.gen(function* () {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        return yield* service.scheduleTask(scope, input);
+        return yield* service.cancelTask(scope, input);
       }),
+    ),
+  ),
+  goat_workflow_stop: McpToolAccess.destructive(
+    McpToolAccess.writesThreads(
+      (input) => [input.threadId],
+      (input) =>
+        Effect.gen(function* () {
+          const { threads } = yield* readCaller();
+          return yield* threads.stopWorkflow(input).pipe(
+            Effect.as({}),
+            Effect.mapError(
+              (cause) =>
+                new OrchestratorMcpFailure({
+                  code:
+                    cause.reason === "unavailable" || cause.reason === "stop-failed"
+                      ? "orchestration_error"
+                      : "invalid_request",
+                  message: cause.message,
+                }),
+            ),
+          );
+        }),
+    ),
+  ),
+  schedule_task: McpToolAccess.destructive(
+    McpToolAccess.startsThreads(
+      // A scheduled task runs with the caller's own modes.
+      () => ({}),
+      (input) =>
+        Effect.gen(function* () {
+          const scope = yield* McpInvocationContext.McpInvocationContext;
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          return yield* service.scheduleTask(scope, input);
+        }),
+    ),
   ),
   list_scheduled_tasks: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
@@ -102,19 +110,23 @@ const handlers = {
       return yield* service.listScheduledTasks(scope, input);
     }),
   ),
-  update_scheduled_task: McpToolAccess.writes((input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.updateScheduledTask(scope, input);
-    }),
+  update_scheduled_task: McpToolAccess.destructive(
+    McpToolAccess.writes((input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* service.updateScheduledTask(scope, input);
+      }),
+    ),
   ),
-  delete_scheduled_task: McpToolAccess.writes((input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.deleteScheduledTask(scope, input);
-    }),
+  delete_scheduled_task: McpToolAccess.destructive(
+    McpToolAccess.writes((input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* service.deleteScheduledTask(scope, input);
+      }),
+    ),
   ),
   request_secret: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
@@ -123,12 +135,14 @@ const handlers = {
       return yield* service.requestSecret(scope, input);
     }),
   ),
-  create_threads: McpToolAccess.actsAsCaller((input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.createThreads(scope, input);
-    }),
+  create_threads: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* service.createThreads(scope, input);
+      }),
+    ),
   ),
   goat_thread_list: McpToolAccess.readsOrReachesHost(reachesHost, (input) =>
     Effect.gen(function* () {
@@ -147,21 +161,25 @@ const handlers = {
       return yield* service.readThread(scope, input);
     }),
   ),
-  goat_thread_update: McpToolAccess.writesThreads(
-    (input) => [input.threadId],
-    (input) =>
+  goat_thread_update: McpToolAccess.destructive(
+    McpToolAccess.writesThreads(
+      (input) => [input.threadId],
+      (input) =>
+        Effect.gen(function* () {
+          const scope = yield* McpInvocationContext.McpInvocationContext;
+          const service = yield* ThreadMetadataMcpService.ThreadMetadataMcpService;
+          return yield* service.update(scope, input);
+        }),
+    ),
+  ),
+  goat_thread_send: McpToolAccess.destructive(
+    McpToolAccess.writesThreads(localTargets, (input) =>
       Effect.gen(function* () {
         const scope = yield* McpInvocationContext.McpInvocationContext;
-        const service = yield* ThreadMetadataMcpService.ThreadMetadataMcpService;
-        return yield* service.update(scope, input);
+        const service = yield* HostThreadsMcpService.HostThreadsMcpService;
+        return yield* service.sendToThread(scope, input);
       }),
-  ),
-  goat_thread_send: McpToolAccess.writesThreads(localTargets, (input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      const service = yield* HostThreadsMcpService.HostThreadsMcpService;
-      return yield* service.sendToThread(scope, input);
-    }),
+    ),
   ),
   goat_thread_wait: McpToolAccess.readsOrReachesHost(reachesHost, (input) =>
     Effect.gen(function* () {
@@ -175,12 +193,14 @@ const handlers = {
         : { ...waited, result };
     }),
   ),
-  goat_thread_interrupt: McpToolAccess.writesThreads(localTargets, (input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      const service = yield* HostThreadsMcpService.HostThreadsMcpService;
-      return yield* service.interruptThread(scope, input);
-    }),
+  goat_thread_interrupt: McpToolAccess.destructive(
+    McpToolAccess.writesThreads(localTargets, (input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* HostThreadsMcpService.HostThreadsMcpService;
+        return yield* service.interruptThread(scope, input);
+      }),
+    ),
   ),
   goat_thread_status: McpToolAccess.readsOrReachesHost(reachesHost, (input) =>
     Effect.gen(function* () {

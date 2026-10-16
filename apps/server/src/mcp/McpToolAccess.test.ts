@@ -83,11 +83,13 @@ const probe = {
   ],
 };
 const ProbeToolkit = Toolkit.make(
-  Tool.make("reads", probe),
+  Tool.make("reads", probe).annotate(Tool.Readonly, false).annotate(Tool.Destructive, true),
   Tool.make("reads_as_caller", probe),
   Tool.make("acts_as_caller", probe),
-  Tool.make("writes", probe),
-  Tool.make("writes_with_capability", probe),
+  Tool.make("writes", probe).annotate(Tool.Readonly, true).annotate(Tool.Destructive, true),
+  Tool.make("writes_with_capability", probe)
+    .annotate(Tool.Readonly, true)
+    .annotate(Tool.Destructive, false),
   Tool.make("writes_threads", {
     ...probe,
     parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
@@ -107,7 +109,7 @@ const probeHandlers: McpToolAccess.Handlers<typeof ProbeToolkit.tools> = {
   reads_as_caller: McpToolAccess.readsAsCaller(() => ran),
   acts_as_caller: McpToolAccess.actsAsCaller(() => ran),
   writes: McpToolAccess.writes(() => ran),
-  writes_with_capability: McpToolAccess.writesWithCapability(() => ran),
+  writes_with_capability: McpToolAccess.destructive(McpToolAccess.writesWithCapability(() => ran)),
   writes_threads: McpToolAccess.writesThreads(
     (input) => [input.threadId],
     () => ran,
@@ -319,4 +321,24 @@ it.effect("refuses a change when the calling thread cannot be read", () =>
       ),
     ),
   ),
+);
+
+it("refuses to mark a read declaration destructive", () => {
+  expect(() => McpToolAccess.destructive(McpToolAccess.reads(() => ran))).toThrow(TypeError);
+});
+
+it.effect("publishes declaration effects even when a tool's annotations disagree", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    for (const [name, readOnlyHint, destructiveHint] of [
+      ["reads", true, false],
+      ["writes", false, false],
+      ["writes_with_capability", false, true],
+    ] as const) {
+      expect(server.tools.find(({ tool }) => tool.name === name)?.tool.annotations).toMatchObject({
+        readOnlyHint,
+        destructiveHint,
+      });
+    }
+  }).pipe(Effect.provide(probeServer(Layer.mock(ThreadManagement.ThreadManagementService)({})))),
 );

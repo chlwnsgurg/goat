@@ -182,8 +182,10 @@
       "path": "mcp-toolkits.md",
       "tier": 3,
       "title": "MCP toolkits",
-      "scope": "The GOAT MCP server, toolkit layout, and which tool names use which prefix.",
+      "scope": "The GOAT MCP server, agent surface registry, toolkit layout, and access-derived tool metadata.",
       "documents": [
+        "packages/contracts/src/agentSurface/",
+        "apps/server/src/mcp/McpToolAccess.ts",
         "apps/server/src/mcp/",
         "apps/server/src/mcp/McpHttpServer.ts",
         "apps/server/src/mcp/OrchestratorMcpService.ts",

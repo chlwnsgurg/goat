@@ -1,3 +1,5 @@
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import {
   OrchestratorMcpFailure,
   ToolActivityIcon,
@@ -55,255 +57,178 @@ const PreviewActionResult = Schema.Struct(presentationFields).annotate({
   description: "The preview action completed successfully.",
 });
 
-/** Drives the real browser and can destroy page state. */
-const browserTool = <T extends Tool.Any>(tool: T): T =>
-  tool.annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, true) as T;
-
-/** Same open-world browser access, but the action does not destroy page state. */
-const safeBrowserTool = <T extends Tool.Any>(tool: T): T =>
-  tool.annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, false) as T;
-
-/** A safe browser action that only observes, so it is also repeatable. */
-const readonlyBrowserTool = <T extends Tool.Any>(tool: T): T =>
-  safeBrowserTool(tool).annotate(Tool.Readonly, true).annotate(Tool.Idempotent, true) as T;
-
-const PreviewStatusTool = Tool.make("preview_status", {
-  description:
-    "Report whether a collaborative browser tab is automation-capable, including its control owner, pending dialog, URL, title, visibility, loading state, viewport mode, and measured CSS-pixel size. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Server hosts also list every tab in the thread (tabs) with its owner, including tabs the user opened, and the browser profiles preview_open accepts. You can read any listed tab; act only on your own tabs, or on an unclaimed tab while no human controls it.",
+const PreviewStatusTool = Tool.make(agentSurfaceRegistry["preview.status"].name, {
+  description: agentSurfaceRegistry["preview.status"].description,
   parameters: PreviewAutomationTabTargetInput,
   success: PreviewAutomationStatus,
   failure: PreviewToolFailure,
   dependencies,
-})
-  .annotate(Tool.Title, "Get preview status")
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.status"]));
 
-const PreviewOpenTool = browserTool(
-  Tool.make("preview_open", {
-    description:
-      "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Set open=false for background-only automation. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab. Parallel subagents sharing a provider session must each open with reuseExistingTab=false and pass their returned tabId on every call. Pass profileId (an id or name from preview_status profiles) to open under a browser profile and its saved logins; omit it for the user's default profile. Another agent session's tabs can be read but not operated.",
-    parameters: PreviewAutomationOpenInput,
-    success: PreviewAutomationStatus,
-    failure: PreviewToolFailure,
-    dependencies,
-  })
-    .annotate(Tool.Title, "Open browser preview")
-    .annotate(Tool.Destructive, false),
-);
+const PreviewOpenTool = Tool.make(agentSurfaceRegistry["preview.open"].name, {
+  description: agentSurfaceRegistry["preview.open"].description,
+  parameters: PreviewAutomationOpenInput,
+  success: PreviewAutomationStatus,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.open"]));
 
-const PreviewDialogTool = browserTool(
-  Tool.make("preview_dialog", {
-    description:
-      "Accept or dismiss the server browser dialog reported by preview_status. For a prompt, supply promptText when accepting. Requires this agent to own the tab, or the tab to be unclaimed with no human in control. Desktop hosts may not support this operation.",
-    parameters: PreviewAutomationDialogInput,
-    success: PreviewAutomationStatus,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Resolve browser dialog"),
-);
+const PreviewDialogTool = Tool.make(agentSurfaceRegistry["preview.dialog"].name, {
+  description: agentSurfaceRegistry["preview.dialog"].description,
+  parameters: PreviewAutomationDialogInput,
+  success: PreviewAutomationStatus,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.dialog"]));
 
-const PreviewNavigateTool = safeBrowserTool(
-  Tool.make("preview_navigate", {
-    description:
-      "Navigate a collaborative browser tab. Pass tabId to target a specific tab, plus {url:'https://t3.chat'} for a website or {target:{kind:'environment-port',port:5173}} for a dev server. Exactly one of url or target is required.",
-    parameters: PreviewAutomationNavigateInput,
-    success: PreviewAutomationStatus,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Navigate browser preview"),
-);
+const PreviewNavigateTool = Tool.make(agentSurfaceRegistry["preview.navigate"].name, {
+  description: agentSurfaceRegistry["preview.navigate"].description,
+  parameters: PreviewAutomationNavigateInput,
+  success: PreviewAutomationStatus,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.navigate"]));
 
-const PreviewBackTool = safeBrowserTool(
-  Tool.make("preview_back", {
-    description:
-      "Go back one entry in the exact collaborative browser tab's history. Pass tabId to select a tab. Refuses when no back entry exists. Waits for navigation and returns observed URL/status; take a fresh snapshot afterward. Environment-hosted tabs, including desktop-backed tabs.",
-    parameters: PreviewAutomationHistoryInput,
-    success: PreviewAutomationStatus,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Go back in browser preview"),
-);
+const PreviewBackTool = Tool.make(agentSurfaceRegistry["preview.back"].name, {
+  description: agentSurfaceRegistry["preview.back"].description,
+  parameters: PreviewAutomationHistoryInput,
+  success: PreviewAutomationStatus,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.back"]));
 
-const PreviewForwardTool = safeBrowserTool(
-  Tool.make("preview_forward", {
-    description:
-      "Go forward one entry in the exact collaborative browser tab's history. Pass tabId to select a tab. Refuses when no forward entry exists. Waits for navigation and returns observed URL/status; take a fresh snapshot afterward. Environment-hosted tabs, including desktop-backed tabs.",
-    parameters: PreviewAutomationHistoryInput,
-    success: PreviewAutomationStatus,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Go forward in browser preview"),
-);
+const PreviewForwardTool = Tool.make(agentSurfaceRegistry["preview.forward"].name, {
+  description: agentSurfaceRegistry["preview.forward"].description,
+  parameters: PreviewAutomationHistoryInput,
+  success: PreviewAutomationStatus,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.forward"]));
 
-const PreviewReloadTool = safeBrowserTool(
-  Tool.make("preview_reload", {
-    description:
-      "Reload the exact collaborative browser tab selected by tabId, or the current tab. Cache bypass is opt-in with ignoreCache:true. Waits for navigation and returns observed URL/status. Reload may repeat page requests; take a fresh snapshot afterward. Environment-hosted tabs, including desktop-backed tabs.",
-    parameters: PreviewAutomationReloadInput,
-    success: PreviewAutomationStatus,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Reload browser preview"),
-);
+const PreviewReloadTool = Tool.make(agentSurfaceRegistry["preview.reload"].name, {
+  description: agentSurfaceRegistry["preview.reload"].description,
+  parameters: PreviewAutomationReloadInput,
+  success: PreviewAutomationStatus,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.reload"]));
 
-const PreviewResizeTool = safeBrowserTool(
-  Tool.make("preview_resize", {
-    description:
-      "Resize a collaborative browser tab, optionally selected by tabId. Use {mode:'fill'}, {mode:'freeform',width:1024,height:768}, or {mode:'preset',preset:'iphone-12-pro',orientation:'portrait'}. This changes CSS layout breakpoints without changing the desktop browser user agent.",
-    parameters: PreviewAutomationResizeInput,
-    success: Schema.Struct({ ...PreviewAutomationResizeResult.fields, ...presentationFields }),
-    failure: PreviewToolFailure,
-    dependencies,
-  })
-    .annotate(Tool.Title, "Resize browser viewport")
-    .annotate(Tool.Idempotent, true),
-);
+const PreviewResizeTool = Tool.make(agentSurfaceRegistry["preview.resize"].name, {
+  description: agentSurfaceRegistry["preview.resize"].description,
+  parameters: PreviewAutomationResizeInput,
+  success: Schema.Struct({ ...PreviewAutomationResizeResult.fields, ...presentationFields }),
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.resize"]));
 
-const PreviewSetAppearanceTool = safeBrowserTool(
-  Tool.make("preview_set_appearance", {
-    description:
-      "Emulate prefers-color-scheme in a collaborative browser tab, optionally selected by tabId. Use {colorScheme:'dark'} or {colorScheme:'light'} to preview the page in that appearance, and {colorScheme:'system'} to clear the override and follow the OS appearance.",
-    parameters: PreviewAutomationSetColorSchemeInput,
-    success: Schema.Struct({
-      ...PreviewAutomationSetColorSchemeResult.fields,
-      ...presentationFields,
-    }),
-    failure: PreviewToolFailure,
-    dependencies,
-  })
-    .annotate(Tool.Title, "Set preview appearance")
-    .annotate(Tool.Idempotent, true),
-);
+const PreviewSetAppearanceTool = Tool.make(agentSurfaceRegistry["preview.set_appearance"].name, {
+  description: agentSurfaceRegistry["preview.set_appearance"].description,
+  parameters: PreviewAutomationSetColorSchemeInput,
+  success: Schema.Struct({
+    ...PreviewAutomationSetColorSchemeResult.fields,
+    ...presentationFields,
+  }),
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.set_appearance"]));
 
 // Not read-only: save=true writes the screenshot to disk.
-export const PreviewSnapshotTool = safeBrowserTool(
-  Tool.make("preview_snapshot", {
-    description:
-      "Inspect a page before interacting. Pass tabId to inspect a specific tab, including one the user opened (see preview_status tabs), even while they control it; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Returns page state, semantic elements, diagnostics, action history, and screenshot dimensions. Server snapshots include an accessibilityTree with refs; pass locator=aria-ref=<ref> to target one exact element, including inside frames. Refresh refs after navigation, another snapshot, or human takeover. The text is capped near 20 KB and lists what it omitted; use preview_evaluate to read more. Set includeImage=true only when you need to see the page; the image stays in tool history. Set fullPage=true for a bounded document capture with clipping metadata; viewport is the default. Set save=true to write the PNG to disk and get screenshotPath. Saved captures omit the page dump unless includeImage=true; full-page saves retain dimensions and clipping metadata. Embed that path in your reply as ![alt](screenshotPath) so the user sees it. This is the only way to show the user a screenshot; the image in the tool result is not saved anywhere.",
-    parameters: Schema.Struct({
-      ...PreviewAutomationSnapshotInput.fields,
-      includeImage: Schema.optional(
-        Schema.Boolean.annotate({
-          description:
-            "Include the PNG image in the tool response. Defaults to false. Set true only when you need to see the page.",
-        }),
-      ),
-      save: Schema.optional(
-        Schema.Boolean.annotate({
-          description:
-            "Write the screenshot PNG to disk and return its absolute path as screenshotPath. Unless includeImage=true, omit the page dump and return url, screenshotPath, and any full-page capture metadata. Defaults to false.",
-        }),
-      ),
-    }),
-    success: PreviewAutomationSnapshot,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Inspect browser page"),
-);
+export const PreviewSnapshotTool = Tool.make(agentSurfaceRegistry["preview.snapshot"].name, {
+  description: agentSurfaceRegistry["preview.snapshot"].description,
+  parameters: Schema.Struct({
+    ...PreviewAutomationSnapshotInput.fields,
+    includeImage: Schema.optional(
+      Schema.Boolean.annotate({
+        description:
+          "Include the PNG image in the tool response. Defaults to false. Set true only when you need to see the page.",
+      }),
+    ),
+    save: Schema.optional(
+      Schema.Boolean.annotate({
+        description:
+          "Write the screenshot PNG to disk and return its absolute path as screenshotPath. Unless includeImage=true, omit the page dump and return url, screenshotPath, and any full-page capture metadata. Defaults to false.",
+      }),
+    ),
+  }),
+  success: PreviewAutomationSnapshot,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.snapshot"]));
 
-const PreviewLogsTool = readonlyBrowserTool(
-  Tool.make("preview_logs", {
-    description:
-      "Read bounded per-tab console messages, uncaught page errors with stacks, and network metadata, newest first. Network records show the latest request/response/finished/failed phase per request, with elapsed duration when its start was observed. Defaults to 50 entries per stream (maximum 100) within a shared 24 KB entry budget; droppedCount counts buffer evictions before filtering and omittedCount counts retained matches excluded by limits. Filter consoleLevels/text or network url/method/status/failed; includeConsole/includeErrors/includeNetwork default to true. URL credentials and URL query values are redacted, and fragments are dropped. In free-form text, URL tokens start with scheme:// and stop at whitespace, quotes, angle brackets, or closing brackets/parentheses. Within the output limits, other free-form console/error text is returned as the page produced it and is not scrubbed for secrets. Headers and bodies are never collected. Works on server-hosted tabs, including desktop-rendered server tabs, and can observe another agent's or a human-controlled tab. Does not collect DOM/ARIA, take screenshots, clear logs, or invalidate snapshot refs. Native desktop-only hosts may not support it.",
-    parameters: PreviewAutomationLogsInput,
-    success: PreviewAutomationLogs,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Read browser diagnostics"),
-);
+const PreviewLogsTool = Tool.make(agentSurfaceRegistry["preview.logs"].name, {
+  description: agentSurfaceRegistry["preview.logs"].description,
+  parameters: PreviewAutomationLogsInput,
+  success: PreviewAutomationLogs,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.logs"]));
 
-const PreviewClickTool = browserTool(
-  Tool.make("preview_click", {
-    description:
-      "Click exactly one target in the tab selected by tabId, or this agent session's current tab when omitted. Prefer a Playwright locator; selector accepts legacy CSS; x and y must be supplied together. Set button=right for a context menu or clickCount=2 for a double-click; server browser tabs only.",
-    parameters: PreviewAutomationClickInput,
-    success: PreviewActionResult,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Click preview page"),
-);
+const PreviewClickTool = Tool.make(agentSurfaceRegistry["preview.click"].name, {
+  description: agentSurfaceRegistry["preview.click"].description,
+  parameters: PreviewAutomationClickInput,
+  success: PreviewActionResult,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.click"]));
 
-const PreviewTypeTool = browserTool(
-  Tool.make("preview_type", {
-    description:
-      "Insert literal text into one input in the tab selected by tabId, or this agent session's current tab when omitted. Prefer a Playwright locator; set clear=true to replace existing text.",
-    parameters: PreviewAutomationTypeInput,
-    success: PreviewActionResult,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Type into preview page"),
-);
+const PreviewTypeTool = Tool.make(agentSurfaceRegistry["preview.type"].name, {
+  description: agentSurfaceRegistry["preview.type"].description,
+  parameters: PreviewAutomationTypeInput,
+  success: PreviewActionResult,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.type"]));
 
-const PreviewHoverTool = safeBrowserTool(
-  Tool.make("preview_hover", {
-    description:
-      "Move the mouse over exactly one target in the tab selected by tabId, or this agent session's current tab when omitted, to reveal hover menus and tooltips. Server browser tabs only.",
-    parameters: PreviewAutomationHoverInput,
-    success: PreviewActionResult,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Hover preview page"),
-);
+const PreviewHoverTool = Tool.make(agentSurfaceRegistry["preview.hover"].name, {
+  description: agentSurfaceRegistry["preview.hover"].description,
+  parameters: PreviewAutomationHoverInput,
+  success: PreviewActionResult,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.hover"]));
 
-const PreviewSelectTool = browserTool(
-  Tool.make("preview_select", {
-    description:
-      "Choose options in one native <select> in the tab selected by tabId, or this agent session's current tab when omitted, by option value or visible label. Custom dropdowns are not <select>; click them open and click the option instead. Server browser tabs only.",
-    parameters: PreviewAutomationSelectInput,
-    success: Schema.Struct({
-      ...PreviewAutomationSelectResult.fields,
-      ...presentationFields,
-    }),
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Select preview option"),
-);
+const PreviewSelectTool = Tool.make(agentSurfaceRegistry["preview.select"].name, {
+  description: agentSurfaceRegistry["preview.select"].description,
+  parameters: PreviewAutomationSelectInput,
+  success: Schema.Struct({
+    ...PreviewAutomationSelectResult.fields,
+    ...presentationFields,
+  }),
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.select"]));
 
-const PreviewDragTool = browserTool(
-  Tool.make("preview_drag", {
-    description:
-      "Drag one element onto another in the tab selected by tabId, or this agent session's current tab when omitted. Server browser tabs only.",
-    parameters: PreviewAutomationDragInput,
-    success: PreviewActionResult,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Drag in preview page"),
-);
+const PreviewDragTool = Tool.make(agentSurfaceRegistry["preview.drag"].name, {
+  description: agentSurfaceRegistry["preview.drag"].description,
+  parameters: PreviewAutomationDragInput,
+  success: PreviewActionResult,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.drag"]));
 
-const PreviewUploadTool = browserTool(
-  Tool.make("preview_upload", {
-    description:
-      "Give files on the environment to the page in the tab selected by tabId, or this agent session's current tab when omitted. After clicking an upload control, preview_status reports the open fileChooser; call this with absolute paths to answer it, or with an empty list to cancel. Pass a locator for an <input type=file> to set its files without a picker. Server browser tabs only.",
-    parameters: PreviewAutomationUploadInput,
-    success: PreviewActionResult,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Upload files to preview page"),
-);
+const PreviewUploadTool = Tool.make(agentSurfaceRegistry["preview.upload"].name, {
+  description: agentSurfaceRegistry["preview.upload"].description,
+  parameters: PreviewAutomationUploadInput,
+  success: PreviewActionResult,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.upload"]));
 
-const PreviewPressTool = browserTool(
-  Tool.make("preview_press", {
-    description:
-      "Press one keyboard key in the tab selected by tabId, or this agent session's current tab when omitted. Examples: {key:'Enter'}, {key:'Escape'}, or {key:'a',modifiers:['Meta']}.",
-    parameters: PreviewAutomationPressInput,
-    success: PreviewActionResult,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Press key in preview page"),
-);
+const PreviewPressTool = Tool.make(agentSurfaceRegistry["preview.press"].name, {
+  description: agentSurfaceRegistry["preview.press"].description,
+  parameters: PreviewAutomationPressInput,
+  success: PreviewActionResult,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.press"]));
 
-const PreviewScrollTool = safeBrowserTool(
-  Tool.make("preview_scroll", {
-    description:
-      "Scroll the tab selected by tabId, or this agent session's current tab when omitted. Positive deltaY scrolls down and positive deltaX scrolls right; a locator/selector targets a container.",
-    parameters: PreviewAutomationScrollInput,
-    success: PreviewActionResult,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Scroll preview page"),
-);
+const PreviewScrollTool = Tool.make(agentSurfaceRegistry["preview.scroll"].name, {
+  description: agentSurfaceRegistry["preview.scroll"].description,
+  parameters: PreviewAutomationScrollInput,
+  success: PreviewActionResult,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.scroll"]));
 
 /**
  * MCP `structuredContent` must be a JSON object, and Claude Code rejects the
@@ -317,49 +242,37 @@ export const PreviewEvaluateResult = Schema.Struct({
   }),
 }).annotate({ description: "The evaluated expression result." });
 
-const PreviewEvaluateTool = browserTool(
-  Tool.make("preview_evaluate", {
-    description:
-      "Evaluate JavaScript in the tab selected by tabId, or this agent session's current tab when omitted. Needs the same control as clicking: it works on your own tabs and on the user's tab only while nobody controls it. To read a tab the user is driving, use preview_snapshot. Returns {value} with a serializable result up to 64 KB; the expression may mutate page state.",
-    parameters: PreviewAutomationEvaluateInput,
-    success: PreviewEvaluateResult,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Evaluate JavaScript in preview"),
-);
+const PreviewEvaluateTool = Tool.make(agentSurfaceRegistry["preview.evaluate"].name, {
+  description: agentSurfaceRegistry["preview.evaluate"].description,
+  parameters: PreviewAutomationEvaluateInput,
+  success: PreviewEvaluateResult,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.evaluate"]));
 
-const PreviewWaitForTool = readonlyBrowserTool(
-  Tool.make("preview_wait_for", {
-    description:
-      "Wait in the tab selected by tabId, or this agent session's current tab when omitted, until every supplied condition holds together. Locator/selector state defaults to attached; use visible, hidden (also matches absence), or detached for transitions. Add loadState=load or domContentLoaded for document readiness; networkIdle is opt-in and can time out on busy pages. Text is a case-sensitive visible-text substring; urlIncludes also handles same-document navigation. All conditions share one timeoutMs (default 15000, maximum 60000). Human takeover interrupts waits on your own tab; observing a human-driven tab remains allowed. A completed wait proves the conditions, not application success.",
-    parameters: PreviewAutomationWaitForInput,
-    success: PreviewActionResult,
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Wait for preview page condition"),
-);
+const PreviewWaitForTool = Tool.make(agentSurfaceRegistry["preview.wait_for"].name, {
+  description: agentSurfaceRegistry["preview.wait_for"].description,
+  parameters: PreviewAutomationWaitForInput,
+  success: PreviewActionResult,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.wait_for"]));
 
-const PreviewRecordingStartTool = safeBrowserTool(
-  Tool.make("preview_recording_start", {
-    description:
-      "Start recording the collaborative browser tab selected by tabId, or this agent session's current tab when omitted.",
-    parameters: PreviewAutomationTabTargetInput,
-    success: Schema.Struct({ ...PreviewAutomationRecordingStatus.fields, ...presentationFields }),
-    failure: PreviewToolFailure,
-    dependencies,
-  }).annotate(Tool.Title, "Start browser recording"),
-);
+const PreviewRecordingStartTool = Tool.make(agentSurfaceRegistry["preview.recording_start"].name, {
+  description: agentSurfaceRegistry["preview.recording_start"].description,
+  parameters: PreviewAutomationTabTargetInput,
+  success: Schema.Struct({ ...PreviewAutomationRecordingStatus.fields, ...presentationFields }),
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.recording_start"]));
 
-const PreviewRecordingStopTool = safeBrowserTool(
-  Tool.make("preview_recording_stop", {
-    description:
-      "Stop recording the collaborative browser tab selected by tabId, or this agent session's current tab when omitted, and transfer the compressed recording once (up to 50 MiB) to an evidence file readable in this agent's environment. Returns its environment-local path after transfer succeeds.",
-    parameters: PreviewAutomationTabTargetInput,
-    success: Schema.Struct({ ...PreviewAutomationRecordingArtifact.fields, ...presentationFields }),
-    failure: PreviewToolFailure,
-    dependencies: [...dependencies, FileSystem.FileSystem, ServerConfig.ServerConfig],
-  }).annotate(Tool.Title, "Stop browser recording"),
-);
+const PreviewRecordingStopTool = Tool.make(agentSurfaceRegistry["preview.recording_stop"].name, {
+  description: agentSurfaceRegistry["preview.recording_stop"].description,
+  parameters: PreviewAutomationTabTargetInput,
+  success: Schema.Struct({ ...PreviewAutomationRecordingArtifact.fields, ...presentationFields }),
+  failure: PreviewToolFailure,
+  dependencies: [...dependencies, FileSystem.FileSystem, ServerConfig.ServerConfig],
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.recording_stop"]));
 
 export const PreviewToolkit = Toolkit.make(
   PreviewDialogTool,

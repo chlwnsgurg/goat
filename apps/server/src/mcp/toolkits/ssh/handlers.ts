@@ -71,188 +71,193 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
       return { ...result, worktrees: [...result.worktrees], entries: [...result.entries] };
     }),
   ),
-  goat_ssh_thread_launch: McpToolAccess.writesEnvironment((input, check) =>
-    Effect.gen(function* () {
-      const caller = yield* check;
-      const runtimeMode = yield* resolveRuntimeMode(caller.limits.runtimeMode, input.runtimeMode);
-      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
-      // The thread on this machine that launches; an outside client has none to record.
-      const launcher = caller.caller;
-      const launchedBy =
-        launcher === undefined
-          ? undefined
-          : yield* ServerEnvironment.ServerEnvironment.pipe(
-              Effect.flatMap((environment) => environment.getDescriptor),
-              Effect.map((descriptor) => ({
-                kind: "launch" as const,
-                threadId: launcher.id,
-                environmentId: descriptor.environmentId,
-                environmentLabel: descriptor.label,
-                threadTitle: launcher.title,
-                via: "ssh_thread_launch" as const,
-              })),
-            );
-      const attachments = yield* dispatch
-        .validateLaunchAttachments(input.attachments ?? [])
-        .pipe(Effect.mapError(toMcpFailure));
-      const coordinator = yield* RemoteDispatchCoordinator.RemoteDispatchCoordinator;
-      const launch: SshRemoteDispatch.SshLaunchInput = {
-        host: input.host,
-        cwd: input.cwd,
-        workspace: sshLaunchWorkspace(input.workspace),
-        title: input.title,
-        message: input.message,
-        projectTitle: input.projectTitle,
-        // The remote project usually has no default model, so a thread caller's own
-        // model is the sensible default; an outside client must pass one.
-        modelSelection: input.modelSelection ?? caller.caller?.modelSelection,
-        runtimeMode,
-        callerRuntimeMode: caller.limits.runtimeMode,
-        interactionMode: input.interactionMode,
-        attachments,
-        allowBroadWorkspaceRoot: input.allowBroadWorkspaceRoot,
-        launchedBy,
-        standingInstructions: input.standingInstructions,
-      };
-      // A webhook choice is checked, and an inline secret kept, before anything runs remotely.
-      const launchWatches = yield* LaunchWatchService.LaunchWatchService;
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      // Set in the same uninterruptible step that saves the watch, which then holds the route.
-      // Until then any exit, interruption included, frees the secret the route kept.
-      let routeKept = false;
-      return yield* Effect.acquireUseRelease(
-        input.notifyTarget === undefined
-          ? Effect.succeed({ notifyWebhook: input.notifyWebhook ?? false, webhookTarget: null })
-          : launchWatches
-              .resolveRoute({
-                notifyWebhook: input.notifyWebhook,
-                notifyOnCompletion: input.notifyOnCompletion,
-                notifyTarget: input.notifyTarget,
-                projectId: launcher?.projectId ?? null,
-              })
-              .pipe(
-                Effect.mapError(
-                  (error) =>
-                    new OrchestratorMcpFailure({ code: "invalid_request", message: error.message }),
-                ),
-              ),
-        (route) =>
-          Effect.gen(function* () {
-            const result = yield* Effect.gen(function* () {
-              if (scope.thread === undefined) {
-                const value = yield* dispatch.launchThread(launch, check.pipe(Effect.asVoid));
-                return { ...value, correlationId: null };
-              }
-              const value = yield* coordinator.launch(
-                {
-                  kind: "thread",
-                  originThreadId: scope.thread.threadId,
-                  delivery: input.reportDelivery ?? "wake",
-                  launch,
-                },
-                check.pipe(Effect.asVoid),
+  goat_ssh_thread_launch: McpToolAccess.destructive(
+    McpToolAccess.writesEnvironment((input, check) =>
+      Effect.gen(function* () {
+        const caller = yield* check;
+        const runtimeMode = yield* resolveRuntimeMode(caller.limits.runtimeMode, input.runtimeMode);
+        const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+        // The thread on this machine that launches; an outside client has none to record.
+        const launcher = caller.caller;
+        const launchedBy =
+          launcher === undefined
+            ? undefined
+            : yield* ServerEnvironment.ServerEnvironment.pipe(
+                Effect.flatMap((environment) => environment.getDescriptor),
+                Effect.map((descriptor) => ({
+                  kind: "launch" as const,
+                  threadId: launcher.id,
+                  environmentId: descriptor.environmentId,
+                  environmentLabel: descriptor.label,
+                  threadTitle: launcher.title,
+                  via: "ssh_thread_launch" as const,
+                })),
               );
-              return { ...value.launch, correlationId: value.correlationId };
-            }).pipe(
-              Effect.mapError((error) =>
-                error instanceof SshRemoteDispatch.SshRemoteDispatchError
-                  ? toMcpFailure(error)
-                  : isRemoteDispatchError(error)
-                    ? new OrchestratorMcpFailure({
-                        code: "orchestration_error",
-                        message: "SSH report coordination failed.",
-                      })
-                    : error,
-              ),
-            );
-            const runId = result.runId === null ? null : RunId.make(result.runId);
-            const watching =
-              input.notifyOnCompletion !== false && (launcher !== undefined || runId !== null)
-                ? yield* (
-                    launcher !== undefined
-                      ? launchWatches
-                          .register({
-                            launcherThreadId: launcher.id,
-                            host: result.host,
-                            threadId: ThreadId.make(result.threadId),
-                            projectId: null,
-                            title: input.title,
-                            runId,
-                            notifyWebhook: route.notifyWebhook,
-                            webhookTarget: route.webhookTarget,
-                          })
-                          .pipe(
-                            Effect.tap(() =>
-                              Effect.sync(() => {
-                                routeKept = true;
-                              }),
-                            ),
-                            Effect.as(true),
-                            Effect.uninterruptible,
-                          )
-                      : runId === null
-                        ? Effect.succeed(false)
-                        : // An outside client's launch is watched only for the completion webhook.
-                          launchWatches
-                            .watchExternal({
-                              owner: scope.requestNamespace,
+        const attachments = yield* dispatch
+          .validateLaunchAttachments(input.attachments ?? [])
+          .pipe(Effect.mapError(toMcpFailure));
+        const coordinator = yield* RemoteDispatchCoordinator.RemoteDispatchCoordinator;
+        const launch: SshRemoteDispatch.SshLaunchInput = {
+          host: input.host,
+          cwd: input.cwd,
+          workspace: sshLaunchWorkspace(input.workspace),
+          title: input.title,
+          message: input.message,
+          projectTitle: input.projectTitle,
+          // The remote project usually has no default model, so a thread caller's own
+          // model is the sensible default; an outside client must pass one.
+          modelSelection: input.modelSelection ?? caller.caller?.modelSelection,
+          runtimeMode,
+          callerRuntimeMode: caller.limits.runtimeMode,
+          interactionMode: input.interactionMode,
+          attachments,
+          allowBroadWorkspaceRoot: input.allowBroadWorkspaceRoot,
+          launchedBy,
+          standingInstructions: input.standingInstructions,
+        };
+        // A webhook choice is checked, and an inline secret kept, before anything runs remotely.
+        const launchWatches = yield* LaunchWatchService.LaunchWatchService;
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        // Set in the same uninterruptible step that saves the watch, which then holds the route.
+        // Until then any exit, interruption included, frees the secret the route kept.
+        let routeKept = false;
+        return yield* Effect.acquireUseRelease(
+          input.notifyTarget === undefined
+            ? Effect.succeed({ notifyWebhook: input.notifyWebhook ?? false, webhookTarget: null })
+            : launchWatches
+                .resolveRoute({
+                  notifyWebhook: input.notifyWebhook,
+                  notifyOnCompletion: input.notifyOnCompletion,
+                  notifyTarget: input.notifyTarget,
+                  projectId: launcher?.projectId ?? null,
+                })
+                .pipe(
+                  Effect.mapError(
+                    (error) =>
+                      new OrchestratorMcpFailure({
+                        code: "invalid_request",
+                        message: error.message,
+                      }),
+                  ),
+                ),
+          (route) =>
+            Effect.gen(function* () {
+              const result = yield* Effect.gen(function* () {
+                if (scope.thread === undefined) {
+                  const value = yield* dispatch.launchThread(launch, check.pipe(Effect.asVoid));
+                  return { ...value, correlationId: null };
+                }
+                const value = yield* coordinator.launch(
+                  {
+                    kind: "thread",
+                    originThreadId: scope.thread.threadId,
+                    delivery: input.reportDelivery ?? "wake",
+                    launch,
+                  },
+                  check.pipe(Effect.asVoid),
+                );
+                return { ...value.launch, correlationId: value.correlationId };
+              }).pipe(
+                Effect.mapError((error) =>
+                  error instanceof SshRemoteDispatch.SshRemoteDispatchError
+                    ? toMcpFailure(error)
+                    : isRemoteDispatchError(error)
+                      ? new OrchestratorMcpFailure({
+                          code: "orchestration_error",
+                          message: "SSH report coordination failed.",
+                        })
+                      : error,
+                ),
+              );
+              const runId = result.runId === null ? null : RunId.make(result.runId);
+              const watching =
+                input.notifyOnCompletion !== false && (launcher !== undefined || runId !== null)
+                  ? yield* (
+                      launcher !== undefined
+                        ? launchWatches
+                            .register({
+                              launcherThreadId: launcher.id,
                               host: result.host,
                               threadId: ThreadId.make(result.threadId),
                               projectId: null,
                               title: input.title,
                               runId,
-                              ceiling: caller.limits.runtimeMode,
-                              route,
+                              notifyWebhook: route.notifyWebhook,
+                              webhookTarget: route.webhookTarget,
                             })
                             .pipe(
-                              Effect.map((watch) => {
-                                routeKept = watch !== null;
-                                return routeKept;
-                              }),
+                              Effect.tap(() =>
+                                Effect.sync(() => {
+                                  routeKept = true;
+                                }),
+                              ),
+                              Effect.as(true),
                               Effect.uninterruptible,
                             )
-                  ).pipe(
-                    // The remote thread exists either way; a watch that failed to save is reported, not fatal.
-                    Effect.catch((error) =>
-                      Effect.logWarning("launch watch not recorded", {
-                        host: result.host,
-                        threadId: result.threadId,
-                        cause: error,
-                      }).pipe(Effect.as(false)),
-                    ),
-                  )
-                : false;
-            return {
-              ...result,
-              watching,
-              notes: [
-                ...result.notes,
-                ...(watching && launcher === undefined
-                  ? [
-                      `This machine follows the thread over SSH and posts to its completion webhook when the run ends, waits on a question, or if ${result.host} stays unreachable.`,
-                    ]
-                  : watching
+                        : runId === null
+                          ? Effect.succeed(false)
+                          : // An outside client's launch is watched only for the completion webhook.
+                            launchWatches
+                              .watchExternal({
+                                owner: scope.requestNamespace,
+                                host: result.host,
+                                threadId: ThreadId.make(result.threadId),
+                                projectId: null,
+                                title: input.title,
+                                runId,
+                                ceiling: caller.limits.runtimeMode,
+                                route,
+                              })
+                              .pipe(
+                                Effect.map((watch) => {
+                                  routeKept = watch !== null;
+                                  return routeKept;
+                                }),
+                                Effect.uninterruptible,
+                              )
+                    ).pipe(
+                      // The remote thread exists either way; a watch that failed to save is reported, not fatal.
+                      Effect.catch((error) =>
+                        Effect.logWarning("launch watch not recorded", {
+                          host: result.host,
+                          threadId: result.threadId,
+                          cause: error,
+                        }).pipe(Effect.as(false)),
+                      ),
+                    )
+                  : false;
+              return {
+                ...result,
+                watching,
+                notes: [
+                  ...result.notes,
+                  ...(watching && launcher === undefined
                     ? [
-                        `This machine follows the thread over SSH and wakes this thread when its run ends, when it waits on a question, or if ${result.host} stays unreachable; do not poll it. goat_thread_unwatch stops that.`,
+                        `This machine follows the thread over SSH and posts to its completion webhook when the run ends, waits on a question, or if ${result.host} stays unreachable.`,
                       ]
-                    : scope.thread !== undefined
+                    : watching
                       ? [
-                          `${
-                            input.notifyOnCompletion === false
-                              ? "Run ends are not followed because completion notifications are disabled."
-                              : "Run ends are not followed because no launch watch was recorded."
-                          }${result.reportsSupported ? " Agent reports still arrive per reportDelivery." : ""}`,
+                          `This machine follows the thread over SSH and wakes this thread when its run ends, when it waits on a question, or if ${result.host} stays unreachable; do not poll it. goat_thread_unwatch stops that.`,
                         ]
-                      : []),
-              ],
-            };
-          }),
-        (route) =>
-          routeKept || route.webhookTarget === null
-            ? Effect.void
-            : launchWatches.releaseRoute(route),
-      );
-    }),
+                      : scope.thread !== undefined
+                        ? [
+                            `${
+                              input.notifyOnCompletion === false
+                                ? "Run ends are not followed because completion notifications are disabled."
+                                : "Run ends are not followed because no launch watch was recorded."
+                            }${result.reportsSupported ? " Agent reports still arrive per reportDelivery." : ""}`,
+                          ]
+                        : []),
+                ],
+              };
+            }),
+          (route) =>
+            routeKept || route.webhookTarget === null
+              ? Effect.void
+              : launchWatches.releaseRoute(route),
+        );
+      }),
+    ),
   ),
   goat_ssh_reports: McpToolAccess.readsAsCaller((input) =>
     Effect.gen(function* () {

@@ -1,3 +1,5 @@
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import {
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
@@ -43,10 +45,9 @@ const shared = {
     ThreadCommandExecutor.ThreadCommandExecutor,
   ],
 };
-const EnvironmentReadTool = Tool.make("goat_environment_read", {
+const EnvironmentReadTool = Tool.make(agentSurfaceRegistry["environment.read"].name, {
   ...shared,
-  description:
-    "Read this server's identity and selected environment preferences. Provider/model availability is exposed by orchestrator_capabilities. Writing instructions are limited to 4,000 characters. standingInstructions is the policy GOAT prepends to the first message of every thread an agent launches here (goat_thread_launch, and goat_ssh_thread_launch from other machines); projectStandingInstructions replaces it for those projects.",
+  description: agentSurfaceRegistry["environment.read"].description,
   success: Schema.Struct({
     environmentId: ExecutionEnvironmentDescriptor.fields.environmentId,
     label: Schema.String,
@@ -54,24 +55,24 @@ const EnvironmentReadTool = Tool.make("goat_environment_read", {
     platform: ExecutionEnvironmentDescriptor.fields.platform,
     preferences: Schema.Struct(PreferenceFields),
   }),
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
-const EnvironmentPreferencesTool = Tool.make("goat_environment_preferences_update", {
-  ...shared,
-  description:
-    "Update selected environment-wide preferences through normal settings persistence and notifications. Requires a live full-access/default calling thread. Omitted fields are preserved; empty customInstructions clears them. Empty standingInstructions clears them. In projectStandingInstructions, a project's text replaces the environment's for threads launched in that project (empty turns them off there) and null removes the override.",
-  parameters: Schema.Struct({
-    defaultThreadEnvMode: ServerSettingsPatch.fields.defaultThreadEnvMode,
-    newWorktreesStartFromOrigin: ServerSettingsPatch.fields.newWorktreesStartFromOrigin,
-    enableProviderUpdateChecks: ServerSettingsPatch.fields.enableProviderUpdateChecks,
-    backgroundActivity: Schema.optionalKey(Schema.Struct({ profile: BackgroundActivityProfile })),
-    sourceControlWritingStyle: ServerSettingsPatch.fields.sourceControlWritingStyle,
-    standingInstructions: ServerSettingsPatch.fields.standingInstructions,
-    projectStandingInstructions: Schema.optionalKey(
-      Schema.Record(ProjectId, Schema.NullOr(StandingInstructions)),
-    ),
-  }),
-  success: Schema.Struct(PreferenceFields),
-}).annotate(Tool.Destructive, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["environment.read"]));
+const EnvironmentPreferencesTool = Tool.make(
+  agentSurfaceRegistry["environment.preferences_update"].name,
+  {
+    ...shared,
+    description: agentSurfaceRegistry["environment.preferences_update"].description,
+    parameters: Schema.Struct({
+      defaultThreadEnvMode: ServerSettingsPatch.fields.defaultThreadEnvMode,
+      newWorktreesStartFromOrigin: ServerSettingsPatch.fields.newWorktreesStartFromOrigin,
+      enableProviderUpdateChecks: ServerSettingsPatch.fields.enableProviderUpdateChecks,
+      backgroundActivity: Schema.optionalKey(Schema.Struct({ profile: BackgroundActivityProfile })),
+      sourceControlWritingStyle: ServerSettingsPatch.fields.sourceControlWritingStyle,
+      standingInstructions: ServerSettingsPatch.fields.standingInstructions,
+      projectStandingInstructions: Schema.optionalKey(
+        Schema.Record(ProjectId, Schema.NullOr(StandingInstructions)),
+      ),
+    }),
+    success: Schema.Struct(PreferenceFields),
+  },
+).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["environment.preferences_update"]));
 export const EnvironmentToolkit = Toolkit.make(EnvironmentReadTool, EnvironmentPreferencesTool);

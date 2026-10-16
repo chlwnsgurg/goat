@@ -26,6 +26,14 @@
     "./adoptLegacyEnv": {
       "types": "./src/adoptLegacyEnv.ts",
       "import": "./src/adoptLegacyEnv.ts"
+    },
+    "./agentSurface": {
+      "types": "./src/agentSurface/registry.ts",
+      "import": "./src/agentSurface/registry.ts"
+    },
+    "./agentSurface/html": {
+      "types": "./src/agentSurface/html.ts",
+      "import": "./src/agentSurface/html.ts"
     }
   },
   "scripts": {

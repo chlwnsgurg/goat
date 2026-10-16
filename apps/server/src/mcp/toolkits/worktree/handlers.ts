@@ -111,12 +111,14 @@ const handlers = {
         .pipe(Effect.mapError(unavailable));
     }),
   ),
-  goat_worktree_handoff: McpToolAccess.actsAsCaller((input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      const service = yield* WorktreeMcpService.WorktreeMcpService;
-      return yield* service.handoff(scope, input);
-    }),
+  goat_worktree_handoff: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* WorktreeMcpService.WorktreeMcpService;
+        return yield* service.handoff(scope, input);
+      }),
+    ),
   ),
   goat_worktree_status: McpToolAccess.readsAsCaller(() =>
     Effect.gen(function* () {

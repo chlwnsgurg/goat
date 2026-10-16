@@ -1,3 +1,5 @@
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import {
   NonNegativeInt,
   OrchestratorMcpFailure,
@@ -22,10 +24,9 @@ const shared = {
     PreviewAutomationBroker.PreviewAutomationBroker,
   ],
 };
-const PreviewListTool = Tool.make("goat_preview_list", {
+const PreviewListTool = Tool.make(agentSurfaceRegistry["preview.list"].name, {
   ...shared,
-  description:
-    "List this thread's preview tabs. Pages reflect the current server state and may shift as tabs change.",
+  description: agentSurfaceRegistry["preview.list"].description,
   parameters: Schema.Struct({
     cursor: Schema.optional(NonNegativeInt),
     limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 50 }))),
@@ -34,14 +35,11 @@ const PreviewListTool = Tool.make("goat_preview_list", {
     ...PreviewListResult.fields,
     nextCursor: Schema.NullOr(NonNegativeInt),
   }),
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
-const PreviewCloseTool = Tool.make("goat_preview_close", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.list"]));
+const PreviewCloseTool = Tool.make(agentSurfaceRegistry["preview.close"].name, {
   ...shared,
-  description:
-    "Close one preview tab owned by this thread through the normal server/host tab lifecycle. This does not wait for renderer cleanup.",
+  description: agentSurfaceRegistry["preview.close"].description,
   parameters: Schema.Struct({ tabId: PreviewTabId }),
   success: Schema.Struct({}),
-}).annotate(Tool.Destructive, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.close"]));
 export const PreviewControlsToolkit = Toolkit.make(PreviewListTool, PreviewCloseTool);
