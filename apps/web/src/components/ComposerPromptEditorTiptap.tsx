@@ -44,6 +44,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
@@ -425,7 +426,9 @@ function ComposerCitationNodeView({ node, editor, getPos }: NodeViewProps) {
         citation: next,
         source: serializeAssistantCitation(next),
       });
-      editor.view.dispatch(tr);
+      const view = mountedEditorView(editor);
+      if (!view) return false;
+      view.dispatch(tr);
       return true;
     },
     [editor, nodePos],
@@ -1517,6 +1520,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     },
     [],
   );
+  const mountedEditor = useMountedEditor(editor);
 
   useEffect(() => {
     editor?.setEditable(!disabled);
@@ -1533,9 +1537,8 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
   // through `className`, so the attributes are pushed to the view here for
   // those measurements to see the layout they are about to reserve for.
   useLayoutEffect(() => {
-    if (!editor?.isInitialized) return;
-    editor.view.setProps({ attributes: editorAttributes });
-  }, [editor, editorAttributes]);
+    mountedEditorView(mountedEditor)?.setProps({ attributes: editorAttributes });
+  }, [mountedEditor, editorAttributes]);
 
   const readSnapshot = useCallback(() => {
     const snapshot = snapshotRef.current;
@@ -1579,7 +1582,9 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     });
     if (dismissal.kind !== "commit") return;
     const next = withAssistantCitationComment(citation, dismissal.comment);
-    current.view.dispatch(
+    const view = mountedEditorView(current);
+    if (!view) return;
+    view.dispatch(
       current.state.tr
         .setNodeMarkup(pos, undefined, {
           ...node.attrs,
@@ -1592,8 +1597,11 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
   });
 
   // Controlled value/cursor from the store (history recall, chip insertion…).
+  // Without a view the editor is about to be replaced or remounted, which
+  // reruns this with the latest value, so nothing is recorded as applied yet.
   useLayoutEffect(() => {
-    if (!editor) return;
+    const view = mountedEditorView(mountedEditor);
+    if (!mountedEditor || !view) return;
     const initialSelection = !hasAppliedControlledSelectionRef.current;
     hasAppliedControlledSelectionRef.current = true;
     const normalizedCursor = clampEditorCursor(value, cursor);
@@ -1617,26 +1625,25 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
       end: normalizedExpandedCursor,
     };
     setIsEmpty(value.length === 0);
-    const rootElement = editor.view.dom;
-    const isFocused = Boolean(rootElement && document.activeElement === rootElement);
+    const isFocused = document.activeElement === view.dom;
     if (!initialSelection && previousSnapshot.value === value && !isFocused) return;
 
     isApplyingControlledUpdateRef.current = true;
     const pendingCitation =
       citationRequestRef.current?.value === value ? citationRequestRef.current : null;
     if (previousSnapshot.value !== value) {
-      saveCitationDraft(editor, previousSnapshot.value);
-      editor.commands.setContent(
+      saveCitationDraft(mountedEditor, previousSnapshot.value);
+      mountedEditor.commands.setContent(
         buildDocJson(value, skillLabelFor, { styling: richText, literalText }),
         {
           emitUpdate: false,
         },
       );
     }
-    const map = serializeEditorDoc(editor.state.doc);
+    const map = serializeEditorDoc(mountedEditor.state.doc);
     const flat = collapsedToFlat(map, normalizedCursor);
-    editor.commands.setTextSelection(flatToPm(map, flat));
-    if (isFocused) scrollTiptapCaretIntoView(editor);
+    mountedEditor.commands.setTextSelection(flatToPm(map, flat));
+    if (isFocused) scrollTiptapCaretIntoView(mountedEditor);
     if (pendingCitation) {
       citationRequestRef.current = null;
       const target = map.runs.find(
@@ -1646,7 +1653,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
           run.mdStart === pendingCitation.citationStart,
       );
       if (target) {
-        const node = editor.state.doc.nodeAt(target.pmPos);
+        const node = mountedEditor.state.doc.nodeAt(target.pmPos);
         const citeKey = (node?.attrs as { citeKey?: string } | undefined)?.citeKey;
         if (citeKey) {
           setOpenCitation({
@@ -1663,9 +1670,9 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
   }, [
     clampEditorCursor,
     cursor,
-    editor,
     expandEditorCursor,
     literalText,
+    mountedEditor,
     richText,
     skillLabelFor,
     value,
@@ -1673,12 +1680,13 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
 
   const focusAt = useCallback(
     (nextCursor: number) => {
-      if (!editor) return;
+      const view = mountedEditorView(editor);
+      if (!editor || !view) return;
       // view.focus() writes the state selection to the DOM as it focuses. A
       // bare DOM focus leaves the native caret at the start until
       // ProseMirror resyncs it 20ms later, and dictation tools type fast
       // enough to land keys there, ahead of the text already inserted.
-      editor.view.focus();
+      view.focus();
       // A newer prompt is waiting to be applied (a chip was just inserted
       // through the store). Reporting the editor's stale text now would
       // overwrite that prompt; the pending rewrite places the caret instead.
@@ -1763,7 +1771,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
         if (edge === "start" ? beforeCaret.includes("\n") : afterCaret.includes("\n")) {
           return false;
         }
-        const rootElement = editor?.view.dom;
+        const rootElement = mountedEditorView(editor)?.dom;
         const selection = window.getSelection();
         if (
           !rootElement ||
@@ -1919,7 +1927,39 @@ function insertMarkdownParagraphs(
  * composer to the caret explicitly.
  */
 function scrollTiptapCaretIntoView(editor: TiptapEditor): void {
-  editor.view.dispatch(editor.state.tr.scrollIntoView());
+  mountedEditorView(editor)?.dispatch(editor.state.tr.scrollIntoView());
+}
+
+/**
+ * The editor's ProseMirror view, or null before mount and after unmount or
+ * destroy, when Tiptap throws on most `editor.view` reads. Read every view in
+ * this file through it: @tiptap/react destroys an editor whose component has
+ * not run its passive effects within a millisecond, which happens to a composer
+ * React prerenders behind a Suspense fallback before revealing it.
+ */
+function mountedEditorView(editor: TiptapEditor | null | undefined): EditorView | null {
+  return editor && !editor.isDestroyed ? editor.view : null;
+}
+
+/**
+ * The editor while it has a view, re-rendering when it gains or loses one.
+ * Effects still read the view through {@link mountedEditorView}: an editor
+ * can lose its view between this render and the commit.
+ */
+function useMountedEditor(editor: TiptapEditor | null): TiptapEditor | null {
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      if (!editor) return () => {};
+      editor.on("mount", onChange);
+      editor.on("unmount", onChange);
+      return () => {
+        editor.off("mount", onChange);
+        editor.off("unmount", onChange);
+      };
+    },
+    [editor],
+  );
+  return useSyncExternalStore(subscribe, () => (mountedEditorView(editor) ? editor : null));
 }
 
 /**
