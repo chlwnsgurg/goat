@@ -92,22 +92,27 @@ function useRunScopedPlan() {
           return persistServer(request);
         },
         persistClientSettingsPatch,
-      ).then(({ failedEnvironments, savedEnvironments, savedEnvironmentCount }) => {
-        if (failedEnvironments.length === 0) return;
-        toastManager.add({
-          type: "error",
-          title:
-            savedEnvironmentCount > 0 ? "Setting saved on some environments" : "Setting not saved",
-          description: [
-            ...failedEnvironments.map(
-              ({ label, message }) => `Could not save on ${label}: ${message}`,
-            ),
-            ...(savedEnvironmentCount > 0
-              ? [`Saved on ${savedEnvironments.map(({ label }) => label).join(", ")}.`]
-              : []),
-          ].join("\n"),
-        });
-      });
+      ).then(
+        ({ clientSaveFailed, failedEnvironments, savedEnvironments, savedEnvironmentCount }) => {
+          if (!clientSaveFailed && failedEnvironments.length === 0) return;
+          toastManager.add({
+            type: "error",
+            title:
+              savedEnvironmentCount > 0
+                ? "Setting saved on some environments"
+                : "Setting not saved",
+            description: [
+              ...(clientSaveFailed ? ["Could not save settings on this device. Try again."] : []),
+              ...failedEnvironments.map(
+                ({ label, message }) => `Could not save on ${label}: ${message}`,
+              ),
+              ...(savedEnvironmentCount > 0
+                ? [`Saved on ${savedEnvironments.map(({ label }) => label).join(", ")}.`]
+                : []),
+            ].join("\n"),
+          });
+        },
+      );
     },
     [persistServer],
   );

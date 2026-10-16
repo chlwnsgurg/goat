@@ -1,3 +1,4 @@
+import { checkUsage } from "./MemoryUsageScan.testkit.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- historical admin request fixture.
@@ -25,6 +26,9 @@ import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
+import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
+import usageMigration from "../persistence/Migrations/078_MemoryUsageCounters.ts";
+import revertMigration from "../persistence/Migrations/079_MemoryRevertResults.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Store from "./MemoryStore.ts";
@@ -50,10 +54,21 @@ const database = Layer.effectDiscard(
     Effect.andThen(hubMigration),
     Effect.andThen(lineageMigration),
     Effect.andThen(checkpointMigration),
+    Effect.andThen(reportMigration),
+    Effect.andThen(usageMigration),
+    Effect.andThen(revertMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storeLayer = Store.layer.pipe(Layer.provideMerge(database));
 const core = Service.layer.pipe(
+  Layer.provide(
+    Layer.succeed(Settings.MemoryHubCommittedSettings, {
+      read: Effect.succeed({
+        settings: { mode: "hub" as const, memorySpaceId: space },
+        version: 1,
+      }),
+    }),
+  ),
   Layer.provide(
     Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
       resolve: () => Effect.succeed(null),
@@ -166,7 +181,7 @@ describe("MemoryHubService", () => {
           .count,
         1,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("checks member origin, space and excess fields before any sequence", () =>
     Effect.gen(function* () {
@@ -196,7 +211,7 @@ describe("MemoryHubService", () => {
           .count,
         0,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("semantic refusal is sequenced metadata and a later sibling commits", () =>
     Effect.gen(function* () {
@@ -223,7 +238,7 @@ describe("MemoryHubService", () => {
       );
       assert.strictEqual(page.throughSequence, 2);
       assert.isFalse(JSON.stringify(page.entries[0]).includes("PRIVATE KEY"));
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("capacity failure returns null sequence and rolls back all canonical writes", () =>
     Effect.gen(function* () {
@@ -241,7 +256,7 @@ describe("MemoryHubService", () => {
           .count,
         M.MEMORY_LOG_MAX_TAIL_ROWS,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("post-lock membership sees a revoke committed while push waited", () =>
     Effect.gen(function* () {
@@ -267,7 +282,7 @@ describe("MemoryHubService", () => {
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(blocker);
       assert.strictEqual((yield* Fiber.join(waiting))._tag, "MemoryHubUnauthorizedError");
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("fixed watermark excludes later writes until the next pull", () =>
     Effect.gen(function* () {
@@ -294,7 +309,7 @@ describe("MemoryHubService", () => {
           .entries.length,
         1,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("only one claimant holds the fence; expiry takeover rejects stale release", () =>
     Effect.gen(function* () {
@@ -335,7 +350,7 @@ describe("MemoryHubService", () => {
         (yield* store.loadAggregate(space, memoryId)).fence!.activeLease!.holderEnvironmentId,
         otherEnv,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("renewal never extends the ten-minute attempt deadline", () =>
     Effect.gen(function* () {
@@ -361,7 +376,7 @@ describe("MemoryHubService", () => {
         (yield* hub.renew(request, principal()).pipe(Effect.flip))._tag,
         "MemoryHubError",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("join requires publication and checkpoint token expires without sliding", () =>
     Effect.gen(function* () {
@@ -387,7 +402,7 @@ describe("MemoryHubService", () => {
         (yield* hub.pull(pull, principal(otherEnv)).pipe(Effect.flip))._tag,
         "MemoryHubError",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 
@@ -495,7 +510,7 @@ describe("MemoryHubService source relay", () => {
           0,
         );
         assert.strictEqual((yield* hub.pull(pullInput, principal())).entries.length, 1);
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("expires at the original 75-second deadline and rejects a late owner response", () =>
     Effect.gen(function* () {
@@ -534,7 +549,7 @@ describe("MemoryHubService source relay", () => {
           .count,
         0,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 
@@ -1652,7 +1667,7 @@ describe("MemoryHubService resolution approval", () => {
         yield* TestClock.adjust(M.MEMORY_RESOLUTION_ATTEMPT_MAX_MS);
         assert.deepStrictEqual(yield* hub.applyResolution(request, principal()), approved);
         assert.deepStrictEqual((yield* hub.push(pushInput(op), principal())).receipts, [approved]);
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("ordinary push cannot admit a new resolution", () =>
     Effect.gen(function* () {
@@ -1667,7 +1682,7 @@ describe("MemoryHubService resolution approval", () => {
       );
       const page = yield* hub.pull(pullInput, principal());
       assert.strictEqual(page.entries.at(-1)!.kind, "metadata");
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("SQL lock wait crossing expiry cannot approve a stale resolution", () =>
     Effect.gen(function* () {
@@ -1692,7 +1707,7 @@ describe("MemoryHubService resolution approval", () => {
       assert.strictEqual(refusal.failureCode, "lease_expired");
       assert.isUndefined(refusal.resolutionApproval);
       assert.strictEqual((yield* store.loadAggregate(space, memoryId)).resolutions.length, 0);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("forget immediately invalidates pending source relay", () =>
     Effect.gen(function* () {
@@ -1744,7 +1759,7 @@ describe("MemoryHubService resolution approval", () => {
           .count,
         0,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 

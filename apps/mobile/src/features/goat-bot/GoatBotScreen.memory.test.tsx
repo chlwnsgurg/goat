@@ -10,7 +10,12 @@ import {
   nativeId,
   type NativeMemoryHarness,
 } from "../../testing/memoryNativeHarness";
-vi.mock("@legendapp/list/keyboard", () => ({ KeyboardAwareLegendList: () => null }));
+vi.mock("@legendapp/list/react-native", () => ({ LegendList: () => null }));
+vi.mock("react-native-keyboard-controller", () => ({
+  KeyboardAvoidingView: () => null,
+  useKeyboardState: () => false,
+}));
+vi.mock("../../native/NativeScrollViewMarker", () => ({ NativeScrollViewMarker: () => null }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ bottom: 0 }) }));
 vi.mock("./useMobileGoatBotSession", () => ({ useMobileGoatBotSession: () => ({}) }));
 import { GoatBotTimelineRow } from "./GoatBotScreen";

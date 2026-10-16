@@ -8,6 +8,8 @@ import {
   MemorySpaceId,
   MemoryItem,
   MemorySyncStatus,
+  MemoryImportProviderInput,
+  MemoryImportProviderResult,
   MemoryOwnerSourceReadPolicyView,
   WS_METHODS,
   sessionGrantsScope,
@@ -43,6 +45,9 @@ const bridge = vi.hoisted(() => ({
   focus: new Map<() => void | (() => void), void | (() => void)>(),
   active: new Set<(state: string) => void>(),
   confirmations: [] as Array<() => void>,
+  secure: new Map<string, string>(),
+  beforeSecureWrite: null as (() => Promise<void>) | null,
+  projects: [] as Array<{ id: string; title: string; environmentId: EnvironmentId }>,
 }));
 vi.mock("react-native", async () => {
   const { createElement } = await import("react");
@@ -123,6 +128,19 @@ vi.mock("react-native", async () => {
     StyleSheet: { create: (value: unknown) => value },
   };
 });
+vi.mock("../persistence/namespaced-secure-store", () => ({
+  secureStore: {
+    getItem: (key: string) => Promise.resolve(bridge.secure.get(key) ?? null),
+    setItem: async (key: string, value: string) => {
+      await bridge.beforeSecureWrite?.();
+      bridge.secure.set(key, value);
+    },
+    removeItem: (key: string) => {
+      bridge.secure.delete(key);
+      return Promise.resolve();
+    },
+  },
+}));
 vi.mock("expo-crypto", () => ({ randomUUID: () => globalThis.crypto.randomUUID() }));
 vi.mock("@react-navigation/native", async () => ({
   useFocusEffect: (callback: () => void | (() => void)) => {
@@ -171,6 +189,7 @@ vi.mock("../state/session", () => ({
     return AsyncResult.isSuccess(result) && sessionGrantsScope(result.value, scope);
   },
   environmentSession: {
+    sessionStateAtom: (id: EnvironmentId) => (bridge.current as NativeMemoryHarness).grants(id),
     preparedConnectionValueAtom: (id: EnvironmentId) =>
       (bridge.current as NativeMemoryHarness).prepared(id),
   },
@@ -187,6 +206,7 @@ vi.mock("@goat/client-runtime/state/session", () => ({
 vi.mock("../state/entities", () => ({
   useThreadShell: () => null,
   useProject: () => null,
+  useProjects: () => bridge.projects,
   useEnvironmentServerConfig: () => null,
 }));
 vi.mock("../state/use-remote-environment-registry", () => ({
@@ -232,8 +252,10 @@ vi.mock("../features/settings/components/SettingsSwitchRow", () => ({
     label: string;
     value: boolean;
     onValueChange: (value: boolean) => void;
+    disabled?: boolean;
   }) => (
     <button
+      disabled={props.disabled}
       role="switch"
       aria-checked={props.value}
       onClick={() => props.onValueChange(!props.value)}
@@ -249,6 +271,9 @@ vi.mock("../features/settings/components/SettingsRow", () => ({
     </button>
   ),
 }));
+
+const decodeImportInput = Schema.decodeUnknownSync(MemoryImportProviderInput);
+const decodeImportResult = Schema.decodeUnknownSync(MemoryImportProviderResult);
 
 export const nativeDevice = EnvironmentId.make("synthetic-device");
 export const nativeEnv = EnvironmentId.make("synthetic-selected-tunnel");
@@ -408,7 +433,7 @@ export function createNativeMemoryHarness() {
   const registry = AtomRegistry.make();
   const configs = Atom.family((_id: EnvironmentId | null) => Atom.make<ServerConfig | null>(null));
   const grants = Atom.family((_id: EnvironmentId | null) =>
-    Atom.make(AsyncResult.success(scopes([]))),
+    Atom.make<AsyncResult.AsyncResult<AuthSessionState, never>>(AsyncResult.success(scopes([]))),
   );
   const prepared = Atom.family((_id: EnvironmentId | null) =>
     Atom.make(Option.some({} as PreparedConnection)),
@@ -417,7 +442,7 @@ export function createNativeMemoryHarness() {
   const waiters: Array<{ method: string; count: number; resolve: () => void }> = [];
   const queue = Effect.runSync(Queue.unbounded<MemoryChangeSignal>());
   const config = {
-    environment: { capabilities: { memory: { protocolVersion: 1 } } },
+    environment: { capabilities: { memory: { protocolVersion: 1, importProvider: true } } },
     settings: { enableAgentMemoryAccess: true },
   } as ServerConfig;
   const responses = new Map<string, (input: unknown) => unknown>([
@@ -465,6 +490,7 @@ export function createNativeMemoryHarness() {
               Stream.fromQueue(queue),
             );
           return Effect.suspend(() => {
+            if (method === WS_METHODS.memoryImportProvider) decodeImportInput(input);
             calls.push({ method: String(method), input, environmentId });
             waiters
               .filter(
@@ -474,7 +500,10 @@ export function createNativeMemoryHarness() {
               )
               .forEach((waiter) => waiter.resolve());
             const response = responses.get(String(method))?.(input);
-            return Effect.isEffect(response) ? response : Effect.succeed(response);
+            const effect = Effect.isEffect(response) ? response : Effect.succeed(response);
+            return method === WS_METHODS.memoryImportProvider
+              ? Effect.map(effect, decodeImportResult)
+              : effect;
           });
         },
       },
@@ -540,6 +569,11 @@ export function createNativeMemoryHarness() {
   });
   const harness = {
     registry,
+    secureValues: bridge.secure,
+    setSecureWrite: (before: (() => Promise<void>) | null) => {
+      bridge.beforeSecureWrite = before;
+    },
+    projects: bridge.projects,
     configs,
     grants,
     prepared,
@@ -598,6 +632,9 @@ export function createNativeMemoryHarness() {
     },
   };
   bridge.current = harness;
+  bridge.secure.clear();
+  bridge.beforeSecureWrite = null;
+  bridge.projects.length = 0;
   bridge.navigations.length = 0;
   bridge.confirmations.length = 0;
   registry.mount(configs(nativeEnv));

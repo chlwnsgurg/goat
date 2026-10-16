@@ -426,6 +426,9 @@ export const WS_METHODS = {
   memoryList: "memory.list",
   memoryRead: "memory.read",
   memoryHistory: "memory.history",
+  memoryHubDiagnostics: "memory.hub.diagnostics",
+  memoryHubReconcile: "memory.hub.reconcile",
+  memoryResetReportAttempts: "memory.resetReportAttempts",
   memorySyncStatus: "memory.syncStatus",
   memoryOwnerSourceReadPolicyGet: "memory.ownerSourceReadPolicy.get",
   memoryOwnerSourceReadPolicyUpdate: "memory.ownerSourceReadPolicy.update",
@@ -2353,6 +2356,11 @@ export const WsMemorySyncStatusRpc = Rpc.make(WS_METHODS.memorySyncStatus, {
   success: Memory.MemorySyncStatus,
   error: MemoryRpcErrors,
 });
+export const WsMemoryHubDiagnosticsRpc = Rpc.make(WS_METHODS.memoryHubDiagnostics, {
+  payload: Memory.MemorySyncStatusInput,
+  success: Memory.MemoryHubDiagnostics,
+  error: MemoryRpcErrors,
+});
 export const WsMemoryUpsertRpc = Rpc.make(WS_METHODS.memoryUpsert, {
   payload: Memory.MemoryUpsertInput,
   success: Memory.MemoryMutationReceipt,
@@ -2399,7 +2407,19 @@ export const WsMemoryOwnerSourceReadPolicyUpdateRpc = Rpc.make(
     error: MemoryRpcErrors,
   },
 );
+export const WsMemoryResetReportAttemptsRpc = Rpc.make(WS_METHODS.memoryResetReportAttempts, {
+  payload: Memory.MemoryResetReportAttemptsInput,
+  success: Memory.MemoryResetReportAttemptsResult,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryHubReconcileRpc = Rpc.make(WS_METHODS.memoryHubReconcile, {
+  payload: Memory.MemoryHubReconcileInput,
+  success: Memory.MemoryHubReconcileResult,
+  error: MemoryRpcErrors,
+});
 export const WsMemoryAdministrationRpcGroup = RpcGroup.make(
+  WsMemoryHubReconcileRpc,
+  WsMemoryResetReportAttemptsRpc,
   WsMemoryOwnerSourceReadPolicyGetRpc,
   WsMemoryOwnerSourceReadPolicyUpdateRpc,
 ).middleware(RpcScopeAuthorization);
@@ -2417,6 +2437,7 @@ export const WsMemoryCoreRpcGroup = RpcGroup.make(
   WsMemoryReadRpc,
   WsMemoryHistoryRpc,
   WsMemorySyncStatusRpc,
+  WsMemoryHubDiagnosticsRpc,
   WsMemoryUpsertRpc,
   WsMemoryForgetRpc,
   WsMemoryRevertResolutionRpc,

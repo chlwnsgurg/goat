@@ -1,5 +1,8 @@
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
+import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
+import usageMigration from "../persistence/Migrations/078_MemoryUsageCounters.ts";
+import revertMigration from "../persistence/Migrations/079_MemoryRevertResults.ts";
 import { assert, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -23,6 +26,9 @@ const setup = Layer.effectDiscard(
     Effect.andThen(hubMigration),
     Effect.andThen(lineageMigration),
     Effect.andThen(checkpointMigration),
+    Effect.andThen(reportMigration),
+    Effect.andThen(usageMigration),
+    Effect.andThen(revertMigration),
   ),
 ).pipe(Layer.provideMerge(database));
 const live = Auth.layer.pipe(

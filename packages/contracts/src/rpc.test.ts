@@ -188,12 +188,14 @@ it.effect("applies scope middleware to SSH workspace RPCs", () =>
 );
 
 describe("memory RPC groups", () => {
-  it("declares seventeen memory methods with typed inputs and authorization middleware", () => {
-    expect(WsMemoryRpcGroup.requests.size).toBe(17);
-    expect(WsMemoryCoreRpcGroup.requests.size).toBe(14);
+  it("declares twenty memory methods with typed inputs and authorization middleware", () => {
+    expect(WsMemoryRpcGroup.requests.size).toBe(20);
+    expect(WsMemoryCoreRpcGroup.requests.size).toBe(15);
     expect(WsMemoryImportRpcGroup.requests.size).toBe(1);
-    expect(WsMemoryAdministrationRpcGroup.requests.size).toBe(2);
+    expect(WsMemoryAdministrationRpcGroup.requests.size).toBe(4);
     expect([...WsMemoryAdministrationRpcGroup.requests.keys()]).toEqual([
+      "memory.hub.reconcile",
+      "memory.resetReportAttempts",
       "memory.ownerSourceReadPolicy.get",
       "memory.ownerSourceReadPolicy.update",
     ]);
@@ -255,10 +257,10 @@ describe("memory RPC groups", () => {
     ).toThrow();
   });
 });
-it("declares fourteen core methods and one staged import", () => {
+it("declares fifteen core methods and one staged import", () => {
   expect([...WsMemoryCoreRpcGroup.requests.keys()]).not.toContain("memory.importProvider");
   expect([...WsMemoryImportRpcGroup.requests.keys()]).toEqual(["memory.importProvider"]);
-  expect(WsMemoryCoreRpcGroup.requests.size).toBe(14);
+  expect(WsMemoryCoreRpcGroup.requests.size).toBe(15);
 });
 it("memory changes is a typed authorized stream", () => {
   const rpc = WsMemoryCoreRpcGroup.requests.get("memory.changes")!;

@@ -6,7 +6,9 @@ import {
   WS_METHODS,
   supportsMemoryProtocol,
 } from "@goat/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import { createMemoryImportWorkflow } from "../memoryImportWorkflow.ts";
 import * as HashMap from "effect/HashMap";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
@@ -277,6 +279,8 @@ export function createMemoryEnvironmentAtoms<R, E>(
           Option.isSome(get(sessions.preparedConnectionValueAtom(environmentId))) &&
           config !== null &&
           supportsMemoryProtocol(config.environment.capabilities) &&
+          ((tag !== WS_METHODS.memoryHubDiagnostics && tag !== WS_METHODS.memoryHubReconcile) ||
+            config.environment.capabilities.memory?.hubDiagnostics === true) &&
           (tag !== WS_METHODS.memoryImportProvider ||
             config.environment.capabilities.memory?.importProvider === true)
         );
@@ -323,8 +327,22 @@ export function createMemoryEnvironmentAtoms<R, E>(
               value: Option.none<EnvironmentRpcSuccess<T>>(),
             });
           }
+          const config = get(sessions.initialConfigValueAtom(environmentId));
+          // Strip caller hints as well: legacy servers reject unknown strict input keys.
+          const { includeRefusedReverts: _hint, ...legacyInput } = input as typeof input & {
+            readonly includeRefusedReverts?: true;
+          };
+          const requestInput =
+            tag === WS_METHODS.memoryHistory
+              ? ({
+                  ...legacyInput,
+                  ...(config?.environment.capabilities.memory?.refusedReverts === true
+                    ? { includeRefusedReverts: true as const }
+                    : {}),
+                } as typeof input)
+              : input;
           return Stream.fromEffect(
-            requestMemoryQuery(runtime, get.registry, environmentId, tag, input).pipe(
+            requestMemoryQuery(runtime, get.registry, environmentId, tag, requestInput).pipe(
               Effect.timeoutOption(BODY_TTL),
             ),
           ).pipe(
@@ -445,6 +463,8 @@ export function createMemoryEnvironmentAtoms<R, E>(
     ).pipe(Atom.withLabel(`memory-draft:${draftId}`), Atom.setIdleTTL(0));
   });
 
+  const importProvider = command(WS_METHODS.memoryImportProvider);
+
   return {
     /** Release body-free metadata when the owning runtime is disposed. */
     dispose: (registry: AtomRegistry.AtomRegistry) => {
@@ -456,6 +476,9 @@ export function createMemoryEnvironmentAtoms<R, E>(
     search: bodyQuery(WS_METHODS.memorySearch),
     read: bodyQuery(WS_METHODS.memoryRead),
     history: bodyQuery(WS_METHODS.memoryHistory),
+    resetReportAttempts: command(WS_METHODS.memoryResetReportAttempts),
+    hubDiagnostics: command(WS_METHODS.memoryHubDiagnostics),
+    hubReconcile: command(WS_METHODS.memoryHubReconcile),
     readSource: bodyQuery(WS_METHODS.memoryReadSource),
     upsert: command(WS_METHODS.memoryUpsert),
     forget: command(WS_METHODS.memoryForget),
@@ -467,7 +490,21 @@ export function createMemoryEnvironmentAtoms<R, E>(
     ownerSourceReadPolicyGet: command(WS_METHODS.memoryOwnerSourceReadPolicyGet),
     ownerSourceReadPolicyUpdate: command(WS_METHODS.memoryOwnerSourceReadPolicyUpdate),
     syncStatus: command(WS_METHODS.memorySyncStatus),
-    importProvider: command(WS_METHODS.memoryImportProvider),
+    importProvider,
+    createImportWorkflow: (
+      registry: AtomRegistry.AtomRegistry,
+      options: Omit<Parameters<typeof createMemoryImportWorkflow>[0], "canImport" | "request">,
+    ) =>
+      createMemoryImportWorkflow({
+        ...options,
+        canImport: ({ environmentId }) =>
+          registry.get(importProvider.permissionAtom(environmentId)),
+        request: async (environmentId, input) => {
+          const result = await importProvider.run(registry, { environmentId, input });
+          if (result._tag === "Failure") throw Cause.squash(result.cause);
+          return result.value;
+        },
+      }),
     draftAtom: (target: MemoryTarget & { readonly draftId: string }) =>
       drafts(JSON.stringify([target.environmentId, target.input, target.draftId])),
   };

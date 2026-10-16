@@ -19,7 +19,11 @@ import * as Stream from "effect/Stream";
 import type * as Types from "effect/Types";
 import { AiError, McpProtocol, McpSchema, McpServer, Tool, type Toolkit } from "effect/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
-import { OrchestratorMcpFailure, PreviewAutomationError } from "@goat/contracts";
+import {
+  OrchestratorMcpFailure,
+  PreviewAutomationError,
+  type PreviewAutomationSnapshot,
+} from "@goat/contracts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
@@ -36,6 +40,8 @@ import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { HostStatusToolkit } from "./toolkits/hostStatus/tools.ts";
 import * as HostStatusHandlers from "./toolkits/hostStatus/handlers.ts";
+import { ProviderToolkit } from "./toolkits/provider/tools.ts";
+import * as ProviderHandlers from "./toolkits/provider/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
 import { RemoteReportToolkit } from "./toolkits/remoteReport/tools.ts";
@@ -515,14 +521,10 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
             Effect.gen(function* () {
               const snapshot = encodedResult as SnapshotMetadata & {
                 readonly url: string;
-                readonly screenshot: {
-                  readonly mimeType: "image/png";
-                  readonly data: string;
-                  readonly width: number;
-                  readonly height: number;
-                };
+                readonly screenshot: PreviewAutomationSnapshot["screenshot"];
               };
               const { screenshot, ...page } = snapshot;
+              const { data: _data, ...screenshotMetadata } = screenshot;
               const png = new Uint8Array(Buffer.from(screenshot.data, "base64"));
               const screenshotPath =
                 payload?.save === true ? yield* saveScreenshot(snapshot.url, png) : undefined;
@@ -534,6 +536,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                 const saved = {
                   url: cutText(snapshot.url, MAX_SNAPSHOT_IDENTIFIER_CHARS),
                   screenshotPath,
+                  ...(screenshot.fullPage ? { screenshot: screenshotMetadata } : {}),
                 };
                 return new McpSchema.CallToolResult({
                   isError: false,
@@ -543,11 +546,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
               }
               const metadata = {
                 ...page,
-                screenshot: {
-                  mimeType: screenshot.mimeType,
-                  width: screenshot.width,
-                  height: screenshot.height,
-                },
+                screenshot: screenshotMetadata,
                 ...(screenshotPath === undefined ? {} : { screenshotPath }),
               };
               const bounded = boundSnapshotMetadata(metadata);
@@ -928,6 +927,7 @@ export const catalogRegistrations = {
   previewControls: toolkitRegistration(PreviewControlsToolkit, PreviewControlsHandlers.layer),
   environment: toolkitRegistration(EnvironmentToolkit, EnvironmentHandlers.layer),
   hostStatus: toolkitRegistration(HostStatusToolkit, HostStatusHandlers.layer),
+  provider: toolkitRegistration(ProviderToolkit, ProviderHandlers.layer),
   project: toolkitRegistration(ProjectToolkit, ProjectHandlers.layer),
   connection: toolkitRegistration(ConnectionToolkit, ConnectionHandlers.layer),
   remoteReport: toolkitRegistration(RemoteReportToolkit, RemoteReportHandlers.layer),
@@ -1002,6 +1002,12 @@ export const layerHostStatusService = HostStatusMcpService.layer.pipe(
 
 /** Reads HostStatusMcpService from the server's context; see `layerHostStatusService`. */
 export const layerHostStatusToolkit = catalogRegistrations.hostStatus;
+
+/**
+ * goat_provider_diagnose. Composed beside `layer` by the server, which provides
+ * ProviderDiagnosisService from the provider registry, host, and ACP catalog.
+ */
+export const layerProviderToolkit = catalogRegistrations.provider;
 
 const layerProjectRegistration = catalogRegistrations.project.pipe(
   Layer.provide(ThreadLaunchMcpService.layer),

@@ -1494,7 +1494,7 @@ describe("orchestrator MCP toolkit", () => {
             const threadReadTool = server.tools.find(
               ({ tool }) => tool.name === "goat_thread_read",
             );
-            expect(threadReadTool?.tool.annotations?.readOnlyHint).toBe(false);
+            expect(threadReadTool?.tool.annotations?.readOnlyHint).toBe(true);
             expect(threadReadTool?.tool.inputSchema).toMatchObject({ additionalProperties: false });
             // GOAT names the unknown parameter before schema decoding would reject it.
             const unknownPagingParam = yield* invoke("goat_thread_read", {

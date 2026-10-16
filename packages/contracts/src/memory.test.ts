@@ -2155,3 +2155,89 @@ describe("WP5 lineage checkpoint contracts", () => {
     });
   });
 });
+
+it("report retry reset accepts at most 32 distinct exact-owner IDs and rejects excess fields", () => {
+  const valid = {
+    memorySpaceId: id(),
+    environmentId: "fixture",
+    reportIds: Array.from({ length: 32 }, (_, n) => n.toString(16).padStart(64, "0")),
+  };
+  const decode = Schema.decodeUnknownSync(M.MemoryResetReportAttemptsInput);
+  expect(decode(valid).reportIds).toHaveLength(32);
+  for (const invalid of [
+    { ...valid, reportIds: [...valid.reportIds, "f".repeat(64)] },
+    { ...valid, reportIds: [valid.reportIds[0], valid.reportIds[0]] },
+    { ...valid, reportIds: [] },
+    { ...valid, agent: true },
+    { ...valid, environmentId: undefined },
+  ])
+    expect(() => decode(invalid)).toThrow();
+  expect(() =>
+    Schema.decodeUnknownSync(M.MemoryResetReportAttemptsResult)({
+      resetCount: 33,
+      unchangedCount: 0,
+    }),
+  ).toThrow();
+});
+
+it("refused revert results are body-free and history opt-in is explicit", () => {
+  const result = {
+    operationId: id(80),
+    memoryId: id(2),
+    resolutionId: id(7),
+    revertDeadlineUtc: resolution.revertDeadlineUtc,
+    status: "refused",
+    failureCode: "unavailable",
+  };
+  round(M.MemoryRevertResult, result);
+  round(M.MemoryHistoryPage, { ...history, revertResults: [result] });
+  rejects(M.MemoryRevertResult, { ...result, failureCode: "raw-private-error" });
+  rejects(M.MemoryRevertResult, { ...result, body: "private" });
+  rejects(M.MemoryRevertResult, { ...result, failureCode: undefined });
+  round(M.MemoryHistoryInput, { memorySpaceId: id(), memoryId: id(2), limit: 10 });
+  round(M.MemoryHistoryInput, {
+    memorySpaceId: id(),
+    memoryId: id(2),
+    limit: 10,
+    includeRefusedReverts: true,
+  });
+  rejects(M.MemoryHistoryInput, {
+    memorySpaceId: id(),
+    memoryId: id(2),
+    limit: 10,
+    includeRefusedReverts: false,
+  });
+});
+
+it("strictly bounds hub diagnostics and rejects unsafe or duplicated reasons", () => {
+  const diagnostic = {
+    version: 1,
+    publication: { state: "current" },
+    readiness: "ready",
+    connection: "unreachable",
+    recoverableHolds: ["protocol", "availability"],
+    permanentHolds: ["identity", "authorization"],
+    reconcile: "permanent_hold",
+  };
+  const decode = Schema.decodeUnknownSync(M.MemoryHubDiagnostics);
+  expect(decode(diagnostic)).toEqual(diagnostic);
+  for (const invalid of [
+    { ...diagnostic, reason: "raw endpoint or credential" },
+    { ...diagnostic, permanentHolds: ["identity", "identity"] },
+    { ...diagnostic, recoverableHolds: ["authorization"] },
+    { ...diagnostic, publication: { state: "last_valid", code: "raw exception" } },
+    { ...diagnostic, version: -1 },
+  ])
+    expect(() => decode(invalid)).toThrow();
+  const request = { memorySpaceId: id(), environmentId: "fixture", expectedVersion: 1 };
+  expect(Schema.decodeUnknownSync(M.MemoryHubReconcileInput)(request)).toEqual(request);
+  expect(() =>
+    Schema.decodeUnknownSync(M.MemoryHubReconcileInput)({ ...request, releaseAll: true }),
+  ).toThrow();
+  expect(() =>
+    Schema.decodeUnknownSync(M.MemoryHubReconcileResult)({
+      version: 1,
+      rearmedClasses: ["identity"],
+    }),
+  ).toThrow();
+});

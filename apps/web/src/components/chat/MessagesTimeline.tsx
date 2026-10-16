@@ -479,6 +479,7 @@ interface MessagesTimelineProps {
   footer?: ReactNode;
 
   listRef: React.RefObject<LegendListRef | null>;
+  onScrollableNodeChange?: (node: HTMLElement | null) => void;
   timelineEntries: ReadonlyArray<TimelineEntry>;
   latestRun: TimelineLatestRun | null;
   runningRunId?: RunId | null;
@@ -590,6 +591,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   isCompacting = false,
   awaitingUser = false,
   listRef,
+  onScrollableNodeChange,
   timelineEntries,
   findExpanded = false,
   findQuery = "",
@@ -1098,6 +1100,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     viewport: timelineViewportElement,
     historyLoading: citationHistoryLoading,
     loadEarlier,
+    foldInput: { latestRun, runningRunId, isWorking, runlessWorkActive },
     onExpandTurn: expandCitedRun,
     onManualNavigation,
   });
@@ -1495,9 +1498,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const setTimelineList = useCallback(
     (list: LegendListRef | null) => {
       listRef.current = list;
-      registerTimeline?.(list?.getScrollableNode() ?? null);
+      const node = list?.getScrollableNode() ?? null;
+      registerTimeline?.(node);
+      onScrollableNodeChange?.(node);
     },
-    [listRef, registerTimeline],
+    [listRef, registerTimeline, onScrollableNodeChange],
   );
 
   useLayoutEffect(() => {
@@ -2957,7 +2962,7 @@ function AssistantForkButton({
           />
         }
       >
-        <GitForkIcon className={cn("size-3", busy && "animate-pulse")} />
+        {busy ? <Spinner size="xs" /> : <GitForkIcon className="size-3" />}
       </TooltipTrigger>
       <TooltipPopup side="top">Fork from this response</TooltipPopup>
     </Tooltip>

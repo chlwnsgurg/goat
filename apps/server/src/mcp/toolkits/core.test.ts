@@ -66,6 +66,7 @@ import { PreviewToolkit } from "./preview/tools.ts";
 import { PreviewControlsToolkit } from "./previewControls/tools.ts";
 import { EnvironmentToolkit } from "./environment/tools.ts";
 import { HostStatusToolkit } from "./hostStatus/tools.ts";
+import { ProviderToolkit } from "./provider/tools.ts";
 import * as EnvironmentHandlers from "./environment/handlers.ts";
 import { ProjectToolkit } from "./project/tools.ts";
 import { RemoteReportToolkit } from "./remoteReport/tools.ts";
@@ -134,6 +135,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     ProjectToolkit,
     EnvironmentToolkit,
     HostStatusToolkit,
+    ProviderToolkit,
     PreviewControlsToolkit,
     DeviceToolkit,
     PullRequestsToolkit,
@@ -186,6 +188,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "goat_project_list",
     "goat_project_read",
     "goat_project_update",
+    "goat_provider_diagnose",
     "goat_queue_cancel",
     "goat_queue_edit",
     "goat_queue_list",
@@ -231,7 +234,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "channel_task_list",
     "channel_task_report",
   ]);
-  expect(names.size).toBe(106);
+  expect(names.size).toBe(111);
   expect([...names].some((name) => name.startsWith("t3_"))).toBe(false);
   expect(names.has("goat_thread_launch")).toBe(true);
   expect(names.has("t3_thread_start")).toBe(false);

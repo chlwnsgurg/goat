@@ -1,3 +1,5 @@
+import * as ProviderDiagnosisService from "../provider/ProviderDiagnosisService.ts";
+import { ProviderToolkit } from "./toolkits/provider/tools.ts";
 import * as WorktreeInventoryService from "./WorktreeInventoryService.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
@@ -77,6 +79,7 @@ const toolkits = {
   preview: PreviewToolkit,
   previewControls: PreviewControlsToolkit,
   project: ProjectToolkit,
+  provider: ProviderToolkit,
   pullRequests: PullRequestsToolkit,
   remoteReport: RemoteReportToolkit,
   ssh: SshToolkit,
@@ -131,6 +134,7 @@ const dependencies = Layer.mergeAll(
   Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
   Layer.mock(PreviewManager.PreviewManager)({}),
   Layer.mock(ProjectService.ProjectService)({}),
+  Layer.mock(ProviderDiagnosisService.ProviderDiagnosisService)({}),
   Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
     namedProjectsRoot: "/tmp/agent-surface-catalog",
   }),
@@ -167,7 +171,7 @@ const client = McpSchema.McpServerClient.of({
 });
 
 it("gives every entry a unique path, legacy name and resolvable schema reference", () => {
-  expect(entries).toHaveLength(116); // 106 audited tools plus the ten memory tools added to dev.
+  expect(entries).toHaveLength(121); // Includes current memory, browser and provider tools.
   expect(new Set(entries.map((entry) => entry.name)).size).toBe(entries.length);
   for (const [path, entry] of Object.entries(agentSurfaceRegistry)) {
     expect(path).toBe(entry.path);

@@ -1,5 +1,10 @@
 import {
   MEMORY_REPORT_MAX_AUTOMATIC_ATTEMPTS,
+  type EnvironmentId,
+  type MemoryIndexCoverage,
+  type MemoryProcessingStatus,
+  type MemoryResetReportAttemptsResult,
+  type MemoryStorageStatus,
   type MemoryHistoryPage,
   type MemoryItem,
   type MemoryLocalAvailability,
@@ -10,6 +15,8 @@ import {
   type MemoryRevertResult,
   type MemoryRevisionId,
   type MemorySyncStatus,
+  type MemoryHubDiagnostics,
+  type ExecutionEnvironmentCapabilities,
   type MemoryTaskGrantCeiling,
 } from "@goat/contracts";
 
@@ -62,6 +69,7 @@ export function presentMemoryItem(item: MemoryItem) {
 }
 
 const REVERT_LABELS = {
+  refused: "Revert attempt refused",
   pending: "Waiting for revert approval",
   accepted: "Revert approved",
   revision_changed: "Memory changed; cannot revert",
@@ -134,7 +142,7 @@ export function presentMemoryRevert(input: {
       ? "Memory does not match"
       : item.status === "forgotten"
         ? "Forgotten memory cannot be reverted"
-        : result !== undefined
+        : result !== undefined && result.status !== "refused"
           ? REVERT_LABELS[result.status]
           : resolution.revertsResolutionId !== undefined
             ? "A revert cannot be reverted"
@@ -151,6 +159,10 @@ export function presentMemoryRevert(input: {
                     : null;
   return {
     canRevert: reason === null,
+    notice:
+      result?.status === "refused"
+        ? `Last revert attempt was refused: ${result.failureCode.replaceAll("_", " ")}`
+        : null,
     reason,
     windowLabel: "Revert once within 30 days of resolution",
     revertDeadlineUtc: resolution.revertDeadlineUtc,
@@ -205,14 +217,13 @@ export function presentMemoryOwnerPolicy(view: MemoryOwnerSourceReadPolicyView) 
 export function presentMemoryReport(
   report: MemoryReportDelivery,
   options: {
-    readonly automaticAttempts?: number | undefined;
     readonly isDeliveryOwner?: boolean;
     /** Authoritative classification/approval eligibility, supplied after the lifecycle handoff. */
     readonly isResetEligible?: boolean;
     readonly hasActiveClaim?: boolean | undefined;
   } = {},
 ) {
-  const value = options.automaticAttempts;
+  const value = report.automaticAttempts;
   const attempts =
     value !== undefined &&
     Number.isInteger(value) &&
@@ -245,7 +256,15 @@ export function presentMemoryReport(
 }
 
 /** Online is a connection state, not proof of publication, exposure or policy readiness. */
-export function presentMemorySync(status: Pick<MemorySyncStatus, "state" | "memorySpaceId">) {
+export function presentMemorySync(
+  status: Pick<MemorySyncStatus, "state" | "memorySpaceId">,
+  options?: {
+    readonly capabilities: ExecutionEnvironmentCapabilities;
+    readonly diagnostics?: MemoryHubDiagnostics;
+  },
+) {
+  const diagnostics =
+    options?.capabilities.memory?.hubDiagnostics === true ? options.diagnostics : undefined;
   const labels = {
     disabled: "Memory sharing off",
     bootstrapping: "Receiving initial memories",
@@ -254,22 +273,190 @@ export function presentMemorySync(status: Pick<MemorySyncStatus, "state" | "memo
     error: "Memory sync error",
   } as const;
   return {
-    label:
-      status.state !== "disabled" && status.memorySpaceId === null
+    label: diagnostics
+      ? diagnostics.readiness === "disabled"
+        ? labels.disabled
+        : diagnostics.readiness === "unbound"
+          ? "Connect a memory space"
+          : diagnostics.readiness === "staging"
+            ? labels.bootstrapping
+            : diagnostics.connection === "connected"
+              ? labels.online
+              : diagnostics.connection === "unreachable"
+                ? labels.offline
+                : "Hub connection not confirmed"
+      : status.state !== "disabled" && status.memorySpaceId === null
         ? "Connect a memory space"
         : labels[status.state],
-    diagnostics: "unknown" as const,
-    canReconcileInSettings: false,
+    diagnostics: diagnostics?.publication.state ?? "unknown",
+    readiness: diagnostics?.readiness ?? "unknown",
+    connection: diagnostics?.connection ?? "unknown",
+    publicationLabel:
+      diagnostics?.publication.state === "last_valid" ? "Last valid settings in use" : null,
+    recoverableHolds: diagnostics?.recoverableHolds ?? [],
+    permanentHolds: diagnostics?.permanentHolds ?? [],
+    canReconcileInSettings: diagnostics?.reconcile === "available",
   };
 }
 
 /** Saved ceiling has a legacy default; current effective access needs independent producer evidence. */
 export function presentMemoryRunAccess(input: {
   readonly memoryGrantCeiling?: MemoryTaskGrantCeiling;
+  readonly currentMemoryAccess?: import("@goat/contracts").MemoryCurrentAccess;
 }) {
   return {
     savedCeiling: input.memoryGrantCeiling ?? "none",
-    effectiveAccess: "unknown" as const,
-    effectiveReason: null,
+    effectiveAccess: input.currentMemoryAccess?.access ?? ("unknown" as const),
+    effectiveReason: input.currentMemoryAccess?.reason ?? null,
+  };
+}
+
+/** A candidate only: approval/claim checks and the final reset decision belong to the server. */
+export function isMemoryReportRetryCandidate(report: MemoryReportDelivery, owner: EnvironmentId) {
+  return (
+    report.state === "failed" &&
+    report.automaticAttempts === MEMORY_REPORT_MAX_AUTOMATIC_ATTEMPTS &&
+    report.resolvingEnvironmentId === owner
+  );
+}
+
+export function presentMemoryReportReset(result: MemoryResetReportAttemptsResult) {
+  return {
+    label: `${result.resetCount} reports ready to retry; ${result.unchangedCount} unchanged`,
+    resetCount: result.resetCount,
+    unchangedCount: result.unchangedCount,
+  };
+}
+
+/** Empty results only establish absence when coverage is complete. */
+export function presentMemoryCoverage(
+  coverage: MemoryIndexCoverage | undefined,
+  resultCount: number,
+) {
+  const status = coverage?.status ?? "unknown";
+  return {
+    status,
+    complete: status === "available",
+    label:
+      status === "unavailable"
+        ? "Memory search unavailable"
+        : status === "partial"
+          ? "Some memories are still being indexed"
+          : status === "unknown"
+            ? "Memory coverage unknown"
+            : "Memory search ready",
+    emptyLabel:
+      resultCount > 0
+        ? null
+        : status === "available"
+          ? "No memories found"
+          : "Results are incomplete; memories may still be available",
+  };
+}
+
+const STORAGE_REASON_LABELS = {
+  retained_revert_input: "Originals retained for revert",
+  active_lease: "Waiting for active work",
+  pending_work: "Work pending",
+  checkpoint_pinned: "Checkpoint retained",
+  storage_unavailable: "Memory storage unavailable",
+  index_unavailable: "Memory search unavailable",
+  fts_braked: "Search indexing paused",
+  cleanup_failed: "Memory cleanup needs attention",
+  report_backlog: "Reports waiting to be delivered",
+  capacity_exceeded: "Memory storage limit reached",
+} as const;
+
+export function presentMemoryStorage(storage: MemoryStorageStatus) {
+  const levels = ["normal", "warning", "critical", "full"] as const;
+  const level = levels.reduce(
+    (current, candidate) =>
+      storage.quotas.some((quota) => quota.warning === candidate) ? candidate : current,
+    "normal",
+  );
+  const reasons = [
+    ...new Set([
+      ...storage.warnings,
+      ...storage.quotas.flatMap((quota) => quota.blockedReasons),
+      ...storage.compaction.blockedReasons,
+    ]),
+  ];
+  return {
+    label:
+      level === "full"
+        ? "Memory storage limit reached"
+        : level === "critical"
+          ? "Memory storage nearly full"
+          : level === "warning"
+            ? "Memory storage getting full"
+            : storage.measuredAtUtc === null
+              ? "Memory storage usage unknown"
+              : "Memory storage available",
+    reasons: reasons.map((reason) => STORAGE_REASON_LABELS[reason]),
+    searchLabel:
+      storage.ftsAdmission.state === "braked"
+        ? "Search indexing paused"
+        : storage.ftsAdmission.measurementStatus === "unavailable"
+          ? "Search storage usage unknown"
+          : "Search indexing available",
+  };
+}
+
+export function presentMemoryProcessing(processing: MemoryProcessingStatus) {
+  return {
+    coverage: presentMemoryCoverage(
+      processing.indexCoverage,
+      processing.indexCoverage.indexedItems,
+    ),
+    checkingLabel: processing.scannerPendingItems > 0 ? "Checking content" : null,
+    heldLabel:
+      processing.scannerHeldItems > 0 ? "Sensitive content on hold; forgetting is available" : null,
+    waitingLabel:
+      processing.missingParentItems > 0
+        ? "Waiting for earlier memories"
+        : processing.deferred > 0 &&
+            (processing.scannerPendingItems === 0 ||
+              processing.unindexedItems > 0 ||
+              processing.pendingCleanupItems > 0 ||
+              processing.reportBacklog > 0 ||
+              processing.reportFailed > 0)
+          ? "Memory processing pending"
+          : null,
+    cleanupLabel: processing.pendingCleanupItems > 0 ? "Cleaning up remaining content" : null,
+    receiveLabel:
+      processing.receiveLag === null
+        ? "Sync progress unknown"
+        : processing.receiveLag > 0
+          ? "Receiving memories"
+          : "Memories received",
+    reportLabel:
+      processing.reportFailed > 0
+        ? "Some reports could not be delivered"
+        : processing.reportBacklog > 0
+          ? "Reports waiting to be delivered"
+          : null,
+    admissionLabel:
+      processing.hubAdmissionFailures > 0 ? "Some memory changes could not be accepted" : null,
+  };
+}
+
+/** A receipt describes admission; exposure independently determines whether content can be shown. */
+export function presentMemoryReceipt(
+  receipt: MemoryMutationReceipt,
+  availability: MemoryLocalAvailability,
+) {
+  return {
+    label:
+      receipt.outcome === "rejected"
+        ? "Memory change rejected"
+        : receipt.outcome === "conflicted"
+          ? "Conflicting memory on hold"
+          : receipt.outcome === "deleted"
+            ? "Forget request applied"
+            : receipt.outcome === "noop"
+              ? "Memory unchanged"
+              : "Memory change accepted",
+    syncLabel: receipt.pendingSync ? "Waiting to sync" : null,
+    availability: presentMemoryAvailability(availability),
   };
 }

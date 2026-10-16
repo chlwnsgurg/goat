@@ -112,6 +112,10 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const environmentId = yield* identity.getEnvironmentId;
   const sweepLock = yield* Semaphore.make(1);
+  // Restarting starts a new bounded pass; no durable cursor/index is needed for this
+  // idempotent cleanup. Finish one pass before revisiting unprovable retained rows.
+  let reportCursor: string | null = null;
+  let nextReportPassAt = 0;
   const started = yield* Ref.make(false);
   const query = <A, E>(effect: Effect.Effect<A, E>) => effect.pipe(Effect.mapError(workerError));
   const readSource = Effect.fn("MemoryWorker.readSource")(function* (work: Store.MemoryWork) {
@@ -846,6 +850,14 @@ const make = Effect.gen(function* () {
           continue;
         const work = yield* sweepStage("read-work", store.readWork(candidate.id));
         if (work) yield* sweepStage("execute", execute(work));
+      }
+      if (now >= nextReportPassAt) {
+        const page = yield* sweepStage(
+          "maintenance",
+          store.transact(store.normalizeForeignReportIntentsTx(environmentId, reportCursor)),
+        );
+        reportCursor = page.nextCursor;
+        if (reportCursor === null) nextReportPassAt = now + 60_000;
       }
       yield* sweepStage("maintenance", maintenance.cycle(environmentId));
     },

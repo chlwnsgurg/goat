@@ -84,7 +84,11 @@ export function ConnectionCatalogUnreadableAlert() {
     setStartingFresh(true);
     try {
       // An empty catalog, not a removed file: a missing file re-imports legacy environments.
-      if (!(await save(encodeCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT)))) {
+      const stored = await save(encodeCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT), null);
+      if (stored === "conflict") {
+        throw new Error("Another app changed the saved environments. Reload and try again.");
+      }
+      if (!stored) {
         throw new Error("Secure storage is unavailable.");
       }
       // The renderer's catalog cache is per page; reload to start from the empty catalog.

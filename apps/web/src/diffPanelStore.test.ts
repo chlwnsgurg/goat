@@ -1,4 +1,4 @@
-import { scopeThreadRef } from "@goat/client-runtime/environment";
+import { scopedThreadKey, scopeThreadRef } from "@goat/client-runtime/environment";
 import { EnvironmentId, ThreadId, RunId } from "@goat/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
@@ -85,6 +85,37 @@ describe("diffPanelStore", () => {
     expect(
       selectThreadDiffPanelSelection(useDiffPanelStore.getState().byThreadKey, THREAD_REF),
     ).toEqual({ kind: "branch", baseRef: "origin/release" });
+  });
+
+  it("keeps each repository scope distinct and preserves the branch base", () => {
+    const store = useDiffPanelStore.getState();
+    store.selectBranchBaseRef(THREAD_REF, "origin/release");
+    for (const kind of ["uncommitted", "staged", "unstaged"] as const) {
+      store.selectGitScope(THREAD_REF, kind);
+      expect(
+        selectThreadDiffPanelSelection(useDiffPanelStore.getState().byThreadKey, THREAD_REF),
+      ).toEqual({ kind });
+    }
+    store.selectGitScope(THREAD_REF, "branch");
+    expect(
+      selectThreadDiffPanelSelection(useDiffPanelStore.getState().byThreadKey, THREAD_REF),
+    ).toEqual({ kind: "branch", baseRef: "origin/release" });
+  });
+
+  it("migrates the old unstaged name without changing Uncommitted's meaning", async () => {
+    const store = useDiffPanelStore.getState();
+    store.selectGitScope(THREAD_REF, "unstaged");
+    const migrated = await useDiffPanelStore.persist.getOptions().migrate!(
+      {
+        byThreadKey: useDiffPanelStore.getState().byThreadKey,
+        branchBaseRefByThreadKey: {},
+      },
+      2,
+    );
+    expect(migrated).toEqual({
+      byThreadKey: { [scopedThreadKey(THREAD_REF)]: { kind: "uncommitted" } },
+      branchBaseRefByThreadKey: {},
+    });
   });
 
   it("increments the reveal request when opening the same turn file again", () => {

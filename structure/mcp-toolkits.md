@@ -15,7 +15,10 @@ append orchestration events themselves. That write is the [command commit](serve
 
 The directories under `apps/server/src/mcp/toolkits/` are `attachment`, `channel`, `connection`,
 `device`, `environment`, `hostStatus`, `html`, `memory`, `memoryAdministration`, `orchestrator`, `preview`, `previewControls`, `project`,
-`pullRequests`, `remoteReport`, `ssh`, `thread`, and `worktree`.
+`provider`, `pullRequests`, `remoteReport`, `ssh`, `thread`, and `worktree`. `provider` is
+composed beside `McpHttpServer.layer` in `apps/server/src/server.ts`, which provides
+`ProviderDiagnosisService` from the provider registry and host; `goat provider diagnose` runs the
+same checks in-process (`apps/server/src/provider/ProviderDiagnosis.ts`).
 
 Tool names, descriptions, schema references and discovery metadata live in
 [`agentSurface/registry.ts`](../packages/contracts/src/agentSurface/registry.ts). Each entry has

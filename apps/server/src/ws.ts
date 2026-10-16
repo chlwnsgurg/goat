@@ -562,6 +562,12 @@ function projectFileFailureContext(
       };
     case "WorkspacePathNotFileError":
       return { failure: "path_not_file", resolvedPath: error.resolvedPath };
+    case "WorkspaceFileChangedOnDiskError":
+      return { failure: "changed_on_disk" };
+    case "WorkspaceFileDeletedOnDiskError":
+      return { failure: "deleted_on_disk" };
+    case "WorkspaceUnsupportedTextFormatError":
+      return { failure: "unsupported_text_format" };
     case "WorkspaceBinaryFileError":
       return { failure: "binary_file", resolvedPath: error.resolvedPath };
     default:
@@ -1473,6 +1479,8 @@ const layerWsRpc = (
           memory.read(input, memoryRead).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryHistory]: (input) =>
           memory.history(input, memoryRead).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryHubDiagnostics]: (input) =>
+          memorySync.hubDiagnostics(input, memoryRead).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memorySyncStatus]: (input) =>
           memorySync.syncStatus(input, memoryRead).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryUpsert]: (input) =>
@@ -1495,6 +1503,10 @@ const layerWsRpc = (
           memorySync.updateHubSettings(input, memorySettings).pipe(Effect.mapError(memoryError)),
       });
       const ownerHandlers = WsMemoryAdministrationRpcGroup.middleware(RpcInstrumentation).of({
+        [WS_METHODS.memoryHubReconcile]: (input) =>
+          memorySync.reconcileHub(input, memorySettings).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryResetReportAttempts]: (input) =>
+          memory.resetReportAttempts(input, memorySettings).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryOwnerSourceReadPolicyGet]: () => ownerPolicy.get(ownerSettings),
         [WS_METHODS.memoryOwnerSourceReadPolicyUpdate]: (input) =>
           ownerPolicy.update(input, ownerSettings).pipe(Effect.mapError(memoryError)),

@@ -9,6 +9,9 @@ import {
   type OrchestratorMcpThreadSearchMatch,
 } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -150,6 +153,63 @@ const ids = (matches: ReadonlyArray<OrchestratorMcpThreadSearchMatch>) =>
   matches.map((match) => `${match.host ?? "here"}:${match.threadId}`);
 
 describe("ThreadSearchMcpService", () => {
+  it.effect.each(["allHosts", "hosts"] as const)(
+    "returns fast hosts at the %s fan-out deadline without interrupting a slow launch",
+    (selection) =>
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const finished = yield* Deferred.make<void>();
+        const interrupted = yield* Deferred.make<void>();
+        const returned = yield* Deferred.make<void>();
+        const slow = Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.andThen(Deferred.succeed(finished, undefined)),
+          Effect.as({ matches: [remoteMatch("late", 40)], nextCursor: null, truncated: false }),
+          Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+        );
+        const fiber = yield* runSearch(
+          {
+            local: [localThread("local", 20)],
+            hosts: ["fast", "slow"],
+            hostCall: (call) =>
+              call.host === "slow" ? slow : pagingHost([remoteMatch("fast", 30)])(call),
+          },
+          selection === "allHosts"
+            ? { query: "modelflare", allHosts: true }
+            : { query: "modelflare", hosts: ["fast", "slow"] },
+        ).pipe(
+          Effect.tap(() => Deferred.succeed(returned, undefined)),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(started);
+        yield* TestClock.adjust(14_999);
+        expect(yield* Deferred.isDone(returned)).toBe(false);
+        yield* TestClock.adjust(1);
+        const returnedOnTime = yield* Deferred.isDone(returned);
+        const wasInterrupted = yield* Deferred.isDone(interrupted);
+        // Release even on the old implementation so a failing regression cannot hang.
+        yield* Deferred.succeed(release, undefined);
+        const { result } = yield* Fiber.join(fiber);
+        if (!wasInterrupted) yield* Deferred.await(finished);
+        expect(returnedOnTime).toBe(true);
+        expect(wasInterrupted).toBe(false);
+        expect(result._tag).toBe("Success");
+        if (result._tag !== "Success") return;
+        expect(ids(result.success.matches)).toEqual(
+          selection === "allHosts" ? ["fast:fast", "here:local"] : ["fast:fast"],
+        );
+        expect(result.success.unavailableHosts).toEqual([
+          {
+            host: "slow",
+            code: "host_unavailable",
+            message: expect.stringContaining("host:slow"),
+          },
+        ]);
+        expect(result.success.unavailableHosts?.[0]?.message).toContain("waits longer");
+      }),
+  );
+
   it.effect("pages a fan-out newest first across hosts and reports a host that fails", () =>
     Effect.gen(function* () {
       const remote = [remoteMatch("r1", 40), remoteMatch("r2", 20), remoteMatch("r3", 5)];

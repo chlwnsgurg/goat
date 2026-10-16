@@ -9,11 +9,15 @@ import {
   PreviewAutomationError,
   PreviewAutomationEvaluateInput,
   PreviewAutomationHoverInput,
+  PreviewAutomationHistoryInput,
+  PreviewAutomationLogs,
+  PreviewAutomationLogsInput,
   PreviewAutomationNavigateInput,
   PreviewAutomationOpenInput,
   PreviewAutomationPressInput,
   PreviewAutomationRecordingArtifact,
   PreviewAutomationRecordingStatus,
+  PreviewAutomationReloadInput,
   PreviewAutomationResizeInput,
   PreviewAutomationResizeResult,
   PreviewAutomationScrollInput,
@@ -22,6 +26,7 @@ import {
   PreviewAutomationSetColorSchemeInput,
   PreviewAutomationSetColorSchemeResult,
   PreviewAutomationSnapshot,
+  PreviewAutomationSnapshotInput,
   PreviewAutomationStatus,
   PreviewAutomationTabTargetInput,
   PreviewAutomationTypeInput,
@@ -84,6 +89,30 @@ const PreviewNavigateTool = Tool.make(agentSurfaceRegistry["preview.navigate"].n
   dependencies,
 }).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.navigate"]));
 
+const PreviewBackTool = Tool.make(agentSurfaceRegistry["preview.back"].name, {
+  description: agentSurfaceRegistry["preview.back"].description,
+  parameters: PreviewAutomationHistoryInput,
+  success: PreviewAutomationStatus,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.back"]));
+
+const PreviewForwardTool = Tool.make(agentSurfaceRegistry["preview.forward"].name, {
+  description: agentSurfaceRegistry["preview.forward"].description,
+  parameters: PreviewAutomationHistoryInput,
+  success: PreviewAutomationStatus,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.forward"]));
+
+const PreviewReloadTool = Tool.make(agentSurfaceRegistry["preview.reload"].name, {
+  description: agentSurfaceRegistry["preview.reload"].description,
+  parameters: PreviewAutomationReloadInput,
+  success: PreviewAutomationStatus,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.reload"]));
+
 const PreviewResizeTool = Tool.make(agentSurfaceRegistry["preview.resize"].name, {
   description: agentSurfaceRegistry["preview.resize"].description,
   parameters: PreviewAutomationResizeInput,
@@ -107,7 +136,7 @@ const PreviewSetAppearanceTool = Tool.make(agentSurfaceRegistry["preview.set_app
 export const PreviewSnapshotTool = Tool.make(agentSurfaceRegistry["preview.snapshot"].name, {
   description: agentSurfaceRegistry["preview.snapshot"].description,
   parameters: Schema.Struct({
-    ...PreviewAutomationTabTargetInput.fields,
+    ...PreviewAutomationSnapshotInput.fields,
     includeImage: Schema.optional(
       Schema.Boolean.annotate({
         description:
@@ -117,7 +146,7 @@ export const PreviewSnapshotTool = Tool.make(agentSurfaceRegistry["preview.snaps
     save: Schema.optional(
       Schema.Boolean.annotate({
         description:
-          "Write the screenshot PNG to disk and return its absolute path as screenshotPath. Unless includeImage=true, return only the url and screenshotPath. Defaults to false.",
+          "Write the screenshot PNG to disk and return its absolute path as screenshotPath. Unless includeImage=true, omit the page dump and return url, screenshotPath, and any full-page capture metadata. Defaults to false.",
       }),
     ),
   }),
@@ -125,6 +154,14 @@ export const PreviewSnapshotTool = Tool.make(agentSurfaceRegistry["preview.snaps
   failure: PreviewToolFailure,
   dependencies,
 }).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.snapshot"]));
+
+const PreviewLogsTool = Tool.make(agentSurfaceRegistry["preview.logs"].name, {
+  description: agentSurfaceRegistry["preview.logs"].description,
+  parameters: PreviewAutomationLogsInput,
+  success: PreviewAutomationLogs,
+  failure: PreviewToolFailure,
+  dependencies,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["preview.logs"]));
 
 const PreviewClickTool = Tool.make(agentSurfaceRegistry["preview.click"].name, {
   description: agentSurfaceRegistry["preview.click"].description,
@@ -242,9 +279,13 @@ export const PreviewToolkit = Toolkit.make(
   PreviewStatusTool,
   PreviewOpenTool,
   PreviewNavigateTool,
+  PreviewBackTool,
+  PreviewForwardTool,
+  PreviewReloadTool,
   PreviewResizeTool,
   PreviewSetAppearanceTool,
   PreviewSnapshotTool,
+  PreviewLogsTool,
   PreviewClickTool,
   PreviewTypeTool,
   PreviewHoverTool,
@@ -260,10 +301,14 @@ export const PreviewToolkit = Toolkit.make(
 );
 
 export const PreviewStandardToolkit = Toolkit.make(
+  PreviewLogsTool,
   PreviewDialogTool,
   PreviewStatusTool,
   PreviewOpenTool,
   PreviewNavigateTool,
+  PreviewBackTool,
+  PreviewForwardTool,
+  PreviewReloadTool,
   PreviewResizeTool,
   PreviewSetAppearanceTool,
   PreviewClickTool,

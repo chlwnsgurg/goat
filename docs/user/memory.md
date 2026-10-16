@@ -8,11 +8,21 @@ Memory starts off. To use it on one device, open **Settings → Memory** and cho
 
 ## Save and find memories
 
-Choose **Remember something**, enter what you want to keep, and save it. Memories saved here are available across conversations on devices sharing memory. To keep a memory specific to a project or conversation, ask an agent with memory write access to save it for that project or conversation.
+Choose **Remember something**, enter what you want to keep, and choose its scope: **All projects** for memories shared across conversations, **Project** for one project, or **Thread** for one conversation. Imports use the same scopes.
+
+For project memories, use a shared project binding to share an identity across projects, or return to the repository binding. Changing the binding affects future memories; existing memories keep their scope. Preview an import again after changing its scope or binding.
 
 Search for a memory, open it to read its history, or use **Edit** to change it. Editing keeps it where it was saved.
 
-Settings search may fail while search data is getting ready; clear the search to browse saved memories instead.
+If search coverage is incomplete or unavailable, an empty result does not prove a memory is missing. Clear the search to browse saved memories instead.
+
+## Import memories
+
+In **Settings → Memory → Import memories**, choose Codex, Claude, or OMO and the destination scope. Discover available profiles on the selected device, preview one, choose the memories, confirm your selection, then apply the import. Up to 32 memories are applied per batch. Other providers are not supported for import.
+
+**Stop import** stops later batches; a batch already sent may still be applied. After partial completion, a lost response, or a restart, use **Check import result** to check the saved operation. This never applies it again automatically. If asked to preview again, review the latest result before starting another import.
+
+If your browser cannot safely run imports, use a current browser or the desktop app. You can still check a saved import result. Imports leave provider originals unchanged, and forgotten memories are not imported again.
 
 ## Share between devices
 
@@ -34,7 +44,13 @@ Removing that permission applies to later requests and to results still on the h
 
 When devices make conflicting changes, only the conflicting memory is put on hold. GOAT automatically resolves it using the resolving device’s default provider and model, and applies the result without waiting for approval. If resolution fails, that memory stays on hold.
 
-Open the memory’s history to review the resolution and judgment. The conflicting originals and judgment are kept for 30 days unless the memory is forgotten. During that window, choose a retained original and use **Revert resolution** to restore it once. Reverting requires the resolved memory to be unchanged and its original still available; a revert cannot itself be reverted. Deletion takes priority over edits, so an older edit cannot bring back a forgotten memory.
+Open the memory’s history to review the resolution and judgment. The conflicting originals and judgment are kept for 30 days unless the memory is forgotten. Within 30 days of each resolution, choose a retained original and use **Revert resolution** to restore it once. Reverting requires the resolved memory to be unchanged and its original still available; a revert cannot itself be reverted. Deletion takes priority over edits, so an older edit cannot bring back a forgotten memory.
+
+Settings shows the latest revert attempt for each resolution. A refused attempt shows its reason and does not use up the one-time revert; you can explicitly try again if it is still eligible. History is live: return to its first page to see new changes.
+
+## Retry report delivery
+
+In **Settings → Memory**, open the memory’s history and select up to 32 failed reports that have exhausted automatic delivery retries. **Retry selected reports** lets delivery try again; it does not increase your storage quota or free storage. Reports handled by another device are not eligible here.
 
 ## Forget a memory
 
@@ -44,7 +60,7 @@ The provider’s original conversation stays, but forgotten content is never imp
 
 ## Agent access
 
-Agent memory access depends on the environment’s current policy and the run’s permissions. Scheduled tasks and delegated work also have a saved memory limit: `none`, `read`, or `read_write`. A displayed **Memory: read** or **Memory: read_write** is that saved limit, not proof of the access currently applied to a run. Turning agent memory access on at the environment cannot widen a task’s saved limit.
+Agent memory access depends on the environment’s current policy and the run’s permissions. For scheduled tasks and subagents, **Saved limit** is the stored maximum: none, read only, or read and write. **Allowed now** is what the server currently permits, which may be narrower. If **Allowed now** is absent, the server does not know the current value. Turning agent memory access on cannot widen the saved limit.
 
 When connecting an outside agent through OAuth, select **Read memory** or **Write memory** under **Memory access (optional)** if needed. Nothing is selected by default, and memory permissions are separate from thread access.
 
@@ -55,5 +71,9 @@ Forked or imported conversations, and conversations that have received more memo
 ## Connection problems
 
 If an agent says its memory search was incomplete or unavailable, do not assume the memory is missing.
+
+In **Settings → Memory → Hub diagnostics**, sharing off means memory sharing is disabled; unbound means you need to connect a memory space. Staging means initial memories are still arriving. Ready means initial setup is complete, but does not guarantee that the hub is connected or every memory is searchable.
+
+For a recoverable sync hold, restore compatibility or connectivity, then use **Reconcile** when available to let eligible work resume. A permanent hold needs attention to device identity or authorization in Sharing settings; Reconcile cannot bypass it. **Reconcile accepted** confirms the request was accepted, not that synchronization has finished. **Last valid settings in use** means the latest settings could not be published; review the settings and reload diagnostics after correcting the problem.
 
 On web and desktop, if Memory says **Device disconnected**, reconnect that environment to continue. If it says **Memory unavailable**, update or reconnect the selected environment. **Hub disconnected** means the hub connection is offline; **Hub connected** alone does not mean every memory is ready to read. **Waiting to sync** means that memory still has changes to share.

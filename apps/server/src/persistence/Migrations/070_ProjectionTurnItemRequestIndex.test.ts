@@ -38,6 +38,9 @@ it.effect(
         [74, "MemoryTaskGrantCeiling"],
         [75, "MemoryImportLineage"],
         [76, "MemoryCheckpointAccounting"],
+        [77, "MemoryReportLifecycle"],
+        [78, "MemoryUsageCounters"],
+        [79, "MemoryRevertResults"],
       ]);
       yield* ProjectionTurnItemRequestIndex;
       assert.deepStrictEqual(yield* runMigrations(), []);
