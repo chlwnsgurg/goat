@@ -75,24 +75,6 @@ type CustomThemeLibrarySnapshot =
   | Readonly<{ status: "unavailable"; reason: "storage-unavailable"; cause: unknown }>;
 
 let customThemeLibrarySnapshot: CustomThemeLibrarySnapshot | null = null;
-const themePreviewListeners = new Set<() => void>();
-let themePreviewSidebarArtwork: boolean | null = null;
-
-export function getThemePreviewSidebarArtwork(): boolean | null {
-  return themePreviewSidebarArtwork;
-}
-
-export function subscribeToThemePreview(listener: () => void): () => void {
-  themePreviewListeners.add(listener);
-  return () => themePreviewListeners.delete(listener);
-}
-
-function setThemePreviewSidebarArtwork(next: boolean | null): void {
-  if (themePreviewSidebarArtwork === next) return;
-  themePreviewSidebarArtwork = next;
-  for (const listener of themePreviewListeners) listener();
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1081,15 +1063,6 @@ export function getThemeDefinition(theme: ThemePreference): ThemeDefinition | nu
   );
 }
 
-/** Artwork palettes are reviewed alongside built-ins; user themes always use the pill fallback. */
-export function themeAllowsSidebarArtwork(theme: ThemePreference): boolean {
-  const themeId = themeIdFromPreference(theme);
-  return (
-    BUILT_IN_THEME_DEFINITIONS.find((definition) => definition.id === themeId)?.sidebarArtwork ===
-    true
-  );
-}
-
 /**
  * Which half a theme can claim, or null when it renders both appearances.
  * Selecting a single-appearance theme as the base preference would clear the
@@ -1509,9 +1482,6 @@ export function applyThemeColorPreview(colors: ThemeColors, appearance: ThemeApp
   const root = document.documentElement;
   if (!root?.style) return;
 
-  // Drafts become user-controlled themes when saved, so their preview keeps
-  // the fixed stage artwork hidden even when it was seeded from a built-in.
-  setThemePreviewSidebarArtwork(false);
   root.dataset.themeId = THEME_PREVIEW_ID;
   root.classList.toggle("dark", appearance === "dark");
   for (const [role, value] of Object.entries(colors) as Array<[ThemeColorRole, string]>) {
@@ -1526,7 +1496,6 @@ export function applyThemePalette(theme: ThemePreference, appearance?: ThemeAppe
   const root = document.documentElement;
   if (!root?.style) return;
 
-  setThemePreviewSidebarArtwork(null);
   const palette = getThemeDefinition(theme);
 
   if (palette) {

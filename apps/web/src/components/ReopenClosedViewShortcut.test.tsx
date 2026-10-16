@@ -87,7 +87,6 @@ vi.mock("./sidebar/DestinationRail", async () => {
   const { createContext } = await import("react");
   return { DestinationRail: () => null, DestinationRailVisibleContext: createContext(false) };
 });
-vi.mock("./SidebarStageBackdrop", () => ({ useSidebarStageBackdropVariant: () => null }));
 vi.mock("../panelAnimations", () => ({
   PanelAnimationSuppressionProvider: () => null,
   usePanelAnimationSettings: () => ({}),

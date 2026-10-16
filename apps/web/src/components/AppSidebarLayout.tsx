@@ -26,7 +26,7 @@ import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../termina
 import { resolveThreadRouteRef } from "../threadRoutes";
 import { cn, isMacPlatform } from "../lib/utils";
 import { primaryServerKeybindingsAtom } from "../state/server";
-import { useEnvironmentIdentificationMode, useLegacySidebarEnabled } from "../hooks/useSettings";
+import { useLegacySidebarEnabled } from "../hooks/useSettings";
 import {
   PanelAnimationSuppressionProvider,
   usePanelAnimationSettings,
@@ -45,7 +45,6 @@ import { MainAppLocationTracker } from "./sidebar/mainAppLocation";
 import { DestinationRail, DestinationRailVisibleContext } from "./sidebar/DestinationRail";
 import { DESTINATION_RAIL_WIDTH_PX } from "./sidebar/destinationRail.logic";
 import { useSidebarActivityToggle } from "./sidebar/SidebarViewToggles";
-import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
 import { useProjects } from "../state/entities";
 import {
   clampThreadSidebarWidth,
@@ -90,22 +89,14 @@ function readInitialThreadSidebarWidth(): number {
 
 export function SidebarControl({
   onCollapsedBrandWidthChange,
-  overRail = false,
 }: {
   onCollapsedBrandWidthChange: (width: number) => void;
-  /** The destination rail's frame sits under the trigger instead of the sidebar artwork. */
-  overRail?: boolean;
 }) {
   const usagePageOpen = useLocation({ select: (location) => location.pathname === "/usage" });
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { toggleSidebar, isMobile, mobileSheetMounted } = useSidebar();
   const { toggleActivity } = useSidebarActivityToggle();
   const isSidebarVisible = useSidebarVisibility();
-  const environmentIdentificationMode = useEnvironmentIdentificationMode();
-  const stageBackdropVariant = useSidebarStageBackdropVariant(
-    environmentIdentificationMode === "artwork",
-  );
-  const overArtwork = isSidebarVisible && stageBackdropVariant !== null && !overRail;
   const shortcutLabel = shortcutLabelForCommand(keybindings, "sidebar.toggle", {
     context: { usagePageOpen },
   });
@@ -166,13 +157,8 @@ export function SidebarControl({
         <TooltipTrigger
           render={
             <SidebarTrigger
-              // Over the stage artwork the trigger is a control on imagery, like the media
-              // viewer's arrows; that variant positions itself, so the layout is reset here.
-              variant={overArtwork ? "media-navigation" : "ghost"}
-              className={cn(
-                "pointer-events-auto",
-                overArtwork && "relative top-auto translate-y-0",
-              )}
+              variant="ghost"
+              className="pointer-events-auto"
               aria-label="Toggle main sidebar"
             />
           }
@@ -410,10 +396,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
             className="pointer-events-none fixed inset-x-0 top-[calc(var(--workspace-topbar-height)-1px)] z-30 h-px bg-chrome-divider"
           />
         ) : null}
-        <SidebarControl
-          onCollapsedBrandWidthChange={setCollapsedBrandWidth}
-          overRail={railVisible}
-        />
+        <SidebarControl onCollapsedBrandWidthChange={setCollapsedBrandWidth} />
         <NavigationHistoryShortcuts />
         <MainAppLocationTracker />
       </SidebarProvider>

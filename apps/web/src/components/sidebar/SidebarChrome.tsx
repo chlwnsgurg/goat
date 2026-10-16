@@ -10,13 +10,8 @@ import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { usePullRequestsSupported } from "../../state/environments";
 import { GoatWordmark } from "../GoatWordmark";
-import {
-  resolveEnvironmentIdentificationPillLabel,
-  resolveSidebarStageBackdropVariant,
-  SidebarStageBackdrop,
-  useEnvironmentStageLabel,
-} from "../SidebarStageBackdrop";
-import { Badge } from "../ui/badge";
+import { useBrandChannel } from "./brandChannel";
+import { BrandChannelPill } from "./BrandChannelPill";
 import {
   SidebarFooter,
   SidebarMenu,
@@ -51,16 +46,9 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
     select: (location) =>
       location.pathname === "/settings" || location.pathname.startsWith("/settings/"),
   });
-  const stageLabel = useEnvironmentStageLabel();
+  const channel = useBrandChannel();
   const environmentIdentificationMode = useEnvironmentIdentificationMode();
-  const backdropVariant = resolveSidebarStageBackdropVariant(
-    stageLabel,
-    environmentIdentificationMode === "artwork",
-  );
-  const pillLabel =
-    environmentIdentificationMode === "pill"
-      ? resolveEnvironmentIdentificationPillLabel(stageLabel)
-      : null;
+  const showChannel = environmentIdentificationMode === "pill" && channel !== "stable";
 
   return (
     // The titlebar row, not a padded SidebarHeader: it aligns to the window controls.
@@ -70,12 +58,19 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
         isElectron && "drag-region",
       )}
     >
-      {backdropVariant ? <SidebarStageBackdrop variant={backdropVariant} /> : null}
+      {showChannel ? (
+        <span
+          aria-hidden
+          className={cn(
+            "pointer-events-none absolute inset-x-0 top-0 h-0.5",
+            channel === "dev" ? "bg-channel-dev" : "bg-channel-nightly",
+          )}
+        />
+      ) : null}
       {/* Match the fixed control's inset and border compensation inside the sheet's safe area. */}
       <div className="relative top-[calc(var(--workspace-controls-top)-env(safe-area-inset-top))] z-10 ml-[calc(var(--workspace-controls-left)+1px-env(safe-area-inset-left))] flex shrink-0 items-center md:hidden">
         <SidebarTrigger
-          // Over the stage artwork: the media viewer's control-on-imagery treatment.
-          variant={backdropVariant ? "media-navigation" : "ghost"}
+          variant="ghost"
           className="relative top-auto translate-y-0"
           aria-label="Toggle main sidebar"
         />
@@ -83,16 +78,14 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
       {/* One visible line: the pill wraps onto the clipped second line once it no longer fits.
           The padding keeps the brand's focus ring inside the clip. */}
       <div className="relative z-10 flex h-8 min-w-0 flex-1 flex-wrap content-start items-center gap-x-2 overflow-hidden py-0.5">
-        <SidebarBrand onBackdrop={backdropVariant !== null} />
-        {pillLabel ? (
+        <SidebarBrand />
+        {showChannel ? (
           <div className="ml-1 flex h-7 items-center">
-            <Badge data-environment-identification="pill" size="sm" variant="secondary">
-              {pillLabel}
-            </Badge>
+            <BrandChannelPill channel={channel} />
           </div>
         ) : null}
       </div>
-      {!isOnSettings ? <SidebarViewToggles onBackdrop={backdropVariant !== null} /> : null}
+      {!isOnSettings ? <SidebarViewToggles /> : null}
     </div>
   );
 });
@@ -105,6 +98,8 @@ export function SidebarBrandWidthProbe({
   onWidthChange: (width: number) => void;
 }) {
   const priorityCount = useSidebarPriorityCount();
+  const channel = useBrandChannel();
+  const showChannel = useEnvironmentIdentificationMode() === "pill" && channel !== "stable";
   const observeWidth = useCallback(
     (probe: HTMLDivElement) => {
       return observeResize(probe, ([entry]) => {
@@ -121,8 +116,13 @@ export function SidebarBrandWidthProbe({
       ref={observeWidth}
     >
       <div className="ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] flex px-1.5">
-        <SidebarBrandContents onBackdrop={false} wordmark={false} />
+        <SidebarBrandContents wordmark />
       </div>
+      {showChannel ? (
+        <div className="ml-1 flex h-7 items-center">
+          <BrandChannelPill channel={channel} />
+        </div>
+      ) : null}
       <span className="flex items-center gap-1">
         <span className="size-8 sm:size-7" />
         <SidebarPriorityCountBadge priorityCount={priorityCount} />
@@ -132,13 +132,7 @@ export function SidebarBrandWidthProbe({
   );
 }
 
-function SidebarBrand({
-  onBackdrop,
-  placement = "header",
-}: {
-  onBackdrop: boolean;
-  placement?: "header" | "collapsed";
-}) {
+function SidebarBrand({ placement = "header" }: { placement?: "header" | "collapsed" }) {
   const enabled = useGoatBotPreferred();
   const botRef = useGlobalAgentStore((state) => state.botRef);
   const logo = globalAgentLogoTarget(enabled);
@@ -158,19 +152,16 @@ function SidebarBrand({
         // Padding holds the selected fill off the mark. The left margin keeps the letters at
         // the titlebar inset; the right padding stays in flow (and in the width probe above) so
         // the header's overflow clip never cuts the selected fill at the minimum sidebar width.
-        "relative z-10 h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md px-1.5 outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset",
+        "relative z-10 h-7 w-fit min-w-0 max-w-full shrink-0 items-center overflow-hidden rounded-md px-1.5 outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset",
         placement === "header"
           ? "ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] hidden md:flex"
           : "pointer-events-auto flex [-webkit-app-region:no-drag]",
-        onBackdrop ? "text-white" : "text-foreground",
-        active && !onBackdrop ? "bg-sidebar-row-selected" : null,
-        active && onBackdrop ? "bg-white/15" : null,
+        "text-foreground",
+        active ? "bg-sidebar-row-selected" : null,
       )}
       to={logo.to}
     >
-      {/* The sidebar header is too narrow for the wordmark beside its controls; the collapsed
-          titlebar has room for it. */}
-      <SidebarBrandContents onBackdrop={onBackdrop} wordmark={placement === "collapsed"} />
+      <SidebarBrandContents wordmark />
     </Link>
   );
 }
@@ -182,6 +173,8 @@ export function SidebarCollapsedBrand({
   visible: boolean;
   onWidthChange: (width: number) => void;
 }) {
+  const channel = useBrandChannel();
+  const showChannel = useEnvironmentIdentificationMode() === "pill" && channel !== "stable";
   const observeWidth = useCallback(
     (probe: HTMLDivElement) => {
       return observeResize(probe, ([entry]) => {
@@ -198,34 +191,29 @@ export function SidebarCollapsedBrand({
       aria-hidden={!visible}
       className={cn(
         // oxlint-disable-next-line shadcn/no-arbitrary-values -- Match the measured titlebar control gap.
-        "hidden shrink-0 items-center pl-[var(--workspace-titlebar-control-gap)] md:flex",
+        "hidden shrink-0 items-center gap-2 pl-[var(--workspace-titlebar-control-gap)] md:flex",
         visible ? "pointer-events-auto" : "invisible pointer-events-none",
       )}
     >
       {visible ? (
-        <SidebarBrand placement="collapsed" onBackdrop={false} />
+        <SidebarBrand placement="collapsed" />
       ) : (
         // Keep the measured width without adding a focus target or a no-drag region.
         <span className="flex h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md px-1.5">
-          <SidebarBrandContents onBackdrop={false} wordmark />
+          <SidebarBrandContents wordmark />
         </span>
       )}
+      {showChannel ? <BrandChannelPill channel={channel} /> : null}
     </div>
   );
 }
 
 /** The visible brand and both width probes measure the same waiting badge. */
-function SidebarBrandContents({
-  onBackdrop,
-  wordmark,
-}: {
-  onBackdrop: boolean;
-  wordmark: boolean;
-}) {
+function SidebarBrandContents({ wordmark }: { wordmark: boolean }) {
   const waitingCount = useGoatBotWaitingCount();
   return (
     <>
-      <SidebarBrandMark onBackdrop={onBackdrop} wordmark={wordmark} />
+      <SidebarBrandMark wordmark={wordmark} />
       {waitingCount !== undefined && waitingCount > 0 ? (
         <span className="ml-1 text-xs">{waitingCount}</span>
       ) : null}
@@ -233,7 +221,7 @@ function SidebarBrandContents({
   );
 }
 
-function SidebarBrandMark({ onBackdrop, wordmark }: { onBackdrop: boolean; wordmark: boolean }) {
+function SidebarBrandMark({ wordmark }: { wordmark: boolean }) {
   if (!wordmark) return <GoatWordmark aria-hidden className="size-4 shrink-0" />;
   return (
     // Center the visible capitals, without the font's ascender/descender space.
@@ -244,7 +232,7 @@ function SidebarBrandMark({ onBackdrop, wordmark }: { onBackdrop: boolean; wordm
         className={cn(
           // oxlint-disable-next-line shadcn/no-arbitrary-values -- Brand letter spacing follows the approved wordmark.
           "font-brand truncate font-bold tracking-[0.04em] [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
-          onBackdrop ? "text-white" : "text-foreground",
+          "text-foreground",
         )}
       >
         GOAT

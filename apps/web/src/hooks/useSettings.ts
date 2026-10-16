@@ -44,13 +44,6 @@ import { ensureLocalApi } from "~/localApi";
 import { readBrowserClientSettings } from "~/clientPersistenceStorage";
 import { resolveSidebarViewIsProjects } from "~/components/Sidebar.logic";
 import {
-  getThemeDefinition,
-  getThemePreviewSidebarArtwork,
-  resolveThemeHalf,
-  subscribeToThemePreview,
-  themeAllowsSidebarArtwork,
-} from "~/themePalette";
-import {
   modelPreferencesMigrationPatch,
   resolveModelPreferences,
 } from "@goat/shared/serverSettings";
@@ -62,7 +55,6 @@ import { isHostedStaticApp } from "~/hostedPairing";
 import { primaryServerSettingsAtom, serverEnvironment } from "~/state/server";
 import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
 import { useAtomCommand } from "~/state/use-atom-command";
-import { useTheme } from "./useTheme";
 import { environmentSession, readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 
@@ -465,35 +457,16 @@ export function useClientSettings<T = ClientSettings>(
 export function resolveEnvironmentIdentificationMode(input: {
   mode: EnvironmentIdentificationMode;
   settingsHydrated: boolean;
-  paletteThemeActive?: boolean;
-  paletteThemeAllowsArtwork?: boolean;
 }): EnvironmentIdentificationMode {
-  // Avoid briefly rendering the default artwork before a persisted pill/none choice loads.
+  // Avoid briefly showing the default badge before a persisted choice loads.
   if (!input.settingsHydrated) return "none";
-  // Artwork palettes are maintained for built-ins only. Keep an explicit
-  // "none", but use the theme-aware pill for user-controlled palettes.
-  return input.paletteThemeActive && !input.paletteThemeAllowsArtwork && input.mode === "artwork"
-    ? "pill"
-    : input.mode;
+  return input.mode === "artwork" ? "pill" : input.mode;
 }
 
 export function useEnvironmentIdentificationMode(): EnvironmentIdentificationMode {
   const settingsHydrated = useClientSettingsHydrated();
   const mode = useClientSettingsValue().environmentIdentificationMode;
-  const { resolvedTheme, theme, themeHalves } = useTheme();
-  const previewSidebarArtwork = useSyncExternalStore(
-    subscribeToThemePreview,
-    getThemePreviewSidebarArtwork,
-    () => null,
-  );
-  const activeTheme = resolveThemeHalf(theme, themeHalves, resolvedTheme);
-  const activeThemeDefinition = getThemeDefinition(activeTheme);
-  return resolveEnvironmentIdentificationMode({
-    mode,
-    settingsHydrated,
-    paletteThemeActive: previewSidebarArtwork !== null || activeThemeDefinition !== null,
-    paletteThemeAllowsArtwork: previewSidebarArtwork ?? themeAllowsSidebarArtwork(activeTheme),
-  });
+  return resolveEnvironmentIdentificationMode({ mode, settingsHydrated });
 }
 
 export function useLegacySidebarEnabled(): boolean | null {

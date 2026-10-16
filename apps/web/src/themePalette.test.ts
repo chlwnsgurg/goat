@@ -3,12 +3,9 @@ import { converter } from "culori/fn";
 import { BUILT_IN_THEMES } from "@goat/shared/themePalettes";
 
 import {
-  applyThemeColorPreview,
-  applyThemePalette,
   getThemeColorsForMode,
   getThemeDefinition,
   getThemeModes,
-  getThemePreviewSidebarArtwork,
   getThemePreferenceMode,
   isKnownThemePreference,
   getCustomThemes,
@@ -25,9 +22,7 @@ import {
   resolveDesktopTheme,
   resolveThemeAppearance,
   serializeThemeFile,
-  subscribeToThemePreview,
   subscribeToCustomThemes,
-  themeAllowsSidebarArtwork,
   GOAT_CHAT_THEME,
   EMBER_THEME,
   GROVE_THEME,
@@ -427,29 +422,6 @@ describe("theme files", () => {
     expect(JSON.parse(serializeThemeFile(theme))).not.toHaveProperty("sidebarArtwork");
   });
 
-  it("suppresses sidebar artwork during a live custom-theme preview", () => {
-    const listener = vi.fn();
-    const unsubscribe = subscribeToThemePreview(listener);
-    vi.stubGlobal("document", {
-      documentElement: {
-        classList: { toggle: vi.fn() },
-        dataset: {},
-        style: { removeProperty: vi.fn(), setProperty: vi.fn() },
-      },
-    });
-
-    applyThemeColorPreview(GOAT_CHAT_THEME.colors, "light");
-    expect(getThemePreviewSidebarArtwork()).toBe(false);
-    expect(listener).toHaveBeenCalledTimes(1);
-
-    applyThemePalette("system");
-    expect(getThemePreviewSidebarArtwork()).toBeNull();
-    expect(listener).toHaveBeenCalledTimes(2);
-
-    unsubscribe();
-    vi.unstubAllGlobals();
-  });
-
   it("keeps optional light and dark palettes under one theme id", () => {
     const theme = parseThemeFile({
       version: THEME_FILE_VERSION,
@@ -527,7 +499,6 @@ describe("theme files", () => {
       expect(getThemeDefinition(theme.id)).toBe(theme);
       expect(getThemeModes(theme)).toEqual(["light", "dark"]);
       expect(theme.sidebarArtwork).toBe(true);
-      expect(themeAllowsSidebarArtwork(theme.id)).toBe(true);
       expect(theme.colors.accent).toMatch(/^oklch\(/);
       expect(theme.variants?.dark?.accent).toMatch(/^oklch\(/);
 
@@ -562,7 +533,6 @@ describe("theme files", () => {
         );
       }
     }
-    expect(themeAllowsSidebarArtwork("my-custom-theme")).toBe(false);
   });
 
   it("rejects a variant that repeats the base appearance", () => {

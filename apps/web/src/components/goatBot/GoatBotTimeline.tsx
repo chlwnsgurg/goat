@@ -90,7 +90,7 @@ export function GoatBotTimeline({
                     time={time(row.delivery.state === "read" ? row.delivery.readAt : row.createdAt)}
                     onRetry={onRetry}
                   />
-                  <div className="max-w-3/4 rounded-2xl bg-goat-bubble px-3 py-2 text-sm break-words whitespace-pre-wrap text-goat-bubble-foreground">
+                  <div className="max-w-3/4 rounded-2xl bg-message px-3 py-2 text-sm break-words whitespace-pre-wrap text-message-foreground">
                     {row.text}
                   </div>
                 </li>

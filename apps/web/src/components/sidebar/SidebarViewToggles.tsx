@@ -84,7 +84,7 @@ export function SidebarPriorityCountBadge({ priorityCount }: { priorityCount: nu
   ) : null;
 }
 
-export function SidebarViewToggles({ onBackdrop }: { onBackdrop: boolean }) {
+export function SidebarViewToggles() {
   const { activityActive, toggleActivity } = useSidebarActivityToggle();
   const priorityCount = useSidebarPriorityCount();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -92,7 +92,6 @@ export function SidebarViewToggles({ onBackdrop }: { onBackdrop: boolean }) {
   const activityName =
     priorityCount > 0 ? `${activityLabel}, ${priorityCount} in Priority` : activityLabel;
   const shortcutLabel = shortcutLabelForCommand(keybindings, "sidebar.toggleActivity");
-  const variant = onBackdrop ? "media-navigation" : "ghost";
   const handleSearch = () => {
     if (!requestSidebarSearchFocus()) openCommandPalette();
   };
@@ -103,7 +102,7 @@ export function SidebarViewToggles({ onBackdrop }: { onBackdrop: boolean }) {
         <TooltipTrigger
           render={
             <Button
-              variant={variant}
+              variant="ghost"
               size="icon-sm"
               className="relative top-auto translate-y-0"
               aria-label={activityName}
@@ -125,7 +124,7 @@ export function SidebarViewToggles({ onBackdrop }: { onBackdrop: boolean }) {
         <TooltipTrigger
           render={
             <Button
-              variant={variant}
+              variant="ghost"
               size="icon-sm"
               className="relative top-auto translate-y-0"
               aria-label="Search threads"
