@@ -21,10 +21,10 @@ const decodeSettings = Schema.decodeEffect(ServerSettings);
 
 const credentialFixture = (
   settings: ServerSettings,
-  saved: ReturnType<typeof stored> | undefined = stored("binding-fixture"),
+  saved: ReturnType<typeof stored> | null = stored("binding-fixture"),
 ) => {
   const getKey = vi.fn(() =>
-    saved === undefined
+    saved === null
       ? Effect.succeedNone
       : Effect.succeedSome(new TextEncoder().encode(JSON.stringify(saved))),
   );
@@ -163,7 +163,7 @@ describe("Cursor Cloud credential precedence", () => {
           [siblingId]: { driver: "cursor", enabled: true, config: {} },
         },
       });
-      const h = credentialFixture(settings, undefined);
+      const h = credentialFixture(settings, null);
       const failure = yield* withProcessKey(
         undefined,
         Effect.gen(function* () {
