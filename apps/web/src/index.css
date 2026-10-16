@@ -296,6 +296,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --color-sidebar-row-active: var(--sidebar-row-active);
   --color-sidebar-row-selected: var(--sidebar-row-selected);
   --color-sidebar-border: var(--contrast-sidebar-border);
+  --color-chrome-divider: var(--contrast-chrome-divider);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -1149,7 +1150,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
 :root {
   color-scheme: light;
   --radius: 0.625rem;
-  --background: var(--color-zinc-25);
+  --background: var(--color-white);
   --app-chrome-background: var(--background);
   --toolbar-background: var(--app-chrome-background);
   --toolbar-foreground: var(--foreground);
@@ -1163,7 +1164,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --card-foreground: var(--color-zinc-800);
   --popover: var(--color-white);
   --popover-foreground: var(--color-zinc-800);
-  --primary: oklch(0.488 0.217 264);
+  --primary: oklch(0.55 0.21 259);
   --primary-foreground: var(--color-white);
   --secondary: var(--color-zinc-50);
   --secondary-foreground: var(--color-zinc-800);
@@ -1199,16 +1200,19 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --update-foreground: var(--primary);
   --update-surface: color-mix(in srgb, var(--update) 12%, transparent);
   /* Keep every sidebar primitive on the same light surface hierarchy, including
-     portaled mobile sheets and settings navigation outside the app sidebar. */
-  --sidebar: var(--color-zinc-50);
+     portaled mobile sheets and settings navigation outside the app sidebar.
+     The gray panel against the white canvas carries the layout, so the default
+     light look draws no chrome hairlines (--chrome-divider). */
+  --sidebar: oklch(96.2% 0 0);
   --sidebar-foreground: var(--foreground);
   --sidebar-muted-foreground: var(--muted-foreground);
-  --sidebar-control-surface: var(--color-zinc-100);
-  --sidebar-row-hover: var(--color-zinc-25);
-  --sidebar-row-active: var(--color-white);
-  --sidebar-row-selected: var(--color-white);
+  --sidebar-control-surface: color-mix(in srgb, var(--color-black) 4%, var(--sidebar));
+  --sidebar-row-hover: color-mix(in srgb, var(--color-black) 4%, var(--sidebar));
+  --sidebar-row-active: color-mix(in srgb, var(--color-black) 7%, var(--sidebar));
+  --sidebar-row-selected: color-mix(in srgb, var(--color-black) 7%, var(--sidebar));
   --sidebar-border: var(--border);
   --sidebar-stage-fade: var(--sidebar);
+  --chrome-divider: transparent;
   --code-background: color-mix(in srgb, var(--card) 90%, var(--background));
   --code-foreground: var(--foreground);
   --terminal-background: var(--background);
@@ -1227,7 +1231,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
     --card-foreground: var(--color-neutral-100);
     --popover: color-mix(in srgb, var(--background) 97%, var(--color-white));
     --popover-foreground: var(--color-neutral-100);
-    --primary: oklch(0.571 0.21 264);
+    --primary: oklch(0.57 0.2 259);
     --secondary: --alpha(var(--color-white) / 3%);
     --secondary-foreground: var(--color-neutral-100);
     --muted: --alpha(var(--color-white) / 3%);
@@ -1252,16 +1256,17 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
     --sidebar-row-active: var(--accent);
     --sidebar-row-selected: var(--muted);
     --sidebar-stage-fade: var(--card);
+    --chrome-divider: var(--sidebar-border);
     --terminal-cursor: rgb(180 203 255);
     --terminal-selection-background: rgb(180 203 255 / 25%);
   }
 }
 
 /* Keep both sidebar implementations (default and legacy) on the same quiet
-   zinc hierarchy: zinc-50 navigation, zinc-25 hover, and white selected/raised
-   surfaces. */
+   hierarchy as :root: a gray panel on the white canvas, rows darkening on hover
+   and selection, and no chrome hairline in light mode. */
 [data-app-sidebar] {
-  --background: var(--color-zinc-25);
+  --background: var(--color-white);
   --foreground: var(--color-zinc-800);
   --card: var(--color-white);
   --card-foreground: var(--color-zinc-800);
@@ -1271,15 +1276,18 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --muted-foreground: var(--color-zinc-500);
   --border: var(--color-zinc-200);
   --input: var(--color-zinc-300);
-  --sidebar: var(--color-zinc-50);
+  --sidebar: oklch(96.2% 0 0);
   --sidebar-foreground: var(--color-zinc-800);
   --sidebar-muted-foreground: var(--color-zinc-500);
-  --sidebar-control-surface: var(--color-zinc-100);
-  --sidebar-row-hover: var(--color-zinc-25);
-  --sidebar-row-active: var(--color-white);
-  --sidebar-row-selected: var(--color-white);
+  --sidebar-control-surface: color-mix(in srgb, var(--color-black) 4%, var(--sidebar));
+  --sidebar-row-hover: color-mix(in srgb, var(--color-black) 4%, var(--sidebar));
+  --sidebar-row-active: color-mix(in srgb, var(--color-black) 7%, var(--sidebar));
+  --sidebar-row-selected: color-mix(in srgb, var(--color-black) 7%, var(--sidebar));
   --sidebar-border: var(--color-zinc-200);
   --sidebar-stage-fade: var(--sidebar);
+  --chrome-divider: transparent;
+  /* The panel's outer edge against the main canvas. */
+  border-color: var(--color-chrome-divider);
 
   @variant dark {
     --background: #000;
@@ -1301,6 +1309,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
     --sidebar-row-selected: color-mix(in srgb, var(--contrast-foreground) 7%, transparent);
     --sidebar-border: var(--border);
     --sidebar-stage-fade: var(--card);
+    --chrome-divider: var(--sidebar-border);
   }
 }
 
@@ -1313,6 +1322,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
    dark variant without reintroducing raw `.dark` selectors. */
 html[data-theme-id]:not([data-theme-id=""]) {
   --background: var(--app-theme-canvas);
+  --chrome-divider: var(--app-theme-sidebar-border);
   --app-chrome-background: var(--app-theme-chrome);
   --toolbar-background: var(--app-theme-toolbar);
   --toolbar-foreground: var(--app-theme-toolbar-foreground);
@@ -1552,6 +1562,7 @@ html[data-theme-id="goat-chat"] {
 
 html[data-theme-id] [data-app-sidebar] {
   --background: var(--app-theme-canvas);
+  --chrome-divider: var(--app-theme-sidebar-border);
   --foreground: var(--app-theme-text);
   --card: var(--app-theme-surface);
   --card-foreground: var(--app-theme-text);
@@ -1696,6 +1707,11 @@ html[data-theme-id="goat-chat"] [data-app-sidebar] {
   --contrast-sidebar-border: color-mix(
     in srgb,
     color-mix(in srgb, var(--sidebar-border) var(--appearance-contrast-base), transparent),
+    var(--sidebar-foreground) var(--appearance-contrast-border-boost)
+  );
+  --contrast-chrome-divider: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--chrome-divider) var(--appearance-contrast-base), transparent),
     var(--sidebar-foreground) var(--appearance-contrast-border-boost)
   );
 }

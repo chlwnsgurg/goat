@@ -229,6 +229,7 @@ import {
   sidebarFolderName,
   sidebarShortDeviceName,
   sidebarHostHueClassName,
+  assignSidebarHostHues,
   sortPriorityThreadsForSidebar,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
@@ -1152,6 +1153,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   jumpLabel: string | null;
   currentEnvironmentId: string | null;
   environmentLabel: string | null;
+  // Globe hue for remote rows; distinct per known device.
+  environmentHueClassName: string;
   environmentMachine: EnvironmentMachineKind;
   project: EnvironmentProject | null;
   projectDisplayName: string | null;
@@ -2206,10 +2209,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                       <SidebarEnvironmentConnectionDot environmentId={thread.environmentId} />
                       <GlobeIcon
                         aria-hidden
-                        className={cn(
-                          "size-3 shrink-0",
-                          sidebarHostHueClassName(thread.environmentId),
-                        )}
+                        className={cn("size-3 shrink-0", props.environmentHueClassName)}
                       />
                     </>
                   ) : null}
@@ -2554,6 +2554,16 @@ export default function Sidebar() {
         environments.map((environment) => [environment.environmentId, environment.label] as const),
       ),
     [environments],
+  );
+  // The primary environment shows no globe, so it does not use up a hue.
+  const environmentHueById = useMemo(
+    () =>
+      assignSidebarHostHues(
+        environments
+          .map((environment) => environment.environmentId)
+          .filter((environmentId) => environmentId !== primaryEnvironmentId),
+      ),
+    [environments, primaryEnvironmentId],
   );
   const environmentMachineById = useEnvironmentMachines();
   const projectGroups = useSidebarProjectGroups();
@@ -5587,6 +5597,10 @@ export default function Sidebar() {
                             currentEnvironmentId={primaryEnvironmentId}
                             environmentLabel={
                               environmentLabelById.get(thread.environmentId) ?? null
+                            }
+                            environmentHueClassName={
+                              environmentHueById.get(thread.environmentId) ??
+                              sidebarHostHueClassName(thread.environmentId)
                             }
                             environmentMachine={
                               environmentMachineById.get(thread.environmentId) ?? "server"
