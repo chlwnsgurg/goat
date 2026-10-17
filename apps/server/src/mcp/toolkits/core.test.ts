@@ -170,6 +170,10 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
   expect([...names].filter((name) => name.startsWith("goat_")).sort()).toEqual([
     "goat_attachment_discard",
     "goat_attachment_prepare_upload",
+    "goat_cloud_machine_create",
+    "goat_cloud_machine_list",
+    "goat_cloud_machine_resume",
+    "goat_cloud_machine_stop",
     "goat_connection_add_ssh",
     "goat_connection_list",
     "goat_connection_remove",
@@ -236,7 +240,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "channel_task_list",
     "channel_task_report",
   ]);
-  expect(names.size).toBe(112);
+  expect(names.size).toBe(116);
   expect([...names].some((name) => name.startsWith("t3_"))).toBe(false);
   expect(names.has("goat_thread_launch")).toBe(true);
   expect(names.has("t3_thread_start")).toBe(false);

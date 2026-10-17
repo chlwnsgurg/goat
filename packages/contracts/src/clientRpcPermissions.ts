@@ -85,6 +85,16 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [CHANNEL_GATEWAY_WS_METHODS.unlinkIdentity]: AuthSettingsWriteScope,
   [SLACK_CHANNEL_WS_METHODS.configure]: AuthSettingsWriteScope,
   [SLACK_CHANNEL_WS_METHODS.disconnect]: AuthSettingsWriteScope,
+  // Boat machines bill the owner's account, so every lifecycle change needs settings write.
+  [WS_METHODS.cloudMachinesConfigure]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesDisconnect]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesCreate]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesStop]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesResume]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesDelete]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesForget]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesDismissUnconfirmed]: AuthSettingsWriteScope,
+  [WS_METHODS.cloudMachinesEnsureReady]: AuthSettingsWriteScope,
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: AuthOrchestrationOperateScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;

@@ -3,6 +3,10 @@ import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import { RemoteReportDeliveryMode, RemoteDispatchView } from "@goat/contracts";
 import * as RemoteDispatchCoordinator from "../../../remoteReports/RemoteDispatchCoordinator.ts";
 import {
+  CloudMachine,
+  CloudMachineAlias,
+  CloudMachinesCreateInput,
+  CloudMachinesListResult,
   ModelSelection,
   ProjectId,
   ThreadId,
@@ -18,6 +22,7 @@ import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
+import * as CloudMachineService from "../../../cloudMachines/CloudMachineService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
 import * as SshWorkspaceSync from "../../../sshRemote/SshWorkspaceSync.ts";
@@ -206,10 +211,58 @@ const SshReportsTool = Tool.make(agentSurfaceRegistry["ssh.reports"].name, {
   }),
   success: Schema.Struct({ dispatches: Schema.Array(RemoteDispatchView) }),
 }).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["ssh.reports"]));
+
+const cloudShared = {
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+    CloudMachineService.CloudMachineService,
+  ],
+};
+const CloudAliasParameters = Schema.Struct({
+  alias: CloudMachineAlias.annotate({
+    description: "The machine's SSH alias from goat_cloud_machine_list (boat-<sandbox id>).",
+  }),
+});
+
+const CloudMachineListTool = Tool.make(agentSurfaceRegistry["cloud_machine.list"].name, {
+  ...cloudShared,
+  description: agentSurfaceRegistry["cloud_machine.list"].description,
+  parameters: Tool.EmptyParams,
+  success: CloudMachinesListResult,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["cloud_machine.list"]));
+
+const CloudMachineCreateTool = Tool.make(agentSurfaceRegistry["cloud_machine.create"].name, {
+  ...cloudShared,
+  description: agentSurfaceRegistry["cloud_machine.create"].description,
+  parameters: CloudMachinesCreateInput,
+  success: CloudMachine,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["cloud_machine.create"]));
+
+const CloudMachineStopTool = Tool.make(agentSurfaceRegistry["cloud_machine.stop"].name, {
+  ...cloudShared,
+  description: agentSurfaceRegistry["cloud_machine.stop"].description,
+  parameters: CloudAliasParameters,
+  success: CloudMachine,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["cloud_machine.stop"]));
+
+const CloudMachineResumeTool = Tool.make(agentSurfaceRegistry["cloud_machine.resume"].name, {
+  ...cloudShared,
+  description: agentSurfaceRegistry["cloud_machine.resume"].description,
+  parameters: CloudAliasParameters,
+  success: CloudMachine,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["cloud_machine.resume"]));
+
 export const SshToolkit = Toolkit.make(
   SshHostListTool,
   SshBrowseTool,
   SshThreadLaunchTool,
   SshThreadHandoffTool,
   SshReportsTool,
+  CloudMachineListTool,
+  CloudMachineCreateTool,
+  CloudMachineStopTool,
+  CloudMachineResumeTool,
 );

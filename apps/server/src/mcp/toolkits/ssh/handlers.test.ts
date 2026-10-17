@@ -13,6 +13,7 @@ import { liveThreadShell } from "../../McpToolAccess.testkit.ts";
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  EnvironmentAuthorizationError,
   ProjectId,
   ProviderInstanceId,
   SshWorkspaceError,
@@ -28,6 +29,7 @@ import * as Stream from "effect/Stream";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as RemoteDispatchCoordinator from "../../../remoteReports/RemoteDispatchCoordinator.ts";
+import * as CloudMachineService from "../../../cloudMachines/CloudMachineService.ts";
 import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
 import * as SshWorkspaceSync from "../../../sshRemote/SshWorkspaceSync.ts";
 import * as LaunchWatchService from "../../LaunchWatchService.ts";
@@ -123,6 +125,7 @@ const launchRaw = (options: LaunchOptions = {}) =>
         getThreadShell: () => Effect.succeed(caller),
       }),
       Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
+      Layer.mock(CloudMachineService.CloudMachineService)({}),
       Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
         validateLaunchAttachments: (requested) => Effect.succeed(requested),
         launchThread: (input, beforeLaunch) => {
@@ -507,6 +510,7 @@ const fixture = (sourceFault?: "missing" | "size") =>
             getThreadShell: () => Ref.get(shell),
           }),
           Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
+          Layer.mock(CloudMachineService.CloudMachineService)({}),
           Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
             validateLaunchAttachments: localDispatch.validateLaunchAttachments,
             launchThread: (input, check) =>
@@ -778,6 +782,7 @@ it.effect.each([undefined, 2])("passes the SSH report limit to the coordinator (
       Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
       Layer.mock(LaunchWatchService.LaunchWatchService)({}),
       Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
+      Layer.mock(CloudMachineService.CloudMachineService)({}),
       Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
       Layer.mock(ThreadManagementService.ThreadManagementService)({}),
       Layer.mock(ServerEnvironment.ServerEnvironment)({}),
@@ -831,6 +836,7 @@ const handoff = (
             return currentCaller;
           }),
       }),
+      Layer.mock(CloudMachineService.CloudMachineService)({}),
       Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
         listHosts: ({ probe }) =>
           Effect.sync(() => {
@@ -1018,5 +1024,98 @@ it.effect("an outside full-access client must name a thread and cannot exempt an
     const transferred = yield* handoff({ threadId }, { invocation });
     expect(transferred.inputs).toHaveLength(1);
     expect(transferred.inputs[0]?.allowRunId).toBeUndefined();
+  }),
+);
+
+const cloudMachineView = {
+  alias: "boat-bx_23456789",
+  sandboxId: "bx_23456789",
+  label: "Build box",
+  provider: "boat",
+  type: "small",
+  ttlSeconds: 3600,
+  presence: "present",
+  state: "provisioning",
+  deletePending: false,
+  lastError: null,
+} as const;
+
+/** Calls goat_cloud_machine_create as a thread caller with the given settings grant. */
+const createCloudMachine = (grant: {
+  readonly readOnly?: boolean;
+  readonly grantedScopes?: ReadonlyArray<"settings:write" | "orchestration:read">;
+  readonly reauthorize?: "ok" | "fail";
+}) =>
+  Effect.gen(function* () {
+    const created: Array<unknown> = [];
+    const reauthorized: Array<ReadonlyArray<string>> = [];
+    const invocation: McpInvocationContext.McpInvocationScope = {
+      ...scope,
+      ...(grant.readOnly === undefined ? {} : { readOnly: grant.readOnly }),
+      ...(grant.grantedScopes === undefined ? {} : { grantedScopes: grant.grantedScopes }),
+      ...(grant.reauthorize === undefined
+        ? {}
+        : {
+            reauthorize: (required) =>
+              Effect.sync(() => void reauthorized.push(required)).pipe(
+                Effect.andThen(
+                  grant.reauthorize === "ok"
+                    ? Effect.void
+                    : Effect.fail(
+                        new EnvironmentAuthorizationError({
+                          message: "revoked",
+                          requiredScope: "settings:write",
+                        }),
+                      ),
+                ),
+              ),
+          }),
+    };
+    const dependencies = Layer.mergeAll(
+      Layer.succeed(McpInvocationContext.McpInvocationContext, invocation),
+      Layer.mock(ThreadManagementService.ThreadManagementService)({
+        getThreadShell: () => Effect.succeed(liveThreadShell(threadId)),
+      }),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
+      Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
+      Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({}),
+      Layer.mock(LaunchWatchService.LaunchWatchService)({}),
+      Layer.mock(CloudMachineService.CloudMachineService)({
+        create: (input) =>
+          Effect.sync(() => void created.push(input)).pipe(Effect.as(cloudMachineView)),
+      }),
+    );
+    const toolkit = yield* SshToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(SshHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const responses = yield* toolkit
+      .handle("goat_cloud_machine_create", { label: "Build box", type: "small", ttlSeconds: 3600 })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    return { response: responses.at(-1)?.result, created, reauthorized };
+  });
+
+it.effect("creates a cloud machine only for a caller whose settings grant is reconfirmed", () =>
+  Effect.gen(function* () {
+    const granted = yield* createCloudMachine({
+      grantedScopes: ["settings:write"],
+      reauthorize: "ok",
+    });
+    expect(granted.response).toMatchObject({ alias: "boat-bx_23456789" });
+    expect(granted.created).toHaveLength(1);
+    expect(granted.reauthorized).toEqual([["settings:write"]]);
+
+    for (const grant of [
+      { grantedScopes: ["orchestration:read"] as const, reauthorize: "ok" as const },
+      { grantedScopes: ["settings:write"] as const },
+      { grantedScopes: ["settings:write"] as const, reauthorize: "ok" as const, readOnly: true },
+      { grantedScopes: ["settings:write"] as const, reauthorize: "fail" as const },
+    ]) {
+      const denied = yield* createCloudMachine(grant);
+      expect(denied.response, JSON.stringify(grant)).toMatchObject({ code: "capability_denied" });
+      expect(denied.created).toEqual([]);
+    }
   }),
 );

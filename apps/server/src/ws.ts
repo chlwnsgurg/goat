@@ -5,6 +5,7 @@ import * as MemorySyncService from "./memory/MemorySyncService.ts";
 import { memoryError } from "./mcp/toolkits/memory/handlers.ts";
 import * as SshWorkspaceSync from "./sshRemote/SshWorkspaceSync.ts";
 import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
+import * as CloudMachineService from "./cloudMachines/CloudMachineService.ts";
 import {
   CHANNEL_GATEWAY_WS_METHODS,
   ChannelGatewayError,
@@ -1320,6 +1321,7 @@ const layerWsRpc = (
       const projectStore = yield* ProjectStore.ProjectStoreV2;
       const sshWorkspace = yield* SshWorkspaceSync.SshWorkspaceSync;
       const remoteLaunchCatalog = yield* RemoteLaunchCatalog.RemoteLaunchCatalog;
+      const cloudMachines = yield* CloudMachineService.CloudMachineService;
       const projectService = yield* ProjectService.ProjectService;
       const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
@@ -2357,6 +2359,19 @@ const layerWsRpc = (
             Effect.andThen(handoffs.answerSecret(input, currentSessionId)),
           ),
         [WS_METHODS.remoteLaunchesList]: (input) => remoteLaunchCatalog.list(input),
+        [WS_METHODS.cloudMachinesList]: () => cloudMachines.list(),
+        [WS_METHODS.cloudMachinesConfigure]: (input) => cloudMachines.configure(input),
+        [WS_METHODS.cloudMachinesDisconnect]: () => cloudMachines.disconnect(),
+        [WS_METHODS.cloudMachinesCreate]: (input) => cloudMachines.create(input),
+        [WS_METHODS.cloudMachinesStop]: (input) => cloudMachines.stop(input.alias),
+        [WS_METHODS.cloudMachinesResume]: (input) => cloudMachines.resume(input.alias),
+        [WS_METHODS.cloudMachinesDelete]: (input) => cloudMachines.delete(input.alias),
+        [WS_METHODS.cloudMachinesForget]: (input) => cloudMachines.forget(input.alias),
+        [WS_METHODS.cloudMachinesDismissUnconfirmed]: () =>
+          cloudMachines.dismissUnconfirmedCreates(),
+        // A client connecting to a saved machine never wakes it; Resume does.
+        [WS_METHODS.cloudMachinesEnsureReady]: (input) =>
+          cloudMachines.ensureReady(input.alias, { wake: false }),
         [WS_METHODS.scheduledTasksListWebhookDeliveries]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.listWebhookDeliveries(input)),

@@ -1,5 +1,6 @@
 import * as RemoteDispatchCoordinator from "../../../remoteReports/RemoteDispatchCoordinator.ts";
 import {
+  type CloudMachineError,
   OrchestratorMcpFailure,
   RunId,
   SshWorkspaceError,
@@ -10,6 +11,7 @@ import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
+import * as CloudMachineService from "../../../cloudMachines/CloudMachineService.ts";
 import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
 import * as SshWorkspaceSync from "../../../sshRemote/SshWorkspaceSync.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -66,6 +68,35 @@ const requireOrchestration = McpInvocationContext.McpInvocationContext.pipe(
         ),
   ),
 );
+
+/**
+ * Cloud machines bill the user's Boat account, so changing them needs what changing settings
+ * needs: a live settings:write grant that is reconfirmed for this call (as memory's settings tools).
+ */
+export const requireSettingsWrite = McpInvocationContext.McpInvocationContext.pipe(
+  Effect.flatMap((scope) => {
+    const deny = () =>
+      new OrchestratorMcpFailure({
+        code: "capability_denied",
+        message:
+          "Changing cloud machines needs a caller allowed to change this machine's settings.",
+      });
+    if (
+      scope.readOnly ||
+      scope.client?.access === "read-only" ||
+      !scope.grantedScopes?.includes("settings:write") ||
+      !scope.reauthorize
+    )
+      return Effect.fail(deny());
+    return scope.reauthorize(["settings:write"]).pipe(Effect.mapError(deny));
+  }),
+);
+
+const toCloudFailure = (error: CloudMachineError) =>
+  new OrchestratorMcpFailure({
+    code: error.reason === "not_found" ? "invalid_request" : "orchestration_error",
+    message: error.message,
+  });
 
 export const layer = McpToolAccess.toLayer(SshToolkit, {
   // Reading ~/.ssh/config changes nothing; probing logs in but runs only `true`.
@@ -361,6 +392,34 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
       return {
         dispatches: records.map(RemoteDispatchCoordinator.dispatchView),
       };
+    }),
+  ),
+  goat_cloud_machine_list: McpToolAccess.reads(() =>
+    Effect.gen(function* () {
+      yield* requireOrchestration;
+      const cloud = yield* CloudMachineService.CloudMachineService;
+      return yield* cloud.list().pipe(Effect.mapError(toCloudFailure));
+    }),
+  ),
+  goat_cloud_machine_create: McpToolAccess.writes((input) =>
+    Effect.gen(function* () {
+      yield* requireSettingsWrite;
+      const cloud = yield* CloudMachineService.CloudMachineService;
+      return yield* cloud.create(input).pipe(Effect.mapError(toCloudFailure));
+    }),
+  ),
+  goat_cloud_machine_stop: McpToolAccess.writes((input) =>
+    Effect.gen(function* () {
+      yield* requireSettingsWrite;
+      const cloud = yield* CloudMachineService.CloudMachineService;
+      return yield* cloud.stop(input.alias).pipe(Effect.mapError(toCloudFailure));
+    }),
+  ),
+  goat_cloud_machine_resume: McpToolAccess.writes((input) =>
+    Effect.gen(function* () {
+      yield* requireSettingsWrite;
+      const cloud = yield* CloudMachineService.CloudMachineService;
+      return yield* cloud.resume(input.alias).pipe(Effect.mapError(toCloudFailure));
     }),
   ),
 });
