@@ -388,8 +388,9 @@ export class SessionStore extends Context.Service<
       readonly replaceSessionId?: AuthSessionId;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
     /**
-     * Token-free live authority; revocation and expiry are checked on every read. Sessions
-     * stored by another process after startup are read through from the store once.
+     * Token-free live authority; revocation and expiry are checked on every read. A memory read
+     * with no SQL or lock, so it is safe inside a SQL transaction. Covers sessions loaded at
+     * startup, issued here, or accepted by `verify`, including ones another process issued.
      */
     readonly readActiveScopes: (
       sessionId: AuthSessionId,
@@ -553,14 +554,23 @@ export const make = Effect.gen(function* () {
     now: yield* DateTime.now,
     connectedSessionIds: [],
   });
-  const activeScopes = yield* Ref.make(
-    new Map(
+  type ActiveScopeRecord = {
+    readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+    readonly expiresAt: DateTime.Utc;
+  };
+  // `removed` remembers sessions this process revoked or retired, in the same atomic update
+  // that drops their grant, so a verify that read the row earlier cannot restore it.
+  const activeScopes = yield* Ref.make({
+    records: new Map<AuthSessionId, ActiveScopeRecord>(
       activeScopeRows.map((row) => [
         row.sessionId,
         { scopes: row.scopes, expiresAt: row.expiresAt },
       ]),
     ),
-  );
+    removed: new Set<AuthSessionId>(),
+  });
+  const withoutExpired = (records: ReadonlyMap<AuthSessionId, ActiveScopeRecord>, at: number) =>
+    new Map(Array.from(records).filter(([, record]) => record.expiresAt.epochMilliseconds > at));
 
   // Serialize auth mutations through publication: a delayed activity event must
   // never restore a removed grant, and a committed revoke must update the Ref.
@@ -569,13 +579,33 @@ export const make = Effect.gen(function* () {
     PubSub.publish(changesPubSub, { type: "clientUpserted", clientSession }).pipe(Effect.asVoid);
 
   const emitRemoved = (sessionId: AuthSessionId) =>
-    Ref.update(activeScopes, (current) => {
-      const next = new Map(current);
+    Ref.update(activeScopes, ({ records, removed }) => {
+      const next = new Map(records);
       next.delete(sessionId);
-      return next;
+      return { records: next, removed: new Set(removed).add(sessionId) };
     }).pipe(
       Effect.andThen(PubSub.publish(changesPubSub, { type: "clientRemoved", sessionId })),
       Effect.asVoid,
+    );
+
+  /**
+   * Records the live grant of a session `verify` just accepted, including one another process
+   * (the CLI's `goat auth session issue`) stored after startup. Runs outside authorityLock and
+   * SQL so `readActiveScopes` stays a lock-free memory read inside memory transactions.
+   */
+  const rememberVerified = (sessionId: AuthSessionId, record: ActiveScopeRecord) =>
+    Effect.flatMap(DateTime.now, (now) =>
+      Ref.update(activeScopes, (current) =>
+        current.records.has(sessionId) || current.removed.has(sessionId)
+          ? current
+          : {
+              records: withoutExpired(current.records, now.epochMilliseconds).set(
+                sessionId,
+                record,
+              ),
+              removed: current.removed,
+            },
+      ),
     );
 
   const loadActiveSession = (sessionId: AuthSessionId) =>
@@ -801,13 +831,13 @@ export const make = Effect.gen(function* () {
           discard: true,
         });
       }
-      yield* Ref.update(activeScopes, (current) =>
-        new Map(
-          Array.from(current).filter(
-            ([, record]) => record.expiresAt.epochMilliseconds > issuedAt.epochMilliseconds,
-          ),
-        ).set(sessionId, { scopes: claims.scopes, expiresAt }),
-      );
+      yield* Ref.update(activeScopes, (current) => ({
+        records: withoutExpired(current.records, issuedAt.epochMilliseconds).set(sessionId, {
+          scopes: claims.scopes,
+          expiresAt,
+        }),
+        removed: current.removed,
+      }));
       yield* emitUpsert(
         toAuthClientSession({
           sessionId,
@@ -834,40 +864,11 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  // Another process (the CLI's `goat auth session issue`) can store a session after startup.
-  // Runs under authorityLock: in-process revocation commits and removes the entry under the
-  // same permit, so a stale read can never restore a removed grant.
-  const readThroughActiveScopes = Effect.fn("SessionStore.readThroughActiveScopes")(function* (
-    sessionId: AuthSessionId,
-  ) {
-    const cached = (yield* Ref.get(activeScopes)).get(sessionId);
-    if (cached) return cached;
-    const row = yield* authSessions
-      .getById({ sessionId })
-      .pipe(
-        Effect.mapError((cause) => new SessionCredentialVerificationError({ sessionId, cause })),
-      );
-    if (Option.isNone(row)) return yield* new UnknownSessionTokenError({ sessionId });
-    if (row.value.revokedAt !== null)
-      return yield* new SessionTokenRevokedError({ sessionId, revokedAt: row.value.revokedAt });
-    const observedAt = yield* DateTime.now;
-    if (row.value.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds)
-      return yield* new SessionTokenExpiredError({
-        sessionId,
-        expiresAt: row.value.expiresAt,
-        observedAt,
-      });
-    const record = { scopes: row.value.scopes, expiresAt: row.value.expiresAt };
-    yield* Ref.update(activeScopes, (current) => new Map(current).set(sessionId, record));
-    return record;
-  });
-
   const readActiveScopes: SessionStore["Service"]["readActiveScopes"] = Effect.fn(
     "SessionStore.readActiveScopes",
   )(function* (sessionId) {
-    const record =
-      (yield* Ref.get(activeScopes)).get(sessionId) ??
-      (yield* authorityLock.withPermit(readThroughActiveScopes(sessionId)));
+    const record = (yield* Ref.get(activeScopes)).records.get(sessionId);
+    if (!record) return yield* new UnknownSessionTokenError({ sessionId });
     const observedAt = yield* DateTime.now;
     if (record.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds)
       return yield* new SessionTokenExpiredError({
@@ -906,6 +907,10 @@ export const make = Effect.gen(function* () {
             observedAt,
           });
         }
+        yield* rememberVerified(row.value.sessionId, {
+          scopes: row.value.scopes,
+          expiresAt: row.value.expiresAt,
+        });
         return {
           sessionId: row.value.sessionId,
           token,
@@ -963,6 +968,10 @@ export const make = Effect.gen(function* () {
         });
       }
 
+      yield* rememberVerified(claims.sid, {
+        scopes: row.value.scopes,
+        expiresAt: row.value.expiresAt,
+      });
       return {
         sessionId: claims.sid,
         token,
