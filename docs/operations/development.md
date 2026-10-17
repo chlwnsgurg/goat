@@ -15,6 +15,17 @@ a new browser.
 
 Prefer a container? See [Dev container](../internals/devcontainer.md) for VS Code and Codespaces setup.
 
+## Worktrees
+
+A new worktree sets itself up. When `git worktree add` creates a checkout, the
+`.vite-hooks/post-checkout` hook runs `node scripts/setup-worktree.ts` in it, whether GOAT, Codex,
+or an agent ran git. Setup installs dependencies, links the main checkout's env files, and warms the
+web dependency cache, so the command returns with a ready worktree, usually within a minute.
+
+Git reads the hook from the checkout that runs `git worktree add`, so that checkout needs one
+`vp i` first. Set `GOAT_WORKTREE_SETUP=0` to skip setup for a throwaway checkout. For a worktree
+created without the hook, run `node scripts/setup-worktree.ts` from its root.
+
 ## Choosing a dev process
 
 Use `vp run dev` for server and web, or `vp run dev:desktop` for the Electron client.
@@ -76,7 +87,7 @@ Put that value in the main checkout's gitignored `.env`:
 GOAT_DEV_AUTH_TOKEN=<the value generated above>
 ```
 
-The `t3.json` Setup Worktree action links that file to each worktree's `.env`. The dev runner reads repository env files at startup. `.env.local` and inherited process
+[Worktree setup](#worktrees) links that file to each worktree's `.env`. The dev runner reads repository env files at startup. `.env.local` and inherited process
 environment values override `.env`, so no per-worktree export is needed after setup.
 
 For a manual worktree or launcher without that link, export the same fixed value instead:
