@@ -55,6 +55,23 @@ function workflow(job: unknown = baseJob, on: unknown = { push: null }) {
   return JSON.stringify({ on, jobs: { ci: job } });
 }
 
+const screenshotPermissions = {
+  contents: "read",
+  issues: "read",
+  "pull-requests": "read",
+  checks: "write",
+};
+
+function screenshotWorkflow(patch: Record<string, unknown> = {}) {
+  return JSON.stringify({
+    on: { pull_request: null },
+    jobs: {
+      ci: baseJob,
+      "screenshot-gate": { ...baseJob, permissions: screenshotPermissions, ...patch },
+    },
+  });
+}
+
 function fixture(
   options: {
     node?: boolean;
@@ -219,6 +236,43 @@ describe("goat pre-push workflow guard", () => {
       '.workflows[] | select(.state=="disabled_manually") | .path',
       "",
     ]);
+  });
+
+  it("allows the screenshot job alongside ci with scoped Checks API permission", () => {
+    const f = fixture({ workflow: screenshotWorkflow() });
+    expect(f.hook(f.record(f.sha)).status).toBe(0);
+  });
+
+  it.each([
+    ["hosted runner", { "runs-on": "ubuntu-latest" }, "jobs.screenshot-gate.runs-on"],
+    [
+      "unapproved action",
+      { steps: [{ uses: "actions/checkout@v5" }] },
+      "uses is not an allowed action",
+    ],
+    [
+      "reusable job",
+      { uses: "org/repo/.github/workflows/ci.yml@main" },
+      "jobs.screenshot-gate.uses is forbidden",
+    ],
+    ["container", { container: "node:24" }, "jobs.screenshot-gate.container"],
+    ["services", { services: {} }, "jobs.screenshot-gate.container"],
+    ["missing permissions", { permissions: undefined }, "jobs.screenshot-gate.permissions"],
+    [
+      "extra write permission",
+      { permissions: { ...screenshotPermissions, contents: "write" } },
+      "jobs.screenshot-gate.permissions",
+    ],
+    [
+      "extra scope",
+      { permissions: { ...screenshotPermissions, actions: "read" } },
+      "jobs.screenshot-gate.permissions",
+    ],
+  ])("rejects a screenshot job with %s", (_name, patch, message) => {
+    const f = fixture({ workflow: screenshotWorkflow(patch) });
+    const result = f.hook(f.record(f.sha));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(message);
   });
 
   it("allows deletion-only pushes without node, yaml or gh", () => {
@@ -425,13 +479,17 @@ describe("goat pre-push workflow guard", () => {
     [
       "extra job",
       JSON.stringify({ on: { push: null }, jobs: { ci: baseJob, extra: baseJob } }),
-      "jobs must contain exactly ci",
+      "jobs must contain ci and optionally screenshot-gate",
     ],
-    ["missing jobs", JSON.stringify({ on: { push: null } }), "jobs must contain exactly ci"],
+    [
+      "missing jobs",
+      JSON.stringify({ on: { push: null } }),
+      "jobs must contain ci and optionally screenshot-gate",
+    ],
     [
       "jobs array",
       JSON.stringify({ on: { push: null }, jobs: [] }),
-      "jobs must contain exactly ci",
+      "jobs must contain ci and optionally screenshot-gate",
     ],
     ["nonmapping ci", workflow(null), "jobs.ci must be a mapping"],
     [

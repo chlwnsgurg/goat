@@ -7,6 +7,7 @@
 // evidence only); goat arms the gate on changed paths, not on title words.
 
 const fs = require("node:fs");
+const { setTimeout: sleep } = require("node:timers/promises");
 
 const WAIVER_LABEL = "gui-screenshot-waived";
 const MODES = new Set(["off", "warn", "enforce"]);
@@ -133,18 +134,35 @@ function decideGate({ draft, files, filesTruncated, body, waived }) {
   return { outcome: "missing", reason, uiFiles };
 }
 
-async function api(path, { token, apiUrl }) {
-  const response = await fetch(apiUrl + path, {
-    headers: {
-      accept: "application/vnd.github+json",
-      authorization: "Bearer " + token,
-      "x-github-api-version": "2022-11-28",
-    },
-  });
-  if (!response.ok) {
-    throw new Error("GET " + path + " returned " + response.status);
+async function api(
+  path,
+  { token, apiUrl, attempts = 1, sleep: wait = sleep, method = "GET", body },
+) {
+  for (let attempt = 1; ; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(apiUrl + path, {
+        method,
+        ...(method === "GET" ? {} : { body: JSON.stringify(body) }),
+        headers: {
+          accept: "application/vnd.github+json",
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+          authorization: "Bearer " + token,
+          "x-github-api-version": "2022-11-28",
+        },
+      });
+    } catch (error) {
+      // Fetch rejection is a transport failure; JSON parsing below is not retried.
+      if (attempt >= attempts) throw error;
+      await wait(250 * attempt);
+      continue;
+    }
+    if (response.ok) return response.json();
+    if (response.status < 500 || response.status >= 600 || attempt >= attempts) {
+      throw new Error(method + " " + path + " returned " + response.status);
+    }
+    await wait(250 * attempt);
   }
-  return response.json();
 }
 
 async function paginate(path, options, maxPages = 30) {
@@ -171,16 +189,62 @@ async function labelWaiver({ repoPath, number, labels, options, log }) {
     if (isMaintainerPermission(permission)) return true;
     log("ignoring " + WAIVER_LABEL + ": applied by " + actor + ", who is not a maintainer");
   } catch (error) {
-    log("could not verify who applied " + WAIVER_LABEL + ": " + error.message);
+    throw new Error("could not verify who applied " + WAIVER_LABEL + ": " + error.message);
   }
   return false;
+}
+
+async function syncInconclusiveCheck({ repoPath, headSha, decision, options }) {
+  if (!headSha) throw new Error("event payload has no PR head SHA");
+  const name = "goat-screenshot-gate: inconclusive";
+  const checks = await api(
+    repoPath +
+      "/commits/" +
+      headSha +
+      "/check-runs?check_name=" +
+      encodeURIComponent(name) +
+      "&filter=latest",
+    options,
+  );
+  const existing = checks.check_runs[0];
+  const inconclusive = decision.outcome === "inconclusive";
+  if (!inconclusive && !existing) return;
+  await api(repoPath + "/check-runs" + (existing ? "/" + existing.id : ""), {
+    ...options,
+    method: existing ? "PATCH" : "POST",
+    // A transport failure may have created the check; do not duplicate it by retrying.
+    attempts: 1,
+    body: {
+      ...(existing ? {} : { name, head_sha: headSha }),
+      status: "completed",
+      conclusion: inconclusive ? "neutral" : "success",
+      output: {
+        title: inconclusive
+          ? "Screenshot gate could not inspect this PR"
+          : "Resolved: a later run inspected this PR",
+        summary: inconclusive
+          ? decision.reason + ". Please re-run the goat-screenshot-gate job."
+          : decision.outcome +
+            ": " +
+            decision.reason +
+            ". See the goat-screenshot-gate job for the gate result.",
+      },
+    },
+  });
 }
 
 function summaryMarkdown({ number, mode, decision }) {
   const lines = [
     "### PR screenshot gate",
     "",
-    "PR #" + number + " (" + mode + " mode): " + decision.reason + ".",
+    "PR #" +
+      number +
+      " (" +
+      mode +
+      " mode): " +
+      (decision.outcome === "inconclusive" ? "inconclusive: " : "") +
+      decision.reason +
+      ".",
   ];
   if (decision.outcome === "missing") {
     lines.push(
@@ -200,7 +264,7 @@ function summaryMarkdown({ number, mode, decision }) {
   return lines.join("\n") + "\n";
 }
 
-async function main(env = process.env) {
+async function main(env = process.env, { sleep: wait = sleep } = {}) {
   const log = (message) => console.log("pr-screenshot-gate: " + message);
   const mode = resolveMode(env.GOAT_SCREENSHOT_GATE);
   if (env.GITHUB_EVENT_NAME !== "pull_request") {
@@ -217,6 +281,8 @@ async function main(env = process.env) {
   const options = {
     token: env.GITHUB_TOKEN,
     apiUrl: env.GITHUB_API_URL || "https://api.github.com",
+    attempts: 3,
+    sleep: wait,
   };
 
   let decision;
@@ -241,18 +307,34 @@ async function main(env = process.env) {
         ? { ...preliminary, outcome: "pass", reason: "waived by the " + WAIVER_LABEL + " label" }
         : preliminary;
   } catch (error) {
-    const message = "could not read PR #" + number + ": " + error.message;
-    if (mode === "enforce") {
-      console.log("::error title=PR screenshot gate::" + message);
-      return 1;
-    }
-    console.log("::warning title=PR screenshot gate::" + message);
-    return 0;
+    decision = {
+      outcome: "inconclusive",
+      reason: "could not inspect PR #" + number + ": " + error.message,
+      uiFiles: [],
+    };
   }
 
   log(decision.outcome + ": " + decision.reason);
   if (env.GITHUB_STEP_SUMMARY) {
     fs.appendFileSync(env.GITHUB_STEP_SUMMARY, summaryMarkdown({ number, mode, decision }));
+  }
+  try {
+    await syncInconclusiveCheck({
+      repoPath,
+      headSha: event.pull_request?.head?.sha,
+      decision,
+      options,
+    });
+  } catch (error) {
+    console.log(
+      "::warning title=PR screenshot gate::could not synchronize inconclusive check: " +
+        error.message,
+    );
+  }
+  if (decision.outcome === "inconclusive") {
+    const level = mode === "enforce" ? "error" : "warning";
+    console.log("::" + level + " title=PR screenshot gate::inconclusive: " + decision.reason);
+    return mode === "enforce" ? 1 : 0;
   }
   if (decision.outcome !== "missing") return 0;
   const message =

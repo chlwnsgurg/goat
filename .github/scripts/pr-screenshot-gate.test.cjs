@@ -19,6 +19,7 @@ const {
 
 const SHOT = "![after](https://raw.githubusercontent.com/goat-si/goat/abc123/120/after.png)";
 const FENCE = "\x60\x60\x60";
+const CHECK_LIST_PATH = "/repos/goat-si/goat/commits/" + "c".repeat(40) + "/check-runs";
 
 describe("hasScreenshotEvidence", () => {
   it("accepts inline markdown images, img tags, and defined reference images", () => {
@@ -168,12 +169,14 @@ describe("waiver provenance", () => {
 });
 
 describe("main", () => {
-  function stubFetch(routes) {
+  function stubFetch(routes, requests) {
     const original = global.fetch;
-    global.fetch = async (url) => {
+    global.fetch = async (url, options) => {
       const pathname = new URL(url).pathname;
+      requests.push({ path: pathname, ...options });
       if (!(pathname in routes)) return { ok: false, status: 404, json: async () => ({}) };
       const value = routes[pathname];
+      if (typeof value === "function") return value(url, options);
       const page = Number(new URL(url).searchParams.get("page") ?? "1");
       return {
         ok: true,
@@ -189,29 +192,58 @@ describe("main", () => {
   function run(mode, routes) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pr-screenshot-gate-"));
     const eventPath = path.join(dir, "event.json");
-    fs.writeFileSync(eventPath, JSON.stringify({ pull_request: { number: 7 } }));
-    const restore = stubFetch(routes);
+    const summaryPath = path.join(dir, "summary.md");
+    fs.writeFileSync(
+      eventPath,
+      JSON.stringify({ pull_request: { number: 7, head: { sha: "c".repeat(40) } } }),
+    );
+    const requests = [];
+    const restore = stubFetch({ [CHECK_LIST_PATH]: { check_runs: [] }, ...routes }, requests);
     const logs = [];
     const originalLog = console.log;
     console.log = (line) => logs.push(line);
-    return main({
-      GITHUB_EVENT_NAME: "pull_request",
-      GITHUB_EVENT_PATH: eventPath,
-      GITHUB_REPOSITORY: "goat-si/goat",
-      GITHUB_TOKEN: "test",
-      GITHUB_API_URL: "https://api.example.test",
-      GOAT_SCREENSHOT_GATE: mode,
-    })
+    const delays = [];
+    return main(
+      {
+        GITHUB_EVENT_NAME: "pull_request",
+        GITHUB_EVENT_PATH: eventPath,
+        GITHUB_REPOSITORY: "goat-si/goat",
+        GITHUB_TOKEN: "test",
+        GITHUB_API_URL: "https://api.example.test",
+        GOAT_SCREENSHOT_GATE: mode,
+        GITHUB_STEP_SUMMARY: summaryPath,
+      },
+      {
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+      },
+    )
+      .then((code) => ({
+        code,
+        logs,
+        delays,
+        summary: fs.existsSync(summaryPath) ? fs.readFileSync(summaryPath, "utf8") : "",
+        requests,
+        outcome: logs
+          .join("\n")
+          .match(/pr-screenshot-gate: (pass|skip|missing|inconclusive):/)?.[1],
+      }))
       .finally(() => {
         console.log = originalLog;
         restore();
         fs.rmSync(dir, { recursive: true, force: true });
-      })
-      .then((code) => ({ code, logs }));
+      });
   }
 
   const uiPr = (labels = []) => ({
-    "/repos/goat-si/goat/pulls/7": { draft: false, body: "No image.", changed_files: 1, labels },
+    "/repos/goat-si/goat/pulls/7": {
+      draft: false,
+      body: "No image.",
+      changed_files: 1,
+      labels,
+      head: { sha: "d".repeat(40) },
+    },
     "/repos/goat-si/goat/pulls/7/files": [{ filename: "apps/web/src/App.tsx" }],
   });
 
@@ -252,7 +284,415 @@ describe("main", () => {
   });
 
   it("does not break CI when the API is unreachable in warn mode", async () => {
-    const { code } = await run("warn", {});
+    const { code, logs, summary, outcome, delays } = await run("warn", {});
     assert.equal(code, 0);
+    assert.ok(logs.some((line) => line.startsWith("::warning") && line.includes("inconclusive")));
+    assert.match(summary, /inconclusive/);
+    assert.equal(outcome, "inconclusive");
+    assert.deepEqual(delays, []);
   });
+
+  it("recovers from a files HTTP 500 and network failure within three attempts", async () => {
+    let calls = 0;
+    const { code, outcome, summary, delays } = await run("enforce", {
+      ...uiPr(),
+      "/repos/goat-si/goat/pulls/7/files": async () => {
+        calls += 1;
+        if (calls === 1) return { ok: false, status: 500 };
+        if (calls === 2) throw new TypeError("fetch failed");
+        return { ok: true, json: async () => [{ filename: "apps/server/src/ws.ts" }] };
+      },
+    });
+    assert.equal(calls, 3);
+    assert.deepEqual(delays, [250, 500]);
+    assert.equal(code, 0);
+    assert.equal(outcome, "skip");
+    assert.doesNotMatch(summary, /inconclusive/);
+  });
+
+  it("reports exhausted files 5xx errors as inconclusive in advisory mode", async () => {
+    let calls = 0;
+    const { code, logs, summary, outcome, delays } = await run("warn", {
+      ...uiPr(),
+      "/repos/goat-si/goat/pulls/7/files": async () => {
+        calls += 1;
+        return { ok: false, status: 503 };
+      },
+    });
+    assert.equal(calls, 3);
+    assert.deepEqual(delays, [250, 500]);
+    assert.equal(code, 0);
+    assert.equal(outcome, "inconclusive");
+    assert.match(summary, /inconclusive.*returned 503/);
+    assert.ok(logs.some((line) => line.startsWith("::warning") && line.includes("inconclusive")));
+  });
+
+  it("fails enforce mode with an inconclusive outcome after network retries", async () => {
+    let calls = 0;
+    const { code, logs, summary, outcome, delays } = await run("enforce", {
+      ...uiPr(),
+      "/repos/goat-si/goat/pulls/7/files": async () => {
+        calls += 1;
+        throw new TypeError("fetch failed");
+      },
+    });
+    assert.equal(calls, 3);
+    assert.deepEqual(delays, [250, 500]);
+    assert.equal(code, 1);
+    assert.equal(outcome, "inconclusive");
+    assert.match(summary, /inconclusive/);
+    assert.ok(logs.some((line) => line.startsWith("::error") && line.includes("inconclusive")));
+  });
+
+  it("does not retry files 4xx responses, including rate limits", async () => {
+    for (const status of [401, 403, 404, 429]) {
+      let calls = 0;
+      const { code, outcome, delays } = await run("warn", {
+        ...uiPr(),
+        "/repos/goat-si/goat/pulls/7/files": async () => {
+          calls += 1;
+          return { ok: false, status };
+        },
+      });
+      assert.equal(calls, 1, String(status));
+      assert.deepEqual(delays, []);
+      assert.equal(code, 0);
+      assert.equal(outcome, "inconclusive");
+    }
+  });
+
+  it("does not retry a malformed files response", async () => {
+    let calls = 0;
+    const { outcome, delays } = await run("warn", {
+      ...uiPr(),
+      "/repos/goat-si/goat/pulls/7/files": async () => {
+        calls += 1;
+        return {
+          ok: true,
+          json: async () => {
+            throw new SyntaxError("invalid JSON");
+          },
+        };
+      },
+    });
+    assert.equal(calls, 1);
+    assert.deepEqual(delays, []);
+    assert.equal(outcome, "inconclusive");
+  });
+
+  it("retries only the failed page and keeps files from earlier pages", async () => {
+    const pages = [];
+    const routes = uiPr();
+    routes["/repos/goat-si/goat/pulls/7"].changed_files = 101;
+    const { code, outcome, delays } = await run("enforce", {
+      ...routes,
+      "/repos/goat-si/goat/pulls/7/files": async (url) => {
+        const page = Number(new URL(url).searchParams.get("page"));
+        pages.push(page);
+        if (page === 1) {
+          return {
+            ok: true,
+            json: async () =>
+              Array.from({ length: 100 }, () => ({ filename: "apps/server/src/ws.ts" })),
+          };
+        }
+        if (pages.length === 2) return { ok: false, status: 502 };
+        return { ok: true, json: async () => [{ filename: "apps/web/src/App.tsx" }] };
+      },
+    });
+    assert.deepEqual(pages, [1, 2, 2]);
+    assert.deepEqual(delays, [250]);
+    assert.equal(code, 1);
+    assert.equal(outcome, "missing");
+  });
+
+  it("creates a neutral check on the event PR head when inspection is inconclusive", async () => {
+    for (const mode of ["warn", "enforce"]) {
+      const result = await run(mode, {
+        ...uiPr(),
+        "/repos/goat-si/goat/pulls/7/files": async () => ({ ok: false, status: 503 }),
+        "/repos/goat-si/goat/check-runs": { id: 123 },
+      });
+      assert.equal(result.code, mode === "warn" ? 0 : 1);
+      const posts = result.requests.filter((request) => request.method === "POST");
+      assert.equal(posts.length, 1);
+      assert.equal(posts[0].path, "/repos/goat-si/goat/check-runs");
+      assert.deepEqual(JSON.parse(posts[0].body), {
+        name: "goat-screenshot-gate: inconclusive",
+        head_sha: "c".repeat(40),
+        status: "completed",
+        conclusion: "neutral",
+        output: {
+          title: "Screenshot gate could not inspect this PR",
+          summary:
+            "could not inspect PR #7: GET /repos/goat-si/goat/pulls/7/files?per_page=100&page=1 returned 503. Please re-run the goat-screenshot-gate job.",
+        },
+      });
+      assert.match(result.summary, /inconclusive.*503/);
+    }
+  });
+
+  it("keeps annotations, summaries, and exit codes when the neutral check cannot be posted", async () => {
+    for (const failure of [403, 503, "network"]) {
+      for (const mode of ["warn", "enforce"]) {
+        const result = await run(mode, {
+          ...uiPr(),
+          "/repos/goat-si/goat/pulls/7/files": async () => ({ ok: false, status: 404 }),
+          "/repos/goat-si/goat/check-runs": async () => {
+            if (failure === "network") throw new TypeError("fetch failed");
+            return { ok: false, status: failure };
+          },
+        });
+        assert.equal(result.code, mode === "warn" ? 0 : 1);
+        assert.equal(result.requests.filter((request) => request.method === "POST").length, 1);
+        assert.deepEqual(result.delays, []);
+        assert.match(result.summary, /inconclusive.*404/);
+        assert.ok(
+          result.logs.some(
+            (line) =>
+              line.startsWith("::" + (mode === "warn" ? "warning" : "error")) &&
+              line.includes("inconclusive"),
+          ),
+        );
+        assert.ok(
+          result.logs.some(
+            (line) =>
+              line.startsWith("::warning") &&
+              line.includes("could not synchronize inconclusive check") &&
+              line.includes(failure === "network" ? "fetch failed" : String(failure)),
+          ),
+        );
+      }
+    }
+  });
+
+  it("does not create neutral checks for completed inspections or off mode", async () => {
+    const pass = uiPr();
+    pass["/repos/goat-si/goat/pulls/7"].body = SHOT;
+    const skip = uiPr();
+    skip["/repos/goat-si/goat/pulls/7"].draft = true;
+    for (const [mode, routes, expected] of [
+      ["warn", uiPr(), "missing"],
+      ["enforce", pass, "pass"],
+      ["warn", skip, "skip"],
+      ["off", {}, undefined],
+    ]) {
+      const result = await run(mode, routes);
+      assert.equal(result.outcome, expected);
+      assert.equal(
+        result.requests.some((request) => request.method === "POST"),
+        false,
+      );
+    }
+  });
+
+  const waiverRoutes = () => ({
+    ...uiPr([{ name: WAIVER_LABEL }]),
+    "/repos/goat-si/goat/issues/7/events": [
+      { event: "labeled", label: { name: WAIVER_LABEL }, actor: { login: "lead" } },
+    ],
+    "/repos/goat-si/goat/collaborators/lead/permission": {
+      permission: "admin",
+      role_name: "admin",
+    },
+  });
+  const inspectionPaths = [
+    "/repos/goat-si/goat/pulls/7",
+    "/repos/goat-si/goat/issues/7/events",
+    "/repos/goat-si/goat/collaborators/lead/permission",
+  ];
+
+  it("reuses the same check on repeated inconclusive runs for the same head", async () => {
+    let check;
+    const routes = {
+      ...uiPr(),
+      "/repos/goat-si/goat/pulls/7/files": async () => ({ ok: false, status: 404 }),
+      [CHECK_LIST_PATH]: async (url) => {
+        const query = new URL(url).searchParams;
+        assert.equal(query.get("check_name"), "goat-screenshot-gate: inconclusive");
+        assert.equal(query.get("filter"), "latest");
+        return { ok: true, json: async () => ({ check_runs: check ? [check] : [] }) };
+      },
+      "/repos/goat-si/goat/check-runs": async (_url, options) => {
+        check = { id: 123, ...JSON.parse(options.body) };
+        return { ok: true, json: async () => check };
+      },
+      "/repos/goat-si/goat/check-runs/123": async (_url, options) => {
+        check = { ...check, ...JSON.parse(options.body) };
+        return { ok: true, json: async () => check };
+      },
+    };
+    const first = await run("warn", routes);
+    assert.equal(first.requests.filter((request) => request.method === "POST").length, 1);
+    routes["/repos/goat-si/goat/pulls/7/files"] = async () => ({ ok: false, status: 403 });
+    const second = await run("enforce", routes);
+    assert.equal(second.code, 1);
+    assert.equal(second.outcome, "inconclusive");
+    assert.equal(second.requests.filter((request) => request.method === "POST").length, 0);
+    const patches = second.requests.filter((request) => request.method === "PATCH");
+    assert.equal(patches.length, 1);
+    assert.equal(patches[0].path, "/repos/goat-si/goat/check-runs/123");
+    assert.equal(check.conclusion, "neutral");
+    assert.equal(check.output.title, "Screenshot gate could not inspect this PR");
+    assert.match(check.output.summary, /returned 403.*re-run/);
+  });
+
+  it("resolves an earlier inconclusive check after pass, skip, missing, or waiver", async () => {
+    const pass = uiPr();
+    pass["/repos/goat-si/goat/pulls/7"].body = SHOT;
+    const skip = uiPr();
+    skip["/repos/goat-si/goat/pulls/7"].draft = true;
+    for (const [routes, expected] of [
+      [pass, "pass"],
+      [skip, "skip"],
+      [uiPr(), "missing"],
+      [waiverRoutes(), "pass"],
+    ]) {
+      const result = await run("enforce", {
+        ...routes,
+        [CHECK_LIST_PATH]: { check_runs: [{ id: 123, conclusion: "neutral" }] },
+        "/repos/goat-si/goat/check-runs/123": { id: 123 },
+      });
+      assert.equal(result.code, expected === "missing" ? 1 : 0);
+      assert.equal(result.outcome, expected);
+      assert.equal(result.requests.filter((request) => request.method === "POST").length, 0);
+      const patches = result.requests.filter((request) => request.method === "PATCH");
+      assert.equal(patches.length, 1);
+      assert.equal(patches[0].path, "/repos/goat-si/goat/check-runs/123");
+      const body = JSON.parse(patches[0].body);
+      assert.equal(body.status, "completed");
+      assert.equal(body.conclusion, "success");
+      assert.equal(body.output.title, "Resolved: a later run inspected this PR");
+      assert.ok(body.output.summary.includes(expected));
+    }
+  });
+
+  it("tolerates check-list failures without changing decisions or exit codes", async () => {
+    for (const failure of [403, 503, "network"]) {
+      for (const mode of ["warn", "enforce"]) {
+        for (const inconclusive of [false, true]) {
+          const routes = uiPr();
+          if (inconclusive) {
+            routes["/repos/goat-si/goat/pulls/7/files"] = async () => ({ ok: false, status: 404 });
+          } else {
+            routes["/repos/goat-si/goat/pulls/7"].body = SHOT;
+          }
+          const result = await run(mode, {
+            ...routes,
+            [CHECK_LIST_PATH]: async () => {
+              if (failure === "network") throw new TypeError("fetch failed");
+              return { ok: false, status: failure };
+            },
+          });
+          assert.equal(result.code, inconclusive && mode === "enforce" ? 1 : 0);
+          assert.equal(result.outcome, inconclusive ? "inconclusive" : "pass");
+          assert.equal(
+            result.requests.some((request) => request.method !== "GET"),
+            false,
+          );
+          assert.ok(
+            result.logs.some(
+              (line) =>
+                line.startsWith("::warning") &&
+                line.includes("inconclusive check") &&
+                line.includes(failure === "network" ? "fetch failed" : String(failure)),
+            ),
+          );
+        }
+      }
+    }
+  });
+
+  it("tolerates check-update failures without changing decisions or exit codes", async () => {
+    for (const mode of ["warn", "enforce"]) {
+      for (const inconclusive of [false, true]) {
+        const routes = uiPr();
+        if (inconclusive) {
+          routes["/repos/goat-si/goat/pulls/7/files"] = async () => ({ ok: false, status: 404 });
+        }
+        const result = await run(mode, {
+          ...routes,
+          [CHECK_LIST_PATH]: { check_runs: [{ id: 123 }] },
+          "/repos/goat-si/goat/check-runs/123": async () => ({ ok: false, status: 503 }),
+        });
+        assert.equal(result.code, mode === "enforce" ? 1 : 0);
+        assert.equal(result.outcome, inconclusive ? "inconclusive" : "missing");
+        assert.equal(result.requests.filter((request) => request.method === "PATCH").length, 1);
+        assert.equal(result.requests.filter((request) => request.method === "POST").length, 0);
+        assert.ok(result.logs.some((line) => line.startsWith("::warning") && line.includes("503")));
+      }
+    }
+  });
+
+  for (const inspectionPath of inspectionPaths) {
+    it("retries HTTP 5xx and network errors for " + inspectionPath, async () => {
+      const routes = waiverRoutes();
+      const value = routes[inspectionPath];
+      let calls = 0;
+      routes[inspectionPath] = async () => {
+        calls += 1;
+        if (calls === 1) return { ok: false, status: 502 };
+        if (calls === 2) throw new TypeError("fetch failed");
+        return { ok: true, json: async () => value };
+      };
+      const result = await run("enforce", routes);
+      assert.equal(calls, 3);
+      assert.deepEqual(result.delays, [250, 500]);
+      assert.equal(result.code, 0);
+      assert.equal(result.outcome, "pass");
+      assert.equal(
+        result.requests.some((request) => request.method === "POST"),
+        false,
+      );
+    });
+
+    it("reports exhausted retries as inconclusive for " + inspectionPath, async () => {
+      for (const failure of [503, "network"]) {
+        for (const mode of ["warn", "enforce"]) {
+          let calls = 0;
+          const result = await run(mode, {
+            ...waiverRoutes(),
+            [inspectionPath]: async () => {
+              calls += 1;
+              if (failure === "network") throw new TypeError("fetch failed");
+              return { ok: false, status: failure };
+            },
+            "/repos/goat-si/goat/check-runs": { id: 123 },
+          });
+          assert.equal(calls, 3);
+          assert.deepEqual(result.delays, [250, 500]);
+          assert.equal(result.code, mode === "warn" ? 0 : 1);
+          assert.equal(result.outcome, "inconclusive");
+          assert.match(result.summary, /inconclusive/);
+          assert.ok(
+            result.summary.includes(failure === "network" ? "fetch failed" : inspectionPath),
+          );
+          if (failure !== "network") assert.match(result.summary, /returned 503/);
+          assert.equal(result.requests.filter((request) => request.method === "POST").length, 1);
+        }
+      }
+    });
+
+    it("does not retry 4xx or malformed JSON for " + inspectionPath, async () => {
+      for (const failure of [403, "json"]) {
+        let calls = 0;
+        const result = await run("warn", {
+          ...waiverRoutes(),
+          [inspectionPath]: async () => {
+            calls += 1;
+            return {
+              ok: failure === "json",
+              status: 403,
+              json: async () => {
+                throw new SyntaxError("invalid JSON");
+              },
+            };
+          },
+        });
+        assert.equal(calls, 1);
+        assert.deepEqual(result.delays, []);
+        assert.equal(result.outcome, "inconclusive");
+      }
+    });
+  }
 });
