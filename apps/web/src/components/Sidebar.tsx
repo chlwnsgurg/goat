@@ -176,12 +176,6 @@ import { useThreadSearch } from "../state/queries";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useAtomCommand } from "../state/use-atom-command";
 import { SidebarOpenSubagent } from "./sidebar/SidebarOpenSubagent";
-import { SidebarRemoteLaunchRows } from "./sidebar/SidebarRemoteLaunchRows";
-import {
-  useSidebarRemoteLaunchIndex,
-  useSidebarRemoteLaunchRefresh,
-} from "./sidebar/remoteLaunchIndex";
-import type { SidebarRemoteLaunchGroup } from "@goat/client-runtime/state/remote-launch-index";
 import { useSidebarOpenSubagent, useSidebarSubagentIndex } from "./sidebar/subagentIndex";
 import { usePromoteThread } from "./promoteThread";
 import {
@@ -1114,8 +1108,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   openSubagent: EnvironmentThreadShell | null;
   // A pending approval or question from one of this row's subagents.
   childAttention: SidebarChildAttention | undefined;
-  // Recent threads this row launched on other machines.
-  remoteLaunches: SidebarRemoteLaunchGroup | null;
   onOpenDelegatedChild: (threadRef: ScopedThreadRef) => void;
   onStopDelegatedChild: (threadRef: ScopedThreadRef) => void;
   onDelegatedChildContextMenu: (
@@ -1225,26 +1217,15 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     [thread.environmentId, thread.id],
   );
   const threadKey = scopedThreadKey(threadRef);
-  const delegatedChildrenGroup =
-    props.openSubagent || props.remoteLaunches ? (
-      <>
-        {props.openSubagent ? (
-          <SidebarOpenSubagent
-            thread={props.openSubagent}
-            onOpen={props.onOpenDelegatedChild}
-            onStop={props.onStopDelegatedChild}
-            onContextMenu={props.onDelegatedChildContextMenu}
-            isStopping={props.isStoppingOpenSubagent}
-          />
-        ) : null}
-        {props.remoteLaunches ? (
-          <SidebarRemoteLaunchRows
-            group={props.remoteLaunches}
-            onOpen={props.onOpenDelegatedChild}
-          />
-        ) : null}
-      </>
-    ) : null;
+  const delegatedChildrenGroup = props.openSubagent ? (
+    <SidebarOpenSubagent
+      thread={props.openSubagent}
+      onOpen={props.onOpenDelegatedChild}
+      onStop={props.onStopDelegatedChild}
+      onContextMenu={props.onDelegatedChildContextMenu}
+      isStopping={props.isStoppingOpenSubagent}
+    />
+  ) : null;
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
   useEffect(() => {
     if (!canOperateThread && isRenaming) onCancelRename();
@@ -2441,8 +2422,6 @@ export default function Sidebar() {
   const projects = useProjects();
   const threads = useThreadShells();
   const subagentIndex = useSidebarSubagentIndex();
-  const remoteLaunchesByLauncherKey = useSidebarRemoteLaunchIndex().byLauncherKey;
-  useSidebarRemoteLaunchRefresh();
   const promoteDelegatedChild = usePromoteThread();
   const interruptDelegatedTurn = useAtomCommand(threadEnvironment.interruptTurn, {
     reportFailure: false,
@@ -4031,17 +4010,14 @@ export default function Sidebar() {
   }, [dragState, settledThreads, threadByKey]);
   const nestedKeys = useMemo(() => {
     const keys = new Set<string>();
-    // Rows with children beneath them measure taller while dragging.
-    for (const item of sidebarListItems) {
-      if (item.kind !== "thread") continue;
-      if (
-        (openSubagent !== null && item.key === openSubagentOwnerKey) ||
-        remoteLaunchesByLauncherKey.has(item.key)
-      )
-        keys.add(item.key);
-    }
+    if (
+      openSubagent !== null &&
+      openSubagentOwnerKey !== undefined &&
+      sidebarListItems.some((item) => item.kind === "thread" && item.key === openSubagentOwnerKey)
+    )
+      keys.add(openSubagentOwnerKey);
     return keys;
-  }, [openSubagent, openSubagentOwnerKey, remoteLaunchesByLauncherKey, sidebarListItems]);
+  }, [openSubagent, openSubagentOwnerKey, sidebarListItems]);
   const sidebarSortingStrategy = useMemo(
     () =>
       createSidebarSortingStrategy({
@@ -5564,7 +5540,6 @@ export default function Sidebar() {
                             thread={thread}
                             openSubagent={threadKey === openSubagentOwnerKey ? openSubagent : null}
                             childAttention={subagentIndex.attentionByOwnerKey.get(threadKey)}
-                            remoteLaunches={remoteLaunchesByLauncherKey.get(threadKey) ?? null}
                             onOpenDelegatedChild={navigateToThread}
                             onStopDelegatedChild={onStopDelegatedChild}
                             onDelegatedChildContextMenu={onDelegatedChildContextMenu}
