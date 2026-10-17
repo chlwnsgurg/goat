@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   type CloudMachine,
@@ -289,7 +290,7 @@ describe("buildFleet", () => {
       primaryEnvironmentId: local,
       shells: [shell(local, "a"), shell(local, "b", { approval: true }), shell(local, "c")],
       remote: [],
-      providerName: () => "Codex",
+      provider: () => ({ label: "Codex", driver: ProviderDriverKind.make("codex") }),
     });
     expect(fleet.threads.map((thread) => thread.state)).toEqual([
       "attention",
@@ -297,7 +298,7 @@ describe("buildFleet", () => {
       "running",
     ]);
     expect(fleet.machines[0]!.agents).toEqual([
-      { key: "codex", label: "Codex", running: 2, attention: 1, reported: 0 },
+      { key: "codex", label: "Codex", driver: "codex", running: 2, attention: 1, reported: 0 },
     ]);
   });
 });

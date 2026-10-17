@@ -106,6 +106,7 @@ function snapshotKey(snapshot: FleetSnapshot): string {
       machine.agents.map((agent) => [
         agent.key,
         agent.label,
+        agent.driver,
         agent.running,
         agent.attention,
         agent.reported,
@@ -124,18 +125,20 @@ interface FleetPageState {
 const fleetPageAtom = Atom.make((get): FleetPageState => {
   const serverConfigs = get(environmentServerConfigsAtom);
   const remote = get(fleetRemoteAtom);
-  const providerName = (environmentId: EnvironmentId, instanceId: string) => {
+  const provider = (environmentId: EnvironmentId, instanceId: string) => {
     const provider = serverConfigs
       .get(environmentId)
       ?.providers.find((candidate) => candidate.instanceId === instanceId);
-    return provider === undefined ? null : resolveProviderInstanceDisplayName(provider);
+    return provider === undefined
+      ? null
+      : { label: resolveProviderInstanceDisplayName(provider), driver: provider.driver };
   };
   const snapshot = buildFleet({
     environments: get(fleetEnvironmentsAtom),
     primaryEnvironmentId: get(primaryEnvironmentIdAtom),
     shells: get(environmentThreadShells.threadShellsAtom),
     remote: remote.sources,
-    providerName,
+    provider,
   });
   const key = snapshotKey(snapshot);
   const previous = Option.getOrNull(get.self<FleetPageState>());

@@ -3,6 +3,7 @@ import type {
   CloudMachineState,
   EnvironmentId,
   OrchestrationV2ThreadShell,
+  ProviderDriverKind,
   RemoteLaunch,
   ScopedThreadRef,
 } from "@goat/contracts";
@@ -155,6 +156,8 @@ export interface FleetAgent {
   /** Provider instance id, or "unknown" for work a dispatcher reported. */
   readonly key: string;
   readonly label: string;
+  /** The provider's driver, for its logo; null when unknown. */
+  readonly driver: ProviderDriverKind | null;
   readonly running: number;
   readonly attention: number;
   readonly reported: number;
@@ -181,6 +184,7 @@ export interface FleetThread {
   readonly title: string;
   readonly agentKey: string;
   readonly agentLabel: string;
+  readonly agentDriver: ProviderDriverKind | null;
   readonly state: FleetThreadState | "reported";
   readonly updatedAt: string;
   /** The dispatching environment's label, for reported work. */
@@ -205,6 +209,7 @@ export interface FleetRemoteSource {
 }
 
 const UNKNOWN_AGENT = "unknown";
+const UNKNOWN_AGENT_LABEL = "Unknown agent";
 const STATE_ORDER: Record<FleetThread["state"], number> = { attention: 0, running: 1, reported: 2 };
 
 type MutableAgent = { -readonly [K in keyof FleetAgent]: FleetAgent[K] };
@@ -219,7 +224,11 @@ export function buildFleet(input: {
   readonly primaryEnvironmentId: EnvironmentId | null;
   readonly shells: ReadonlyArray<FleetShell>;
   readonly remote: ReadonlyArray<FleetRemoteSource>;
-  readonly providerName?: (environmentId: EnvironmentId, instanceId: string) => string | null;
+  /** A provider instance's display name and driver in the environment that runs it. */
+  readonly provider?: (
+    environmentId: EnvironmentId,
+    instanceId: string,
+  ) => { readonly label: string; readonly driver: ProviderDriverKind } | null;
 }): FleetSnapshot {
   const machines = new Map<string, MutableMachine>();
   const threads: FleetThread[] = [];
@@ -245,30 +254,32 @@ export function buildFleet(input: {
 
   const count = (
     machine: MutableMachine,
-    agentKey: string,
-    agentLabel: string,
+    agentIdentity: Pick<FleetAgent, "key" | "label" | "driver">,
     state: FleetThread["state"],
   ) => {
     machine[state] += 1;
-    const agent = machine.agents.get(agentKey) ?? {
-      key: agentKey,
-      label: agentLabel,
+    const agent = machine.agents.get(agentIdentity.key) ?? {
+      ...agentIdentity,
       running: 0,
       attention: 0,
       reported: 0,
     };
     agent[state] += 1;
-    machine.agents.set(agentKey, agent);
+    machine.agents.set(agentIdentity.key, agent);
   };
 
   for (const shell of connectedShells) {
     const state = classifyFleetThread(shell);
     if (state === null) continue;
     const machine = machines.get(machineId(shell.environmentId))!;
-    const agentLabel =
-      input.providerName?.(shell.environmentId, shell.providerInstanceId) ??
-      shell.providerInstanceId;
-    count(machine, shell.providerInstanceId, agentLabel, state);
+    const provider = input.provider?.(shell.environmentId, shell.providerInstanceId) ?? null;
+    const agentLabel = provider?.label ?? shell.providerInstanceId;
+    const agentDriver = provider?.driver ?? null;
+    count(
+      machine,
+      { key: shell.providerInstanceId, label: agentLabel, driver: agentDriver },
+      state,
+    );
     threads.push({
       key: JSON.stringify([shell.environmentId, shell.id]),
       machineId: machine.id,
@@ -276,6 +287,7 @@ export function buildFleet(input: {
       title: shell.title,
       agentKey: shell.providerInstanceId,
       agentLabel,
+      agentDriver,
       state,
       updatedAt: shell.updatedAt,
       reportedBy: null,
@@ -338,14 +350,20 @@ export function buildFleet(input: {
         if (launch.state !== "launching" && launch.state !== "running") return;
         if (launch.hostUnavailableSince !== null) return;
         const machine = hostMachine(group.host, "ssh", group.host);
-        count(machine, UNKNOWN_AGENT, "Unknown agent", "reported");
+        count(
+          machine,
+          { key: UNKNOWN_AGENT, label: UNKNOWN_AGENT_LABEL, driver: null },
+          "reported",
+        );
         threads.push({
           key: JSON.stringify(["reported", dispatcher, group.host, index]),
           machineId: machine.id,
           ref: null,
-          title: presented.title ?? "Untitled launch",
+          // Dispatch records carry no title; the latest report says what the work is.
+          title: presented.title ?? launch.latest?.summary ?? "Untitled launch",
           agentKey: UNKNOWN_AGENT,
-          agentLabel: "Unknown agent",
+          agentLabel: UNKNOWN_AGENT_LABEL,
+          agentDriver: null,
           state: "reported",
           updatedAt: launch.updatedAt,
           reportedBy: dispatcherLabel,

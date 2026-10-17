@@ -95,8 +95,8 @@ function machineWork(machine: FleetMachineSummary) {
 }
 
 /**
- * Live glance at everything running on connected machines: a total badge and one row per
- * machine, busy machines first. Subscribes to the fleet summary alone, which keeps its
+ * Live glance at everything running on connected machines: one dot and count per machine,
+ * busy machines first. Subscribes to the fleet summary alone, which keeps its
  * object while counts hold, so streamed thread updates do not repaint the rail.
  */
 const FleetRailItem = memo(function FleetRailItem({ active }: { active: boolean }) {
@@ -123,8 +123,7 @@ const FleetRailItem = memo(function FleetRailItem({ active }: { active: boolean 
             className={railItemClassName(active, "w-10 flex-col gap-1 pt-2.5 pb-2")}
           >
             <ActivityIcon aria-hidden />
-            <RailCount count={live} />
-            {rows.length > 1 ? (
+            {rows.length > 0 ? (
               <span aria-hidden className="flex w-full flex-col items-center gap-0.5">
                 {rows.map((machine) => (
                   <span
@@ -159,7 +158,7 @@ const FleetRailItem = memo(function FleetRailItem({ active }: { active: boolean 
               ? "Fleet: nothing running"
               : `Fleet: ${summary.running} running, ${summary.attention} need you`}
           </span>
-          {summary.machines.length > 1
+          {summary.machines.length > 0
             ? tooltipRows.map((machine) => (
                 <span key={machine.environmentId}>
                   {machine.label}: {machineWork(machine)}

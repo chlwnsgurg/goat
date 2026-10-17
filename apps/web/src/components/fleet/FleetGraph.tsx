@@ -1,15 +1,45 @@
-import { providerInstanceInitials } from "@goat/client-runtime/state/provider-instance-display";
 import type { FleetMachine, FleetSnapshot, FleetThread } from "@goat/client-runtime/state/fleet";
-import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
-import { layoutFleet, type FleetLayoutMachine } from "./fleetLayout";
+import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
+import {
+  rubberBand,
+  stepSpring,
+  ZERO_VECTOR,
+  type FleetSpring,
+  type FleetVector,
+} from "./fleetDrag";
+import {
+  layoutFleet,
+  orbitEdge,
+  type FleetLayoutAgent,
+  type FleetLayoutMachine,
+  type FleetPoint,
+} from "./fleetLayout";
 
 /** Animated particles are capped; further running work still shows in the counts. */
 const MAX_PARTICLES = 24;
 const PARTICLE_SECONDS = 2.6;
+/** How far a pulled node can travel from its orbit. */
+const PULL_REACH = 110;
+/** Agents trail their machine by this share of its pull. */
+const AGENT_FOLLOW = 0.7;
+/** A press that moves less than this is a click. */
+const CLICK_SLOP = 4;
+const MACHINE_RADIUS = 18;
+const AGENT_RADIUS = 11;
 
 function useElementWidth() {
   const ref = useRef<HTMLDivElement>(null);
@@ -40,6 +70,124 @@ function usePauseWhileHidden(svg: React.RefObject<SVGSVGElement | null>) {
   }, [svg]);
 }
 
+type Offsets = ReadonlyMap<string, FleetVector>;
+
+/**
+ * Lets the user pull machine and agent nodes around. A node follows the pointer with
+ * rubber-band resistance and springs back to its orbit on release. Frames are drawn
+ * only while something is held or settling.
+ */
+function usePullableNodes(
+  svg: React.RefObject<SVGSVGElement | null>,
+  width: number,
+  reduced: boolean,
+) {
+  const [offsets, setOffsets] = useState<Offsets>(() => new Map());
+  const held = useRef<{
+    key: string;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    base: FleetVector;
+    moved: boolean;
+  } | null>(null);
+  const springs = useRef(new Map<string, FleetSpring>());
+  const frame = useRef<number | null>(null);
+  const lastTick = useRef(0);
+
+  const tick = useCallback(function tick(now: number) {
+    const seconds = lastTick.current === 0 ? 1 / 60 : (now - lastTick.current) / 1000;
+    lastTick.current = now;
+    const next = new Map<string, FleetVector>();
+    for (const [key, spring] of springs.current) {
+      const stepped = stepSpring(spring, seconds);
+      if (stepped === null) springs.current.delete(key);
+      else {
+        springs.current.set(key, stepped);
+        next.set(key, stepped.offset);
+      }
+    }
+    setOffsets((current) => {
+      const merged = new Map(current);
+      for (const key of current.keys()) {
+        if (key !== held.current?.key && !next.has(key)) merged.delete(key);
+      }
+      for (const [key, offset] of next) merged.set(key, offset);
+      return merged;
+    });
+    frame.current = springs.current.size > 0 ? requestAnimationFrame(tick) : null;
+    if (frame.current === null) lastTick.current = 0;
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
+    },
+    [],
+  );
+
+  const press = useCallback(
+    (key: string, event: PointerEvent<SVGGElement>) => {
+      if (event.button !== 0) return;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      springs.current.delete(key);
+      held.current = {
+        key,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        base: offsets.get(key) ?? ZERO_VECTOR,
+        moved: false,
+      };
+    },
+    [offsets],
+  );
+
+  const move = useCallback(
+    (event: PointerEvent<SVGGElement>) => {
+      const current = held.current;
+      if (current === null || current.pointerId !== event.pointerId) return;
+      const rect = svg.current?.getBoundingClientRect();
+      const scale = rect && rect.width > 0 ? width / rect.width : 1;
+      const dx = (event.clientX - current.startX) * scale;
+      const dy = (event.clientY - current.startY) * scale;
+      if (!current.moved && Math.hypot(dx, dy) < CLICK_SLOP) return;
+      current.moved = true;
+      const offset = rubberBand({ x: current.base.x + dx, y: current.base.y + dy }, PULL_REACH);
+      setOffsets((previous) => new Map(previous).set(current.key, offset));
+    },
+    [svg, width],
+  );
+
+  /** Returns whether the press was a click rather than a pull. */
+  const release = useCallback(
+    (event: PointerEvent<SVGGElement>): boolean => {
+      const current = held.current;
+      if (current === null || current.pointerId !== event.pointerId) return false;
+      held.current = null;
+      if (!current.moved) return true;
+      const offset = offsets.get(current.key) ?? ZERO_VECTOR;
+      if (reduced) {
+        setOffsets((previous) => {
+          const next = new Map(previous);
+          next.delete(current.key);
+          return next;
+        });
+        return false;
+      }
+      springs.current.set(current.key, { offset, velocity: ZERO_VECTOR });
+      frame.current ??= requestAnimationFrame(tick);
+      return false;
+    },
+    [offsets, reduced],
+  );
+
+  return { offsets, press, move, release };
+}
+
+const add = (point: FleetPoint, offset: FleetVector | undefined, share = 1): FleetPoint =>
+  offset === undefined ? point : { x: point.x + offset.x * share, y: point.y + offset.y * share };
+
 const truncate = (text: string, max: number) =>
   text.length > max ? text.slice(0, max - 1) + "…" : text;
 
@@ -52,6 +200,22 @@ function workSummary(work: { running: number; attention: number; reported: numbe
   return parts.length === 0 ? "idle" : parts.join(", ");
 }
 
+const machineKey = (machineId: string) => "machine\u0000" + machineId;
+const agentKey = (machineId: string, agent: string) => "agent\u0000" + machineId + "\u0000" + agent;
+
+interface PlacedAgent {
+  readonly key: string;
+  readonly layout: FleetLayoutAgent;
+  readonly at: FleetPoint;
+}
+
+interface PlacedMachine {
+  readonly layout: FleetLayoutMachine;
+  readonly at: FleetPoint;
+  readonly edge: string;
+  readonly agents: ReadonlyArray<PlacedAgent>;
+}
+
 export const FleetGraph = memo(function FleetGraph(props: {
   readonly snapshot: FleetSnapshot;
   readonly selectedMachineId: string | null;
@@ -62,7 +226,9 @@ export const FleetGraph = memo(function FleetGraph(props: {
   const svgRef = useRef<SVGSVGElement>(null);
   const reduced = useMediaQuery("(prefers-reduced-motion: reduce)");
   usePauseWhileHidden(svgRef);
-  const height = width < 640 ? 480 : Math.max(420, Math.min(560, Math.round(width * 0.5)));
+  const { offsets, press, move, release } = usePullableNodes(svgRef, width, reduced);
+  // Below 340 the orbits cannot keep labels apart; see ORBIT_GAP in fleetLayout.
+  const height = width < 640 ? 360 : Math.max(340, Math.min(420, Math.round(width * 0.42)));
   const layout = useMemo(
     () => (width > 0 ? layoutFleet(snapshot.machines, width, height) : null),
     [snapshot.machines, width, height],
@@ -71,26 +237,59 @@ export const FleetGraph = memo(function FleetGraph(props: {
     () => new Map(snapshot.machines.map((machine) => [machine.id, machine])),
     [snapshot.machines],
   );
-  const nodesById = useMemo(
+  // Where every node is drawn this frame: its orbit spot plus any pull.
+  const placed = useMemo(() => {
+    if (layout === null) return [];
+    return layout.machines.map((node): PlacedMachine => {
+      const id = node.id ?? "more";
+      const machineOffset = offsets.get(machineKey(id));
+      const at = add(node, machineOffset);
+      return {
+        layout: node,
+        at,
+        edge: machineOffset === undefined ? node.edge : orbitEdge(layout.center, at),
+        agents: node.agents.map((agentNode) => {
+          const key = agentKey(id, agentNode.key);
+          return {
+            key,
+            layout: agentNode,
+            at: add(add(agentNode, machineOffset, AGENT_FOLLOW), offsets.get(key)),
+          };
+        }),
+      };
+    });
+  }, [layout, offsets]);
+  const placedById = useMemo(
     () =>
       new Map(
-        (layout?.machines ?? []).flatMap((node) =>
-          node.id === null ? [] : [[node.id, node] as const],
+        placed.flatMap((entry) =>
+          entry.layout.id === null ? [] : [[entry.layout.id, entry] as const],
         ),
       ),
-    [layout],
+    [placed],
   );
   const live = snapshot.totals.running + snapshot.totals.attention;
 
+  const nodeHandlers = (key: string, onClick?: () => void) => ({
+    onPointerDown: (event: PointerEvent<SVGGElement>) => press(key, event),
+    onPointerMove: move,
+    onPointerUp: (event: PointerEvent<SVGGElement>) => {
+      if (release(event)) onClick?.();
+    },
+    onPointerCancel: (event: PointerEvent<SVGGElement>) => {
+      release(event);
+    },
+  });
+
   return (
-    <div ref={wrapperRef} className="fleet-graph w-full" style={{ minHeight: height }}>
-      {layout === null ? null : (
+    <div ref={wrapperRef} className="fleet-graph w-full">
+      {layout === null ? (
+        <div style={{ height }} />
+      ) : (
         <svg
           ref={svgRef}
           viewBox={"0 0 " + width + " " + height}
-          width={width}
-          height={height}
-          className="block select-none"
+          className="block h-auto w-full select-none"
           role="group"
           aria-label={
             snapshot.totals.machines +
@@ -120,14 +319,14 @@ export const FleetGraph = memo(function FleetGraph(props: {
             strokeDasharray="1 9"
           />
 
-          {layout.machines.map((node) => {
-            const machine = node.id === null ? null : machinesById.get(node.id)!;
-            const work = machine ?? node.aggregate!;
+          {placed.map((entry) => {
+            const machine = entry.layout.id === null ? null : machinesById.get(entry.layout.id)!;
+            const work = machine ?? entry.layout.aggregate!;
             const busy = work.running + work.attention > 0;
             return (
-              <g key={"edge:" + (node.id ?? "more")}>
+              <g key={"edge:" + (entry.layout.id ?? "more")}>
                 <path
-                  d={node.edge}
+                  d={entry.edge}
                   fill="none"
                   className={busy ? "stroke-info/40" : "stroke-border"}
                   strokeWidth={busy ? 1.6 : 1.2}
@@ -135,24 +334,24 @@ export const FleetGraph = memo(function FleetGraph(props: {
                 />
                 {busy && !reduced ? (
                   <path
-                    d={node.edge}
+                    d={entry.edge}
                     fill="none"
                     className="fleet-flow stroke-info"
                     strokeWidth={1.6}
                     strokeDasharray="2 12"
                   />
                 ) : null}
-                {node.agents.map((agentNode) => {
-                  const agent = machine?.agents.find((entry) => entry.key === agentNode.key);
-                  const agentWork = agent ?? agentNode.aggregate!;
+                {entry.agents.map((agent) => {
+                  const data = machine?.agents.find((item) => item.key === agent.layout.key);
+                  const agentWork = data ?? agent.layout.aggregate!;
                   const agentBusy = agentWork.running + agentWork.attention > 0;
                   return (
                     <line
-                      key={"link:" + agentNode.key}
-                      x1={node.x}
-                      y1={node.y}
-                      x2={agentNode.x}
-                      y2={agentNode.y}
+                      key={"link:" + agent.key}
+                      x1={entry.at.x}
+                      y1={entry.at.y}
+                      x2={agent.at.x}
+                      y2={agent.at.y}
                       className={agentBusy ? "stroke-info/60" : "stroke-border"}
                       strokeDasharray={agentBusy ? undefined : "2 4"}
                     />
@@ -172,36 +371,36 @@ export const FleetGraph = memo(function FleetGraph(props: {
                     key={thread.key}
                     thread={thread}
                     index={index}
-                    node={nodesById.get(thread.machineId)}
+                    entry={placedById.get(thread.machineId)}
                   />
                 ))}
 
-          {layout.machines.flatMap((node) =>
-            node.agents.map((agentNode) => {
-              const machine = node.id === null ? undefined : machinesById.get(node.id);
-              const agent = machine?.agents.find((entry) => entry.key === agentNode.key);
-              const work = agent ?? agentNode.aggregate!;
-              const label = agent ? agent.label : agentNode.aggregate!.count + " more";
-              const glyph = agent
-                ? providerInstanceInitials(agent.label) || "?"
-                : "+" + agentNode.aggregate!.count;
-              const labelY = agentNode.labelBelow ? 28 : -22;
+          {placed.flatMap((entry) =>
+            entry.agents.map((agent) => {
+              const machine =
+                entry.layout.id === null ? undefined : machinesById.get(entry.layout.id);
+              const data = machine?.agents.find((item) => item.key === agent.layout.key);
+              const work = data ?? agent.layout.aggregate!;
+              const label = data ? data.label : agent.layout.aggregate!.count + " more";
+              const labelY = agent.layout.labelBelow ? AGENT_RADIUS + 13 : -(AGENT_RADIUS + 7);
               return (
                 <g
-                  key={"agent:" + agentNode.key}
-                  transform={"translate(" + agentNode.x + " " + agentNode.y + ")"}
+                  key={agent.key}
+                  transform={"translate(" + agent.at.x + " " + agent.at.y + ")"}
+                  className="cursor-grab touch-none active:cursor-grabbing"
+                  {...nodeHandlers(agent.key)}
                 >
                   <title>{label + " · " + workSummary(work)}</title>
                   {work.attention > 0 ? (
                     <circle
-                      r={20}
+                      r={AGENT_RADIUS + 6}
                       fill="none"
                       className={cn("stroke-warning", !reduced && "fleet-ring")}
                       strokeWidth={1.5}
                     />
                   ) : null}
                   <circle
-                    r={13}
+                    r={AGENT_RADIUS}
                     className={cn(
                       "fill-background",
                       work.attention > 0
@@ -215,14 +414,32 @@ export const FleetGraph = memo(function FleetGraph(props: {
                       work.reported > 0 && work.running + work.attention === 0 ? "2 3" : undefined
                     }
                   />
-                  <text
-                    y={4}
-                    textAnchor="middle"
-                    className="fill-foreground text-3xs font-semibold"
-                  >
-                    {glyph}
-                  </text>
-                  <text y={labelY} textAnchor="middle" className="fill-muted-foreground text-3xs">
+                  {data?.driver ? (
+                    // The same logo the rest of the app shows for this provider.
+                    <foreignObject
+                      x={-7}
+                      y={-7}
+                      width={14}
+                      height={14}
+                      className="pointer-events-none"
+                    >
+                      <ProviderInstanceIcon
+                        driverKind={data.driver}
+                        displayName={data.label}
+                        className="size-3.5"
+                        iconClassName="size-3.5"
+                      />
+                    </foreignObject>
+                  ) : (
+                    <text
+                      y={3.5}
+                      textAnchor="middle"
+                      className="fill-foreground text-4xs font-semibold"
+                    >
+                      {data ? "?" : "+" + agent.layout.aggregate!.count}
+                    </text>
+                  )}
+                  <text y={labelY} textAnchor="middle" className="fill-muted-foreground text-4xs">
                     {truncate(label, 18)}
                   </text>
                 </g>
@@ -230,36 +447,44 @@ export const FleetGraph = memo(function FleetGraph(props: {
             }),
           )}
 
-          {layout.machines.map((node) =>
-            node.id === null ? (
-              <AggregateNode key="machine:more" node={node} />
+          {placed.map((entry) =>
+            entry.layout.id === null ? (
+              <AggregateNode
+                key="machine:more"
+                at={entry.at}
+                node={entry.layout}
+                handlers={nodeHandlers(machineKey("more"))}
+              />
             ) : (
               <MachineNode
-                key={"machine:" + node.id}
-                node={node}
-                machine={machinesById.get(node.id)!}
-                selected={selectedMachineId === node.id}
+                key={"machine:" + entry.layout.id}
+                at={entry.at}
+                machine={machinesById.get(entry.layout.id)!}
+                selected={selectedMachineId === entry.layout.id}
                 reduced={reduced}
                 onSelect={onSelectMachine}
+                handlers={nodeHandlers(machineKey(entry.layout.id), () =>
+                  onSelectMachine(entry.layout.id!),
+                )}
               />
             ),
           )}
 
           <g transform={"translate(" + layout.center.x + " " + layout.center.y + ")"}>
             {live > 0 && !reduced ? (
-              <circle r={44} className="fleet-breathe fill-primary/10" />
+              <circle r={36} className="fleet-breathe fill-primary/10" />
             ) : null}
             <circle
-              r={36}
+              r={29}
               fill="none"
               className={cn("stroke-primary/50", !reduced && "fleet-spin")}
               strokeDasharray="3 7"
             />
-            <circle r={27} className="fill-primary" />
+            <circle r={22} className="fill-primary" />
             <text
-              y={4}
+              y={3.5}
               textAnchor="middle"
-              className="fill-primary-foreground text-xs font-semibold"
+              className="fill-primary-foreground text-3xs font-semibold"
             >
               GOAT
             </text>
@@ -273,18 +498,18 @@ export const FleetGraph = memo(function FleetGraph(props: {
 function Particle(props: {
   readonly thread: FleetThread;
   readonly index: number;
-  readonly node: FleetLayoutMachine | undefined;
+  readonly entry: PlacedMachine | undefined;
 }) {
-  const { node, index, thread } = props;
-  if (node === undefined) return null;
-  const agent = node.agents.find((entry) => entry.key === thread.agentKey);
-  const path = node.edge + (agent ? " L" + agent.x + " " + agent.y : "");
+  const { entry, index, thread } = props;
+  if (entry === undefined) return null;
+  const agent = entry.agents.find((item) => item.layout.key === thread.agentKey);
+  const path = entry.edge + (agent ? " L" + agent.at.x + " " + agent.at.y : "");
   return (
-    <g>
+    <g className="pointer-events-none">
       {[0, 1, 2].map((step) => (
         <circle
           key={step}
-          r={step === 0 ? 4 : 2.5}
+          r={step === 0 ? 3.5 : 2.2}
           className="fill-info"
           opacity={step === 0 ? 1 : 0.5}
         >
@@ -304,20 +529,27 @@ function Particle(props: {
   );
 }
 
+type NodeHandlers = {
+  readonly onPointerDown: (event: PointerEvent<SVGGElement>) => void;
+  readonly onPointerMove: (event: PointerEvent<SVGGElement>) => void;
+  readonly onPointerUp: (event: PointerEvent<SVGGElement>) => void;
+  readonly onPointerCancel: (event: PointerEvent<SVGGElement>) => void;
+};
+
 function MachineNode(props: {
-  readonly node: FleetLayoutMachine;
+  readonly at: FleetPoint;
   readonly machine: FleetMachine;
   readonly selected: boolean;
   readonly reduced: boolean;
   readonly onSelect: (machineId: string) => void;
+  readonly handlers: NodeHandlers;
 }) {
-  const { node, machine, selected, reduced, onSelect } = props;
+  const { at, machine, selected, reduced, onSelect, handlers } = props;
   const busy = machine.running + machine.attention;
-  const select = () => onSelect(machine.id);
   const onKeyDown = (event: KeyboardEvent<SVGGElement>) => {
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
-    select();
+    onSelect(machine.id);
   };
   const sub =
     machine.subtitle ??
@@ -328,15 +560,17 @@ function MachineNode(props: {
       tabIndex={0}
       aria-pressed={selected}
       aria-label={machine.label + ", " + workSummary(machine)}
-      className="fleet-node cursor-pointer outline-none"
-      onClick={select}
+      className="fleet-node cursor-grab touch-none outline-none active:cursor-grabbing"
       onKeyDown={onKeyDown}
-      transform={"translate(" + node.x + " " + node.y + ")"}
+      transform={"translate(" + at.x + " " + at.y + ")"}
+      {...handlers}
     >
       <title>{machine.label + " · " + workSummary(machine)}</title>
-      {busy > 0 && !reduced ? <circle r={30} className="fleet-breathe fill-info/10" /> : null}
+      {busy > 0 && !reduced ? (
+        <circle r={MACHINE_RADIUS + 8} className="fleet-breathe fill-info/10" />
+      ) : null}
       <circle
-        r={21}
+        r={MACHINE_RADIUS}
         className={cn(
           "fleet-node-ring fill-background",
           selected
@@ -350,7 +584,7 @@ function MachineNode(props: {
         strokeWidth={selected ? 2.4 : 1.6}
       />
       <g
-        transform="translate(-8 -8)"
+        transform="translate(-7 -7) scale(0.875)"
         fill="none"
         className="stroke-foreground"
         strokeWidth={1.4}
@@ -367,18 +601,33 @@ function MachineNode(props: {
         )}
       </g>
       {busy > 0 ? (
-        <g transform="translate(15 -15)">
-          <circle r={8} className={machine.attention > 0 ? "fill-warning" : "fill-info"} />
-          <text y={3.2} textAnchor="middle" className="fill-background text-4xs font-bold">
+        <g transform="translate(13 -13)">
+          <circle r={7} className={machine.attention > 0 ? "fill-warning" : "fill-info"} />
+          <text y={3} textAnchor="middle" className="fill-background text-4xs font-bold">
             {busy > 99 ? "99+" : busy}
           </text>
         </g>
+      ) : machine.reported > 0 ? (
+        <g transform="translate(13 -13)">
+          <circle r={7} className="fill-background stroke-muted-foreground" strokeDasharray="2 2" />
+          <text y={3} textAnchor="middle" className="fill-muted-foreground text-4xs font-bold">
+            {machine.reported > 99 ? "99+" : machine.reported}
+          </text>
+        </g>
       ) : null}
-      <text y={36} textAnchor="middle" className="fill-foreground text-2xs font-medium">
+      <text
+        y={MACHINE_RADIUS + 13}
+        textAnchor="middle"
+        className="fill-foreground text-3xs font-medium"
+      >
         {truncate(machine.label, 18)}
       </text>
       {sub === null ? null : (
-        <text y={48} textAnchor="middle" className="fill-muted-foreground text-4xs">
+        <text
+          y={MACHINE_RADIUS + 24}
+          textAnchor="middle"
+          className="fill-muted-foreground text-4xs"
+        >
           {truncate(sub, 22)}
         </text>
       )}
@@ -386,22 +635,29 @@ function MachineNode(props: {
   );
 }
 
-function AggregateNode(props: { readonly node: FleetLayoutMachine }) {
-  const { node } = props;
-  const work = node.aggregate!;
+function AggregateNode(props: {
+  readonly at: FleetPoint;
+  readonly node: FleetLayoutMachine;
+  readonly handlers: NodeHandlers;
+}) {
+  const work = props.node.aggregate!;
   return (
-    <g transform={"translate(" + node.x + " " + node.y + ")"}>
+    <g
+      transform={"translate(" + props.at.x + " " + props.at.y + ")"}
+      className="cursor-grab touch-none active:cursor-grabbing"
+      {...props.handlers}
+    >
       <title>{work.count + " more machines · " + workSummary(work)}</title>
       <circle
-        r={21}
+        r={MACHINE_RADIUS}
         className="fill-background stroke-muted-foreground/60"
         strokeWidth={1.6}
         strokeDasharray="3 3"
       />
-      <text y={4} textAnchor="middle" className="fill-foreground text-2xs font-semibold">
+      <text y={3.5} textAnchor="middle" className="fill-foreground text-3xs font-semibold">
         {"+" + work.count}
       </text>
-      <text y={36} textAnchor="middle" className="fill-muted-foreground text-3xs">
+      <text y={MACHINE_RADIUS + 13} textAnchor="middle" className="fill-muted-foreground text-4xs">
         {workSummary(work)}
       </text>
     </g>

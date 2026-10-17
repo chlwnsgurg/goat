@@ -8,6 +8,11 @@
 
 export const MAX_GRAPH_MACHINES = 12;
 export const MAX_GRAPH_AGENTS = 6;
+/**
+ * Vertical room between the orbits: a machine's radius and two label lines plus an
+ * agent's radius and attention ring, so a node directly above or below never collides.
+ */
+const ORBIT_GAP = 72;
 
 export interface FleetWork {
   readonly running: number;
@@ -86,6 +91,30 @@ function machineAngles(count: number, narrow: boolean): number[] {
 
 const round = (value: number) => Math.round(value * 10) / 10;
 
+/** A gentle curve from Main to a machine, as an SVG path. */
+export function orbitEdge(center: FleetPoint, point: FleetPoint): string {
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const bend = 0.18 * length;
+  const cx = round((center.x + point.x) / 2 - (dy / length) * bend);
+  const cy = round((center.y + point.y) / 2 + (dx / length) * bend);
+  return (
+    "M" +
+    center.x +
+    " " +
+    center.y +
+    " Q" +
+    cx +
+    " " +
+    cy +
+    " " +
+    round(point.x) +
+    " " +
+    round(point.y)
+  );
+}
+
 export function layoutFleet(
   machines: ReadonlyArray<LayoutMachineInput>,
   width: number,
@@ -93,12 +122,13 @@ export function layoutFleet(
 ): FleetLayout {
   const center = { x: width / 2, y: height / 2 };
   const narrow = width < 640;
-  const inner = narrow
-    ? { rx: width * 0.17, ry: height * 0.27 }
-    : { rx: width * 0.25, ry: height * 0.26 };
   const outer = narrow
     ? { rx: width / 2 - 42, ry: height / 2 - 40 }
-    : { rx: width / 2 - 70, ry: height / 2 - 46 };
+    : { rx: width / 2 - 70, ry: height / 2 - 40 };
+  const inner = {
+    rx: width * (narrow ? 0.17 : 0.25),
+    ry: Math.min(height * 0.22, outer.ry - ORBIT_GAP),
+  };
   const { shown, folded } = fold(machines, MAX_GRAPH_MACHINES);
   const nodes: ReadonlyArray<LayoutMachineInput | null> = folded ? [...shown, null] : shown;
   const angles = machineAngles(nodes.length, narrow);
@@ -111,13 +141,7 @@ export function layoutFleet(
       const angle = angles[index]!;
       const x = round(center.x + inner.rx * Math.cos(angle));
       const y = round(center.y + inner.ry * Math.sin(angle));
-      const dx = x - center.x;
-      const dy = y - center.y;
-      const length = Math.hypot(dx, dy) || 1;
-      const bend = 0.18 * length;
-      const cx = round((center.x + x) / 2 - (dy / length) * bend);
-      const cy = round((center.y + y) / 2 + (dx / length) * bend);
-      const edge = "M" + center.x + " " + center.y + " Q" + cx + " " + cy + " " + x + " " + y;
+      const edge = orbitEdge(center, { x, y });
       if (machine === null) {
         return { id: null, x, y, angle, edge, aggregate: folded, agents: [] };
       }

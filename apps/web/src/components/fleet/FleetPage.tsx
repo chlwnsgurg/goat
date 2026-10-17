@@ -10,6 +10,7 @@ import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { Button } from "../ui/button";
 import { SidebarInset } from "../ui/sidebar";
+import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { FleetGraph } from "./FleetGraph";
 
 const STATE_LABEL: Record<FleetThread["state"], string> = {
@@ -159,7 +160,14 @@ function FleetThreadRow({ thread }: { readonly thread: FleetThread }) {
     <>
       <span aria-hidden className={cn("size-2 shrink-0 rounded-full", STATE_DOT[thread.state])} />
       <span className="min-w-0 flex-1 truncate">{thread.title}</span>
-      <span className="shrink-0 text-xs text-muted-foreground">
+      <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+        {thread.agentDriver ? (
+          <ProviderInstanceIcon
+            driverKind={thread.agentDriver}
+            displayName={thread.agentLabel}
+            iconClassName="size-3.5"
+          />
+        ) : null}
         {thread.ref === null && thread.reportedBy !== null
           ? "Last reported by " + thread.reportedBy
           : thread.agentLabel}
