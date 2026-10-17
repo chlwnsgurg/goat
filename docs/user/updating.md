@@ -7,13 +7,15 @@ notice.
 
 ## Update everything at once
 
-The update button at the bottom of the sidebar updates every connected machine
-in one step. It updates outdated providers, then servers that are behind, then
+The update button sits above Settings in the icon bar on the left edge of the
+window; in narrow windows it is at the bottom of the sidebar. It updates every
+connected machine in one step: outdated providers, then servers that are behind, then
 the desktop app you are using, which restarts last. Servers move to the
 version your desktop app is installing, or to your web app's version. A
 background service stays on its current release channel. A remote desktop app
 installs the latest release from its own channel. Hover the button to see what
-it will update.
+it will update: the first line says whether it is a GOAT app update, provider or
+server updates, or everything.
 
 Server updates appear only after that version is published to npm. Remote
 desktop apps do not wait for npm. The confirmation lists each machine it skips

@@ -62,7 +62,7 @@ export function SidebarUpdateReleaseNotes({
         {state.status === "available" ? (
           <div>
             <div className="whitespace-nowrap text-sm leading-5 font-medium">
-              Update ready to download
+              GOAT app update ready to download
             </div>
             {state.availableVersion ? (
               <div className="mt-0.5 text-xs leading-4 text-muted-foreground">
@@ -71,7 +71,7 @@ export function SidebarUpdateReleaseNotes({
             ) : null}
           </div>
         ) : (
-          <div className="text-sm leading-5 font-medium">{tooltip}</div>
+          <div className="text-sm leading-5 font-medium whitespace-pre-line">{tooltip}</div>
         )}
       </div>
       <div className="min-h-0 max-h-[min(28rem,calc(100vh-6rem))] overflow-y-auto px-1 pt-4 pb-1">

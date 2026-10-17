@@ -42,10 +42,17 @@ export function shouldContinueDesktopUpdateCheckAnimation({
   return isChecking && !prefersReducedMotion;
 }
 
-function DesktopUpdateAvailableIcon() {
+export type DesktopUpdateStatusIconSize = "sm" | "md";
+
+/** The footer pill draws 16px glyphs; the destination rail matches its 20px icons. */
+function glyphSize(size: DesktopUpdateStatusIconSize) {
+  return size === "md" ? "size-5" : "size-4";
+}
+
+function DesktopUpdateAvailableIcon({ size }: { readonly size: DesktopUpdateStatusIconSize }) {
   return (
-    <span className="relative grid size-4 place-items-center">
-      <DownloadIcon className="size-4" />
+    <span className={`relative grid place-items-center ${glyphSize(size)}`}>
+      <DownloadIcon className={glyphSize(size)} />
       <span
         aria-hidden="true"
         className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-current ring-2 ring-sidebar-control-surface"
@@ -54,7 +61,13 @@ function DesktopUpdateAvailableIcon() {
   );
 }
 
-function DesktopUpdateDownloadingIcon({ percent }: { readonly percent: number | null }) {
+function DesktopUpdateDownloadingIcon({
+  percent,
+  size,
+}: {
+  readonly percent: number | null;
+  readonly size: DesktopUpdateStatusIconSize;
+}) {
   const normalizedPercent = normalizeDesktopUpdateDownloadPercent(percent);
   const progressOffset = DOWNLOAD_PROGRESS_CIRCUMFERENCE * (1 - normalizedPercent / 100);
 
@@ -86,15 +99,15 @@ function DesktopUpdateDownloadingIcon({ percent }: { readonly percent: number | 
           className="transition-[stroke-dashoffset] duration-300 ease-out motion-reduce:transition-none"
         />
       </svg>
-      <DownloadIcon className="size-4" />
+      <DownloadIcon className={glyphSize(size)} />
     </span>
   );
 }
 
-function DesktopUpdateDownloadedIcon() {
+function DesktopUpdateDownloadedIcon({ size }: { readonly size: DesktopUpdateStatusIconSize }) {
   return (
-    <span className="relative grid size-4 place-items-center">
-      <RotateCwIcon className="size-4" />
+    <span className={`relative grid place-items-center ${glyphSize(size)}`}>
+      <RotateCwIcon className={glyphSize(size)} />
       <span className="absolute -right-1 -bottom-1 grid size-2.5 place-items-center rounded-full bg-foreground text-background ring-2 ring-background">
         <CheckIcon className="size-2" strokeWidth={3} />
       </span>
@@ -106,23 +119,25 @@ export function DesktopUpdateStatusIcon({
   downloadPercent,
   isCheckAnimating,
   onCheckAnimationIteration,
+  size = "sm",
   status,
 }: {
   readonly downloadPercent?: number | null;
   readonly isCheckAnimating?: boolean;
   readonly onCheckAnimationIteration?: AnimationEventHandler<SVGSVGElement>;
+  readonly size?: DesktopUpdateStatusIconSize;
   readonly status: DesktopUpdateStatusIconState;
 }) {
-  if (status === "available") return <DesktopUpdateAvailableIcon />;
+  if (status === "available") return <DesktopUpdateAvailableIcon size={size} />;
   if (status === "downloading") {
-    return <DesktopUpdateDownloadingIcon percent={downloadPercent ?? null} />;
+    return <DesktopUpdateDownloadingIcon percent={downloadPercent ?? null} size={size} />;
   }
-  if (status === "downloaded") return <DesktopUpdateDownloadedIcon />;
-  if (status === "everything") return <CircleArrowUpIcon className="size-4" />;
+  if (status === "downloaded") return <DesktopUpdateDownloadedIcon size={size} />;
+  if (status === "everything") return <CircleArrowUpIcon className={glyphSize(size)} />;
 
   return (
     <RefreshIcon
-      className="size-4"
+      className={size === "md" ? "size-5" : "size-4"}
       refreshing={status === "checking" && isCheckAnimating === true}
       onAnimationIteration={onCheckAnimationIteration}
     />

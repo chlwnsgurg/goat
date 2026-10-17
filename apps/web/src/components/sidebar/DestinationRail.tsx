@@ -28,6 +28,7 @@ import {
 } from "../settings/MemorySettings.logic";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { resolveActiveDestination, type DestinationId } from "./destinationRail.logic";
+import { SidebarUpdatePill } from "./SidebarUpdatePill";
 
 /** True while the desktop destination rail is on screen; the sidebar footer drops its duplicates. */
 export const DestinationRailVisibleContext = createContext(false);
@@ -104,7 +105,8 @@ export const DestinationRail = memo(function DestinationRail() {
         aria-hidden
         className={cn("h-(--workspace-topbar-height) w-full shrink-0", isElectron && "drag-region")}
       />
-      <div className="flex min-h-0 w-full flex-1 flex-col items-center gap-1 pt-2 pb-3">
+      {/* Scrolls on short windows so the bottom controls stay reachable. */}
+      <div className="flex min-h-0 w-full flex-1 scrollbar-gutter-both flex-col items-center gap-1 overflow-y-auto pt-2 pb-3">
         <RailTooltip label="Home">
           <Link
             to="/"
@@ -192,6 +194,7 @@ export const DestinationRail = memo(function DestinationRail() {
           </Link>
         </RailTooltip>
         <div className="flex-1" />
+        <SidebarUpdatePill placement="rail" />
         <RailTooltip label="Settings">
           <Link
             to="/settings"

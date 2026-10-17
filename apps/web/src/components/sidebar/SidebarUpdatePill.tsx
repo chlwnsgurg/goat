@@ -121,6 +121,49 @@ function resolveSidebarUpdatePresentation({
   } as const;
 }
 
+function joinRemoteKinds(providers: boolean, servers: boolean, provider: string, server: string) {
+  if (providers && !servers) return provider;
+  if (servers && !providers) return server;
+  return `${provider} and ${server.toLowerCase()}`;
+}
+
+/**
+ * The first tooltip line, naming what the button updates: this GOAT app, the
+ * providers and servers on connected machines, or both. One button covers all
+ * of them, so the icon alone cannot say which.
+ */
+export function resolveSidebarUpdateHeading({
+  local,
+  remote,
+  run,
+  checking,
+}: {
+  /** This app has an update to download, downloading, or to install. */
+  readonly local: boolean;
+  /** Remote work the button would run now, or null when none. */
+  readonly remote: { readonly providers: boolean; readonly servers: boolean } | null;
+  readonly run: Pick<UpdateEverythingRun, "localVersion" | "machines"> | null;
+  readonly checking: boolean;
+}): string {
+  if (run !== null) {
+    if (run.localVersion !== null) return "Updating everything";
+    return `Updating ${joinRemoteKinds(
+      run.machines.some((machine) => machine.updatesProviders),
+      run.machines.some((machine) => machine.updatesServer),
+      "providers",
+      "servers",
+    )}`;
+  }
+  if (remote !== null) {
+    if (local) return "Update everything";
+    return `${joinRemoteKinds(remote.providers, remote.servers, "Provider", "Server")} updates`;
+  }
+  if (local) return "GOAT app update";
+  return checking ? "Checking for GOAT app updates…" : "Check for GOAT app updates";
+}
+
+export type SidebarUpdatePlacement = "footer" | "rail";
+
 export function SidebarUpdateArchitectureWarning() {
   return isElectron ? <SidebarUpdateArchitectureWarningContent /> : null;
 }
@@ -245,11 +288,16 @@ function useUpdateRunTooltip(
  * click updates everything: providers, then servers, then this app last. On
  * web there is no local app, so the button shows only for remote updates.
  */
-export function SidebarUpdatePill() {
-  return <SidebarUpdateControl />;
+export function SidebarUpdatePill({
+  placement = "footer",
+}: {
+  placement?: SidebarUpdatePlacement;
+}) {
+  return <SidebarUpdateControl placement={placement} />;
 }
 
-function SidebarUpdateControl() {
+function SidebarUpdateControl({ placement }: { placement: SidebarUpdatePlacement }) {
+  const inRail = placement === "rail";
   const state = useDesktopUpdateState();
   const [isActionPending, setIsActionPending] = useState(false);
   const [isConfirmingEverything, setIsConfirmingEverything] = useState(false);
@@ -292,7 +340,13 @@ function SidebarUpdateControl() {
     isDownloading,
     showCheckIcon,
   });
-  const tooltip =
+  const heading = resolveSidebarUpdateHeading({
+    local: action !== "none" || isDownloading,
+    remote: runsEverything ? everything.remote : null,
+    run,
+    checking: showCheckIcon,
+  });
+  const detail =
     runTooltip !== null
       ? runTooltip
       : runsEverything
@@ -301,9 +355,9 @@ function SidebarUpdateControl() {
           ? state
             ? getDesktopUpdateButtonTooltip(state)
             : "Update available"
-          : showCheckIcon
-            ? "Checking for updates…"
-            : "Check for updates";
+          : null;
+  const tooltip = detail === null ? heading : `${heading}\n${detail}`;
+  const ariaLabel = detail === null ? heading : `${heading}: ${detail.split("\n")[0]}`;
   const disabled = showCheckIcon
     ? true
     : runsEverything
@@ -445,20 +499,28 @@ function SidebarUpdateControl() {
   const updateButton = (
     <button
       type="button"
-      aria-label={tooltip}
+      aria-label={ariaLabel}
       aria-disabled={isInteractionDisabled || undefined}
       className={cn(
-        "inline-flex size-8 items-center justify-center rounded-full outline-hidden ring-ring transition-colors focus-visible:ring-2 focus-visible:ring-inset",
+        "inline-flex items-center justify-center outline-hidden ring-ring transition-colors focus-visible:ring-2 focus-visible:ring-inset",
+        // The rail's accent fill means "current page", so waiting updates keep the control fill.
+        inRail ? "size-10 shrink-0 rounded-lg" : "size-8 rounded-full",
         isInteractionDisabled ? "cursor-not-allowed" : "cursor-pointer",
         showUpdateIconState
           ? cn(
               "bg-sidebar-control-surface text-sidebar-foreground",
-              !isInteractionDisabled && "hover:bg-sidebar-row-hover",
+              !isInteractionDisabled && (inRail ? "hover:bg-accent" : "hover:bg-sidebar-row-hover"),
             )
-          : cn(
-              "text-(--sidebar-icon-color)",
-              !isInteractionDisabled && "hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
-            ),
+          : inRail
+            ? cn(
+                "text-sidebar-muted-foreground",
+                !isInteractionDisabled && "hover:bg-accent hover:text-accent-foreground",
+              )
+            : cn(
+                "text-(--sidebar-icon-color)",
+                !isInteractionDisabled &&
+                  "hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
+              ),
         disabled && !showUpdateIconState && "opacity-60",
       )}
       onClick={handleAction}
@@ -487,13 +549,14 @@ function SidebarUpdateControl() {
         downloadPercent={state?.downloadPercent ?? null}
         isCheckAnimating={showCheckIcon && !prefersReducedMotion}
         onCheckAnimationIteration={handleCheckAnimationIteration}
+        size={inRail ? "md" : "sm"}
         status={iconStatus}
       />
     </button>
   );
 
-  return (
-    <SidebarMenuItem className="ml-auto shrink-0">
+  const control = (
+    <>
       <Popover
         handle={releaseNotesPopoverHandle}
         onOpenChange={(open, details) => {
@@ -527,7 +590,7 @@ function SidebarUpdateControl() {
           {!showReleaseNotesPopover ? (
             <TooltipPopup
               align="center"
-              side="top"
+              side={inRail ? "right" : "top"}
               variant={showUpdateDetails ? "glass" : "default"}
             >
               <span className="whitespace-pre-line">{tooltip}</span>
@@ -536,7 +599,7 @@ function SidebarUpdateControl() {
         </Tooltip>
         {showReleaseNotesPopover && state ? (
           <PopoverPopup
-            align="center"
+            align={inRail ? "end" : "center"}
             aria-label="Nightly update release notes"
             initialFocus={false}
             onKeyDownCapture={(event) => {
@@ -548,7 +611,7 @@ function SidebarUpdateControl() {
               }
             }}
             ref={releaseNotesPopupRef}
-            side="top"
+            side={inRail ? "right" : "top"}
             tooltipStyle
           >
             <SidebarUpdateReleaseNotes
@@ -568,6 +631,12 @@ function SidebarUpdateControl() {
         skipped={everything.skipped}
         onConfirm={() => void runEverything()}
       />
-    </SidebarMenuItem>
+    </>
+  );
+
+  return inRail ? (
+    <div className="flex shrink-0">{control}</div>
+  ) : (
+    <SidebarMenuItem className="ml-auto shrink-0">{control}</SidebarMenuItem>
   );
 }
