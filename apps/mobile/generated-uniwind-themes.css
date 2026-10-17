@@ -2,6 +2,18 @@
 @layer theme {
   :root {
     @variant light {
+      --color-pr-open: #447766;
+      --color-pr-open-surface: rgba(68, 119, 102, 0.12);
+      --color-pr-closed: #a34e49;
+      --color-pr-closed-surface: rgba(163, 78, 73, 0.12);
+      --color-pr-merged: #6d52b9;
+      --color-pr-merged-surface: rgba(109, 82, 185, 0.12);
+      --color-composer-send: #143eb0;
+      --color-composer-stop: #cd222a;
+      --color-composer-stop-foreground: #ffffff;
+      --color-goat-avatar: #eeeeee;
+      --color-goat-avatar-border: #dfdfe0;
+      --color-goat-avatar-foreground: #48484b;
       --color-screen: #fcfcfc;
       --color-sheet: rgba(252, 252, 252, 0.98);
       --color-sheet-solid: #fcfcfc;
@@ -91,6 +103,10 @@
       --color-dot-separator: rgba(113, 113, 123, 0.35);
       --color-wordmark: #27272a;
       --color-chevron: rgba(113, 113, 123, 0.42);
+      --color-channel-dev: oklch(48.8% 0.243 264.376);
+      --color-channel-dev-surface: oklch(48.8% 0.243 264.376 / 10%);
+      --color-channel-nightly: oklch(51.1% 0.262 276.966);
+      --color-channel-nightly-surface: oklch(51.1% 0.262 276.966 / 10%);
       --color-adaptive-amber-50-950-a40: oklch(98.7% 0.022 95.277);
       --color-adaptive-amber-200-900-a60: oklch(92.4% 0.12 95.746);
       --color-adaptive-amber-500-a12-a16: oklch(76.9% 0.188 70.08 / 12%);
@@ -163,6 +179,18 @@
     }
 
     @variant dark {
+      --color-pr-open: #5eaf8b;
+      --color-pr-open-surface: rgba(94, 175, 139, 0.16);
+      --color-pr-closed: #c97774;
+      --color-pr-closed-surface: rgba(201, 119, 116, 0.16);
+      --color-pr-merged: #9485c9;
+      --color-pr-merged-surface: rgba(148, 133, 201, 0.16);
+      --color-composer-send: #2956c5;
+      --color-composer-stop: #cd333b;
+      --color-composer-stop-foreground: #ffffff;
+      --color-goat-avatar: #151515;
+      --color-goat-avatar-border: #202020;
+      --color-goat-avatar-foreground: #c4c4c4;
       --color-screen: #0a0a0a;
       --color-sheet: rgba(10, 10, 10, 0.98);
       --color-sheet-solid: #0a0a0a;
@@ -252,6 +280,10 @@
       --color-dot-separator: rgba(129, 129, 129, 0.35);
       --color-wordmark: #f5f5f5;
       --color-chevron: rgba(129, 129, 129, 0.42);
+      --color-channel-dev: oklch(70.7% 0.165 254.624);
+      --color-channel-dev-surface: oklch(70.7% 0.165 254.624 / 10%);
+      --color-channel-nightly: oklch(78.5% 0.115 274.713);
+      --color-channel-nightly-surface: oklch(78.5% 0.115 274.713 / 10%);
       --color-adaptive-amber-50-950-a40: oklch(27.9% 0.077 45.635 / 40%);
       --color-adaptive-amber-200-900-a60: oklch(41.4% 0.112 45.904 / 60%);
       --color-adaptive-amber-500-a12-a16: oklch(76.9% 0.188 70.08 / 16%);
@@ -324,6 +356,18 @@
     }
 
     @variant goat-chat-light {
+      --color-pr-open: #635956;
+      --color-pr-open-surface: rgba(99, 89, 86, 0.12);
+      --color-pr-closed: #961551;
+      --color-pr-closed-surface: rgba(150, 21, 81, 0.12);
+      --color-pr-merged: #7c26a5;
+      --color-pr-merged-surface: rgba(124, 38, 165, 0.12);
+      --color-composer-send: #b31e60;
+      --color-composer-stop: #ca0557;
+      --color-composer-stop-foreground: #ffffff;
+      --color-goat-avatar: #f2e9f2;
+      --color-goat-avatar-border: #e7dae8;
+      --color-goat-avatar-foreground: #6e3f71;
       --color-screen: #fdf7fd;
       --color-sheet: rgba(253, 247, 253, 0.98);
       --color-sheet-solid: #fdf7fd;
@@ -413,6 +457,10 @@
       --color-dot-separator: rgba(172, 22, 104, 0.35);
       --color-wordmark: #501854;
       --color-chevron: rgba(172, 22, 104, 0.42);
+      --color-channel-dev: oklch(48.8% 0.243 264.376);
+      --color-channel-dev-surface: oklch(48.8% 0.243 264.376 / 10%);
+      --color-channel-nightly: oklch(51.1% 0.262 276.966);
+      --color-channel-nightly-surface: oklch(51.1% 0.262 276.966 / 10%);
       --color-adaptive-amber-50-950-a40: oklch(98.7% 0.022 95.277);
       --color-adaptive-amber-200-900-a60: oklch(92.4% 0.12 95.746);
       --color-adaptive-amber-500-a12-a16: oklch(76.9% 0.188 70.08 / 12%);
@@ -485,6 +533,18 @@
     }
 
     @variant goat-chat-dark {
+      --color-pr-open: #90d5b4;
+      --color-pr-open-surface: rgba(144, 213, 180, 0.16);
+      --color-pr-closed: #f2d0e3;
+      --color-pr-closed-surface: rgba(242, 208, 227, 0.16);
+      --color-pr-merged: #c2a8f5;
+      --color-pr-merged-surface: rgba(194, 168, 245, 0.16);
+      --color-composer-send: #85003d;
+      --color-composer-stop: #80113d;
+      --color-composer-stop-foreground: #ffffff;
+      --color-goat-avatar: #2a252f;
+      --color-goat-avatar-border: #35303a;
+      --color-goat-avatar-foreground: #cdcbd0;
       --color-screen: #1f1a24;
       --color-sheet: rgba(31, 26, 36, 0.98);
       --color-sheet-solid: #1f1a24;
@@ -574,6 +634,10 @@
       --color-dot-separator: rgba(231, 208, 221, 0.35);
       --color-wordmark: #f9f8fb;
       --color-chevron: rgba(231, 208, 221, 0.42);
+      --color-channel-dev: oklch(70.7% 0.165 254.624);
+      --color-channel-dev-surface: oklch(70.7% 0.165 254.624 / 10%);
+      --color-channel-nightly: oklch(78.5% 0.115 274.713);
+      --color-channel-nightly-surface: oklch(78.5% 0.115 274.713 / 10%);
       --color-adaptive-amber-50-950-a40: oklch(27.9% 0.077 45.635 / 40%);
       --color-adaptive-amber-200-900-a60: oklch(41.4% 0.112 45.904 / 60%);
       --color-adaptive-amber-500-a12-a16: oklch(76.9% 0.188 70.08 / 16%);
@@ -646,6 +710,18 @@
     }
 
     @variant grove-light {
+      --color-pr-open: #447361;
+      --color-pr-open-surface: rgba(68, 115, 97, 0.12);
+      --color-pr-closed: #a14a44;
+      --color-pr-closed-surface: rgba(161, 74, 68, 0.12);
+      --color-pr-merged: #6c4eb3;
+      --color-pr-merged-surface: rgba(108, 78, 179, 0.12);
+      --color-composer-send: #74500b;
+      --color-composer-stop: #cd222a;
+      --color-composer-stop-foreground: #ffffff;
+      --color-goat-avatar: #e5e8e6;
+      --color-goat-avatar-border: #d7d8d8;
+      --color-goat-avatar-foreground: #453744;
       --color-screen: #f3f7f4;
       --color-sheet: rgba(243, 247, 244, 0.98);
       --color-sheet-solid: #f3f7f4;
@@ -735,6 +811,10 @@
       --color-dot-separator: rgba(116, 108, 115, 0.35);
       --color-wordmark: #241523;
       --color-chevron: rgba(116, 108, 115, 0.42);
+      --color-channel-dev: oklch(48.8% 0.243 264.376);
+      --color-channel-dev-surface: oklch(48.8% 0.243 264.376 / 10%);
+      --color-channel-nightly: oklch(51.1% 0.262 276.966);
+      --color-channel-nightly-surface: oklch(51.1% 0.262 276.966 / 10%);
       --color-adaptive-amber-50-950-a40: oklch(98.7% 0.022 95.277);
       --color-adaptive-amber-200-900-a60: oklch(92.4% 0.12 95.746);
       --color-adaptive-amber-500-a12-a16: oklch(76.9% 0.188 70.08 / 12%);
@@ -807,6 +887,18 @@
     }
 
     @variant grove-dark {
+      --color-pr-open: #69c09a;
+      --color-pr-open-surface: rgba(105, 192, 154, 0.16);
+      --color-pr-closed: #d88883;
+      --color-pr-closed-surface: rgba(216, 136, 131, 0.16);
+      --color-pr-merged: #a196da;
+      --color-pr-merged-surface: rgba(161, 150, 218, 0.16);
+      --color-composer-send: #ba923e;
+      --color-composer-stop: #cd333b;
+      --color-composer-stop-foreground: #ffffff;
+      --color-goat-avatar: #26322c;
+      --color-goat-avatar-border: #323d37;
+      --color-goat-avatar-foreground: #d1d0d2;
       --color-screen: #1b2821;
       --color-sheet: rgba(27, 40, 33, 0.98);
       --color-sheet-solid: #1b2821;
@@ -896,6 +988,10 @@
       --color-dot-separator: rgba(145, 149, 149, 0.35);
       --color-wordmark: #fffaff;
       --color-chevron: rgba(145, 149, 149, 0.42);
+      --color-channel-dev: oklch(70.7% 0.165 254.624);
+      --color-channel-dev-surface: oklch(70.7% 0.165 254.624 / 10%);
+      --color-channel-nightly: oklch(78.5% 0.115 274.713);
+      --color-channel-nightly-surface: oklch(78.5% 0.115 274.713 / 10%);
       --color-adaptive-amber-50-950-a40: oklch(27.9% 0.077 45.635 / 40%);
       --color-adaptive-amber-200-900-a60: oklch(41.4% 0.112 45.904 / 60%);
       --color-adaptive-amber-500-a12-a16: oklch(76.9% 0.188 70.08 / 16%);
@@ -968,6 +1064,18 @@
     }
 
     @variant ocean-light {
+      --color-pr-open: #447363;
+      --color-pr-open-surface: rgba(68, 115, 99, 0.12);
+      --color-pr-closed: #a14945;
+      --color-pr-closed-surface: rgba(161, 73, 69, 0.12);
+      --color-pr-merged: #6c4eb5;
+      --color-pr-merged-surface: rgba(108, 78, 181, 0.12);
+      --color-composer-send: #065a5e;
+      --color-composer-stop: #cd222a;
+      --color-composer-stop-foreground: #ffffff;
+      --color-goat-avatar: #e7e7ea;
+      --color-goat-avatar-border: #d9d8dc;
+      --color-goat-avatar-foreground: #453744;
       --color-screen: #f5f7f8;
       --color-sheet: rgba(245, 247, 248, 0.98);
       --color-sheet-solid: #f5f7f8;
@@ -1057,6 +1165,10 @@
       --color-dot-separator: rgba(116, 108, 117, 0.35);
       --color-wordmark: #241523;
       --color-chevron: rgba(116, 108, 117, 0.42);
+      --color-channel-dev: oklch(48.8% 0.243 264.376);
+      --color-channel-dev-surface: oklch(48.8% 0.243 264.376 / 10%);
+      --color-channel-nightly: oklch(51.1% 0.262 276.966);
+      --color-channel-nightly-surface: oklch(51.1% 0.262 276.966 / 10%);
       --color-adaptive-amber-50-950-a40: oklch(98.7% 0.022 95.277);
       --color-adaptive-amber-200-900-a60: oklch(92.4% 0.12 95.746);
       --color-adaptive-amber-500-a12-a16: oklch(76.9% 0.188 70.08 / 12%);
@@ -1129,6 +1241,18 @@
     }
 
     @variant ocean-dark {
+      --color-pr-open: #66bc9c;
+      --color-pr-open-surface: rgba(102, 188, 156, 0.16);
+      --color-pr-closed: #d58485;
+      --color-pr-closed-surface: rgba(213, 132, 133, 0.16);
+      --color-pr-merged: #9e91db;
+      --color-pr-merged-surface: rgba(158, 145, 219, 0.16);
+      --color-composer-send: #49aaaf;
+      --color-composer-stop: #cd333b;
+      --color-composer-stop-foreground: #ffffff;
+      --color-goat-avatar: #232c36;
+      --color-goat-avatar-border: #2e3741;
+      --color-goat-avatar-foreground: #d0ced5;
       --color-screen: #17212b;
       --color-sheet: rgba(23, 33, 43, 0.98);
       --color-sheet-solid: #17212b;
@@ -1218,6 +1342,10 @@
       --color-dot-separator: rgba(141, 143, 151, 0.35);
       --color-wordmark: #fffaff;
       --color-chevron: rgba(141, 143, 151, 0.42);
+      --color-channel-dev: oklch(70.7% 0.165 254.624);
+      --color-channel-dev-surface: oklch(70.7% 0.165 254.624 / 10%);
+      --color-channel-nightly: oklch(78.5% 0.115 274.713);
+      --color-channel-nightly-surface: oklch(78.5% 0.115 274.713 / 10%);
       --color-adaptive-amber-50-950-a40: oklch(27.9% 0.077 45.635 / 40%);
       --color-adaptive-amber-200-900-a60: oklch(41.4% 0.112 45.904 / 60%);
       --color-adaptive-amber-500-a12-a16: oklch(76.9% 0.188 70.08 / 16%);
@@ -1290,6 +1418,18 @@
     }
 
     @variant ember-light {
+      --color-pr-open: #477361;
+      --color-pr-open-surface: rgba(71, 115, 97, 0.12);
+      --color-pr-closed: #a34943;
+      --color-pr-closed-surface: rgba(163, 73, 67, 0.12);
+      --color-pr-merged: #6e4eb3;
+      --color-pr-merged-surface: rgba(110, 78, 179, 0.12);
+      --color-composer-send: #912929;
+      --color-composer-stop: #cd222a;
+      --color-composer-stop-foreground: #ffffff;
+      --color-goat-avatar: #eae7e7;
+      --color-goat-avatar-border: #dcd8d9;
+      --color-goat-avatar-foreground: #453744;
       --color-screen: #f9f7f5;
       --color-sheet: rgba(249, 247, 245, 0.98);
       --color-sheet-solid: #f9f7f5;
@@ -1379,6 +1519,10 @@
       --color-dot-separator: rgba(118, 108, 116, 0.35);
       --color-wordmark: #241523;
       --color-chevron: rgba(118, 108, 116, 0.42);
+      --color-channel-dev: oklch(48.8% 0.243 264.376);
+      --color-channel-dev-surface: oklch(48.8% 0.243 264.376 / 10%);
+      --color-channel-nightly: oklch(51.1% 0.262 276.966);
+      --color-channel-nightly-surface: oklch(51.1% 0.262 276.966 / 10%);
       --color-adaptive-amber-50-950-a40: oklch(98.7% 0.022 95.277);
       --color-adaptive-amber-200-900-a60: oklch(92.4% 0.12 95.746);
       --color-adaptive-amber-500-a12-a16: oklch(76.9% 0.188 70.08 / 12%);
@@ -1451,6 +1595,18 @@
     }
 
     @variant ember-dark {
+      --color-pr-open: #72bb94;
+      --color-pr-open-surface: rgba(114, 187, 148, 0.16);
+      --color-pr-closed: #da817d;
+      --color-pr-closed-surface: rgba(218, 129, 125, 0.16);
+      --color-pr-merged: #a590d4;
+      --color-pr-merged-surface: rgba(165, 144, 212, 0.16);
+      --color-composer-send: #ca7063;
+      --color-composer-stop: #cd333b;
+      --color-composer-stop-foreground: #ffffff;
+      --color-goat-avatar: #342925;
+      --color-goat-avatar-border: #3f3430;
+      --color-goat-avatar-foreground: #d4ced0;
       --color-screen: #291e1a;
       --color-sheet: rgba(41, 30, 26, 0.98);
       --color-sheet-solid: #291e1a;
@@ -1540,6 +1696,10 @@
       --color-dot-separator: rgba(150, 142, 143, 0.35);
       --color-wordmark: #fffaff;
       --color-chevron: rgba(150, 142, 143, 0.42);
+      --color-channel-dev: oklch(70.7% 0.165 254.624);
+      --color-channel-dev-surface: oklch(70.7% 0.165 254.624 / 10%);
+      --color-channel-nightly: oklch(78.5% 0.115 274.713);
+      --color-channel-nightly-surface: oklch(78.5% 0.115 274.713 / 10%);
       --color-adaptive-amber-50-950-a40: oklch(27.9% 0.077 45.635 / 40%);
       --color-adaptive-amber-200-900-a60: oklch(41.4% 0.112 45.904 / 60%);
       --color-adaptive-amber-500-a12-a16: oklch(76.9% 0.188 70.08 / 16%);
@@ -1612,6 +1772,18 @@
     }
 
     @variant iris-light {
+      --color-pr-open: #467363;
+      --color-pr-open-surface: rgba(70, 115, 99, 0.12);
+      --color-pr-closed: #a24946;
+      --color-pr-closed-surface: rgba(162, 73, 70, 0.12);
+      --color-pr-merged: #6d4db5;
+      --color-pr-merged-surface: rgba(109, 77, 181, 0.12);
+      --color-composer-send: #89226d;
+      --color-composer-stop: #cd222a;
+      --color-composer-stop-foreground: #ffffff;
+      --color-goat-avatar: #e9e7eb;
+      --color-goat-avatar-border: #dbd8dd;
+      --color-goat-avatar-foreground: #453744;
       --color-screen: #f8f7f9;
       --color-sheet: rgba(248, 247, 249, 0.98);
       --color-sheet-solid: #f8f7f9;
@@ -1701,6 +1873,10 @@
       --color-dot-separator: rgba(118, 108, 118, 0.35);
       --color-wordmark: #241523;
       --color-chevron: rgba(118, 108, 118, 0.42);
+      --color-channel-dev: oklch(48.8% 0.243 264.376);
+      --color-channel-dev-surface: oklch(48.8% 0.243 264.376 / 10%);
+      --color-channel-nightly: oklch(51.1% 0.262 276.966);
+      --color-channel-nightly-surface: oklch(51.1% 0.262 276.966 / 10%);
       --color-adaptive-amber-50-950-a40: oklch(98.7% 0.022 95.277);
       --color-adaptive-amber-200-900-a60: oklch(92.4% 0.12 95.746);
       --color-adaptive-amber-500-a12-a16: oklch(76.9% 0.188 70.08 / 12%);
@@ -1773,6 +1949,18 @@
     }
 
     @variant iris-dark {
+      --color-pr-open: #68b79a;
+      --color-pr-open-surface: rgba(104, 183, 154, 0.16);
+      --color-pr-closed: #d37d83;
+      --color-pr-closed-surface: rgba(211, 125, 131, 0.16);
+      --color-pr-merged: #9e8bd8;
+      --color-pr-merged-surface: rgba(158, 139, 216, 0.16);
+      --color-composer-send: #c47cb0;
+      --color-composer-stop: #cd333b;
+      --color-composer-stop-foreground: #ffffff;
+      --color-goat-avatar: #282434;
+      --color-goat-avatar-border: #33303f;
+      --color-goat-avatar-foreground: #d1ccd4;
       --color-screen: #1d1929;
       --color-sheet: rgba(29, 25, 41, 0.98);
       --color-sheet-solid: #1d1929;
@@ -1862,6 +2050,10 @@
       --color-dot-separator: rgba(142, 138, 149, 0.35);
       --color-wordmark: #fffaff;
       --color-chevron: rgba(142, 138, 149, 0.42);
+      --color-channel-dev: oklch(70.7% 0.165 254.624);
+      --color-channel-dev-surface: oklch(70.7% 0.165 254.624 / 10%);
+      --color-channel-nightly: oklch(78.5% 0.115 274.713);
+      --color-channel-nightly-surface: oklch(78.5% 0.115 274.713 / 10%);
       --color-adaptive-amber-50-950-a40: oklch(27.9% 0.077 45.635 / 40%);
       --color-adaptive-amber-200-900-a60: oklch(41.4% 0.112 45.904 / 60%);
       --color-adaptive-amber-500-a12-a16: oklch(76.9% 0.188 70.08 / 16%);

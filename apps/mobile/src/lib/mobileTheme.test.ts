@@ -61,6 +61,39 @@ function compositeOver(overlay: string, background: string): string {
 }
 
 describe("mobile themes", () => {
+  it.each(["light", "dark"] as const)(
+    "emits semantic colors and %s PR surface opacity",
+    (appearance) => {
+      const variables = createMobileThemeVariables(
+        {
+          ...GOAT_LIGHT_THEME_COLORS,
+          text: "#ffffff",
+          canvas: "#000000",
+          mutedForeground: "#000000",
+          messageAction: "#ffffff",
+          error: "#ffffff",
+          errorForeground: "#ffffff",
+        },
+        appearance,
+      );
+      expect(variables["--color-pr-closed"]).toBe("#717171");
+      for (const state of ["open", "closed", "merged"] as const) {
+        expect(variables[`--color-pr-${state}-surface`]).toBe(
+          themeColorWithAlpha(
+            variables[`--color-pr-${state}`],
+            appearance === "dark" ? 0.16 : 0.12,
+          ),
+        );
+      }
+      expect(variables["--color-composer-send"]).toBe("#d1d1d1");
+      expect(variables["--color-composer-stop"]).toBe("#d1d1d1");
+      expect(variables["--color-composer-stop-foreground"]).toBe("#ffffff");
+      expect(variables["--color-goat-avatar"]).toBe("#010101");
+      expect(variables["--color-goat-avatar-border"]).toBe("#060606");
+      expect(variables["--color-goat-avatar-foreground"]).toBe("#c4c4c4");
+    },
+  );
+
   it("declares every runtime theme variable in the static stylesheet", () => {
     const generatedVariables = createMobileThemeVariables(GOAT_CHAT_THEME.colors, "light");
     expect(Object.keys(readDefaultMobileThemeVariables("light")).sort()).toEqual(

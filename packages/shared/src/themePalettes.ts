@@ -124,6 +124,112 @@ export const THEME_COLOR_ROLES = [
 
 export type ThemeColorRole = (typeof THEME_COLOR_ROLES)[number];
 export type ThemeColors = Readonly<Record<ThemeColorRole, string>>;
+
+type Oklab = Readonly<{ l: number; a: number; b: number }>;
+
+function colorToOklab(value: string): Oklab {
+  const oklch =
+    /^oklch\(\s*([\d.]+)(%?)\s+([\d.]+)\s+(-?[\d.]+)(?:deg)?(?:\s*\/[^)]+)?\s*\)$/i.exec(value);
+  if (oklch) {
+    const hue = (Number(oklch[4]) * Math.PI) / 180;
+    return {
+      l: Number(oklch[1]) / (oklch[2] ? 100 : 1),
+      a: Number(oklch[3]) * Math.cos(hue),
+      b: Number(oklch[3]) * Math.sin(hue),
+    };
+  }
+
+  const hex = /^#([\da-f]{3}|[\da-f]{6}|[\da-f]{8})$/i.exec(value);
+  const rgb = /^rgba?\(\s*([\d.]+%?)[,\s]+([\d.]+%?)[,\s]+([\d.]+%?)(?:\s*[,/][^)]+)?\s*\)$/i.exec(
+    value,
+  );
+  let channels: number[];
+  if (hex) {
+    const digits =
+      hex[1]!.length === 3 ? [...hex[1]!].map((digit) => digit + digit).join("") : hex[1]!;
+    channels = [0, 2, 4].map(
+      (offset) => Number.parseInt(digits.slice(offset, offset + 2), 16) / 255,
+    );
+  } else if (rgb) {
+    channels = rgb
+      .slice(1, 4)
+      .map((channel) => Number.parseFloat(channel!) / (channel!.endsWith("%") ? 100 : 255));
+  } else {
+    throw new Error(`Unsupported theme color: ${value}`);
+  }
+  const [red, green, blue] = channels.map((channel) =>
+    channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+  );
+  const l = Math.cbrt(0.4122214708 * red! + 0.5363325363 * green! + 0.0514459929 * blue!);
+  const m = Math.cbrt(0.2119034982 * red! + 0.6806995451 * green! + 0.1073969566 * blue!);
+  const s = Math.cbrt(0.0883024619 * red! + 0.2817188376 * green! + 0.6299787005 * blue!);
+  return {
+    l: 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    a: 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    b: 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  };
+}
+
+/** Mix opaque palette/native colors like CSS color-mix(in oklab), then encode for React Native. */
+export function mixOklab(first: string, second: string, weightOfFirst: number): string {
+  const a = colorToOklab(first.trim());
+  const b = colorToOklab(second.trim());
+  const weightOfSecond = 1 - weightOfFirst;
+  const lightness = a.l * weightOfFirst + b.l * weightOfSecond;
+  const axisA = a.a * weightOfFirst + b.a * weightOfSecond;
+  const axisB = a.b * weightOfFirst + b.b * weightOfSecond;
+  const l = (lightness + 0.3963377774 * axisA + 0.2158037573 * axisB) ** 3;
+  const m = (lightness - 0.1055613458 * axisA - 0.0638541728 * axisB) ** 3;
+  const s = (lightness - 0.0894841775 * axisA - 1.291485548 * axisB) ** 3;
+  const channels = [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+  ].map((channel) => {
+    const srgb = channel <= 0.0031308 ? 12.92 * channel : 1.055 * channel ** (1 / 2.4) - 0.055;
+    return Math.round(Math.min(1, Math.max(0, srgb)) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  });
+  return `#${channels.join("")}`;
+}
+
+/** Effective roles also let Android's system palette derive the same semantic tones. */
+export function deriveSemanticColorsFrom(
+  input: Pick<
+    ThemeColors,
+    "text" | "canvas" | "mutedForeground" | "messageAction" | "errorForeground"
+  > & { readonly appearance: ThemeAppearance; readonly error?: string },
+) {
+  const dark = input.appearance === "dark";
+  // Web mixes with contrast-adjusted muted text. Mobile has no contrast slider,
+  // so semantic tones use the palette's mutedForeground directly.
+  return {
+    prOpen: mixOklab(
+      dark ? "oklch(76.5% 0.177 163.223)" : "oklch(50.8% 0.118 165.612)",
+      input.mutedForeground,
+      0.55,
+    ),
+    prClosed: mixOklab(input.errorForeground, input.mutedForeground, 0.55),
+    prMerged: mixOklab(
+      dark ? "oklch(70.2% 0.183 293.541)" : "oklch(49.1% 0.27 292.581)",
+      input.mutedForeground,
+      0.55,
+    ),
+    composerSend: mixOklab(input.messageAction, "#000000", 0.86),
+    ...(input.error === undefined ? {} : { composerStop: mixOklab(input.error, "#000000", 0.86) }),
+    goatAvatar: mixOklab(input.text, input.canvas, 0.06),
+    goatAvatarBorder: mixOklab(input.text, input.canvas, 0.12),
+    goatAvatarForeground: mixOklab(input.text, input.canvas, 0.82),
+  };
+}
+
+export function deriveSemanticColors(colors: ThemeColors, appearance: ThemeAppearance) {
+  const semantic = deriveSemanticColorsFrom({ ...colors, appearance });
+  // A complete palette always supplies the solid destructive role.
+  return { ...semantic, composerStop: semantic.composerStop! };
+}
+
 export type ThemeVariants = Readonly<Partial<Record<ThemeAppearance, ThemeColors>>>;
 export type ThemeDefinition = Readonly<{
   id: string;

@@ -1,11 +1,13 @@
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import Constants from "expo-constants";
+import { BRAND_CHANNEL_LABEL } from "@goat/shared/brandChannels";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
+import { resolveMobileBrandChannel } from "../../lib/mobileBranding";
 import {
   type AppUpdateCheckState,
   isAppUpdateCheckAvailable,
@@ -43,7 +45,7 @@ function AppSettingsSection() {
   // Fall back to "production" to match resolveAppVariant in app.config.ts, so a
   // missing variant never mislabels a production build as development.
   const variant = (Constants.expoConfig?.extra?.appVariant as string | undefined) ?? "production";
-  const variantLabel = variant === "production" ? "" : capitalize(variant);
+  const variantLabel = BRAND_CHANNEL_LABEL[resolveMobileBrandChannel(variant)];
   const versionLabel = variantLabel ? `${version} · ${variantLabel}` : version;
   const updateCheckAvailable = isAppUpdateCheckAvailable();
   const busy =
@@ -142,8 +144,4 @@ function AppSettingsSection() {
       )}
     </SettingsSection>
   );
-}
-
-function capitalize(value: string): string {
-  return value.length > 0 ? value.charAt(0).toUpperCase() + value.slice(1) : value;
 }

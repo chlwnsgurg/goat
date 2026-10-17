@@ -55,6 +55,10 @@ const color = (family: TailwindColorFamily, shade?: TailwindColorShade, opacity 
 // neither literally `light` nor `dark`, so appearance-sensitive values must also be
 // represented as semantic variables for custom themes.
 const ADAPTIVE_COLORS: Readonly<Record<string, readonly [light: string, dark: string]>> = {
+  "--color-channel-dev": [color("blue", 700), color("blue", 400)],
+  "--color-channel-dev-surface": [color("blue", 700, 0.1), color("blue", 400, 0.1)],
+  "--color-channel-nightly": [color("indigo", 600), color("indigo", 300)],
+  "--color-channel-nightly-surface": [color("indigo", 600, 0.1), color("indigo", 300, 0.1)],
   "--color-adaptive-amber-50-950-a40": [color("amber", 50), color("amber", 950, 0.4)],
   "--color-adaptive-amber-200-900-a60": [color("amber", 200), color("amber", 900, 0.6)],
   "--color-adaptive-amber-500-a12-a16": [color("amber", 500, 0.12), color("amber", 500, 0.16)],

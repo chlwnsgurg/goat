@@ -18,11 +18,22 @@ const pullRequest: NonNullable<VcsStatusResult["pr"]> = {
 };
 
 describe("presentThreadPr", () => {
+  it.each(["open", "closed", "merged"] as const)("uses the semantic %s lifecycle tone", (state) => {
+    expect(presentThreadPr({ ...pullRequest, state }, undefined).textClassName).toBe(
+      `text-pr-${state}`,
+    );
+    const link = linkedPr(1);
+    expect(
+      presentThreadLinkedPullRequests([{ ...link, snapshot: { ...link.snapshot!, state } }])
+        ?.textClassName,
+    ).toBe(`text-pr-${state}`);
+  });
+
   it("uses the compact pull request number label without a hash prefix", () => {
     expect(presentThreadPr(pullRequest, undefined)).toMatchObject({
       label: "3774",
       accessibilityLabel: "#3774 pull request merged",
-      textClassName: "text-adaptive-violet-600-400",
+      textClassName: "text-pr-merged",
     });
   });
 
@@ -92,17 +103,17 @@ describe("presentThreadLinkedPullRequests", () => {
       others: 1,
       state: "open",
       isDraft: false,
-      textClassName: "text-adaptive-emerald-600-400",
+      textClassName: "text-pr-open",
     });
   });
 
   it.each([
-    ["closed", false, "closed", false, "closed", false, "text-adaptive-rose-600-400"],
+    ["closed", false, "closed", false, "closed", false, "text-pr-closed"],
     ["open", true, "open", true, "open", true, "text-foreground-muted"],
-    ["open", true, "open", false, "open", false, "text-adaptive-emerald-600-400"],
-    ["closed", false, "open", false, "open", false, "text-adaptive-emerald-600-400"],
-    ["merged", false, "merged", false, "merged", false, "text-adaptive-violet-600-400"],
-    ["closed", false, "merged", false, "closed", false, "text-adaptive-rose-600-400"],
+    ["open", true, "open", false, "open", false, "text-pr-open"],
+    ["closed", false, "open", false, "open", false, "text-pr-open"],
+    ["merged", false, "merged", false, "merged", false, "text-pr-merged"],
+    ["closed", false, "merged", false, "closed", false, "text-pr-closed"],
   ] as const)(
     "colors linked %s (draft %s) and %s (draft %s) by their aggregate state",
     (firstState, firstDraft, secondState, secondDraft, state, isDraft, textClassName) => {
@@ -152,7 +163,7 @@ describe("presentThreadLinkedPullRequests", () => {
       presentThreadLinkedPullRequests([
         { ...link, snapshot: { ...link.snapshot!, state: "merged" } },
       ]),
-    ).toMatchObject({ state: "merged", textClassName: "text-adaptive-violet-600-400" });
+    ).toMatchObject({ state: "merged", textClassName: "text-pr-merged" });
   });
 });
 

@@ -255,10 +255,10 @@ export function ComposerActionButton(props: {
         className={cn(
           "items-center justify-center rounded-full",
           props.variant === "danger"
-            ? "bg-danger"
+            ? "bg-composer-stop"
             : props.disabled
               ? "bg-primary/15"
-              : "bg-primary",
+              : "bg-composer-send",
         )}
       >
         <SymbolView
@@ -266,7 +266,9 @@ export function ComposerActionButton(props: {
           size={smallIconSize}
           weight="semibold"
           tintColorClassName={
-            props.variant === "danger" ? "accent-danger-foreground" : "accent-primary-foreground"
+            props.variant === "danger"
+              ? "accent-composer-stop-foreground"
+              : "accent-primary-foreground"
           }
           type="monochrome"
         />
