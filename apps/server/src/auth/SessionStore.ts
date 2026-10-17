@@ -445,6 +445,11 @@ export class SessionStore extends Context.Service<
 const SIGNING_SECRET_NAME = "server-signing-key";
 const DEFAULT_SESSION_TTL = Duration.days(30);
 const MARK_USED_INTERVAL_MS = 60_000;
+/**
+ * How long a removal fences a `verify` that read the session row before it was revoked. A
+ * verify that started earlier than this does not record a grant, so older fences can go.
+ */
+const REMOVAL_FENCE_MS = 60_000;
 const DEFAULT_WEBSOCKET_TOKEN_TTL = Duration.minutes(5);
 
 const SessionClaims = Schema.Struct({
@@ -558,8 +563,8 @@ export const make = Effect.gen(function* () {
     readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
     readonly expiresAt: DateTime.Utc;
   };
-  // `removed` remembers sessions this process revoked or retired, in the same atomic update
-  // that drops their grant, so a verify that read the row earlier cannot restore it.
+  // `removed` maps sessions this process revoked or retired to when, set in the same atomic
+  // update that drops their grant, so a verify that read the row earlier cannot restore it.
   const activeScopes = yield* Ref.make({
     records: new Map<AuthSessionId, ActiveScopeRecord>(
       activeScopeRows.map((row) => [
@@ -567,10 +572,12 @@ export const make = Effect.gen(function* () {
         { scopes: row.scopes, expiresAt: row.expiresAt },
       ]),
     ),
-    removed: new Set<AuthSessionId>(),
+    removed: new Map<AuthSessionId, number>(),
   });
   const withoutExpired = (records: ReadonlyMap<AuthSessionId, ActiveScopeRecord>, at: number) =>
     new Map(Array.from(records).filter(([, record]) => record.expiresAt.epochMilliseconds > at));
+  const withoutStaleFences = (removed: ReadonlyMap<AuthSessionId, number>, at: number) =>
+    new Map(Array.from(removed).filter(([, removedAt]) => at - removedAt < REMOVAL_FENCE_MS));
 
   // Serialize auth mutations through publication: a delayed activity event must
   // never restore a removed grant, and a committed revoke must update the Ref.
@@ -579,11 +586,20 @@ export const make = Effect.gen(function* () {
     PubSub.publish(changesPubSub, { type: "clientUpserted", clientSession }).pipe(Effect.asVoid);
 
   const emitRemoved = (sessionId: AuthSessionId) =>
-    Ref.update(activeScopes, ({ records, removed }) => {
-      const next = new Map(records);
-      next.delete(sessionId);
-      return { records: next, removed: new Set(removed).add(sessionId) };
-    }).pipe(
+    DateTime.now.pipe(
+      Effect.flatMap((now) =>
+        Ref.update(activeScopes, ({ records, removed }) => {
+          const next = new Map(records);
+          next.delete(sessionId);
+          return {
+            records: next,
+            removed: withoutStaleFences(removed, now.epochMilliseconds).set(
+              sessionId,
+              now.epochMilliseconds,
+            ),
+          };
+        }),
+      ),
       Effect.andThen(PubSub.publish(changesPubSub, { type: "clientRemoved", sessionId })),
       Effect.asVoid,
     );
@@ -593,20 +609,24 @@ export const make = Effect.gen(function* () {
    * (the CLI's `goat auth session issue`) stored after startup. Runs outside authorityLock and
    * SQL so `readActiveScopes` stays a lock-free memory read inside memory transactions.
    */
-  const rememberVerified = (sessionId: AuthSessionId, record: ActiveScopeRecord) =>
-    Effect.flatMap(DateTime.now, (now) =>
-      Ref.update(activeScopes, (current) =>
+  const rememberVerified = (
+    sessionId: AuthSessionId,
+    record: ActiveScopeRecord,
+    verifyStartedAt: DateTime.Utc,
+  ) =>
+    Effect.flatMap(DateTime.now, (now) => {
+      const at = now.epochMilliseconds;
+      // A removal older than the fence may be forgotten, so such a slow verify records nothing.
+      if (at - verifyStartedAt.epochMilliseconds >= REMOVAL_FENCE_MS) return Effect.void;
+      return Ref.update(activeScopes, (current) =>
         current.records.has(sessionId) || current.removed.has(sessionId)
           ? current
           : {
-              records: withoutExpired(current.records, now.epochMilliseconds).set(
-                sessionId,
-                record,
-              ),
-              removed: current.removed,
+              records: withoutExpired(current.records, at).set(sessionId, record),
+              removed: withoutStaleFences(current.removed, at),
             },
-      ),
-    );
+      );
+    });
 
   const loadActiveSession = (sessionId: AuthSessionId) =>
     Effect.gen(function* () {
@@ -881,6 +901,7 @@ export const make = Effect.gen(function* () {
 
   const verify: SessionStore["Service"]["verify"] = Effect.fn("SessionStore.verify")(
     function* (token) {
+      const verifyStartedAt = yield* DateTime.now;
       if (devAuth?.matches(token)) {
         const row = yield* authSessions
           .getById({ sessionId: devAuth.sessionId })
@@ -907,10 +928,11 @@ export const make = Effect.gen(function* () {
             observedAt,
           });
         }
-        yield* rememberVerified(row.value.sessionId, {
-          scopes: row.value.scopes,
-          expiresAt: row.value.expiresAt,
-        });
+        yield* rememberVerified(
+          row.value.sessionId,
+          { scopes: row.value.scopes, expiresAt: row.value.expiresAt },
+          verifyStartedAt,
+        );
         return {
           sessionId: row.value.sessionId,
           token,
@@ -968,10 +990,11 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      yield* rememberVerified(claims.sid, {
-        scopes: row.value.scopes,
-        expiresAt: row.value.expiresAt,
-      });
+      yield* rememberVerified(
+        claims.sid,
+        { scopes: row.value.scopes, expiresAt: row.value.expiresAt },
+        verifyStartedAt,
+      );
       return {
         sessionId: claims.sid,
         token,
