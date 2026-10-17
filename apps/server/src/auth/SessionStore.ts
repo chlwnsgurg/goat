@@ -388,8 +388,9 @@ export class SessionStore extends Context.Service<
       readonly replaceSessionId?: AuthSessionId;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
     /**
-     * Token-free live authority; revocation and expiry are checked on every read. Sessions
-     * stored by another process after startup are read through from the store once.
+     * Token-free live authority; revocation and expiry are checked on every read. A memory read
+     * with no SQL or lock, so it is safe inside a SQL transaction. Covers sessions loaded at
+     * startup, issued here, or accepted by `verify`, including ones another process issued.
      */
     readonly readActiveScopes: (
       sessionId: AuthSessionId,
@@ -553,14 +554,42 @@ export const make = Effect.gen(function* () {
     now: yield* DateTime.now,
     connectedSessionIds: [],
   });
-  const activeScopes = yield* Ref.make(
-    new Map(
+  type ActiveScopeRecord = {
+    readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+    readonly expiresAt: DateTime.Utc;
+  };
+  // Live grants plus the fences that keep a verify from restoring one removed while it ran.
+  // Removals are numbered; each running verify registers the removal count at its start, and a
+  // removal is fenced only while a verify that started before it is still running.
+  type ActiveScopeState = {
+    readonly records: ReadonlyMap<AuthSessionId, ActiveScopeRecord>;
+    readonly removed: ReadonlyMap<AuthSessionId, number>;
+    readonly removals: number;
+    readonly verifying: ReadonlyMap<number, number>;
+    readonly nextVerify: number;
+  };
+  const activeScopes = yield* Ref.make<ActiveScopeState>({
+    records: new Map<AuthSessionId, ActiveScopeRecord>(
       activeScopeRows.map((row) => [
         row.sessionId,
         { scopes: row.scopes, expiresAt: row.expiresAt },
       ]),
     ),
-  );
+    removed: new Map(),
+    removals: 0,
+    verifying: new Map(),
+    nextVerify: 0,
+  });
+  const withoutExpired = (records: ReadonlyMap<AuthSessionId, ActiveScopeRecord>, at: number) =>
+    new Map(Array.from(records).filter(([, record]) => record.expiresAt.epochMilliseconds > at));
+  /** Keeps only fences a running verify that started before that removal still needs. */
+  const neededFences = (
+    removed: ReadonlyMap<AuthSessionId, number>,
+    verifying: ReadonlyMap<number, number>,
+  ) => {
+    const oldestStart = Math.min(...verifying.values());
+    return new Map(Array.from(removed).filter(([, removal]) => removal > oldestStart));
+  };
 
   // Serialize auth mutations through publication: a delayed activity event must
   // never restore a removed grant, and a committed revoke must update the Ref.
@@ -570,12 +599,62 @@ export const make = Effect.gen(function* () {
 
   const emitRemoved = (sessionId: AuthSessionId) =>
     Ref.update(activeScopes, (current) => {
-      const next = new Map(current);
-      next.delete(sessionId);
-      return next;
+      const records = new Map(current.records);
+      records.delete(sessionId);
+      const removals = current.removals + 1;
+      return {
+        ...current,
+        records,
+        removals,
+        removed: neededFences(new Map(current.removed).set(sessionId, removals), current.verifying),
+      };
     }).pipe(
       Effect.andThen(PubSub.publish(changesPubSub, { type: "clientRemoved", sessionId })),
       Effect.asVoid,
+    );
+
+  /** Registers a running verify; yields its ticket and the removal count it started at. */
+  const beginVerify = Ref.modify(activeScopes, (current) => {
+    const ticket = current.nextVerify;
+    return [
+      { ticket, startedAt: current.removals },
+      {
+        ...current,
+        nextVerify: ticket + 1,
+        verifying: new Map(current.verifying).set(ticket, current.removals),
+      },
+    ] as const;
+  });
+  const endVerify = (ticket: number) =>
+    Ref.update(activeScopes, (current) => {
+      const verifying = new Map(current.verifying);
+      verifying.delete(ticket);
+      return { ...current, verifying, removed: neededFences(current.removed, verifying) };
+    });
+
+  /**
+   * Records the live grant of a session `verify` just accepted, including one another process
+   * (the CLI's `goat auth session issue`) stored after startup. Runs outside authorityLock and
+   * SQL so `readActiveScopes` stays a lock-free memory read inside memory transactions.
+   */
+  const rememberVerified = (
+    sessionId: AuthSessionId,
+    record: ActiveScopeRecord,
+    verifyStartedAt: number,
+  ) =>
+    Effect.flatMap(DateTime.now, (now) =>
+      Ref.update(activeScopes, (current) =>
+        current.records.has(sessionId) ||
+        (current.removed.get(sessionId) ?? Number.NEGATIVE_INFINITY) > verifyStartedAt
+          ? current
+          : {
+              ...current,
+              records: withoutExpired(current.records, now.epochMilliseconds).set(
+                sessionId,
+                record,
+              ),
+            },
+      ),
     );
 
   const loadActiveSession = (sessionId: AuthSessionId) =>
@@ -801,13 +880,13 @@ export const make = Effect.gen(function* () {
           discard: true,
         });
       }
-      yield* Ref.update(activeScopes, (current) =>
-        new Map(
-          Array.from(current).filter(
-            ([, record]) => record.expiresAt.epochMilliseconds > issuedAt.epochMilliseconds,
-          ),
-        ).set(sessionId, { scopes: claims.scopes, expiresAt }),
-      );
+      yield* Ref.update(activeScopes, (current) => ({
+        ...current,
+        records: withoutExpired(current.records, issuedAt.epochMilliseconds).set(sessionId, {
+          scopes: claims.scopes,
+          expiresAt,
+        }),
+      }));
       yield* emitUpsert(
         toAuthClientSession({
           sessionId,
@@ -834,40 +913,11 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  // Another process (the CLI's `goat auth session issue`) can store a session after startup.
-  // Runs under authorityLock: in-process revocation commits and removes the entry under the
-  // same permit, so a stale read can never restore a removed grant.
-  const readThroughActiveScopes = Effect.fn("SessionStore.readThroughActiveScopes")(function* (
-    sessionId: AuthSessionId,
-  ) {
-    const cached = (yield* Ref.get(activeScopes)).get(sessionId);
-    if (cached) return cached;
-    const row = yield* authSessions
-      .getById({ sessionId })
-      .pipe(
-        Effect.mapError((cause) => new SessionCredentialVerificationError({ sessionId, cause })),
-      );
-    if (Option.isNone(row)) return yield* new UnknownSessionTokenError({ sessionId });
-    if (row.value.revokedAt !== null)
-      return yield* new SessionTokenRevokedError({ sessionId, revokedAt: row.value.revokedAt });
-    const observedAt = yield* DateTime.now;
-    if (row.value.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds)
-      return yield* new SessionTokenExpiredError({
-        sessionId,
-        expiresAt: row.value.expiresAt,
-        observedAt,
-      });
-    const record = { scopes: row.value.scopes, expiresAt: row.value.expiresAt };
-    yield* Ref.update(activeScopes, (current) => new Map(current).set(sessionId, record));
-    return record;
-  });
-
   const readActiveScopes: SessionStore["Service"]["readActiveScopes"] = Effect.fn(
     "SessionStore.readActiveScopes",
   )(function* (sessionId) {
-    const record =
-      (yield* Ref.get(activeScopes)).get(sessionId) ??
-      (yield* authorityLock.withPermit(readThroughActiveScopes(sessionId)));
+    const record = (yield* Ref.get(activeScopes)).records.get(sessionId);
+    if (!record) return yield* new UnknownSessionTokenError({ sessionId });
     const observedAt = yield* DateTime.now;
     if (record.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds)
       return yield* new SessionTokenExpiredError({
@@ -878,104 +928,123 @@ export const make = Effect.gen(function* () {
     return record.scopes;
   });
 
-  const verify: SessionStore["Service"]["verify"] = Effect.fn("SessionStore.verify")(
-    function* (token) {
-      if (devAuth?.matches(token)) {
-        const row = yield* authSessions
-          .getById({ sessionId: devAuth.sessionId })
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new SessionCredentialVerificationError({ sessionId: devAuth.sessionId, cause }),
-            ),
-          );
-        if (Option.isNone(row)) {
-          return yield* new UnknownSessionTokenError({ sessionId: devAuth.sessionId });
-        }
-        if (row.value.revokedAt !== null) {
-          return yield* new SessionTokenRevokedError({
-            sessionId: devAuth.sessionId,
-            revokedAt: row.value.revokedAt,
-          });
-        }
-        const observedAt = yield* DateTime.now;
-        if (row.value.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds) {
-          return yield* new SessionTokenExpiredError({
-            sessionId: devAuth.sessionId,
-            expiresAt: row.value.expiresAt,
-            observedAt,
-          });
-        }
-        return {
-          sessionId: row.value.sessionId,
-          token,
-          method: row.value.method,
-          client: toClientMetadata(row.value.client),
-          expiresAt: row.value.expiresAt,
-          subject: row.value.subject,
-          scopes: row.value.scopes,
-        } satisfies VerifiedSession;
-      }
-      const [encodedPayload, signature] = token.split(".");
-      if (!encodedPayload || !signature) {
-        return yield* new MalformedSessionTokenError({});
-      }
-
-      const expectedSignature = signPayload(encodedPayload, signingSecret);
-      if (!timingSafeEqualBase64Url(signature, expectedSignature)) {
-        return yield* new InvalidSessionTokenSignatureError({});
-      }
-
-      const claims = yield* decodeSessionClaims(base64UrlDecodeUtf8(encodedPayload)).pipe(
-        Effect.mapError((cause) => new InvalidSessionTokenPayloadError({ cause })),
-      );
-
-      const observedAt = yield* DateTime.now;
-      const expiresAt = DateTime.make(claims.exp);
-      if (Option.isNone(expiresAt)) {
-        return yield* new InvalidSessionExpirationClaimError({
-          sessionId: claims.sid,
-          expirationClaim: claims.exp,
-        });
-      }
-      if (claims.exp <= observedAt.epochMilliseconds) {
-        return yield* new SessionTokenExpiredError({
-          sessionId: claims.sid,
-          expiresAt: expiresAt.value,
-          observedAt,
-        });
-      }
-
+  const verifyToken = Effect.fn("SessionStore.verifyToken")(function* (
+    token: string,
+    verifyStartedAt: number,
+  ) {
+    if (devAuth?.matches(token)) {
       const row = yield* authSessions
-        .getById({ sessionId: claims.sid })
+        .getById({ sessionId: devAuth.sessionId })
         .pipe(
           Effect.mapError(
-            (cause) => new SessionCredentialVerificationError({ sessionId: claims.sid, cause }),
+            (cause) =>
+              new SessionCredentialVerificationError({ sessionId: devAuth.sessionId, cause }),
           ),
         );
       if (Option.isNone(row)) {
-        return yield* new UnknownSessionTokenError({ sessionId: claims.sid });
+        return yield* new UnknownSessionTokenError({ sessionId: devAuth.sessionId });
       }
       if (row.value.revokedAt !== null) {
         return yield* new SessionTokenRevokedError({
-          sessionId: claims.sid,
+          sessionId: devAuth.sessionId,
           revokedAt: row.value.revokedAt,
         });
       }
-
+      const observedAt = yield* DateTime.now;
+      if (row.value.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds) {
+        return yield* new SessionTokenExpiredError({
+          sessionId: devAuth.sessionId,
+          expiresAt: row.value.expiresAt,
+          observedAt,
+        });
+      }
+      yield* rememberVerified(
+        row.value.sessionId,
+        { scopes: row.value.scopes, expiresAt: row.value.expiresAt },
+        verifyStartedAt,
+      );
       return {
-        sessionId: claims.sid,
+        sessionId: row.value.sessionId,
         token,
-        method: claims.method,
+        method: row.value.method,
         client: toClientMetadata(row.value.client),
-        expiresAt: expiresAt.value,
-        subject: claims.sub,
-        scopes: claims.scopes,
-        ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
-        ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
+        expiresAt: row.value.expiresAt,
+        subject: row.value.subject,
+        scopes: row.value.scopes,
       } satisfies VerifiedSession;
-    },
-  );
+    }
+    const [encodedPayload, signature] = token.split(".");
+    if (!encodedPayload || !signature) {
+      return yield* new MalformedSessionTokenError({});
+    }
+
+    const expectedSignature = signPayload(encodedPayload, signingSecret);
+    if (!timingSafeEqualBase64Url(signature, expectedSignature)) {
+      return yield* new InvalidSessionTokenSignatureError({});
+    }
+
+    const claims = yield* decodeSessionClaims(base64UrlDecodeUtf8(encodedPayload)).pipe(
+      Effect.mapError((cause) => new InvalidSessionTokenPayloadError({ cause })),
+    );
+
+    const observedAt = yield* DateTime.now;
+    const expiresAt = DateTime.make(claims.exp);
+    if (Option.isNone(expiresAt)) {
+      return yield* new InvalidSessionExpirationClaimError({
+        sessionId: claims.sid,
+        expirationClaim: claims.exp,
+      });
+    }
+    if (claims.exp <= observedAt.epochMilliseconds) {
+      return yield* new SessionTokenExpiredError({
+        sessionId: claims.sid,
+        expiresAt: expiresAt.value,
+        observedAt,
+      });
+    }
+
+    const row = yield* authSessions
+      .getById({ sessionId: claims.sid })
+      .pipe(
+        Effect.mapError(
+          (cause) => new SessionCredentialVerificationError({ sessionId: claims.sid, cause }),
+        ),
+      );
+    if (Option.isNone(row)) {
+      return yield* new UnknownSessionTokenError({ sessionId: claims.sid });
+    }
+    if (row.value.revokedAt !== null) {
+      return yield* new SessionTokenRevokedError({
+        sessionId: claims.sid,
+        revokedAt: row.value.revokedAt,
+      });
+    }
+
+    yield* rememberVerified(
+      claims.sid,
+      { scopes: row.value.scopes, expiresAt: row.value.expiresAt },
+      verifyStartedAt,
+    );
+    return {
+      sessionId: claims.sid,
+      token,
+      method: claims.method,
+      client: toClientMetadata(row.value.client),
+      expiresAt: expiresAt.value,
+      subject: claims.sub,
+      scopes: claims.scopes,
+      ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
+      ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
+    } satisfies VerifiedSession;
+  });
+
+  // Registration is released on success, failure and interruption so fences never pile up.
+  const verify: SessionStore["Service"]["verify"] = (token) =>
+    Effect.acquireUseRelease(
+      beginVerify,
+      ({ startedAt }) => verifyToken(token, startedAt),
+      ({ ticket }) => endVerify(ticket),
+    ).pipe(Effect.withSpan("SessionStore.verify"));
 
   const encodeWsClaims = Schema.encodeEffect(Schema.fromJsonString(WebSocketClaims));
   const issueWebSocketToken: SessionStore["Service"]["issueWebSocketToken"] = Effect.fn(
