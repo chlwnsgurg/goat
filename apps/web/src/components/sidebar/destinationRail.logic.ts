@@ -1,5 +1,6 @@
 export type DestinationId =
   | "home"
+  | "fleet"
   | "bot"
   | "decisions"
   | "usage"
@@ -23,6 +24,7 @@ export function resolveActiveDestination(
   context: { readonly isBotRoute: boolean },
 ): DestinationId {
   if (context.isBotRoute) return "bot";
+  if (pathname === "/fleet") return "fleet";
   if (pathname === "/decisions") return "decisions";
   if (pathname === "/usage") return "usage";
   if (pathname === "/pull-requests") return "pullRequests";

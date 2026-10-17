@@ -60,6 +60,7 @@ import {
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import {
+  ActivityIcon,
   CloudDownloadIcon,
   BellIcon,
   ArrowLeftIcon,
@@ -2286,6 +2287,17 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:fleet",
+    searchTerms: ["fleet", "running", "machines", "agents", "graph", "activity"],
+    title: "Open fleet",
+    icon: <ActivityIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/fleet" });
+    },
+  });
 
   actionItems.push({
     kind: "action",

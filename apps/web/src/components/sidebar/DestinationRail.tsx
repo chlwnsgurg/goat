@@ -1,8 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
+import type { FleetMachineSummary } from "@goat/client-runtime/state/fleet";
 import { Link, useLocation, useParams } from "@tanstack/react-router";
 import { createContext, memo, useContext, type ReactElement } from "react";
 
 import {
+  ActivityIcon,
   BotIcon,
   BrainIcon,
   CalendarClockIcon,
@@ -20,6 +22,7 @@ import { useGlobalAgentStore } from "../../globalAgentStore";
 import { cn } from "../../lib/utils";
 import { decisionInbox } from "../../state/decisionInbox";
 import { useEnvironments, usePullRequestsSupported } from "../../state/environments";
+import { useFleetSummary } from "../../state/fleet";
 import { resolveThreadRouteTarget } from "../../threadRoutes";
 import { useGoatBotWaitingCount } from "../goatBot/useGoatBotWaitingCount";
 import {
@@ -41,9 +44,10 @@ export function useDestinationRailVisible(): boolean {
 // subpages.
 const EXACT_MATCH = { exact: true } as const;
 
-function railItemClassName(active: boolean) {
+function railItemClassName(active: boolean, shape = "size-10 justify-center") {
   return cn(
-    "relative flex size-10 shrink-0 items-center justify-center rounded-lg outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&_svg]:size-5",
+    "relative flex shrink-0 items-center rounded-lg outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&_svg]:size-5",
+    shape,
     // The rail sits on the window background, where the sidebar's row fills (tuned for the
     // sidebar surface) barely show; the accent pair keeps both states visible in every theme.
     active
@@ -76,6 +80,100 @@ function RailTooltip({ label, children }: { label: string; children: ReactElemen
 function countLabel(label: string, count: number | undefined) {
   return count !== undefined && count > 0 ? `${label}, ${count} waiting` : label;
 }
+
+const FLEET_RAIL_ROWS = 3;
+const FLEET_TOOLTIP_ROWS = 8;
+
+const machineBusy = (machine: FleetMachineSummary) => machine.running + machine.attention > 0;
+
+function machineWork(machine: FleetMachineSummary) {
+  const parts = [
+    machine.running > 0 ? `${machine.running} running` : null,
+    machine.attention > 0 ? `${machine.attention} need you` : null,
+  ].filter((part) => part !== null);
+  return parts.length === 0 ? "idle" : parts.join(", ");
+}
+
+/**
+ * Live glance at everything running on connected machines: a total badge and one row per
+ * machine, busy machines first. Subscribes to the fleet summary alone, which keeps its
+ * object while counts hold, so streamed thread updates do not repaint the rail.
+ */
+const FleetRailItem = memo(function FleetRailItem({ active }: { active: boolean }) {
+  const summary = useFleetSummary();
+  const live = summary.running + summary.attention;
+  const ranked = [
+    ...summary.machines.filter(machineBusy),
+    ...summary.machines.filter((machine) => !machineBusy(machine)),
+  ];
+  const rows = ranked.slice(0, FLEET_RAIL_ROWS);
+  const hiddenRows = ranked.length - rows.length;
+  const tooltipRows = ranked.slice(0, FLEET_TOOLTIP_ROWS);
+  const label =
+    live === 0 ? "Fleet" : `Fleet, ${summary.running} running, ${summary.attention} need you`;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Link
+            to="/fleet"
+            aria-label={label}
+            activeOptions={EXACT_MATCH}
+            aria-current={active ? "page" : undefined}
+            className={railItemClassName(active, "w-10 flex-col gap-1 pt-2.5 pb-2")}
+          >
+            <ActivityIcon aria-hidden />
+            <RailCount count={live} />
+            {rows.length > 1 ? (
+              <span aria-hidden className="flex w-full flex-col items-center gap-0.5">
+                {rows.map((machine) => (
+                  <span
+                    key={machine.environmentId}
+                    className="flex h-2.5 items-center gap-1 text-3xs leading-none tabular-nums"
+                  >
+                    <span
+                      className={cn(
+                        "size-1.5 rounded-full",
+                        machine.attention > 0
+                          ? "bg-warning"
+                          : machine.running > 0
+                            ? "bg-info"
+                            : "bg-muted-foreground/40",
+                      )}
+                    />
+                    {machineBusy(machine) ? machine.running + machine.attention : null}
+                  </span>
+                ))}
+                {hiddenRows > 0 ? (
+                  <span className="text-3xs leading-none tabular-nums">+{hiddenRows}</span>
+                ) : null}
+              </span>
+            ) : null}
+          </Link>
+        }
+      />
+      <TooltipPopup side="right">
+        <span className="flex flex-col gap-0.5">
+          <span className="font-medium">
+            {live === 0
+              ? "Fleet: nothing running"
+              : `Fleet: ${summary.running} running, ${summary.attention} need you`}
+          </span>
+          {summary.machines.length > 1
+            ? tooltipRows.map((machine) => (
+                <span key={machine.environmentId}>
+                  {machine.label}: {machineWork(machine)}
+                </span>
+              ))
+            : null}
+          {summary.machines.length > FLEET_TOOLTIP_ROWS ? (
+            <span>and {summary.machines.length - FLEET_TOOLTIP_ROWS} more</span>
+          ) : null}
+        </span>
+      </TooltipPopup>
+    </Tooltip>
+  );
+});
 
 /** The desktop app-wide destination rail beside the thread sidebar. */
 export const DestinationRail = memo(function DestinationRail() {
@@ -118,6 +216,7 @@ export const DestinationRail = memo(function DestinationRail() {
             <HomeIcon aria-hidden />
           </Link>
         </RailTooltip>
+        <FleetRailItem active={active === "fleet"} />
         <RailTooltip label="GOAT Bot">
           <Link
             to="/bot"

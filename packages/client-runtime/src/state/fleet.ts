@@ -1,0 +1,380 @@
+import type {
+  CloudMachine,
+  CloudMachineState,
+  EnvironmentId,
+  OrchestrationV2ThreadShell,
+  RemoteLaunch,
+  ScopedThreadRef,
+} from "@goat/contracts";
+import * as Option from "effect/Option";
+import { Atom } from "effect/reactivity";
+
+import { scopeThreadRef } from "../environment/scoped.ts";
+import { threadRuntimeIsActive, type EnvironmentThreadShell } from "./models.ts";
+import { presentRemoteLaunches } from "./remoteLaunches.ts";
+
+/**
+ * Fleet: what is running right now across every connected environment, for the
+ * destination rail's glance and the /fleet page.
+ *
+ * Counts come only from live thread shells. Remote launches and cloud machines
+ * are what a dispatching server last reported; they are read while the page is
+ * open and never feed the rail, which would otherwise keep a stale count.
+ */
+
+/** "attention" is a pending approval or question: the thread needs the user. */
+export type FleetThreadState = "running" | "attention";
+
+export type FleetShell = Pick<
+  EnvironmentThreadShell,
+  | "environmentId"
+  | "id"
+  | "title"
+  | "providerInstanceId"
+  | "runtime"
+  | "hasPendingApprovals"
+  | "hasPendingUserInput"
+  | "pendingBackgroundTasks"
+  | "archivedAt"
+  | "deletedAt"
+  | "sideChatOf"
+  | "updatedAt"
+> & { readonly source: Pick<OrchestrationV2ThreadShell, "launchedBy"> };
+
+/**
+ * Subagents count, since Fleet shows all work in flight; side chats, archived
+ * and deleted threads do not. A run parked at idle while its background work
+ * holds completion still counts as running, as in the sidebar.
+ */
+export function classifyFleetThread(
+  shell: Pick<
+    FleetShell,
+    | "runtime"
+    | "hasPendingApprovals"
+    | "hasPendingUserInput"
+    | "pendingBackgroundTasks"
+    | "archivedAt"
+    | "deletedAt"
+    | "sideChatOf"
+  >,
+): FleetThreadState | null {
+  if (shell.archivedAt !== null || shell.deletedAt !== null || shell.sideChatOf != null) {
+    return null;
+  }
+  if (shell.hasPendingApprovals || shell.hasPendingUserInput) return "attention";
+  if (threadRuntimeIsActive(shell.runtime)) return "running";
+  if (shell.runtime?.status === "idle" && shell.pendingBackgroundTasks.length > 0) {
+    return "running";
+  }
+  return null;
+}
+
+export interface FleetEnvironment {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+  /** SSH aliases this client reaches the environment through. */
+  readonly sshAliases: ReadonlyArray<string>;
+}
+
+export interface FleetMachineSummary {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+  readonly running: number;
+  readonly attention: number;
+}
+
+export interface FleetSummary {
+  readonly running: number;
+  readonly attention: number;
+  /** Every connected environment, in connection order, busy or not. */
+  readonly machines: ReadonlyArray<FleetMachineSummary>;
+}
+
+export function summarizeFleet(
+  shells: ReadonlyArray<FleetShell>,
+  environments: ReadonlyArray<Pick<FleetEnvironment, "environmentId" | "label">>,
+): FleetSummary {
+  const counts = new Map<EnvironmentId, { running: number; attention: number }>(
+    environments.map((environment) => [environment.environmentId, { running: 0, attention: 0 }]),
+  );
+  let running = 0;
+  let attention = 0;
+  for (const shell of shells) {
+    const machine = counts.get(shell.environmentId);
+    if (machine === undefined) continue;
+    const state = classifyFleetThread(shell);
+    if (state === null) continue;
+    machine[state] += 1;
+    if (state === "running") running += 1;
+    else attention += 1;
+  }
+  return {
+    running,
+    attention,
+    machines: environments.map((environment) => ({
+      environmentId: environment.environmentId,
+      label: environment.label,
+      ...counts.get(environment.environmentId)!,
+    })),
+  };
+}
+
+export function fleetSummariesEqual(left: FleetSummary, right: FleetSummary): boolean {
+  return (
+    left.running === right.running &&
+    left.attention === right.attention &&
+    left.machines.length === right.machines.length &&
+    left.machines.every((machine, index) => {
+      const other = right.machines[index]!;
+      return (
+        machine.environmentId === other.environmentId &&
+        machine.label === other.label &&
+        machine.running === other.running &&
+        machine.attention === other.attention
+      );
+    })
+  );
+}
+
+/** The rail's glance. Keeps the previous object while counts and labels hold, so
+    the rail item renders only when what it shows changes. */
+export function createFleetSummaryAtom(input: {
+  readonly threadShellsAtom: Atom.Atom<ReadonlyArray<FleetShell>>;
+  readonly environmentsAtom: Atom.Atom<ReadonlyArray<FleetEnvironment>>;
+}): Atom.Atom<FleetSummary> {
+  return Atom.make((get) => {
+    const next = summarizeFleet(get(input.threadShellsAtom), get(input.environmentsAtom));
+    const previous = Option.getOrNull(get.self<FleetSummary>());
+    return previous !== null && fleetSummariesEqual(previous, next) ? previous : next;
+  }).pipe(Atom.withLabel("fleet-summary"));
+}
+
+export type FleetMachineKind = "environment" | "ssh" | "cloud";
+
+export interface FleetAgent {
+  /** Provider instance id, or "unknown" for work a dispatcher reported. */
+  readonly key: string;
+  readonly label: string;
+  readonly running: number;
+  readonly attention: number;
+  readonly reported: number;
+}
+
+export interface FleetMachine {
+  readonly id: string;
+  readonly label: string;
+  readonly subtitle: string | null;
+  readonly kind: FleetMachineKind;
+  readonly environmentId: EnvironmentId | null;
+  readonly cloudState: CloudMachineState | null;
+  readonly running: number;
+  readonly attention: number;
+  readonly reported: number;
+  readonly agents: ReadonlyArray<FleetAgent>;
+}
+
+export interface FleetThread {
+  readonly key: string;
+  readonly machineId: string;
+  /** Null for reported work this client cannot open. */
+  readonly ref: ScopedThreadRef | null;
+  readonly title: string;
+  readonly agentKey: string;
+  readonly agentLabel: string;
+  readonly state: FleetThreadState | "reported";
+  readonly updatedAt: string;
+  /** The dispatching environment's label, for reported work. */
+  readonly reportedBy: string | null;
+}
+
+export interface FleetSnapshot {
+  readonly machines: ReadonlyArray<FleetMachine>;
+  readonly threads: ReadonlyArray<FleetThread>;
+  readonly totals: {
+    readonly running: number;
+    readonly attention: number;
+    readonly reported: number;
+    readonly machines: number;
+  };
+}
+
+export interface FleetRemoteSource {
+  readonly dispatcherEnvironmentId: EnvironmentId;
+  readonly launches: ReadonlyArray<RemoteLaunch>;
+  readonly cloudMachines: ReadonlyArray<CloudMachine>;
+}
+
+const UNKNOWN_AGENT = "unknown";
+const STATE_ORDER: Record<FleetThread["state"], number> = { attention: 0, running: 1, reported: 2 };
+
+type MutableAgent = { -readonly [K in keyof FleetAgent]: FleetAgent[K] };
+type MutableMachine = Omit<{ -readonly [K in keyof FleetMachine]: FleetMachine[K] }, "agents"> & {
+  agents: Map<string, MutableAgent>;
+};
+
+/** The /fleet page's full picture: live threads plus what dispatchers reported. */
+export function buildFleet(input: {
+  readonly environments: ReadonlyArray<FleetEnvironment>;
+  /** Desktop reaches cloud machines through the primary environment's SSH aliases. */
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  readonly shells: ReadonlyArray<FleetShell>;
+  readonly remote: ReadonlyArray<FleetRemoteSource>;
+  readonly providerName?: (environmentId: EnvironmentId, instanceId: string) => string | null;
+}): FleetSnapshot {
+  const machines = new Map<string, MutableMachine>();
+  const threads: FleetThread[] = [];
+  const labelOf = new Map(input.environments.map((env) => [env.environmentId, env.label]));
+  const environmentBySshAlias = new Map<string, EnvironmentId>();
+  for (const environment of input.environments) {
+    machines.set(machineId(environment.environmentId), {
+      id: machineId(environment.environmentId),
+      label: environment.label,
+      subtitle: null,
+      kind: "environment",
+      environmentId: environment.environmentId,
+      cloudState: null,
+      running: 0,
+      attention: 0,
+      reported: 0,
+      agents: new Map(),
+    });
+    for (const alias of environment.sshAliases)
+      environmentBySshAlias.set(alias, environment.environmentId);
+  }
+  const connectedShells = input.shells.filter((shell) => labelOf.has(shell.environmentId));
+
+  const count = (
+    machine: MutableMachine,
+    agentKey: string,
+    agentLabel: string,
+    state: FleetThread["state"],
+  ) => {
+    machine[state] += 1;
+    const agent = machine.agents.get(agentKey) ?? {
+      key: agentKey,
+      label: agentLabel,
+      running: 0,
+      attention: 0,
+      reported: 0,
+    };
+    agent[state] += 1;
+    machine.agents.set(agentKey, agent);
+  };
+
+  for (const shell of connectedShells) {
+    const state = classifyFleetThread(shell);
+    if (state === null) continue;
+    const machine = machines.get(machineId(shell.environmentId))!;
+    const agentLabel =
+      input.providerName?.(shell.environmentId, shell.providerInstanceId) ??
+      shell.providerInstanceId;
+    count(machine, shell.providerInstanceId, agentLabel, state);
+    threads.push({
+      key: JSON.stringify([shell.environmentId, shell.id]),
+      machineId: machine.id,
+      ref: scopeThreadRef(shell.environmentId, shell.id),
+      title: shell.title,
+      agentKey: shell.providerInstanceId,
+      agentLabel,
+      state,
+      updatedAt: shell.updatedAt,
+      reportedBy: null,
+    });
+  }
+
+  for (const source of input.remote) {
+    const dispatcher = source.dispatcherEnvironmentId;
+    const dispatcherLabel = labelOf.get(dispatcher) ?? null;
+    // Shells from disconnected environments must not resolve a launch: their
+    // state is stale, so the launch would vanish from both live and reported.
+    const groups = presentRemoteLaunches({
+      dispatcherEnvironmentId: dispatcher,
+      launches: source.launches,
+      shells: connectedShells,
+    });
+    const resolvedHosts = new Map<string, EnvironmentId>();
+    for (const group of groups) {
+      if (group.environmentId !== null) resolvedHosts.set(group.host, group.environmentId);
+    }
+    const resolveAlias = (alias: string) =>
+      resolvedHosts.get(alias) ??
+      (dispatcher === input.primaryEnvironmentId ? environmentBySshAlias.get(alias) : undefined);
+    const hostMachine = (alias: string, kind: "ssh" | "cloud", label: string) => {
+      const environmentId = resolveAlias(alias);
+      if (environmentId !== undefined) return machines.get(machineId(environmentId))!;
+      const id = JSON.stringify(["ssh", dispatcher, alias]);
+      const existing = machines.get(id);
+      if (existing !== undefined) return existing;
+      const created: MutableMachine = {
+        id,
+        label,
+        subtitle: dispatcherLabel === null ? null : "via " + dispatcherLabel,
+        kind,
+        environmentId: null,
+        cloudState: null,
+        running: 0,
+        attention: 0,
+        reported: 0,
+        agents: new Map(),
+      };
+      machines.set(id, created);
+      return created;
+    };
+
+    for (const cloud of source.cloudMachines) {
+      if (cloud.deletePending || cloud.presence === "not_found") continue;
+      const machine = hostMachine(cloud.alias, "cloud", cloud.label);
+      machine.cloudState = cloud.state;
+      if (machine.kind === "environment" && machine.label !== cloud.label) {
+        machine.subtitle = cloud.label;
+      }
+    }
+
+    groups.forEach((group) => {
+      group.launches.forEach((presented, index) => {
+        const launch = presented.launch;
+        // A launch whose thread is loaded here is that live thread, idle or not.
+        if (presented.ref !== null) return;
+        if (launch.state !== "launching" && launch.state !== "running") return;
+        if (launch.hostUnavailableSince !== null) return;
+        const machine = hostMachine(group.host, "ssh", group.host);
+        count(machine, UNKNOWN_AGENT, "Unknown agent", "reported");
+        threads.push({
+          key: JSON.stringify(["reported", dispatcher, group.host, index]),
+          machineId: machine.id,
+          ref: null,
+          title: presented.title ?? "Untitled launch",
+          agentKey: UNKNOWN_AGENT,
+          agentLabel: "Unknown agent",
+          state: "reported",
+          updatedAt: launch.updatedAt,
+          reportedBy: dispatcherLabel,
+        });
+      });
+    });
+  }
+
+  threads.sort(
+    (left, right) =>
+      STATE_ORDER[left.state] - STATE_ORDER[right.state] ||
+      (left.updatedAt < right.updatedAt ? 1 : left.updatedAt > right.updatedAt ? -1 : 0),
+  );
+  const list = [...machines.values()].map(({ agents, ...machine }): FleetMachine => ({
+    ...machine,
+    agents: [...agents.values()],
+  }));
+  return {
+    machines: list,
+    threads,
+    totals: {
+      running: list.reduce((sum, machine) => sum + machine.running, 0),
+      attention: list.reduce((sum, machine) => sum + machine.attention, 0),
+      reported: list.reduce((sum, machine) => sum + machine.reported, 0),
+      machines: list.length,
+    },
+  };
+}
+
+function machineId(environmentId: EnvironmentId): string {
+  return JSON.stringify(["env", environmentId]);
+}

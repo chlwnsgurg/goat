@@ -10,6 +10,7 @@ describe("resolveActiveDestination", () => {
     ["/env-1/thread-1", "home"],
     ["/draft/draft-1", "home"],
     ["/new", "home"],
+    ["/fleet", "fleet"],
     ["/decisions", "decisions"],
     ["/usage", "usage"],
     ["/pull-requests", "pullRequests"],
