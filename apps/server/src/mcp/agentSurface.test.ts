@@ -27,6 +27,7 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
 import * as ThreadLaunchMcpService from "./ThreadLaunchMcpService.ts";
 import * as RemoteReportService from "../remoteReports/RemoteReportService.ts";
+import * as CloudMachineService from "../cloudMachines/CloudMachineService.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import * as SshWorkspaceSync from "../sshRemote/SshWorkspaceSync.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
@@ -152,6 +153,7 @@ const dependencies = Layer.mergeAll(
   Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
   Layer.mock(ThreadResultService.ThreadResultService)({}),
   Layer.mock(WorktreeMcpService.WorktreeMcpService)({}),
+  Layer.mock(CloudMachineService.CloudMachineService)({}),
   Layer.mock(GitWorkflowService.GitWorkflowService)({}),
   NodeCrypto.layer,
 );
@@ -173,7 +175,7 @@ const client = McpSchema.McpServerClient.of({
 });
 
 it("gives every entry a unique path, legacy name and resolvable schema reference", () => {
-  expect(entries).toHaveLength(122); // Includes current memory, browser and provider tools.
+  expect(entries).toHaveLength(126); // Includes current memory, browser and provider tools.
   expect(new Set(entries.map((entry) => entry.name)).size).toBe(entries.length);
   for (const [path, entry] of Object.entries(agentSurfaceRegistry)) {
     expect(path).toBe(entry.path);

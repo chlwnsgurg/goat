@@ -15,6 +15,17 @@ describe("memory client guards", () => {
       "memory:write",
       "filesystem:read",
     ]));
+  it("disables cloud machine changes without settings write and leaves listing to the server", () => {
+    expect(clientRpcRequiredScopes(WS_METHODS.cloudMachinesList, {})).toEqual([]);
+    for (const method of [
+      WS_METHODS.cloudMachinesConfigure,
+      WS_METHODS.cloudMachinesCreate,
+      WS_METHODS.cloudMachinesResume,
+      WS_METHODS.cloudMachinesDelete,
+      WS_METHODS.cloudMachinesEnsureReady,
+    ])
+      expect(clientRpcRequiredScopes(method, {}), method).toEqual(["settings:write"]);
+  });
   it("guards hub settings update with settings write", () => {
     for (const method of [WS_METHODS.memoryHubSettingsGet, WS_METHODS.memoryHubSettingsUpdate])
       expect(clientRpcRequiredScopes(method, {})).toEqual(["settings:write"]);

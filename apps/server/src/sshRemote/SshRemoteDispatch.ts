@@ -6,7 +6,9 @@ import {
   ChatAttachmentId,
   ChatFileAttachment,
   ChatImageAttachment,
+  type CloudMachineAlias,
   EnvironmentId,
+  isCloudMachineAlias,
   ProjectId,
   ThreadId,
   OrchestratorMcpCapabilitiesResult,
@@ -44,6 +46,7 @@ import type { ChildProcessSpawner } from "effect/process";
 
 import packageJson from "../../package.json" with { type: "json" };
 import { BUILD_COMMIT_TIME } from "../buildCommitTime.ts";
+import * as CloudMachineService from "../cloudMachines/CloudMachineService.ts";
 import { resolveAttachmentPath, resolveAttachmentPathById } from "../attachmentStore.ts";
 import { ATTACHMENT_UPLOAD_ROUTE_PREFIX } from "../assets/AttachmentUpload.ts";
 import * as Claims from "../orchestration-v2/AttachmentClaims.ts";
@@ -520,6 +523,41 @@ const make = Effect.gen(function* () {
       Effect.provide(runtime),
     );
 
+  // Cloud machines this server manages get a fresh address and pinned host key before an SSH
+  // operation. Optional so test layers without it dial every alias as plain SSH.
+  const cloudMachines = yield* Effect.serviceOption(CloudMachineService.CloudMachineService);
+  /** Forgets everything cached for an alias whose address or host key changed. */
+  const invalidateAlias = (alias: string) =>
+    Effect.gen(function* () {
+      const prefix = `${alias}\u0000`;
+      for (const key of sessions.keys()) if (key.startsWith(prefix)) sessions.delete(key);
+      for (const key of launchArguments.keys())
+        if (key.startsWith(prefix)) launchArguments.delete(key);
+      connected.delete(alias);
+      yield* withRuntime(
+        manager.disconnectEnvironment({ alias, hostname: alias, username: null, port: null }),
+      ).pipe(Effect.ignore({ log: true }));
+    });
+  if (Option.isSome(cloudMachines)) yield* cloudMachines.value.onAliasInvalidated(invalidateAlias);
+  /**
+   * `wake` resumes a stopped machine; only explicit agent work passes it. Polling through
+   * callHostTool (launch watches, reports, host status) must never start a billed machine.
+   */
+  const readyCloudTarget = (target: DesktopSshEnvironmentTarget, wake: boolean) =>
+    Option.isNone(cloudMachines) || !isCloudMachineAlias(target.alias)
+      ? Effect.void
+      : cloudMachines.value.owns(target.alias).pipe(
+          Effect.flatMap((owned) =>
+            owned
+              ? cloudMachines.value.ensureReady(target.alias as CloudMachineAlias, { wake })
+              : Effect.void,
+          ),
+          Effect.asVoid,
+          Effect.mapError((error) =>
+            failure("host_unavailable", `${target.alias}: ${error.message}`),
+          ),
+        );
+
   const knownHosts = withRuntime(discoverSshHosts({})).pipe(
     Effect.mapError((error) => failure("ssh_failed", describe(error))),
   );
@@ -530,7 +568,12 @@ const make = Effect.gen(function* () {
       return yield* failure("invalid_request", `"${host}" is not a usable SSH host alias.`);
     }
     const hosts = yield* knownHosts;
-    if (!hosts.some((entry) => entry.alias === alias)) {
+    // A managed cloud machine's SSH entry is written by its first use, so it may not exist yet.
+    const ownedCloudMachine =
+      Option.isSome(cloudMachines) &&
+      isCloudMachineAlias(alias) &&
+      (yield* cloudMachines.value.owns(alias));
+    if (!ownedCloudMachine && !hosts.some((entry) => entry.alias === alias)) {
       return yield* failure(
         "host_unknown",
         `${alias} is not in this machine's SSH config or known_hosts. Call goat_ssh_host_list for the hosts it can reach.`,
@@ -559,6 +602,7 @@ const make = Effect.gen(function* () {
       readonly limit?: number | undefined;
     },
   ) {
+    yield* readyCloudTarget(target, true);
     const limit = Math.min(Math.max(input.limit ?? DEFAULT_BROWSE_LIMIT, 0), MAX_BROWSE_LIMIT);
     const result = yield* withRuntime(
       manager.runRemoteScript(target, {
@@ -1027,6 +1071,7 @@ const make = Effect.gen(function* () {
     readonly script: string;
     readonly timeoutMs: number;
   }) {
+    yield* readyCloudTarget(input.target, true);
     return yield* withRuntime(
       manager.runRemoteScript(input.target, {
         script: input.script,
@@ -1039,6 +1084,7 @@ const make = Effect.gen(function* () {
     readonly runtimeMode: RuntimeMode;
     readonly modelSelection: ModelSelection;
   }) {
+    yield* readyCloudTarget(input.target, true);
     const bootstrap = yield* withRuntime(
       manager.ensureEnvironment(input.target, AGENT_CONNECTION),
     ).pipe(sshFailed(input.target.alias));
@@ -1376,6 +1422,7 @@ const make = Effect.gen(function* () {
     authorize: Effect.Effect<RuntimeMode, E, R>,
   ) {
     const target = yield* resolveHost(call.host);
+    yield* readyCloudTarget(target, false);
     const ceiling = yield* authorize;
     const bootstrap = yield* withRuntime(manager.ensureEnvironment(target, AGENT_CONNECTION)).pipe(
       unavailable(target.alias),

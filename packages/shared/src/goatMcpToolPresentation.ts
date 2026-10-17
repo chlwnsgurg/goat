@@ -62,6 +62,8 @@ export type GoatMcpToolSummaryAction =
   | "ssh-host-list"
   | "ssh-browse"
   | "ssh-thread-launch"
+  | "cloud-machine-list"
+  | "cloud-machine-change"
   | "connection-list"
   | "connection-add"
   | "connection-remove"
@@ -405,6 +407,22 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
   goat_ssh_thread_handoff: tool(
     ["Continue", "Continuing", "Continued", "a thread on another machine"],
     "ssh-thread-launch",
+  ),
+  goat_cloud_machine_list: tool(
+    ["List", "Listing", "Listed", "cloud machines"],
+    "cloud-machine-list",
+  ),
+  goat_cloud_machine_create: tool(
+    ["Create", "Creating", "Created", "a cloud machine"],
+    "cloud-machine-change",
+  ),
+  goat_cloud_machine_stop: tool(
+    ["Stop", "Stopping", "Stopped", "a cloud machine"],
+    "cloud-machine-change",
+  ),
+  goat_cloud_machine_resume: tool(
+    ["Resume", "Resuming", "Resumed", "a cloud machine"],
+    "cloud-machine-change",
   ),
   goat_connection_list: tool(["List", "Listing", "Listed", "saved connections"], "connection-list"),
   goat_connection_add_ssh: tool(["Save", "Saving", "Saved", "an SSH connection"], "connection-add"),

@@ -33,14 +33,14 @@ Wire schemas and the libraries web, desktop, and mobile share.
 
 The process that commits orchestration, runs providers, and reaches other machines.
 
-| Doc                                                              | Scope                                                                                                                 |
-| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| [`server.md`](server.md)                                         | Process entry, command commit, local/cloud orchestration, human handoffs, checkpoints, providers, and source control. |
-| [`mcp-toolkits.md`](mcp-toolkits.md)                             | The GOAT MCP server, agent surface registry, toolkit layout, and access-derived tool metadata.                        |
-| [`channels.md`](channels.md)                                     | The channel ledger, Slack and MCP ingress, and the GOAT Bot thread clients render.                                    |
-| [`scheduled-tasks.md`](scheduled-tasks.md)                       | Clock and webhook tasks that launch or send through orchestration services.                                           |
-| [`ssh.md`](ssh.md)                                               | OpenSSH host discovery, the remote ~/.goat server, and agent browse and launch.                                       |
-| [`launch-and-remote-dispatch.md`](launch-and-remote-dispatch.md) | Wakes for a launched thread, and durable SSH dispatches that report back.                                             |
+| Doc                                                              | Scope                                                                                                                   |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| [`server.md`](server.md)                                         | Process entry, command commit, local/cloud orchestration, human handoffs, checkpoints, providers, and source control.   |
+| [`mcp-toolkits.md`](mcp-toolkits.md)                             | The GOAT MCP server, agent surface registry, toolkit layout, and access-derived tool metadata.                          |
+| [`channels.md`](channels.md)                                     | The channel ledger, Slack and MCP ingress, and the GOAT Bot thread clients render.                                      |
+| [`scheduled-tasks.md`](scheduled-tasks.md)                       | Clock and webhook tasks that launch or send through orchestration services.                                             |
+| [`ssh.md`](ssh.md)                                               | OpenSSH host discovery, the remote ~/.goat server, agent browse and launch, and Boat cloud machines as managed aliases. |
+| [`launch-and-remote-dispatch.md`](launch-and-remote-dispatch.md) | Wakes for a launched thread, and durable SSH dispatches that report back.                                               |
 
 ### Tier 4 — Clients
 
@@ -110,6 +110,9 @@ the repository is organised by package. Changing an area requires review of ever
 | `apps/server/src/cli/config.ts`                                         | [`settings-and-storage.md`](settings-and-storage.md)                                                                                                   |
 | `apps/server/src/cli/server.ts`                                         | [`server.md`](server.md)                                                                                                                               |
 | `apps/server/src/cli/sshHelper.ts`                                      | [`server.md`](server.md)<br>[`ssh.md`](ssh.md)                                                                                                         |
+| `apps/server/src/cloudMachines/BoatClient.ts`                           | [`ssh.md`](ssh.md)                                                                                                                                     |
+| `apps/server/src/cloudMachines/CloudMachineService.ts`                  | [`ssh.md`](ssh.md)                                                                                                                                     |
+| `apps/server/src/cloudMachines/sshConfig.ts`                            | [`ssh.md`](ssh.md)                                                                                                                                     |
 | `apps/server/src/config.ts`                                             | [`overview.md`](overview.md)<br>[`settings-and-storage.md`](settings-and-storage.md)                                                                   |
 | `apps/server/src/device/SshDeviceHost.ts`                               | [`ssh.md`](ssh.md)                                                                                                                                     |
 | `apps/server/src/handoffs/Handoffs.ts`                                  | [`server.md`](server.md)                                                                                                                               |
@@ -192,6 +195,7 @@ the repository is organised by package. Changing an area requires review of ever
 | `packages/contracts/src/agentSurface/`                                  | [`mcp-toolkits.md`](mcp-toolkits.md)                                                                                                                   |
 | `packages/contracts/src/channelCommon.ts`                               | [`contracts.md`](contracts.md)<br>[`channels.md`](channels.md)                                                                                         |
 | `packages/contracts/src/channelGateway.ts`                              | [`contracts.md`](contracts.md)<br>[`mcp-toolkits.md`](mcp-toolkits.md)                                                                                 |
+| `packages/contracts/src/cloudMachines.ts`                               | [`ssh.md`](ssh.md)                                                                                                                                     |
 | `packages/contracts/src/index.ts`                                       | [`contracts.md`](contracts.md)                                                                                                                         |
 | `packages/contracts/src/ipc.ts`                                         | [`contracts.md`](contracts.md)<br>[`ssh.md`](ssh.md)                                                                                                   |
 | `packages/contracts/src/orchestrationV2.ts`                             | [`contracts.md`](contracts.md)                                                                                                                         |

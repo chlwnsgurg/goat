@@ -25,13 +25,18 @@ import {
   AuthAccessTokenResult,
   AuthSessionState,
   AuthWebSocketTicketResult,
+  isCloudMachineAlias,
 } from "@goat/contracts";
-import { SshHttpBridgeError } from "@goat/ssh/errors";
+import { SshHttpBridgeError, SshInvalidTargetError } from "@goat/ssh/errors";
 import { resolveLoopbackSshHttpBaseUrl } from "@goat/ssh/tunnel";
+import * as Clock from "effect/Clock";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
 import * as DesktopSshEnvironment from "../../ssh/DesktopSshEnvironment.ts";
@@ -107,6 +112,42 @@ const withLoopbackSshApi =
       ),
     );
 
+/** How recently the owning GOAT server must have confirmed a cloud machine's address and key. */
+export const CLOUD_MACHINE_READY_WINDOW_MS = 10 * 60_000;
+
+/**
+ * A `boat-` alias is a cloud machine managed by a GOAT server, which rewrites its
+ * ~/.ssh/goat-cloud/<alias>.conf each time it readies the machine. The renderer asks this
+ * desktop's server to do that first; a missing file means another server owns the machine,
+ * and an old one means nothing confirmed its current address. Picking a host stays unguarded.
+ */
+export const requireReadiedCloudMachine = Effect.fn("desktop.ipc.sshEnvironment.cloudMachine")(
+  function* (alias: string) {
+    if (!isCloudMachineAlias(alias)) return;
+    const environment = yield* DesktopEnvironment.DesktopEnvironment;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const conf = environment.path.join(
+      environment.homeDirectory,
+      ".ssh",
+      "goat-cloud",
+      `${alias}.conf`,
+    );
+    const info = yield* fileSystem.stat(conf).pipe(Effect.option);
+    if (Option.isNone(info))
+      return yield* new SshInvalidTargetError({
+        message: "This cloud machine belongs to another GOAT server. Open it from that server.",
+      });
+    const modified = Option.match(info.value.mtime, {
+      onNone: () => 0,
+      onSome: (date) => date.getTime(),
+    });
+    if ((yield* Clock.currentTimeMillis) - modified > CLOUD_MACHINE_READY_WINDOW_MS)
+      return yield* new SshInvalidTargetError({
+        message: "Prepare this cloud machine from Settings → Connections → Cloud machines first.",
+      });
+  },
+);
+
 export const discoverSshHosts = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.DISCOVER_SSH_HOSTS_CHANNEL,
   payload: Schema.Void,
@@ -136,6 +177,7 @@ export const ensureSshEnvironment = DesktopIpc.makeIpcMethod({
     options,
   }) {
     const sshEnvironment = yield* DesktopSshEnvironment.DesktopSshEnvironment;
+    yield* requireReadiedCloudMachine(target.alias);
     return yield* sshEnvironment.ensureEnvironment(target, options).pipe(
       Effect.catchIf(DesktopSshEnvironment.isDesktopSshPasswordPromptCancellation, (error) =>
         Effect.succeed({

@@ -16,6 +16,7 @@ import {
   isRejectedSecondaryBootstrap,
   nextRejectedSecondaryBootstrap,
   primaryRegistrationToRetainAfterTopologyRead,
+  prepareDesktopSshEnvironment,
   provisionDesktopSshEnvironment,
   readPrimaryEnvironmentTargetResult,
   secondaryRegistrationsToRetainAfterTopologyRead,
@@ -331,4 +332,62 @@ describe("primary topology cache", () => {
       }),
     ).toBeUndefined();
   });
+});
+
+describe("cloud machine SSH preflight", () => {
+  const CLOUD: DesktopSshEnvironmentTarget = {
+    alias: "boat-bx_23456789",
+    hostname: "203.0.113.10",
+    username: "user",
+    port: 22,
+  };
+  const ready = (calls: string[], failure?: ConnectionBlockedError) => (alias: string) =>
+    Effect.sync(() => void calls.push(`ready:${alias}`)).pipe(
+      Effect.andThen(failure === undefined ? Effect.void : Effect.fail(failure)),
+    );
+
+  it.effect("readies a cloud machine through its server before the desktop dials it", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      yield* provisionDesktopSshEnvironment(
+        makeBridge(calls),
+        CLOUD,
+        undefined,
+        undefined,
+        ready(calls),
+      );
+      yield* prepareDesktopSshEnvironment(makeBridge(calls), CLOUD, ready(calls));
+      expect(calls).toEqual([
+        "ready:boat-bx_23456789",
+        "ensure",
+        "descriptor",
+        "token",
+        "ready:boat-bx_23456789",
+        "ensure",
+        "token",
+      ]);
+    }),
+  );
+
+  it.effect("never dials a cloud machine its server could not ready", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const stopped = new ConnectionBlockedError({ reason: "configuration", detail: "stopped" });
+      const error = yield* prepareDesktopSshEnvironment(
+        makeBridge(calls),
+        CLOUD,
+        ready(calls, stopped),
+      ).pipe(Effect.flip);
+      expect(error).toBe(stopped);
+      expect(calls).toEqual(["ready:boat-bx_23456789"]);
+    }),
+  );
+
+  it.effect("leaves ordinary SSH hosts alone", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      yield* prepareDesktopSshEnvironment(makeBridge(calls), TARGET, ready(calls));
+      expect(calls).toEqual(["ensure", "token"]);
+    }),
+  );
 });

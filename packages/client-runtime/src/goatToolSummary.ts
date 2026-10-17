@@ -370,6 +370,12 @@ export function summarizeGoatToolCalls(
     case "ssh-browse":
       label = phrase("Browsed", "browse", `folders over SSH ${times}`);
       break;
+    case "cloud-machine-list":
+      label = phrase("Listed", "list", `cloud machines ${times}`);
+      break;
+    case "cloud-machine-change":
+      label = phrase("Changed", "change", quantity(selected.length, "cloud machine"));
+      break;
     case "connection-list":
       label = phrase("Listed", "list", `saved connections ${times}`);
       break;

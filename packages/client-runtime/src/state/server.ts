@@ -21,7 +21,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { AsyncResult, Atom } from "effect/reactivity";
+import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
 
 import {
   createAtomCommandScheduler,
@@ -985,8 +985,60 @@ export function createServerEnvironmentAtoms<R, E>(
     scheduler: configScheduler,
     concurrency: configConcurrency,
   });
+  /** Boat machines this environment manages. Reading it never wakes a machine. */
+  const cloudMachines = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:server:cloud-machines",
+    tag: WS_METHODS.cloudMachinesList,
+    staleTimeMs: 5_000,
+  });
+  const cloudMachineScheduler = createAtomCommandScheduler();
+  const refreshCloudMachines = (
+    target: { readonly environmentId: EnvironmentId },
+    registry: AtomRegistry.AtomRegistry,
+  ) =>
+    Effect.sync(() =>
+      registry.refresh(cloudMachines({ environmentId: target.environmentId, input: {} })),
+    );
+  /** Lifecycle changes to one machine run one at a time; a success refreshes the list. */
+  const cloudMachineCommand = <
+    TTag extends
+      | typeof WS_METHODS.cloudMachinesConfigure
+      | typeof WS_METHODS.cloudMachinesDisconnect
+      | typeof WS_METHODS.cloudMachinesCreate
+      | typeof WS_METHODS.cloudMachinesStop
+      | typeof WS_METHODS.cloudMachinesResume
+      | typeof WS_METHODS.cloudMachinesDelete
+      | typeof WS_METHODS.cloudMachinesForget
+      | typeof WS_METHODS.cloudMachinesDismissUnconfirmed
+      | typeof WS_METHODS.cloudMachinesEnsureReady,
+  >(
+    tag: TTag,
+  ) =>
+    createEnvironmentRpcCommand(runtime, {
+      label: `environment-data:server:${tag}`,
+      tag,
+      scheduler: cloudMachineScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${"alias" in input ? String(input.alias) : tag}`,
+      },
+      onSuccess: refreshCloudMachines,
+    });
 
   return {
+    cloudMachines,
+    configureCloudMachines: cloudMachineCommand(WS_METHODS.cloudMachinesConfigure),
+    disconnectCloudMachines: cloudMachineCommand(WS_METHODS.cloudMachinesDisconnect),
+    createCloudMachine: cloudMachineCommand(WS_METHODS.cloudMachinesCreate),
+    stopCloudMachine: cloudMachineCommand(WS_METHODS.cloudMachinesStop),
+    resumeCloudMachine: cloudMachineCommand(WS_METHODS.cloudMachinesResume),
+    deleteCloudMachine: cloudMachineCommand(WS_METHODS.cloudMachinesDelete),
+    forgetCloudMachine: cloudMachineCommand(WS_METHODS.cloudMachinesForget),
+    dismissUnconfirmedCloudMachines: cloudMachineCommand(
+      WS_METHODS.cloudMachinesDismissUnconfirmed,
+    ),
+    ensureCloudMachineReady: cloudMachineCommand(WS_METHODS.cloudMachinesEnsureReady),
     configValueAtom,
     runStorageCleanup: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:run-storage-cleanup",

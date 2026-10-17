@@ -72,6 +72,25 @@ describe("RPC authorization scopes", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });
 
+  // Boat machines bill the owner's account, so only a settings writer may change or wake them.
+  it("lets readers list cloud machines and only settings writers change them", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.cloudMachinesList)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    for (const method of [
+      WS_METHODS.cloudMachinesConfigure,
+      WS_METHODS.cloudMachinesDisconnect,
+      WS_METHODS.cloudMachinesCreate,
+      WS_METHODS.cloudMachinesStop,
+      WS_METHODS.cloudMachinesResume,
+      WS_METHODS.cloudMachinesDelete,
+      WS_METHODS.cloudMachinesForget,
+      WS_METHODS.cloudMachinesDismissUnconfirmed,
+      WS_METHODS.cloudMachinesEnsureReady,
+    ])
+      expect(requiredScopeForRpcMethod(method), method).toBe(AuthSettingsWriteScope);
+  });
+
   it("requires operate access to stop a workflow", () => {
     expect(requiredScopeForRpcMethod(ORCHESTRATION_V2_WS_METHODS.stopWorkflow)).toBe(
       AuthOrchestrationOperateScope,

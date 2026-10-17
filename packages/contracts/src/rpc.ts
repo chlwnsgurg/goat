@@ -424,6 +424,22 @@ import {
   RemoteLaunchesListResult,
 } from "./remoteReports.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
+import {
+  CloudMachine,
+  CloudMachineError,
+  CloudMachinesAliasInput,
+  CloudMachinesConfigureInput,
+  CloudMachinesConfigureResult,
+  CloudMachinesCreateInput,
+  CloudMachinesDismissUnconfirmedInput,
+  CloudMachinesDismissUnconfirmedResult,
+  CloudMachinesDisconnectInput,
+  CloudMachinesDisconnectResult,
+  CloudMachinesEnsureReadyResult,
+  CloudMachinesForgetResult,
+  CloudMachinesListInput,
+  CloudMachinesListResult,
+} from "./cloudMachines.ts";
 
 export const WS_METHODS = {
   memoryProjectBindingGet: "memory.projectBinding.get",
@@ -608,6 +624,18 @@ export const WS_METHODS = {
 
   // Threads this environment launched or watches on other machines
   remoteLaunchesList: "remoteLaunches.list",
+
+  // Boat cloud machines this environment manages as SSH hosts
+  cloudMachinesList: "cloudMachines.list",
+  cloudMachinesConfigure: "cloudMachines.configure",
+  cloudMachinesDisconnect: "cloudMachines.disconnect",
+  cloudMachinesCreate: "cloudMachines.create",
+  cloudMachinesStop: "cloudMachines.stop",
+  cloudMachinesResume: "cloudMachines.resume",
+  cloudMachinesDelete: "cloudMachines.delete",
+  cloudMachinesForget: "cloudMachines.forget",
+  cloudMachinesDismissUnconfirmed: "cloudMachines.dismissUnconfirmed",
+  cloudMachinesEnsureReady: "cloudMachines.ensureReady",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -1974,6 +2002,60 @@ const WsRemoteLaunchesListRpc = Rpc.make(WS_METHODS.remoteLaunchesList, {
   error: Schema.Union([RemoteLaunchesError, EnvironmentAuthorizationError]),
 });
 
+const CloudMachineRpcError = Schema.Union([CloudMachineError, EnvironmentAuthorizationError]);
+const WsCloudMachinesListRpc = Rpc.make(WS_METHODS.cloudMachinesList, {
+  payload: CloudMachinesListInput,
+  success: CloudMachinesListResult,
+  error: CloudMachineRpcError,
+});
+const WsCloudMachinesConfigureRpc = Rpc.make(WS_METHODS.cloudMachinesConfigure, {
+  payload: CloudMachinesConfigureInput,
+  success: CloudMachinesConfigureResult,
+  error: CloudMachineRpcError,
+});
+const WsCloudMachinesDisconnectRpc = Rpc.make(WS_METHODS.cloudMachinesDisconnect, {
+  payload: CloudMachinesDisconnectInput,
+  success: CloudMachinesDisconnectResult,
+  error: CloudMachineRpcError,
+});
+const WsCloudMachinesCreateRpc = Rpc.make(WS_METHODS.cloudMachinesCreate, {
+  payload: CloudMachinesCreateInput,
+  success: CloudMachine,
+  error: CloudMachineRpcError,
+});
+const WsCloudMachinesStopRpc = Rpc.make(WS_METHODS.cloudMachinesStop, {
+  payload: CloudMachinesAliasInput,
+  success: CloudMachine,
+  error: CloudMachineRpcError,
+});
+/** The only client path that wakes a stopped machine. */
+const WsCloudMachinesResumeRpc = Rpc.make(WS_METHODS.cloudMachinesResume, {
+  payload: CloudMachinesAliasInput,
+  success: CloudMachine,
+  error: CloudMachineRpcError,
+});
+const WsCloudMachinesDeleteRpc = Rpc.make(WS_METHODS.cloudMachinesDelete, {
+  payload: CloudMachinesAliasInput,
+  success: CloudMachine,
+  error: CloudMachineRpcError,
+});
+const WsCloudMachinesForgetRpc = Rpc.make(WS_METHODS.cloudMachinesForget, {
+  payload: CloudMachinesAliasInput,
+  success: CloudMachinesForgetResult,
+  error: CloudMachineRpcError,
+});
+const WsCloudMachinesDismissUnconfirmedRpc = Rpc.make(WS_METHODS.cloudMachinesDismissUnconfirmed, {
+  payload: CloudMachinesDismissUnconfirmedInput,
+  success: CloudMachinesDismissUnconfirmedResult,
+  error: CloudMachineRpcError,
+});
+/** Refreshes a running machine's SSH address and host key before a connection; never wakes it. */
+const WsCloudMachinesEnsureReadyRpc = Rpc.make(WS_METHODS.cloudMachinesEnsureReady, {
+  payload: CloudMachinesAliasInput,
+  success: CloudMachinesEnsureReadyResult,
+  error: CloudMachineRpcError,
+});
+
 const WsScheduledTasksListWebhookDeliveriesRpc = Rpc.make(
   WS_METHODS.scheduledTasksListWebhookDeliveries,
   {
@@ -2171,6 +2253,16 @@ export const WsCoreRpcGroup = RpcGroup.make(
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsRemoteLaunchesListRpc,
+  WsCloudMachinesListRpc,
+  WsCloudMachinesConfigureRpc,
+  WsCloudMachinesDisconnectRpc,
+  WsCloudMachinesCreateRpc,
+  WsCloudMachinesStopRpc,
+  WsCloudMachinesResumeRpc,
+  WsCloudMachinesDeleteRpc,
+  WsCloudMachinesForgetRpc,
+  WsCloudMachinesDismissUnconfirmedRpc,
+  WsCloudMachinesEnsureReadyRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,

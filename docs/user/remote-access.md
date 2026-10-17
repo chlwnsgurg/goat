@@ -301,6 +301,31 @@ desktop app, **Connect** adds the host over SSH using the same host name. A
 thread started from another machine shows **Launched by** with that machine's
 name in its header, also when the launching thread is not open here.
 
+### Cloud machines
+
+GOAT can create [Boat](https://boat.dev) cloud machines and use them like any other
+SSH host. In **Settings → Connections → Cloud machines**, paste a Boat API key and agree
+to one `Include ~/.ssh/goat-cloud/*.conf` line at the top of this computer's
+`~/.ssh/config`. The key needs the sandbox and `ssh` actions, and it stays on the GOAT
+server that owns the machines.
+
+Create a machine with a name, a size and an auto-stop time. It appears as
+`boat-<id>`, which you can open from **Connect**, pick as an SSH host for a thread, or
+give an agent. Boat bills the machine while it runs:
+
+- **Stop** saves its disk as a snapshot that Boat keeps for about 14 days.
+- **Resume** starts it again, and billing with it. Browsing, launching a thread or
+  continuing a thread on a stopped machine also resumes it. Listing hosts, checking host
+  status and following a running thread never do.
+- **Delete** removes the machine and its data from Boat permanently.
+
+Each use you start pushes the auto-stop time out again, but work that keeps running on
+its own does not, so choose an auto-stop time that covers it. Boat gives a resumed
+machine a new address and host key; GOAT refreshes and pins both before it connects.
+Removing the key keeps the machines listed, so you can still find ones that may be
+billing. Machines belong to the GOAT server that created them; open them from that
+server.
+
 ## Browser on a remote environment
 
 Browser tabs belong to the environment, so you and your agents see the same

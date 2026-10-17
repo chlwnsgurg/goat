@@ -190,4 +190,30 @@ SSH toolkit asks `RemoteDispatchCoordinator` to persist the dispatch first. That
 Workspace sync for a remote checkout is `apps/server/src/sshRemote/SshWorkspaceSync.ts`. Remote
 repo paths it prints sit under `$HOME/.goat/repos/`.
 
+## Cloud machines
+
+A Boat (boat.dev) machine becomes an ordinary OpenSSH alias, `boat-<sandbox id>`. The GOAT
+server that created it owns everything about it: the Boat API key in `ServerSecretStore`, a
+private catalog of owned sandbox ids in `cloud-machines.json` under the state directory, and the
+SSH files. With the user's consent it puts one `Include ~/.ssh/goat-cloud/*.conf` line at the top
+of `~/.ssh/config`, because OpenSSH keeps the first value it reads. Each machine gets its own
+`.conf` and a pinned `.known_hosts` there; after every rewrite `ssh -G` must show the pinned
+settings, or GOAT refuses to connect.
+
+Boat moves a machine to a new address and host key on every resume, so
+`apps/server/src/cloudMachines/CloudMachineService.ts` refreshes both through Boat's SSH-key call
+before an SSH operation on an owned alias (`SshRemoteDispatch` calls it at browse, launch,
+preflight, remote scripts and host tool calls) and drops that alias's tunnel and session caches
+when either changed. Only explicit work wakes a stopped machine and extends its auto-stop time:
+browse, launch, handoff and Resume. Host tool calls also serve launch watches, report polling and
+host status, so they only refresh a running machine, and host listing never asks Boat at all.
+The desktop connects only after the renderer asks the owning server for the same non-waking
+refresh, and Electron refuses a `boat-` alias whose `.conf` is missing or stale.
+
+The catalog keeps a machine until Boat confirms it is gone or the user forgets a stopped one, so
+GOAT never loses track of a machine that may still bill. `BoatClient.ts` is the REST client;
+`sshConfig.ts` writes the SSH files. Agents list, create, stop and resume machines through
+`goat_cloud_machine_*` tools in the SSH toolkit; every change needs a reconfirmed
+`settings:write` grant, as in Settings. Deleting a machine and managing the key stay in Settings.
+
 > Decision record: [ADR-0008](decisions/ADR-0008-ssh-hosts.md)
