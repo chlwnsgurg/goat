@@ -275,7 +275,9 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-muted-foreground">
-              {formatWorkspaceRelativePath(item.fileName, props.workspaceRoot)}
+              {item.changes !== undefined && item.changes.length > 1
+                ? `${item.changes.length} files total`
+                : formatWorkspaceRelativePath(item.fileName, props.workspaceRoot)}
             </span>
             {item.additions !== undefined || item.deletions !== undefined ? (
               <span>
@@ -287,7 +289,14 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
               <Button
                 size="xs"
                 variant="outline"
-                onClick={() => props.onOpenTurnDiff(item.runId!, item.fileName)}
+                onClick={() =>
+                  props.onOpenTurnDiff(
+                    item.runId!,
+                    item.changes !== undefined && item.changes.length > 1
+                      ? undefined
+                      : item.fileName,
+                  )
+                }
               >
                 Open diff
               </Button>
