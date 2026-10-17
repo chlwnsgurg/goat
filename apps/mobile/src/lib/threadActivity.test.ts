@@ -43,6 +43,43 @@ const threadId = ThreadId.make("thread-1");
 const sourceThreadId = ThreadId.make("thread-source");
 const runId = RunId.make("run-1");
 
+it.each([undefined, [{ operation: "update", path: "src/a.ts" }]])(
+  "keeps single-file edit rows when changes are %j",
+  (changes) => {
+    const item: OrchestrationV2TurnItem = {
+      ...base("single-edit", "2026-06-20T00:00:03.000Z", 2),
+      type: "file_change",
+      fileName: "src/a.ts",
+      changes,
+    };
+    const [activity] = buildThreadFeed([projected(item, 0)]).flatMap((entry) =>
+      entry.type === "activity-group" ? entry.activities : [],
+    );
+    expect(activity?.workEntry.changedFiles).toEqual(["src/a.ts"]);
+    expect(workEntryRowLabel(activity!.workEntry)).toBe("src/a.ts");
+  },
+);
+
+it("shows every changed path beside the aggregate edit counts", () => {
+  const item: OrchestrationV2TurnItem = {
+    ...base("multi-edit", "2026-06-20T00:00:03.000Z", 2),
+    type: "file_change",
+    fileName: "src/a.ts",
+    additions: 101,
+    deletions: 2,
+    changes: [
+      { operation: "update", path: "src/a.ts" },
+      { operation: "update", path: "src/b.ts" },
+    ],
+  };
+  const [activity] = buildThreadFeed([projected(item, 0)]).flatMap((entry) =>
+    entry.type === "activity-group" ? entry.activities : [],
+  );
+  expect(activity?.workEntry.changedFiles).toEqual(["src/a.ts", "src/b.ts"]);
+  expect(workEntryRowLabel(activity!.workEntry)).toBe("src/a.ts +1 more");
+  expect(summarizeToolGroup([activity!.workEntry]).summary).toContain("2 files");
+});
+
 it("keeps historical plan detail accessible from its paged turn item", () => {
   const item = {
     ...base("historical-plan", "2026-08-29T00:00:00.000Z", 1),
