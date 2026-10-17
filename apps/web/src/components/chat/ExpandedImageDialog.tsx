@@ -7,7 +7,7 @@ import {
   type ReactNode,
   type KeyboardEvent,
 } from "react";
-import { ChevronLeftIcon, ChevronRightIcon, XIcon } from "~/components/solar";
+import { ChevronLeftIcon, ChevronRightIcon, RotateCwIcon, XIcon } from "~/components/solar";
 import { Image as ImageGlyph, Text as TextGlyph } from "~/components/solar/nodes";
 import { Button } from "../ui/button";
 import { MorphIcon } from "~/components/MorphIcon";
@@ -27,6 +27,7 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ZoomableImage, type ZoomableImageHandle } from "./ZoomableImage";
 import { composerFloatingLayerProps } from "./composerEventScope";
+import { useRightPanelStore } from "../../rightPanelStore";
 
 interface ExpandedImageDialogProps {
   preview: ExpandedImagePreview;
@@ -75,6 +76,8 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
 }: ExpandedImageDialogProps) {
   const [imageOffset, setImageOffset] = useState(0);
   const [failedImageSrc, setFailedImageSrc] = useState<string | null>(null);
+  const [imageLoadAttempt, setImageLoadAttempt] = useState(0);
+  const [retryingImage, setRetryingImage] = useState(false);
   const [accessibilityDetailsSrc, setAccessibilityDetailsSrc] = useState<string | null>(null);
   const zoomableImageRef = useRef<ZoomableImageHandle>(null);
   const [returnFocusTarget] = useState(() =>
@@ -87,12 +90,45 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
   const index =
     imageCount > 0 ? (((preview.index + imageOffset) % imageCount) + imageCount) % imageCount : 0;
   const item = preview.images[index];
+  const imageAsset = item?.type === "video" ? undefined : item?.actionsSource?.asset;
+  const imageAssetUrl = useAssetUrlState(
+    imageAsset?.environmentId ?? null,
+    imageAsset?.resource ?? null,
+  );
+  const refreshImageAssetUrl = useAssetUrlRefresh(
+    imageAsset?.environmentId ?? null,
+    imageAsset?.resource ?? null,
+  );
+  const imageSrc = imageAsset
+    ? imageAssetUrl._tag === "Success"
+      ? imageAssetUrl.url + (item?.srcFragment ?? "")
+      : imageAssetUrl._tag === "Loading"
+        ? (item?.src ?? null)
+        : null
+    : (item?.src ?? null);
   const source: MediaActionSource = item?.actionsSource ?? {
     kind: item?.type === "video" ? "video" : "image",
     name: item?.name ?? "Media",
     src: item?.src ?? null,
   };
-  const openFile = source.onOpenFile;
+  const fileAsset = source.asset;
+  const fileResource = fileAsset?.resource;
+  // Signed host media carries its owning environment and thread even outside the workspace.
+  const openFile =
+    source.onOpenFile ??
+    (fileAsset &&
+    fileResource &&
+    (fileResource._tag === "media-file" || fileResource._tag === "workspace-file")
+      ? () =>
+          useRightPanelStore
+            .getState()
+            .openFile(
+              { environmentId: fileAsset.environmentId, threadId: fileResource.threadId },
+              source.reference?.kind === "file"
+                ? (source.reference.relativePath ?? source.reference.path)
+                : fileResource.path,
+            )
+      : undefined);
   const actionsSource: MediaActionSource = openFile
     ? {
         ...source,
@@ -106,6 +142,19 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
   const navigateImage = useCallback((direction: -1 | 1) => {
     setImageOffset((current) => current + direction);
   }, []);
+  const retryImage = async () => {
+    if (retryingImage || !imageAsset) return;
+    setRetryingImage(true);
+    try {
+      await refreshImageAssetUrl();
+      setFailedImageSrc(null);
+      setImageLoadAttempt((attempt) => attempt + 1);
+    } catch {
+      // The placeholder stays available for another retry.
+    } finally {
+      setRetryingImage(false);
+    }
+  };
 
   // The element that opened the preview gets focus back on close. Without
   // this a close button click leaves focus on the unmounted dialog, and the
@@ -224,22 +273,33 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
                   className="h-[min(var(--media-height),40rem)] w-[min(var(--media-width),42rem)] transition-opacity duration-140 ease-out starting:opacity-0 rounded-lg border border-border/70 bg-background p-4 text-xs leading-5 shadow-2xl motion-reduce:transition-none"
                 />
               ) : null
-            ) : item.src === null || failedImageSrc === item.src ? (
+            ) : imageSrc === null || failedImageSrc === imageSrc ? (
               <ExpandedMediaFailure>
                 <p>
                   {openOriginalLink
                     ? "This image could not be loaded."
                     : "Image unavailable. The file may have been moved or deleted."}
                 </p>
+                {imageAsset && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={retryingImage}
+                    onClick={() => void retryImage()}
+                  >
+                    <RotateCwIcon />
+                    {retryingImage ? "Retrying…" : "Retry image"}
+                  </Button>
+                )}
                 {openOriginalLink}
               </ExpandedMediaFailure>
             ) : (
               <ZoomableImage
                 ref={zoomableImageRef}
-                key={`${index}:${item.src}`}
-                src={item.src}
+                key={`${index}:${imageSrc}:${imageLoadAttempt}`}
+                src={imageSrc}
                 name={item.name}
-                onError={() => setFailedImageSrc(item.src)}
+                onError={() => setFailedImageSrc(imageSrc)}
               />
             )}
             <div className="mt-2 flex max-w-[var(--media-width)] items-center justify-center gap-1.5 text-xs text-white/80 max-sm:px-10">
