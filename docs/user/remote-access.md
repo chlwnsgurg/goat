@@ -306,8 +306,10 @@ name in its header, also when the launching thread is not open here.
 GOAT can create [Boat](https://boat.dev) cloud machines and use them like any other
 SSH host. In **Settings → Connections → Cloud machines**, paste a Boat API key and agree
 to one `Include ~/.ssh/goat-cloud/*.conf` line at the top of this computer's
-`~/.ssh/config`. The key needs the sandbox and `ssh` actions, and it stays on the GOAT
-server that owns the machines.
+`~/.ssh/config`. Create the key with Boat's `ci` preset (`boat api-key create goat
+--preset ci`), which can create, resume and delete the machines it made and connect
+over SSH. A `full-sandbox` key cannot create or resume machines. The key stays on the
+GOAT server that owns the machines.
 
 Create a machine with a name, a size and an auto-stop time. It appears as
 `boat-<id>`, which you can open from **Connect**, pick as an SSH host for a thread, or
