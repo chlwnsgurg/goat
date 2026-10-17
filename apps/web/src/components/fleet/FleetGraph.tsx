@@ -14,6 +14,7 @@ import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { GoatWordmark } from "../GoatWordmark";
 import { renderProviderGlyph } from "../chat/ProviderInstanceIcon";
 import { describeMachine } from "./describeMachine";
 import { providerInstanceInitials } from "@goat/client-runtime/state/provider-instance-display";
@@ -474,13 +475,15 @@ export const FleetGraph = memo(function FleetGraph(props: {
               strokeDasharray="3 7"
             />
             <circle r={22} className="fill-primary" />
-            <text
-              y={3.5}
-              textAnchor="middle"
-              className="fill-primary-foreground text-3xs font-semibold"
-            >
-              GOAT
-            </text>
+            <GoatWordmark
+              x={-12}
+              y={-12}
+              width={24}
+              height={24}
+              role="img"
+              aria-label="GOAT"
+              className="text-primary-foreground"
+            />
           </g>
         </svg>
       )}
