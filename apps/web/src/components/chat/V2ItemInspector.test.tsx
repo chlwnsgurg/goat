@@ -61,7 +61,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function renderItem(changes: typeof item.changes) {
+async function renderItem(changes: typeof item.changes, hideFileChangeSummary = false) {
   await act(() =>
     root.render(
       <V2ItemInspector
@@ -76,6 +76,7 @@ async function renderItem(changes: typeof item.changes) {
         workspaceRoot="/workspace"
         onOpenThread={vi.fn()}
         onOpenTurnDiff={onOpenTurnDiff}
+        hideFileChangeSummary={hideFileChangeSummary}
       />,
     ),
   );
@@ -105,3 +106,24 @@ it.each([undefined, [], [{ operation: "update", path: "/workspace/src/a.ts" }]])
     expect(onOpenTurnDiff).toHaveBeenCalledWith(runId, "/workspace/src/a.ts");
   },
 );
+
+it("leaves the summary to the row it expands from, without repeating totals", async () => {
+  await renderItem(
+    [
+      { operation: "update", path: "/workspace/src/a.ts" },
+      { operation: "update", path: "/workspace/src/b.ts" },
+    ],
+    true,
+  );
+  expect(container.textContent).not.toContain("files total");
+  expect(container.textContent).not.toContain("+101");
+  expect(container.querySelector("button")).toBeNull();
+  expect(container.textContent).toContain("update workspace/src/a.ts");
+  expect(container.textContent).toContain("update workspace/src/b.ts");
+});
+
+it("names the file when a row's edit has nothing else to show", async () => {
+  await renderItem(undefined, true);
+  expect(container.textContent).toBe("workspace/src/a.ts");
+  expect(container.querySelector("button")).toBeNull();
+});
