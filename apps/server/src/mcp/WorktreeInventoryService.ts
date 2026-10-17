@@ -646,8 +646,11 @@ const make = Effect.gen(function* () {
         requested + " is not a git worktree of a GOAT project. goat_worktree_inventory lists them.",
       );
     // A symlink to a worktree resolves to it; deleting through an alias would
-    // remove a checkout the caller did not name.
-    if (!target.leaseKeys.includes(requested))
+    // remove a checkout the caller did not name. A path must be the worktree's
+    // own; a threadId may also use the path that thread recorded, even when
+    // that path is a symlink.
+    const named = input.path !== undefined ? [target.entry.path] : target.leaseKeys;
+    if (!named.includes(requested))
       return yield* failure(
         "invalid_request",
         requested +

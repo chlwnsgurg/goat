@@ -401,6 +401,27 @@ describe("WorktreeInventoryService", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
+  it.live("refuses a thread's symlink as a path but removes it by threadId", () =>
+    Effect.gen(function* () {
+      const { service, fs, root, addWorktree, setThreads } = yield* fixture;
+      const path = yield* addWorktree("bound-alias");
+      const alias = root + "/bound-alias";
+      yield* fs.symlink(path, alias);
+      setThreads([{ id: "t1", worktreePath: alias, status: "completed" }]);
+
+      // The thread's recorded symlink is not the worktree's own path.
+      expect(yield* refusal(service.remove({ path: alias, force: true }))).toContain(
+        "is an alias of the worktree at " + path,
+      );
+      expect(yield* fs.exists(path)).toBe(true);
+
+      // Naming the thread is unambiguous, so its recorded path is accepted.
+      const removed = yield* service.remove({ threadId: ThreadId.make("t1"), force: true });
+      expect(removed.path).toBe(path);
+      expect(yield* fs.exists(path)).toBe(false);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
   it.live("rechecks the thread right before deleting, after the slow commit checks", () =>
     Effect.gen(function* () {
       const {
