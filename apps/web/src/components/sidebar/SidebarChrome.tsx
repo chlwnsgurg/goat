@@ -274,7 +274,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     select: (location) => isSidebarUtilityPage(location.pathname),
   });
   const pullRequestsSupported = usePullRequestsSupported();
-  // The destination rail already carries Settings, Pull requests and Usage.
+  // The destination rail carries Home, Settings, Pull requests, Usage and the update button.
   const railVisible = useDestinationRailVisible();
   const closeMobileSidebar = useCallback(() => {
     if (isMobile) {
@@ -305,6 +305,8 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     void navigateToMainApp();
   }, [closeMobileSidebar, navigateToMainApp]);
 
+  if (railVisible) return null;
+
   return (
     <SidebarMenu className="flex-row items-center">
       {isOnUtilityPage ? (
@@ -314,7 +316,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             <span>Back</span>
           </SidebarMenuButton>
         </SidebarMenuItem>
-      ) : railVisible ? null : (
+      ) : (
         <>
           <SidebarUtilityItem
             icon={<SettingsIcon />}

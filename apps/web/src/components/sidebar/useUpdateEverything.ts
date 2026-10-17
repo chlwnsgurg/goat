@@ -105,6 +105,8 @@ export function useUpdateEverything(localUpdateVersion: string | null) {
 
   return {
     hasUpdates: servers.length > 0 || providers.machines.length > 0,
+    /** Which kinds of remote work are behind, so the button can name them. */
+    remote: { providers: providers.machines.length > 0, servers: servers.length > 0 },
     /** Short label for the tooltip and the confirmation title. */
     summary,
     /** One line per machine, for the confirmation. */
