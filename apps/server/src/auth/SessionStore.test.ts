@@ -876,7 +876,7 @@ it.effect("reads live scopes without a token and fences replacement, revocation 
       ttl: Duration.seconds(1),
     });
     expect((yield* store.readActiveScopes(first.sessionId).pipe(Effect.flip))._tag).toBe(
-      "UnknownSessionTokenError",
+      "SessionTokenRevokedError",
     );
     expect(yield* store.readActiveScopes(second.sessionId)).toEqual(["memory:read"]);
     yield* TestClock.adjust(Duration.seconds(1));
@@ -886,9 +886,56 @@ it.effect("reads live scopes without a token and fences replacement, revocation 
     const third = yield* store.issue({ scopes: ["memory:write"] });
     yield* store.revoke(third.sessionId);
     expect((yield* store.readActiveScopes(third.sessionId).pipe(Effect.flip))._tag).toBe(
-      "UnknownSessionTokenError",
+      "SessionTokenRevokedError",
     );
   }).pipe(Effect.provide(layerSessionStore().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect("reads through sessions another process stores after startup", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-session-read-through-" });
+    const running = yield* makeDiskSessionStoreLayer(baseDir);
+    // A separate store on the same database stands in for `goat auth session issue`; a local
+    // memo map keeps it from reusing the running store's instance.
+    const cli = yield* makeDiskSessionStoreLayer(baseDir);
+    const fromCli = <A, E>(
+      use: (store: SessionStore.SessionStore["Service"]) => Effect.Effect<A, E>,
+    ) =>
+      SessionStore.SessionStore.pipe(
+        Effect.flatMap(use),
+        Effect.provide(cli, { local: true }),
+        Effect.scoped,
+      );
+
+    yield* Effect.gen(function* () {
+      const store = yield* SessionStore.SessionStore;
+      const issue = (ttl: Duration.Duration) =>
+        fromCli((other) =>
+          other.issue({ method: "bearer-access-token", scopes: ["memory:read"], ttl }),
+        );
+
+      const active = yield* issue(Duration.hours(1));
+      expect((yield* store.verify(active.token)).sessionId).toBe(active.sessionId);
+      expect(yield* store.readActiveScopes(active.sessionId)).toEqual(["memory:read"]);
+      yield* store.revoke(active.sessionId);
+      expect((yield* store.readActiveScopes(active.sessionId).pipe(Effect.flip))._tag).toBe(
+        "SessionTokenRevokedError",
+      );
+
+      const revoked = yield* issue(Duration.hours(1));
+      yield* fromCli((other) => other.revoke(revoked.sessionId));
+      expect((yield* store.readActiveScopes(revoked.sessionId).pipe(Effect.flip))._tag).toBe(
+        "SessionTokenRevokedError",
+      );
+
+      const expiring = yield* issue(Duration.seconds(1));
+      yield* TestClock.adjust(Duration.seconds(1));
+      expect((yield* store.readActiveScopes(expiring.sessionId).pipe(Effect.flip))._tag).toBe(
+        "SessionTokenExpiredError",
+      );
+    }).pipe(Effect.provide(running), Effect.scoped);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("next issuance prunes all expired live authority entries without reading them", () =>
@@ -908,13 +955,13 @@ it.effect("next issuance prunes all expired live authority entries without readi
     const next = yield* store.issue({ scopes: ["memory:read"] });
     for (const session of expired)
       expect((yield* store.readActiveScopes(session.sessionId).pipe(Effect.flip))._tag).toBe(
-        "UnknownSessionTokenError",
+        "SessionTokenExpiredError",
       );
     expect(yield* store.readActiveScopes(retained.sessionId)).toEqual(["memory:write"]);
     expect(yield* store.readActiveScopes(next.sessionId)).toEqual(["memory:read"]);
     yield* store.revokeAllExcept(next.sessionId);
     expect((yield* store.readActiveScopes(retained.sessionId).pipe(Effect.flip))._tag).toBe(
-      "UnknownSessionTokenError",
+      "SessionTokenRevokedError",
     );
     expect(yield* store.readActiveScopes(next.sessionId)).toEqual(["memory:read"]);
   }).pipe(Effect.provide(layerSessionStore().pipe(Layer.provideMerge(NodeServices.layer)))),
