@@ -2,6 +2,8 @@ import type {
   CloudMachine,
   CloudMachineState,
   EnvironmentId,
+  EnvironmentMachineKind,
+  ExecutionEnvironmentPlatformOs,
   OrchestrationV2ThreadShell,
   ProviderDriverKind,
   RemoteLaunch,
@@ -75,6 +77,9 @@ export interface FleetEnvironment {
   readonly label: string;
   /** SSH aliases this client reaches the environment through. */
   readonly sshAliases: ReadonlyArray<string>;
+  /** What the server reports about its host; absent until its config loads. */
+  readonly os?: ExecutionEnvironmentPlatformOs | null;
+  readonly machineKind?: EnvironmentMachineKind | null;
 }
 
 export interface FleetMachineSummary {
@@ -168,6 +173,9 @@ export interface FleetMachine {
   readonly label: string;
   readonly subtitle: string | null;
   readonly kind: FleetMachineKind;
+  /** Host OS and hardware shape, known for connected environments only. */
+  readonly os: ExecutionEnvironmentPlatformOs | null;
+  readonly machineKind: EnvironmentMachineKind | null;
   readonly environmentId: EnvironmentId | null;
   readonly cloudState: CloudMachineState | null;
   readonly running: number;
@@ -240,6 +248,8 @@ export function buildFleet(input: {
       label: environment.label,
       subtitle: null,
       kind: "environment",
+      os: environment.os ?? null,
+      machineKind: environment.machineKind ?? null,
       environmentId: environment.environmentId,
       cloudState: null,
       running: 0,
@@ -322,6 +332,8 @@ export function buildFleet(input: {
         label,
         subtitle: dispatcherLabel === null ? null : "via " + dispatcherLabel,
         kind,
+        os: null,
+        machineKind: null,
         environmentId: null,
         cloudState: null,
         running: 0,

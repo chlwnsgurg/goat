@@ -14,7 +14,7 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
-import { environmentSummaries } from "./presentation";
+import { environmentPresentations, environmentSummaries } from "./presentation";
 import { primaryEnvironmentIdAtom } from "./primaryEnvironment";
 import { environmentServerConfigsAtom, serverEnvironment } from "./server";
 import { environmentThreadShells } from "./threads";
@@ -32,7 +32,9 @@ function sameEnvironments(
       return (
         environment.environmentId === other.environmentId &&
         environment.label === other.label &&
-        environment.sshAliases.join("\n") === other.sshAliases.join("\n")
+        environment.sshAliases.join("\n") === other.sshAliases.join("\n") &&
+        environment.os === other.os &&
+        environment.machineKind === other.machineKind
       );
     })
   );
@@ -41,6 +43,7 @@ function sameEnvironments(
 /** Connected environments with their labels and the SSH aliases this client uses for them. */
 export const fleetEnvironmentsAtom = Atom.make((get): ReadonlyArray<FleetEnvironment> => {
   const catalog = get(environmentCatalog.catalogValueAtom);
+  const machineKinds = get(environmentSummaries.machineByIdAtom);
   const next: FleetEnvironment[] = [];
   for (const environmentId of get(environmentSummaries.connectedEnvironmentIdsAtom)) {
     const entry = catalog.entries.get(environmentId);
@@ -50,7 +53,16 @@ export const fleetEnvironmentsAtom = Atom.make((get): ReadonlyArray<FleetEnviron
       const profile = Option.getOrNull(route.profile);
       if (profile?._tag === "SshConnectionProfile") sshAliases.push(profile.target.alias);
     }
-    next.push({ environmentId, label: entry.target.label, sshAliases });
+    const serverConfig = get(
+      environmentPresentations.presentationAtom(environmentId),
+    )?.serverConfig;
+    next.push({
+      environmentId,
+      label: entry.target.label,
+      sshAliases,
+      os: serverConfig?.environment.platform.os ?? null,
+      machineKind: serverConfig ? (machineKinds.get(environmentId) ?? null) : null,
+    });
   }
   const previous = Option.getOrNull(get.self<ReadonlyArray<FleetEnvironment>>());
   return previous !== null && sameEnvironments(previous, next) ? previous : next;
@@ -100,6 +112,8 @@ function snapshotKey(snapshot: FleetSnapshot): string {
       machine.label,
       machine.subtitle,
       machine.cloudState,
+      machine.os,
+      machine.machineKind,
       machine.running,
       machine.attention,
       machine.reported,

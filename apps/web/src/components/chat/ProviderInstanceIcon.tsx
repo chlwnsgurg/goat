@@ -1,4 +1,4 @@
-import { type CSSProperties, memo } from "react";
+import { type CSSProperties, memo, type ReactElement } from "react";
 
 import { providerInstanceInitials } from "@goat/client-runtime/state/provider-instance-display";
 
@@ -52,6 +52,23 @@ export function resolveProviderInstanceAcpRegistryIconUrl(input: {
     resolveOfficialAcpRegistryIconUrl(input.iconUrl ?? null) ??
     officialAcpRegistryIconUrlForAgentId(input.agentId?.trim() || null)
   );
+}
+
+/**
+ * A provider's logo as a bare `<svg>` placed at (x, y), for drawing inside another SVG
+ * where HTML cannot go. Null when the provider has no vector logo.
+ */
+export function renderProviderGlyph(input: {
+  readonly driverKind: ProviderDriverKind;
+  readonly x: number;
+  readonly y: number;
+  readonly size: number;
+}): ReactElement | null {
+  const placement = { x: input.x, y: input.y, width: input.size, height: input.size };
+  const packageIcon = providerClients.get(input.driverKind)?.icon;
+  if (packageIcon) return <ProviderPackageIcon icon={packageIcon} {...placement} aria-hidden />;
+  const Icon = PROVIDER_ICON_BY_PROVIDER[input.driverKind];
+  return Icon ? <Icon {...placement} className="text-foreground" aria-hidden /> : null;
 }
 
 export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {

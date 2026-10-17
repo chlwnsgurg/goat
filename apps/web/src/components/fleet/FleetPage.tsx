@@ -12,6 +12,7 @@ import { Button } from "../ui/button";
 import { SidebarInset } from "../ui/sidebar";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { FleetGraph } from "./FleetGraph";
+import { describeMachine } from "./describeMachine";
 
 const STATE_LABEL: Record<FleetThread["state"], string> = {
   running: "Running",
@@ -39,6 +40,11 @@ function machineWork(machine: FleetMachine): string {
 
 const isBusy = (machine: FleetMachine) =>
   machine.running + machine.attention + machine.reported > 0;
+
+const machineSubtitle = (machine: FleetMachine) =>
+  [describeMachine(machine.os, machine.machineKind), machine.subtitle]
+    .filter((part) => part !== null)
+    .join(" · ");
 
 /** Everything running across connected machines, as a graph and a list grouped by machine. */
 export function FleetPage() {
@@ -123,8 +129,10 @@ export function FleetPage() {
                   className="flex items-baseline gap-2 rounded-md text-left outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                 >
                   <span className="text-sm font-medium">{machine.label}</span>
-                  {machine.subtitle ? (
-                    <span className="text-xs text-muted-foreground">{machine.subtitle}</span>
+                  {machineSubtitle(machine) ? (
+                    <span className="text-xs text-muted-foreground">
+                      {machineSubtitle(machine)}
+                    </span>
                   ) : null}
                   <span className="ml-auto text-xs text-muted-foreground tabular-nums">
                     {machineWork(machine)}

@@ -13,7 +13,10 @@ import {
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
-import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
+import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { renderProviderGlyph } from "../chat/ProviderInstanceIcon";
+import { describeMachine } from "./describeMachine";
+import { providerInstanceInitials } from "@goat/client-runtime/state/provider-instance-display";
 import {
   rubberBand,
   stepSpring,
@@ -414,29 +417,19 @@ export const FleetGraph = memo(function FleetGraph(props: {
                       work.reported > 0 && work.running + work.attention === 0 ? "2 3" : undefined
                     }
                   />
-                  {data?.driver ? (
-                    // The same logo the rest of the app shows for this provider.
-                    <foreignObject
-                      x={-7}
-                      y={-7}
-                      width={14}
-                      height={14}
-                      className="pointer-events-none"
-                    >
-                      <ProviderInstanceIcon
-                        driverKind={data.driver}
-                        displayName={data.label}
-                        className="size-3.5"
-                        iconClassName="size-3.5"
-                      />
-                    </foreignObject>
-                  ) : (
+                  {(data?.driver
+                    ? renderProviderGlyph({ driverKind: data.driver, x: -7, y: -7, size: 14 })
+                    : null) ?? (
                     <text
                       y={3.5}
                       textAnchor="middle"
                       className="fill-foreground text-4xs font-semibold"
                     >
-                      {data ? "?" : "+" + agent.layout.aggregate!.count}
+                      {data
+                        ? data.driver
+                          ? providerInstanceInitials(data.label)
+                          : "?"
+                        : "+" + agent.layout.aggregate!.count}
                     </text>
                   )}
                   <text y={labelY} textAnchor="middle" className="fill-muted-foreground text-4xs">
@@ -551,8 +544,9 @@ function MachineNode(props: {
     event.preventDefault();
     onSelect(machine.id);
   };
+  const device = describeMachine(machine.os, machine.machineKind);
   const sub =
-    machine.subtitle ??
+    [device, machine.subtitle].filter((part) => part !== null).join(" · ") ||
     (machine.kind === "environment" ? null : machine.kind === "cloud" ? "cloud" : "ssh");
   return (
     <g
@@ -583,23 +577,17 @@ function MachineNode(props: {
         )}
         strokeWidth={selected ? 2.4 : 1.6}
       />
-      <g
-        transform="translate(-7 -7) scale(0.875)"
-        fill="none"
-        className="stroke-foreground"
-        strokeWidth={1.4}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        {machine.kind === "cloud" || machine.cloudState !== null ? (
-          <path d="M4.5 12.5h7.2a3 3 0 0 0 .4-6 4.2 4.2 0 0 0-8.1 1.2A2.4 2.4 0 0 0 4.5 12.5z" />
-        ) : (
-          <>
-            <rect x={1.5} y={2.5} width={13} height={8.5} rx={1.5} />
-            <path d="M5.5 14h5M8 11v3" />
-          </>
-        )}
-      </g>
+      <EnvironmentMachineIcon
+        kind={
+          machine.machineKind ??
+          (machine.kind === "cloud" || machine.cloudState !== null ? "cloud" : "server")
+        }
+        x={-8}
+        y={-8}
+        width={16}
+        height={16}
+        className="text-foreground"
+      />
       {busy > 0 ? (
         <g transform="translate(13 -13)">
           <circle r={7} className={machine.attention > 0 ? "fill-warning" : "fill-info"} />
