@@ -31,6 +31,7 @@ check to the PR head, with the failure reason and instructions to re-run the job
 incomplete inspection visible in the PR checks list. If creating that check fails, such as with a
 read-only fork PR token, a warning is logged and the annotation and summary remain available.
 The job stays green in `warn` mode and fails in `enforce` mode.
+Repeated inconclusive runs reuse the existing check on the same head SHA, and a later conclusive inspection marks it resolved; lookup or update failures only log a warning and do not change the job's exit code.
 
 ## Switching to enforce
 

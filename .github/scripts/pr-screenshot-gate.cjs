@@ -194,6 +194,45 @@ async function labelWaiver({ repoPath, number, labels, options, log }) {
   return false;
 }
 
+async function syncInconclusiveCheck({ repoPath, headSha, decision, options }) {
+  if (!headSha) throw new Error("event payload has no PR head SHA");
+  const name = "goat-screenshot-gate: inconclusive";
+  const checks = await api(
+    repoPath +
+      "/commits/" +
+      headSha +
+      "/check-runs?check_name=" +
+      encodeURIComponent(name) +
+      "&filter=latest",
+    options,
+  );
+  const existing = checks.check_runs[0];
+  const inconclusive = decision.outcome === "inconclusive";
+  if (!inconclusive && !existing) return;
+  await api(repoPath + "/check-runs" + (existing ? "/" + existing.id : ""), {
+    ...options,
+    method: existing ? "PATCH" : "POST",
+    // A transport failure may have created the check; do not duplicate it by retrying.
+    attempts: 1,
+    body: {
+      ...(existing ? {} : { name, head_sha: headSha }),
+      status: "completed",
+      conclusion: inconclusive ? "neutral" : "success",
+      output: {
+        title: inconclusive
+          ? "Screenshot gate could not inspect this PR"
+          : "Resolved: a later run inspected this PR",
+        summary: inconclusive
+          ? decision.reason + ". Please re-run the goat-screenshot-gate job."
+          : decision.outcome +
+            ": " +
+            decision.reason +
+            ". See the goat-screenshot-gate job for the gate result.",
+      },
+    },
+  });
+}
+
 function summaryMarkdown({ number, mode, decision }) {
   const lines = [
     "### PR screenshot gate",
@@ -279,33 +318,22 @@ async function main(env = process.env, { sleep: wait = sleep } = {}) {
   if (env.GITHUB_STEP_SUMMARY) {
     fs.appendFileSync(env.GITHUB_STEP_SUMMARY, summaryMarkdown({ number, mode, decision }));
   }
+  try {
+    await syncInconclusiveCheck({
+      repoPath,
+      headSha: event.pull_request?.head?.sha,
+      decision,
+      options,
+    });
+  } catch (error) {
+    console.log(
+      "::warning title=PR screenshot gate::could not synchronize inconclusive check: " +
+        error.message,
+    );
+  }
   if (decision.outcome === "inconclusive") {
     const level = mode === "enforce" ? "error" : "warning";
     console.log("::" + level + " title=PR screenshot gate::inconclusive: " + decision.reason);
-    try {
-      const headSha = event.pull_request?.head?.sha;
-      if (!headSha) throw new Error("event payload has no PR head SHA");
-      await api(repoPath + "/check-runs", {
-        ...options,
-        method: "POST",
-        // A transport failure may have created the check; do not duplicate it by retrying.
-        attempts: 1,
-        body: {
-          name: "goat-screenshot-gate: inconclusive",
-          head_sha: headSha,
-          status: "completed",
-          conclusion: "neutral",
-          output: {
-            title: "Screenshot gate could not inspect this PR",
-            summary: decision.reason + ". Please re-run the goat-screenshot-gate job.",
-          },
-        },
-      });
-    } catch (error) {
-      console.log(
-        "::warning title=PR screenshot gate::could not create inconclusive check: " + error.message,
-      );
-    }
     return mode === "enforce" ? 1 : 0;
   }
   if (decision.outcome !== "missing") return 0;

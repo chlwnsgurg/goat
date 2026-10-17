@@ -19,6 +19,7 @@ const {
 
 const SHOT = "![after](https://raw.githubusercontent.com/goat-si/goat/abc123/120/after.png)";
 const FENCE = "\x60\x60\x60";
+const CHECK_LIST_PATH = "/repos/goat-si/goat/commits/" + "c".repeat(40) + "/check-runs";
 
 describe("hasScreenshotEvidence", () => {
   it("accepts inline markdown images, img tags, and defined reference images", () => {
@@ -197,7 +198,7 @@ describe("main", () => {
       JSON.stringify({ pull_request: { number: 7, head: { sha: "c".repeat(40) } } }),
     );
     const requests = [];
-    const restore = stubFetch(routes, requests);
+    const restore = stubFetch({ [CHECK_LIST_PATH]: { check_runs: [] }, ...routes }, requests);
     const logs = [];
     const originalLog = console.log;
     console.log = (line) => logs.push(line);
@@ -457,7 +458,7 @@ describe("main", () => {
           result.logs.some(
             (line) =>
               line.startsWith("::warning") &&
-              line.includes("could not create inconclusive check") &&
+              line.includes("could not synchronize inconclusive check") &&
               line.includes(failure === "network" ? "fetch failed" : String(failure)),
           ),
         );
@@ -500,6 +501,128 @@ describe("main", () => {
     "/repos/goat-si/goat/issues/7/events",
     "/repos/goat-si/goat/collaborators/lead/permission",
   ];
+
+  it("reuses the same check on repeated inconclusive runs for the same head", async () => {
+    let check;
+    const routes = {
+      ...uiPr(),
+      "/repos/goat-si/goat/pulls/7/files": async () => ({ ok: false, status: 404 }),
+      [CHECK_LIST_PATH]: async (url) => {
+        const query = new URL(url).searchParams;
+        assert.equal(query.get("check_name"), "goat-screenshot-gate: inconclusive");
+        assert.equal(query.get("filter"), "latest");
+        return { ok: true, json: async () => ({ check_runs: check ? [check] : [] }) };
+      },
+      "/repos/goat-si/goat/check-runs": async (_url, options) => {
+        check = { id: 123, ...JSON.parse(options.body) };
+        return { ok: true, json: async () => check };
+      },
+      "/repos/goat-si/goat/check-runs/123": async (_url, options) => {
+        check = { ...check, ...JSON.parse(options.body) };
+        return { ok: true, json: async () => check };
+      },
+    };
+    const first = await run("warn", routes);
+    assert.equal(first.requests.filter((request) => request.method === "POST").length, 1);
+    routes["/repos/goat-si/goat/pulls/7/files"] = async () => ({ ok: false, status: 403 });
+    const second = await run("enforce", routes);
+    assert.equal(second.code, 1);
+    assert.equal(second.outcome, "inconclusive");
+    assert.equal(second.requests.filter((request) => request.method === "POST").length, 0);
+    const patches = second.requests.filter((request) => request.method === "PATCH");
+    assert.equal(patches.length, 1);
+    assert.equal(patches[0].path, "/repos/goat-si/goat/check-runs/123");
+    assert.equal(check.conclusion, "neutral");
+    assert.equal(check.output.title, "Screenshot gate could not inspect this PR");
+    assert.match(check.output.summary, /returned 403.*re-run/);
+  });
+
+  it("resolves an earlier inconclusive check after pass, skip, missing, or waiver", async () => {
+    const pass = uiPr();
+    pass["/repos/goat-si/goat/pulls/7"].body = SHOT;
+    const skip = uiPr();
+    skip["/repos/goat-si/goat/pulls/7"].draft = true;
+    for (const [routes, expected] of [
+      [pass, "pass"],
+      [skip, "skip"],
+      [uiPr(), "missing"],
+      [waiverRoutes(), "pass"],
+    ]) {
+      const result = await run("enforce", {
+        ...routes,
+        [CHECK_LIST_PATH]: { check_runs: [{ id: 123, conclusion: "neutral" }] },
+        "/repos/goat-si/goat/check-runs/123": { id: 123 },
+      });
+      assert.equal(result.code, expected === "missing" ? 1 : 0);
+      assert.equal(result.outcome, expected);
+      assert.equal(result.requests.filter((request) => request.method === "POST").length, 0);
+      const patches = result.requests.filter((request) => request.method === "PATCH");
+      assert.equal(patches.length, 1);
+      assert.equal(patches[0].path, "/repos/goat-si/goat/check-runs/123");
+      const body = JSON.parse(patches[0].body);
+      assert.equal(body.status, "completed");
+      assert.equal(body.conclusion, "success");
+      assert.equal(body.output.title, "Resolved: a later run inspected this PR");
+      assert.ok(body.output.summary.includes(expected));
+    }
+  });
+
+  it("tolerates check-list failures without changing decisions or exit codes", async () => {
+    for (const failure of [403, 503, "network"]) {
+      for (const mode of ["warn", "enforce"]) {
+        for (const inconclusive of [false, true]) {
+          const routes = uiPr();
+          if (inconclusive) {
+            routes["/repos/goat-si/goat/pulls/7/files"] = async () => ({ ok: false, status: 404 });
+          } else {
+            routes["/repos/goat-si/goat/pulls/7"].body = SHOT;
+          }
+          const result = await run(mode, {
+            ...routes,
+            [CHECK_LIST_PATH]: async () => {
+              if (failure === "network") throw new TypeError("fetch failed");
+              return { ok: false, status: failure };
+            },
+          });
+          assert.equal(result.code, inconclusive && mode === "enforce" ? 1 : 0);
+          assert.equal(result.outcome, inconclusive ? "inconclusive" : "pass");
+          assert.equal(
+            result.requests.some((request) => request.method !== "GET"),
+            false,
+          );
+          assert.ok(
+            result.logs.some(
+              (line) =>
+                line.startsWith("::warning") &&
+                line.includes("inconclusive check") &&
+                line.includes(failure === "network" ? "fetch failed" : String(failure)),
+            ),
+          );
+        }
+      }
+    }
+  });
+
+  it("tolerates check-update failures without changing decisions or exit codes", async () => {
+    for (const mode of ["warn", "enforce"]) {
+      for (const inconclusive of [false, true]) {
+        const routes = uiPr();
+        if (inconclusive) {
+          routes["/repos/goat-si/goat/pulls/7/files"] = async () => ({ ok: false, status: 404 });
+        }
+        const result = await run(mode, {
+          ...routes,
+          [CHECK_LIST_PATH]: { check_runs: [{ id: 123 }] },
+          "/repos/goat-si/goat/check-runs/123": async () => ({ ok: false, status: 503 }),
+        });
+        assert.equal(result.code, mode === "enforce" ? 1 : 0);
+        assert.equal(result.outcome, inconclusive ? "inconclusive" : "missing");
+        assert.equal(result.requests.filter((request) => request.method === "PATCH").length, 1);
+        assert.equal(result.requests.filter((request) => request.method === "POST").length, 0);
+        assert.ok(result.logs.some((line) => line.startsWith("::warning") && line.includes("503")));
+      }
+    }
+  });
 
   for (const inspectionPath of inspectionPaths) {
     it("retries HTTP 5xx and network errors for " + inspectionPath, async () => {
