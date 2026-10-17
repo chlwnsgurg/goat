@@ -26,7 +26,9 @@ const fs = Effect.runSync(FileSystem.FileSystem.pipe(Effect.provide(NodeFileSyst
 const pathApi = Effect.runSync(Path.Path.pipe(Effect.provide(NodePath.layer)));
 const REPOSITORY_ROOT = pathApi.resolve(import.meta.dirname, "..");
 const CANVAS = 1024;
-const MARK_FRACTION = 0.644;
+// The mark's share of the raster icon width. The Icon Composer layer below is sized to
+// render at the same share of the macOS tile, so change the two together.
+const MARK_FRACTION = 0.74;
 export type IconOutputs = Map<string, Buffer>;
 
 /** Center the visible ink on a square canvas, preserving the canonical path data. */
@@ -47,7 +49,7 @@ export async function renderGoatIconOutputs(
 ): Promise<IconOutputs> {
   const outputs: IconOutputs = new Map();
   const text = (path: string, contents: string) => outputs.set(path, Buffer.from(`${contents}\n`));
-  const layerMark = `<g transform="translate(17.24 17.31) scale(3.897)">${goatMarkSvgElements("white")}</g>`;
+  const layerMark = `<g transform="translate(10.26 10.34) scale(4.478)">${goatMarkSvgElements("white")}</g>`;
   const variants = [
     {
       channel: "stable",
