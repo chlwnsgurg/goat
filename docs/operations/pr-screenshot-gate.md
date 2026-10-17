@@ -23,6 +23,10 @@ The repository variable `GOAT_SCREENSHOT_GATE` selects the mode. Unset or unknow
 - `enforce`: the job fails until the PR has a screenshot or a maintainer waiver.
 - `off`: the job reports nothing.
 
+Changed-file requests make up to three attempts on network errors or HTTP 5xx responses. If PR
+inspection still fails, the annotation and summary say `inconclusive`, and the `screenshot_gate`
+step outputs `outcome=inconclusive`. The job stays green in `warn` mode and fails in `enforce` mode.
+
 ## Switching to enforce
 
 1. Create the waiver label so maintainers can apply it:

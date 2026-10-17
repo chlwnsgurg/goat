@@ -155,6 +155,7 @@ jobs:
       # PR, so re-running only this job picks up a new screenshot or waiver label.
       # See docs/operations/pr-screenshot-gate.md.
       - name: PR screenshot gate
+        id: screenshot_gate
         if: matrix.task == 'screenshot-gate'
         env:
           GITHUB_TOKEN: ${{ github.token }}

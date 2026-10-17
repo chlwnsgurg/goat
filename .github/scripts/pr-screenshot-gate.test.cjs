@@ -174,6 +174,7 @@ describe("main", () => {
       const pathname = new URL(url).pathname;
       if (!(pathname in routes)) return { ok: false, status: 404, json: async () => ({}) };
       const value = routes[pathname];
+      if (typeof value === "function") return value(url);
       const page = Number(new URL(url).searchParams.get("page") ?? "1");
       return {
         ok: true,
@@ -189,25 +190,43 @@ describe("main", () => {
   function run(mode, routes) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pr-screenshot-gate-"));
     const eventPath = path.join(dir, "event.json");
+    const summaryPath = path.join(dir, "summary.md");
+    const outputPath = path.join(dir, "output.txt");
     fs.writeFileSync(eventPath, JSON.stringify({ pull_request: { number: 7 } }));
     const restore = stubFetch(routes);
     const logs = [];
     const originalLog = console.log;
     console.log = (line) => logs.push(line);
-    return main({
-      GITHUB_EVENT_NAME: "pull_request",
-      GITHUB_EVENT_PATH: eventPath,
-      GITHUB_REPOSITORY: "goat-si/goat",
-      GITHUB_TOKEN: "test",
-      GITHUB_API_URL: "https://api.example.test",
-      GOAT_SCREENSHOT_GATE: mode,
-    })
+    const delays = [];
+    return main(
+      {
+        GITHUB_EVENT_NAME: "pull_request",
+        GITHUB_EVENT_PATH: eventPath,
+        GITHUB_REPOSITORY: "goat-si/goat",
+        GITHUB_TOKEN: "test",
+        GITHUB_API_URL: "https://api.example.test",
+        GOAT_SCREENSHOT_GATE: mode,
+        GITHUB_STEP_SUMMARY: summaryPath,
+        GITHUB_OUTPUT: outputPath,
+      },
+      {
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+      },
+    )
+      .then((code) => ({
+        code,
+        logs,
+        delays,
+        summary: fs.existsSync(summaryPath) ? fs.readFileSync(summaryPath, "utf8") : "",
+        output: fs.existsSync(outputPath) ? fs.readFileSync(outputPath, "utf8") : "",
+      }))
       .finally(() => {
         console.log = originalLog;
         restore();
         fs.rmSync(dir, { recursive: true, force: true });
-      })
-      .then((code) => ({ code, logs }));
+      });
   }
 
   const uiPr = (labels = []) => ({
@@ -252,7 +271,125 @@ describe("main", () => {
   });
 
   it("does not break CI when the API is unreachable in warn mode", async () => {
-    const { code } = await run("warn", {});
+    const { code, logs, summary, output, delays } = await run("warn", {});
     assert.equal(code, 0);
+    assert.ok(logs.some((line) => line.startsWith("::warning") && line.includes("inconclusive")));
+    assert.match(summary, /inconclusive/);
+    assert.equal(output, "outcome=inconclusive\n");
+    assert.deepEqual(delays, []);
+  });
+
+  it("recovers from a files HTTP 500 and network failure within three attempts", async () => {
+    let calls = 0;
+    const { code, output, summary, delays } = await run("enforce", {
+      ...uiPr(),
+      "/repos/goat-si/goat/pulls/7/files": async () => {
+        calls += 1;
+        if (calls === 1) return { ok: false, status: 500 };
+        if (calls === 2) throw new TypeError("fetch failed");
+        return { ok: true, json: async () => [{ filename: "apps/server/src/ws.ts" }] };
+      },
+    });
+    assert.equal(calls, 3);
+    assert.deepEqual(delays, [250, 500]);
+    assert.equal(code, 0);
+    assert.equal(output, "outcome=skip\n");
+    assert.doesNotMatch(summary, /inconclusive/);
+  });
+
+  it("reports exhausted files 5xx errors as inconclusive in advisory mode", async () => {
+    let calls = 0;
+    const { code, logs, summary, output, delays } = await run("warn", {
+      ...uiPr(),
+      "/repos/goat-si/goat/pulls/7/files": async () => {
+        calls += 1;
+        return { ok: false, status: 503 };
+      },
+    });
+    assert.equal(calls, 3);
+    assert.deepEqual(delays, [250, 500]);
+    assert.equal(code, 0);
+    assert.equal(output, "outcome=inconclusive\n");
+    assert.match(summary, /inconclusive.*returned 503/);
+    assert.ok(logs.some((line) => line.startsWith("::warning") && line.includes("inconclusive")));
+  });
+
+  it("fails enforce mode with an inconclusive outcome after network retries", async () => {
+    let calls = 0;
+    const { code, logs, summary, output, delays } = await run("enforce", {
+      ...uiPr(),
+      "/repos/goat-si/goat/pulls/7/files": async () => {
+        calls += 1;
+        throw new TypeError("fetch failed");
+      },
+    });
+    assert.equal(calls, 3);
+    assert.deepEqual(delays, [250, 500]);
+    assert.equal(code, 1);
+    assert.equal(output, "outcome=inconclusive\n");
+    assert.match(summary, /inconclusive/);
+    assert.ok(logs.some((line) => line.startsWith("::error") && line.includes("inconclusive")));
+  });
+
+  it("does not retry files 4xx responses, including rate limits", async () => {
+    for (const status of [401, 403, 404, 429]) {
+      let calls = 0;
+      const { code, output, delays } = await run("warn", {
+        ...uiPr(),
+        "/repos/goat-si/goat/pulls/7/files": async () => {
+          calls += 1;
+          return { ok: false, status };
+        },
+      });
+      assert.equal(calls, 1, String(status));
+      assert.deepEqual(delays, []);
+      assert.equal(code, 0);
+      assert.equal(output, "outcome=inconclusive\n");
+    }
+  });
+
+  it("does not retry a malformed files response", async () => {
+    let calls = 0;
+    const { output, delays } = await run("warn", {
+      ...uiPr(),
+      "/repos/goat-si/goat/pulls/7/files": async () => {
+        calls += 1;
+        return {
+          ok: true,
+          json: async () => {
+            throw new SyntaxError("invalid JSON");
+          },
+        };
+      },
+    });
+    assert.equal(calls, 1);
+    assert.deepEqual(delays, []);
+    assert.equal(output, "outcome=inconclusive\n");
+  });
+
+  it("retries only the failed page and keeps files from earlier pages", async () => {
+    const pages = [];
+    const routes = uiPr();
+    routes["/repos/goat-si/goat/pulls/7"].changed_files = 101;
+    const { code, output, delays } = await run("enforce", {
+      ...routes,
+      "/repos/goat-si/goat/pulls/7/files": async (url) => {
+        const page = Number(new URL(url).searchParams.get("page"));
+        pages.push(page);
+        if (page === 1) {
+          return {
+            ok: true,
+            json: async () =>
+              Array.from({ length: 100 }, () => ({ filename: "apps/server/src/ws.ts" })),
+          };
+        }
+        if (pages.length === 2) return { ok: false, status: 502 };
+        return { ok: true, json: async () => [{ filename: "apps/web/src/App.tsx" }] };
+      },
+    });
+    assert.deepEqual(pages, [1, 2, 2]);
+    assert.deepEqual(delays, [250]);
+    assert.equal(code, 1);
+    assert.equal(output, "outcome=missing\n");
   });
 });
