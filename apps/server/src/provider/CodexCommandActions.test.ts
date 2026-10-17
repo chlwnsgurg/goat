@@ -27,6 +27,61 @@ describe("codexCommandActions", () => {
     expect(codexCommandActions([])).toEqual([]);
   });
 
+  it.each(["src", "src/", "dist", "dist/"])(
+    "recovers explicit list and search targets ending in %s",
+    (target) => {
+      const path = `/tmp/demo/${target}`;
+      expect(
+        codexCommandActions([
+          { type: "listFiles", command: `ls ${path}`, path: "demo" },
+          { type: "search", command: `rg -n TODO ${path}`, query: "TODO", path: "demo" },
+        ]),
+      ).toEqual([
+        { type: "list", path },
+        { type: "search", query: "TODO", path },
+      ]);
+    },
+  );
+
+  it("keeps Codex metadata when commands cannot identify a single matching action", () => {
+    expect(
+      codexCommandActions([
+        { type: "listFiles", command: "custom-list /tmp/demo/src", path: "demo" },
+        {
+          type: "search",
+          command: "custom-search TODO /tmp/demo/dist",
+          query: "TODO",
+          path: "demo",
+        },
+        { type: "listFiles", command: "rg TODO /tmp/demo/src", path: "demo" },
+        { type: "search", command: "ls /tmp/demo/dist", query: "TODO", path: "demo" },
+        { type: "listFiles", command: "ls src dist", path: "demo" },
+        { type: "search", command: "rg TODO src && rg FIXME dist", query: "TODO", path: "demo" },
+      ]),
+    ).toEqual([
+      { type: "list", path: "demo" },
+      { type: "search", query: "TODO", path: "demo" },
+      { type: "list", path: "demo" },
+      { type: "search", query: "TODO", path: "demo" },
+      { type: "list", path: "demo" },
+      { type: "search", query: "TODO", path: "demo" },
+    ]);
+  });
+
+  it("keeps Codex metadata without an explicit target and preserves its search query", () => {
+    expect(
+      codexCommandActions([
+        { type: "listFiles", command: "ls", path: " demo " },
+        { type: "search", command: "rg TODO", query: " TODO ", path: " demo " },
+        { type: "search", command: "rg TODO src/", query: "Codex query", path: "demo" },
+      ]),
+    ).toEqual([
+      { type: "list", path: "demo" },
+      { type: "search", query: "TODO", path: "demo" },
+      { type: "search", query: "Codex query", path: "src/" },
+    ]);
+  });
+
   it("keeps commands plain when any action field cannot fit the wire", () => {
     expect(
       codexCommandActions([
