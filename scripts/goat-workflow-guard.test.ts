@@ -243,6 +243,23 @@ describe("goat pre-push workflow guard", () => {
     expect(f.hook(f.record(f.sha)).status).toBe(0);
   });
 
+  it("allows the scope and result jobs and holds them to the EPYC runner", () => {
+    const jobs = { scope: baseJob, ci: baseJob, result: baseJob };
+    const allowed = fixture({ workflow: JSON.stringify({ on: { pull_request: null }, jobs }) });
+    expect(allowed.hook(allowed.record(allowed.sha)).status).toBe(0);
+    const hosted = fixture({
+      workflow: JSON.stringify({
+        on: { pull_request: null },
+        jobs: { ...jobs, scope: { ...baseJob, "runs-on": "ubuntu-latest" } },
+      }),
+    });
+    const refused = hosted.hook(hosted.record(hosted.sha));
+    expect(refused.status).not.toBe(0);
+    expect(refused.stderr).toContain(
+      "jobs.scope.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+    );
+  });
+
   it.each([
     ["hosted runner", { "runs-on": "ubuntu-latest" }, "jobs.screenshot-gate.runs-on"],
     [
@@ -479,17 +496,17 @@ describe("goat pre-push workflow guard", () => {
     [
       "extra job",
       JSON.stringify({ on: { push: null }, jobs: { ci: baseJob, extra: baseJob } }),
-      "jobs must contain ci and optionally screenshot-gate",
+      "jobs must contain ci and optionally scope, screenshot-gate, result",
     ],
     [
       "missing jobs",
       JSON.stringify({ on: { push: null } }),
-      "jobs must contain ci and optionally screenshot-gate",
+      "jobs must contain ci and optionally scope, screenshot-gate, result",
     ],
     [
       "jobs array",
       JSON.stringify({ on: { push: null }, jobs: [] }),
-      "jobs must contain ci and optionally screenshot-gate",
+      "jobs must contain ci and optionally scope, screenshot-gate, result",
     ],
     ["nonmapping ci", workflow(null), "jobs.ci must be a mapping"],
     [
@@ -744,7 +761,7 @@ exit 1
 
 const nightlyPath = ".github/workflows/goat-nightly.yml";
 const prepareGateText =
-  "github.repository == 'goat-si/goat' && (github.event_name == 'workflow_dispatch' || (vars.GOAT_RELEASES_PUBLISH == 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'dev' && github.event.workflow_run.head_repository.full_name == 'goat-si/goat'))";
+  "github.repository == 'goat-si/goat' && (github.event_name == 'workflow_dispatch' || (vars.GOAT_RELEASES_PUBLISH == 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_branch == 'dev' && github.event.workflow_run.head_repository.full_name == 'goat-si/goat'))";
 const downstreamGateText =
   "needs.prepare.result == 'success' && needs.prepare.outputs.skip == 'false'";
 const macRunner = ["self-hosted", "macOS", "ARM64", "goat", "mac-studio"];
@@ -906,14 +923,17 @@ describe("goat pre-push nightly workflow guard", () => {
     [
       "a gate that accepts pull request runs",
       withJob("prepare", {
-        if: prepareGateText.replace(" && github.event.workflow_run.event == 'push'", ""),
+        if: prepareGateText.replace(
+          " && github.event.workflow_run.event == 'workflow_dispatch'",
+          "",
+        ),
       }),
-      "jobs.prepare.if must be the dev-push gate",
+      "jobs.prepare.if must be the manual dev run gate",
     ],
     [
       "a missing gate",
       withJob("prepare", { if: undefined }),
-      "jobs.prepare.if must be the dev-push gate",
+      "jobs.prepare.if must be the manual dev run gate",
     ],
     [
       "a job without needs: prepare",
