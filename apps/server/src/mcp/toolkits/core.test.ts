@@ -55,6 +55,7 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as McpHttpServer from "../McpHttpServer.ts";
 import * as ThreadResultService from "../../threadResults/ThreadResultService.ts";
 import * as SshRemoteDispatch from "../../sshRemote/SshRemoteDispatch.ts";
+import * as SshHostSetup from "../../sshRemote/SshHostSetup.ts";
 import * as SshWorkspaceSync from "../../sshRemote/SshWorkspaceSync.ts";
 import * as LaunchWatchService from "../LaunchWatchService.ts";
 import { newLaunchWatch } from "../launchWatch.ts";
@@ -204,7 +205,9 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "goat_review_findings_record",
     "goat_ssh_browse",
     "goat_ssh_host_list",
+    "goat_ssh_host_status",
     "goat_ssh_reports",
+    "goat_ssh_runtime_update",
     "goat_ssh_thread_handoff",
     "goat_ssh_thread_launch",
     "goat_thread_configuration",
@@ -244,7 +247,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "channel_task_move",
     "channel_task_report",
   ]);
-  expect(names.size).toBe(120);
+  expect(names.size).toBe(122);
   expect([...names].some((name) => name.startsWith("t3_"))).toBe(false);
   expect(names.has("goat_thread_launch")).toBe(true);
   expect(names.has("t3_thread_start")).toBe(false);
@@ -1454,6 +1457,7 @@ it.effect.each([false, true])(
             }),
         }),
         Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
+        Layer.mock(SshHostSetup.SshHostSetup)({}),
         Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
           validateLaunchAttachments: (attachments) => Effect.succeed(attachments),
           launchThread: (input, check) =>

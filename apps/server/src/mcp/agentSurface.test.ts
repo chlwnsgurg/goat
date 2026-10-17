@@ -32,6 +32,7 @@ import * as ThreadLaunchMcpService from "./ThreadLaunchMcpService.ts";
 import * as RemoteReportService from "../remoteReports/RemoteReportService.ts";
 import * as CloudMachineService from "../cloudMachines/CloudMachineService.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
+import * as SshHostSetup from "../sshRemote/SshHostSetup.ts";
 import * as SshWorkspaceSync from "../sshRemote/SshWorkspaceSync.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import * as RemoteDispatchCoordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
@@ -151,6 +152,7 @@ const dependencies = Layer.mergeAll(
   Layer.mock(Orchestrator.OrchestratorV2)({}),
   Layer.mock(RemoteReportService.RemoteReportService)({}),
   Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
+  Layer.mock(SshHostSetup.SshHostSetup)({}),
   Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
   Layer.mock(LaunchWatchService.LaunchWatchService)({}),
   Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({}),
@@ -181,7 +183,7 @@ const client = McpSchema.McpServerClient.of({
 });
 
 it("gives every entry a unique path, legacy name and resolvable schema reference", () => {
-  expect(entries).toHaveLength(130); // Includes current memory, browser and provider tools.
+  expect(entries).toHaveLength(132); // Includes current memory, browser, provider and SSH runtime tools.
   expect(new Set(entries.map((entry) => entry.name)).size).toBe(entries.length);
   for (const [path, entry] of Object.entries(agentSurfaceRegistry)) {
     expect(path).toBe(entry.path);
