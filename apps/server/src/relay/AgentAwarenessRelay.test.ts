@@ -182,6 +182,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
   const catchUp = { shellSnapshotReads: 0 };
   const threads = ThreadManagementService.ThreadManagementService.of({
     getLaunchedPendingQuestions: () => Effect.die("Unused launched question query"),
+    assertReviewTaskSendAllowed: unused,
     getThreadShell: (threadId) =>
       Effect.sync(() => shellReads.push(threadId)).pipe(
         Effect.andThen(options.readShell?.(threadId) ?? Ref.get(currentShell)),
@@ -200,6 +201,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
     getTimelinePage: () => Effect.die("Unused timeline read"),
     getMessageCount: () => Effect.die("unused message count"),
     getTurnItem: () => Effect.die("unused turn item read"),
+    getReviewLedgerEntries: () => Effect.die("unused review ledger query"),
     getThreadRecords: () => Effect.die("unused record read"),
     getThreadProjection: unused,
     getCheckpointContext: unused,

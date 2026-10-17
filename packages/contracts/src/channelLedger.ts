@@ -22,6 +22,7 @@ import {
   ChannelTaskEventId,
   ChannelTaskId,
 } from "./channelCommon.ts";
+import { ChannelTaskBrief, ChannelTaskMemoryDelivered } from "./channelBrief.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import { MemoryTaskGrantCeiling } from "./memory.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
@@ -180,6 +181,7 @@ export const ChannelTask = Schema.Struct({
   status: ChannelTaskStatus,
   version: PositiveInt,
   generation: PositiveInt,
+  briefVersion: Schema.optional(PositiveInt),
   projectId: Schema.optional(ProjectId),
   /** The machine the requester asked for, as an SSH alias; the dispatcher checks it. */
   host: Schema.optional(TrimmedNonEmptyString),
@@ -202,6 +204,7 @@ export type ChannelTask = typeof ChannelTask.Type;
 export const ChannelTaskEventType = Schema.Literals([
   "task.created",
   "task.dispatch.claimed",
+  "task.brief.frozen",
   "task.worker.bound",
   "task.progress",
   "task.question.opened",
@@ -262,6 +265,7 @@ export const ChannelTaskEvent = Schema.Union([
     target: ChannelDispatchTarget,
     leaseExpiresAt: IsoDateTime,
   }),
+  taskEvent("task.brief.frozen", { brief: ChannelTaskBrief }),
   taskEvent("task.worker.bound", { worker: ChannelWorkerAssignment }),
   taskEvent("task.progress", { generation: PositiveInt, summary: TrimmedNonEmptyString }),
   taskEvent("task.question.opened", { question: ChannelOpenQuestion }),
@@ -272,17 +276,22 @@ export const ChannelTaskEvent = Schema.Union([
   }),
   taskEvent("task.completion.proposed", { proposal: ChannelProposedCompletion }),
   taskEvent("task.completed", {
+    briefVersion: Schema.optional(PositiveInt),
     generation: PositiveInt,
     runId: Schema.optional(RunId),
     summary: Schema.String,
     report: Schema.optional(ChannelTaskCompletionReport),
   }),
   taskEvent("task.failed", {
+    briefVersion: Schema.optional(PositiveInt),
     generation: PositiveInt,
     reason: TrimmedNonEmptyString,
     summary: Schema.optional(Schema.String),
   }),
-  taskEvent("task.cancelled", { reason: Schema.optional(Schema.String) }),
+  taskEvent("task.cancelled", {
+    reason: Schema.optional(Schema.String),
+    briefVersion: Schema.optional(PositiveInt),
+  }),
   taskEvent("task.retry.requested", { generation: PositiveInt }),
   taskEvent("task.worker.observed", {
     generation: PositiveInt,
@@ -344,3 +353,41 @@ export const ChannelTimelineRecord = Schema.Struct({
   ]),
 });
 export type ChannelTimelineRecord = typeof ChannelTimelineRecord.Type;
+
+const ChannelTaskOutcomeFields = {
+  sequence: NonNegativeInt,
+  taskId: ChannelTaskId,
+  ownerId: TrimmedNonEmptyString,
+  requester: ChannelRequester,
+  conversationId: ChannelConversationId,
+  originBindingId: ChannelBindingId,
+  originAddress: ChannelReplyAddress,
+  originInputId: ChannelInputId,
+  title: TrimmedNonEmptyString,
+  brief: Schema.NullOr(ChannelTaskBrief),
+  terminalState: Schema.Literals(CHANNEL_TASK_TERMINAL_STATUSES),
+  occurredAt: IsoDateTime,
+  resultSummary: Schema.NullOr(Schema.String),
+  evidence: Schema.NullOr(ChannelWorkerAssignment),
+  reruns: NonNegativeInt,
+  generation: PositiveInt,
+};
+
+/** Ledger-only source rows; thread evidence is joined by the channel export service. */
+export const ChannelTaskLedgerExportRow = Schema.Struct({
+  ...ChannelTaskOutcomeFields,
+  channelAnswers: NonNegativeInt,
+});
+export type ChannelTaskLedgerExportRow = typeof ChannelTaskLedgerExportRow.Type;
+
+export const ChannelTaskExportRow = Schema.Struct({
+  ...ChannelTaskOutcomeFields,
+  /** Both counters belong to this outcome's generation; reruns remains task-cumulative. */
+  humanInterventions: Schema.Struct({
+    channelAnswers: NonNegativeInt,
+    /** Local worker's native human answers through the terminal time; null means unknown. */
+    threadAnswers: Schema.NullOr(NonNegativeInt),
+  }),
+  memoryDelivered: ChannelTaskMemoryDelivered,
+});
+export type ChannelTaskExportRow = typeof ChannelTaskExportRow.Type;

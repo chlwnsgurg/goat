@@ -107,6 +107,8 @@ const Row = Schema.Struct({
   Schema.makeFilter((r) => r.kind !== "task" || (r.task_id !== null && r.parent_run_id !== null)),
 );
 type Row = typeof Row.Type;
+
+const RELAY_REQUEST_OUTCOME_LIMIT = 1_000;
 const decodeRows = Schema.decodeUnknownEffect(Schema.Array(Row));
 const encodeRequestIds = Schema.encodeSync(Schema.fromJsonString(Schema.Array(RuntimeRequestId)));
 const decodeReportWait = Schema.decodeUnknownEffect(RemoteOriginReportsWaitResult);
@@ -226,6 +228,11 @@ export class RemoteDispatchCoordinator extends Context.Service<
     readonly listRecent: (
       limit: number,
     ) => Effect.Effect<ReadonlyArray<RemoteDispatchRecord>, RemoteDispatchError>;
+    /** The task owner remains available after completion, including for sends from other threads. */
+    readonly taskOrigin: (
+      host: string,
+      threadId: string,
+    ) => Effect.Effect<ThreadId | null, RemoteDispatchError>;
     readonly isTaskThread: (
       host: string,
       threadId: string,
@@ -260,6 +267,10 @@ const make = Effect.gen(function* () {
     effect.pipe(Effect.mapError((cause) => new RemoteDispatchError({ stage: "storage", cause })));
   const rows = <E>(statement: Effect.Effect<ReadonlyArray<unknown>, E>) =>
     statement.pipe(Effect.flatMap(decodeRows), db);
+  const taskOrigin = (host: string, threadId: string) =>
+    rows(
+      sql`SELECT * FROM remote_dispatches WHERE kind = 'task' AND host = ${host} AND remote_thread_id = ${threadId} LIMIT 1`,
+    ).pipe(Effect.map((matches) => matches[0]?.origin_thread_id ?? null));
   const load = (id: string) =>
     rows(sql`SELECT * FROM remote_dispatches
     WHERE correlation_id = ${id}`).pipe(Effect.map((values) => values[0] ?? null));
@@ -446,13 +457,23 @@ const make = Effect.gen(function* () {
    * outcome it already has.
    */
   const relayOutcomes = new Map<string, RelayOutcome>();
+  // Keyed by the caller's request id for retries after a lost response; bounded, oldest first out.
+  const relayRequestOutcomes = new Map<string, RelayOutcome>();
   const relay = Effect.fn("RemoteDispatchCoordinator.relay")(function* (
     r: Row,
     report: RemoteReport,
     send: RemoteRelaySend,
   ) {
     const key = `${r.correlation_id}:${report.sequence}`;
-    const known = relayOutcomes.get(key);
+    const requestKey =
+      send.clientRequestId === undefined
+        ? undefined
+        : [r.correlation_id, send.host, send.threadId, send.clientRequestId]
+            .map(encodeURIComponent)
+            .join(":");
+    const known =
+      relayOutcomes.get(key) ??
+      (requestKey === undefined ? undefined : relayRequestOutcomes.get(requestKey));
     if (known !== undefined) return known;
     const outcome = (
       status: string,
@@ -487,6 +508,30 @@ const make = Effect.gen(function* () {
         WHERE correlation_id = ${r.correlation_id}`);
       const refused = (code: OrchestratorMcpFailure["code"], message: string) =>
         new OrchestratorMcpFailure({ code, message });
+      const reviewAllowed = taskOrigin(send.host, send.threadId).pipe(
+        Effect.mapError((error) => refused("orchestration_error", error.message)),
+        Effect.flatMap((originThreadId) =>
+          originThreadId === null
+            ? Effect.void
+            : threads
+                .assertReviewTaskSendAllowed({
+                  threadId: send.threadId,
+                  senderThreadId: originThreadId,
+                  host: send.host,
+                  createdBy: "agent",
+                })
+                .pipe(
+                  Effect.mapError((error) =>
+                    refused(
+                      error._tag === "ThreadManagementReviewTaskFinishedError"
+                        ? "thread_not_sendable"
+                        : "orchestration_error",
+                      error.message,
+                    ),
+                  ),
+                ),
+        ),
+      );
       const launcherMode = threads.getThreadShell(r.origin_thread_id).pipe(
         Effect.mapError(() =>
           refused("orchestration_error", "The launcher thread could not be read."),
@@ -526,7 +571,7 @@ const make = Effect.gen(function* () {
               writes: true,
               timeoutMs: 120_000,
             },
-            launcherMode,
+            reviewAllowed.pipe(Effect.andThen(launcherMode)),
           ),
         )
         .pipe(Effect.flatMap(decodeSend), Effect.result);
@@ -565,6 +610,13 @@ const make = Effect.gen(function* () {
       return outcome(`Delivered: ${result.delivery}, run ${frameLiteral(result.runId)}.`, false);
     });
     relayOutcomes.set(key, decided);
+    if (requestKey !== undefined) {
+      relayRequestOutcomes.set(requestKey, decided);
+      if (relayRequestOutcomes.size > RELAY_REQUEST_OUTCOME_LIMIT) {
+        const oldest = relayRequestOutcomes.keys().next().value;
+        if (oldest !== undefined) relayRequestOutcomes.delete(oldest);
+      }
+    }
     return decided;
   });
   const importBatch = Effect.fn("RemoteDispatchCoordinator.importBatch")(function* (
@@ -1168,6 +1220,7 @@ const make = Effect.gen(function* () {
     launch,
     cancel,
     resume,
+    taskOrigin,
     isTaskThread: (host, threadId) =>
       db(
         sql<{

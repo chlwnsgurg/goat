@@ -32,12 +32,16 @@ import {
   UserInputRespondedBy,
   ProviderApprovalDecision,
 } from "./providerPolicy.ts";
+import { ModelSelection } from "./modelSelection.ts";
 import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
 import { ThreadResult } from "./threadResult.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import { OrchestrationSearchThreadsInput } from "./threadSearch.ts";
 import {
   OrchestrationV2Actor,
+  OrchestrationV2TaskRole,
+  ReviewLedgerEntry,
+  ReviewLedgerEntryInput,
   OrchestrationV2CloudTask,
   OrchestrationV2RuntimeRequest,
   OrchestrationV2UserInputQuestion,
@@ -190,14 +194,7 @@ export const OrchestratorMcpInteractionMode = Schema.Union([
 ]);
 export type OrchestratorMcpInteractionMode = typeof OrchestratorMcpInteractionMode.Type;
 
-export const OrchestratorMcpTaskRole = Schema.Literals([
-  "implementation",
-  "research",
-  "review",
-  "design",
-  "test",
-  "general",
-]);
+export const OrchestratorMcpTaskRole = OrchestrationV2TaskRole;
 export type OrchestratorMcpTaskRole = typeof OrchestratorMcpTaskRole.Type;
 
 export const OrchestratorMcpDelegatedTaskStatus = Schema.Literals([
@@ -289,6 +286,10 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   latestTerminalResultContextTransferId: Schema.NullOr(ContextTransferId),
   providerInstanceId: ProviderInstanceId,
   model: Schema.NullOr(Schema.String),
+  role: Schema.optional(OrchestratorMcpTaskRole),
+  modelSelection: Schema.optional(ModelSelection),
+  parentModelSelection: Schema.optional(ModelSelection),
+  reviewLedger: Schema.optional(Schema.Array(ReviewLedgerEntry)),
   summary: Schema.NullOr(Schema.String),
   resultContextTransferId: Schema.NullOr(ContextTransferId),
   pendingRequestIds: Schema.optional(Schema.Array(RuntimeRequestId)),
@@ -298,6 +299,43 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   }),
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
+
+export const OrchestratorMcpReviewFindingsRecordInput = Schema.Struct({
+  taskId: NodeId,
+  entries: Schema.Array(ReviewLedgerEntryInput).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(100),
+  ),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpReviewFindingsRecordInput =
+  typeof OrchestratorMcpReviewFindingsRecordInput.Type;
+export const OrchestratorMcpReviewFindingsRecordResult = Schema.Struct({
+  taskId: NodeId,
+  reviewLedger: Schema.Array(ReviewLedgerEntry),
+  findings: Schema.Array(
+    Schema.Struct({
+      decision: ReviewLedgerEntry.members[0],
+      latestOutcome: Schema.NullOr(ReviewLedgerEntry.members[1]),
+    }),
+  ),
+});
+export type OrchestratorMcpReviewFindingsRecordResult =
+  typeof OrchestratorMcpReviewFindingsRecordResult.Type;
+export const OrchestratorMcpReviewFindingsExportInput = Schema.Struct({
+  from: IsoDateTime,
+  to: IsoDateTime,
+  limit: Schema.optional(PositiveInt.check(Schema.isLessThanOrEqualTo(1_000))),
+  cursor: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(4_000))),
+});
+export type OrchestratorMcpReviewFindingsExportInput =
+  typeof OrchestratorMcpReviewFindingsExportInput.Type;
+export const OrchestratorMcpReviewFindingsExportResult = Schema.Struct({
+  jsonl: Schema.String,
+  nextCursor: Schema.optional(Schema.String),
+});
+export type OrchestratorMcpReviewFindingsExportResult =
+  typeof OrchestratorMcpReviewFindingsExportResult.Type;
 
 export const OrchestratorMcpTaskStatusInput = Schema.Struct({
   taskId: NodeId,
@@ -468,6 +506,10 @@ export const OrchestratorMcpPendingRequestRespondInput = Schema.Struct({
   ).annotate({
     description:
       'Required provenance shown to the user: explain why you chose these answers or this decision. Send 1–2000 characters including non-whitespace text, e.g. "The user requested the existing API."',
+  }),
+  relayedFromUser: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Set true when your answer relays the user's own decision. This records your claim, not verified human involvement; omit or set false for your own answer.",
   }),
   respondedBy: Schema.optional(UserInputRespondedBy),
 });
@@ -685,6 +727,9 @@ export const OrchestratorMcpThreadTimelineItem = Schema.Struct({
   sourceThreadId: ThreadId,
   itemId: TurnItemId,
   subagentId: Schema.optional(NodeId),
+  role: Schema.optional(OrchestratorMcpTaskRole),
+  modelSelection: Schema.optional(ModelSelection),
+  parentModelSelection: Schema.optional(ModelSelection),
   runId: Schema.NullOr(RunId),
   messageId: Schema.NullOr(MessageId),
   createdBy: Schema.NullOr(OrchestrationV2Actor),

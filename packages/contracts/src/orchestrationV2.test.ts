@@ -133,6 +133,7 @@ const decodeProviderReplayTranscript = Schema.decodeUnknownSync(ProviderReplayTr
 const encodeOrchestrationV2Subagent = Schema.encodeSync(OrchestrationV2Subagent);
 const decodeOrchestrationV2Subagent = Schema.decodeUnknownSync(OrchestrationV2Subagent);
 const encodeOrchestrationV2SubagentJson = Schema.encodeSync(OrchestrationV2SubagentJson);
+const decodeOrchestrationV2SubagentJson = Schema.decodeUnknownSync(OrchestrationV2SubagentJson);
 const decodeOrchestrationV2ThreadProjection = Schema.decodeUnknownSync(
   OrchestrationV2ThreadProjection,
 );
@@ -1956,13 +1957,14 @@ it("round-trips responder metadata in resolved requests, commands and history", 
     undefined,
     { type: "user" as const },
     { type: "client" as const, reason: "R" },
-    {
+    ...[undefined, false, true].map((relayedFromUser) => ({
       type: "agent" as const,
       threadId: ThreadId.make("caller"),
       environmentId: null,
       title: null,
       reason: "  R  ",
-    },
+      ...(relayedFromUser === undefined ? {} : { relayedFromUser }),
+    })),
   ]) {
     const metadata = respondedBy === undefined ? {} : { respondedBy };
     const request = decodeRuntimeRequestJson({
@@ -1979,6 +1981,18 @@ it("round-trips responder metadata in resolved requests, commands and history", 
       ...metadata,
     });
     expect(decodeRuntimeRequestJson(encodeRuntimeRequestJson(request))).toEqual(request);
+    const event = decodeOrchestrationV2DomainEvent({
+      id: "answer-event",
+      type: "runtime-request.updated",
+      threadId: "thread",
+      occurredAt: now,
+      payload: request,
+    });
+    expect(event.payload).toEqual(request);
+    if (respondedBy?.type === "agent" && respondedBy.relayedFromUser === undefined) {
+      expect(describeUserInputResponder({ respondedBy })).toBe('orchestrator "caller"');
+      expect(request.respondedBy).not.toHaveProperty("relayedFromUser");
+    }
     expect(
       decodeOrchestrationV2Command({
         type: "runtime-request.respond",
@@ -2018,6 +2032,32 @@ it("round-trips responder metadata in resolved requests, commands and history", 
       item,
     );
   }
+});
+it("counts human answers from direct users and agent relay claims only", () => {
+  const decode = Schema.decodeUnknownSync(UserInputRespondedBy);
+  const agent = {
+    type: "agent",
+    threadId: "caller",
+    environmentId: null,
+    title: "Coordinator",
+    reason: "The user decided this.",
+  };
+  const responders = [
+    { type: "user" },
+    { ...agent, relayedFromUser: true },
+    { ...agent, environmentId: "foreign", relayedFromUser: true },
+    agent,
+    { ...agent, relayedFromUser: false },
+    { type: "client", reason: "The user decided this." },
+  ].map((responder) => decode(responder));
+  expect(
+    responders.filter(
+      (responder) =>
+        responder.type === "user" ||
+        (responder.type === "agent" && responder.relayedFromUser === true),
+    ),
+  ).toHaveLength(3);
+  expect(() => decode({ ...agent, relayedFromUser: "true" })).toThrow();
 });
 it("describes responders and terminal outcomes truthfully", () => {
   expect(describeUserInputResponder({})).toBe("another responder");
@@ -2391,6 +2431,19 @@ describe("WP4 task ceiling propagation codecs", () => {
   it("defaults legacy commands to none and preserves explicit ceiling", () => {
     const legacy = decodeOrchestrationV2Command(delegate);
     expect(legacy).toMatchObject({ memoryGrantCeiling: "none" });
+    expect(legacy).not.toHaveProperty("role");
+    expect(legacy).not.toHaveProperty("parentModelSelection");
+    expect(
+      decodeOrchestrationV2Command({
+        ...delegate,
+        role: "review",
+        parentModelSelection: { instanceId: "author", model: "author-model" },
+      }),
+    ).toMatchObject({
+      role: "review",
+      parentModelSelection: { instanceId: "author", model: "author-model" },
+    });
+
     for (const memoryGrantCeiling of ["none", "read", "read_write"])
       expect(decodeOrchestrationV2Command({ ...delegate, memoryGrantCeiling })).toMatchObject({
         memoryGrantCeiling,
@@ -2422,6 +2475,44 @@ describe("WP4 task ceiling propagation codecs", () => {
       updatedAt: now,
     };
     expect(decodeOrchestrationV2Subagent(child)).toMatchObject({ memoryGrantCeiling: "none" });
+    const legacyTask = decodeOrchestrationV2Subagent(child);
+    expect(legacyTask).not.toHaveProperty("role");
+    expect(legacyTask).not.toHaveProperty("parentModelSelection");
+    expect(legacyTask).not.toHaveProperty("reviewLedger");
+    const metadata = {
+      role: "review",
+      modelSelection: { instanceId: "reviewer", model: "reviewer-model" },
+      parentModelSelection: { instanceId: "author", model: "author-model" },
+    };
+    const reviewLedger = [
+      {
+        kind: "decision",
+        entryId: "entry:1",
+        findingId: "finding:1",
+        severity: "high",
+        cites: "a.ts:10",
+        summary: "Verify the guard",
+        decision: "rebutted",
+        evidence: { kind: "test", ref: "guard.test.ts", exitCode: 0 },
+        recordedAt: "2026-10-16T00:00:00.000Z",
+        recordedByRunId: "run",
+      },
+      {
+        kind: "outcome",
+        entryId: "entry:2",
+        findingId: "finding:1",
+        outcome: "later_confirmed",
+        link: { kind: "test", ref: "failure.test.ts" },
+        recordedAt: "2026-10-17T00:00:00.000Z",
+        recordedByRunId: null,
+      },
+    ];
+    const review = decodeOrchestrationV2Subagent({ ...child, ...metadata, reviewLedger });
+    const reviewJson = JSON.parse(JSON.stringify(encodeOrchestrationV2SubagentJson(review)));
+    expect(decodeOrchestrationV2SubagentJson(reviewJson)).toMatchObject(metadata);
+    expect(decodeOrchestrationV2SubagentJson(reviewJson).reviewLedger).toEqual(reviewLedger);
+    expect(() => decodeOrchestrationV2Subagent({ ...child, role: "invalid" })).toThrow();
+
     expect(decodeOrchestrationV2Subagent(child)).not.toHaveProperty("currentMemoryAccess");
     const assessment = { access: "none", reason: "environment_off" } as const;
     expect(
@@ -2440,7 +2531,7 @@ describe("WP4 task ceiling propagation codecs", () => {
       } else {
         expect(json).toHaveProperty("memoryGrantCeiling", memoryGrantCeiling);
       }
-      expect(Schema.decodeUnknownSync(OrchestrationV2SubagentJson)(json)).toMatchObject({
+      expect(decodeOrchestrationV2SubagentJson(json)).toMatchObject({
         memoryGrantCeiling,
       });
     }
@@ -2477,4 +2568,18 @@ it("round-trips usage-limit run ancestry and omits absent ancestry on the wire",
   ).toHaveProperty("currentMemoryAccess", assessment);
   const continuation = { ...legacy, usageLimitContinuationOfRunId: "run-original" };
   expect(encodeMemoryRun(decodeMemoryRun(continuation))).toEqual(continuation);
+});
+
+it("decodes review ledger append commands and refuses empty batches", () => {
+  const command = {
+    type: "delegated_task.review-ledger.append",
+    commandId: "record-review",
+    parentThreadId: "parent",
+    taskId: "review",
+    entries: [
+      { kind: "outcome", findingId: "finding", link: { kind: "test", ref: "failing.test.ts" } },
+    ],
+  };
+  expect(decodeOrchestrationV2Command(command)).toEqual(command);
+  expect(() => decodeOrchestrationV2Command({ ...command, entries: [] })).toThrow();
 });

@@ -53,6 +53,7 @@ import { boundedStatus, statusFromRead } from "./threadStatus.ts";
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_FAN_OUT_LIMIT = 100;
 const REMOTE_TIMEOUT_MS = 120_000;
+const SENT_REQUEST_CACHE_LIMIT = 1_000;
 const DEFAULT_WAIT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_MS = 60 * 60 * 1_000;
 /** Extra time a remote wait gets to answer after its own timeout. */
@@ -623,6 +624,20 @@ const make = Effect.gen(function* () {
     }) satisfies OrchestratorMcpThreadStatusResult;
   });
 
+  // The caller may lose a successful response and retry after the review
+  // finishes. Reuse that response before applying new-send lifecycle checks.
+  // Direct SSH sends have no local durable request receipt. After eviction or
+  // restart they still pass the new-send checks; relay handoffs can recover
+  // their receipt from RemoteReportService below.
+  const sentRequests = new Map<string, OrchestratorMcpThreadSendResult>();
+  const rememberSentRequest = (key: string, result: OrchestratorMcpThreadSendResult) => {
+    sentRequests.set(key, result);
+    if (sentRequests.size > SENT_REQUEST_CACHE_LIMIT) {
+      const oldest = sentRequests.keys().next().value;
+      if (oldest !== undefined) sentRequests.delete(oldest);
+    }
+  };
+
   return HostThreadsMcpService.of({
     listThreads: (scope, input) =>
       input.allHosts === true
@@ -654,39 +669,112 @@ const make = Effect.gen(function* () {
       );
     },
     sendToThread: (scope, input) =>
-      (input.host === undefined
-        ? local
-            .sendToThread(scope, input)
-            .pipe(Effect.map((result): OrchestratorMcpThreadSendResult => result))
-        : onHost(
-            scope,
-            {
-              host: input.host,
-              tool: "goat_thread_send",
-              // The remote sees an outside client; a thread's queue or steer still means "like
-              // steering" there, which its auto now does.
-              arguments:
-                scope.thread !== undefined && (input.mode === "queue" || input.mode === "steer")
-                  ? { ...withoutHost(input), mode: "auto" }
-                  : withoutHost(input),
-              writes: true,
-              relay: relaySend(scope, { ...input, host: input.host }),
-            },
-            decodeSend,
-          )
-      ).pipe(
-        Effect.tap((result) => rearmAfterSend(scope, input, result)),
-        // A send to a remote thread this one launched follows its reports again.
-        Effect.tap((result) =>
-          input.host === undefined || result.delivery === "relayed"
-            ? Effect.void
-            : coordinator
-                .resume(input.host, input.threadId)
-                .pipe(
-                  Effect.catch(() => Effect.logWarning("Could not resume SSH report observation.")),
+      Effect.gen(function* () {
+        const host = input.host;
+        const requestKey =
+          host === undefined || input.clientRequestId === undefined
+            ? undefined
+            : [
+                scope.requestNamespace,
+                scope.thread?.threadId ?? "",
+                host,
+                input.threadId,
+                input.clientRequestId,
+              ]
+                .map(encodeURIComponent)
+                .join(":");
+        const delivered = requestKey === undefined ? undefined : sentRequests.get(requestKey);
+        if (delivered !== undefined) return delivered;
+        // Relay requests survive report collection, cache eviction and restarts.
+        // A receipt acknowledges the earlier handoff; it does not enqueue a send.
+        if (
+          host !== undefined &&
+          input.clientRequestId !== undefined &&
+          scope.thread !== undefined &&
+          Option.isSome(reports)
+        ) {
+          const receipt = yield* reports.value
+            .relayReceipt(scope.thread.threadId, input.clientRequestId)
+            .pipe(
+              Effect.mapError(() =>
+                failure("orchestration_error", "Unable to read the remote relay receipt."),
+              ),
+            );
+          if (receipt !== null) {
+            const result = {
+              host,
+              threadId: input.threadId,
+              delivery: "relayed",
+              via: receipt.originLabel,
+            } satisfies OrchestratorMcpThreadSendResult;
+            if (requestKey !== undefined) rememberSentRequest(requestKey, result);
+            return result;
+          }
+        }
+        const result = yield* (
+          host === undefined
+            ? local
+                .sendToThread(scope, input)
+                .pipe(Effect.map((result): OrchestratorMcpThreadSendResult => result))
+            : coordinator.taskOrigin(host, input.threadId).pipe(
+                Effect.mapError((error) => failure("orchestration_error", error.message)),
+                Effect.flatMap((originThreadId) =>
+                  threads
+                    .assertReviewTaskSendAllowed({
+                      threadId: input.threadId,
+                      ...(originThreadId === null ? {} : { senderThreadId: originThreadId }),
+                      host,
+                      createdBy: "agent",
+                    })
+                    .pipe(
+                      Effect.mapError((error) =>
+                        failure(
+                          error._tag === "ThreadManagementReviewTaskFinishedError"
+                            ? "thread_not_sendable"
+                            : "orchestration_error",
+                          error.message,
+                        ),
+                      ),
+                    ),
                 ),
-        ),
-      ),
+                Effect.andThen(() =>
+                  onHost(
+                    scope,
+                    {
+                      host,
+                      tool: "goat_thread_send",
+                      // The remote sees an outside client; a thread's queue or steer still means "like
+                      // steering" there, which its auto now does.
+                      arguments:
+                        scope.thread !== undefined &&
+                        (input.mode === "queue" || input.mode === "steer")
+                          ? { ...withoutHost(input), mode: "auto" }
+                          : withoutHost(input),
+                      writes: true,
+                      relay: relaySend(scope, { ...input, host }),
+                    },
+                    decodeSend,
+                  ),
+                ),
+              )
+        ).pipe(
+          Effect.tap((result) => rearmAfterSend(scope, input, result)),
+          // A send to a remote thread this one launched follows its reports again.
+          Effect.tap((result) =>
+            host === undefined || result.delivery === "relayed"
+              ? Effect.void
+              : coordinator
+                  .resume(host, input.threadId)
+                  .pipe(
+                    Effect.catch(() =>
+                      Effect.logWarning("Could not resume SSH report observation."),
+                    ),
+                  ),
+          ),
+        );
+        if (requestKey !== undefined) rememberSentRequest(requestKey, result);
+        return result;
+      }),
     interruptThread: (scope, input) =>
       input.host === undefined
         ? local.interruptThread(scope, input)
