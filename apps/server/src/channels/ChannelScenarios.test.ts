@@ -32,6 +32,7 @@ import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
+import { splitStandingInstructions } from "@goat/shared/standingInstructions";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as ServerConfig from "../config.ts";
@@ -1107,6 +1108,86 @@ describe("duplicates and restarts (scenario 2)", () => {
         ).length,
         1,
       );
+    }).pipe(Effect.provide(harness.layer));
+  });
+});
+
+describe("what a channel worker is told", () => {
+  it.effect("starts a worker on this machine with the project's standing instructions", () => {
+    const harness = makeHarness({
+      settingsLayer: ServerSettings.layerTest({
+        textGenerationModelSelection: modelSelection,
+        defaultRuntimeMode: "full-access",
+        standingInstructions: "Open pull requests as drafts.",
+      }).pipe(Layer.orDie),
+    });
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      yield* gateway.ingest(goatInput("do: tidy the docs", "standing-local"), rpcContext);
+      yield* runtime.drain;
+      assert.strictEqual(harness.world.launches.length, 1);
+      const first = splitStandingInstructions(
+        harness.world.launches[0]?.initialMessage?.text ?? "",
+      );
+      // The same versioned block goat_thread_launch writes, so clients show it collapsed.
+      assert.strictEqual(first.block?.text, "Open pull requests as drafts.");
+      assert.isTrue(first.text.startsWith("tidy the docs\n"));
+      assert.include(first.text, "ask first: show the draft or plan in a waiting_input question.");
+    }).pipe(Effect.provide(harness.layer));
+  });
+});
+
+describe("where channel work runs", () => {
+  it.effect(
+    "moves work off an account at its limit to another signed-in account of that provider",
+    () => {
+      const harness = makeHarness({
+        providerInstances: [
+          {
+            instanceId: "codex",
+            displayName: "Codex",
+            weeklyUsedPercent: 100,
+            resetsAt: "2099-01-01T00:00:00.000Z",
+          },
+          { instanceId: "codex-work", displayName: "Codex (work)", weeklyUsedPercent: 20 },
+        ],
+      });
+      return Effect.gen(function* () {
+        yield* setupBot;
+        const gateway = yield* ChannelGateway.ChannelGateway;
+        const runtime = yield* ChannelRuntime.ChannelRuntime;
+        yield* gateway.ingest(goatInput("do: busy work", "placement-local"), rpcContext);
+        yield* runtime.drain;
+        assert.strictEqual(harness.world.launches[0]?.modelSelection.instanceId, "codex-work");
+        assert.strictEqual(harness.world.launches[0]?.modelSelection.model, modelSelection.model);
+        const reason = "Codex (work) · 20% weekly used · Codex at usage limit";
+        assert.strictEqual((yield* onlyTask).target?.placementReason, reason);
+        const chip = (yield* botMessages).turnItems
+          .flatMap((item) => (item.type === "notification" ? [item] : []))
+          .flatMap((item) => (item.ledgerTask === undefined ? [] : [item.ledgerTask]))
+          .at(-1);
+        assert.strictEqual(chip?.placementReason, reason);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect("keeps the configured account when it has room, and says how much it used", () => {
+    const harness = makeHarness({
+      providerInstances: [
+        { instanceId: "codex", displayName: "Codex", weeklyUsedPercent: 30 },
+        { instanceId: "codex-work", displayName: "Codex (work)", weeklyUsedPercent: 30 },
+      ],
+    });
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      yield* gateway.ingest(goatInput("do: light work", "placement-tie"), rpcContext);
+      yield* runtime.drain;
+      assert.strictEqual(harness.world.launches[0]?.modelSelection.instanceId, "codex");
+      assert.strictEqual((yield* onlyTask).target?.placementReason, "Codex · 30% weekly used");
     }).pipe(Effect.provide(harness.layer));
   });
 });

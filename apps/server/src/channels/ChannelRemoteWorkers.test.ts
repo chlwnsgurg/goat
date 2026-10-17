@@ -21,15 +21,19 @@ import {
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Logger from "effect/Logger";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
+import { channelBotFilesFor } from "./channelBotNotes.ts";
 import * as ChannelGateway from "./ChannelGateway.ts";
 import * as ChannelReceptionService from "./ChannelReceptionService.ts";
 import * as ChannelLayers from "./ChannelLayers.ts";
@@ -119,6 +123,10 @@ class RemoteMachine {
   offeredModels: ReadonlyArray<{ readonly instance: string; readonly model: string }> | undefined;
   /** orchestrator_capabilities alone cannot be reached (the call times out). */
   capabilitiesUnreachable = false;
+  /** Weekly quota use per account that goat_host_status reports; unset, the tool is refused. */
+  hostQuotas: Readonly<Record<string, number>> | undefined;
+  /** Accounts orchestrator_capabilities lists but reports as unable to run work. */
+  unrunnable: ReadonlyArray<string> = [];
   /** goat_thread_send names a run that never exists. */
   sendNamesMissingRun = false;
   /** After the answer's run, another run starts at once and asks this. */
@@ -383,11 +391,45 @@ class RemoteMachine {
                   providers: [...new Set(machine.offeredModels.map((entry) => entry.instance))].map(
                     (instance) => ({
                       providerInstanceId: instance,
+                      driverKind: "codex",
+                      // A real GOAT sends null for an account without a display name.
+                      displayName: null,
+                      canRunChildTask: !machine.unrunnable.includes(instance),
                       models: machine
                         .offeredModels!.filter((entry) => entry.instance === instance)
                         .map((entry) => ({ id: entry.model })),
                     }),
                   ),
+                };
+              case "goat_host_status":
+                if (machine.hostQuotas === undefined) break;
+                return {
+                  hosts: [
+                    {
+                      host: null,
+                      reachability: "ok",
+                      metrics: {
+                        threads: { running: 0, waiting: 0, queued: 0 },
+                        quotas: Object.entries(machine.hostQuotas).map(([instanceId, used]) => ({
+                          instanceId,
+                          driver: "codex",
+                          fromCache: true,
+                          limits: {
+                            checkedAt: "2026-10-17T00:00:00.000Z",
+                            windows: [
+                              {
+                                id: "weekly",
+                                kind: "weekly",
+                                label: "Weekly",
+                                usedPercent: used,
+                                resetsAt: "2099-01-01T00:00:00.000Z",
+                              },
+                            ],
+                          },
+                        })),
+                      },
+                    },
+                  ],
                 };
               case "goat_thread_send": {
                 machine.sends.push(call.arguments);
@@ -2209,6 +2251,126 @@ describe("models the other machine offers", () => {
       yield* gateway.ingest(goatInput("answer: try again", "mm8"), rpcContext);
       yield* until("running", (task) => task.status === "running");
       assert.strictEqual(machine.launches[0]!.cwd, "/Users/jun/developer/goat-si/goat");
+    }).pipe(Effect.provide(harness.layer));
+  });
+});
+
+describe("what a worker on another machine is told", () => {
+  it.effect(
+    "carries this machine's GOAT Bot notes, the named skill, and the same safety rules",
+    () => {
+      const { machine, harness } = remoteHarness();
+      return Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const files = channelBotFilesFor(path, (yield* ServerConfig.ServerConfig).stateDir);
+        yield* fs.makeDirectory(files.skills, { recursive: true });
+        yield* fs.writeFileString(files.notes, "- 2026-10-17: open PRs as drafts (asked in x)\n");
+        yield* fs.writeFileString(
+          path.join(files.skills, "deploy-staging.md"),
+          "# Deploy staging\nRun the deploy script, then check the health page.\n",
+        );
+        yield* fs.writeFileString(path.join(files.skills, "unrelated.md"), "# Unrelated\n");
+        yield* setupBot;
+        yield* linkSlackUser();
+        const gateway = yield* ChannelGateway.ChannelGateway;
+        yield* gateway.ingest(
+          slackInput("do@mac-studio: ship it with deploy-staging", "notes-remote"),
+          slackContext,
+        );
+        yield* until("running", (task) => task.status === "running");
+        const message = machine.launches[0]?.message ?? "";
+        assert.include(message, "<goat_bot_notes>\n- 2026-10-17: open PRs as drafts (asked in x)");
+        assert.include(message, '<goat_bot_skill name="deploy-staging">\n# Deploy staging');
+        assert.notInclude(message, "Unrelated");
+        assert.include(message, "ask first: show the draft or plan in a needs_input report.");
+        assert.include(message, "goat_origin_report with status progress");
+        // The home machine's paths mean nothing over there.
+        assert.notInclude(message, files.notes);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+});
+
+describe("which account runs work on another machine", () => {
+  it.effect("uses another account there when the configured one is at its limit", () => {
+    const { machine, harness } = remoteHarness();
+    machine.offeredModels = [
+      { instance: "codex", model: "gpt-6.1-sol" },
+      { instance: "codex-work", model: "gpt-6.1-sol" },
+    ];
+    machine.hostQuotas = { codex: 100, "codex-work": 15 };
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      yield* gateway.ingest(goatInput("do@mac-studio: heavy work", "placement-remote"), rpcContext);
+      const running = yield* until("running", (task) => task.status === "running");
+      // Only the account changes; the model and its options go along unchanged.
+      const launched = machine.launches[0]?.modelSelection;
+      assert.strictEqual(launched?.instanceId, ProviderInstanceId.make("codex-work"));
+      assert.strictEqual(launched?.model, "gpt-6.1-sol");
+      assert.strictEqual(
+        running.target?.placementReason,
+        "codex-work · 15% weekly used · codex at usage limit",
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("says so when the only account there is at its limit, and still runs there", () => {
+    const { machine, harness } = remoteHarness();
+    machine.offeredModels = [{ instance: "codex", model: "gpt-6.1-sol" }];
+    machine.hostQuotas = { codex: 100 };
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      yield* gateway.ingest(goatInput("do@mac-studio: still go", "placement-full"), rpcContext);
+      const running = yield* until("running", (task) => task.status === "running");
+      assert.strictEqual(machine.launches[0]?.modelSelection?.instanceId, "codex");
+      assert.strictEqual(running.target?.placementReason, "codex · at its usage limit");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect(
+    "keeps the configured account, without a reason, when that machine reports no quota",
+    () => {
+      const { machine, harness } = remoteHarness();
+      machine.offeredModels = [
+        { instance: "codex", model: "gpt-6.1-sol" },
+        { instance: "codex-work", model: "gpt-6.1-sol" },
+      ];
+      return Effect.gen(function* () {
+        yield* setupBot;
+        const gateway = yield* ChannelGateway.ChannelGateway;
+        yield* gateway.ingest(
+          goatInput("do@mac-studio: older goat", "placement-unknown"),
+          rpcContext,
+        );
+        const running = yield* until("running", (task) => task.status === "running");
+        assert.strictEqual(machine.launches[0]?.modelSelection?.instanceId, "codex");
+        assert.isUndefined(running.target?.placementReason);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect("never moves work to an account there that cannot run it", () => {
+    const { machine, harness } = remoteHarness();
+    machine.offeredModels = [
+      { instance: "codex", model: "gpt-6.1-sol" },
+      { instance: "codex-signed-out", model: "gpt-6.1-sol" },
+    ];
+    machine.unrunnable = ["codex-signed-out"];
+    // The signed-out account reports no quota, which alone would score it below 80%.
+    machine.hostQuotas = { codex: 80 };
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      yield* gateway.ingest(
+        goatInput("do@mac-studio: busy there", "placement-unrunnable"),
+        rpcContext,
+      );
+      const running = yield* until("running", (task) => task.status === "running");
+      assert.strictEqual(machine.launches[0]?.modelSelection?.instanceId, "codex");
+      assert.strictEqual(running.target?.placementReason, "codex · 80% weekly used");
     }).pipe(Effect.provide(harness.layer));
   });
 });

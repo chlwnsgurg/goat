@@ -23,6 +23,7 @@ import {
   ProjectId,
 } from "@goat/contracts";
 import { resolveProjectSettings } from "@goat/shared/projectSettings";
+import { prependStandingInstructions } from "@goat/shared/standingInstructions";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -50,7 +51,9 @@ import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRemoteWorkers from "./ChannelRemoteWorkers.ts";
 import { type ChannelBotFiles, channelBotFilesFor } from "./channelBotNotes.ts";
 import { answerForwardIdsFor, questionIdFor, workerLaunchIdsFor } from "./channelIds.ts";
+import { choosePlacement, type PlacementCandidate } from "./channelPlacement.ts";
 import { commitTransition } from "./channelTaskWrites.ts";
+import { channelWorkerRules, workerHeader } from "./channelWorkerBrief.ts";
 import * as SlackChannelSettings from "./SlackChannelSettings.ts";
 
 export class ChannelDispatcher extends Context.Service<
@@ -72,14 +75,7 @@ export class ChannelDispatcher extends Context.Service<
 /** What the worker thread is told besides the instruction itself. */
 const workerInstruction = (task: ChannelTask, files: ChannelBotFiles) =>
   [
-    task.instruction,
-    "",
-    "---",
-    "This work came in through GOAT as task " +
-      task.taskId +
-      " (generation " +
-      task.generation +
-      ").",
+    ...workerHeader(task),
     "Standing notes from the person are in " +
       files.notes +
       "; follow them. Reusable procedures (skills) are in " +
@@ -90,11 +86,7 @@ const workerInstruction = (task: ChannelTask, files: ChannelBotFiles) =>
       : "The person asked to change or forget a note (" +
         JSON.stringify(task.notesChangeRequested) +
         "). Edit the notes file only to make that change.",
-    'For progress on long work, call channel_task_report with status "running" at meaningful milestones.',
-    "Before anything sent under the person's name (messages, email, posts) or hard to undo (merging, deleting, purchasing), ask first: show the draft or plan in a waiting_input question.",
-    'If you need a decision from the person who asked, call channel_task_report with this taskId and generation, status "waiting_input", a new eventId, and your question, then stop.',
-    "Before you end, call goat_thread_report_result with your outcome (succeeded, failed, blocked or cancelled) and a short summary; GOAT settles the task from that report.",
-    "When you finish, end with a short summary of the result.",
+    ...channelWorkerRules("local"),
   ].join("\n");
 
 const MEMORY_CEILING_RANK = { none: 0, read: 1, read_write: 2 } as const;
@@ -234,6 +226,86 @@ const make = Effect.gen(function* () {
       );
     });
 
+  /** Channel work already started on this machine, per provider account. */
+  const localTasksByInstance = ledger
+    .listTasksByStatus(["dispatching", "running", "waiting_input"])
+    .pipe(
+      Effect.map((stored) => {
+        const counts = new Map<string, number>();
+        for (const { task } of stored) {
+          const target = task.target;
+          if (target === undefined || target.remote !== undefined) continue;
+          const instanceId = target.modelSelection.instanceId;
+          counts.set(instanceId, (counts.get(instanceId) ?? 0) + 1);
+        }
+        return counts;
+      }),
+      Effect.orElseSucceed(() => new Map<string, number>()),
+    );
+
+  /**
+   * The provider account to run a model on here. Another signed-in account of the same provider
+   * that offers the model can take the work when it has more quota left or less channel work
+   * running; the configured account stays a candidate and wins ties. The reason is for the chip.
+   */
+  const placeLocally = (selection: ModelSelection) =>
+    Effect.gen(function* () {
+      const configured = yield* providers.getInstance(selection.instanceId);
+      if (configured === undefined) return { modelSelection: selection, reason: undefined };
+      const siblings = (yield* providers.listInstances).filter(
+        (instance) =>
+          instance.instanceId === selection.instanceId ||
+          (instance.enabled && instance.driverKind === configured.driverKind),
+      );
+      const load = yield* localTasksByInstance;
+      const candidates = yield* Effect.forEach(siblings, (instance) =>
+        Effect.gen(function* () {
+          const snapshot = yield* instance.snapshot.getSnapshot;
+          const isConfigured = instance.instanceId === selection.instanceId;
+          const ready =
+            snapshot.enabled &&
+            snapshot.installed &&
+            (snapshot.status === "ready" || snapshot.status === "warning") &&
+            snapshot.auth.status !== "unauthenticated" &&
+            (snapshot.availability ?? "available") === "available";
+          const offers =
+            snapshot.models.length === 0 ||
+            snapshot.models.some((candidate) => candidate.slug === selection.model);
+          if (!isConfigured && !(ready && offers)) return [];
+          const windows = snapshot.usageLimits?.windows ?? [];
+          const candidate: PlacementCandidate<ModelSelection> = {
+            value: isConfigured ? selection : { ...selection, instanceId: instance.instanceId },
+            host: null,
+            providerLabel:
+              instance.displayName ?? snapshot.displayName ?? String(instance.instanceId),
+            preferred: isConfigured,
+            windows: windows.length === 0 ? null : windows,
+            activeTasks: load.get(instance.instanceId) ?? 0,
+          };
+          return [candidate];
+        }),
+      );
+      // listInstances leaves out instances that failed to start; the configured one still runs.
+      const pool = candidates.flat();
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      const placed = choosePlacement(
+        pool.length === 0
+          ? [
+              {
+                value: selection,
+                host: null,
+                providerLabel: String(selection.instanceId),
+                preferred: true,
+                windows: null,
+                activeTasks: 0,
+              },
+            ]
+          : pool,
+        now,
+      );
+      return { modelSelection: placed?.chosen.value ?? selection, reason: placed?.reason };
+    });
+
   /**
    * The memory a task's worker may use: what the requester was granted, the same rule MCP and
    * scheduled launches use. A Slack requester is judged by the identity link as it stands now,
@@ -328,10 +400,11 @@ const make = Effect.gen(function* () {
         .exists(path.join(chosen.workspaceRoot, ".git"))
         .pipe(Effect.orElseSucceed(() => false));
       const memoryGrantCeiling = yield* requesterMemoryCeiling(task);
+      const placed = yield* placeLocally(modelSelection);
       const target: ChannelDispatchTarget = {
         environmentId: yield* environment.getEnvironmentId,
         projectId: chosen.id,
-        modelSelection,
+        modelSelection: placed.modelSelection,
         runtimeMode: lowerRuntimeMode(
           task.requester.runtimeModeCeiling,
           settings.defaultRuntimeMode,
@@ -339,6 +412,7 @@ const make = Effect.gen(function* () {
         interactionMode: "default",
         // Each task in a repository gets its own worktree so two tasks never share a checkout.
         workspaceStrategy: isGit ? { type: "worktree", baseRef: "HEAD" } : { type: "root" },
+        ...(placed.reason === undefined ? {} : { placementReason: placed.reason }),
         ...(memoryGrantCeiling === "none" ? {} : { memoryGrantCeiling }),
       };
       return { type: "target" as const, target };
@@ -350,6 +424,12 @@ const make = Effect.gen(function* () {
       const target = task.target;
       if (target === undefined) return;
       const ids = workerLaunchIdsFor(task.taskId, task.generation);
+      // The project's standing instructions go in front, as goat_thread_launch puts them, so a
+      // channel worker follows the rules every thread in that project follows.
+      const standing = resolveProjectSettings(
+        yield* serverSettings.getSettings.pipe(Effect.orDie),
+        target.projectId,
+      ).settings.standingInstructions;
       const launched = yield* launches
         .launch({
           commandId: ids.commandId,
@@ -363,7 +443,7 @@ const make = Effect.gen(function* () {
           workspaceStrategy: toLaunchStrategy(target.workspaceStrategy),
           initialMessage: {
             messageId: ids.messageId,
-            text: workerInstruction(task, botFiles),
+            text: prependStandingInstructions(standing, workerInstruction(task, botFiles)).text,
             attachments: [],
             ...(target.memoryGrantCeiling === undefined
               ? {}
