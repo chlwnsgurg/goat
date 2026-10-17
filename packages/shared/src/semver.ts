@@ -163,6 +163,19 @@ const isNumberedTrain = (prerelease: ReadonlyArray<string>) =>
   prerelease[0] !== "dev" &&
   prerelease.slice(1).every((part) => SEMVER_NUMBER_SEGMENT.test(part));
 
+// `<base>-dev.<commit unix time>.g<sha>` (scripts/lib/release-version.ts) carries its own commit time.
+const devVersionCommitTime = (prerelease: ReadonlyArray<string>) => {
+  const [train, time, sha] = prerelease;
+  return prerelease.length === 3 &&
+    train === "dev" &&
+    time !== undefined &&
+    /^[1-9]\d{0,15}$/.test(time) &&
+    sha !== undefined &&
+    /^g[0-9a-f]{7,40}$/.test(sha)
+    ? Number(time)
+    : undefined;
+};
+
 /**
  * Orders two runtime builds, or returns `undefined` when nothing proves an order.
  *
@@ -170,7 +183,9 @@ const isNumberedTrain = (prerelease: ReadonlyArray<string>) =>
  * (`0.1.0-nightly.20261012.2`) order by SemVer too. Every other pair of one
  * core, such as `0.1.0-dev.<sha>` builds or a dev build against a nightly,
  * orders only by commit time, because SemVer would compare the sha or train
- * name alphabetically. Without both commit times such a pair has no order.
+ * name alphabetically. A `<base>-dev.<time>.g<sha>` version supplies its own
+ * commit time when the build did not report one. Without both commit times
+ * such a pair has no order.
  */
 export function compareRuntimeBuilds(left: RuntimeBuild, right: RuntimeBuild): number | undefined {
   if (left.version === right.version) return 0;
@@ -186,8 +201,10 @@ export function compareRuntimeBuilds(left: RuntimeBuild, right: RuntimeBuild): n
     a.prerelease[0] === b.prerelease[0]
   )
     return compareSemverVersions(left.version, right.version);
-  if (left.commitTime === undefined || right.commitTime === undefined) return undefined;
-  return left.commitTime - right.commitTime;
+  const leftTime = left.commitTime ?? devVersionCommitTime(a.prerelease);
+  const rightTime = right.commitTime ?? devVersionCommitTime(b.prerelease);
+  if (leftTime === undefined || rightTime === undefined) return undefined;
+  return leftTime - rightTime;
 }
 
 /**

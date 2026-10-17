@@ -20,6 +20,10 @@ import {
 import * as HostProcess from "@goat/shared/HostProcess";
 import { DEFAULT_GOAT_HOME } from "./dev-runner.ts";
 import { validateSshRuntimeArchives } from "./build-desktop-artifact.ts";
+import {
+  releasePackageFiles,
+  updateReleasePackageVersions,
+} from "./update-release-package-versions.ts";
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
@@ -50,11 +54,18 @@ export const resolveRuntimeArchiveHome = (input: {
 export async function buildDevRuntimeArchive(input: {
   readonly homeDir?: string | undefined;
   readonly nodeVersion?: string | undefined;
+  /**
+   * Version to stamp into the archive and the server inside it. Defaults to the manifest
+   * version, which is what a source-run dev server reports. Pass the desktop build's version
+   * (`<base>-dev.<time>.g<sha>`) to bundle this archive into a local desktop build.
+   */
+  readonly version?: string | undefined;
   readonly env?: NodeJS.ProcessEnv;
   readonly cwd?: string;
   readonly repoRoot?: string;
 }) {
   const buildRoot = input.repoRoot ?? repoRoot;
+  const version = input.version?.trim() || serverPackageJson.version;
   const env = { ...(input.env ?? process.env) };
   const platform = HostProcess.Platform.defaultValue();
   const arch = HostProcess.Architecture.defaultValue();
@@ -94,14 +105,33 @@ export async function buildDevRuntimeArchive(input: {
   await NodeFSP.mkdir(directory, { recursive: true });
   // Stage on the cache filesystem so final rename cannot be an EXDEV copy.
   const staging = await NodeFSP.mkdtemp(NodePath.join(directory, ".goat-dev-"));
-  const publicationLock = NodePath.join(
-    directory,
-    `.goat-dev-${serverPackageJson.version}-${key}.lock`,
-  );
+  const publicationLock = NodePath.join(directory, `.goat-dev-${version}-${key}.lock`);
   let locked = false;
+  // Stamp the release manifests only while the server and its executable build, so they
+  // report the archive's version; the originals come back whatever happens.
+  const originalManifests =
+    version === serverPackageJson.version
+      ? []
+      : await Promise.all(
+          releasePackageFiles.map(async (file) => {
+            const filePath = NodePath.join(buildRoot, file);
+            return [filePath, await NodeFSP.readFile(filePath, "utf8")] as const;
+          }),
+        );
+  const restoreManifests = async () => {
+    await Promise.all(originalManifests.map(([file, text]) => NodeFSP.writeFile(file, text)));
+    originalManifests.length = 0;
+  };
   try {
     const monitor = NodePath.join(staging, "resource-monitor", key);
     await NodeFSP.mkdir(monitor, { recursive: true });
+    if (originalManifests.length > 0) {
+      await Effect.runPromise(
+        updateReleasePackageVersions(version, { rootDir: buildRoot }).pipe(
+          Effect.provide(NodeServices.layer),
+        ),
+      );
+    }
     // Server build task depends on @goat/web#build and stages dist/client.
     await run(vp, ["run", "--filter", "goat", "build"]);
     await run(vp, [
@@ -113,6 +143,7 @@ export async function buildDevRuntimeArchive(input: {
       "host",
       "--verbose",
     ]);
+    await restoreManifests();
     await run("cargo", [
       "build",
       "--locked",
@@ -144,13 +175,13 @@ export async function buildDevRuntimeArchive(input: {
       "--arch",
       arch,
       "--version",
-      serverPackageJson.version,
+      version,
       "--resource-monitor-dir",
       NodePath.dirname(monitor),
       "--output-dir",
       staging,
     ]);
-    const name = cliArchiveFileName(serverPackageJson.version, key);
+    const name = cliArchiveFileName(version, key);
     const file = NodePath.join(staging, name);
     const bytes = await NodeFSP.readFile(file);
     const hash = NodeCrypto.createHash("sha256").update(bytes).digest("hex");
@@ -159,7 +190,7 @@ export async function buildDevRuntimeArchive(input: {
       await Effect.runPromise(
         validateSshRuntimeArchives({
           directory: staging,
-          version: serverPackageJson.version,
+          version,
           requireAll: false,
           requireSidecars: true,
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
@@ -171,10 +202,10 @@ export async function buildDevRuntimeArchive(input: {
     const extracted = NodePath.join(staging, "verify-executable");
     await NodeFSP.mkdir(extracted);
     await run(cliArchiveTarCommand(platform, env), ["-xf", file, "-C", extracted]);
-    const stem = `goat-${serverPackageJson.version}-${key}`;
+    const stem = `goat-${version}-${key}`;
     const binary = NodePath.join(extracted, stem, platform === "win32" ? "goat.exe" : "goat");
     const actual = (await run(binary, ["--version"], 30_000)).stdout.trim();
-    const expected = `goat v${serverPackageJson.version}`;
+    const expected = `goat v${version}`;
     if (actual !== expected)
       throw new Error(
         `Runtime archive executable reported ${JSON.stringify(actual)}; expected ${expected}. Previous cache left unchanged.`,
@@ -206,6 +237,7 @@ export async function buildDevRuntimeArchive(input: {
     return finalFile;
   } finally {
     try {
+      await restoreManifests();
       if (locked) await NodeFSP.rmdir(publicationLock);
     } finally {
       await NodeFSP.rm(staging, { recursive: true, force: true });
@@ -218,9 +250,14 @@ if (import.meta.main) {
     options: {
       "home-dir": { type: "string" },
       "node-version": { type: "string" },
+      version: { type: "string" },
     },
   });
-  buildDevRuntimeArchive({ homeDir: values["home-dir"], nodeVersion: values["node-version"] }).then(
+  buildDevRuntimeArchive({
+    homeDir: values["home-dir"],
+    nodeVersion: values["node-version"],
+    version: values.version,
+  }).then(
     (archive) => process.stdout.write(`[dev-runtime-archive] ${archive}\n`),
     (cause: unknown) => {
       process.stderr.write(`${String(cause)}\n`);

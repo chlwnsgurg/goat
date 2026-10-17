@@ -32,7 +32,26 @@ Both channels share one workflow because they differ only in version, manifest p
 
 Stable is a promotion of a commit that already ran as a nightly. Run the workflow with `channel=stable` and `sha` set to that nightly's commit. The release uses the plain version from the manifests.
 
-After a stable `vX.Y.Z` is published, bump the release manifests to the next version. A nightly is a prerelease of `X.Y.Z` and sorts below it, so nightly installs would never move past the stable release and the no-downgrade rule would strand them. The prepare job enforces this: it refuses to build a nightly or a stable release while `vX.Y.Z` already exists in goat-releases.
+After a stable `vX.Y.Z` is published, bump the release manifests to the next version. A nightly is a prerelease of `X.Y.Z` and sorts below it, so nightly installs would never move past the stable release and the no-downgrade rule would strand them. The prepare job enforces this: it refuses to build a nightly or a stable release while `vX.Y.Z` already exists in goat-releases, and its error names the bump command (see the version rule below).
+
+## Version rule
+
+Every build carries exactly one version, and the desktop bundle, the server inside it, and the SSH runtime archive all report it. SSH remotes download the runtime archive named after the server's version, so a server that reports a version nobody published (#339) breaks every remote. The source manifests always hold the plain base `X.Y.Z`; a build stamps its full version into all four with `node scripts/update-release-package-versions.ts <version>` before anything is built.
+
+| Build                | Version                               | Ordered by                                             |
+| -------------------- | ------------------------------------- | ------------------------------------------------------ |
+| Stable               | `X.Y.Z`                               | the base                                               |
+| Nightly              | `X.Y.Z-nightly.YYYYMMDD.<run>`        | date, then the workflow run number                     |
+| Preview (PR builds)  | `X.Y.Z-pr.<pr>.<run>`                 | run number within one PR                               |
+| Local or dev desktop | `X.Y.Z-dev.<commit unix time>.g<sha>` | commit time; SSH refresh reads it from the version too |
+
+Only a published stable release may report the bare `X.Y.Z`. `scripts/build-desktop-artifact.ts` gives a local build of a plain base the dev version automatically, and `--build-version` (or `GOAT_DESKTOP_VERSION`) is stamped into all four manifests for the build step, then restored. Outside CI nothing ships with the bare base. In CI the release jobs stamp the manifests first and the build packages that version. With `--skip-build` the server is already built, so a bundle version that differs from the manifests fails with the stamp command. To bundle a local SSH runtime, build it at the same version: `node scripts/dev-runtime-archive.ts --version <desktop version>`.
+
+Three checks hold the rule:
+
+- `build-desktop-artifact` runs the built server's `--version` and fails unless it equals the bundle version, on every platform and in every build, local or CI.
+- The nightly prepare job runs `check-release-version.ts --candidate <version> --published-tags <file>`: the version must sort above the newest stable and the previous build of its channel. Once the base has shipped stable it fails with `node scripts/update-release-package-versions.ts <next patch>`; merge that bump as a PR to dev and rerun.
+- The CLI and desktop jobs verify the runtime archive (`smoke-cli-archive --expect-version`) and the bundled archives (`validateSshRuntimeArchives`) against the same version.
 
 ## Publishing gate
 

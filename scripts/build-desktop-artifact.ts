@@ -29,6 +29,16 @@ import gnomeCaptureBundle from "../apps/desktop/gnome-extension/bundle.json" wit
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 
 import { applyWebBrandAssets } from "./apply-web-brand-assets.ts";
+import { resolveBuildCommitTime } from "./lib/build-commit-time.ts";
+import {
+  isPlainReleaseVersion,
+  RELEASE_VERSION_STAMP_COMMAND,
+  resolveDevBuildVersion,
+} from "./lib/release-version.ts";
+import {
+  releasePackageFiles,
+  updateReleasePackageVersions,
+} from "./update-release-package-versions.ts";
 import {
   BRAND_ASSET_PATHS,
   resolveWebAssetBrandForChannel,
@@ -970,7 +980,7 @@ interface ResolvedBuildOptions {
   readonly platform: typeof BuildPlatform.Type;
   readonly target: string;
   readonly arch: typeof BuildArch.Type;
-  readonly version: string | undefined;
+  readonly version: string;
   readonly outputDir: string;
   readonly payloadReport: string | undefined;
   readonly skipBuild: boolean;
@@ -1825,7 +1835,14 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
       supportedArchitectures: [...supportedArchitectures],
     });
   }
-  const version = mergeOptions(input.buildVersion, env.version, undefined);
+  const skipBuild = resolveBooleanFlag(input.skipBuild, env.skipBuild);
+  const version = yield* resolveDesktopBuildVersion({
+    explicitVersion: mergeOptions(input.buildVersion, env.version, undefined),
+    packageVersion: serverPackageJson.version,
+    ci: env.ci,
+    skipBuild,
+    repoRoot,
+  });
   const releaseDir = resolveBooleanFlag(input.mockUpdates, env.mockUpdates)
     ? "release-mock"
     : "release";
@@ -1834,7 +1851,6 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     mergeOptions(input.outputDir, env.outputDir, releaseDir),
   );
 
-  const skipBuild = resolveBooleanFlag(input.skipBuild, env.skipBuild);
   const keepStage = resolveBooleanFlag(input.keepStage, env.keepStage);
   const signed = resolveBooleanFlag(input.signed, env.signed);
   const verbose = resolveBooleanFlag(input.verbose, env.verbose);
@@ -1862,12 +1878,6 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   const requireAllSshRuntimes =
     (env.ci && (!env.sshRuntimeBundleOptional || sshRuntimeArchiveDir !== undefined)) ||
     resolveBooleanFlag(input.requireAllSshRuntimes, env.requireAllSshRuntimes);
-  const appVersion = version ?? serverPackageJson.version;
-  if (sshRuntimeArchiveDir !== undefined && appVersion !== serverPackageJson.version) {
-    return yield* new SshRuntimeArchiveValidationError({
-      message: `Bundled SSH runtime version ${appVersion} must equal packaged server version ${serverPackageJson.version}. Stamp package versions before building; do not use a desktop-only version override.`,
-    });
-  }
   if (requireAllSshRuntimes && sshRuntimeArchiveDir === undefined) {
     return yield* new SshRuntimeArchiveValidationError({
       message:
@@ -1895,6 +1905,118 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     sshRuntimeArchiveDir,
     requireAllSshRuntimes,
   } satisfies ResolvedBuildOptions;
+});
+
+export class DesktopBuildVersionError extends Schema.TaggedError<DesktopBuildVersionError>()(
+  "DesktopBuildVersionError",
+  { message: Schema.String },
+) {}
+
+/**
+ * The one version this build stamps into the desktop bundle, the server it packages and any
+ * bundled runtime (docs/internals/release-channels.md#version-rule). An explicit --build-version wins.
+ * CI release jobs stamp the manifests before building, so they package the manifest version.
+ * A local build of a plain x.y.z becomes `<base>-dev.<commit time>.g<sha>`: only the published
+ * stable may report the bare base, or SSH remotes go looking for a release that does not exist.
+ */
+export const resolveDesktopBuildVersion = Effect.fn("resolveDesktopBuildVersion")(
+  function* (input: {
+    readonly explicitVersion: string | undefined;
+    readonly packageVersion: string;
+    readonly ci: boolean;
+    readonly skipBuild: boolean;
+    readonly repoRoot: string;
+  }) {
+    let version = input.explicitVersion?.trim() || undefined;
+    if (version === undefined) {
+      if (input.ci || !isPlainReleaseVersion(input.packageVersion)) {
+        version = input.packageVersion;
+      } else {
+        version = resolveDevBuildVersion({
+          baseVersion: input.packageVersion,
+          commitTime: resolveBuildCommitTime(input.repoRoot),
+          commitSha: yield* resolveGitCommitHash(input.repoRoot),
+        });
+        if (version === undefined) {
+          return yield* new DesktopBuildVersionError({
+            message: `A local build of ${input.packageVersion} needs git commit metadata to get its dev version, and must not claim the published stable ${input.packageVersion}. Pass --build-version <version>.`,
+          });
+        }
+      }
+    }
+    if (input.skipBuild && version !== input.packageVersion) {
+      return yield* new DesktopBuildVersionError({
+        message: `--skip-build packages the server already built from apps/server/package.json (${input.packageVersion}), so the desktop bundle cannot be ${version}. Run \`${RELEASE_VERSION_STAMP_COMMAND} ${version}\` before building the JS bundle, or drop --skip-build so this build stamps it.`,
+      });
+    }
+    return version;
+  },
+);
+
+/** The version in `goat --version` output (`goat v0.1.0-nightly.20261012.1`). */
+export const parseServerVersionOutput = (output: string): string | undefined =>
+  /v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\s*$/.exec(output.trim())?.[1];
+
+/**
+ * Keeps every release manifest at `version` for the duration of the scope, so the server,
+ * web and desktop bundles built inside it report the version the desktop bundle carries.
+ * The original manifests are restored when the scope closes.
+ */
+export const stampReleaseVersionForBuild = Effect.fn("stampReleaseVersionForBuild")(function* (
+  repoRoot: string,
+  version: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* Effect.acquireRelease(
+    Effect.forEach(releasePackageFiles, (file) =>
+      fs
+        .readFileString(path.join(repoRoot, file))
+        .pipe(Effect.map((text) => [file, text] as const)),
+    ),
+    (originals) =>
+      Effect.forEach(
+        originals,
+        ([file, text]) => fs.writeFileString(path.join(repoRoot, file), text),
+        { discard: true },
+      ).pipe(Effect.orDie),
+  );
+  yield* updateReleasePackageVersions(version, { rootDir: repoRoot });
+  yield* Effect.log(
+    `[desktop-artifact] Stamped ${version} into the release manifests for this build.`,
+  );
+});
+
+/**
+ * Runs the built server's `--version` and fails unless it reports the desktop bundle's
+ * version. This is the packaging check for #339: a desktop-only version override used to ship
+ * a server reporting the bare base, so every SSH remote asked for a release that did not exist.
+ */
+const verifyBuiltServerVersion = Effect.fn("verifyBuiltServerVersion")(function* (input: {
+  readonly serverDist: string;
+  readonly expectedVersion: string;
+}) {
+  const path = yield* Path.Path;
+  const result = yield* spawnAndCollectOutput(
+    ChildProcess.make(process.execPath, [path.join(input.serverDist, "bin.mjs"), "--version"], {
+      cwd: path.dirname(input.serverDist),
+    }),
+  ).pipe(
+    Effect.timeout(BUNDLE_SELF_CHECK_TIMEOUT),
+    Effect.mapError(
+      (cause) =>
+        new DesktopBuildVersionError({
+          message: `Could not run the built server to read its version: ${String(cause)}`,
+        }),
+    ),
+  );
+  const reported = result.exitCode === 0 ? parseServerVersionOutput(result.stdout) : undefined;
+  if (reported !== input.expectedVersion) {
+    return yield* new DesktopBuildVersionError({
+      message: `The built server reports ${reported ?? `no version (exit ${String(result.exitCode)}: ${`${result.stderr}${result.stdout}`.trim().slice(-400)})`} but this desktop bundle is ${input.expectedVersion}. Both must carry one version (docs/internals/release-channels.md#version-rule): run \`${RELEASE_VERSION_STAMP_COMMAND} ${input.expectedVersion}\` before building the JS bundle.`,
+    });
+  }
+  yield* Effect.log(`[desktop-artifact] Built server reports ${reported}, matching the bundle.`);
 });
 
 const runCommand = Effect.fn("runCommand")(function* (
@@ -3934,7 +4056,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       }),
   });
 
-  const appVersion = options.version ?? serverPackageJson.version;
+  const appVersion = options.version;
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
   const commitHash = yield* resolveGitCommitHash(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
@@ -3954,12 +4076,19 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
     const spawnCommand = yield* resolveSpawnCommand(vp, ["run", "build:desktop"]);
-    yield* runCommand(
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        cwd: repoRoot,
-        shell: spawnCommand.shell,
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        if (appVersion !== serverPackageJson.version) {
+          yield* stampReleaseVersionForBuild(repoRoot, appVersion);
+        }
+        yield* runCommand(
+          ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+            cwd: repoRoot,
+            shell: spawnCommand.shell,
+          }),
+          { label: "vp run build:desktop", verbose: options.verbose },
+        );
       }),
-      { label: "vp run build:desktop", verbose: options.verbose },
     );
   }
 
@@ -3976,6 +4105,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       });
     }
   }
+  yield* verifyBuiltServerVersion({
+    serverDist: distDirs.serverDist,
+    expectedVersion: appVersion,
+  });
 
   // Assert against the emitted bundle, not the bundler config. `alwaysBundle`
   // only forces packages IN, so a transitive dependency of an external package
