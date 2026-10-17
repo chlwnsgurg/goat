@@ -202,8 +202,8 @@ export const InlineHostResolver = Context.Reference<ResolveHost>(
 
 /**
  * Addresses an inline URL may not reach: this machine, its networks (including CGNAT, which
- * Tailscale uses), link-local and cloud metadata, multicast and reserved ranges. A receiver on
- * one of them needs a named target in settings, which only the server's owner can add.
+ * Tailscale uses), link-local and cloud metadata, multicast, documentation and reserved ranges.
+ * A receiver on one of them needs a named target in settings, which only the server's owner can add.
  */
 const internalAddresses = (() => {
   const list = new NodeNet.BlockList();
@@ -215,8 +215,11 @@ const internalAddresses = (() => {
     ["169.254.0.0", 16],
     ["172.16.0.0", 12],
     ["192.0.0.0", 24],
+    ["192.0.2.0", 24],
     ["192.168.0.0", 16],
     ["198.18.0.0", 15],
+    ["198.51.100.0", 24],
+    ["203.0.113.0", 24],
     ["224.0.0.0", 4],
     ["240.0.0.0", 4],
   ] as const) {
@@ -225,8 +228,10 @@ const internalAddresses = (() => {
   for (const [network, prefix] of [
     ["::", 96],
     ["64:ff9b::", 96],
+    ["2001:db8::", 32],
     ["fc00::", 7],
     ["fe80::", 10],
+    ["fec0::", 10],
     ["ff00::", 8],
   ] as const) {
     list.addSubnet(network, prefix, "ipv6");
@@ -238,6 +243,27 @@ const isInternalAddress = (address: string) => {
   const family = NodeNet.isIP(address);
   // Anything that is not a plain address cannot be checked, so it is not trusted.
   if (family === 0) return true;
+  if (family === 6 && address.startsWith("2002:")) {
+    // 6to4 routes through the IPv4 in bits 16..47, not the low 32 bits.
+    const [head = "", tail] = address.split("::");
+    const words = head.split(":");
+    if (tail !== undefined) {
+      const trailing = tail.length === 0 ? [] : tail.split(":");
+      const trailingWidth = trailing.length + (tail.includes(".") ? 1 : 0);
+      words.push(
+        ...Array.from({ length: 8 - words.length - trailingWidth }, () => "0"),
+        ...trailing,
+      );
+    }
+    const ipv4 = words
+      .slice(1, 3)
+      .flatMap((word) => {
+        const value = Number.parseInt(word, 16);
+        return [value >> 8, value & 255];
+      })
+      .join(".");
+    return internalAddresses.check(ipv4, "ipv4");
+  }
   return internalAddresses.check(address, family === 4 ? "ipv4" : "ipv6");
 };
 

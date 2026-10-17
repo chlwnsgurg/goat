@@ -821,29 +821,97 @@ describe("CompletionWebhook notify targets", () => {
     }),
   );
 
-  it.effect("stops posting to an inline host that later resolves to an internal address", () =>
+  it.effect.each([
+    "2002:a00:1::1",
+    "2002:a9fe:a9fe::1",
+    "2002:7f00:1::1",
+    "2002::1",
+    "fec0::1",
+    "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+    "192.0.2.1",
+    "198.51.100.1",
+    "203.0.113.1",
+    "2001:db8::1",
+    "::ffff:192.0.2.1",
+    "64:ff9b::c000:201",
+    "2002:c000:201::1",
+  ])("refuses non-public notify target %s directly and through DNS", (address) =>
     Effect.gen(function* () {
       const h = yield* harness(routed);
+      h.dns.set("blocked.example", [address]);
+      const host = address.includes(":") ? `[${address}]` : address;
       yield* withWebhook(h.layer, (webhook) =>
-        Effect.gen(function* () {
-          const route = yield* webhook.resolveRoute({
-            notifyWebhook: undefined,
-            notifyOnCompletion: undefined,
-            notifyTarget: { url: "https://rebind.example/hook" },
-            projectId: null,
-          });
-          h.dns.set("rebind.example", ["169.254.169.254"]);
-          yield* webhook.notify(
-            watchFor({ notifyWebhook: false, webhookTarget: route.webhookTarget }),
-            runReport(),
-          );
-          yield* settle;
-          yield* TestClock.adjust(60_000);
-          yield* settle;
-        }),
+        Effect.forEach([`https://${host}/hook`, "https://blocked.example/hook"], (url) =>
+          Effect.gen(function* () {
+            const error = yield* webhook
+              .resolveRoute({
+                notifyWebhook: undefined,
+                notifyOnCompletion: undefined,
+                notifyTarget: { url },
+                projectId: null,
+              })
+              .pipe(Effect.flip);
+            expect(error.message).toContain("named target");
+          }),
+        ),
       );
-      expect(h.log).toHaveLength(0);
+      expect(h.log).toEqual([]);
     }),
+  );
+
+  it.effect.each([
+    "2002:808:808::1",
+    "2002:808::1",
+    "2002:0808:0808:0:0:0:0:1",
+    "2002:808:808::192.0.2.1",
+    "2001:4860:4860::8888",
+    "8.8.8.8",
+  ])("allows public notify target %s directly and through DNS", (address) =>
+    Effect.gen(function* () {
+      const h = yield* harness(routed);
+      h.dns.set("public.example", [address]);
+      const host = address.includes(":") ? `[${address}]` : address;
+      yield* withWebhook(h.layer, (webhook) =>
+        Effect.forEach([`https://${host}/hook`, "https://public.example/hook"], (url) =>
+          Effect.gen(function* () {
+            const route = yield* webhook.resolveRoute({
+              notifyWebhook: undefined,
+              notifyOnCompletion: undefined,
+              notifyTarget: { url },
+              projectId: null,
+            });
+            expect(route.webhookTarget).toMatchObject({ type: "inline", url });
+          }),
+        ),
+      );
+    }),
+  );
+
+  it.effect.each(["169.254.169.254", "2002:a00:1::1", "fec0::1", "2001:db8::1"])(
+    "stops posting to an inline host that later resolves to %s",
+    (address) =>
+      Effect.gen(function* () {
+        const h = yield* harness(routed);
+        yield* withWebhook(h.layer, (webhook) =>
+          Effect.gen(function* () {
+            const route = yield* webhook.resolveRoute({
+              notifyWebhook: undefined,
+              notifyOnCompletion: undefined,
+              notifyTarget: { url: "https://rebind.example/hook" },
+              projectId: null,
+            });
+            h.dns.set("rebind.example", [address]);
+            yield* webhook.notify(
+              watchFor({ notifyWebhook: false, webhookTarget: route.webhookTarget }),
+              runReport(),
+            );
+            yield* settle;
+            yield* TestClock.adjust(60_000);
+            yield* settle;
+          }),
+        );
+        expect(h.log).toHaveLength(0);
+      }),
   );
 
   it.effect("still posts to loopback receivers the server's settings name", () =>
