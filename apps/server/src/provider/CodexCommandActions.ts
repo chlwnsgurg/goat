@@ -2,7 +2,7 @@ import {
   ORCHESTRATION_V2_MAX_COMMAND_ACTIONS,
   type OrchestrationV2CommandAction,
 } from "@goat/contracts";
-import { isCommandActions } from "@goat/shared/commandActions";
+import { isCommandActions, parseCommandActions } from "@goat/shared/commandActions";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 
 type CodexCommandAction =
@@ -27,13 +27,20 @@ export function codexCommandActions(
         break;
       }
       case "listFiles": {
-        const path = action.path?.trim();
+        // Codex may shorten display paths; recover only an unambiguous matching target.
+        const inferred = parseCommandActions(action.command);
+        const target =
+          inferred.length === 1 && inferred[0]?.type === "list" ? inferred[0] : undefined;
+        const path = target?.path ?? action.path?.trim();
         mapped.push({ type: "list", ...(path === undefined ? {} : { path }) });
         break;
       }
       case "search": {
         const query = action.query?.trim();
-        const path = action.path?.trim();
+        const inferred = parseCommandActions(action.command);
+        const target =
+          inferred.length === 1 && inferred[0]?.type === "search" ? inferred[0] : undefined;
+        const path = target?.path ?? action.path?.trim();
         mapped.push({
           type: "search",
           ...(query === undefined ? {} : { query }),
