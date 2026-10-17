@@ -291,7 +291,7 @@ import {
   formatDayAwareTimestamp,
   formatUpcomingTimestamp,
 } from "../../timestampFormat";
-import { FetchedToolOutput, V2ItemInspector } from "./V2ItemInspector";
+import { FetchedToolOutput, V2ItemInspector, fileChangeDiffTarget } from "./V2ItemInspector";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import {
@@ -5681,6 +5681,18 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       ? getQuestionAnswerPreview(workEntry.questionAnswer)
       : null;
   const lineCounts = fileChangeLineCounts(workEntry.structuredPayload);
+  const projectedFileChange =
+    workEntry.projectedItem?.item.type === "file_change" ? workEntry.projectedItem.item : null;
+  // Expanded edit rows carry Open diff themselves, so the inspector below skips its summary.
+  const fileChangeDiff =
+    expanded && projectedFileChange !== null ? fileChangeDiffTarget(projectedFileChange) : null;
+  // The label truncates and "+N more" hides the rest; the tooltip names every edited file.
+  const changedFilesTooltip =
+    workEntry.changedFiles !== undefined && workEntry.changedFiles.length > 0
+      ? workEntry.changedFiles
+          .map((path) => formatWorkspaceRelativePath(path, workspaceRoot))
+          .join("\n")
+      : null;
   const viewedImagePath = workEntryViewedImagePath(workEntry);
   const payload = workEntry.structuredPayload;
   const skill =
@@ -5764,6 +5776,11 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         ? "text-secondary-label/85"
         : "text-foreground/80";
   const threadLabel = isReasoning ? null : threadReadLabel(previewText, threadTarget);
+  const labelClassName = cn(
+    answerPreview || lineCounts ? "min-w-0" : "min-w-0 flex-1",
+    "truncate",
+    headingClass,
+  );
   const accessiblePreview = [
     threadLabel?.text ?? previewText,
     answerPreview,
@@ -5812,35 +5829,38 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       label={
         <div className="min-w-0 flex-1 overflow-hidden">
           <p className="flex min-w-0 w-full items-baseline gap-1.5 text-work-log">
-            <span
-              className={cn(
-                answerPreview || lineCounts ? "min-w-0" : "min-w-0 flex-1",
-                "truncate",
-                headingClass,
-              )}
-            >
-              {isReasoning && !expanded ? (
-                <ReactMarkdown
-                  remarkPlugins={[
-                    remarkGfm,
-                    [
-                      remarkThoughtPreview,
-                      workEntry.toolLifecycleStatus === "inProgress" ? "Thinking" : "Thought",
-                    ],
-                  ]}
-                >
-                  {workEntry.detail ?? previewText}
-                </ReactMarkdown>
-              ) : threadLabel ? (
-                <ThreadReadLabel
-                  label={threadLabel}
-                  environmentId={ctx.activeThreadEnvironmentId}
-                  linked
-                />
-              ) : (
-                previewText
-              )}
-            </span>
+            {changedFilesTooltip !== null && !isReasoning && threadLabel === null ? (
+              <Tooltip>
+                <TooltipTrigger render={<span className={labelClassName} />}>
+                  {previewText}
+                </TooltipTrigger>
+                <TooltipPopup className="whitespace-pre-line">{changedFilesTooltip}</TooltipPopup>
+              </Tooltip>
+            ) : (
+              <span className={labelClassName}>
+                {isReasoning && !expanded ? (
+                  <ReactMarkdown
+                    remarkPlugins={[
+                      remarkGfm,
+                      [
+                        remarkThoughtPreview,
+                        workEntry.toolLifecycleStatus === "inProgress" ? "Thinking" : "Thought",
+                      ],
+                    ]}
+                  >
+                    {workEntry.detail ?? previewText}
+                  </ReactMarkdown>
+                ) : threadLabel ? (
+                  <ThreadReadLabel
+                    label={threadLabel}
+                    environmentId={ctx.activeThreadEnvironmentId}
+                    linked
+                  />
+                ) : (
+                  previewText
+                )}
+              </span>
+            )}
             {answerPreview ? (
               <span
                 className={cn(
@@ -5885,6 +5905,17 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
               onKeyDown={stopRowToggle}
             >
               Open subagent
+            </InlineButton>
+          ) : null}
+          {fileChangeDiff !== null ? (
+            <InlineButton
+              onClick={(event) => {
+                event.stopPropagation();
+                ctx.onOpenTurnDiff(fileChangeDiff.runId, fileChangeDiff.filePath);
+              }}
+              onKeyDown={stopRowToggle}
+            >
+              Open diff
             </InlineButton>
           ) : null}
           {showFailedIndicator &&
@@ -5945,6 +5976,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
               onOpenTurnDiff={ctx.onOpenTurnDiff}
               onRollbackCheckpoint={ctx.onRollbackCheckpoint}
               onImageExpand={ctx.onImageExpand}
+              hideFileChangeSummary
             />
           ) : (
             <>

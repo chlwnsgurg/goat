@@ -1,6 +1,7 @@
 import type {
   EnvironmentId,
   OrchestrationV2ProjectedTurnItem,
+  OrchestrationV2TurnItem,
   RunId,
   ThreadId,
 } from "@goat/contracts";
@@ -42,6 +43,19 @@ interface V2ItemInspectorProps {
     readonly scopeId: string;
   }) => void;
   readonly onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
+  /** Set where the surrounding row already shows the file label, counts and Open diff. */
+  readonly hideFileChangeSummary?: boolean;
+}
+
+/** The diff a file-change summary opens: the whole run for multi-file edits, else that file. */
+export function fileChangeDiffTarget(
+  item: Extract<OrchestrationV2TurnItem, { type: "file_change" }>,
+): { readonly runId: RunId; readonly filePath: string | undefined } | null {
+  if (item.runId === null) return null;
+  return {
+    runId: item.runId,
+    filePath: item.changes !== undefined && item.changes.length > 1 ? undefined : item.fileName,
+  };
 }
 
 function SyntaxTokens({
@@ -237,6 +251,68 @@ function ToolCallBody(
   );
 }
 
+function FileChangeDetail({
+  item,
+  workspaceRoot,
+  hideSummary,
+  onOpenTurnDiff,
+}: {
+  readonly item: Extract<OrchestrationV2TurnItem, { type: "file_change" }>;
+  readonly workspaceRoot: string | undefined;
+  readonly hideSummary: boolean;
+  readonly onOpenTurnDiff: V2ItemInspectorProps["onOpenTurnDiff"];
+}) {
+  const diffTarget = fileChangeDiffTarget(item);
+  const failedDiff = item.status === "failed" && item.diffStr?.trim() ? item.diffStr : null;
+  const changes = item.changes ?? [];
+  const path = formatWorkspaceRelativePath(item.fileName, workspaceRoot);
+  return (
+    <div className="space-y-2">
+      {hideSummary ? (
+        // Nothing else to show: name the full path instead of an empty panel.
+        failedDiff === null && changes.length === 0 ? (
+          <div className="break-all font-mono text-muted-foreground">{path}</div>
+        ) : null
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-muted-foreground">
+            {changes.length > 1 ? `${changes.length} files total` : path}
+          </span>
+          {item.additions !== undefined || item.deletions !== undefined ? (
+            <span>
+              <span className="text-success">+{formatDiffCount(item.additions ?? 0)}</span>{" "}
+              <span className="text-destructive">-{formatDiffCount(item.deletions ?? 0)}</span>
+            </span>
+          ) : null}
+          {diffTarget !== null ? (
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() => onOpenTurnDiff(diffTarget.runId, diffTarget.filePath)}
+            >
+              Open diff
+            </Button>
+          ) : null}
+        </div>
+      )}
+      {failedDiff !== null ? <StructuredValue value={failedDiff} /> : null}
+      {changes.length > 0 ? (
+        <ul className="space-y-1 font-mono text-muted-foreground">
+          {changes.map((change, index) => (
+            <li key={`${change.operation}:${change.path}:${index}`}>
+              {change.operation} {change.oldPath ? `${change.oldPath} → ` : ""}
+              {formatWorkspaceRelativePath(change.path, workspaceRoot)}
+              {change.fileType || change.mimeType
+                ? ` (${[change.fileType, change.mimeType].filter(Boolean).join(", ")})`
+                : ""}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspectorProps) {
   const fetched = useFetchedTurnItem(props.projectedItem, props.environmentId);
   const item = fetched.item;
@@ -272,53 +348,12 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       ) : null}
 
       {item.type === "file_change" ? (
-        <div className="space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-muted-foreground">
-              {item.changes !== undefined && item.changes.length > 1
-                ? `${item.changes.length} files total`
-                : formatWorkspaceRelativePath(item.fileName, props.workspaceRoot)}
-            </span>
-            {item.additions !== undefined || item.deletions !== undefined ? (
-              <span>
-                <span className="text-success">+{formatDiffCount(item.additions ?? 0)}</span>{" "}
-                <span className="text-destructive">-{formatDiffCount(item.deletions ?? 0)}</span>
-              </span>
-            ) : null}
-            {item.runId !== null ? (
-              <Button
-                size="xs"
-                variant="outline"
-                onClick={() =>
-                  props.onOpenTurnDiff(
-                    item.runId!,
-                    item.changes !== undefined && item.changes.length > 1
-                      ? undefined
-                      : item.fileName,
-                  )
-                }
-              >
-                Open diff
-              </Button>
-            ) : null}
-          </div>
-          {item.status === "failed" && item.diffStr?.trim() ? (
-            <StructuredValue value={item.diffStr} />
-          ) : null}
-          {item.changes !== undefined && item.changes.length > 0 ? (
-            <ul className="space-y-1 font-mono text-muted-foreground">
-              {item.changes.map((change, index) => (
-                <li key={`${change.operation}:${change.path}:${index}`}>
-                  {change.operation} {change.oldPath ? `${change.oldPath} → ` : ""}
-                  {formatWorkspaceRelativePath(change.path, props.workspaceRoot)}
-                  {change.fileType || change.mimeType
-                    ? ` (${[change.fileType, change.mimeType].filter(Boolean).join(", ")})`
-                    : ""}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
+        <FileChangeDetail
+          item={item}
+          workspaceRoot={props.workspaceRoot}
+          hideSummary={props.hideFileChangeSummary === true}
+          onOpenTurnDiff={props.onOpenTurnDiff}
+        />
       ) : null}
 
       {item.type === "file_search" && item.pattern?.trim() ? (
