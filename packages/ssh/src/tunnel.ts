@@ -65,6 +65,7 @@ import {
   resolveSshCommand,
   resolveSshTarget,
   runSshCommand,
+  SSH_KEEPALIVE_ARGS,
   targetConnectionKey,
 } from "./command.ts";
 import {
@@ -3207,10 +3208,7 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
     "ControlPath=none",
     "-o",
     "ControlPersist=no",
-    "-o",
-    "ServerAliveInterval=15",
-    "-o",
-    "ServerAliveCountMax=3",
+    ...SSH_KEEPALIVE_ARGS,
     "-n",
     "-N",
     "-L",
@@ -3861,17 +3859,27 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       remotePort: entry.remotePort,
     };
     yield* Effect.logDebug("ssh.environment.tunnel.existing.check", logFields);
-    const readinessExit = yield* Effect.exit(
-      waitForHttpReady(existingTunnelCheck(entry, EXISTING_TUNNEL_CHECK_TIMEOUT_MS)),
-    );
-    if (Exit.isSuccess(readinessExit)) {
-      yield* Effect.logDebug("ssh.environment.tunnel.reused", logFields);
-      return true;
+    // A forward whose ssh process already exited (after sleep, or a keepalive timeout) cannot
+    // answer, so skip the readiness window. An unreadable state falls back to the HTTP check.
+    const forwardRunning = yield* entry.process.isRunning.pipe(Effect.orElseSucceed(() => true));
+    if (!forwardRunning) {
+      yield* Effect.logWarning("ssh.environment.tunnel.existing.stale", {
+        ...logFields,
+        reason: "forward-exited",
+      });
+    } else {
+      const readinessExit = yield* Effect.exit(
+        waitForHttpReady(existingTunnelCheck(entry, EXISTING_TUNNEL_CHECK_TIMEOUT_MS)),
+      );
+      if (Exit.isSuccess(readinessExit)) {
+        yield* Effect.logDebug("ssh.environment.tunnel.reused", logFields);
+        return true;
+      }
+      yield* Effect.logWarning("ssh.environment.tunnel.existing.stale", {
+        ...logFields,
+        cause: readinessExit.cause,
+      });
     }
-    yield* Effect.logWarning("ssh.environment.tunnel.existing.stale", {
-      ...logFields,
-      cause: readinessExit.cause,
-    });
     yield* Effect.gen(function* () {
       if (tunnels.get(key) === entry) {
         tunnels.delete(key);
@@ -4075,6 +4083,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         ) {
           firstConnectionDecisions.add(decisionKey);
         }
+        // A busy runtime that still answers is used now and replaced when idle; say so.
+        const pendingReplacement = pendingReplacements.get(key)?.pending;
         return {
           target: entry.target,
           httpBaseUrl: entry.httpBaseUrl,
@@ -4085,6 +4095,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           ...(entry.selectedRuntime.version
             ? { remoteServerVersion: entry.selectedRuntime.version }
             : {}),
+          ...(pendingReplacement === undefined ? {} : { pendingReplacement }),
         };
       }),
     );
