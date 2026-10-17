@@ -13844,6 +13844,79 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect("rereads a transcript the member keeps writing after the workflow ends", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWorkflowHarness;
+        const now = yield* DateTime.now;
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-workflow-growing-terminal-answer"),
+            text: "Run the alpha workflow.",
+            attachments: [],
+          }),
+        );
+        yield* launchWorkflow({ harness, snapshotUuid: "00000000-0000-4000-8000-0000000010b0" });
+        const secondThreadId = workflowMemberEvents(harness.events, 2)[0]?.subagent.childThreadId;
+        const transcript = NodePath.join(harness.transcriptDir, "agent-a2.jsonl");
+        // The member has flushed one turn and is still writing the next.
+        NodeFS.writeFileSync(
+          transcript,
+          '{"type":"assistant","message":{"role":"assistant","id":"msg_first","content":[{"type":"text","text":"A2 first turn"}]}}\n',
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          workflowSnapshot({ uuid: "00000000-0000-4000-8000-0000000010b1", state: "done" }),
+        );
+        yield* harness.awaitUntil(
+          () =>
+            threadMessages(harness.events, secondThreadId).at(-1)?.message.text === "A2 first turn",
+          "partial transcript answer",
+        );
+        // The terminal notification reads the same partial answer a second time.
+        const notification = workflowNotification({
+          uuid: "00000000-0000-4000-8000-0000000010b2",
+          status: "completed",
+        });
+        yield* Queue.offer(harness.sdkMessages, notification);
+        yield* harness.awaitUntil(
+          () =>
+            harness.events.some(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "subagent" &&
+                event.turnItem.nativeItemRef?.nativeId === WORKFLOW_TASK_ID &&
+                event.turnItem.status === "completed",
+            ),
+          "terminal workflow notification",
+        );
+        NodeFS.appendFileSync(
+          transcript,
+          '{"type":"assistant","message":{"role":"assistant","id":"msg_second","content":[{"type":"text","text":"A2 second turn"}]}}\n',
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({ ...notification, uuid: "00000000-0000-4000-8000-0000000010b3" }),
+        );
+        yield* harness.awaitUntil(
+          () =>
+            threadMessages(harness.events, secondThreadId).at(-1)?.message.text ===
+            "A2 first turn\n\nA2 second turn",
+          "appended terminal transcript answer",
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-0000000010b4", result: "Done." }),
+        );
+        yield* Queue.take(harness.terminalReceipts);
+        yield* harness.awaitEventsRecorded;
+      }).pipe(Effect.provide(layerAdapterTest)),
+    ),
+  );
+
   it.effect("answers settled workflow members from a transcript, or the snapshot excerpt", () =>
     Effect.scoped(
       Effect.gen(function* () {
