@@ -31,7 +31,13 @@ import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
-import { newCommandId, readCaller, resolveProjectId, unavailable } from "./threadAccess.ts";
+import {
+  newCommandId,
+  readCaller,
+  reauthorizationFailure,
+  resolveProjectId,
+  unavailable,
+} from "./threadAccess.ts";
 
 type Modes = {
   readonly runtimeMode: RuntimeMode;
@@ -175,14 +181,14 @@ const make = Effect.gen(function* () {
                 grantedScopes: scope.grantedScopes,
                 reauthorize: scope.reauthorize,
                 readOnly: scope.client?.access === "read-only",
-              }).pipe(Effect.mapError(unavailable))
+              }).pipe(Effect.mapError(reauthorizationFailure))
             : yield* admitRemoteMemoryGrantCeiling(
                 scope,
                 forwarded,
                 Option.isSome(policy)
                   ? yield* policy.value.read
                   : { policyReady: false, enableAgentMemoryAccess: false, epoch: 0 },
-              ).pipe(Effect.mapError(unavailable));
+              ).pipe(Effect.mapError(reauthorizationFailure));
         if (
           input.launchedBy !== undefined &&
           (caller !== undefined ||

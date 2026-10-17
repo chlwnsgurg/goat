@@ -1,6 +1,7 @@
 import type { ProjectionRecordField } from "../orchestration-v2/ProjectionStore.ts";
 import {
   CommandId,
+  type EnvironmentAuthorizationError,
   OrchestratorMcpFailure,
   type ProjectId,
   type ProviderInteractionMode,
@@ -21,6 +22,14 @@ export const unavailable = () =>
     code: "orchestration_error",
     message: "The operation could not be completed.",
   });
+
+/** Live reauthorization reasons are server-authored and safe to show the caller. */
+export const reauthorizationFailure = (
+  error: EnvironmentAuthorizationError | OrchestratorMcpFailure,
+) =>
+  error._tag === "OrchestratorMcpFailure"
+    ? error
+    : new OrchestratorMcpFailure({ code: "capability_denied", message: error.message });
 
 /** Decider string rejections are public; wrapped storage and hydration causes are not. */
 export const dispatchFailure = (

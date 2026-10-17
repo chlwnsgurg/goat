@@ -1,5 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import {
+  EnvironmentAuthorizationError,
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
@@ -240,6 +241,32 @@ it.effect("unpublished cloud input refuses before thread creation or watch route
     expect(error.message).toBe("Push this branch before starting a cloud task.");
     expect(f.launched).toHaveLength(0);
     expect(f.routes()).toBe(0);
+  }).pipe(Effect.provide(f.layer));
+});
+it.effect("a lapsed caller session is refused with its reason before a thread exists", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const service = yield* ThreadLaunchMcp.ThreadLaunchMcpService;
+    const error = yield* service
+      .launch(
+        {
+          ...scope,
+          grantedScopes: ["orchestration:operate", "memory:read"],
+          reauthorize: (required) =>
+            Effect.fail(
+              new EnvironmentAuthorizationError({
+                message: "The MCP session is no longer active.",
+                requiredScope: required[0] ?? "memory:read",
+              }),
+            ),
+        },
+        { title: "Cloud", message: "Inspect" },
+        { runtimeMode: "full-access", interactionMode: "default" },
+      )
+      .pipe(Effect.flip);
+    expect(error.code).toBe("capability_denied");
+    expect(error.message).toBe("The MCP session is no longer active.");
+    expect(f.launched).toHaveLength(0);
   }).pipe(Effect.provide(f.layer));
 });
 it.effect("explicit cloud scratch rejects before a Scratch folder or thread can be created", () => {

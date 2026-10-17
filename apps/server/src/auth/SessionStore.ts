@@ -387,7 +387,10 @@ export class SessionStore extends Context.Service<
       /** Replace only this session, of the same method, in the issuance transaction. */
       readonly replaceSessionId?: AuthSessionId;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
-    /** Token-free live authority; revocation and expiry are checked on every read. */
+    /**
+     * Token-free live authority; revocation and expiry are checked on every read. Sessions
+     * stored by another process after startup are read through from the store once.
+     */
     readonly readActiveScopes: (
       sessionId: AuthSessionId,
     ) => Effect.Effect<ReadonlyArray<AuthEnvironmentScope>, SessionCredentialError>;
@@ -831,11 +834,40 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  // Another process (the CLI's `goat auth session issue`) can store a session after startup.
+  // Runs under authorityLock: in-process revocation commits and removes the entry under the
+  // same permit, so a stale read can never restore a removed grant.
+  const readThroughActiveScopes = Effect.fn("SessionStore.readThroughActiveScopes")(function* (
+    sessionId: AuthSessionId,
+  ) {
+    const cached = (yield* Ref.get(activeScopes)).get(sessionId);
+    if (cached) return cached;
+    const row = yield* authSessions
+      .getById({ sessionId })
+      .pipe(
+        Effect.mapError((cause) => new SessionCredentialVerificationError({ sessionId, cause })),
+      );
+    if (Option.isNone(row)) return yield* new UnknownSessionTokenError({ sessionId });
+    if (row.value.revokedAt !== null)
+      return yield* new SessionTokenRevokedError({ sessionId, revokedAt: row.value.revokedAt });
+    const observedAt = yield* DateTime.now;
+    if (row.value.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds)
+      return yield* new SessionTokenExpiredError({
+        sessionId,
+        expiresAt: row.value.expiresAt,
+        observedAt,
+      });
+    const record = { scopes: row.value.scopes, expiresAt: row.value.expiresAt };
+    yield* Ref.update(activeScopes, (current) => new Map(current).set(sessionId, record));
+    return record;
+  });
+
   const readActiveScopes: SessionStore["Service"]["readActiveScopes"] = Effect.fn(
     "SessionStore.readActiveScopes",
   )(function* (sessionId) {
-    const record = (yield* Ref.get(activeScopes)).get(sessionId);
-    if (!record) return yield* new UnknownSessionTokenError({ sessionId });
+    const record =
+      (yield* Ref.get(activeScopes)).get(sessionId) ??
+      (yield* authorityLock.withPermit(readThroughActiveScopes(sessionId)));
     const observedAt = yield* DateTime.now;
     if (record.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds)
       return yield* new SessionTokenExpiredError({

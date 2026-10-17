@@ -11,6 +11,7 @@ import {
 } from "@goat/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
@@ -55,6 +56,23 @@ const layerEnvironmentAuth = (overrides?: Partial<ServerConfig.ServerConfig["Ser
     Layer.provide(ServerEnvironment.layerIdentity),
     Layer.provide(layerServerConfig(overrides)),
   );
+
+/** A disk-backed server; two of these on one base directory share state like two processes. */
+const makeDiskEnvironmentAuthLayer = Effect.fn("makeDiskEnvironmentAuthLayer")(function* (
+  baseDir: string,
+) {
+  const devUrl = new URL("http://127.0.0.1:5173");
+  const paths = yield* ServerConfig.deriveServerPaths(baseDir, devUrl, {
+    baseDirIsExplicit: true,
+  });
+  yield* ServerConfig.ensureServerDirectories(paths);
+  return EnvironmentAuth.layer.pipe(
+    Layer.provide(SqlitePersistence.layerFromPath(paths.dbPath)),
+    Layer.provide(ServerSecretStore.layer),
+    Layer.provide(ServerEnvironment.layerIdentity),
+    Layer.provide(layerServerConfig({ ...paths, baseDir, mode: "web", devUrl })),
+  );
+});
 
 const makeCookieRequest = (
   cookieName: string,
@@ -813,5 +831,37 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
       } as never);
       expect(verified.sessionId).toBe(bearer.sessionId);
     }).pipe(Effect.provide(layerEnvironmentAuth({ mode: "web", host: "192.168.1.50" }))),
+  );
+
+  it.effect("reauthorizes MCP clients that the CLI issued after the server started", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-auth-cli-mcp-" });
+      const server = yield* makeDiskEnvironmentAuthLayer(baseDir);
+      const cli = yield* makeDiskEnvironmentAuthLayer(baseDir);
+      yield* Effect.gen(function* () {
+        const auth = yield* EnvironmentAuth.EnvironmentAuth;
+        const issued = yield* EnvironmentAuth.EnvironmentAuth.pipe(
+          Effect.flatMap((other) =>
+            other.issueSession({
+              subject: "mcp-client",
+              scopes: ["orchestration:read", "orchestration:operate", "memory:read"],
+              label: "SSH dispatch",
+            }),
+          ),
+          Effect.provide(cli, { local: true }),
+          Effect.scoped,
+        );
+        const client = yield* auth.authenticateMcpClient(makeBearerRequest(issued.token) as never);
+        yield* client.reauthorize!(["memory:read"]);
+        expect((yield* client.reauthorize!(["memory:write"]).pipe(Effect.flip)).message).toBe(
+          "The MCP session does not grant the required scope.",
+        );
+        yield* auth.revokeSession(client.sessionId);
+        expect((yield* client.reauthorize!(["memory:read"]).pipe(Effect.flip)).message).toBe(
+          "The MCP session is no longer active.",
+        );
+      }).pipe(Effect.provide(server), Effect.scoped);
+    }).pipe(Effect.scoped),
   );
 });
