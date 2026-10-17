@@ -160,6 +160,42 @@ it("custom text replaces selections, and selecting again replaces the custom tex
   expect(onSubmit).toHaveBeenLastCalledWith({ approach: " provider-id ", targets: ["web-id"] });
 });
 
+it("shows which options are selected and clears that state for a custom answer", async () => {
+  const choiceItem: InputItem = {
+    ...questionItem,
+    request: {
+      ...questionItem.request,
+      questions: [
+        {
+          id: "merge",
+          header: "Question",
+          question: "Verify on the simulator first?",
+          multiSelect: false,
+          options: [
+            { label: "Verify first", description: "Check on the simulator" },
+            { label: "Merge on unit tests", description: "Skip the simulator" },
+          ],
+        },
+      ],
+    },
+  };
+  await render(choiceItem);
+  const pressed = () =>
+    [...container.querySelectorAll('button[aria-pressed="true"]')].map((entry) =>
+      entry.textContent?.trim(),
+    );
+  expect(button("Verify first").getAttribute("aria-pressed")).toBe("false");
+  expect(container.querySelector("label")?.textContent).toBe("Or write your own answer");
+  await click("Verify first");
+  expect(pressed()).toEqual([expect.stringMatching(/^Verify first/)]);
+  await click("Merge on unit tests");
+  expect(pressed()).toEqual([expect.stringMatching(/^Merge on unit tests/)]);
+  await typeAnswer("Wait for CI");
+  expect(pressed()).toEqual([]);
+  await submit();
+  expect(onSubmit).toHaveBeenLastCalledWith({ merge: "Wait for CI" });
+});
+
 it("seeds initial-answer bytes once and preserves whitespace-only provider answers", async () => {
   const initialItem: InputItem = {
     ...questionItem,
