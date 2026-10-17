@@ -3640,7 +3640,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               /** Digest of the last emitted transcript answer, not the text: it can run to the transcript cap. */
               readonly transcriptAnswerDigest: string | undefined;
               readonly transcriptReadAttempts: number;
-              readonly finalTranscriptRead: boolean;
               readonly result: string | undefined;
               readonly label: string;
               readonly prompt: string;
@@ -4883,13 +4882,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               previous?.prompt !== prompt ||
               previous?.model !== model;
             const agentId = member.agentId;
+            // While the workflow runs, a settled member is read a few times. After it
+            // ends, every notification reads again: text in the file, even the same
+            // text twice, does not mean the member stopped writing. The digest below
+            // keeps an unchanged answer from being emitted again.
             const readTranscript =
               settled &&
               transcriptDir !== undefined &&
               agentId !== undefined &&
-              (input.coordinator.task.status === "running"
-                ? (restarted ? 0 : (previous?.transcriptReadAttempts ?? 0)) < 3
-                : restarted || previous?.finalTranscriptRead !== true);
+              (input.coordinator.task.status !== "running" ||
+                (restarted ? 0 : (previous?.transcriptReadAttempts ?? 0)) < 3);
             if (!changed && !readTranscript) continue;
 
             const nodeId = idAllocator.derive.nodeFromProviderItem({
@@ -5015,12 +5017,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }
 
             let transcriptAnswerDigest = restarted ? undefined : previous?.transcriptAnswerDigest;
-            let transcript: ReadonlyArray<string> = [];
             if (settled) {
               // The member's own transcript, when the run left one: a missing or
               // unreadable file is expected (a run predating run-handle capture,
               // a member that never started) and falls back to the excerpt.
-              transcript = readTranscript
+              const transcript: ReadonlyArray<string> = readTranscript
                 ? yield* readWorkflowAgentAnswers({
                     transcriptDir,
                     agentId,
@@ -5079,11 +5080,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 transcriptReadAttempts:
                   (restarted ? 0 : (previous?.transcriptReadAttempts ?? 0)) +
                   (readTranscript ? 1 : 0),
-                finalTranscriptRead:
-                  (!restarted && previous?.finalTranscriptRead === true) ||
-                  (readTranscript &&
-                    transcript.length > 0 &&
-                    input.coordinator.task.status !== "running"),
                 createdAt,
                 startedAt,
                 completedAt,
