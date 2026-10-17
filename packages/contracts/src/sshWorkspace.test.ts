@@ -51,6 +51,7 @@ describe("SSH workspace schemas", () => {
   it("round trips launch and fetchBack through JSON schemas", () => {
     for (const [schema, value] of [
       [SshWorkspaceLaunchInput, launch],
+      [SshWorkspaceLaunchInput, { ...launch, sourceThreadId: "thread" }],
       [SshWorkspaceLaunchResult, launchResult],
       [SshWorkspaceFetchBackInput, fetchBack],
       [SshWorkspaceFetchBackResult, fetchResult],
@@ -93,6 +94,7 @@ describe("SSH workspace schemas", () => {
     for (const value of [
       { ...launch, title: " " },
       { ...launch, sourceProjectId: "" },
+      { ...launch, sourceThreadId: "" },
       { ...launch, runtimeMode: "root" },
       { ...launch, interactionMode: "unknown" },
       { ...launch, destination: { ...launch.destination, expectedEnvironmentId: "" } },
@@ -144,5 +146,16 @@ describe("SSH workspace schemas", () => {
       ),
     );
     expect(decoded.message).toContain("repository root");
+  });
+  it("round trips an actionable caller authorization refusal", () => {
+    const codec = Schema.toCodecJson(SshWorkspaceError);
+    const decoded = Schema.decodeUnknownSync(codec)(
+      Schema.encodeSync(codec)(
+        new SshWorkspaceError({ stage: "validate", code: "caller_not_authorized" }),
+      ),
+    );
+    expect(decoded.code).toBe("caller_not_authorized");
+    expect(decoded.message).toContain("no longer authorized");
+    expect(decoded.message).toContain("active run and access modes");
   });
 });
