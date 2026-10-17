@@ -958,6 +958,58 @@ it.effect("serves live scopes for sessions another process issued after startup"
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect("a verify that read the row before a revocation cannot restore the grant", () =>
+  Effect.gen(function* () {
+    const read = yield* Deferred.make<void>();
+    const resume = yield* Deferred.make<void>();
+    let paused = false;
+    // Pauses the first armed getById after it read the still-active row.
+    const layerPausingRepository = Layer.effect(
+      AuthSessions.AuthSessionRepository,
+      Effect.map(AuthSessions.make, (repository) => ({
+        ...repository,
+        getById: (input: Parameters<typeof repository.getById>[0]) =>
+          repository.getById(input).pipe(
+            Effect.tap(() =>
+              paused
+                ? Effect.void
+                : Effect.suspend(() => {
+                    paused = true;
+                    return Deferred.succeed(read, undefined).pipe(
+                      Effect.andThen(Deferred.await(resume)),
+                    );
+                  }),
+            ),
+          ),
+      })),
+    );
+    const layerStore = Layer.effect(SessionStore.SessionStore, SessionStore.make).pipe(
+      Layer.provide(layerPausingRepository),
+      Layer.provide(ServerSecretStore.layer),
+      Layer.provide(SqlitePersistence.layerMemory),
+      Layer.provide(layerServerEnvironment(EnvironmentId.make("test-environment"))),
+      Layer.provide(layerServerConfig()),
+    );
+    yield* Effect.gen(function* () {
+      const store = yield* SessionStore.SessionStore;
+      const issued = yield* store.issue({
+        method: "bearer-access-token",
+        scopes: ["memory:write"],
+      });
+      const verifying = yield* store
+        .verify(issued.token)
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* Deferred.await(read);
+      yield* store.revoke(issued.sessionId);
+      yield* Deferred.succeed(resume, undefined);
+      yield* Fiber.join(verifying);
+      expect((yield* store.readActiveScopes(issued.sessionId).pipe(Effect.flip))._tag).toBe(
+        "UnknownSessionTokenError",
+      );
+    }).pipe(Effect.provide(layerStore), Effect.scoped);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect("next issuance prunes all expired live authority entries without reading them", () =>
   Effect.gen(function* () {
     const store = yield* SessionStore.SessionStore;
