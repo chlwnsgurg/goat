@@ -7,6 +7,10 @@ import {
   type ChannelTask,
   ChannelTaskEvent,
   type RemoteReportedOutcome,
+  type ChannelWorkerObservation,
+  type RemoteKnownRun,
+  type RemoteObservedRun,
+  RuntimeRequestId,
   ProjectId,
   EnvironmentId,
   ProviderInstanceId,
@@ -61,6 +65,8 @@ interface RemoteRun {
   status: string;
   summary: string | null;
   reported?: RemoteReportedOutcome | undefined;
+  pendingRequestIds?: RemoteObservedRun["pendingRequestIds"];
+  observation?: ChannelWorkerObservation;
 }
 
 class RemoteMachine {
@@ -118,6 +124,7 @@ class RemoteMachine {
   /** After the answer's run, another run starts at once and asks this. */
   questionInRunAfterAnswer: string | undefined;
   readonly release = Deferred.makeUnsafe<void>();
+  onWait: ((input: Readonly<Record<string, unknown>>) => Effect.Effect<void>) | undefined;
   private readonly pendingThreads = new Map<string, string>();
   private readonly everFiled = new Map<string, Array<RemoteReport>>();
   private changed = Deferred.makeUnsafe<void>();
@@ -173,6 +180,22 @@ class RemoteMachine {
   holds: { backgroundTasks: number; continuationPending: boolean } | undefined;
   setHolds(holds: { backgroundTasks: number; continuationPending: boolean }) {
     this.holds = holds;
+    this.poke();
+  }
+
+  observeRun(
+    correlationId: string,
+    observation: ChannelWorkerObservation,
+    pendingRequestIds: RemoteObservedRun["pendingRequestIds"] = [],
+  ) {
+    const run = this.runs(correlationId).at(-1)!;
+    run.observation = observation;
+    run.pendingRequestIds = pendingRequestIds;
+    this.poke();
+  }
+
+  /** The remote long poll reaches its deadline without changing durable state. */
+  timeoutWait() {
     this.poke();
   }
 
@@ -240,6 +263,10 @@ class RemoteMachine {
                 ...(TERMINAL.has(run.status) && run.reported !== undefined
                   ? { reported: run.reported }
                   : {}),
+                ...(run.pendingRequestIds === undefined
+                  ? {}
+                  : { pendingRequestIds: run.pendingRequestIds }),
+                ...(run.observation === undefined ? {} : { observation: run.observation }),
                 ...(TERMINAL.has(run.status) && this.holds !== undefined
                   ? { holds: this.holds }
                   : {}),
@@ -393,11 +420,7 @@ class RemoteMachine {
                 }
                 const first = machine.read(call.arguments);
                 if ("error" in first) return yield* first.error!;
-                const known = call.arguments.knownRun as {
-                  runId: string;
-                  status: string;
-                  holds?: { backgroundTasks: number; continuationPending: boolean };
-                } | null;
+                const known = call.arguments.knownRun as RemoteKnownRun | null;
                 const holds = first.value.observedRun?.holds;
                 const changed =
                   first.value.reports.length > 0 ||
@@ -405,11 +428,19 @@ class RemoteMachine {
                   first.value.observedRun?.status !== known?.status ||
                   (known?.holds !== undefined &&
                     (known.holds.backgroundTasks !== (holds?.backgroundTasks ?? 0) ||
-                      known.holds.continuationPending !== (holds?.continuationPending ?? false)));
+                      known.holds.continuationPending !== (holds?.continuationPending ?? false))) ||
+                  (known?.pendingRequestIds !== undefined &&
+                    JSON.stringify(known.pendingRequestIds) !==
+                      JSON.stringify(first.value.observedRun?.pendingRequestIds ?? [])) ||
+                  (known?.observation !== undefined &&
+                    JSON.stringify(known.observation) !==
+                      JSON.stringify(first.value.observedRun?.observation));
                 const timeoutMs = call.arguments.timeoutMs as number;
+                const change = machine.changed;
+                if (machine.onWait !== undefined) yield* machine.onWait(call.arguments);
                 if (changed || timeoutMs === 0) return first.value;
                 yield* Effect.raceFirst(
-                  Deferred.await(machine.changed),
+                  Deferred.await(change),
                   Effect.sleep(Duration.millis(timeoutMs)),
                 );
                 const second = machine.read(call.arguments);
@@ -511,7 +542,12 @@ const readState = (taskId: ChannelTask["taskId"]) =>
   Effect.gen(function* () {
     const ledger = yield* ChannelLedger.ChannelLedger;
     const json = yield* ledger.getRemoteWorker(taskId);
-    return JSON.parse(json ?? "{}") as { readonly readKey: string; readonly cursor: number };
+    return JSON.parse(json ?? "{}") as {
+      readonly readKey: string;
+      readonly cursor: number;
+      readonly knownRun?: RemoteKnownRun;
+      readonly settleRunId?: string;
+    };
   });
 
 /** Read the persisted event after until has driven the task to its expected state. */
@@ -816,6 +852,127 @@ describe("reported outcomes from another machine", () => {
       );
     },
   );
+});
+
+describe("remote worker observations", () => {
+  const startObserved = (machine: RemoteMachine) =>
+    Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      yield* gateway.ingest(goatInput("do@mac-studio: observe the worker", "observed"), rpcContext);
+      const running = yield* until("running", (task) => task.status === "running");
+      const waits: Array<Readonly<Record<string, unknown>>> = [];
+      machine.onWait = (request) => Effect.sync(() => void waits.push(request));
+      return { taskId: running.taskId, correlationId: correlationOf(machine), waits };
+    });
+
+  it.effect(
+    "persists native questions and PRs, commits their observation, and echoes them on the next wait",
+    () => {
+      const { machine, harness } = remoteHarness();
+      return Effect.gen(function* () {
+        const { taskId, correlationId, waits } = yield* startObserved(machine);
+        const pendingRequestIds = [RuntimeRequestId.make("native-question")];
+        const observation: ChannelWorkerObservation = {
+          pullRequests: [
+            {
+              repository: "goat-si/goat",
+              number: 42,
+              url: "https://github.com/goat-si/goat/pull/42",
+              watching: true,
+            },
+          ],
+          needsYou: [{ kind: "question", since: "2026-10-12T00:00:00.000Z" }],
+        };
+        machine.observeRun(correlationId, observation, pendingRequestIds);
+        const observed = yield* until("observed", (task) => task.observed?.needsYou.length === 1);
+        assert.strictEqual(observed.status, "running");
+        assert.deepStrictEqual(observed.observed, observation);
+        const event = yield* readTaskEvent(observed, "task.worker.observed");
+        if (event.type !== "task.worker.observed") throw new Error("expected an observation");
+        assert.deepStrictEqual(event.payload.observed, observation);
+
+        yield* settle();
+        const state = yield* readState(taskId);
+        assert.deepStrictEqual(state.knownRun, {
+          runId: observed.worker!.runId!,
+          status: "running",
+          pendingRequestIds,
+          observation,
+        });
+        // The next long poll sends what this machine last saw, so the remote waits on real change.
+        assert.isTrue(
+          waits.some(
+            (request) => JSON.stringify(request.knownRun) === JSON.stringify(state.knownRun),
+          ),
+        );
+
+        machine.observeRun(correlationId, { pullRequests: [], needsYou: [] });
+        const cleared = yield* until(
+          "cleared",
+          (task) =>
+            task.observed !== undefined &&
+            task.observed.needsYou.length === 0 &&
+            task.observed.pullRequests.length === 0,
+        );
+        assert.strictEqual(cleared.status, "running");
+        yield* settle();
+        assert.deepStrictEqual((yield* readState(taskId)).knownRun?.pendingRequestIds, []);
+      }).pipe(
+        Effect.provide(harness.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
+      );
+    },
+  );
+
+  it.effect.each(["needs a person", "waits for reset"] as const)(
+    "keeps a failed usage-limited worker running when it %s and follows its continuation",
+    (choice) => {
+      const { machine, harness } = remoteHarness();
+      return Effect.gen(function* () {
+        const { correlationId } = yield* startObserved(machine);
+        const observation: ChannelWorkerObservation =
+          choice === "needs a person"
+            ? {
+                pullRequests: [],
+                needsYou: [{ kind: "usage_limit", since: "2026-10-12T00:00:00.000Z" }],
+              }
+            : { pullRequests: [], needsYou: [], usageLimitResetAt: "2099-01-01T00:00:00.000Z" };
+        machine.observeRun(correlationId, observation);
+        machine.finishRun(correlationId, "failed", "Provider usage limit.");
+        yield* until("observed", (task) => task.observed !== undefined);
+        // Well past the settle look an ordinary failed run gets, the task is still open.
+        yield* settle(3 * (REMOTE_SETTLE_WAIT_MS / 100));
+        const paused = yield* onlyTask;
+        assert.strictEqual(paused.status, "running");
+        assert.deepStrictEqual(paused.observed, observation);
+
+        const continuation = machine.startRun(correlationId);
+        machine.observeRun(correlationId, { pullRequests: [], needsYou: [] });
+        const resumed = yield* until("rebound", (task) => task.worker?.runId === continuation);
+        assert.strictEqual(resumed.status, "running");
+        const settled = yield* until(
+          "observation cleared",
+          (task) =>
+            task.observed?.usageLimitResetAt === undefined && task.observed?.needsYou.length === 0,
+        );
+        assert.deepStrictEqual(settled.observed, { pullRequests: [], needsYou: [] });
+      }).pipe(
+        Effect.provide(harness.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
+      );
+    },
+  );
+
+  it.effect("still fails an ordinary failed run that reports an observation", () => {
+    const { machine, harness } = remoteHarness();
+    return Effect.gen(function* () {
+      const { correlationId } = yield* startObserved(machine);
+      machine.observeRun(correlationId, { pullRequests: [], needsYou: [] });
+      machine.finishRun(correlationId, "failed", "Compiler error.");
+      const failed = yield* until("failed", (task) => task.status === "failed");
+      const event = yield* readTaskEvent(failed, "task.failed");
+      assert.strictEqual(event.type, "task.failed");
+    }).pipe(Effect.provide(harness.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))));
+  });
 });
 
 describe("tasks on another machine", () => {
