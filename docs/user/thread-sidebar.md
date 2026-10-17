@@ -258,6 +258,10 @@ finished, on this machine or a connected one. On web and desktop, follow them un
 it, or choose **Promote to thread** from its menu to make it a regular thread. While a subagent
 is open, it shows beneath the thread that started it until you navigate away.
 
+On web and desktop, a thread that launched work on other machines over SSH shows its three most
+recent launches beneath its row, with each machine and status. Open one when this app is also
+connected to that machine; the rest are under **Remote launches** in **Settings → Connections**.
+
 Stop ends the thread's current turn. Subagents it delegated in the background keep
 working and report back when they finish; a subagent the turn was waiting on stops
 with it. To stop a background subagent, use its stop button under **Lineage** in the
