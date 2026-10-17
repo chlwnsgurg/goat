@@ -126,7 +126,7 @@ const CLOUD_MACHINE_FAILURE_MESSAGES = {
   not_configured: "Connect a Boat API key in Settings → Connections → Cloud machines first.",
   invalid_key: "Boat rejected the API key.",
   scope_denied:
-    "The Boat API key lacks a permission this needs, or the Boat plan does not include this machine size.",
+    "The Boat API key lacks a permission this needs (create it with the ci preset: boat api-key create goat --preset ci), or the Boat plan does not include this machine size.",
   billing_required: "Boat needs an active plan or payment for this.",
   limit_reached: "A Boat machine or rate limit was reached. Stop another machine or try later.",
   snapshot_expired: "This machine's saved snapshot expired, so it can no longer be resumed.",
