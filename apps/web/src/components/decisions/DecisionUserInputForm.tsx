@@ -67,7 +67,7 @@ export function DecisionUserInputForm({
               {question.allowCustomAnswer !== false ? (
                 <div>
                   <label htmlFor={inputId} className="text-xs text-muted-foreground">
-                    Your answer
+                    {question.options.length > 0 ? "Or write your own answer" : "Your answer"}
                   </label>
                   <Textarea
                     id={inputId}
