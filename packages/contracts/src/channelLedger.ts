@@ -23,6 +23,7 @@ import {
   ChannelTaskId,
 } from "./channelCommon.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { MemoryTaskGrantCeiling } from "./memory.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 
 /**
@@ -109,6 +110,11 @@ export const ChannelDispatchTarget = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   workspaceStrategy: ChannelWorkspaceStrategy,
   remote: Schema.optional(ChannelRemoteTarget),
+  /**
+   * The memory the worker may use, captured from the requester when the target is chosen so
+   * relaunches and remote recovery reuse it and never widen it. Absent means none.
+   */
+  memoryGrantCeiling: Schema.optional(MemoryTaskGrantCeiling),
 });
 export type ChannelDispatchTarget = typeof ChannelDispatchTarget.Type;
 
@@ -151,6 +157,13 @@ export const ChannelProposedCompletion = Schema.Struct({
 });
 export type ChannelProposedCompletion = typeof ChannelProposedCompletion.Type;
 
+/**
+ * Whether the worker reported its outcome with goat_thread_report_result before its run
+ * completed. Events and tasks from before this field read as unknown and show nothing.
+ */
+export const ChannelTaskCompletionReport = Schema.Literals(["present", "missing"]);
+export type ChannelTaskCompletionReport = typeof ChannelTaskCompletionReport.Type;
+
 export const ChannelTask = Schema.Struct({
   taskId: ChannelTaskId,
   conversationId: ChannelConversationId,
@@ -170,6 +183,9 @@ export const ChannelTask = Schema.Struct({
   target: Schema.optional(ChannelDispatchTarget),
   worker: Schema.optional(ChannelWorkerAssignment),
   resultSummary: Schema.optional(Schema.String),
+  completionReport: Schema.optional(ChannelTaskCompletionReport),
+  /** The person's request, quoted from the origin input, to change or forget a GOAT Bot note. */
+  notesChangeRequested: Schema.optional(TrimmedNonEmptyString),
   proposedCompletion: Schema.optional(ChannelProposedCompletion),
   openQuestions: Schema.Array(ChannelOpenQuestion),
   createdAt: IsoDateTime,
@@ -233,6 +249,7 @@ export const ChannelTaskEvent = Schema.Union([
     title: TrimmedNonEmptyString,
     instruction: Schema.String,
     originInputId: ChannelInputId,
+    notesChangeRequested: Schema.optional(TrimmedNonEmptyString),
   }),
   taskEvent("task.dispatch.claimed", {
     generation: PositiveInt,
@@ -252,6 +269,7 @@ export const ChannelTaskEvent = Schema.Union([
     generation: PositiveInt,
     runId: Schema.optional(RunId),
     summary: Schema.String,
+    report: Schema.optional(ChannelTaskCompletionReport),
   }),
   taskEvent("task.failed", {
     generation: PositiveInt,
@@ -281,6 +299,7 @@ export const ChannelTaskChip = Schema.Struct({
   worker: Schema.optional(ChannelWorkerRef),
   summary: Schema.optional(Schema.String),
   openQuestionCount: NonNegativeInt,
+  completionReport: Schema.optional(ChannelTaskCompletionReport),
 });
 export type ChannelTaskChip = typeof ChannelTaskChip.Type;
 

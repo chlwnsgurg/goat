@@ -17,6 +17,7 @@ import {
   type ChannelDispatchTarget,
   type ChannelTask,
   type ChannelTaskId,
+  type MemoryTaskGrantCeiling,
   type ModelSelection,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   ProjectId,
@@ -38,6 +39,7 @@ import {
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as ServerConfig from "../config.ts";
+import { captureMemoryGrantCeiling } from "../memory/MemoryAccess.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
@@ -82,12 +84,27 @@ const workerInstruction = (task: ChannelTask, files: ChannelBotFiles) =>
       files.notes +
       "; follow them. Reusable procedures (skills) are in " +
       files.skills +
-      "; read the one the instruction names. Edit the notes file only when asked to change or forget a note.",
+      "; read the one the instruction names.",
+    task.notesChangeRequested === undefined
+      ? "Leave the notes file unchanged; this task did not ask to change a note."
+      : "The person asked to change or forget a note (" +
+        JSON.stringify(task.notesChangeRequested) +
+        "). Edit the notes file only to make that change.",
     'For progress on long work, call channel_task_report with status "running" at meaningful milestones.',
     "Before anything sent under the person's name (messages, email, posts) or hard to undo (merging, deleting, purchasing), ask first: show the draft or plan in a waiting_input question.",
     'If you need a decision from the person who asked, call channel_task_report with this taskId and generation, status "waiting_input", a new eventId, and your question, then stop.',
+    "Before you end, call goat_thread_report_result with your outcome (succeeded, failed, blocked or cancelled) and a short summary; GOAT settles the task from that report.",
     "When you finish, end with a short summary of the result.",
   ].join("\n");
+
+const MEMORY_CEILING_RANK = { none: 0, read: 1, read_write: 2 } as const;
+
+/** The narrower of two memory ceilings. */
+const lowerMemoryCeiling = (
+  left: MemoryTaskGrantCeiling,
+  right: MemoryTaskGrantCeiling,
+): MemoryTaskGrantCeiling =>
+  MEMORY_CEILING_RANK[left] <= MEMORY_CEILING_RANK[right] ? left : right;
 
 const toLaunchStrategy = (
   strategy: ChannelDispatchTarget["workspaceStrategy"],
@@ -217,6 +234,32 @@ const make = Effect.gen(function* () {
       );
     });
 
+  /**
+   * The memory a task's worker may use: what the requester was granted, the same rule MCP and
+   * scheduled launches use. A Slack requester is judged by the identity link as it stands now,
+   * so a link narrowed or removed since the message arrived counts. A task that already chose a
+   * target never gets more than that target recorded, so choosing again cannot widen it.
+   */
+  const requesterMemoryCeiling = (task: ChannelTask) =>
+    Effect.gen(function* () {
+      const recorded = task.target === undefined ? undefined : task.target.memoryGrantCeiling;
+      const cap = (ceiling: MemoryTaskGrantCeiling): MemoryTaskGrantCeiling =>
+        task.target === undefined ? ceiling : lowerMemoryCeiling(ceiling, recorded ?? "none");
+      let scopes = task.requester.grantedScopes;
+      if (task.originAddress.kind === "slack") {
+        const actor = task.requester.externalActorId;
+        if (actor === undefined) return "none" satisfies MemoryTaskGrantCeiling;
+        const linked = yield* ledger.findIdentity({
+          connectionId: task.originAddress.connectionId,
+          externalActorId: actor,
+        });
+        if (linked === undefined) return "none" satisfies MemoryTaskGrantCeiling;
+        scopes = scopes.filter((scope) => linked.grantedScopes.includes(scope));
+      }
+      // A read-only destination still narrows this when the thread starts.
+      return cap(captureMemoryGrantCeiling(scopes, false));
+    });
+
   /** The launch settings for a task, or the question to ask when they cannot be chosen. */
   const resolveTarget = (stored: ChannelLedger.ChannelStoredTask) =>
     Effect.gen(function* () {
@@ -284,6 +327,7 @@ const make = Effect.gen(function* () {
       const isGit = yield* fileSystem
         .exists(path.join(chosen.workspaceRoot, ".git"))
         .pipe(Effect.orElseSucceed(() => false));
+      const memoryGrantCeiling = yield* requesterMemoryCeiling(task);
       const target: ChannelDispatchTarget = {
         environmentId: yield* environment.getEnvironmentId,
         projectId: chosen.id,
@@ -295,6 +339,7 @@ const make = Effect.gen(function* () {
         interactionMode: "default",
         // Each task in a repository gets its own worktree so two tasks never share a checkout.
         workspaceStrategy: isGit ? { type: "worktree", baseRef: "HEAD" } : { type: "root" },
+        ...(memoryGrantCeiling === "none" ? {} : { memoryGrantCeiling }),
       };
       return { type: "target" as const, target };
     });
@@ -320,6 +365,9 @@ const make = Effect.gen(function* () {
             messageId: ids.messageId,
             text: workerInstruction(task, botFiles),
             attachments: [],
+            ...(target.memoryGrantCeiling === undefined
+              ? {}
+              : { memoryGrantCeiling: target.memoryGrantCeiling }),
           },
           createdBy: "system",
           creationSource: "server",
@@ -396,6 +444,7 @@ const make = Effect.gen(function* () {
       const bot = yield* ledger.getBot(stored.ownerId);
       return {
         ...(defaultProjectGone ? { requireNamedProject: true } : {}),
+        memoryGrantCeiling: yield* requesterMemoryCeiling(task),
         localProjects: shells
           .filter((shell) => shell.id !== bot?.bot.projectId)
           .map((shell) => ({ id: shell.id, title: shell.title })),

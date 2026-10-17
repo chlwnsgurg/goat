@@ -32,6 +32,7 @@ import {
   type ChannelTaskEventId,
   type ChannelTaskId,
   EnvironmentId,
+  type MemoryTaskGrantCeiling,
   type ModelSelection,
   ModelSelection as ModelSelectionSchema,
   PositiveInt,
@@ -65,6 +66,7 @@ import {
   remoteCorrelationFor,
   remoteReportEventIdFor,
 } from "./channelIds.ts";
+import { settleCompletedRun } from "./channelRunOutcome.ts";
 import { commitTransition, type ChannelTaskEventSpec } from "./channelTaskWrites.ts";
 import { BACKGROUND_HOLD } from "./ChannelWorkerReports.ts";
 
@@ -104,6 +106,10 @@ export const REMOTE_COPY = {
   projectGone: (host: string) =>
     "That project is no longer on " + host + ". Which one should I use?",
   launchRefused: (host: string) => "GOAT on " + host + " refused to start the work.",
+  memoryUnsupported: (host: string) =>
+    "GOAT on " +
+    host +
+    " can't apply the memory access this task may use. Update GOAT there and ask again.",
   launchUncertain: (host: string) =>
     "I can't tell whether the work started on " +
     host +
@@ -271,6 +277,8 @@ export class ChannelRemoteWorkers extends Context.Service<
           | ReadonlyArray<{ readonly id: string; readonly title: string }>
           | undefined;
         readonly runtimeMode: RuntimeMode;
+        /** The memory the worker may use, captured from the requester on this machine. */
+        readonly memoryGrantCeiling?: MemoryTaskGrantCeiling | undefined;
         /** The local project the task named, to find its counterpart on the other machine. */
         readonly title?: string | undefined;
         readonly canonicalKey?: string | undefined;
@@ -306,6 +314,8 @@ export class ChannelRemoteWorkers extends Context.Service<
           | ReadonlyArray<{ readonly id: string; readonly title: string }>
           | undefined;
         readonly runtimeMode: RuntimeMode;
+        /** The memory the worker may use, captured from the requester on this machine. */
+        readonly memoryGrantCeiling?: MemoryTaskGrantCeiling | undefined;
         readonly title?: string | undefined;
         readonly canonicalKey?: string | undefined;
       },
@@ -633,6 +643,9 @@ const make = Effect.gen(function* () {
             ? { type: "worktree" }
             : { type: "root" },
         remote: { host, cwd: chosen.workspaceRoot },
+        ...(local.memoryGrantCeiling === undefined || local.memoryGrantCeiling === "none"
+          ? {}
+          : { memoryGrantCeiling: local.memoryGrantCeiling }),
       };
       return { type: "target", target } as const;
     });
@@ -648,6 +661,7 @@ const make = Effect.gen(function* () {
         task.generation +
         ").",
       "If you need a decision from the person who asked, report needs_input with your question, then stop. When you finish, end with a short summary of the result.",
+      "Before you end, call goat_thread_report_result with your outcome (succeeded, failed, blocked or cancelled) and a short summary; the task settles from that report.",
     ].join("\n");
 
   /** Binds the task to the remote thread the launch (or its recovery) found. */
@@ -887,6 +901,10 @@ const make = Effect.gen(function* () {
             runtimeMode: target.runtimeMode,
             // The remote session may grant no more than the person who asked.
             callerRuntimeMode: task.requester.runtimeModeCeiling,
+            // Omitted when none: an older remote refuses any ceiling it cannot verify.
+            ...(target.memoryGrantCeiling === undefined
+              ? {}
+              : { memoryGrantCeiling: target.memoryGrantCeiling }),
             interactionMode: target.interactionMode,
             report: {
               correlationId: state.correlationId,
@@ -941,6 +959,16 @@ const make = Effect.gen(function* () {
           state,
           seen.success.threadId,
           seen.success.latestRunId,
+        );
+      }
+      // An older remote that cannot apply the task's memory grant refused before launching.
+      // Running without the grant would silently drop it, so the task fails and says why.
+      if (remoteCode(error) === SshRemoteDispatch.MEMORY_CEILING_UNSUPPORTED) {
+        return yield* failTask(
+          owner,
+          stored,
+          "memory_unsupported",
+          REMOTE_COPY.memoryUnsupported(state.host),
         );
       }
       if (remoteCode(seen.failure) !== "capability_denied") return;
@@ -1282,17 +1310,21 @@ const make = Effect.gen(function* () {
       }
       if (watched.status === "completed") {
         const proposal = stored.task.proposedCompletion;
-        const summary =
+        const fallbackSummary =
           watched.summary?.trim() ||
           (proposal?.runId === runId ? proposal.summary : undefined) ||
           "Finished.";
+        // An older remote sends no report, which settles as before with report "missing".
         yield* commitTransition(
           ledger,
           stored,
-          {
-            type: "task.completed",
-            payload: { generation: stored.task.generation, runId, summary },
-          },
+          settleCompletedRun({
+            task: stored.task,
+            runId,
+            reported: watched.reported,
+            fallbackSummary,
+            now: yield* nowIso,
+          }),
           { owner, narrate: true, completionHold: null },
         );
       } else if (watched.status === "cancelled") {
