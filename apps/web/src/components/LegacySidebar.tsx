@@ -217,11 +217,6 @@ import {
   resolveProjectsViewProjectConnectionStatus,
 } from "./LegacySidebar.logic";
 import { SidebarOpenSubagent } from "./sidebar/SidebarOpenSubagent";
-import { SidebarRemoteLaunchRows } from "./sidebar/SidebarRemoteLaunchRows";
-import {
-  useSidebarRemoteLaunchIndex,
-  useSidebarRemoteLaunchRefresh,
-} from "./sidebar/remoteLaunchIndex";
 import {
   threadContextDragListProps,
   useThreadContextDragHandle,
@@ -1103,7 +1098,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   } = props;
   const showMoreButtonRender = useMemo(() => <button type="button" />, []);
   const showLessButtonRender = useMemo(() => <button type="button" />, []);
-  const remoteLaunchesByLauncherKey = useSidebarRemoteLaunchIndex().byLauncherKey;
 
   return (
     <SidebarMenuSub
@@ -1154,23 +1148,15 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
               openPrLink={openPrLink}
             />
           );
-          const openChild = openSubagent?.ownerKey === threadKey ? openSubagent.thread : null;
-          const remoteLaunches = remoteLaunchesByLauncherKey.get(threadKey);
-          if (openChild === null && remoteLaunches === undefined) return row;
-          return (
+          return openSubagent?.ownerKey === threadKey ? (
             <React.Fragment key={threadKey}>
               {row}
-              {openChild !== null ? (
-                <SidebarMenuSubItem className="w-full">
-                  <SidebarOpenSubagent thread={openChild} onOpen={navigateToThread} />
-                </SidebarMenuSubItem>
-              ) : null}
-              {remoteLaunches !== undefined ? (
-                <SidebarMenuSubItem className="w-full">
-                  <SidebarRemoteLaunchRows group={remoteLaunches} onOpen={navigateToThread} />
-                </SidebarMenuSubItem>
-              ) : null}
+              <SidebarMenuSubItem className="w-full">
+                <SidebarOpenSubagent thread={openSubagent.thread} onOpen={navigateToThread} />
+              </SidebarMenuSubItem>
             </React.Fragment>
+          ) : (
+            row
           );
         })}
 
@@ -3443,7 +3429,6 @@ export default function LegacySidebar() {
   const globalAgentRef = useGlobalAgentStore((state) => state.ref);
   const goatBotRef = useGlobalAgentStore((state) => state.botRef);
   const allThreadShells = useThreadShells();
-  useSidebarRemoteLaunchRefresh();
   // The global agent opens from the logo; keep it out of rows, shortcuts and keyboard order.
   const sidebarThreads = useMemo(
     () => excludeGlobalAgentThreads(allThreadShells, globalAgentRef, goatBotRef),

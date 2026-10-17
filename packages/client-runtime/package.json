@@ -251,10 +251,6 @@
       "types": "./src/state/remoteLaunches.ts",
       "default": "./src/state/remoteLaunches.ts"
     },
-    "./state/remote-launch-index": {
-      "types": "./src/state/remoteLaunchIndex.ts",
-      "default": "./src/state/remoteLaunchIndex.ts"
-    },
     "./state/pull-requests": {
       "types": "./src/state/pullRequests.ts",
       "default": "./src/state/pullRequests.ts"
