@@ -103,8 +103,13 @@ import {
   WSL_RUNTIME_EXTRA_RESOURCES,
   WslRuntimeArchiveMissingError,
   wslRuntimeArchiveStem,
+  parseServerVersionOutput,
+  resolveDesktopBuildVersion,
+  stampReleaseVersionForBuild,
 } from "./build-desktop-artifact.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
+import { releasePackageFiles } from "./update-release-package-versions.ts";
+import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 import * as HostProcess from "@goat/shared/HostProcess";
 import { symlinksSupported } from "@goat/shared/testing/symlinks";
 
@@ -3003,6 +3008,7 @@ it.effect.each([
   "missing",
   "override",
   "env-override",
+  "skip-build-override",
   "preview-ci",
   "preview-with-bundle",
   "preview-strict",
@@ -3014,9 +3020,12 @@ it.effect.each([
         platform: Option.some("mac"),
         target: Option.none(),
         arch: Option.some("arm64"),
-        buildVersion: mode === "override" ? Option.some("9.9.9") : Option.none(),
+        buildVersion:
+          mode === "override" || mode === "skip-build-override"
+            ? Option.some("9.9.9")
+            : Option.none(),
         outputDir: Option.none(),
-        skipBuild: Option.none(),
+        skipBuild: mode === "skip-build-override" ? Option.some(true) : Option.none(),
         keepStage: Option.none(),
         signed: Option.none(),
         verbose: Option.none(),
@@ -3053,12 +3062,20 @@ it.effect.each([
     );
     const failed =
       mode === "missing" ||
-      mode === "override" ||
-      mode === "env-override" ||
+      mode === "skip-build-override" ||
       mode === "preview-strict" ||
       mode === "ci-without-bundle";
     assert.equal(result._tag === "Failure", failed);
     if (result._tag === "Success") {
+      // An override is stamped into every release manifest for the build, so the
+      // bundle, the server and the bundled runtime all carry it.
+      if (mode === "override" || mode === "env-override") {
+        assert.equal(result.value.version, "9.9.9");
+      } else if (mode === "ci" || mode.startsWith("preview-")) {
+        assert.equal(result.value.version, serverPackageJson.version);
+      } else {
+        assert.match(result.value.version, /^\d+\.\d+\.\d+-dev\.\d+\.g[0-9a-f]{7,9}$/);
+      }
       assert.equal(
         result.value.requireAllSshRuntimes,
         mode === "ci" || mode === "strict" || mode === "preview-with-bundle",
@@ -3207,3 +3224,75 @@ it.effect.each(SSH_RUNTIME_PLATFORM_KEYS)(
       assert.deepEqual(yield* fs.readDirectory(source), before);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
+
+it.effect("gives a local build of the plain base an ordered dev version, never the bare base", () =>
+  Effect.gen(function* () {
+    const path = yield* Path.Path;
+    const repoRoot = yield* path.fromFileUrl(new URL("..", import.meta.url));
+    const resolve = (input: {
+      explicitVersion?: string;
+      ci?: boolean;
+      skipBuild?: boolean;
+      packageVersion?: string;
+    }) =>
+      Effect.exit(
+        resolveDesktopBuildVersion({
+          explicitVersion: input.explicitVersion,
+          packageVersion: input.packageVersion ?? "0.1.0",
+          ci: input.ci ?? false,
+          skipBuild: input.skipBuild ?? false,
+          repoRoot,
+        }),
+      );
+    const local = yield* resolve({});
+    assert.equal(local._tag, "Success");
+    if (local._tag === "Success") assert.match(local.value, /^0\.1\.0-dev\.\d+\.g[0-9a-f]{7,9}$/);
+    // CI release jobs stamp the manifests before they build.
+    const ci = yield* resolve({ ci: true });
+    assert.equal(ci._tag === "Success" && ci.value, "0.1.0");
+    const stamped = yield* resolve({ packageVersion: "0.1.0-nightly.20261012.1", skipBuild: true });
+    assert.equal(stamped._tag === "Success" && stamped.value, "0.1.0-nightly.20261012.1");
+    // A prebuilt server cannot be restamped, so a different bundle version is refused.
+    const skipped = yield* resolve({ explicitVersion: "0.1.0-dev.1.gabcdef1", skipBuild: true });
+    assert.equal(skipped._tag, "Failure");
+    assert.include(String(skipped), "update-release-package-versions.ts 0.1.0-dev.1.gabcdef1");
+    const skippedLocal = yield* resolve({ skipBuild: true });
+    assert.equal(skippedLocal._tag, "Failure");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("stamps every release manifest for the build and restores them afterwards", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-version-stamp-" });
+    const original = (file: string) => `{\n  "name": "${file}",\n  "version": "0.1.0"\n}\n`;
+    for (const file of releasePackageFiles) {
+      yield* fs.makeDirectory(path.dirname(path.join(root, file)), { recursive: true });
+      yield* fs.writeFileString(path.join(root, file), original(file));
+    }
+    const during = yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* stampReleaseVersionForBuild(root, "0.1.0-dev.1792000000.gabcdef123");
+        return yield* Effect.forEach(releasePackageFiles, (file) =>
+          fs
+            .readFileString(path.join(root, file))
+            .pipe(Effect.map((text) => JSON.parse(text).version)),
+        );
+      }),
+    );
+    assert.deepEqual(new Set(during), new Set(["0.1.0-dev.1792000000.gabcdef123"]));
+    for (const file of releasePackageFiles) {
+      assert.equal(yield* fs.readFileString(path.join(root, file)), original(file));
+    }
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it("reads the version from the server's --version output", () => {
+  assert.equal(
+    parseServerVersionOutput("goat v0.1.0-nightly.20261012.1\n"),
+    "0.1.0-nightly.20261012.1",
+  );
+  assert.equal(parseServerVersionOutput("goat v0.1.0"), "0.1.0");
+  assert.equal(parseServerVersionOutput("Error: boom"), undefined);
+});

@@ -3,18 +3,26 @@
 // stamps must agree, stay on plain x.y.z at or above 0.1.0, and yield a
 // nightly version every consumer (desktop feed and app, CLI installers)
 // accepts. Runs in goat-ci so an upstream merge cannot silently bring back 0.0.x.
+//
+// With --candidate and --published-tags (one goat-releases tag per line) it also
+// checks the version a release run is about to publish: it must sort above the
+// newest stable and the previous build on its channel, and a base that already
+// shipped stable fails with the bump command (docs/internals/release-channels.md#version-rule).
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import { Command, Flag } from "effect/cli";
 
 import { cliReleaseChannelOf, newestCliReleaseVersion } from "@goat/shared/cliRelease";
 import { compareSemverVersions, parseSemver } from "@goat/shared/semver";
 
 import { resolveDesktopUpdateChannel } from "./build-desktop-artifact.ts";
+import { checkReleaseCandidate } from "./lib/release-version.ts";
 import { resolveNightlyReleaseMetadata } from "./resolve-nightly-release.ts";
 
 export const RELEASE_MANIFESTS = [
@@ -96,14 +104,44 @@ export const readReleaseVersions = Effect.fn("readReleaseVersions")(function* (r
   return versions;
 });
 
-const main = Effect.gen(function* () {
-  const path = yield* Path.Path;
-  const root = yield* path.fromFileUrl(new URL("..", import.meta.url));
-  const problems = checkReleaseVersions(yield* readReleaseVersions(root));
-  if (problems.length > 0) return yield* new ReleaseVersionCheckError({ problems });
-  yield* Console.log("check-release-version: ok");
-});
+const command = Command.make(
+  "check-release-version",
+  {
+    candidate: Flag.String("candidate").pipe(
+      Flag.withDescription("Version this run is about to publish."),
+      Flag.optional,
+    ),
+    publishedTags: Flag.String("published-tags").pipe(
+      Flag.withDescription("File with one published goat-releases tag per line."),
+      Flag.optional,
+    ),
+  },
+  ({ candidate, publishedTags }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* path.fromFileUrl(new URL("..", import.meta.url));
+      const problems = checkReleaseVersions(yield* readReleaseVersions(root));
+      if (Option.isSome(candidate)) {
+        const tags = Option.isSome(publishedTags)
+          ? (yield* fs.readFileString(publishedTags.value)).split(/\r?\n/).filter(Boolean)
+          : [];
+        problems.push(
+          ...checkReleaseCandidate({ candidate: candidate.value, publishedTags: tags }),
+        );
+      }
+      if (problems.length > 0) return yield* new ReleaseVersionCheckError({ problems });
+      yield* Console.log(
+        Option.isSome(candidate)
+          ? `check-release-version: ok (${candidate.value} can be published)`
+          : "check-release-version: ok",
+      );
+    }),
+).pipe(Command.withDescription("Check the GOAT release version."));
 
 if (import.meta.main) {
-  main.pipe(Effect.provide(NodeServices.layer), NodeRuntime.runMain);
+  Command.run(command, { version: "0.0.0" }).pipe(
+    Effect.provide(NodeServices.layer),
+    NodeRuntime.runMain,
+  );
 }

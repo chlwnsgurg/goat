@@ -126,8 +126,11 @@ jobs:
         if: steps.resolve.outputs.skip == 'false'
         run: vp install --filter=@goat/scripts...
 
-      # A nightly is a prerelease of the package version, so once that version
-      # ships as stable, nightlies must wait for the next version bump.
+      # Version rule (docs/internals/release-channels.md#version-rule): a nightly is
+      # <base>-nightly.<date>.<run> of the package version, stamped into every
+      # artifact. check-release-version refuses a version that does not sort
+      # above the newest stable and the previous nightly; once the base ships
+      # stable it fails with the exact bump command instead of publishing.
       - name: Resolve release version
         id: release
         if: steps.resolve.outputs.skip == 'false'
@@ -137,25 +140,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          node scripts/check-release-version.ts
           base="$(node -p 'require("./apps/desktop/package.json").version')"
-          published="$(gh api --paginate 'repos/goat-si/goat-releases/releases?per_page=100' --jq '.[].tag_name')"
-          if printf '%s\n' "$published" | grep -Fxq "v$base"; then
-            echo "::error::v$base is already published as stable; bump the version in the release manifests first"
-            exit 1
-          fi
+          tags="$RUNNER_TEMP/goat-releases-tags.txt"
+          gh api --paginate 'repos/goat-si/goat-releases/releases?per_page=100' --jq '.[].tag_name' > "$tags"
           case "$CHANNEL" in
             nightly)
-              node scripts/resolve-nightly-release.ts --date "$(date -u +%Y%m%d)" \
-                --run-number "$GITHUB_RUN_NUMBER" --sha "$SHA" --github-output
+              metadata="$(node scripts/resolve-nightly-release.ts --date "$(date -u +%Y%m%d)" \
+                --run-number "$GITHUB_RUN_NUMBER" --sha "$SHA")"
+              version="$(printf '%s\n' "$metadata" | sed -n 's/^version=//p')"
               manifest=nightly
               ;;
             stable)
-              {
-                echo "version=$base"
-                echo "tag=v$base"
-                echo "name=GOAT $base (${SHA:0:12})"
-              } >> "$GITHUB_OUTPUT"
+              version="$base"
+              metadata="$(printf 'version=%s\ntag=v%s\nname=GOAT %s (%s)\n' "$base" "$base" "$base" "${SHA:0:12}")"
               manifest=latest
               ;;
             *)
@@ -163,6 +160,13 @@ jobs:
               exit 1
               ;;
           esac
+          if ! problems="$(node scripts/check-release-version.ts --candidate "$version" --published-tags "$tags" 2>&1)"; then
+            printf '%s\n' "$problems"
+            printf '%s\n' "$problems" | sed -n 's/^.*check-release-version: /::error::/p'
+            exit 1
+          fi
+          printf '%s\n' "$problems"
+          printf '%s\n' "$metadata" >> "$GITHUB_OUTPUT"
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
           echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
 
