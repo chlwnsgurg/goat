@@ -1113,6 +1113,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["ssh dispatch launched threads other machines hosts cross-host import open"],
   },
   {
+    id: "cloud-machines",
+    title: "Cloud machines",
+    to: "/settings/connections",
+    searchTerms: ["boat vm sandbox cloud machine create stop resume delete ssh api key"],
+  },
+  {
     id: "load-balancing",
     title: "Load balancing",
     to: "/settings/connections",

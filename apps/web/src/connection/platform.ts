@@ -22,13 +22,17 @@ import { bootstrapRemoteBearerSession } from "@goat/client-runtime/authorization
 import { fetchRemoteEnvironmentDescriptor } from "@goat/client-runtime/environment";
 import { managedRelayAccountChanges, managedRelaySessionAtom } from "@goat/client-runtime/relay";
 import { EnvironmentRpcRequestObserver } from "@goat/client-runtime/rpc";
+import { squashAtomCommandFailure } from "@goat/client-runtime/state/runtime";
 import {
   AuthStandardClientScopes,
+  type CloudMachineAlias,
   type DesktopBridge,
   type DesktopEnvironmentBootstrap,
   type DesktopSshEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
   type EnvironmentId,
+  isCloudMachineAlias,
+  isCloudMachineError,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
   type SshRuntimePendingReplacement,
 } from "@goat/contracts";
@@ -229,6 +233,47 @@ function sshRuntimePendingError(pending: {
   });
 }
 
+/** Readies a cloud machine through the GOAT server that owns it, before the desktop dials it. */
+export type CloudMachinePreflight = (alias: string) => Effect.Effect<void, ConnectionBlockedError>;
+
+/**
+ * Asks this desktop's own server to refresh the machine's address and pinned host key. It never
+ * wakes a stopped machine, because reconnects and route checks run this too; Resume in Settings
+ * does. Loaded lazily: the server state module depends on this connection layer.
+ */
+export const readyCloudMachineThroughPrimary: CloudMachinePreflight = Effect.fn(
+  "web.connectionPlatform.ssh.readyCloudMachine",
+)(function* (alias) {
+  const [{ serverEnvironment }, { primaryEnvironmentIdAtom }] = yield* Effect.promise(() =>
+    Promise.all([import("../state/server"), import("../state/primaryEnvironment")]),
+  );
+  const environmentId = appAtomRegistry.get(primaryEnvironmentIdAtom);
+  if (environmentId === null)
+    return yield* new ConnectionBlockedError({
+      reason: "configuration",
+      detail: "Connect to this computer's GOAT server before opening a cloud machine.",
+    });
+  const result = yield* Effect.promise(() =>
+    serverEnvironment.ensureCloudMachineReady.run(appAtomRegistry, {
+      environmentId,
+      input: { alias: alias as CloudMachineAlias },
+    }),
+  );
+  if (result._tag === "Success") return;
+  const error = squashAtomCommandFailure(result);
+  return yield* new ConnectionBlockedError({
+    reason: "configuration",
+    detail: !isCloudMachineError(error)
+      ? "Could not prepare this cloud machine."
+      : error.reason === "not_found"
+        ? "This cloud machine belongs to another GOAT server. Open it from that server."
+        : error.message,
+  });
+});
+
+const preflightCloudMachine = (alias: string, ready: CloudMachinePreflight) =>
+  isCloudMachineAlias(alias) ? ready(alias) : Effect.void;
+
 export const provisionDesktopSshEnvironment = Effect.fn(
   "web.connectionPlatform.ssh.provisionDesktop",
 )(function* (
@@ -236,7 +281,9 @@ export const provisionDesktopSshEnvironment = Effect.fn(
   target: DesktopSshEnvironmentTarget,
   expectedEnvironmentId?: EnvironmentId,
   options?: { readonly keyOnly?: boolean },
+  readyCloudMachine: CloudMachinePreflight = readyCloudMachineThroughPrimary,
 ) {
+  yield* preflightCloudMachine(target.alias, readyCloudMachine);
   const bootstrap = yield* Effect.tryPromise({
     try: () =>
       bridge.ensureSshEnvironment(target, {
@@ -277,7 +324,12 @@ export const provisionDesktopSshEnvironment = Effect.fn(
 });
 
 export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ssh.prepareDesktop")(
-  function* (bridge: DesktopBridge, target: DesktopSshEnvironmentTarget) {
+  function* (
+    bridge: DesktopBridge,
+    target: DesktopSshEnvironmentTarget,
+    readyCloudMachine: CloudMachinePreflight = readyCloudMachineThroughPrimary,
+  ) {
+    yield* preflightCloudMachine(target.alias, readyCloudMachine);
     const bootstrap = yield* Effect.tryPromise({
       try: () =>
         bridge.ensureSshEnvironment(target, {

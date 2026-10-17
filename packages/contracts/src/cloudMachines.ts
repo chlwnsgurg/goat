@@ -160,3 +160,4 @@ export class CloudMachineError extends Schema.TaggedError<CloudMachineError>()(
     return CLOUD_MACHINE_FAILURE_MESSAGES[this.reason];
   }
 }
+export const isCloudMachineError = Schema.is(CloudMachineError);

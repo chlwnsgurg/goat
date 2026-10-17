@@ -177,6 +177,7 @@ import {
   refreshDesktopNetworkAccessState,
 } from "~/state/desktopNetworkAccess";
 import { desktopSshHostsStateAtom, filterDiscoveredSshHosts } from "~/state/desktopSshHosts";
+import { CloudMachinesSettings } from "./CloudMachinesSettings";
 import { RemoteLaunchesSettings } from "./RemoteLaunchesSettings";
 import { desktopWslStateAtom, refreshDesktopWslState } from "~/state/desktopWslState";
 import {
@@ -2049,6 +2050,7 @@ function CloudRemoteEnvironmentRows({
 // Sections folded under "Advanced settings"; a search jump to one opens the group.
 const ADVANCED_CONNECTION_SETTING_IDS = [
   "hosts",
+  "cloud-machines",
   "remote-launches",
   "load-balancing",
   "github-routing",
@@ -4201,6 +4203,9 @@ export function ConnectionsSettings() {
               primaryServerConfig ? resolveEnvironmentMachineKind(primaryServerConfig) : "desktop"
             }
           />
+        ) : null}
+        {primaryEnvironmentId !== null ? (
+          <CloudMachinesSettings environmentId={primaryEnvironmentId} />
         ) : null}
         <RemoteLaunchesSettings />
         <LoadBalancingSettings environments={loadBalancingEnvironments} />

@@ -1,18 +1,37 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
 import * as DesktopSshEnvironment from "../../ssh/DesktopSshEnvironment.ts";
 import { SshHttpBridgeError } from "@goat/ssh/errors";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
+  CLOUD_MACHINE_READY_WINDOW_MS,
   DesktopSshEnvironmentRequestError,
   fetchSshEnvironmentDescriptor,
   ensureSshEnvironment,
+  requireReadiedCloudMachine,
 } from "./sshEnvironment.ts";
+
+/** A desktop whose home is `home`, for the cloud machine guard. */
+const desktopAt = (home: string) =>
+  Layer.effect(
+    DesktopEnvironment.DesktopEnvironment,
+    Effect.map(Path.Path, (path) =>
+      DesktopEnvironment.DesktopEnvironment.of({
+        path,
+        homeDirectory: home,
+      } as DesktopEnvironment.DesktopEnvironment["Service"]),
+    ),
+  ).pipe(Layer.provideMerge(NodeServices.layer));
 
 function jsonResponse(request: HttpClientRequest.HttpClientRequest, body: unknown, status = 200) {
   return HttpClientResponse.fromWeb(
@@ -48,6 +67,7 @@ describe("SSH environment IPC", () => {
       const result = yield* ensureSshEnvironment
         .handler({ target, options: { keyOnly: true, issuePairingToken: true } })
         .pipe(
+          Effect.provide(desktopAt("/nonexistent-home")),
           Effect.provideService(DesktopSshEnvironment.DesktopSshEnvironment, {
             discoverHosts: () => Effect.die("unused"),
             resolveHost: () => Effect.die("unused"),
@@ -152,4 +172,45 @@ describe("SSH environment IPC", () => {
       assert.equal(requestCount, 0);
     }).pipe(Effect.provide(layer));
   });
+});
+
+describe("cloud machine guard", () => {
+  const ALIAS = "boat-bx_23456789";
+  const withHome = <A, E>(
+    use: (
+      home: string,
+      fs: FileSystem.FileSystem,
+    ) => Effect.Effect<A, E, DesktopEnvironment.DesktopEnvironment | FileSystem.FileSystem>,
+  ) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-desktop-cloud-test-" });
+        return yield* use(home, fs).pipe(Effect.provide(desktopAt(home)));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer));
+
+  it.effect("refuses a cloud machine this computer's server has not readied recently", () =>
+    withHome((home, fs) =>
+      Effect.gen(function* () {
+        const missing = yield* requireReadiedCloudMachine(ALIAS).pipe(Effect.flip);
+        assert.include(missing.message, "belongs to another GOAT server");
+
+        const dir = `${home}/.ssh/goat-cloud`;
+        yield* fs.makeDirectory(dir, { recursive: true });
+        yield* fs.writeFileString(`${dir}/${ALIAS}.conf`, "Host x\n");
+        const written = Option.getOrThrow((yield* fs.stat(`${dir}/${ALIAS}.conf`)).mtime).getTime();
+        yield* TestClock.setTime(written);
+        yield* requireReadiedCloudMachine(ALIAS);
+
+        yield* TestClock.setTime(written + CLOUD_MACHINE_READY_WINDOW_MS + 60_000);
+        const stale = yield* requireReadiedCloudMachine(ALIAS).pipe(Effect.flip);
+        assert.include(stale.message, "Prepare this cloud machine");
+
+        // Ordinary hosts, including other boat- names, are not checked.
+        yield* requireReadiedCloudMachine("devbox");
+        yield* requireReadiedCloudMachine("boat-house");
+      }),
+    ),
+  );
 });
