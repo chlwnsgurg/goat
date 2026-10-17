@@ -35,6 +35,7 @@ import { Route as SettingsAppearanceRouteImport } from './routes/settings.appear
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
+import { Route as ChatFleetRouteImport } from './routes/_chat.fleet'
 import { Route as ChatDecisionsRouteImport } from './routes/_chat.decisions'
 import { Route as ChatBotRouteImport } from './routes/_chat.bot'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
@@ -170,6 +171,11 @@ const ChatNewRoute = ChatNewRouteImport.update({
   path: '/new',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatFleetRoute = ChatFleetRouteImport.update({
+  id: '/fleet',
+  path: '/fleet',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatDecisionsRoute = ChatDecisionsRouteImport.update({
   id: '/decisions',
   path: '/decisions',
@@ -202,6 +208,7 @@ export interface FileRoutesByFullPath {
   '/welcome': typeof WelcomeRoute
   '/bot': typeof ChatBotRoute
   '/decisions': typeof ChatDecisionsRoute
+  '/fleet': typeof ChatFleetRoute
   '/new': typeof ChatNewRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
@@ -232,6 +239,7 @@ export interface FileRoutesByTo {
   '/welcome': typeof WelcomeRoute
   '/bot': typeof ChatBotRoute
   '/decisions': typeof ChatDecisionsRoute
+  '/fleet': typeof ChatFleetRoute
   '/new': typeof ChatNewRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
@@ -265,6 +273,7 @@ export interface FileRoutesById {
   '/welcome': typeof WelcomeRoute
   '/_chat/bot': typeof ChatBotRoute
   '/_chat/decisions': typeof ChatDecisionsRoute
+  '/_chat/fleet': typeof ChatFleetRoute
   '/_chat/new': typeof ChatNewRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
@@ -299,6 +308,7 @@ export interface FileRouteTypes {
     | '/welcome'
     | '/bot'
     | '/decisions'
+    | '/fleet'
     | '/new'
     | '/pull-requests'
     | '/projects/$projectKey'
@@ -329,6 +339,7 @@ export interface FileRouteTypes {
     | '/welcome'
     | '/bot'
     | '/decisions'
+    | '/fleet'
     | '/new'
     | '/pull-requests'
     | '/projects/$projectKey'
@@ -361,6 +372,7 @@ export interface FileRouteTypes {
     | '/welcome'
     | '/_chat/bot'
     | '/_chat/decisions'
+    | '/_chat/fleet'
     | '/_chat/new'
     | '/_chat/pull-requests'
     | '/projects/$projectKey'
@@ -579,6 +591,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatNewRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/fleet': {
+      id: '/_chat/fleet'
+      path: '/fleet'
+      fullPath: '/fleet'
+      preLoaderRoute: typeof ChatFleetRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/decisions': {
       id: '/_chat/decisions'
       path: '/decisions'
@@ -613,6 +632,7 @@ declare module '@tanstack/react-router' {
 interface ChatRouteChildren {
   ChatBotRoute: typeof ChatBotRoute
   ChatDecisionsRoute: typeof ChatDecisionsRoute
+  ChatFleetRoute: typeof ChatFleetRoute
   ChatNewRoute: typeof ChatNewRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatIndexRoute: typeof ChatIndexRoute
@@ -623,6 +643,7 @@ interface ChatRouteChildren {
 const ChatRouteChildren: ChatRouteChildren = {
   ChatBotRoute: ChatBotRoute,
   ChatDecisionsRoute: ChatDecisionsRoute,
+  ChatFleetRoute: ChatFleetRoute,
   ChatNewRoute: ChatNewRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatIndexRoute: ChatIndexRoute,

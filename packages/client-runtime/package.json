@@ -331,6 +331,10 @@
       "types": "./src/state/decisionInbox.ts",
       "default": "./src/state/decisionInbox.ts"
     },
+    "./state/fleet": {
+      "types": "./src/state/fleet.ts",
+      "default": "./src/state/fleet.ts"
+    },
     "./state/user-input-draft": {
       "types": "./src/state/userInputDraft.ts",
       "default": "./src/state/userInputDraft.ts"

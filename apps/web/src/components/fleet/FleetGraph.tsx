@@ -1,0 +1,656 @@
+import type { FleetMachine, FleetSnapshot, FleetThread } from "@goat/client-runtime/state/fleet";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
+
+import { useMediaQuery } from "../../hooks/useMediaQuery";
+import { observeResize } from "../../lib/observeResize";
+import { cn } from "../../lib/utils";
+import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { GoatWordmark } from "../GoatWordmark";
+import { renderProviderGlyph } from "../chat/ProviderInstanceIcon";
+import { describeMachine } from "./describeMachine";
+import { providerInstanceInitials } from "@goat/client-runtime/state/provider-instance-display";
+import {
+  rubberBand,
+  stepSpring,
+  ZERO_VECTOR,
+  type FleetSpring,
+  type FleetVector,
+} from "./fleetDrag";
+import {
+  layoutFleet,
+  orbitEdge,
+  type FleetLayoutAgent,
+  type FleetLayoutMachine,
+  type FleetPoint,
+} from "./fleetLayout";
+
+/** Animated particles are capped; further running work still shows in the counts. */
+const MAX_PARTICLES = 24;
+const PARTICLE_SECONDS = 2.6;
+/** How far a pulled node can travel from its orbit. */
+const PULL_REACH = 110;
+/** Agents trail their machine by this share of its pull. */
+const AGENT_FOLLOW = 0.7;
+/** A press that moves less than this is a click. */
+const CLICK_SLOP = 4;
+const MACHINE_RADIUS = 18;
+const AGENT_RADIUS = 11;
+
+function useElementWidth() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    const element = ref.current;
+    if (element === null) return;
+    return observeResize(element, (entries) => {
+      setWidth(Math.round(entries.at(-1)!.contentRect.width));
+    });
+  }, []);
+  return [ref, width] as const;
+}
+
+/** Pauses SMIL and CSS animation while the tab is hidden, without re-rendering. */
+function usePauseWhileHidden(svg: React.RefObject<SVGSVGElement | null>) {
+  useEffect(() => {
+    const sync = () => {
+      const element = svg.current;
+      if (element === null) return;
+      if (document.hidden) element.pauseAnimations();
+      else element.unpauseAnimations();
+      element.toggleAttribute("data-paused", document.hidden);
+    };
+    sync();
+    document.addEventListener("visibilitychange", sync);
+    return () => document.removeEventListener("visibilitychange", sync);
+  }, [svg]);
+}
+
+type Offsets = ReadonlyMap<string, FleetVector>;
+
+/**
+ * Lets the user pull machine and agent nodes around. A node follows the pointer with
+ * rubber-band resistance and springs back to its orbit on release. Frames are drawn
+ * only while something is held or settling.
+ */
+function usePullableNodes(
+  svg: React.RefObject<SVGSVGElement | null>,
+  width: number,
+  reduced: boolean,
+) {
+  const [offsets, setOffsets] = useState<Offsets>(() => new Map());
+  const held = useRef<{
+    key: string;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    base: FleetVector;
+    moved: boolean;
+  } | null>(null);
+  const springs = useRef(new Map<string, FleetSpring>());
+  const frame = useRef<number | null>(null);
+  const lastTick = useRef(0);
+
+  const tick = useCallback(function tick(now: number) {
+    const seconds = lastTick.current === 0 ? 1 / 60 : (now - lastTick.current) / 1000;
+    lastTick.current = now;
+    const next = new Map<string, FleetVector>();
+    for (const [key, spring] of springs.current) {
+      const stepped = stepSpring(spring, seconds);
+      if (stepped === null) springs.current.delete(key);
+      else {
+        springs.current.set(key, stepped);
+        next.set(key, stepped.offset);
+      }
+    }
+    setOffsets((current) => {
+      const merged = new Map(current);
+      for (const key of current.keys()) {
+        if (key !== held.current?.key && !next.has(key)) merged.delete(key);
+      }
+      for (const [key, offset] of next) merged.set(key, offset);
+      return merged;
+    });
+    frame.current = springs.current.size > 0 ? requestAnimationFrame(tick) : null;
+    if (frame.current === null) lastTick.current = 0;
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
+    },
+    [],
+  );
+
+  const press = useCallback(
+    (key: string, event: PointerEvent<SVGGElement>) => {
+      if (event.button !== 0) return;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      springs.current.delete(key);
+      held.current = {
+        key,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        base: offsets.get(key) ?? ZERO_VECTOR,
+        moved: false,
+      };
+    },
+    [offsets],
+  );
+
+  const move = useCallback(
+    (event: PointerEvent<SVGGElement>) => {
+      const current = held.current;
+      if (current === null || current.pointerId !== event.pointerId) return;
+      const rect = svg.current?.getBoundingClientRect();
+      const scale = rect && rect.width > 0 ? width / rect.width : 1;
+      const dx = (event.clientX - current.startX) * scale;
+      const dy = (event.clientY - current.startY) * scale;
+      if (!current.moved && Math.hypot(dx, dy) < CLICK_SLOP) return;
+      current.moved = true;
+      const offset = rubberBand({ x: current.base.x + dx, y: current.base.y + dy }, PULL_REACH);
+      setOffsets((previous) => new Map(previous).set(current.key, offset));
+    },
+    [svg, width],
+  );
+
+  /** Returns whether the press was a click rather than a pull. */
+  const release = useCallback(
+    (event: PointerEvent<SVGGElement>): boolean => {
+      const current = held.current;
+      if (current === null || current.pointerId !== event.pointerId) return false;
+      held.current = null;
+      if (!current.moved) return true;
+      const offset = offsets.get(current.key) ?? ZERO_VECTOR;
+      if (reduced) {
+        setOffsets((previous) => {
+          const next = new Map(previous);
+          next.delete(current.key);
+          return next;
+        });
+        return false;
+      }
+      springs.current.set(current.key, { offset, velocity: ZERO_VECTOR });
+      frame.current ??= requestAnimationFrame(tick);
+      return false;
+    },
+    [offsets, reduced],
+  );
+
+  return { offsets, press, move, release };
+}
+
+const add = (point: FleetPoint, offset: FleetVector | undefined, share = 1): FleetPoint =>
+  offset === undefined ? point : { x: point.x + offset.x * share, y: point.y + offset.y * share };
+
+const truncate = (text: string, max: number) =>
+  text.length > max ? text.slice(0, max - 1) + "…" : text;
+
+function workSummary(work: { running: number; attention: number; reported: number }): string {
+  const parts = [
+    work.running > 0 ? work.running + " running" : null,
+    work.attention > 0 ? work.attention + " need you" : null,
+    work.reported > 0 ? work.reported + " reported" : null,
+  ].filter((part) => part !== null);
+  return parts.length === 0 ? "idle" : parts.join(", ");
+}
+
+const machineKey = (machineId: string) => "machine\u0000" + machineId;
+const agentKey = (machineId: string, agent: string) => "agent\u0000" + machineId + "\u0000" + agent;
+
+interface PlacedAgent {
+  readonly key: string;
+  readonly layout: FleetLayoutAgent;
+  readonly at: FleetPoint;
+}
+
+interface PlacedMachine {
+  readonly layout: FleetLayoutMachine;
+  readonly at: FleetPoint;
+  readonly edge: string;
+  readonly agents: ReadonlyArray<PlacedAgent>;
+}
+
+export const FleetGraph = memo(function FleetGraph(props: {
+  readonly snapshot: FleetSnapshot;
+  readonly selectedMachineId: string | null;
+  readonly onSelectMachine: (machineId: string) => void;
+}) {
+  const { snapshot, selectedMachineId, onSelectMachine } = props;
+  const [wrapperRef, width] = useElementWidth();
+  const svgRef = useRef<SVGSVGElement>(null);
+  const reduced = useMediaQuery("(prefers-reduced-motion: reduce)");
+  usePauseWhileHidden(svgRef);
+  const { offsets, press, move, release } = usePullableNodes(svgRef, width, reduced);
+  // Below 340 the orbits cannot keep labels apart; see ORBIT_GAP in fleetLayout.
+  const height = width < 640 ? 360 : Math.max(340, Math.min(420, Math.round(width * 0.42)));
+  const layout = useMemo(
+    () => (width > 0 ? layoutFleet(snapshot.machines, width, height) : null),
+    [snapshot.machines, width, height],
+  );
+  const machinesById = useMemo(
+    () => new Map(snapshot.machines.map((machine) => [machine.id, machine])),
+    [snapshot.machines],
+  );
+  // Where every node is drawn this frame: its orbit spot plus any pull.
+  const placed = useMemo(() => {
+    if (layout === null) return [];
+    return layout.machines.map((node): PlacedMachine => {
+      const id = node.id ?? "more";
+      const machineOffset = offsets.get(machineKey(id));
+      const at = add(node, machineOffset);
+      return {
+        layout: node,
+        at,
+        edge: machineOffset === undefined ? node.edge : orbitEdge(layout.center, at),
+        agents: node.agents.map((agentNode) => {
+          const key = agentKey(id, agentNode.key);
+          return {
+            key,
+            layout: agentNode,
+            at: add(add(agentNode, machineOffset, AGENT_FOLLOW), offsets.get(key)),
+          };
+        }),
+      };
+    });
+  }, [layout, offsets]);
+  const placedById = useMemo(
+    () =>
+      new Map(
+        placed.flatMap((entry) =>
+          entry.layout.id === null ? [] : [[entry.layout.id, entry] as const],
+        ),
+      ),
+    [placed],
+  );
+  const live = snapshot.totals.running + snapshot.totals.attention;
+
+  const nodeHandlers = (key: string, onClick?: () => void) => ({
+    onPointerDown: (event: PointerEvent<SVGGElement>) => press(key, event),
+    onPointerMove: move,
+    onPointerUp: (event: PointerEvent<SVGGElement>) => {
+      if (release(event)) onClick?.();
+    },
+    onPointerCancel: (event: PointerEvent<SVGGElement>) => {
+      release(event);
+    },
+  });
+
+  return (
+    <div ref={wrapperRef} className="fleet-graph w-full">
+      {layout === null ? (
+        <div style={{ height }} />
+      ) : (
+        <svg
+          ref={svgRef}
+          viewBox={"0 0 " + width + " " + height}
+          className="block h-auto w-full select-none"
+          role="group"
+          aria-label={
+            snapshot.totals.machines +
+            " machines, " +
+            snapshot.totals.running +
+            " running, " +
+            snapshot.totals.attention +
+            " need you"
+          }
+        >
+          <ellipse
+            cx={layout.center.x}
+            cy={layout.center.y}
+            rx={layout.inner.rx}
+            ry={layout.inner.ry}
+            fill="none"
+            className={cn("stroke-border", !reduced && "fleet-orbit")}
+            strokeDasharray="2 6"
+          />
+          <ellipse
+            cx={layout.center.x}
+            cy={layout.center.y}
+            rx={layout.outer.rx}
+            ry={layout.outer.ry}
+            fill="none"
+            className={cn("stroke-border/60", !reduced && "fleet-orbit fleet-orbit-reverse")}
+            strokeDasharray="1 9"
+          />
+
+          {placed.map((entry) => {
+            const machine = entry.layout.id === null ? null : machinesById.get(entry.layout.id)!;
+            const work = machine ?? entry.layout.aggregate!;
+            const busy = work.running + work.attention > 0;
+            return (
+              <g key={"edge:" + (entry.layout.id ?? "more")}>
+                <path
+                  d={entry.edge}
+                  fill="none"
+                  className={busy ? "stroke-info/40" : "stroke-border"}
+                  strokeWidth={busy ? 1.6 : 1.2}
+                  strokeDasharray={machine?.kind === "environment" || busy ? undefined : "3 5"}
+                />
+                {busy && !reduced ? (
+                  <path
+                    d={entry.edge}
+                    fill="none"
+                    className="fleet-flow stroke-info"
+                    strokeWidth={1.6}
+                    strokeDasharray="2 12"
+                  />
+                ) : null}
+                {entry.agents.map((agent) => {
+                  const data = machine?.agents.find((item) => item.key === agent.layout.key);
+                  const agentWork = data ?? agent.layout.aggregate!;
+                  const agentBusy = agentWork.running + agentWork.attention > 0;
+                  return (
+                    <line
+                      key={"link:" + agent.key}
+                      x1={entry.at.x}
+                      y1={entry.at.y}
+                      x2={agent.at.x}
+                      y2={agent.at.y}
+                      className={agentBusy ? "stroke-info/60" : "stroke-border"}
+                      strokeDasharray={agentBusy ? undefined : "2 4"}
+                    />
+                  );
+                })}
+              </g>
+            );
+          })}
+
+          {reduced
+            ? null
+            : snapshot.threads
+                .filter((thread) => thread.state === "running")
+                .slice(0, MAX_PARTICLES)
+                .map((thread, index) => (
+                  <Particle
+                    key={thread.key}
+                    thread={thread}
+                    index={index}
+                    entry={placedById.get(thread.machineId)}
+                  />
+                ))}
+
+          {placed.flatMap((entry) =>
+            entry.agents.map((agent) => {
+              const machine =
+                entry.layout.id === null ? undefined : machinesById.get(entry.layout.id);
+              const data = machine?.agents.find((item) => item.key === agent.layout.key);
+              const work = data ?? agent.layout.aggregate!;
+              const label = data ? data.label : agent.layout.aggregate!.count + " more";
+              const labelY = agent.layout.labelBelow ? AGENT_RADIUS + 13 : -(AGENT_RADIUS + 7);
+              return (
+                <g
+                  key={agent.key}
+                  transform={"translate(" + agent.at.x + " " + agent.at.y + ")"}
+                  className="cursor-grab touch-none active:cursor-grabbing"
+                  {...nodeHandlers(agent.key)}
+                >
+                  <title>{label + " · " + workSummary(work)}</title>
+                  {work.attention > 0 ? (
+                    <circle
+                      r={AGENT_RADIUS + 6}
+                      fill="none"
+                      className={cn("stroke-warning", !reduced && "fleet-ring")}
+                      strokeWidth={1.5}
+                    />
+                  ) : null}
+                  <circle
+                    r={AGENT_RADIUS}
+                    className={cn(
+                      "fill-background",
+                      work.attention > 0
+                        ? "stroke-warning"
+                        : work.running > 0
+                          ? "stroke-info"
+                          : "stroke-muted-foreground",
+                    )}
+                    strokeWidth={1.4}
+                    strokeDasharray={
+                      work.reported > 0 && work.running + work.attention === 0 ? "2 3" : undefined
+                    }
+                  />
+                  {(data?.driver
+                    ? renderProviderGlyph({ driverKind: data.driver, x: -7, y: -7, size: 14 })
+                    : null) ?? (
+                    <text
+                      y={3.5}
+                      textAnchor="middle"
+                      className="fill-foreground text-4xs font-semibold"
+                    >
+                      {data
+                        ? data.driver
+                          ? providerInstanceInitials(data.label)
+                          : "?"
+                        : "+" + agent.layout.aggregate!.count}
+                    </text>
+                  )}
+                  <text y={labelY} textAnchor="middle" className="fill-muted-foreground text-4xs">
+                    {truncate(label, 18)}
+                  </text>
+                </g>
+              );
+            }),
+          )}
+
+          {placed.map((entry) =>
+            entry.layout.id === null ? (
+              <AggregateNode
+                key="machine:more"
+                at={entry.at}
+                node={entry.layout}
+                handlers={nodeHandlers(machineKey("more"))}
+              />
+            ) : (
+              <MachineNode
+                key={"machine:" + entry.layout.id}
+                at={entry.at}
+                machine={machinesById.get(entry.layout.id)!}
+                selected={selectedMachineId === entry.layout.id}
+                reduced={reduced}
+                onSelect={onSelectMachine}
+                handlers={nodeHandlers(machineKey(entry.layout.id), () =>
+                  onSelectMachine(entry.layout.id!),
+                )}
+              />
+            ),
+          )}
+
+          <g transform={"translate(" + layout.center.x + " " + layout.center.y + ")"}>
+            {live > 0 && !reduced ? (
+              <circle r={36} className="fleet-breathe fill-primary/10" />
+            ) : null}
+            <circle
+              r={29}
+              fill="none"
+              className={cn("stroke-primary/50", !reduced && "fleet-spin")}
+              strokeDasharray="3 7"
+            />
+            <circle r={22} className="fill-primary" />
+            <GoatWordmark
+              x={-12}
+              y={-12}
+              width={24}
+              height={24}
+              role="img"
+              aria-label="GOAT"
+              className="text-primary-foreground"
+            />
+          </g>
+        </svg>
+      )}
+    </div>
+  );
+});
+
+function Particle(props: {
+  readonly thread: FleetThread;
+  readonly index: number;
+  readonly entry: PlacedMachine | undefined;
+}) {
+  const { entry, index, thread } = props;
+  if (entry === undefined) return null;
+  const agent = entry.agents.find((item) => item.layout.key === thread.agentKey);
+  const path = entry.edge + (agent ? " L" + agent.at.x + " " + agent.at.y : "");
+  return (
+    <g className="pointer-events-none">
+      {[0, 1, 2].map((step) => (
+        <circle
+          key={step}
+          r={step === 0 ? 3.5 : 2.2}
+          className="fill-info"
+          opacity={step === 0 ? 1 : 0.5}
+        >
+          <animateMotion
+            dur={PARTICLE_SECONDS + "s"}
+            begin={-((index * 0.37 + step * (PARTICLE_SECONDS / 3)) % PARTICLE_SECONDS) + "s"}
+            repeatCount="indefinite"
+            path={path}
+            keyPoints="0;1"
+            keyTimes="0;1"
+            calcMode="spline"
+            keySplines="0.45 0 0.35 1"
+          />
+        </circle>
+      ))}
+    </g>
+  );
+}
+
+type NodeHandlers = {
+  readonly onPointerDown: (event: PointerEvent<SVGGElement>) => void;
+  readonly onPointerMove: (event: PointerEvent<SVGGElement>) => void;
+  readonly onPointerUp: (event: PointerEvent<SVGGElement>) => void;
+  readonly onPointerCancel: (event: PointerEvent<SVGGElement>) => void;
+};
+
+function MachineNode(props: {
+  readonly at: FleetPoint;
+  readonly machine: FleetMachine;
+  readonly selected: boolean;
+  readonly reduced: boolean;
+  readonly onSelect: (machineId: string) => void;
+  readonly handlers: NodeHandlers;
+}) {
+  const { at, machine, selected, reduced, onSelect, handlers } = props;
+  const busy = machine.running + machine.attention;
+  const onKeyDown = (event: KeyboardEvent<SVGGElement>) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onSelect(machine.id);
+  };
+  const device = describeMachine(machine.os, machine.machineKind);
+  const sub =
+    [device, machine.subtitle].filter((part) => part !== null).join(" · ") ||
+    (machine.kind === "environment" ? null : machine.kind === "cloud" ? "cloud" : "ssh");
+  return (
+    <g
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      aria-label={machine.label + ", " + workSummary(machine)}
+      className="fleet-node cursor-grab touch-none outline-none active:cursor-grabbing"
+      onKeyDown={onKeyDown}
+      transform={"translate(" + at.x + " " + at.y + ")"}
+      {...handlers}
+    >
+      <title>{machine.label + " · " + workSummary(machine)}</title>
+      {busy > 0 && !reduced ? (
+        <circle r={MACHINE_RADIUS + 8} className="fleet-breathe fill-info/10" />
+      ) : null}
+      <circle
+        r={MACHINE_RADIUS}
+        className={cn(
+          "fleet-node-ring fill-background",
+          selected
+            ? "stroke-primary"
+            : machine.attention > 0
+              ? "stroke-warning"
+              : busy > 0
+                ? "stroke-info"
+                : "stroke-muted-foreground/60",
+        )}
+        strokeWidth={selected ? 2.4 : 1.6}
+      />
+      <EnvironmentMachineIcon
+        kind={
+          machine.machineKind ??
+          (machine.kind === "cloud" || machine.cloudState !== null ? "cloud" : "server")
+        }
+        x={-8}
+        y={-8}
+        width={16}
+        height={16}
+        className="text-foreground"
+      />
+      {busy > 0 ? (
+        <g transform="translate(13 -13)">
+          <circle r={7} className={machine.attention > 0 ? "fill-warning" : "fill-info"} />
+          <text y={3} textAnchor="middle" className="fill-background text-4xs font-bold">
+            {busy > 99 ? "99+" : busy}
+          </text>
+        </g>
+      ) : machine.reported > 0 ? (
+        <g transform="translate(13 -13)">
+          <circle r={7} className="fill-background stroke-muted-foreground" strokeDasharray="2 2" />
+          <text y={3} textAnchor="middle" className="fill-muted-foreground text-4xs font-bold">
+            {machine.reported > 99 ? "99+" : machine.reported}
+          </text>
+        </g>
+      ) : null}
+      <text
+        y={MACHINE_RADIUS + 13}
+        textAnchor="middle"
+        className="fill-foreground text-3xs font-medium"
+      >
+        {truncate(machine.label, 18)}
+      </text>
+      {sub === null ? null : (
+        <text
+          y={MACHINE_RADIUS + 24}
+          textAnchor="middle"
+          className="fill-muted-foreground text-4xs"
+        >
+          {truncate(sub, 22)}
+        </text>
+      )}
+    </g>
+  );
+}
+
+function AggregateNode(props: {
+  readonly at: FleetPoint;
+  readonly node: FleetLayoutMachine;
+  readonly handlers: NodeHandlers;
+}) {
+  const work = props.node.aggregate!;
+  return (
+    <g
+      transform={"translate(" + props.at.x + " " + props.at.y + ")"}
+      className="cursor-grab touch-none active:cursor-grabbing"
+      {...props.handlers}
+    >
+      <title>{work.count + " more machines · " + workSummary(work)}</title>
+      <circle
+        r={MACHINE_RADIUS}
+        className="fill-background stroke-muted-foreground/60"
+        strokeWidth={1.6}
+        strokeDasharray="3 3"
+      />
+      <text y={3.5} textAnchor="middle" className="fill-foreground text-3xs font-semibold">
+        {"+" + work.count}
+      </text>
+      <text y={MACHINE_RADIUS + 13} textAnchor="middle" className="fill-muted-foreground text-4xs">
+        {workSummary(work)}
+      </text>
+    </g>
+  );
+}
