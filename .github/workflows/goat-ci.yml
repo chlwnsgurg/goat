@@ -38,7 +38,6 @@ jobs:
             test-shared,
             test-memory-growth,
             build,
-            screenshot-gate,
           ]
         include:
           # apps/server runs one file at a time. Four duration-balanced shards
@@ -71,8 +70,7 @@ jobs:
         with:
           node-version-file: package.json
           cache: false
-          # The screenshot gate only needs Node; skip the dependency install.
-          run-install: ${{ matrix.task != 'screenshot-gate' }}
+          run-install: true
 
       - name: Toolchain
         run: |
@@ -151,17 +149,6 @@ jobs:
           apps/mobile/src/features/threads/useThreadHeaderOptions.test.tsx
           apps/mobile/src/features/keyboard/commandPaletteItems.test.ts
 
-      # Advisory until GOAT_SCREENSHOT_GATE is "enforce". The script reads the live
-      # PR, so re-running only this job picks up a new screenshot or waiver label.
-      # See docs/operations/pr-screenshot-gate.md.
-      - name: PR screenshot gate
-        id: screenshot_gate
-        if: matrix.task == 'screenshot-gate'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GOAT_SCREENSHOT_GATE: ${{ vars.GOAT_SCREENSHOT_GATE }}
-        run: node .github/scripts/pr-screenshot-gate.cjs
-
       - name: Test server
         if: matrix.task == 'test-server'
         run: vp run --filter goat test --shard ${{ matrix.shard }}/${{ matrix.shard_count }}
@@ -232,3 +219,47 @@ jobs:
             native/browser-secret/build/x64/goat-browser-secret
           if-no-files-found: error
           retention-days: 1
+
+  screenshot-gate:
+    name: goat-screenshot-gate
+    runs-on: [self-hosted, linux, x64, goat, epyc]
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: false
+          # The screenshot gate only needs Node; skip the dependency install.
+          run-install: false
+
+      - name: Toolchain
+        run: |
+          echo "HOME=$HOME"
+          test "$HOME" = "/opt/actions-runner/$RUNNER_NAME/_home"
+          test -w "$HOME"
+          command -v vp
+          command -v vpr
+          node --version
+
+      # Advisory until GOAT_SCREENSHOT_GATE is "enforce". The script reads the live
+      # PR, so re-running only this job picks up a new screenshot or waiver label.
+      # See docs/operations/pr-screenshot-gate.md.
+      - name: PR screenshot gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GOAT_SCREENSHOT_GATE: ${{ vars.GOAT_SCREENSHOT_GATE }}
+        run: node .github/scripts/pr-screenshot-gate.cjs

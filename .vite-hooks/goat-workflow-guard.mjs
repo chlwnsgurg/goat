@@ -119,38 +119,56 @@ function validateWorkflow(source, yaml) {
   }
   if (
     !isMapping(workflow.jobs) ||
-    Object.keys(workflow.jobs).length !== 1 ||
-    !Object.hasOwn(workflow.jobs, "ci")
+    !Object.hasOwn(workflow.jobs, "ci") ||
+    Object.keys(workflow.jobs).some((name) => name !== "ci" && name !== "screenshot-gate")
   ) {
-    return refuse("jobs must contain exactly ci");
+    return refuse("jobs must contain ci and optionally screenshot-gate");
   }
-  const job = workflow.jobs.ci;
-  if (!isMapping(job)) return refuse("jobs.ci must be a mapping");
-  if (Object.hasOwn(job, "uses")) return refuse("jobs.ci.uses is forbidden");
-  if (Object.hasOwn(job, "container") || Object.hasOwn(job, "services")) {
-    return refuse("jobs.ci.container and jobs.ci.services are forbidden");
-  }
-  const runners = job["runs-on"];
-  if (
-    !Array.isArray(runners) ||
-    runners.length !== 5 ||
-    new Set(runners).size !== 5 ||
-    runners.some((label) => typeof label !== "string" || !labels.has(label))
-  ) {
-    return refuse("jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc");
-  }
-  if (
-    !Array.isArray(job.steps) ||
-    job.steps.length === 0 ||
-    job.steps.some((step) => !isMapping(step))
-  ) {
-    return refuse("jobs.ci.steps must be a nonempty array of mappings");
-  }
-  for (const [index, step] of job.steps.entries()) {
-    if (Object.hasOwn(step, "run") === Object.hasOwn(step, "uses")) {
-      refuse(`step ${index} must contain exactly one of run or uses`);
-    } else if (Object.hasOwn(step, "uses") && !actions.has(step.uses)) {
-      refuse(`step ${index}.uses is not an allowed action`);
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    if (!isMapping(job)) return refuse(`jobs.${name} must be a mapping`);
+    if (name === "screenshot-gate") {
+      const permissions = job.permissions;
+      if (
+        !isMapping(permissions) ||
+        Object.keys(permissions).length !== 4 ||
+        permissions.contents !== "read" ||
+        permissions.issues !== "read" ||
+        permissions["pull-requests"] !== "read" ||
+        permissions.checks !== "write"
+      ) {
+        return refuse(
+          "jobs.screenshot-gate.permissions must grant only contents/issues/pull-requests: read and checks: write",
+        );
+      }
+    }
+    if (Object.hasOwn(job, "uses")) return refuse(`jobs.${name}.uses is forbidden`);
+    if (Object.hasOwn(job, "container") || Object.hasOwn(job, "services")) {
+      return refuse(`jobs.${name}.container and jobs.${name}.services are forbidden`);
+    }
+    const runners = job["runs-on"];
+    if (
+      !Array.isArray(runners) ||
+      runners.length !== 5 ||
+      new Set(runners).size !== 5 ||
+      runners.some((label) => typeof label !== "string" || !labels.has(label))
+    ) {
+      return refuse(
+        `jobs.${name}.runs-on must contain exactly self-hosted, linux, x64, goat, epyc`,
+      );
+    }
+    if (
+      !Array.isArray(job.steps) ||
+      job.steps.length === 0 ||
+      job.steps.some((step) => !isMapping(step))
+    ) {
+      return refuse(`jobs.${name}.steps must be a nonempty array of mappings`);
+    }
+    for (const [index, step] of job.steps.entries()) {
+      if (Object.hasOwn(step, "run") === Object.hasOwn(step, "uses")) {
+        refuse(`step ${index} must contain exactly one of run or uses`);
+      } else if (Object.hasOwn(step, "uses") && !actions.has(step.uses)) {
+        refuse(`step ${index}.uses is not an allowed action`);
+      }
     }
   }
 }

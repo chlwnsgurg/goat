@@ -134,13 +134,19 @@ function decideGate({ draft, files, filesTruncated, body, waived }) {
   return { outcome: "missing", reason, uiFiles };
 }
 
-async function api(path, { token, apiUrl, attempts = 1, sleep: wait = sleep }) {
+async function api(
+  path,
+  { token, apiUrl, attempts = 1, sleep: wait = sleep, method = "GET", body },
+) {
   for (let attempt = 1; ; attempt += 1) {
     let response;
     try {
       response = await fetch(apiUrl + path, {
+        method,
+        ...(method === "GET" ? {} : { body: JSON.stringify(body) }),
         headers: {
           accept: "application/vnd.github+json",
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
           authorization: "Bearer " + token,
           "x-github-api-version": "2022-11-28",
         },
@@ -153,7 +159,7 @@ async function api(path, { token, apiUrl, attempts = 1, sleep: wait = sleep }) {
     }
     if (response.ok) return response.json();
     if (response.status < 500 || response.status >= 600 || attempt >= attempts) {
-      throw new Error("GET " + path + " returned " + response.status);
+      throw new Error(method + " " + path + " returned " + response.status);
     }
     await wait(250 * attempt);
   }
@@ -183,7 +189,7 @@ async function labelWaiver({ repoPath, number, labels, options, log }) {
     if (isMaintainerPermission(permission)) return true;
     log("ignoring " + WAIVER_LABEL + ": applied by " + actor + ", who is not a maintainer");
   } catch (error) {
-    log("could not verify who applied " + WAIVER_LABEL + ": " + error.message);
+    throw new Error("could not verify who applied " + WAIVER_LABEL + ": " + error.message);
   }
   return false;
 }
@@ -236,6 +242,8 @@ async function main(env = process.env, { sleep: wait = sleep } = {}) {
   const options = {
     token: env.GITHUB_TOKEN,
     apiUrl: env.GITHUB_API_URL || "https://api.github.com",
+    attempts: 3,
+    sleep: wait,
   };
 
   let decision;
@@ -243,13 +251,9 @@ async function main(env = process.env, { sleep: wait = sleep } = {}) {
     const pr = await api(repoPath + "/pulls/" + number, options);
     const files = pr.draft
       ? []
-      : (
-          await paginate(repoPath + "/pulls/" + number + "/files", {
-            ...options,
-            attempts: 3,
-            sleep: wait,
-          })
-        ).map((file) => file.filename);
+      : (await paginate(repoPath + "/pulls/" + number + "/files", options)).map(
+          (file) => file.filename,
+        );
     const labels = (pr.labels ?? []).map((label) => label.name);
     const preliminary = decideGate({
       draft: pr.draft,
@@ -275,12 +279,33 @@ async function main(env = process.env, { sleep: wait = sleep } = {}) {
   if (env.GITHUB_STEP_SUMMARY) {
     fs.appendFileSync(env.GITHUB_STEP_SUMMARY, summaryMarkdown({ number, mode, decision }));
   }
-  if (env.GITHUB_OUTPUT) {
-    fs.appendFileSync(env.GITHUB_OUTPUT, "outcome=" + decision.outcome + "\n");
-  }
   if (decision.outcome === "inconclusive") {
     const level = mode === "enforce" ? "error" : "warning";
     console.log("::" + level + " title=PR screenshot gate::inconclusive: " + decision.reason);
+    try {
+      const headSha = event.pull_request?.head?.sha;
+      if (!headSha) throw new Error("event payload has no PR head SHA");
+      await api(repoPath + "/check-runs", {
+        ...options,
+        method: "POST",
+        // A transport failure may have created the check; do not duplicate it by retrying.
+        attempts: 1,
+        body: {
+          name: "goat-screenshot-gate: inconclusive",
+          head_sha: headSha,
+          status: "completed",
+          conclusion: "neutral",
+          output: {
+            title: "Screenshot gate could not inspect this PR",
+            summary: decision.reason + ". Please re-run the goat-screenshot-gate job.",
+          },
+        },
+      });
+    } catch (error) {
+      console.log(
+        "::warning title=PR screenshot gate::could not create inconclusive check: " + error.message,
+      );
+    }
     return mode === "enforce" ? 1 : 0;
   }
   if (decision.outcome !== "missing") return 0;

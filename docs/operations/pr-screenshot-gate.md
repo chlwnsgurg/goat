@@ -23,9 +23,14 @@ The repository variable `GOAT_SCREENSHOT_GATE` selects the mode. Unset or unknow
 - `enforce`: the job fails until the PR has a screenshot or a maintainer waiver.
 - `off`: the job reports nothing.
 
-Changed-file requests make up to three attempts on network errors or HTTP 5xx responses. If PR
-inspection still fails, the annotation and summary say `inconclusive`, and the `screenshot_gate`
-step outputs `outcome=inconclusive`. The job stays green in `warn` mode and fails in `enforce` mode.
+PR metadata, changed-file, and waiver-provenance requests make up to three attempts on network
+errors or HTTP 5xx responses, with 250ms/500ms backoff. Other HTTP errors and malformed JSON are
+not retried. If inspection or waiver verification fails, the annotation and summary say
+`inconclusive`. The script also attempts to add a neutral `goat-screenshot-gate: inconclusive`
+check to the PR head, with the failure reason and instructions to re-run the job. This makes an
+incomplete inspection visible in the PR checks list. If creating that check fails, such as with a
+read-only fork PR token, a warning is logged and the annotation and summary remain available.
+The job stays green in `warn` mode and fails in `enforce` mode.
 
 ## Switching to enforce
 
