@@ -10,7 +10,11 @@ import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { Button } from "../ui/button";
 import { SidebarInset } from "../ui/sidebar";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { SettingsIcon } from "~/components/solar";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
+import { ConnectionCatalogUnreadableAlert } from "../desktop/ConnectionCatalogUnreadableNotice";
+import { ConnectionEnvironmentsSection } from "../settings/ConnectionEnvironmentsSection";
 import { FleetGraph } from "./FleetGraph";
 import { describeMachine } from "./describeMachine";
 
@@ -156,6 +160,30 @@ export function FleetPage() {
             {selectedMachine && listed.length === 0 ? (
               <p className="text-sm text-muted-foreground">Nothing running on this machine.</p>
             ) : null}
+
+            <ConnectionCatalogUnreadableAlert />
+            {/* The same rows and Add environment flow as Settings > Connections. */}
+            <ConnectionEnvironmentsSection
+              title="Connections"
+              searchable={false}
+              headerAction={
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        size="icon-xs"
+                        variant="ghost-muted"
+                        aria-label="Connection settings"
+                        render={<Link to="/settings/connections" />}
+                      />
+                    }
+                  >
+                    <SettingsIcon className="size-3.5" />
+                  </TooltipTrigger>
+                  <TooltipPopup side="top">Connection settings</TooltipPopup>
+                </Tooltip>
+              }
+            />
           </WorkspacePageContainer>
         </main>
       </div>
