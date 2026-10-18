@@ -2794,31 +2794,59 @@ export const prepareRemoteRuntime = (
       ),
     );
     if (selectedVersion !== undefined) return yield* selectInstalled(selectedVersion);
-    if (upgradeRetained && probe.retainedVersion !== undefined) {
-      const retainedVersion = probe.retainedVersion;
+    // Legacy ownership must be adopted through its normal replacement path;
+    // attaching without adoption would fail the launch-time identity check.
+    const fallbackToLive = probe.liveStatus === "live" && liveCompatible && !adoptLegacy;
+    const fallbackVersion = fallbackToLive
+      ? probe.liveVersion
+      : upgradeRetained
+        ? probe.retainedVersion
+        : undefined;
+    if (fallbackVersion !== undefined) {
       yield* Effect.logInfo("ssh.runtime.upgrade.start", {
         ...sshTargetLogFields(target),
-        installedVersion: retainedVersion,
+        installedVersion: fallbackVersion,
         requestedVersion: version,
       });
       return yield* acquireRequested.pipe(
         Effect.catchTags({
-          SshLaunchError: (error) =>
-            Effect.logWarning("ssh.runtime.upgrade.skipped", {
+          SshLaunchError: (error) => {
+            // An unavailable archive may cancel an optional upgrade. Upload and
+            // SSH failures retain their own error instead of being hidden by reuse.
+            if (error.reason !== "archive-unavailable") return Effect.fail(error);
+            return Effect.logWarning("ssh.runtime.upgrade.skipped", {
               ...sshTargetLogFields(target),
-              installedVersion: retainedVersion,
+              installedVersion: fallbackVersion,
               requestedVersion: version,
-              reason: `GOAT ${version} could not be installed, so the installed ${retainedVersion} starts instead: ${error.message}`,
+              reason: `GOAT ${version} could not be installed, so compatible GOAT ${fallbackVersion} is used instead: ${error.message}`,
             }).pipe(
-              Effect.andThen(selectInstalled(retainedVersion)),
+              Effect.andThen(selectInstalled(fallbackVersion)),
               Effect.map((selected): PreparedRemoteRuntime => {
                 const failure = archiveFailure(error);
-                return {
+                const fallback = {
                   ...selected,
-                  ...(failure === undefined ? {} : { upgradeFailure: failure }),
+                  // Revalidate compatibility at launch, but never refresh or adopt
+                  // an installed runtime after failing to acquire its replacement.
+                  mayUpgradeOwnedServer: false,
+                  refreshIfIdle: false,
+                  ...(failure === undefined
+                    ? {}
+                    : {
+                        upgradeFailure: {
+                          ...failure,
+                          fix: {
+                            ...failure.fix,
+                            instruction: `Using compatible GOAT ${fallbackVersion}. ${failure.fix.instruction}`,
+                          },
+                        },
+                      }),
                 };
+                delete fallback.expectedLiveVersion;
+                delete fallback.expectedLiveRunnerSha256;
+                return fallback;
               }),
-            ),
+            );
+          },
         }),
       );
     }
@@ -3556,8 +3584,7 @@ function archiveFailure(error: SshLaunchError): SshHostFailure | undefined {
     archive: error.acquisition,
     fix: {
       actor: "human",
-      instruction:
-        "This build has no published server archive. Install a published GOAT release, or set a release mirror.",
+      instruction: `GOAT ${error.acquisition.requestedVersion} runtime archive is unavailable. Install a published GOAT release, or set a release mirror.`,
     },
   };
 }

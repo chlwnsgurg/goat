@@ -18,6 +18,7 @@ import {
   ARCHIVE,
   uploadTarget,
   installArchivePsDouble,
+  makeSuccessfulProcess,
 } from "./tunnel.fixture.ts";
 import { makeProtocolFixture } from "./tunnel.protocol.fixture.ts";
 
@@ -36,13 +37,25 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             ssh: SSH_RUNTIME_PROTOCOL_VERSION,
             orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
+          const before = yield* f.snapshot;
           yield* f.fs.writeFileString(
             `${f.test}/activity`,
             mode === "busy" || mode === "unknown" ? mode : "idle",
           );
+          let failUpload = mode === "failure";
+          const transport = ChildProcessSpawner.make((command) => {
+            if (failUpload && command._tag === "StandardCommand" && command.args.includes("-c")) {
+              failUpload = false;
+              return Effect.succeed({
+                ...makeSuccessfulProcess("remote upload failed"),
+                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+              });
+            }
+            return f.transport.spawn(command);
+          });
           const layer = Layer.mergeAll(
             NodeServices.layer,
-            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, transport),
             Layer.succeed(FileSystem.FileSystem, f.observedFs),
             Layer.succeed(HttpClient.HttpClient, testHttpClient),
             Layer.succeed(NetService.NetService, testNetService),
@@ -58,16 +71,13 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           yield* Effect.gen(function* () {
             const manager = yield* SshTunnel.SshEnvironmentManager;
             if (mode === "failure") {
-              const name = (yield* f.fs.readDirectory(f.runner.archiveDirectory)).find((name) =>
-                name.endsWith(".sha256"),
-              )!;
-              const file = `${f.runner.archiveDirectory}/${name}`;
-              const bytes = yield* f.fs.readFileString(file);
-              yield* f.fs.writeFileString(file, "invalid checksum\n");
-              assert.isTrue(
-                Result.isFailure(yield* Effect.result(manager.ensureEnvironment(uploadTarget))),
-              );
-              yield* f.fs.writeFileString(file, bytes);
+              // Missing/unusable archives now permit compatible fallback; upload
+              // failures must still fail and preserve the first-connection retry.
+              const failed = yield* Effect.result(manager.ensureEnvironment(uploadTarget));
+              assert.isTrue(Result.isFailure(failed));
+              if (Result.isFailure(failed))
+                assert.include(failed.failure.message, "Uploading the runtime archive failed");
+              assert.deepEqual(yield* f.snapshot, before);
             }
             yield* manager.ensureEnvironment(uploadTarget, { issuePairingToken: true });
             if (mode === "idle" || mode === "failure") {
