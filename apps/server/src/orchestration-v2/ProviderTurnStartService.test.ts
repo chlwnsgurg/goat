@@ -838,37 +838,39 @@ effectIt.effect("preserves earlier failures and defers even the final normal att
   }).pipe(Effect.scoped),
 );
 
-effectIt.effect("fails a still-contended start only at its ten-minute deadline", () =>
-  Effect.gen(function* () {
-    const h = yield* leaseWorker();
-    yield* h.worker.runOnce;
-    yield* TestClock.adjust("599 seconds");
-    yield* h.worker.runOnce;
-    expect(yield* h.row).toMatchObject({ status: "pending", attemptCount: 0 });
-    expect(h.projection().runs.at(-1)?.status).toBe("starting");
-    yield* TestClock.adjust("1 second");
-    yield* h.worker.runOnce;
-    expect(yield* h.row).toMatchObject({
-      status: "failed",
-      attemptCount: 1,
-      lastError: expect.stringContaining("Workspace is busy"),
-    });
-    expect(h.projection().runs.at(-1)?.status).toBe("failed");
-    expect(h.projection().turnItems).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "error",
-          title: "Workspace is busy",
-          failure: expect.objectContaining({
-            message: expect.stringContaining("workspace is busy"),
+for (const type of ["provider-turn.start", "provider-turn.restart"] as const) {
+  effectIt.effect(`settles a still-contended ${type} only at its ten-minute deadline`, () =>
+    Effect.gen(function* () {
+      const h = yield* leaseWorker(type);
+      yield* h.worker.runOnce;
+      yield* TestClock.adjust("599 seconds");
+      yield* h.worker.runOnce;
+      expect(yield* h.row).toMatchObject({ status: "pending", attemptCount: 0 });
+      expect(h.projection().runs.at(-1)?.status).toBe("starting");
+      yield* TestClock.adjust("1 second");
+      yield* h.worker.runOnce;
+      expect(yield* h.row).toMatchObject({
+        status: "succeeded",
+        attemptCount: 1,
+        lastError: null,
+      });
+      expect(h.projection().runs.at(-1)?.status).toBe("failed");
+      expect(h.projection().turnItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "error",
+            title: "Workspace is busy",
+            failure: expect.objectContaining({
+              message: expect.stringContaining("workspace is busy"),
+            }),
           }),
-        }),
-      ]),
-    );
-    expect(h.open).not.toHaveBeenCalled();
-    expect(h.startRootRun).not.toHaveBeenCalled();
-  }).pipe(Effect.scoped),
-);
+        ]),
+      );
+      expect(h.open).not.toHaveBeenCalled();
+      expect(h.startRootRun).not.toHaveBeenCalled();
+    }).pipe(Effect.scoped),
+  );
+}
 
 effectIt.effect("terminalizes a starting run when its provider session cannot open", () =>
   Effect.gen(function* () {

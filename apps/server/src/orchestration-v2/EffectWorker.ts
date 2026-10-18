@@ -834,19 +834,15 @@ export const layerWithOptions = (
               ? workspaceLeaseBusy(exit.cause)
               : undefined;
           if (busy !== undefined) {
-            const updated = busy.deadlineExceeded
-              ? yield* outbox
-                  .fail({ effectId: effect.id, workerId, error: busy.message })
-                  .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
-              : yield* outbox
-                  .retry({
-                    effectId: effect.id,
-                    workerId,
-                    error: busy.message,
-                    delayMs: WORKSPACE_LEASE_RETRY_MS,
-                    undoAttempt: true,
-                  })
-                  .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
+            const updated = yield* outbox
+              .retry({
+                effectId: effect.id,
+                workerId,
+                error: busy.message,
+                delayMs: WORKSPACE_LEASE_RETRY_MS,
+                undoAttempt: true,
+              })
+              .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
             if (!updated && !(yield* wasCancelled(effect.id))) {
               return yield* new OrchestrationEffectWorkerError({
                 operation: "defer-workspace-lease",

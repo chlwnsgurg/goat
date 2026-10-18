@@ -67,7 +67,7 @@ export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStart
 
 export class WorkspaceLeaseBusyError extends Schema.TaggedError<WorkspaceLeaseBusyError>()(
   "WorkspaceLeaseBusyError",
-  { deadlineExceeded: Schema.Boolean },
+  {},
 ) {
   override get message(): string {
     return "Workspace is busy with checkout removal or preparation.";
@@ -639,14 +639,16 @@ export const layer: Layer.Layer<
           const deadlineExceeded =
             input.workspaceLeaseDeadline !== undefined &&
             DateTime.toEpochMillis(now) >= DateTime.toEpochMillis(input.workspaceLeaseDeadline);
-          const busy = new WorkspaceLeaseBusyError({ deadlineExceeded });
           if (
             !deadlineExceeded &&
             (input.workspaceLeaseDeadline !== undefined ||
               input.willRetry === true ||
               input.reattach === true)
           ) {
-            return yield* new ProviderTurnStartError({ runId, cause: busy });
+            return yield* new ProviderTurnStartError({
+              runId,
+              cause: new WorkspaceLeaseBusyError({}),
+            });
           }
           yield* settleRunBeforeStart({
             signal: "workspace-lease-busy",
@@ -660,7 +662,6 @@ export const layer: Layer.Layer<
               failure: makeProviderFailure({ message: reason, class: "validation_error" }),
             },
           });
-          if (deadlineExceeded) return yield* new ProviderTurnStartError({ runId, cause: busy });
           return;
         }
       }
