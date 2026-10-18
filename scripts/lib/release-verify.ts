@@ -170,6 +170,11 @@ export function localBuildRoots(env: Readonly<Record<string, string | undefined>
   return [...new Set(roots)];
 }
 const defaultBuildRoots = localBuildRoots(process.env, process.cwd());
+// GitHub-hosted runners share one home directory per OS, so a dependency built on
+// any hosted runner (the Cursor SDK's sandbox binary, for one) carries the same
+// paths. Inside third-party files they do not identify this machine; workspace
+// and temp roots still do.
+const sharedHostedHomes = new Set(["/home/runner", "/Users/runner", "C:\\Users\\runneradmin"]);
 
 export function exposureProblems(
   name: string,
@@ -193,7 +198,8 @@ export function exposureProblems(
     problems.push(`${name}: private repository URL`);
   // V8/Node's diagnostic code embeds this documented Windows example literally.
   const pathContent = content.replace(/C:\\(?:\\)?a\\(?:\\)?b\\(?:\\)?c(?=["'`\s)]|$)/g, "");
-  const machinePath = roots.some(
+  const machineRoots = ours ? roots : roots.filter((root) => !sharedHostedHomes.has(root));
+  const machinePath = machineRoots.some(
     (root) =>
       pathContent.includes(`${root}/`) || pathContent.includes(`${root}\\`) || name.includes(root),
   );
