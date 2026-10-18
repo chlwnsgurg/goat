@@ -12,40 +12,56 @@ const PARENT_ENV = "GOAT_TEST_PARENT_TMPDIR";
 export const GUARD_ENV = "GOAT_TEST_TMP_GUARD";
 
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+const WINDOWS_TEMP_ENV_KEYS = ["TMPDIR", "TEMP", "TMP"] as const;
+const POSIX_TEMP_ENV_KEYS = ["TMPDIR"] as const;
+
+/**
+ * macOS's `sockaddr_un.sun_path` holds 104 bytes including the terminating NUL.
+ * The longest Unix socket a test binds inside its sandbox is
+ * `<sandbox>/t3code-<uid>/<24-hex>.sock` (`packages/shared/src/desktopAppControl.ts`).
+ */
+const DARWIN_SUN_PATH_BYTES = 103;
+const LONGEST_SANDBOX_SOCKET_RELATIVE_PATH = NodePath.posix.join(
+  `${SANDBOX_PREFIX}XXXXXX`,
+  "t3code-00000",
+  `${"0".repeat(24)}.sock`,
+);
 
 /**
  * Where a test file's sandbox goes, given the temp directory it inherited.
  *
- * macOS's per-user temp directory is already long (/private/var/folders/xx/…/T), and one more
- * segment pushes Unix socket paths past the 104-byte sun_path limit, so sockets fail with EINVAL.
- * Only that default moves under /tmp. A TMPDIR the caller chose, such as a CI job's own temp
- * directory, is kept so the job's cleanup and leak check still see the sandbox.
+ * A caller-chosen `TMPDIR`, such as a CI job's private temp directory, is kept whenever
+ * Unix sockets inside the sandbox still fit `sun_path`. When the inherited path is so
+ * long that adding the sandbox segment would push socket paths past macOS's 104-byte
+ * `sun_path` limit (as macOS's `/private/var/folders/xx/…/T` default does), the sandbox
+ * falls back to `/tmp` so socket tests do not fail with `EINVAL`.
  */
 export const sandboxParentFor = (
   platform: NodeJS.Platform,
   inherited: string,
   resolveTmp: () => string,
 ): string => {
-  if (platform !== "darwin" || !/^(\/private)?\/var\/folders\/[^/]+\/[^/]+\/T\/?$/.test(inherited))
+  if (
+    platform !== "darwin" ||
+    Buffer.byteLength(NodePath.posix.join(inherited, LONGEST_SANDBOX_SOCKET_RELATIVE_PATH)) <=
+      DARWIN_SUN_PATH_BYTES
+  ) {
     return inherited;
+  }
   try {
-    return resolveTmp();
+    const fallback = resolveTmp();
+    return Buffer.byteLength(fallback) < Buffer.byteLength(inherited) ? fallback : inherited;
   } catch {
     return inherited;
   }
 };
 
-const sandboxParent = (): string =>
-  sandboxParentFor(
-    // oxlint-disable-next-line goat/no-global-process-runtime -- Same reason as below: HostProcess cannot load in every test config.
-    NodeOS.platform(),
-    NodeOS.tmpdir(),
-    () => NodeFS.realpathSync.native("/tmp"),
-  );
+const sandboxParent = (platform: NodeJS.Platform): string =>
+  sandboxParentFor(platform, NodeOS.tmpdir(), () => NodeFS.realpathSync.native("/tmp"));
 
 export interface TestTempSandbox {
   readonly directory: string;
-  /** Restores TMPDIR, deletes the sandbox, and returns the leaked goat-* entries it held. */
+  /** Restores the process temp env, deletes the sandbox, and returns the leaked goat-* entries it held. */
   readonly close: () => ReadonlyArray<string>;
 }
 
@@ -58,24 +74,32 @@ const removeQuietly = (path: string) => {
 };
 
 /**
- * Point TMPDIR at a fresh directory for the rest of this test file.
+ * Point `os.tmpdir()` at a fresh directory for the rest of this test file.
  *
  * Everything that honors os.tmpdir(), including spawned servers that inherit the
  * environment, then writes inside it. Closing the sandbox reports what a test left
  * behind and deletes it; process exit and termination signals delete it too, so a
  * crashed or interrupted worker does not leave its temp files on the host.
- *
- * Windows keeps its temp directory: MAX_PATH leaves no room for another segment.
  */
-export const enterTestTempSandbox = (): TestTempSandbox | undefined => {
+export const enterTestTempSandbox = (
   // oxlint-disable-next-line goat/no-global-process-runtime -- Every test config loads this setup, and HostProcess imports node:sea, which mobile tests cannot bundle.
-  if (NodeOS.platform() === "win32") return undefined;
-
-  const previous = process.env.TMPDIR;
-  const parent = process.env[PARENT_ENV] ?? sandboxParent();
+  platform: NodeJS.Platform = NodeOS.platform(),
+): TestTempSandbox => {
+  const keys = platform === "win32" ? WINDOWS_TEMP_ENV_KEYS : POSIX_TEMP_ENV_KEYS;
+  const previousEnv = new Map<string, string | undefined>(
+    keys.map((key) => [key, process.env[key]]),
+  );
+  const previousParent = process.env[PARENT_ENV];
+  const currentTmp = NodeOS.tmpdir();
+  const parent =
+    NodePath.basename(currentTmp).startsWith(SANDBOX_PREFIX) && previousParent !== undefined
+      ? previousParent
+      : sandboxParent(platform);
   const directory = NodeFS.mkdtempSync(NodePath.join(parent, SANDBOX_PREFIX));
   process.env[PARENT_ENV] = parent;
-  process.env.TMPDIR = directory;
+  for (const key of keys) {
+    process.env[key] = directory;
+  }
 
   const onExit = () => removeQuietly(directory);
   const onSignal = (signal: NodeJS.Signals) => {
@@ -97,8 +121,12 @@ export const enterTestTempSandbox = (): TestTempSandbox | undefined => {
     directory,
     close: () => {
       detach();
-      if (previous === undefined) delete process.env.TMPDIR;
-      else process.env.TMPDIR = previous;
+      if (previousParent === undefined) delete process.env[PARENT_ENV];
+      else process.env[PARENT_ENV] = previousParent;
+      for (const [key, value] of previousEnv) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       let leaked: string[] = [];
       try {
         leaked = NodeFS.readdirSync(directory).filter((name) => name.startsWith(LEAK_PREFIX));
