@@ -52,6 +52,7 @@ import { resolveAttachmentPath, resolveAttachmentPathById } from "../attachmentS
 import { ATTACHMENT_UPLOAD_ROUTE_PREFIX } from "../assets/AttachmentUpload.ts";
 import * as Claims from "../orchestration-v2/AttachmentClaims.ts";
 import * as ServerConfig from "../config.ts";
+import * as LinkedHosts from "../linkedHosts/LinkedHosts.ts";
 import { AcpMcpBridgeError, callAcpMcpTool, listAcpMcpTools } from "../mcp/AcpMcpStdioBridge.ts";
 import {
   buildRemoteBrowseScript,
@@ -67,6 +68,9 @@ import {
  * projects, worktrees and threads; this process only launches or reuses the
  * remote server through the shared SSH manager and then calls the remote's
  * own `/mcp` tools as an outside agent with a short-lived session.
+ *
+ * A linked host (`LinkedHosts`) is reached the same way without SSH: its
+ * name resolves to an HTTPS origin and the session saved when it was linked.
  */
 
 export class SshRemoteDispatchError extends Data.TaggedError("SshRemoteDispatchError")<{
@@ -315,7 +319,7 @@ export class SshRemoteDispatch extends Context.Service<
       call: SshHostToolCall,
       authorize: Effect.Effect<RuntimeMode, E, R>,
     ) => Effect.Effect<unknown, SshRemoteDispatchError | E, R>;
-    /** Hosts this process holds an SSH tunnel to, sorted. */
+    /** Hosts this process holds an SSH tunnel to, and every linked host, sorted. */
     readonly connectedHosts: Effect.Effect<ReadonlyArray<string>>;
   }
 >()("goat/sshRemote/SshRemoteDispatch") {}
@@ -592,6 +596,26 @@ const make = Effect.gen(function* () {
         ).pipe(Effect.ignore({ log: true }));
     });
   if (Option.isSome(cloudMachines)) yield* cloudMachines.value.onAliasInvalidated(invalidateAlias);
+
+  // Hosts linked over HTTPS. Optional so test layers without it dial every alias as plain SSH.
+  const linkedHosts = yield* Effect.serviceOption(LinkedHosts.LinkedHosts);
+  const linkedAliases = new Set<string>();
+  const linkedFor = (host: string) =>
+    Option.isNone(linkedHosts)
+      ? Effect.succeed(Option.none<LinkedHosts.LinkedHostCredential>())
+      : linkedHosts.value.find(host).pipe(
+          Effect.tap((found) =>
+            Effect.sync(() => {
+              if (Option.isSome(found)) linkedAliases.add(found.value.host.name);
+            }),
+          ),
+          Effect.mapError((error) => failure("host_unavailable", error.message)),
+        );
+  const linkExpired = (alias: string) =>
+    failure(
+      "remote_refused",
+      `${alias} no longer accepts this machine's link; it expired or was revoked there. Create a pairing code on ${alias} with goat auth pairing create and call goat_host_link_create again.`,
+    );
   /**
    * `wake` resumes a stopped machine; only explicit agent work passes it. Polling through
    * callHostTool (launch watches, reports, host status) must never start a billed machine.
@@ -620,6 +644,12 @@ const make = Effect.gen(function* () {
     if (!SAFE_HOST_ALIAS.test(alias)) {
       return yield* failure("invalid_request", `"${host}" is not a usable SSH host alias.`);
     }
+    if (Option.isSome(yield* linkedFor(alias))) {
+      return yield* failure(
+        "invalid_request",
+        `${alias} is a linked GOAT host reached over HTTPS, so SSH tools cannot reach it. Use goat_project_list and the goat_thread_* tools with host "${alias}", or goat_ssh_thread_launch with a folder that exists there.`,
+      );
+    }
     const hosts = yield* knownHosts;
     // A managed cloud machine's SSH entry is written by its first use, so it may not exist yet.
     const ownedCloudMachine =
@@ -629,7 +659,7 @@ const make = Effect.gen(function* () {
     if (!ownedCloudMachine && !hosts.some((entry) => entry.alias === alias)) {
       return yield* failure(
         "host_unknown",
-        `${alias} is not in this machine's SSH config or known_hosts. Call goat_ssh_host_list for the hosts it can reach.`,
+        `${alias} is not in this machine's SSH config or known_hosts. It is not a linked host either. Call goat_ssh_host_list or goat_host_link_list for the hosts it can reach.`,
       );
     }
     return {
@@ -966,6 +996,7 @@ const make = Effect.gen(function* () {
           );
         }
         if (describe(error).includes("HTTP 401")) {
+          if (linkedAliases.has(input.target.alias)) return linkExpired(input.target.alias);
           // Revoked or expired on the remote: forget it so the next call issues a fresh one.
           invalidateSession(
             sessionKey(input.target, input.ceiling, false, input.memoryGrantCeiling),
@@ -1325,13 +1356,66 @@ const make = Effect.gen(function* () {
     return environment;
   });
 
+  /** A linked host's name in the shape the SSH helpers key their caches by. */
+  const linkedTarget = (alias: string): DesktopSshEnvironmentTarget => ({
+    alias,
+    hostname: alias,
+    username: null,
+    port: null,
+  });
+
+  /** What launch knows about a folder on a linked host without browsing it. */
+  const linkedFolder = (alias: string, cwd: string): SshBrowseResult => ({
+    host: alias,
+    os: null,
+    home: null,
+    path: normalizeRemotePath(cwd.trim()),
+    realPath: normalizeRemotePath(cwd.trim()),
+    gitRoot: null,
+    branch: null,
+    worktrees: [],
+    entries: [],
+    truncated: false,
+  });
+
+  /**
+   * The session saved with a link, when this caller may use it to change things there.
+   * It was issued with the access chosen at link time and carries no memory scopes.
+   */
+  const linkedSession = (
+    link: LinkedHosts.LinkedHostCredential,
+    callerMode: RuntimeMode,
+    memoryGrantCeiling: import("@goat/contracts").MemoryTaskGrantCeiling,
+  ) => {
+    const refusal = LinkedHosts.linkWriteRefusal(link.host, callerMode);
+    if (refusal !== null) return Effect.fail(failure("remote_refused", refusal));
+    if (memoryGrantCeiling !== "none")
+      return Effect.fail(
+        memoryRefusal(
+          `The link to ${link.host.name} carries no memory access, so it cannot start a task with a memory ceiling.`,
+        ),
+      );
+    return Effect.succeed({
+      token: link.token,
+      expiresAt: Date.parse(link.host.expiresAt),
+      ceilingApplied: true,
+    });
+  };
+
   const launchThread = Effect.fn("SshRemoteDispatch.launchThread")(function* <E, R>(
     input: SshLaunchInput,
     beforeLaunch: Effect.Effect<void, E, R>,
   ) {
     const sources = yield* resolveLaunchAttachmentSources(input.attachments ?? []);
-    const target = input.target ?? (yield* resolveHost(input.host!));
-    const folder = yield* browseTarget(target, { path: input.cwd, limit: 0 });
+    const linked = input.target === undefined ? yield* linkedFor(input.host) : Option.none<never>();
+    const target = Option.isSome(linked)
+      ? linkedTarget(linked.value.host.name)
+      : (input.target ?? (yield* resolveHost(input.host!)));
+    // A linked host has no shell to browse with: its server checks the folder when the
+    // project is created, and a worktree needs an explicit baseRef.
+    const folder = Option.isSome(linked)
+      ? linkedFolder(target.alias, input.cwd)
+      : yield* browseTarget(target, { path: input.cwd, limit: 0 });
     const broad = input.allowBroadWorkspaceRoot === true ? null : broadWorkspaceRoot(folder);
     if (broad !== null) {
       return yield* failure(
@@ -1350,7 +1434,7 @@ const make = Effect.gen(function* () {
         workspaceStrategy = { type: "root" };
         break;
       case "worktree": {
-        if (folder.gitRoot === null) {
+        if (folder.gitRoot === null && Option.isNone(linked)) {
           return yield* failure(
             "invalid_request",
             `${folder.path} on ${target.alias} is not inside a Git repository, so it cannot get a worktree. Omit workspace to run in the folder itself, or pick a folder goat_ssh_browse marks isGitRepository.`,
@@ -1380,9 +1464,15 @@ const make = Effect.gen(function* () {
         break;
     }
 
-    const bootstrap = yield* withRuntime(manager.ensureEnvironment(target, AGENT_CONNECTION)).pipe(
-      sshFailed(target.alias),
-    );
+    const bootstrap = Option.isSome(linked)
+      ? {
+          httpBaseUrl: `${linked.value.host.baseUrl}/`,
+          remoteServerVersion: linked.value.host.serverVersion,
+          remoteServerKind: undefined,
+        }
+      : yield* withRuntime(manager.ensureEnvironment(target, AGENT_CONNECTION)).pipe(
+          sshFailed(target.alias),
+        );
     if ("type" in bootstrap)
       return yield* failure(
         "host_unavailable",
@@ -1398,7 +1488,9 @@ const make = Effect.gen(function* () {
     // Bootstrap may have taken a while; the session carries the caller's authority.
     yield* beforeLaunch;
     const memoryGrantCeiling = input.memoryGrantCeiling ?? "none";
-    const session = yield* sessionFor(target, input.callerRuntimeMode, false, memoryGrantCeiling);
+    const session = Option.isSome(linked)
+      ? yield* linkedSession(linked.value, input.callerRuntimeMode, memoryGrantCeiling)
+      : yield* sessionFor(target, input.callerRuntimeMode, false, memoryGrantCeiling);
     const remote = {
       target,
       httpBaseUrl: bootstrap.httpBaseUrl,
@@ -1424,6 +1516,12 @@ const make = Effect.gen(function* () {
     let project = yield* findProject(remote, folder);
     let projectCreated = false;
     if (project === undefined) {
+      if (Option.isSome(linked) && linked.value.host.access !== "full-access") {
+        return yield* failure(
+          "remote_refused",
+          `${folder.path} is not a project on ${target.alias}, and its link allows ${linked.value.host.access}; only a full-access link may register a project. Add the folder as a project on ${target.alias}, or link it again with access full-access.`,
+        );
+      }
       if (!session.ceilingApplied) {
         return yield* failure(
           "remote_refused",
@@ -1572,7 +1670,7 @@ const make = Effect.gen(function* () {
         | null
         | undefined;
       notes.push(
-        `The thread lives in the GOAT environment on ${target.alias}. Read it with goat_thread_read and send to it with goat_thread_send, passing host "${target.alias}" and this threadId. The user can watch it by connecting to ${target.alias} (Settings → Connections → SSH).`,
+        `The thread lives in the GOAT environment on ${target.alias}. Read it with goat_thread_read and send to it with goat_thread_send, passing host "${target.alias}" and this threadId. The user can watch it by connecting to ${target.alias} (${Option.isSome(linked) ? "Settings → Connections, with a pairing URL from that host" : "Settings → Connections → SSH"}).`,
       );
       return {
         host: target.alias,
@@ -1605,10 +1703,87 @@ const make = Effect.gen(function* () {
           ),
     );
 
+  /**
+   * callHostTool for a linked host: the saved session instead of one issued
+   * over SSH. It cannot narrow that session to the caller, so a write needs a
+   * caller whose ceiling covers the link's access, and approvals are refused.
+   */
+  const callLinkedHostTool = <E, R>(
+    link: LinkedHosts.LinkedHostCredential,
+    call: SshHostToolCall,
+    authorize: Effect.Effect<RuntimeMode, E, R>,
+  ): Effect.Effect<unknown, SshRemoteDispatchError | E, R> =>
+    Effect.gen(function* () {
+      const alias = link.host.name;
+      const ceiling = yield* authorize;
+      if (call.approvals === true)
+        return yield* failure(
+          "remote_refused",
+          `A link cannot answer approvals on ${alias}; answer them in that thread from a client connected to ${alias}.`,
+        );
+      const refusal = call.writes ? LinkedHosts.linkWriteRefusal(link.host, ceiling) : null;
+      if (refusal !== null) return yield* failure("remote_refused", refusal);
+      const stillAuthorized = authorize.pipe(
+        Effect.flatMap((current) =>
+          current === ceiling
+            ? Effect.void
+            : Effect.fail(
+                failure(
+                  "caller_changed",
+                  `The caller's runtime mode changed from ${ceiling} to ${current} during the call; nothing was sent to ${alias}.`,
+                ),
+              ),
+        ),
+      );
+      const answer = yield* callAcpMcpTool({
+        endpoint: new URL("/mcp", link.host.baseUrl).toString(),
+        authorization: `Bearer ${link.token}`,
+        tool: call.tool,
+        arguments: call.arguments,
+        beforeToolCall: stillAuthorized,
+      }).pipe(
+        Effect.timeoutOption(call.timeoutMs),
+        Effect.catch((error) => {
+          if (!(error instanceof AcpMcpBridgeError)) return Effect.fail(error);
+          if (error.kind === "http" && error.status === 401) return Effect.fail(linkExpired(alias));
+          if (isUnknownToolRefusal(error, call.tool))
+            return Effect.fail(
+              failure(
+                "remote_refused",
+                missingRemoteToolMessage(alias, call.tool, link.host.serverVersion),
+              ),
+            );
+          return Effect.fail(
+            error.kind === "transport" || error.kind === "http"
+              ? failure("host_unavailable", `GOAT on ${alias} is unavailable: ${describe(error)}`)
+              : failure(
+                  "remote_refused",
+                  `GOAT on ${alias} could not run ${call.tool}: ${describe(error)}`,
+                ),
+          );
+        }),
+      );
+      if (Option.isNone(answer))
+        return yield* failure(
+          "host_unavailable",
+          `${alias} did not answer ${call.tool} within ${Math.round(call.timeoutMs / 1000)}s.`,
+        );
+      const result = readRemoteToolResult(call.tool, answer.value);
+      if (!result.ok)
+        return yield* new SshRemoteDispatchError({
+          reason: "remote_refused",
+          message: result.message,
+          remoteCode: result.code,
+        });
+      return result.value;
+    });
+
   const callHostTool = Effect.fn("SshRemoteDispatch.callHostTool")(function* <E, R>(
     call: SshHostToolCall,
     authorize: Effect.Effect<RuntimeMode, E, R>,
   ) {
+    const linked = yield* linkedFor(call.host);
+    if (Option.isSome(linked)) return yield* callLinkedHostTool(linked.value, call, authorize);
     const target = yield* resolveHost(call.host);
     const ceiling = yield* authorize;
     if (call.requireReady !== true) yield* readyCloudTarget(target, false);
@@ -1743,7 +1918,10 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const connectedHosts = Effect.sync(() => [...connected].toSorted());
+  const connectedHosts = Effect.gen(function* () {
+    const linked = Option.isNone(linkedHosts) ? [] : yield* linkedHosts.value.names;
+    return [...new Set([...connected, ...linked])].toSorted();
+  });
 
   return SshRemoteDispatch.of({
     runtimeStatus,

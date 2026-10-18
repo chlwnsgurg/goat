@@ -416,6 +416,12 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
   ),
   goat_ssh_host_forget: tool(["Forget", "Forgetting", "Forgot", "an SSH host"], "ssh-host-list"),
   goat_ssh_host_list: tool(["List", "Listing", "Listed", "SSH hosts"], "ssh-host-list"),
+  goat_host_link_create: tool(["Link", "Linking", "Linked", "a GOAT host"], "ssh-host-list"),
+  goat_host_link_list: tool(["List", "Listing", "Listed", "linked GOAT hosts"], "ssh-host-list"),
+  goat_host_link_remove: tool(
+    ["Remove", "Removing", "Removed", "a linked GOAT host"],
+    "ssh-host-list",
+  ),
   goat_ssh_host_status: tool(
     ["Check", "Checking", "Checked", "an SSH host's runtime"],
     "host-status",

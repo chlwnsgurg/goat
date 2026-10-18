@@ -121,7 +121,7 @@ export type OrchestratorMcpTargetOptions = typeof OrchestratorMcpTargetOptions.T
  */
 export const OrchestratorMcpHost = TrimmedNonEmptyString.check(Schema.isMaxLength(255)).annotate({
   description:
-    "Another machine's SSH host alias, from goat_ssh_host_list or the host goat_ssh_thread_launch returned. Omit for this environment.",
+    "Another machine: an SSH host alias from goat_ssh_host_list, a linked host name from goat_host_link_list, or the host goat_ssh_thread_launch returned. Omit for this environment.",
 });
 
 export const SshLaunchWorkspace = Schema.Union([
