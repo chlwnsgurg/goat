@@ -1225,12 +1225,16 @@ export function ConnectionEnvironmentsSection({
           context: { modelPickerOpen: false },
         });
         const index = threadJumpIndexFromCommand(command ?? "");
-        const target = index === null ? undefined : filteredDiscoveredSshHosts[index];
-        if (target) {
+        // Claim every jump chord while the list is open, including ones past the last host;
+        // otherwise the thread sidebar (mounted on Fleet) navigates away under the dialog.
+        if (index !== null) {
           event.preventDefault();
           event.stopPropagation();
-          setSshHostSuggestionsOpen(false);
-          void handleSelectSshHostSuggestion(target);
+          const target = filteredDiscoveredSshHosts[index];
+          if (target) {
+            setSshHostSuggestionsOpen(false);
+            void handleSelectSshHostSuggestion(target);
+          }
           return;
         }
 

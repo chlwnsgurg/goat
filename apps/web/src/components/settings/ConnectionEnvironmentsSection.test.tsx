@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   connectPairing: vi.fn(),
+  sshHosts: null as unknown,
 }));
 
 vi.mock("../../state/environments", () => ({
@@ -27,8 +28,14 @@ vi.mock("../../connection/catalog", () => ({
 }));
 vi.mock("../../state/server", async () => {
   const { Atom } = await import("effect/reactivity");
+  const { compileResolvedKeybindingsConfig } = await import("@goat/shared/keybindings");
   return {
-    primaryServerKeybindingsAtom: Atom.make([]),
+    primaryServerKeybindingsAtom: Atom.make(
+      compileResolvedKeybindingsConfig([
+        { key: "mod+1", command: "thread.jump.1" },
+        { key: "mod+2", command: "thread.jump.2" },
+      ]),
+    ),
     serverEnvironment: {
       probeSshHost: vi.fn(),
       trustSshHost: Object.assign(vi.fn(), { permissionAtom: () => Atom.make(false) }),
@@ -38,7 +45,12 @@ vi.mock("../../state/server", async () => {
   };
 });
 vi.mock("../../state/query", () => ({
-  useEnvironmentQuery: () => ({ data: null, isPending: false, error: null, refresh: () => {} }),
+  useEnvironmentQuery: () => ({
+    data: state.sshHosts,
+    isPending: false,
+    error: null,
+    refresh: () => {},
+  }),
 }));
 vi.mock(import("../../cloud/publicConfig"), async (importOriginal) => ({
   ...(await importOriginal()),
@@ -65,6 +77,8 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   document.body.innerHTML = "";
+  state.sshHosts = null;
+  delete (window as { desktopBridge?: unknown }).desktopBridge;
 });
 
 const flush = () => act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
@@ -146,4 +160,49 @@ it("keeps the dialog open with the error when pairing fails", async () => {
   });
   const open = document.querySelector('[role="dialog"]');
   expect(open?.textContent).toContain("Pairing code expired");
+});
+
+it("keeps thread jump chords inside the SSH host suggestions", async () => {
+  const resolveSshHost = vi.fn(async () => ({
+    alias: "devbox",
+    hostname: "devbox.local",
+    username: null,
+    port: null,
+  }));
+  (window as { desktopBridge?: unknown }).desktopBridge = { resolveSshHost };
+  state.sshHosts = [{ alias: "devbox", hostname: "devbox.local", username: null, port: null }];
+  const dialog = await openAddDialog();
+  const sshMode = [...dialog.querySelectorAll("button")].find((element) =>
+    element.textContent?.startsWith("SSH"),
+  );
+  await act(async () => sshMode!.click());
+  await flush();
+  const hostInput = document.querySelector<HTMLInputElement>("#saved-backend-ssh-host")!;
+  await act(async () => {
+    hostInput.focus();
+    hostInput.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  });
+  await flush();
+
+  const chord = (key: string) =>
+    new KeyboardEvent("keydown", {
+      key,
+      code: `Digit${key}`,
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+  // The second jump has no host behind it; it must not reach the thread sidebar's window listener.
+  let notCanceled = true;
+  act(() => {
+    notCanceled = hostInput.dispatchEvent(chord("2"));
+  });
+  expect(notCanceled).toBe(false);
+  expect(resolveSshHost).not.toHaveBeenCalled();
+
+  await act(async () => {
+    hostInput.dispatchEvent(chord("1"));
+  });
+  await flush();
+  expect(resolveSshHost).toHaveBeenCalledWith("devbox");
 });
