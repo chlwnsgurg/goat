@@ -2237,7 +2237,8 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
   { error: EnvironmentAuthorizationError },
 ) {}
 
-export const WsCoreRpcGroup = RpcGroup.make(
+// Register core handlers in smaller layers to stay below TypeScript's instantiation-depth limit.
+export const WsCoreServerRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
@@ -2350,6 +2351,9 @@ export const WsCoreRpcGroup = RpcGroup.make(
   WsPullRequestsRequestReviewersRpc,
   WsPullRequestsLabelCandidatesRpc,
   WsPullRequestsSetLabelsRpc,
+).middleware(RpcScopeAuthorization);
+
+export const WsCoreWorkspaceRpcGroup = RpcGroup.make(
   WsSourceControlLookupRepositoryRpc,
   WsSourceControlCloneRepositoryRpc,
   WsSourceControlPublishRepositoryRpc,
@@ -2457,6 +2461,8 @@ export const WsCoreRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeShellRpc,
   WsOrchestrationV2SubscribeThreadRpc,
 ).middleware(RpcScopeAuthorization);
+
+export const WsCoreRpcGroup = WsCoreServerRpcGroup.merge(WsCoreWorkspaceRpcGroup);
 
 /**
  * GOAT Bot and Slack channel RPCs. The server registers their handlers in a layer of their own:
