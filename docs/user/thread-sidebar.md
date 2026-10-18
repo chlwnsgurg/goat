@@ -159,6 +159,10 @@ each, and a list of those threads grouped by machine; select a machine to show o
 Subagents count; archived threads do not. Work an environment started on an SSH host you are not
 connected to appears as last reported by that environment.
 
+Below the list, **Connections** shows your saved machines with the same controls as
+**Settings → Connections**: switch one off, check its routes and permissions, remove it, or pair
+another with **Add environment**.
+
 ### Fold working threads on mobile
 
 On iOS and Android, turn on **Settings → Thread behavior → Working section** to move threads
