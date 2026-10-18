@@ -153,11 +153,11 @@ resume stays listed with answering turned off.
 ### See everything running
 
 On web and desktop, **Fleet** in the rail beside the thread sidebar shows how many threads are
-running or need you across every connected machine, with one dot per machine. Open it, or search
-for it in the command palette, for a graph of your machines and the agents working on each, and a
-list of those threads grouped by machine; select a machine to show only its threads. Subagents
-count; archived threads do not. Work an environment started on an SSH host you are not connected
-to appears as last reported by that environment.
+running or need you across every connected machine; hover it for a count per machine. Open it,
+or search for it in the command palette, for a graph of your machines and the agents working on
+each, and a list of those threads grouped by machine; select a machine to show only its threads.
+Subagents count; archived threads do not. Work an environment started on an SSH host you are not
+connected to appears as last reported by that environment.
 
 ### Fold working threads on mobile
 
