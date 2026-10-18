@@ -288,22 +288,6 @@ jobs:
             test -e "$p" || { echo "missing build output: $p" >&2; exit 1; }
           done
 
-      - name: Upload build output
-        # Only on manual runs of dev/main: PR runs filled the private-repo artifact quota.
-        if: matrix.task == 'build' && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
-        # Nothing downloads this artifact, so a full storage quota must not fail the build.
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: goat-desktop-build
-          path: |
-            apps/desktop/dist-electron
-            apps/server/dist
-            apps/web/dist
-            native/browser-secret/build/x64/goat-browser-secret
-          if-no-files-found: error
-          retention-days: 1
-
   screenshot-gate:
     name: ${{ (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')) && 'goat-screenshot-gate' || 'goat-ci (label ignored)' }}
     # It reads the pull request, so a manual run has nothing to inspect.

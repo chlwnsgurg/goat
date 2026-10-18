@@ -15,6 +15,7 @@ export const GitHubReleaseAsset = Schema.Struct({
   name: Schema.String,
   size: Schema.Int,
   digest: Schema.optional(Schema.NullOr(Schema.String)),
+  state: Schema.optional(Schema.String),
 });
 export type GitHubReleaseAsset = typeof GitHubReleaseAsset.Type;
 
@@ -24,6 +25,7 @@ export const GitHubRelease = Schema.Struct({
   draft: Schema.Boolean,
   prerelease: Schema.Boolean,
   published_at: Schema.NullOr(Schema.String),
+  created_at: Schema.optional(Schema.String),
 });
 export type GitHubRelease = typeof GitHubRelease.Type;
 export const GitHubReleaseTag = Schema.Struct({ name: Schema.String });
@@ -204,6 +206,18 @@ export const makeGitHubReleasesClient = Effect.fn("makeGitHubReleasesClient")(fu
         make_latest: prerelease ? "false" : "true",
         name,
         body,
+      }).pipe(Effect.flatMap((response) => readJson(response, GitHubRelease))),
+    // goat-nightly's per-run hand-off store. A draft creates no tag and stays hidden
+    // from anyone without push access.
+    createStagingDraft: (tag: string, target: string) =>
+      jsonRequest(`${base}/releases`, "POST", {
+        tag_name: tag,
+        target_commitish: target,
+        draft: true,
+        prerelease: true,
+        make_latest: "false",
+        name: `${tag} (goat-nightly hand-off, deleted after the run)`,
+        body: "Temporary goat-nightly build hand-off. The run's cleanup job deletes it.",
       }).pipe(Effect.flatMap((response) => readJson(response, GitHubRelease))),
     publishDraft: (id: number, prerelease: boolean) =>
       jsonRequest(`${base}/releases/${id}`, "PATCH", {
