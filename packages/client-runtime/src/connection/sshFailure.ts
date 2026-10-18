@@ -19,6 +19,11 @@ const UNREACHABLE_RE =
 // ensure superseded by a newer one. Retrying on a timer would reopen the prompt.
 const CANCELLED_RE =
   /^SSH (?:authentication|connection|setup)(?: was)? cancel|^SSH authentication timed out for |^SSH password prompt (?:service stopped|expired)/iu;
+// Fetching the runtime archive happens after the SSH login and can quote its
+// own tools' stderr (for example gh's "authentication failed"), which must not
+// read as a rejected SSH login.
+const RUNTIME_ACQUISITION_RE =
+  /^Local gh release download failed|SSH runtime archive|runtime archive for /u;
 // The remote runtime refused this client and will keep refusing until someone
 // updates this app or stops the remote server (see the launch script in
 // @goat/ssh/tunnel). Retrying on a timer cannot fix it.
@@ -62,13 +67,14 @@ export function sshPreparationFailure(cause: unknown): ConnectionAttemptError {
   if (UNREACHABLE_RE.test(message)) {
     return new ConnectionTransientError({ reason: "host-unreachable", detail: message });
   }
-  if (AUTH_FAILURE_RE.test(message)) {
+  const acquisition = RUNTIME_ACQUISITION_RE.test(message);
+  if (!acquisition && AUTH_FAILURE_RE.test(message)) {
     return new ConnectionBlockedError({
       reason: "authentication",
       detail: `The SSH host rejected the login. Check your SSH key or ssh-agent, then reconnect. (${message})`,
     });
   }
-  if (HOST_KEY_FAILURE_RE.test(message)) {
+  if (!acquisition && HOST_KEY_FAILURE_RE.test(message)) {
     return new ConnectionBlockedError({
       reason: "configuration",
       detail: `SSH could not verify this host's key. Forget the host and add it again to review its fingerprint. (${message})`,
