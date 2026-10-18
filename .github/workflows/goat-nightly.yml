@@ -347,6 +347,22 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
+      # Rust embeds dependency source paths (~/.cargo/registry/...) in its binaries,
+      # and the payload check refuses this machine's home and checkout paths.
+      - name: Keep build paths out of Rust binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+          # The last matching prefix wins, so the cargo homes come after the home.
+          flags="--remap-path-prefix=$(native "$HOME")=~"
+          cargo_bin="$(command -v cargo || true)"
+          for cargo_home in "${CARGO_HOME:-$HOME/.cargo}" ${cargo_bin:+"$(dirname "$(dirname "$cargo_bin")")"}; do
+            flags="$flags --remap-path-prefix=$(native "$cargo_home")=/cargo"
+          done
+          flags="$flags --remap-path-prefix=$(native "$GITHUB_WORKSPACE")=/goat-build"
+          echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"
+
       - name: Build resource monitor
         run: |
           set -euo pipefail
@@ -467,6 +483,22 @@ jobs:
       # Exports CSC_NAME, CSC_KEYCHAIN, APPLE_KEYCHAIN and GOAT_CLI_MAC_SIGN_IDENTITY.
       - name: Mac signing preflight
         run: bash scripts/goat-mac-runner/preflight.sh --ci
+
+      # Rust embeds dependency source paths (~/.cargo/registry/...) in its binaries,
+      # and the payload check refuses this machine's home and checkout paths.
+      - name: Keep build paths out of Rust binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+          # The last matching prefix wins, so the cargo homes come after the home.
+          flags="--remap-path-prefix=$(native "$HOME")=~"
+          cargo_bin="$(command -v cargo || true)"
+          for cargo_home in "${CARGO_HOME:-$HOME/.cargo}" ${cargo_bin:+"$(dirname "$(dirname "$cargo_bin")")"}; do
+            flags="$flags --remap-path-prefix=$(native "$cargo_home")=/cargo"
+          done
+          flags="$flags --remap-path-prefix=$(native "$GITHUB_WORKSPACE")=/goat-build"
+          echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"
 
       - name: Build, sign and notarize desktop app
         run: |
@@ -627,6 +659,22 @@ jobs:
           $component = "Microsoft.VisualStudio.Component.VC.Runtimes.${{ matrix.arch == 'arm64' && 'ARM64' || 'x86.x64' }}.Spectre"
           $proc = Start-Process -FilePath $setupExe -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", $component, "--quiet", "--norestart" -Wait -PassThru -NoNewWindow
           if ($null -eq $proc -or $proc.ExitCode -ne 0) { exit 1 }
+
+      # Rust embeds dependency source paths (~/.cargo/registry/...) in its binaries,
+      # and the payload check refuses this machine's home and checkout paths.
+      - name: Keep build paths out of Rust binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+          # The last matching prefix wins, so the cargo homes come after the home.
+          flags="--remap-path-prefix=$(native "$HOME")=~"
+          cargo_bin="$(command -v cargo || true)"
+          for cargo_home in "${CARGO_HOME:-$HOME/.cargo}" ${cargo_bin:+"$(dirname "$(dirname "$cargo_bin")")"}; do
+            flags="$flags --remap-path-prefix=$(native "$cargo_home")=/cargo"
+          done
+          flags="$flags --remap-path-prefix=$(native "$GITHUB_WORKSPACE")=/goat-build"
+          echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"
 
       - name: Build desktop app (unsigned)
         run: |
