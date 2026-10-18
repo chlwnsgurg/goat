@@ -168,6 +168,19 @@ describe("release payload helpers", () => {
     expect(
       exposureProblems("node_modules/pkg/addon.node", `${roots[0]}/node_modules/x`, roots),
     ).toEqual(["node_modules/pkg/addon.node: absolute build path"]);
+    // Every GitHub-hosted Linux runner's home is /home/runner, so a dependency built
+    // on one carries it; only this checkout's paths count in third-party files.
+    const hosted = ["/home/runner", "/home/runner/work/goat/goat"];
+    const sandbox = "node_modules/@cursor/sdk-linux-arm64/bin/cursorsandbox";
+    expect(
+      exposureProblems(sandbox, "/home/runner/.cargo/registry/src/x/lib.rs", hosted, true),
+    ).toEqual([]);
+    expect(exposureProblems(sandbox, "/home/runner/work/goat/goat/x", hosted, true)).toEqual([
+      `${sandbox}: absolute build path`,
+    ]);
+    expect(exposureProblems("goat", "/home/runner/.cargo/registry/src/x.rs", hosted, true)).toEqual(
+      ["goat: absolute build path"],
+    );
     expect(exposureProblems("main.js", "'C:\\a\\b\\c'")).toEqual([]);
     expect(exposureProblems("main.js", "C:\\a\\b\\c\\build")).not.toEqual([]);
   });
