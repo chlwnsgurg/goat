@@ -7,6 +7,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -100,15 +101,14 @@ const sha256 = (bytes: Uint8Array) => NodeCrypto.createHash("sha256").update(byt
 
 let tarFlavor: "bsd" | "gnu" | undefined;
 /** bsdtar (macOS, Windows System32) and GNU tar (Linux, Git Bash) take different flags. */
-function tarFlags() {
+function tarFlags(platform: NodeJS.Platform) {
   tarFlavor ??= /bsdtar/.test(
     NodeChildProcess.spawnSync("tar", ["--version"], { encoding: "utf8" }).stdout ?? "",
   )
     ? "bsd"
     : "gnu";
-  if (tarFlavor === "bsd")
-    return process.platform === "darwin" ? ["--no-mac-metadata", "--no-xattrs"] : [];
-  return process.platform === "win32" ? ["--force-local"] : [];
+  if (tarFlavor === "bsd") return platform === "darwin" ? ["--no-mac-metadata", "--no-xattrs"] : [];
+  return platform === "win32" ? ["--force-local"] : [];
 }
 
 /**
@@ -121,12 +121,21 @@ const runTar = (
   cwd: string,
   io: { stdin?: string; stdout?: string },
 ) =>
+  Effect.flatMap(HostProcess.Platform, (platform) =>
+    runTarWith([...tarFlags(platform), ...args], cwd, io),
+  );
+
+const runTarWith = (
+  args: ReadonlyArray<string>,
+  cwd: string,
+  io: { stdin?: string; stdout?: string },
+) =>
   Effect.tryPromise({
     try: () =>
       new Promise<void>((resolve, reject) => {
         const input = io.stdin === undefined ? "ignore" : NodeFS.openSync(io.stdin, "r");
         const output = io.stdout === undefined ? "inherit" : NodeFS.openSync(io.stdout, "w");
-        const child = NodeChildProcess.spawn("tar", [...tarFlags(), ...args], {
+        const child = NodeChildProcess.spawn("tar", args, {
           cwd,
           env: { ...process.env, COPYFILE_DISABLE: "1" },
           stdio: [input, output, "inherit"],
