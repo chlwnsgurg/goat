@@ -254,6 +254,8 @@ export interface EffectOutboxV2Shape {
     readonly workerId: string;
     readonly error: string;
     readonly delayMs: number;
+    /** Undo this claim's attempt when execution was deferred before doing work. */
+    readonly undoAttempt?: boolean;
   }) => Effect.Effect<boolean, EffectOutboxError>;
   readonly fail: (input: {
     readonly effectId: string;
@@ -644,7 +646,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             (cause) => new EffectOutboxError({ operation: "succeed", effectId, cause }),
           ),
         ),
-      retry: ({ effectId, workerId, error, delayMs }) =>
+      retry: ({ effectId, workerId, error, delayMs, undoAttempt = false }) =>
         Effect.gen(function* () {
           const now = yield* DateTime.now;
           const nowIso = DateTime.formatIso(now);
@@ -655,6 +657,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             UPDATE orchestration_v2_effect_outbox
             SET
               status = 'pending',
+              attempt_count = attempt_count - ${undoAttempt ? 1 : 0},
               available_at = ${availableAt},
               lease_owner = NULL,
               lease_expires_at = NULL,

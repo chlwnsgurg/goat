@@ -50,7 +50,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { makeProviderFailure } from "@goat/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
-import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import { tryWithWorkspaceLease } from "../workspace/workspaceLease.ts";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -65,6 +65,15 @@ export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStart
   },
 ) {}
 
+export class WorkspaceLeaseBusyError extends Schema.TaggedError<WorkspaceLeaseBusyError>()(
+  "WorkspaceLeaseBusyError",
+  {},
+) {
+  override get message(): string {
+    return "Workspace is busy with checkout removal or preparation.";
+  }
+}
+
 const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
 const isCloudTaskSourceError = Schema.is(CloudSource.CloudTaskSourceError);
 
@@ -76,13 +85,14 @@ const refusedBeforePrompt = (error: unknown): boolean =>
 export interface ProviderTurnStartServiceV2Shape {
   /**
    * Starts the run's provider turn. When `willRetry` is true, a session open
-   * failure is returned so the caller can retry. Otherwise the run is settled
-   * as failed.
+   * failure is returned so the caller can retry. A workspace lease deadline
+   * gives contention its own wait budget, independent of normal failures.
    */
   readonly start: (input: {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly willRetry?: boolean;
+    readonly workspaceLeaseDeadline?: DateTime.Utc;
     readonly reattach?: boolean;
   }) => Effect.Effect<void, ProviderTurnStartError>;
 }
@@ -257,6 +267,7 @@ export const layer: Layer.Layer<
       readonly threadId: ThreadId;
       readonly runId: RunId;
       readonly willRetry?: boolean;
+      readonly workspaceLeaseDeadline?: DateTime.Utc;
       readonly reattach?: boolean;
     }) {
       const { runId } = input;
@@ -579,11 +590,9 @@ export const layer: Layer.Layer<
       cloudSource = sourceResult.success;
       const { worktreePath, branch } = projection.thread;
       if (!cloud && worktreePath !== null) {
-        // Worktree removal holds this lease while it checks and deletes the
-        // checkout, so a turn that starts meanwhile waits for it. A thread with
-        // a branch then recreates the checkout; one without has nothing to
-        // recreate it from, but still must not start inside a half-deleted folder.
-        yield* withWorkspaceLease(
+        // Removal may hold this lease for minutes. Return to the outbox's
+        // retry schedule instead of occupying an effect-worker slot waiting.
+        const prepared = yield* tryWithWorkspaceLease(
           worktreePath,
           Effect.gen(function* () {
             if (branch === null) return;
@@ -623,6 +632,38 @@ export const layer: Layer.Layer<
             }
           }),
         );
+        if (Option.isNone(prepared)) {
+          const reason =
+            "The workspace is busy with checkout removal or preparation. Retry the turn when it finishes.";
+          const now = yield* DateTime.now;
+          const deadlineExceeded =
+            input.workspaceLeaseDeadline !== undefined &&
+            DateTime.toEpochMillis(now) >= DateTime.toEpochMillis(input.workspaceLeaseDeadline);
+          if (
+            !deadlineExceeded &&
+            (input.workspaceLeaseDeadline !== undefined ||
+              input.willRetry === true ||
+              input.reattach === true)
+          ) {
+            return yield* new ProviderTurnStartError({
+              runId,
+              cause: new WorkspaceLeaseBusyError({}),
+            });
+          }
+          yield* settleRunBeforeStart({
+            signal: "workspace-lease-busy",
+            status: "failed",
+            now,
+            providerInstanceId: run.providerInstanceId,
+            itemProviderThreadId: providerThread.id,
+            item: {
+              type: "error",
+              title: "Workspace is busy",
+              failure: makeProviderFailure({ message: reason, class: "validation_error" }),
+            },
+          });
+          return;
+        }
       }
       const selectInheritedBackgroundItems = (
         current: ProjectionStore.ProjectionRuntimeRecoveryState,

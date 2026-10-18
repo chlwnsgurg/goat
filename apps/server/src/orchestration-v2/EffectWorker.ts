@@ -75,6 +75,22 @@ function hasCloudTrackingFailure(cause: Cause.Cause<unknown>): boolean {
   });
 }
 
+const isProviderTurnStartError = Schema.is(ProviderTurnStartService.ProviderTurnStartError);
+const isWorkspaceLeaseBusyError = Schema.is(ProviderTurnStartService.WorkspaceLeaseBusyError);
+
+function workspaceLeaseBusy(cause: Cause.Cause<unknown>) {
+  for (const reason of cause.reasons) {
+    if (!Cause.isFailReason(reason)) continue;
+    const startError = isOrchestrationEffectExecutionError(reason.error)
+      ? reason.error.cause
+      : reason.error;
+    if (isProviderTurnStartError(startError) && isWorkspaceLeaseBusyError(startError.cause)) {
+      return startError.cause;
+    }
+  }
+  return undefined;
+}
+
 export interface OrchestrationEffectExecutorV2Shape {
   /**
    * Runs one claimed effect. `willRetry` is true when the worker will retry a
@@ -90,6 +106,11 @@ export class OrchestrationEffectExecutorV2 extends Context.Service<
   OrchestrationEffectExecutorV2,
   OrchestrationEffectExecutorV2Shape
 >()("goat/orchestration-v2/EffectWorker/OrchestrationEffectExecutorV2") {}
+
+// Persist the deadline through the outbox's enqueue time: ten minutes gives
+// the five-minute git removal timeout headroom without resetting on reclaims.
+const WORKSPACE_LEASE_WAIT_MS = 10 * 60_000;
+const WORKSPACE_LEASE_RETRY_MS = 1_000;
 
 export const layerExecutor: Layer.Layer<
   OrchestrationEffectExecutorV2,
@@ -182,7 +203,14 @@ export const layerExecutor: Layer.Layer<
               );
           case "provider-turn.start":
             return providerTurnStart
-              .start({ threadId: effect.threadId, runId: effect.request.runId, willRetry })
+              .start({
+                threadId: effect.threadId,
+                runId: effect.request.runId,
+                willRetry,
+                workspaceLeaseDeadline: DateTime.add(DateTime.makeUnsafe(effect.createdAt), {
+                  milliseconds: WORKSPACE_LEASE_WAIT_MS,
+                }),
+              })
               .pipe(
                 Effect.mapError(
                   (cause) =>
@@ -413,6 +441,9 @@ export const layerExecutor: Layer.Layer<
                     threadId: effect.threadId,
                     runId: effect.request.runId,
                     willRetry,
+                    workspaceLeaseDeadline: DateTime.add(DateTime.makeUnsafe(effect.createdAt), {
+                      milliseconds: WORKSPACE_LEASE_WAIT_MS,
+                    }),
                   }),
                 ),
                 Effect.mapError(
@@ -792,6 +823,34 @@ export const layerWithOptions = (
               }
               return true;
             }).pipe(Effect.onError((cause) => recoverPostSuccessSettlement(effect, cause)));
+          }
+
+          // Lease admission did no provider work. Return its claim to the
+          // durable schedule and refund only that claim, preserving earlier
+          // real failures and leaving all other effect retry policies alone.
+          const busy =
+            effect.request.type === "provider-turn.start" ||
+            effect.request.type === "provider-turn.restart"
+              ? workspaceLeaseBusy(exit.cause)
+              : undefined;
+          if (busy !== undefined) {
+            const updated = yield* outbox
+              .retry({
+                effectId: effect.id,
+                workerId,
+                error: busy.message,
+                delayMs: WORKSPACE_LEASE_RETRY_MS,
+                undoAttempt: true,
+              })
+              .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
+            if (!updated && !(yield* wasCancelled(effect.id))) {
+              return yield* new OrchestrationEffectWorkerError({
+                operation: "defer-workspace-lease",
+                effectId: effect.id,
+                cause: "The worker no longer owns the effect lease.",
+              });
+            }
+            return true;
           }
 
           const error = Cause.pretty(exit.cause);
