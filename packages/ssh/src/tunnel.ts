@@ -2794,7 +2794,9 @@ export const prepareRemoteRuntime = (
       ),
     );
     if (selectedVersion !== undefined) return yield* selectInstalled(selectedVersion);
-    const fallbackToLive = probe.liveStatus === "live" && liveCompatible;
+    // Legacy ownership must be adopted through its normal replacement path;
+    // attaching without adoption would fail the launch-time identity check.
+    const fallbackToLive = probe.liveStatus === "live" && liveCompatible && !adoptLegacy;
     const fallbackVersion = fallbackToLive
       ? probe.liveVersion
       : upgradeRetained
@@ -2821,25 +2823,27 @@ export const prepareRemoteRuntime = (
               Effect.andThen(selectInstalled(fallbackVersion)),
               Effect.map((selected): PreparedRemoteRuntime => {
                 const failure = archiveFailure(error);
-                return {
+                const fallback = {
                   ...selected,
                   // Revalidate compatibility at launch, but never refresh or adopt
-                  // the running server after failing to acquire its replacement.
-                  ...(fallbackToLive ? { mayUpgradeOwnedServer: false, refreshIfIdle: false } : {}),
+                  // an installed runtime after failing to acquire its replacement.
+                  mayUpgradeOwnedServer: false,
+                  refreshIfIdle: false,
                   ...(failure === undefined
                     ? {}
                     : {
-                        upgradeFailure: fallbackToLive
-                          ? {
-                              ...failure,
-                              fix: {
-                                ...failure.fix,
-                                instruction: `Using compatible GOAT ${fallbackVersion}. ${failure.fix.instruction}`,
-                              },
-                            }
-                          : failure,
+                        upgradeFailure: {
+                          ...failure,
+                          fix: {
+                            ...failure.fix,
+                            instruction: `Using compatible GOAT ${fallbackVersion}. ${failure.fix.instruction}`,
+                          },
+                        },
                       }),
                 };
+                delete fallback.expectedLiveVersion;
+                delete fallback.expectedLiveRunnerSha256;
+                return fallback;
               }),
             );
           },

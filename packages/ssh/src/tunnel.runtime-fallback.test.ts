@@ -12,6 +12,7 @@ import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as SshAuth from "./auth.ts";
+import { REMOTE_RUNTIME_STATE_KEY } from "./command.ts";
 import { SshLaunchError } from "./errors.ts";
 import * as SshTunnel from "./tunnel.ts";
 import {
@@ -69,113 +70,165 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
-    it.live.each(["compatible", "incompatible", "stopped"] as const)(
-      "missing HTTPS release and failed gh acquisition with a %s runtime",
-      (state) =>
-        Effect.gen(function* () {
-          const f = yield* makeProtocolFixture({
-            live: state !== "stopped",
-            kind: "managed",
-            oldVersion: "1.2.2",
-            drain: true,
-            ssh: state === "compatible" ? SSH_RUNTIME_PROTOCOL_VERSION : 99,
-            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
-          });
-          const before = yield* f.snapshot;
-          let httpsRequests = 0;
-          let ghRequests = 0;
-          vi.stubGlobal("fetch", async () => {
-            httpsRequests++;
-            return new Response(null, { status: 404 });
-          });
-          const transport = ChildProcessSpawner.make((command) => {
-            if (command._tag === "StandardCommand" && command.command === "gh") {
-              ghRequests++;
-              return Effect.succeed({
-                ...makeSuccessfulProcess("release not found"),
-                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
-              });
-            }
-            return f.transport.spawn(command);
-          });
-          const layer = Layer.mergeAll(
-            NodeServices.layer,
-            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, transport),
-            Layer.succeed(HttpClient.HttpClient, testHttpClient),
-            Layer.succeed(NetService.NetService, testNetService),
-            SshAuth.SshPasswordPrompt.disabledLayer,
-            SshTunnel.SshEnvironmentManager.layer({
-              resolveCliRunner: Effect.succeed({
-                ...f.runner,
-                archiveDirectory: `${f.home}/missing-archives`,
-                refreshOwnedRuntimeOnFirstConnection: true,
-              }),
-              leaveRemoteServerRunning: true,
-            }),
-          );
-          yield* Effect.gen(function* () {
-            const manager = yield* SshTunnel.SshEnvironmentManager;
-            const result = yield* Effect.result(
-              manager.ensureEnvironment(uploadTarget, { issuePairingToken: true, keyOnly: true }),
-            );
-            assert.equal(httpsRequests, 1);
-            assert.equal(ghRequests, 1);
-            if (state === "compatible") {
-              assert.isTrue(Result.isSuccess(result));
-              if (Result.isSuccess(result)) {
-                assert.notProperty(result.success, "type");
-                if (!("type" in result.success)) {
-                  assert.equal(result.success.remotePort, f.port);
-                  assert.equal(result.success.remoteServerVersion, "1.2.2");
-                }
-              }
-            } else {
-              assert.isTrue(Result.isFailure(result));
-              if (Result.isFailure(result)) {
-                assert.instanceOf(result.failure, SshLaunchError);
-                assert.include(
-                  result.failure.message,
-                  `Cannot prepare GOAT ${ARCHIVE.archiveVersion}`,
-                );
-                assert.include(result.failure.message, "Public HTTPS release is not published");
-                if (result.failure instanceof SshLaunchError) {
-                  assert.equal(result.failure.reason, "archive-unavailable");
-                  assert.equal(
-                    result.failure.acquisition?.requestedVersion,
-                    ARCHIVE.archiveVersion,
-                  );
-                }
-              }
-            }
-            // A fresh read on the incompatible live host reports its protocol mismatch.
-            if (state === "incompatible") return;
-            const status = (yield* manager.status(uploadTarget)).status;
-            assert.equal(status?.failure?.reason, "archive_unavailable");
-            assert.deepEqual(status?.failure?.archive, {
-              requestedVersion: ARCHIVE.archiveVersion,
-              platformKey: `${HostProcess.Platform.defaultValue()}-${HostProcess.Architecture.defaultValue()}`,
-              sourcesTried: ["cache", "https", "gh"],
+    it.live.each([true, false])("disables replacement for fallback; live=%s", (live) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          drain: true,
+          ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+          orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+        });
+        const selected = yield* SshTunnel.prepareRemoteRuntime(
+          uploadTarget,
+          {},
+          { ...f.runner, archiveDirectory: "", refreshOwnedRuntimeOnFirstConnection: true },
+          REMOTE_RUNTIME_STATE_KEY,
+          true,
+        ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport));
+        assert.equal(selected.version, "1.2.2");
+        assert.isFalse(selected.mayUpgradeOwnedServer);
+        assert.isFalse(selected.refreshIfIdle);
+        assert.isUndefined(selected.expectedLiveVersion);
+        assert.isUndefined(selected.expectedLiveRunnerSha256);
+        assert.equal(selected.upgradeFailure?.archive?.requestedVersion, ARCHIVE.archiveVersion);
+        assert.include(
+          selected.upgradeFailure?.fix.instruction ?? "",
+          "Using compatible GOAT 1.2.2.",
+        );
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each([
+      "live-compatible",
+      "live-incompatible",
+      "live-legacy",
+      "stopped-compatible",
+      "stopped-uninstalled",
+      "stopped-incompatible",
+    ] as const)("missing HTTPS release and failed gh acquisition with a %s runtime", (state) =>
+      Effect.gen(function* () {
+        const live = state.startsWith("live-");
+        const installed = state !== "stopped-uninstalled";
+        const fallback = state === "live-compatible" || state === "stopped-compatible";
+        const f = yield* makeProtocolFixture({
+          live,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          drain: true,
+          ssh: state.endsWith("incompatible") ? 99 : SSH_RUNTIME_PROTOCOL_VERSION,
+          orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+        });
+        if (state === "live-legacy") yield* f.fs.remove(`${f.state}/identity`);
+        if (!installed) {
+          yield* f.fs.remove(f.old, { recursive: true });
+          yield* f.fs.remove(`${f.state}/run-t3.sh`);
+        }
+        const before = installed ? yield* f.snapshot : undefined;
+        let httpsRequests = 0;
+        let ghRequests = 0;
+        vi.stubGlobal("fetch", async () => {
+          httpsRequests++;
+          return new Response(null, { status: 404 });
+        });
+        const transport = ChildProcessSpawner.make((command) => {
+          if (command._tag === "StandardCommand" && command.command === "gh") {
+            ghRequests++;
+            return Effect.succeed({
+              ...makeSuccessfulProcess("release not found"),
+              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
             });
-            assert.include(status?.failure?.fix.instruction ?? "", ARCHIVE.archiveVersion);
-            if (state === "compatible") {
-              assert.equal(status?.runtimeVersion, "1.2.2");
-              assert.include(status?.failure?.fix.instruction ?? "", "compatible GOAT 1.2.2");
-              // Cached reuse must preserve the visible acquisition warning as well.
-              yield* manager.ensureEnvironment(uploadTarget, { keyOnly: true });
-              assert.deepEqual(
-                (yield* manager.status(uploadTarget)).status?.failure,
-                status?.failure,
-              );
-              assert.equal(ghRequests, 1);
+          }
+          return f.transport.spawn(command);
+        });
+        const layer = Layer.mergeAll(
+          NodeServices.layer,
+          Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, transport),
+          Layer.succeed(HttpClient.HttpClient, testHttpClient),
+          Layer.succeed(NetService.NetService, testNetService),
+          SshAuth.SshPasswordPrompt.disabledLayer,
+          SshTunnel.SshEnvironmentManager.layer({
+            resolveCliRunner: Effect.succeed({
+              ...f.runner,
+              archiveDirectory: `${f.home}/missing-archives`,
+              refreshOwnedRuntimeOnFirstConnection: true,
+            }),
+            leaveRemoteServerRunning: true,
+          }),
+        );
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          const result = yield* Effect.result(
+            manager.ensureEnvironment(uploadTarget, { issuePairingToken: true, keyOnly: true }),
+          );
+          assert.equal(httpsRequests, 1);
+          assert.equal(ghRequests, 1);
+          if (fallback) {
+            assert.isTrue(Result.isSuccess(result));
+            if (Result.isSuccess(result)) {
+              assert.notProperty(result.success, "type");
+              if (!("type" in result.success)) {
+                if (live) assert.equal(result.success.remotePort, f.port);
+                else assert.isAbove(result.success.remotePort ?? 0, 0);
+                assert.equal(result.success.remoteServerVersion, "1.2.2");
+              }
             }
-          }).pipe(Effect.provide(layer), Effect.scoped);
-          assert.deepEqual(yield* f.snapshot, before);
-          assert.equal(f.counters().uploads, 0);
-          const events = yield* f.fs.readFileString(`${f.test}/events`);
-          for (const type of ["drain", "drain-request", "self-stop", "stop", "supervise"])
-            assert.notInclude(events, `"type":"${type}"`);
-          assert.equal(events.includes('"type":"auth"'), state === "compatible");
-        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+          } else {
+            assert.isTrue(Result.isFailure(result));
+            if (Result.isFailure(result)) {
+              assert.instanceOf(result.failure, SshLaunchError);
+              assert.include(
+                result.failure.message,
+                `Cannot prepare GOAT ${ARCHIVE.archiveVersion}`,
+              );
+              assert.include(result.failure.message, "Public HTTPS release is not published");
+              if (result.failure instanceof SshLaunchError) {
+                assert.equal(result.failure.reason, "archive-unavailable");
+                assert.equal(result.failure.acquisition?.requestedVersion, ARCHIVE.archiveVersion);
+              }
+            }
+          }
+          // A fresh read on the incompatible live host reports its protocol mismatch.
+          if (state === "live-incompatible") return;
+          const status = (yield* manager.status(uploadTarget)).status;
+          assert.equal(status?.failure?.reason, "archive_unavailable");
+          assert.deepEqual(status?.failure?.archive, {
+            requestedVersion: ARCHIVE.archiveVersion,
+            platformKey: `${HostProcess.Platform.defaultValue()}-${HostProcess.Architecture.defaultValue()}`,
+            sourcesTried: ["cache", "https", "gh"],
+          });
+          assert.include(status?.failure?.fix.instruction ?? "", ARCHIVE.archiveVersion);
+          if (fallback) {
+            assert.equal(status?.runtimeVersion, "1.2.2");
+            assert.include(status?.failure?.fix.instruction ?? "", "compatible GOAT 1.2.2");
+            // Cached reuse must preserve the visible acquisition warning as well.
+            yield* manager.ensureEnvironment(uploadTarget, { keyOnly: true });
+            assert.deepEqual(
+              (yield* manager.status(uploadTarget)).status?.failure,
+              status?.failure,
+            );
+            assert.equal(ghRequests, 1);
+          }
+        }).pipe(Effect.provide(layer), Effect.scoped);
+        if (state === "stopped-compatible") {
+          const after = yield* f.snapshot;
+          for (const file of ["run-t3.sh", "oldExecutable", "oldMarker"])
+            assert.equal(after[file], before?.[file]);
+          assert.isNotNull(after.runtime);
+        } else if (installed) assert.deepEqual(yield* f.snapshot, before);
+        else {
+          assert.isFalse(yield* f.fs.exists(f.old));
+          assert.isFalse(yield* f.fs.exists(`${f.state}/run-t3.sh`));
+          assert.isFalse(yield* f.fs.exists(`${f.home}/.goat/userdata/server-runtime.json`));
+        }
+        assert.equal(f.counters().uploads, 0);
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        for (const type of ["drain", "drain-request", "self-stop", "stop", "supervise"])
+          assert.notInclude(events, `"type":"${type}"`);
+        assert.equal(events.includes('"type":"start"'), live || fallback);
+        assert.equal(events.includes('"type":"auth"'), fallback);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
   },
 );
