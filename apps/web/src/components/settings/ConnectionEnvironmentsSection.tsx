@@ -313,6 +313,8 @@ function savedBackendStatus(environment: EnvironmentPresentation): {
     case "connecting":
       return { text: "Connecting", tone: "muted" };
     case "reconnecting":
+      // Expected for a laptop that is asleep or away; it retries on its own.
+      if (connection.unreachable) return { text: "Unreachable", tone: "muted" };
       return {
         text: connection.error ? `Reconnecting: ${connection.error}` : "Reconnecting",
         tone: "error",

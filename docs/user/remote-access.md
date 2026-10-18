@@ -186,6 +186,12 @@ checksums. If a public download fails, GOAT can try the GitHub CLI when signed i
 (`gh auth login`). It refuses a checksum mismatch and names the expected release
 when it cannot obtain an archive.
 
+When the host is asleep or off the network, its connection shows **Unreachable**
+and GOAT keeps retrying, sooner when this computer wakes or joins a network.
+Agent work on the host keeps running while you are away. A rejected SSH key, a
+changed host key, or a runtime that refuses this app stops retrying until you
+choose **Reconnect**; the connection's status says what to fix.
+
 On Linux and macOS hosts, provider CLIs must be on the `PATH` of a
 non-interactive login shell there; check with:
 
