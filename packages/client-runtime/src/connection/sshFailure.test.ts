@@ -60,6 +60,9 @@ describe("sshPreparationFailure", () => {
     "SSH authentication cancelled for jun@mbp.",
     "SSH authentication was cancelled because the app window closed.",
     "SSH connection was cancelled.",
+    "SSH authentication timed out for jun@mbp.",
+    "SSH password prompt service stopped.",
+    "SSH password prompt expired. Try connecting again.",
   ])("keeps a cancelled login blocked until the user reconnects: %s", (message) => {
     expect(sshPreparationFailure(new Error(`${IPC}${message}`))).toMatchObject({
       _tag: "ConnectionBlockedError",

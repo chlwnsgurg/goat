@@ -14,9 +14,11 @@ const HOST_KEY_FAILURE_RE =
 // rewrites these as "Cannot reach …"; the tunnel step passes ssh's own stderr.
 const UNREACHABLE_RE =
   /\bCannot reach .+ over SSH \(|ssh: connect to host \S+ port \d+: |ssh: Could not resolve hostname |Connection timed out during banner exchange|Connection to \S+ port \d+ timed out/u;
-// The desktop's own cancellation sentences: a dismissed password prompt, a
-// closed window, or an ensure superseded by a newer one.
-const CANCELLED_RE = /^SSH (?:authentication|connection|setup)(?: was)? cancel/iu;
+// The desktop's own prompt endings (DesktopSshPasswordPrompts): dismissed,
+// timed out, expired, the window closed, or the prompt service stopped; and an
+// ensure superseded by a newer one. Retrying on a timer would reopen the prompt.
+const CANCELLED_RE =
+  /^SSH (?:authentication|connection|setup)(?: was)? cancel|^SSH authentication timed out for |^SSH password prompt (?:service stopped|expired)/iu;
 // The remote runtime refused this client and will keep refusing until someone
 // updates this app or stops the remote server (see the launch script in
 // @goat/ssh/tunnel). Retrying on a timer cannot fix it.
