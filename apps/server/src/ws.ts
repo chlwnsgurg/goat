@@ -117,6 +117,8 @@ import {
   WS_METHODS,
   WsChannelRpcGroup,
   WsCoreRpcGroup,
+  WsCoreServerRpcGroup,
+  WsCoreWorkspaceRpcGroup,
   MemoryMutationReceipt,
   MemoryImportRpcError,
   WsMemoryCoreRpcGroup,
@@ -131,6 +133,7 @@ import {
   HttpServerResponse,
 } from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
+import type * as RpcGroup from "effect/rpc/RpcGroup";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "./config.ts";
@@ -625,8 +628,10 @@ export const makeMemoryImportHandlers = <E>(
 
 const decodeMemoryMutationReceipt = Schema.decodeUnknownEffect(MemoryMutationReceipt);
 const ServerWsRpcGroup = RpcAuthorization.AuthorizedWsRpcGroup.middleware(RpcInstrumentation);
-// Handlers register per part of the group; see WsChannelRpcGroup.
+// Validate the full handler map, but register smaller groups to bound layer inference.
 const ServerWsCoreRpcGroup = WsCoreRpcGroup.middleware(RpcInstrumentation);
+const ServerWsCoreServerRpcGroup = WsCoreServerRpcGroup.middleware(RpcInstrumentation);
+const ServerWsCoreWorkspaceRpcGroup = WsCoreWorkspaceRpcGroup.middleware(RpcInstrumentation);
 const ServerWsChannelRpcGroup = WsChannelRpcGroup.middleware(RpcInstrumentation);
 // When a resuming client's cursor is more than this many events behind the
 // current head, skip the per-event catch-up replay and send a fresh shell
@@ -3477,11 +3482,17 @@ const layerWsRpc = (
             ),
           ),
       });
+      // toLayer derives services from every handler key, so narrow each part with Pick.
       return Layer.mergeAll(
         WsMemoryImportRpcGroup.middleware(RpcInstrumentation).toLayer(importHandlers),
         WsMemoryCoreRpcGroup.middleware(RpcInstrumentation).toLayer(memoryHandlers),
         WsMemoryAdministrationRpcGroup.middleware(RpcInstrumentation).toLayer(ownerHandlers),
-        ServerWsCoreRpcGroup.toLayer(handlers),
+        ServerWsCoreServerRpcGroup.toLayer<
+          Pick<typeof handlers, RpcGroup.Rpcs<typeof ServerWsCoreServerRpcGroup>["_tag"]>
+        >(handlers),
+        ServerWsCoreWorkspaceRpcGroup.toLayer<
+          Pick<typeof handlers, RpcGroup.Rpcs<typeof ServerWsCoreWorkspaceRpcGroup>["_tag"]>
+        >(handlers),
         ServerWsChannelRpcGroup.toLayer(channelHandlers),
       );
     }),
