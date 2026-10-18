@@ -2809,9 +2809,9 @@ export const prepareRemoteRuntime = (
       return yield* acquireRequested.pipe(
         Effect.catchTags({
           SshLaunchError: (error) => {
-            // An unavailable archive may cancel an optional live upgrade. Upload and
+            // An unavailable archive may cancel an optional upgrade. Upload and
             // SSH failures retain their own error instead of being hidden by reuse.
-            if (fallbackToLive && error.reason !== "archive-unavailable") return Effect.fail(error);
+            if (error.reason !== "archive-unavailable") return Effect.fail(error);
             return Effect.logWarning("ssh.runtime.upgrade.skipped", {
               ...sshTargetLogFields(target),
               installedVersion: fallbackVersion,

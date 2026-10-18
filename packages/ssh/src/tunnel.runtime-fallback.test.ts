@@ -7,6 +7,7 @@ import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
+import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -27,6 +28,47 @@ afterEach(() => vi.unstubAllGlobals());
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "SSH runtime archive fallback",
   () => {
+    it.live("fails an upload instead of starting a compatible retained runtime", () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: false,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+          orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+        });
+        const before = yield* f.snapshot;
+        let uploads = 0;
+        const transport = ChildProcessSpawner.make((command) => {
+          if (
+            command._tag === "StandardCommand" &&
+            command.args.some((arg) => arg.includes("GOAT_SSH_UPLOADED_ARCHIVE"))
+          ) {
+            uploads++;
+            return Effect.succeed({
+              ...makeSuccessfulProcess(""),
+              stderr: Stream.make(new TextEncoder().encode("No space left on device")),
+              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+            });
+          }
+          return f.transport.spawn(command);
+        });
+        const result = yield* SshTunnel.launchOrReuseRemoteServer(uploadTarget, {}, f.runner).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, transport),
+          Effect.result,
+        );
+        assert.equal(uploads, 1);
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result)) {
+          assert.instanceOf(result.failure, SshLaunchError);
+          assert.include(result.failure.message, "Uploading the runtime archive failed (exit 1)");
+          assert.include(result.failure.message, "No space left on device");
+        }
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"start"');
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
     it.live.each(["compatible", "incompatible", "stopped"] as const)(
       "missing HTTPS release and failed gh acquisition with a %s runtime",
       (state) =>
