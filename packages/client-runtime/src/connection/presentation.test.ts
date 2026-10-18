@@ -251,6 +251,43 @@ describe("connection presentation", () => {
     expect(connectionStatusTitle(connection)).toBe("Failed to connect. Reconnecting...");
   });
 
+  it("shows an unreachable host quietly through backoff and the next attempt", () => {
+    const failure = new ConnectionTransientError({
+      reason: "host-unreachable",
+      detail: "Cannot reach mbp over SSH (192.168.1.20:22: Operation timed out).",
+    });
+    const waiting = presentConnectionState(
+      supervisorState({ phase: "backoff", attempt: 3, lastFailure: failure, retryAt: 241_000 }),
+    );
+    expect(waiting).toMatchObject({ phase: "reconnecting", unreachable: true });
+    expect(connectionProgressLabel(waiting, 1_000)).toBe("Unreachable, retrying in 4m");
+    expect(connectionProgressLabel(waiting, 236_000)).toBe("Unreachable, retrying in 5s");
+    expect(connectionStatusTitle(waiting)).toBe("Host unreachable");
+    expect(connectionStatusText(waiting)).toBe(
+      "Host unreachable. Reconnecting... Reason: Cannot reach mbp over SSH (192.168.1.20:22: Operation timed out).",
+    );
+
+    const trying = presentConnectionState(
+      supervisorState({ phase: "connecting", attempt: 4, lastFailure: failure }),
+    );
+    expect(trying).toMatchObject({ phase: "reconnecting", unreachable: true });
+    expect(connectionProgressLabel(trying, 0)).toBe("Unreachable, retrying");
+
+    const broken = presentConnectionState(
+      supervisorState({
+        phase: "backoff",
+        attempt: 2,
+        lastFailure: new ConnectionTransientError({
+          reason: "remote-unavailable",
+          detail: "Server stopped.",
+        }),
+        retryAt: 5_000,
+      }),
+    );
+    expect(broken.unreachable).toBeUndefined();
+    expect(connectionStatusTitle(broken)).toBe("Failed to connect. Reconnecting...");
+  });
+
   it("presents the supervisor's offline state without consulting shell state", () => {
     expect(
       presentEnvironmentConnection(
