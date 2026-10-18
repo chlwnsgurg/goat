@@ -556,11 +556,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Hosted: the AppImage icon needs ImageMagick, which the EPYC runners do
+          # not carry and cannot install without sudo.
           - platform: linux
             arch: x64
             target: AppImage
             rust_target: x86_64-unknown-linux-gnu
-            runner: [self-hosted, linux, x64, goat, epyc]
+            runner: ubuntu-24.04
           - platform: linux
             arch: arm64
             target: AppImage
@@ -642,7 +644,7 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           set -euo pipefail
-          # EPYC runners already carry these (goat-ci builds the desktop there).
+          # Hosted runners install whatever their image lacks.
           if ! pkg-config --exists libsecret-1 2>/dev/null ||
             ! { command -v magick || command -v convert; } >/dev/null 2>&1; then
             sudo apt-get update
