@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 
 import { expect, it } from "vite-plus/test";
 
+import { resolveDesktopAppControlAddresses } from "../desktopAppControl.ts";
 import { enterTestTempSandbox, sandboxParentFor } from "./testTempSandbox.ts";
 
 const DARWIN_DEFAULT_TMPDIR = "/private/var/folders/07/pv7qpvg55cq8nn8k_8lnqklc0000gn/T";
@@ -35,6 +36,28 @@ it("falls back to /tmp on macOS only when the inherited temp path would push Uni
     throw new Error("ENOENT");
   };
   expect(sandboxParentFor("darwin", DARWIN_DEFAULT_TMPDIR, missing)).toBe(DARWIN_DEFAULT_TMPDIR);
+});
+
+it("keeps a macOS TMPDIR only when every app-control socket inside the sandbox fits sun_path", () => {
+  const tmp = () => "/private/tmp";
+  // Longest user keys the resolver can produce: a 10-digit UID and the 12-hex hash fallback.
+  for (const userId of [4_294_967_295, undefined]) {
+    for (let length = 14; length <= 80; length++) {
+      const inherited = `/private/tmp/${"x".repeat(length - "/private/tmp/".length)}`;
+      const parent = sandboxParentFor("darwin", inherited, tmp);
+      if (parent !== inherited) continue;
+      const sandbox = NodePath.posix.join(parent, "goat-test-XXXXXX");
+      for (const { address } of resolveDesktopAppControlAddresses({
+        stateDir: "/Users/someone/.goat/userdata",
+        platform: "darwin",
+        tempDir: sandbox,
+        userId,
+        joinPath: NodePath.posix.join,
+      })) {
+        expect(Buffer.byteLength(address)).toBeLessThanOrEqual(103);
+      }
+    }
+  }
 });
 
 it("reports goat-* leftovers, deletes the sandbox, and restores os.tmpdir()", () => {

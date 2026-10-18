@@ -18,12 +18,13 @@ const POSIX_TEMP_ENV_KEYS = ["TMPDIR"] as const;
 /**
  * macOS's `sockaddr_un.sun_path` holds 104 bytes including the terminating NUL.
  * The longest Unix socket a test binds inside its sandbox is
- * `<sandbox>/t3code-<uid>/<24-hex>.sock` (`packages/shared/src/desktopAppControl.ts`).
+ * `<sandbox>/t3code-<user key>/<24-hex>.sock` (`packages/shared/src/desktopAppControl.ts`),
+ * where the user key is the UID (up to 10 digits) or a 12-hex hash when there is none.
  */
 const DARWIN_SUN_PATH_BYTES = 103;
 const LONGEST_SANDBOX_SOCKET_RELATIVE_PATH = NodePath.posix.join(
   `${SANDBOX_PREFIX}XXXXXX`,
-  "t3code-00000",
+  `t3code-${"0".repeat(12)}`,
   `${"0".repeat(24)}.sock`,
 );
 
