@@ -4334,8 +4334,8 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     description:
       "GOAT is an open-source desktop app for coding agents. Work with your existing agent subscriptions, review code changes, and run commands in your projects. Connect from desktop, web, or mobile to continue working remotely.",
     license: "MIT",
-    // Required by the .deb control file.
-    homepage: "https://github.com/goat-si/goat",
+    // Required by the .deb control file. Public: the source repository is private (D-10).
+    homepage: `https://github.com/${DESKTOP_UPDATE_REPOSITORY}`,
     author: "T3 Tools",
     main: "apps/desktop/dist-electron/boot.cjs",
     build: yield* createBuildConfig(
