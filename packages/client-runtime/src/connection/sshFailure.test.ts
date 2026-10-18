@@ -83,12 +83,18 @@ describe("sshPreparationFailure", () => {
   it("retries other failures as a remote problem, without the IPC prefix", () => {
     const gh =
       "Local gh release download failed (exit 1; goat 0.3.0 darwin-arm64). Check gh auth status and that the release contains both assets. stderr (last 400 sanitized characters): authentication failed";
-    // gh's login, after the SSH login succeeded: not an SSH key problem.
-    expect(sshPreparationFailure(new Error(`${IPC}${gh}`))).toMatchObject({
-      _tag: "ConnectionTransientError",
-      reason: "remote-unavailable",
-      detail: `Could not prepare the SSH environment: ${gh}`,
-    });
+    // gh's login, after the SSH login succeeded: not an SSH key problem, bare
+    // or inside the launch's wrappers (tunnel.ts).
+    for (const message of [
+      gh,
+      `Cannot prepare GOAT 0.3.0 on mbp: Public HTTPS release download failed and local gh acquisition failed: ${gh} The existing runner and server have been left unchanged.`,
+    ]) {
+      expect(sshPreparationFailure(new Error(`${IPC}${message}`))).toMatchObject({
+        _tag: "ConnectionTransientError",
+        reason: "remote-unavailable",
+        detail: `Could not prepare the SSH environment: ${message}`,
+      });
+    }
     expect(sshPreparationFailure(new Error(`${IPC}mkdir: Permission denied`))).toMatchObject({
       _tag: "ConnectionTransientError",
       reason: "remote-unavailable",
