@@ -36,6 +36,7 @@ describe("sshPreparationFailure", () => {
   it.each([
     "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.",
     "Managed SSH host key changed.",
+    "Offending ED25519 key in /tmp/SSH runtime archive/known_hosts:3\nHost key verification failed.",
   ])("blocks a host key that no longer verifies: %s", (message) => {
     const error = sshPreparationFailure(new Error(message));
     expect(error).toMatchObject({ _tag: "ConnectionBlockedError", reason: "configuration" });

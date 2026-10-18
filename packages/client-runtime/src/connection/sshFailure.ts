@@ -19,11 +19,11 @@ const UNREACHABLE_RE =
 // ensure superseded by a newer one. Retrying on a timer would reopen the prompt.
 const CANCELLED_RE =
   /^SSH (?:authentication|connection|setup)(?: was)? cancel|^SSH authentication timed out for |^SSH password prompt (?:service stopped|expired)/iu;
-// Fetching the runtime archive happens after the SSH login and can quote its
-// own tools' stderr (for example gh's "authentication failed"), which must not
-// read as a rejected SSH login.
+// The two runtime download errors that quote gh's stderr (runtimeArchiveGh.ts).
+// They happen on this machine after the SSH login, so gh's "authentication
+// failed" must not read as a rejected SSH login.
 const RUNTIME_ACQUISITION_RE =
-  /^Local gh release download failed|SSH runtime archive|runtime archive for /u;
+  /^(?:Local gh release download failed|Failed to acquire the SSH runtime archive with local gh) /u;
 // The remote runtime refused this client and will keep refusing until someone
 // updates this app or stops the remote server (see the launch script in
 // @goat/ssh/tunnel). Retrying on a timer cannot fix it.
