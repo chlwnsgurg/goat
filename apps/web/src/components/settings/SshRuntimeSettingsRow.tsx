@@ -4,10 +4,11 @@ import {
   sshRuntimeStatusText,
   sshRuntimeTargetKey,
 } from "@goat/client-runtime/state/sshRuntime";
-import type {
-  DesktopSshEnvironmentTarget,
-  EnvironmentId,
-  SshRuntimeUpdateMode,
+import {
+  buildSshKeyAuthInstructions,
+  type DesktopSshEnvironmentTarget,
+  type EnvironmentId,
+  type SshRuntimeUpdateMode,
 } from "@goat/contracts";
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
 
@@ -27,6 +28,12 @@ type SshRuntimeSettingsRowProps = {
   readonly target: DesktopSshEnvironmentTarget;
   readonly environmentId: EnvironmentId;
   readonly enabled: boolean;
+  readonly pendingAdd?: boolean;
+  readonly connecting?: boolean;
+  readonly originLabel?: string;
+  readonly onRetry?: () => void;
+  readonly onReviewTrust?: () => void;
+  readonly onOpenApproval?: () => void;
 };
 
 /** Reset local actions when the saved route changes or is switched off. */
@@ -44,6 +51,12 @@ function SshRuntimeSettingsRowContent({
   target,
   environmentId,
   enabled,
+  onRetry,
+  originLabel,
+  pendingAdd,
+  connecting,
+  onReviewTrust,
+  onOpenApproval,
 }: SshRuntimeSettingsRowProps) {
   const registry = useContext(RegistryContext);
   const { alias, hostname, username, port } = target;
@@ -74,11 +87,15 @@ function SshRuntimeSettingsRowContent({
     if (!enabled) return;
     const state = result?.status?.state;
     const delay =
-      busy || state === "preparing" ? 1_000 : state === "update_waiting" ? 10_000 : null;
+      connecting || busy || state === "preparing"
+        ? 1_000
+        : state === "update_waiting"
+          ? 10_000
+          : null;
     if (delay === null) return;
     const timer = setTimeout(() => void sshRuntime.refresh.run(registry, input), delay);
     return () => clearTimeout(timer);
-  }, [registry, input, result, enabled, busy]);
+  }, [registry, input, result, enabled, busy, connecting]);
 
   const update = async (mode: SshRuntimeUpdateMode) => {
     if (!enabled || busy) return;
@@ -95,13 +112,36 @@ function SshRuntimeSettingsRowContent({
     }
   };
   const canUpdate =
+    !connecting &&
     status !== undefined &&
     (status.state === "update_waiting" ||
       status.state === "failed" ||
       status.state === "stopped" ||
       (status.state === "ready" && status.runtimeVersion !== status.requestedVersion));
-  const recovery = status === undefined ? null : sshRuntimeRecoveryText(status);
+  const authInstructions =
+    status?.keyAuth ??
+    (status?.state === "auth_failed" && originLabel
+      ? buildSshKeyAuthInstructions({
+          originLabel,
+          host: target.alias || target.hostname,
+          user: target.username ?? "your SSH user",
+          port: target.port ?? 22,
+          ...(status.publicKey ? { publicKey: status.publicKey, generatedKey: true } : {}),
+        })
+      : null);
+  const recovery =
+    (result?.kind === "error" && result.code === "host_unreachable") ||
+    (status?.state === "untrusted" && onReviewTrust)
+      ? null
+      : (authInstructions?.instruction ??
+        (status === undefined ? null : sshRuntimeRecoveryText(status)));
   const fix = result?.kind === "error" ? result.fix : status?.failure?.fix;
+  const copyCommand = authInstructions?.command ?? fix?.command;
+  const showRetry =
+    onRetry !== undefined &&
+    (status?.state === "auth_failed" || result?.kind === "error" || status?.state === "failed");
+  const publicKey = status?.keyAuth?.publicKey ?? status?.publicKey;
+  const copyText = publicKey ?? copyCommand;
   const errorMessage =
     result?.kind === "error"
       ? result.code === "host_unreachable"
@@ -113,9 +153,26 @@ function SshRuntimeSettingsRowContent({
     <div className="mt-1 max-w-lg space-y-1 text-xs text-muted-foreground">
       {status ? (
         <div role="status">
+          {pendingAdd && status.state !== "preparing" ? (
+            <p>{sshRuntimeStatusText(status)}</p>
+          ) : null}
           {status.state === "preparing" ? <p>{`Setting up GOAT on ${status.host}…`}</p> : null}
           {status.state === "preparing" ? <p>{sshRuntimeStatusText(status)}</p> : null}
-          {recovery ? <p>{recovery}</p> : null}
+          {recovery && status.state !== "trust_pending" ? (
+            <p>
+              {recovery}
+              {status.state === "auth_failed" ? " GOAT connects with SSH keys only." : ""}
+            </p>
+          ) : null}
+          {status.state === "trust_pending" ? (
+            onOpenApproval ? (
+              <Button variant="link" size="xs" onClick={onOpenApproval}>
+                Open the host approval card
+              </Button>
+            ) : (
+              <p>Review the request in its original thread.</p>
+            )
+          ) : null}
         </div>
       ) : null}
       {errorMessage ? <p role="alert">{errorMessage}</p> : null}
@@ -126,7 +183,17 @@ function SshRuntimeSettingsRowContent({
         <p>{fix.instruction}</p>
       ) : null}
       {commandError && result?.kind !== "error" ? <p role="alert">{commandError}</p> : null}
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        {status?.state === "untrusted" && onReviewTrust ? (
+          <Button variant="outline" size="xs" disabled={busy} onClick={onReviewTrust}>
+            Review fingerprint
+          </Button>
+        ) : null}
+        {showRetry ? (
+          <Button variant="outline" size="xs" disabled={busy} onClick={onRetry}>
+            Retry
+          </Button>
+        ) : null}
         {canUpdate ? (
           status?.state === "update_waiting" ? (
             <Button
@@ -148,21 +215,33 @@ function SshRuntimeSettingsRowContent({
             </Button>
           )
         ) : null}
-        <Button
-          variant="ghost"
-          size="xs"
-          disabled={!enabled || busy}
-          onClick={() => void sshRuntime.refresh.run(registry, input)}
-        >
-          Refresh status
-        </Button>
-        {fix?.command ? (
+        {!showRetry ? (
           <Button
             variant="ghost"
             size="xs"
-            onClick={() => void navigator.clipboard.writeText(fix.command!)}
+            disabled={!enabled || busy}
+            onClick={() => void sshRuntime.refresh.run(registry, input)}
           >
-            Copy command
+            Refresh status
+          </Button>
+        ) : null}
+        {copyText && !(result?.kind === "error" && result.code === "host_unreachable") ? (
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() =>
+              void navigator.clipboard
+                .writeText(copyText)
+                .catch(() =>
+                  setCommandError(
+                    publicKey
+                      ? "Could not copy the public key. Try again."
+                      : "Could not copy the command. Try again.",
+                  ),
+                )
+            }
+          >
+            {publicKey ? "Copy public key" : "Copy setup command"}
           </Button>
         ) : null}
       </div>

@@ -33,7 +33,7 @@ import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
 import * as SshConfig from "@goat/ssh/config";
-import { SshCommandError } from "@goat/ssh/errors";
+import { SshCommandError, SshLaunchError } from "@goat/ssh/errors";
 import * as SshTunnel from "@goat/ssh/tunnel";
 
 import * as ConfigProvider from "effect/ConfigProvider";
@@ -133,6 +133,11 @@ describe("SSH dispatch tool compatibility", () => {
             wsBaseUrl: "ws://legacy-host:3773/",
             pairingToken: null,
           }),
+        readyEnvironment: () => Effect.die("Unexpected ready environment"),
+        beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+        publishSetupOutcome: () => Effect.succeed(true),
+        publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+        forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
         issueMcpClientSession: () =>
@@ -543,6 +548,11 @@ describe("SshRemoteDispatch.callHostTool", () => {
                 wsBaseUrl: "ws://127.0.0.1:41000/",
                 pairingToken: null,
               }),
+        readyEnvironment: () => Effect.die("Unexpected ready environment"),
+        beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+        publishSetupOutcome: () => Effect.succeed(true),
+        publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+        forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
         issueMcpClientSession: (_target, sessionOptions) => {
@@ -1169,6 +1179,11 @@ const withLaunchRemote = <A, E>(
             pairingToken: null,
           };
         }),
+      readyEnvironment: () => Effect.die("Unexpected ready environment"),
+      beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+      publishSetupOutcome: () => Effect.succeed(true),
+      publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+      forgetEnvironment: () => Effect.die("Unexpected forget"),
       disconnectEnvironment: () => Effect.void,
       revalidateTunnels: () => Effect.void,
       issueMcpClientSession: (target, opts) =>
@@ -1786,6 +1801,11 @@ describe("SSH dispatch launch lineage", () => {
             wsBaseUrl: "ws://lineage-host:3773/",
             pairingToken: null,
           }),
+        readyEnvironment: () => Effect.die("Unexpected ready environment"),
+        beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+        publishSetupOutcome: () => Effect.succeed(true),
+        publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+        forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
         issueMcpClientSession: (_target, options) =>
@@ -2492,6 +2512,11 @@ it.effect.each(["matching", "missing", "wrong"] as const)(
             wsBaseUrl: "ws://projects/fixture.invalid/",
             pairingToken: null,
           }),
+        readyEnvironment: () => Effect.die("Unexpected ready environment"),
+        beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+        publishSetupOutcome: () => Effect.succeed(true),
+        publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+        forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.void,
         revalidateTunnels: () => Effect.void,
         issueMcpClientSession: () =>
@@ -2896,6 +2921,11 @@ describe("SshRemoteDispatch SSH attachments", () => {
                 pairingToken: null,
               };
             }),
+          readyEnvironment: () => Effect.die("Unexpected ready environment"),
+          beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+          publishSetupOutcome: () => Effect.succeed(true),
+          publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+          forgetEnvironment: () => Effect.die("Unexpected forget"),
           disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
           revalidateTunnels: () => Effect.void,
           issueMcpClientSession: () =>
@@ -3690,6 +3720,11 @@ describe("SSH launcher transport", () => {
             pairingToken: null,
             remoteServerVersion: "0.0.1-older",
           }),
+        readyEnvironment: () => Effect.die("Unexpected ready environment"),
+        beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+        publishSetupOutcome: () => Effect.succeed(true),
+        publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+        forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
         revalidateTunnels: () => Effect.void,
         issueMcpClientSession: () =>
@@ -3773,3 +3808,65 @@ describe("SSH launcher transport", () => {
     }),
   );
 });
+
+it.effect("ready-only host tools never bootstrap or issue a session on a stopped runtime", () =>
+  Effect.gen(function* () {
+    const host = "ready-only";
+    const target = { alias: host, hostname: host, username: null, port: null };
+    let ensures = 0;
+    let sessions = 0;
+    const discover = vi
+      .spyOn(SshConfig, "discoverSshHosts")
+      .mockReturnValue(Effect.succeed([{ ...target, source: "ssh-config" }]));
+    const manager = vi.spyOn(SshTunnel.SshEnvironmentManager, "layer").mockReturnValue(
+      Layer.mock(SshTunnel.SshEnvironmentManager)({
+        readyEnvironment: () =>
+          Effect.fail(new SshLaunchError({ message: "Runtime is stopped", stdout: "" })),
+        ensureEnvironment: () => {
+          ensures++;
+          return Effect.die("must not bootstrap");
+        },
+        issueMcpClientSession: () => {
+          sessions++;
+          return Effect.die("must not issue");
+        },
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const failure = yield* dispatch
+        .callHostTool(
+          {
+            host,
+            tool: "goat_provider_diagnose",
+            arguments: {},
+            timeoutMs: 1000,
+            writes: false,
+            requireReady: true,
+          },
+          Effect.succeed("approval-required"),
+        )
+        .pipe(Effect.result);
+      expect(failure._tag).toBe("Failure");
+      if (failure._tag === "Failure") {
+        expect(failure.failure.reason).toBe("host_unavailable");
+        expect(failure.failure.message).toContain("goat_ssh_host_prepare");
+      }
+      expect([ensures, sessions]).toEqual([0, 0]);
+    }).pipe(
+      Effect.provide(
+        SshRemoteDispatch.layer.pipe(
+          Layer.provide(ServerConfig.layerTest("/fixture", { prefix: "ready-only-" })),
+          Layer.provide(FetchHttpClient.layer),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+      Effect.ensuring(
+        Effect.sync(() => {
+          manager.mockRestore();
+          discover.mockRestore();
+        }),
+      ),
+    );
+  }),
+);

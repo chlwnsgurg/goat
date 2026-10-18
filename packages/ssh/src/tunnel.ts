@@ -10,6 +10,8 @@ import type {
   SshHostFailure,
   SshHostResult,
   SshHostStatus,
+  SshHostProviders,
+  SshHostSetupProgress,
   SshRuntimePhase,
 } from "@goat/contracts";
 import {
@@ -17,6 +19,7 @@ import {
   ORCHESTRATION_PROTOCOL_VERSION,
   RUNTIME_DRAIN_DEFAULT_GRACE_SECONDS,
   RUNTIME_DRAIN_MAX_GRACE_SECONDS,
+  buildSshKeyAuthInstructions,
 } from "@goat/contracts";
 import {
   compareRuntimeProtocols,
@@ -42,6 +45,8 @@ import {
   WINDOWS_DETACHED_SPAWN_POWERSHELL,
   WINDOWS_PROCESS_INFO_POWERSHELL,
 } from "@goat/shared/windowsHostProcess";
+import * as Config from "effect/Config";
+import * as Option from "effect/Option";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -358,7 +363,48 @@ function notifyRuntimePhase(
   }
 }
 
+/** Publications never resolve aliases or acquire installation locks; stale operations are ignored. */
+export type SshSetupOutcome =
+  | { readonly kind: "complete" }
+  | {
+      readonly kind: "error";
+      readonly reason:
+        | "diagnosis_failed"
+        | "approval_expired"
+        | "authorization_revoked"
+        | "operation_failed";
+      readonly message: string;
+      readonly fix: SshHostFailure["fix"];
+    };
+
 export interface SshEnvironmentManagerShape {
+  readonly readyEnvironment: (
+    target: DesktopSshEnvironmentTarget,
+  ) => Effect.Effect<
+    Exclude<DesktopSshEnvironmentReadyOrPending, DesktopSshRuntimePendingResult>,
+    SshEnvironmentEffectError,
+    SshEnvironmentEffectContext
+  >;
+
+  readonly beginSetupOperation: (
+    target: DesktopSshEnvironmentTarget,
+    operationId: string,
+  ) => Effect.Effect<SshHostSetupProgress, SshEnvironmentEffectError, SshEnvironmentEffectContext>;
+  readonly publishSetupOutcome: (
+    target: DesktopSshEnvironmentTarget,
+    operation: Pick<SshHostSetupProgress, "generation" | "operationId">,
+    outcome: SshSetupOutcome,
+  ) => Effect.Effect<boolean>;
+  readonly publishProviderDiagnosis: (
+    target: DesktopSshEnvironmentTarget,
+    operation: Pick<SshHostSetupProgress, "generation" | "operationId">,
+    providers: SshHostProviders,
+  ) => Effect.Effect<boolean, SshEnvironmentEffectError, SshEnvironmentEffectContext>;
+  readonly forgetEnvironment: (
+    target: DesktopSshEnvironmentTarget,
+    options: { readonly stopRuntime: "if_idle" | "no" },
+  ) => Effect.Effect<SshHostResult, SshEnvironmentEffectError, SshEnvironmentEffectContext>;
+
   readonly status: (
     target: DesktopSshEnvironmentTarget,
   ) => Effect.Effect<SshHostResult, SshEnvironmentEffectError, SshEnvironmentEffectContext>;
@@ -404,6 +450,7 @@ export interface SshEnvironmentManagerShape {
 }
 
 export interface RemoteMcpClientSessionOptions {
+  readonly requireReady?: boolean;
   readonly label: string;
   /** A duration the remote CLI accepts, such as `12h`. */
   readonly ttl: string;
@@ -1859,6 +1906,11 @@ acquire_replacement_lock || { printf 'Another client is replacing the remote run
 REMOTE_MANAGED="$(cat "$MANAGED_FILE" 2>/dev/null || true)"
 REMOTE_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
 REMOTE_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
+# Forget may stop only an owned runtime; external/unknown state belongs to another owner.
+if [ @@GOAT_STOP_OWNED_ONLY@@ = 1 ] && [ "$REMOTE_MANAGED" != managed ]; then
+  printf '{"stopped":false,"activity":"unknown"}\\n'
+  exit 0
+fi
 ownership_unverified() {
   printf 'GOAT ownership could not be verified for PID %s; process and ownership files were preserved.\\n' "$REMOTE_PID" >&2
   exit 1
@@ -2790,9 +2842,13 @@ export const prepareRemoteRuntime = (
     Effect.withSpan("ssh.prepareRemoteRuntime"),
   );
 
-export function buildRemoteStopScript(stateKey: string): string {
+export function buildRemoteStopScript(
+  stateKey: string,
+  options: { readonly ownedOnly?: boolean } = {},
+): string {
   return applyScriptPlaceholders(REMOTE_STOP_SCRIPT, {
     GOAT_STATE_KEY: stateKey,
+    GOAT_STOP_OWNED_ONLY: options.ownedOnly === true ? "1" : "0",
     GOAT_PROTOCOL_TOKENS: REMOTE_PROTOCOL_TOKEN_SCRIPT,
     GOAT_REPLACEMENT_LOCK: REMOTE_REPLACEMENT_LOCK_SCRIPT,
     GOAT_OWNED_IDENTITY: REMOTE_OWNED_IDENTITY_SCRIPT,
@@ -3070,7 +3126,7 @@ export const issueRemoteMcpClientSession = Effect.fn("ssh/tunnel.issueRemoteMcpC
 
 const stopRemoteServer = Effect.fn("ssh/tunnel.stopRemoteServer")(function* (
   target: DesktopSshEnvironmentTarget,
-  input?: SshAuth.SshAuthOptions,
+  input?: SshAuth.SshAuthOptions & { readonly ownedOnly?: boolean },
 ): Effect.fn.Return<
   void,
   SshCommandError | SshInvalidTargetError,
@@ -3083,7 +3139,7 @@ const stopRemoteServer = Effect.fn("ssh/tunnel.stopRemoteServer")(function* (
   });
   const result = yield* runSshCommand(target, {
     remoteCommandArgs: ["sh", "-s"],
-    stdin: buildRemoteStopScript(stateKey),
+    stdin: buildRemoteStopScript(stateKey, { ownedOnly: input?.ownedOnly === true }),
     ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
     ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
     ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
@@ -3492,7 +3548,7 @@ function archiveFailure(error: SshLaunchError): SshHostFailure | undefined {
   if (error.acquisition.platformKey === "darwin-x64") {
     return {
       reason: "unsupported_platform",
-      fix: { actor: "human", instruction: "Use a supported platform for the SSH runtime." },
+      fix: { actor: "human", instruction: "Use Linux, an Apple Silicon Mac, or Windows." },
     };
   }
   return {
@@ -3557,7 +3613,8 @@ function runtimeFailureResult(
       reason: "host_key_changed",
       fix: {
         actor: "human",
-        instruction: "Verify the host fingerprint before trusting the changed key.",
+        instruction: "Forget the host, then add it again to review its new fingerprint.",
+        path: "ssh.host_forget",
       },
     });
   }
@@ -3579,11 +3636,18 @@ function runtimeFailureResult(
     return failed({ reason: "start_timeout", fix: { actor: "agent", instruction: "Try again" } });
   }
   if (
-    /Remote host is missing node on PATH|Install shasum or sha256sum|Remote host needs curl or wget/iu.test(
+    /Remote host is missing node on PATH|Install shasum or sha256sum|Remote host needs curl or wget|tar:.*(?:not found|not recognized)/iu.test(
       diagnostic,
     )
   ) {
-    return failed({ reason: "missing_tools", fix: { actor: "human", instruction: diagnostic } });
+    const instruction = /missing node/iu.test(diagnostic)
+      ? `Install Node on ${host} for the source runtime, then try again.`
+      : /curl or wget/iu.test(diagnostic)
+        ? `Install curl or wget on ${host}, then try again.`
+        : /tar:/iu.test(diagnostic)
+          ? `Install tar on ${host}, then try again.`
+          : `Install sha256sum (coreutils) on ${host}, then try again.`;
+    return failed({ reason: "missing_tools", fix: { actor: "human", instruction } });
   }
   return {
     kind: "error",
@@ -3609,6 +3673,276 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
   const resolvedTargets = new Map<string, DesktopSshEnvironmentTarget>();
   const statuses = new Map<string, SshHostResult>();
   const acquisitionFailures = new Map<string, SshHostFailure>();
+  const setupOperations = new Map<
+    string,
+    SshHostSetupProgress & { readonly diagnosisRequired?: boolean }
+  >();
+  const forgotten = new Set<string>();
+  const setupFields = (key: string, stage?: SshHostSetupProgress["stage"]) => {
+    const previous = setupOperations.get(key);
+    if (previous === undefined) return {};
+    const setup = { ...previous, stage: stage ?? previous.stage };
+    setupOperations.set(key, setup);
+    return {
+      setup: { operationId: setup.operationId, generation: setup.generation, stage: setup.stage },
+    };
+  };
+  const managedAliases = new Set<string>();
+  const observedPins = new Map<string, string>();
+  const managedDirectory = Effect.gen(function* () {
+    const path = yield* Path.Path;
+    const env = yield* Config.all({
+      home: Config.String("HOME").pipe(Config.option),
+      profile: Config.String("USERPROFILE").pipe(Config.option),
+    });
+    const home = Option.getOrUndefined(env.home) ?? Option.getOrUndefined(env.profile);
+    return home === undefined ? undefined : path.join(home, ".ssh", "goat-hosts");
+  }).pipe(Effect.orElseSucceed(() => undefined));
+  const pinError = (changed = false) =>
+    new SshCommandError({
+      command: ["ssh", "-G"],
+      exitCode: null,
+      message: changed
+        ? "Managed SSH host key changed."
+        : "Host key verification failed. Add this host again to review its fingerprint.",
+      stderr: changed
+        ? "Managed SSH host key changed."
+        : "Host key verification failed. Add this host again to review its fingerprint.",
+    });
+  const readManagedPin = Effect.fn("ssh/tunnel.readManagedPin")(
+    function* (target: DesktopSshEnvironmentTarget) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(target.alias)) return undefined;
+      const directory = yield* managedDirectory;
+      if (directory === undefined) return undefined;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const confPath = path.join(directory, `${target.alias}.conf`);
+      if (!(yield* fs.exists(confPath))) {
+        if (managedAliases.has(target.alias)) return yield* pinError();
+        return undefined;
+      }
+      managedAliases.add(target.alias);
+      for (const file of [
+        directory,
+        confPath,
+        path.join(directory, `${target.alias}.known_hosts`),
+      ]) {
+        const linked = yield* fs.readLink(file).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        );
+        if (linked) return yield* pinError();
+      }
+      const conf = yield* fs.readFileString(confPath);
+      const knownHostsFile = path.join(directory, `${target.alias}.known_hosts`);
+      const pin = (yield* fs.readFileString(knownHostsFile)).trim();
+      const parts = pin.split(/\s+/u);
+      if (
+        parts.length !== 3 ||
+        parts[0] !== target.alias ||
+        !/^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521))$/u.test(parts[1]!) ||
+        !/^[A-Za-z0-9+/]+={0,2}$/u.test(parts[2]!)
+      )
+        return yield* pinError();
+      const stat = yield* fs.stat(confPath);
+      const mtime = Option.getOrUndefined(stat.mtime);
+      if (mtime === undefined) return yield* pinError();
+      const crypto = yield* Crypto.Crypto;
+      const digest = yield* crypto.digest("SHA-256", Buffer.from(parts[2]!, "base64"));
+      return {
+        alias: target.alias,
+        confMtimeMs: mtime.getTime(),
+        fingerprint: `SHA256:${Buffer.from(digest).toString("base64").replace(/=+$/u, "")}`,
+        conf,
+        knownHostsFile,
+        algorithm: parts[1]!,
+      };
+    },
+    Effect.mapError((error) => (error instanceof SshCommandError ? error : pinError())),
+  );
+  type ManagedPin = NonNullable<Effect.Success<ReturnType<typeof readManagedPin>>>;
+  const samePin = (left: ManagedPin | undefined, right: ManagedPin | undefined) =>
+    left === undefined
+      ? right === undefined
+      : right !== undefined &&
+        left.alias === right.alias &&
+        left.fingerprint === right.fingerprint &&
+        left.confMtimeMs === right.confMtimeMs &&
+        left.conf === right.conf;
+  const validateManagedPin = Effect.fn("ssh/tunnel.validateManagedPin")(function* (
+    target: DesktopSshEnvironmentTarget,
+  ) {
+    const pin = yield* readManagedPin(target);
+    if (pin === undefined) return undefined;
+    const output = yield* runSshCommand(target, {
+      preHostArgs: ["-G"],
+      batchMode: "yes",
+      interactiveAuth: false,
+    });
+    const values = new Map<string, string[]>();
+    for (const line of output.stdout.split(/\r?\n/u)) {
+      const [name, ...rest] = line.trim().split(/\s+/u);
+      if (name)
+        values.set(name.toLowerCase(), [...(values.get(name.toLowerCase()) ?? []), rest.join(" ")]);
+    }
+    const value = (name: string) => values.get(name)?.[0];
+    const confValue = (name: string) =>
+      new RegExp(`^\\s*${name}\\s+(.+)$`, "imu").exec(pin.conf)?.[1]?.replace(/^"|"$/gu, "");
+    const algorithms = pin.algorithm === "ssh-rsa" ? "rsa-sha2-512,rsa-sha2-256" : pin.algorithm;
+    if (
+      value("hostkeyalias") !== target.alias ||
+      value("userknownhostsfile") !== pin.knownHostsFile ||
+      value("globalknownhostsfile") !== "/dev/null" ||
+      !["yes", "true"].includes(value("stricthostkeychecking") ?? "") ||
+      !["no", "false"].includes(value("updatehostkeys") ?? "") ||
+      value("hostkeyalgorithms") !== algorithms ||
+      (confValue("ProxyJump") !== undefined && value("proxyjump") !== confValue("ProxyJump")) ||
+      (confValue("ProxyCommand") !== undefined &&
+        value("proxycommand") !== confValue("ProxyCommand")) ||
+      value("hostname") !== confValue("HostName") ||
+      value("port") !== confValue("Port") ||
+      value("user") !== confValue("User") ||
+      (confValue("IdentityFile") !== undefined &&
+        (value("identityfile") !== confValue("IdentityFile") ||
+          !["yes", "true"].includes(value("identitiesonly") ?? "")))
+    )
+      return yield* pinError();
+    const previous = observedPins.get(pin.alias);
+    if (previous !== undefined && previous !== pin.fingerprint) return yield* pinError(true);
+    observedPins.set(pin.alias, pin.fingerprint);
+    return pin;
+  });
+  const enrichFailure = Effect.fn("ssh/tunnel.enrichFailure")(function* (
+    target: DesktopSshEnvironmentTarget,
+    result: SshHostResult,
+  ) {
+    if (result.status?.failure?.reason === "missing_tools") {
+      const snapshot = result.status;
+      const failure = snapshot.failure!;
+      const tools = failure.fix.instruction.includes("curl")
+        ? "curl"
+        : failure.fix.instruction.includes("Node")
+          ? "nodejs"
+          : failure.fix.instruction.includes("Install tar")
+            ? "tar"
+            : "coreutils";
+      const probe = yield* runSshCommand(target, {
+        batchMode: "yes",
+        interactiveAuth: false,
+        preHostArgs: ["-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"],
+        remoteCommandArgs: ["sh", "-s"],
+        timeoutMs: 10_000,
+        stdin:
+          "GOAT_TOOL_FIX_PROBE=1\nid -u\nuname -s\nif [ -r /etc/os-release ]; then cat /etc/os-release; fi\n",
+      }).pipe(Effect.option);
+      if (Option.isSome(probe)) {
+        const [uid, os, ...release] = probe.value.stdout.trim().split(/\r?\n/u);
+        const id = /^ID=["']?([a-z0-9-]+)["']?$/mu.exec(release.join("\n"))?.[1];
+        const command =
+          uid === "0" && os === "Linux"
+            ? id === "debian" || id === "ubuntu"
+              ? `apt-get update && apt-get install -y ${tools}`
+              : id === "alpine"
+                ? `apk add ${tools}`
+                : id === "fedora" || id === "rhel" || id === "rocky"
+                  ? `dnf install -y ${tools}`
+                  : undefined
+            : undefined;
+        if (command !== undefined)
+          return {
+            ...result,
+            status: { ...snapshot, failure: { ...failure, fix: { ...failure.fix, command } } },
+          };
+      }
+      return result;
+    }
+    if (
+      result.status?.state !== "auth_failed" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(target.alias)
+    )
+      return result;
+    // Expose only GOAT's generated public key; an arbitrary IdentityFile is never disclosed.
+    const directory = yield* managedDirectory;
+    if (directory === undefined) return result;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    for (const name of ["goat-hosts", "goat-cloud"]) {
+      const dir = path.join(path.dirname(directory), name);
+      const conf = yield* fs
+        .readFileString(path.join(dir, `${target.alias}.conf`))
+        .pipe(Effect.orElseSucceed(() => ""));
+      const identity = /^\s*IdentityFile\s+"?(.+?)"?\s*$/imu.exec(conf)?.[1];
+      if (identity === undefined) continue;
+      const expandedIdentity = identity.replace(
+        /^~(?=[/\\])/u,
+        path.dirname(path.dirname(directory)),
+      );
+      const publicPath = expandedIdentity.endsWith(".pub")
+        ? expandedIdentity
+        : `${expandedIdentity}.pub`;
+      const linked = yield* fs.readLink(publicPath).pipe(
+        Effect.as(true),
+        Effect.orElseSucceed(() => false),
+      );
+      if (linked) continue;
+      const key = (yield* fs
+        .readFileString(publicPath)
+        .pipe(Effect.orElseSucceed(() => ""))).trim();
+      if (
+        !/^(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)) [A-Za-z0-9+/]+={0,2}( .*)?$/u.test(
+          key,
+        )
+      )
+        continue;
+      const generatedKey = expandedIdentity === path.join(dir, "id_ed25519");
+      const known = resolvedTargets.get(targetConnectionKey(target)) ?? target;
+      const resolved =
+        known.username === null
+          ? yield* resolveSshTarget(target.alias).pipe(Effect.option)
+          : Option.none();
+      const user =
+        /^\s*User\s+(.+?)\s*$/imu.exec(conf)?.[1] ??
+        known.username ??
+        (Option.isSome(resolved) ? resolved.value.username : null);
+      const port = Number(
+        /^\s*Port\s+(\d+)\s*$/imu.exec(conf)?.[1] ??
+          known.port ??
+          (Option.isSome(resolved) ? resolved.value.port : null) ??
+          22,
+      );
+      if (user === null) {
+        if (generatedKey) return { ...result, status: { ...result.status, publicKey: key } };
+        continue;
+      }
+      const keyAuth = buildSshKeyAuthInstructions({
+        originLabel: "the computer that owns this SSH connection",
+        host: target.alias,
+        user,
+        port,
+        publicKeyPath: publicPath,
+        generatedKey,
+        ...(generatedKey ? { publicKey: key } : {}),
+      });
+      return {
+        ...result,
+        status: { ...result.status, ...(generatedKey ? { publicKey: key } : {}), keyAuth },
+      };
+    }
+    return result;
+  });
+  const setupTerminalFailure = (key: string) => {
+    const current = statuses.get(key)?.status;
+    return (
+      current?.setup?.stage === "complete" &&
+      current.state === "failed" &&
+      [
+        "diagnosis_failed",
+        "approval_expired",
+        "authorization_revoked",
+        "operation_failed",
+      ].includes(current.failure?.reason ?? "")
+    );
+  };
   const publishPhase = (
     key: string,
     target: DesktopSshEnvironmentTarget,
@@ -3616,6 +3950,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     phase: SshRuntimePhase,
     onPhase?: SshRuntimeProgressCallback,
   ) => {
+    if (setupTerminalFailure(key)) return;
     const previous = statuses.get(key);
     statuses.set(key, {
       kind: "ok",
@@ -3625,6 +3960,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         runtimeVersion: previous?.status?.runtimeVersion ?? null,
         state: "preparing",
         phase,
+        ...setupFields(key, "runtime"),
       },
     });
     notifyRuntimePhase(target, phase, onPhase);
@@ -3635,6 +3971,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     result: SshTunnelEntry | DesktopSshRuntimePendingResult,
     runner?: RemoteGoatRunnerOptions,
   ) => {
+    if (setupTerminalFailure(key)) return;
     const pending = "type" in result ? result.pending : pendingReplacements.get(key)?.pending;
     const host = target.alias || target.hostname;
     const runtimeVersion =
@@ -3661,15 +3998,35 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       snapshot = { ...base, state: "ready" };
       if (runtimeVersion === requestedVersion) acquisitionFailures.delete(key);
     }
+    const setup = setupOperations.get(key);
+    const providers = statuses.get(key)?.status?.providers;
+    if (snapshot.state === "ready" && setup?.stage === "complete" && providers !== undefined)
+      snapshot = {
+        ...snapshot,
+        state: providers.ready ? "ready" : "providers_not_ready",
+        providers,
+      };
+    snapshot = {
+      ...snapshot,
+      ...setupFields(
+        key,
+        snapshot.state === "ready" &&
+          setup?.stage !== "complete" &&
+          setup?.diagnosisRequired !== false
+          ? "diagnosis"
+          : "complete",
+      ),
+    };
     statuses.set(key, { kind: "ok", status: snapshot });
   };
-  const publishFailure = (
+  const publishFailure = Effect.fn("ssh/tunnel.publishFailure")(function* (
     key: string,
     target: DesktopSshEnvironmentTarget,
     runner: RemoteGoatRunnerOptions | undefined,
     error: SshEnvironmentEffectError,
-  ) => {
-    const result = runtimeFailureResult(
+  ) {
+    const generation = generations.get(key) ?? 0;
+    let result = runtimeFailureResult(
       target.alias || target.hostname,
       runner?.archiveVersion?.trim() ?? "",
       statuses.get(key)?.status?.runtimeVersion ?? null,
@@ -3680,8 +4037,12 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       result.status?.failure?.reason === "unsupported_platform"
     )
       acquisitionFailures.set(key, result.status.failure);
+    result = yield* enrichFailure(target, result);
+    if (closed || (generations.get(key) ?? 0) !== generation) return;
+    if (result.status !== undefined)
+      result = { ...result, status: { ...result.status, ...setupFields(key, "complete") } };
     statuses.set(key, result);
-  };
+  });
   // A disconnect waits on the target lock, then acts on the completed launch result.
   const cancelledLaunches = new Map<string, boolean>();
   const pendingReplacements = new Map<
@@ -3691,6 +4052,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       requestedRunner: RemoteGoatRunnerOptions;
       pending: SshRuntimePendingReplacement;
       generation: number;
+      managedPin?: ManagedPin;
       nextAttemptAt: number;
     }
   >();
@@ -3731,13 +4093,42 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
   const ensureSuperseded = (ticket: RequestTicket) =>
     (latestDisconnect.get(ticket.key) ?? 0) > ticket.sequence;
 
-  // Keep one lock per target so reconnect cannot reuse a server while stop is pending.
-  const withTargetLock = Effect.fn("ssh/tunnel.withTargetLock")(function* <A, E, R>(
+  const lockUsers = new Map<string, number>();
+  const releaseLockUser = (key: string) =>
+    Effect.sync(() => {
+      const count = lockUsers.get(key) ?? 0;
+      if (count <= 1) lockUsers.delete(key);
+      else lockUsers.set(key, count - 1);
+    });
+  // Count admission before any yield, so ready-only requests never queue behind installation.
+  const withTargetLock = <A, E, R>(key: string, effect: Effect.Effect<A, E, R>) =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        lockUsers.set(key, (lockUsers.get(key) ?? 0) + 1);
+      }),
+      () => targetLocks.withLock(key, effect),
+      () => releaseLockUser(key),
+    );
+  const notReady = (target: DesktopSshEnvironmentTarget) =>
+    new SshLaunchError({
+      message: `Call goat_ssh_host_prepare for ${target.alias}, then call goat_ssh_host_status until setup completes; retry goat_provider_diagnose.`,
+      stdout: "",
+    });
+  const withIdleTargetLock = <A, E, R>(
     key: string,
+    target: DesktopSshEnvironmentTarget,
     effect: Effect.Effect<A, E, R>,
-  ): Effect.fn.Return<A, E, R> {
-    return yield* targetLocks.withLock(key, effect);
-  });
+  ) =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        if (lockUsers.has(key)) return false;
+        lockUsers.set(key, 1);
+        return true;
+      }),
+      (acquired): Effect.Effect<A, E | SshLaunchError, R> =>
+        acquired ? targetLocks.withLock(key, effect) : Effect.fail(notReady(target)),
+      (acquired) => (acquired ? releaseLockUser(key) : Effect.void),
+    );
 
   const closeTunnelEntry = Effect.fn("ssh/tunnel.closeTunnelEntry")(function* (
     entry: SshTunnelEntry,
@@ -3929,6 +4320,9 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       key: input.key,
     });
     const generation = generations.get(input.key) ?? 0;
+    const managedPin = yield* validateManagedPin(input.resolvedTarget);
+    if (closed || (generations.get(input.key) ?? 0) !== generation)
+      return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
     // Only an observed remote pending result grants background replacement intent.
     const phase: SshRuntimeProgressCallback = ({ phase }) => {
       if (!closed && (generations.get(input.key) ?? 0) === generation) {
@@ -3967,6 +4361,25 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         },
       }),
     );
+    const currentPin = yield* readManagedPin(input.resolvedTarget).pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
+    if (
+      !closed &&
+      (generations.get(input.key) ?? 0) === generation &&
+      !samePin(managedPin, currentPin)
+    ) {
+      generations.set(input.key, (generations.get(input.key) ?? 0) + 1);
+      pendingReplacements.delete(input.key);
+      setupOperations.delete(input.key);
+      const error = pinError(
+        managedPin !== undefined &&
+          currentPin !== undefined &&
+          managedPin.fingerprint !== currentPin.fingerprint,
+      );
+      yield* publishFailure(input.key, input.resolvedTarget, input.runner, error);
+      return yield* error;
+    }
     // The launch round trip measures this link; the forward's readiness budget scales with it.
     const launchMs = (yield* Clock.currentTimeMillis) - launchStartedAt;
     if (closed || (generations.get(input.key) ?? 0) !== generation) {
@@ -3995,6 +4408,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         requestedRunner: { ...input.runner, confirmReplacement: false },
         pending: remoteLaunch.pending,
         generation,
+        ...(managedPin === undefined ? {} : { managedPin }),
         nextAttemptAt: (yield* Clock.currentTimeMillis) + 600_000,
       });
     }
@@ -4205,6 +4619,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     SshEnvironmentEffectError,
     SshEnvironmentEffectContext
   > {
+    const managedPin = yield* validateManagedPin(resolvedTarget);
+    keyOnly = keyOnly || managedPin !== undefined;
     const entry = tunnels.get(key);
     if (entry !== undefined) {
       // The background retry owns a deferred refresh; this caller only needs a forward.
@@ -4274,6 +4690,29 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
                 (generations.get(key) ?? 0) !== intent.generation
               )
                 return;
+              if (intent.managedPin !== undefined) {
+                const current = yield* readManagedPin(intent.target).pipe(
+                  Effect.orElseSucceed(() => undefined),
+                );
+                if (!samePin(intent.managedPin, current)) {
+                  pendingReplacements.delete(key);
+                  generations.set(key, (generations.get(key) ?? 0) + 1);
+                  setupOperations.delete(key);
+                  acquisitionFailures.delete(key);
+                  forgotten.add(key);
+                  const error = pinError(
+                    current !== undefined && current.fingerprint !== intent.managedPin.fingerprint,
+                  );
+                  yield* publishFailure(key, intent.target, intent.requestedRunner, error);
+                  const entry = tunnels.get(key);
+                  if (entry !== undefined) {
+                    tunnels.delete(key);
+                    yield* closeTunnelEntry(entry);
+                  }
+                  authSecrets.delete(key);
+                  return;
+                }
+              }
               intent.nextAttemptAt = (yield* Clock.currentTimeMillis) + 600_000;
               const result = yield* ensureTunnelEntry(
                 key,
@@ -4285,6 +4724,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
                 },
                 true,
               );
+              if (closed || (generations.get(key) ?? 0) !== intent.generation) return;
               publishResult(key, intent.target, result, intent.requestedRunner);
               if (!("type" in result) && !pendingReplacements.has(key)) {
                 firstConnectionDecisions.add(
@@ -4293,14 +4733,16 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
               }
             }),
           ).pipe(
-            Effect.tapError((cause) => {
-              if (!closed && (generations.get(key) ?? 0) === intent.generation)
-                publishFailure(key, intent.target, intent.requestedRunner, cause);
-              return Effect.logWarning("ssh.runtime.retry.failed", {
-                alias: intent.target.alias,
-                cause,
-              });
-            }),
+            Effect.tapError((cause) =>
+              Effect.gen(function* () {
+                if (!closed && (generations.get(key) ?? 0) === intent.generation)
+                  yield* publishFailure(key, intent.target, intent.requestedRunner, cause);
+                yield* Effect.logWarning("ssh.runtime.retry.failed", {
+                  alias: intent.target.alias,
+                  cause,
+                });
+              }),
+            ),
             Effect.ignore,
           );
         }
@@ -4318,9 +4760,13 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
   > {
     const ticket = yield* takeRequestTicket(target, "ensure");
     const requestKey = targetConnectionKey(target);
+    const knownKey = targetConnectionKey(resolvedTargets.get(requestKey) ?? target);
+    const requestGeneration = generations.get(knownKey) ?? 0;
     const runner =
       options.resolveCliRunner === undefined ? undefined : yield* options.resolveCliRunner;
-    const knownKey = targetConnectionKey(resolvedTargets.get(requestKey) ?? target);
+    if (ensureSuperseded(ticket) || (generations.get(knownKey) ?? 0) !== requestGeneration)
+      return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
+    forgotten.delete(knownKey);
     const announcedConnecting = statuses.get(knownKey)?.status?.state !== "preparing";
     if (announcedConnecting) {
       publishPhase(
@@ -4338,9 +4784,13 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     });
     const baseResolved = yield* resolveSshTarget(target.alias || target.hostname).pipe(
       Effect.tapError((error) =>
-        Effect.sync(() => {
-          if (!closed && !ensureSuperseded(ticket)) publishFailure(knownKey, target, runner, error);
-        }),
+        Effect.suspend(() =>
+          !closed &&
+          !ensureSuperseded(ticket) &&
+          (generations.get(knownKey) ?? 0) === requestGeneration
+            ? publishFailure(knownKey, target, runner, error)
+            : Effect.void,
+        ),
       ),
     );
     const resolvedTarget: DesktopSshEnvironmentTarget = {
@@ -4348,7 +4798,10 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       ...(target.username !== null ? { username: target.username } : {}),
       ...(target.port !== null ? { port: target.port } : {}),
     };
+    if (ensureSuperseded(ticket) || (generations.get(knownKey) ?? 0) !== requestGeneration)
+      return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
     const key = targetConnectionKey(resolvedTarget);
+    const admittedGeneration = generations.get(key) ?? 0;
     resolvedTargets.set(targetConnectionKey(target), resolvedTarget);
     if (key !== knownKey && !statuses.has(key)) {
       const initial = statuses.get(knownKey);
@@ -4367,7 +4820,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     return yield* withTargetLock(
       key,
       Effect.gen(function* () {
-        if (ensureSuperseded(ticket)) {
+        if (ensureSuperseded(ticket) || (generations.get(key) ?? 0) !== admittedGeneration) {
           yield* Effect.logInfo("ssh.environment.ensure.superseded", {
             ...sshTargetLogFields(resolvedTarget),
             key,
@@ -4377,6 +4830,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
             stdout: "",
           });
         }
+        forgotten.delete(key);
+        const ensureGeneration = generations.get(key) ?? 0;
         const decisionKey = `${key}:${runner?.archiveVersion ?? runner?.nodeScriptPath ?? ""}`;
         if (requestOptions?.refreshRuntime === true) acquisitionFailures.delete(key);
         publishPhase(
@@ -4409,6 +4864,11 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
             requestOptions.refreshRuntime !== true,
           requestOptions?.onPhase,
         );
+        if (ensureSuperseded(ticket) || (generations.get(key) ?? 0) !== ensureGeneration)
+          return yield* new SshLaunchError({
+            message: "SSH connection was cancelled.",
+            stdout: "",
+          });
         if ("type" in entry) {
           publishResult(key, resolvedTarget, entry, runner);
           return entry;
@@ -4417,7 +4877,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         const pairingResult = requestOptions?.issuePairingToken
           ? yield* runWithSshAuth({
               key,
-              keyOnly: requestOptions?.keyOnly === true,
+              keyOnly: requestOptions?.keyOnly === true || managedAliases.has(resolvedTarget.alias),
               target: entry.target,
               operation: (authOptions) =>
                 issueRemotePairingToken(entry.target, authOptions, runner, entry.selectedRuntime),
@@ -4439,6 +4899,11 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         ) {
           firstConnectionDecisions.add(decisionKey);
         }
+        if (ensureSuperseded(ticket) || (generations.get(key) ?? 0) !== ensureGeneration)
+          return yield* new SshLaunchError({
+            message: "SSH connection was cancelled.",
+            stdout: "",
+          });
         // A busy runtime that still answers is used now and replaced when idle; say so.
         const pendingReplacement = pendingReplacements.get(key)?.pending;
         publishResult(key, resolvedTarget, entry, runner);
@@ -4457,10 +4922,11 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       }),
     ).pipe(
       Effect.tapError((error) =>
-        Effect.sync(() => {
-          if (!closed && !ensureSuperseded(ticket))
-            publishFailure(key, resolvedTarget, runner, error);
-        }),
+        Effect.suspend(() =>
+          !closed && !ensureSuperseded(ticket) && (generations.get(key) ?? 0) === admittedGeneration
+            ? publishFailure(key, resolvedTarget, runner, error)
+            : Effect.void,
+        ),
       ),
     );
   });
@@ -4510,6 +4976,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     pendingReplacements.delete(key);
     statuses.delete(key);
     acquisitionFailures.delete(key);
+    setupOperations.delete(key);
     for (const [request, value] of resolvedTargets)
       if (targetConnectionKey(value) === key) resolvedTargets.delete(request);
     yield* withTargetLock(
@@ -4574,6 +5041,18 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     const knownTarget = resolvedTargets.get(requestKey) ?? target;
     const knownKey = targetConnectionKey(knownTarget);
     const active = statuses.get(knownKey);
+    if (forgotten.has(knownKey) && active !== undefined) return active;
+    if (
+      active?.status?.setup?.stage === "complete" &&
+      active.status.state === "failed" &&
+      [
+        "diagnosis_failed",
+        "approval_expired",
+        "authorization_revoked",
+        "operation_failed",
+      ].includes(active.status.failure?.reason ?? "")
+    )
+      return active;
     if (active?.status?.state === "preparing" || active?.status?.state === "update_waiting")
       return active;
     const runner =
@@ -4581,12 +5060,29 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     let key = knownKey;
     let observed = active;
     let generation = generations.get(key) ?? 0;
+    const initialGeneration = generation;
     const result = yield* Effect.gen(function* () {
       const { resolvedTarget } = yield* resolveManagedTarget(target);
       key = targetConnectionKey(resolvedTarget);
+      if ((generations.get(knownKey) ?? 0) !== initialGeneration)
+        return (
+          statuses.get(knownKey) ??
+          statuses.get(key) ??
+          ({
+            kind: "ok",
+            status: {
+              host: target.alias || target.hostname,
+              requestedVersion: "",
+              runtimeVersion: null,
+              state: "untrusted",
+            },
+          } satisfies SshHostResult)
+        );
+      if (forgotten.has(key) && statuses.has(key)) return statuses.get(key)!;
       generation = generations.get(key) ?? 0;
       resolvedTargets.set(requestKey, resolvedTarget);
       observed = statuses.get(key);
+      yield* validateManagedPin(resolvedTarget);
       if (observed?.status?.state === "preparing" || observed?.status?.state === "update_waiting")
         return observed;
       const requestedVersion = runner?.archiveVersion?.trim() ?? "";
@@ -4686,7 +5182,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           failure: previousFailure,
         };
       }
-      return { kind: "ok", status: snapshot } satisfies SshHostResult;
+      return { kind: "ok", status: { ...snapshot, ...setupFields(key) } } satisfies SshHostResult;
     }).pipe(
       Effect.catch((error) => {
         const failure = runtimeFailureResult(
@@ -4716,11 +5212,54 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       }),
     );
     // A read started before a launch/disconnect must not overwrite its newer snapshot.
-    if (closed || (generations.get(key) ?? 0) !== generation) return result;
+    if (closed || (generations.get(key) ?? 0) !== generation) return statuses.get(key) ?? result;
     const latest = statuses.get(key);
     if (latest !== observed && latest !== undefined) return latest;
-    statuses.set(key, result);
-    return result;
+    const enriched = yield* enrichFailure(target, result);
+    if (closed || (generations.get(key) ?? 0) !== generation) return statuses.get(key) ?? enriched;
+    statuses.set(key, enriched);
+    return enriched;
+  });
+
+  const requireReadyEntry = Effect.fn("ssh/tunnel.requireReadyEntry")(function* (
+    target: DesktopSshEnvironmentTarget,
+    key: string,
+  ) {
+    const entry = tunnels.get(key);
+    const snapshot = statuses.get(key)?.status;
+    if (
+      closed ||
+      entry === undefined ||
+      (snapshot?.state !== "ready" && snapshot?.state !== "providers_not_ready") ||
+      !(yield* entry.process.isRunning.pipe(Effect.orElseSucceed(() => false)))
+    )
+      return yield* notReady(target);
+    yield* validateManagedPin(entry.target);
+    return entry;
+  });
+  const readyEnvironment: SshEnvironmentManagerShape["readyEnvironment"] = Effect.fn(
+    "ssh/tunnel.readyEnvironment",
+  )(function* (target) {
+    const known = resolvedTargets.get(targetConnectionKey(target)) ?? target;
+    const key = targetConnectionKey(known);
+    return yield* withIdleTargetLock(
+      key,
+      target,
+      Effect.gen(function* () {
+        const entry = yield* requireReadyEntry(target, key);
+        return {
+          target: entry.target,
+          httpBaseUrl: entry.httpBaseUrl,
+          wsBaseUrl: entry.wsBaseUrl,
+          pairingToken: null,
+          remotePort: entry.remotePort,
+          ...(entry.remoteServerKind === null ? {} : { remoteServerKind: entry.remoteServerKind }),
+          ...(entry.selectedRuntime.version === null
+            ? {}
+            : { remoteServerVersion: entry.selectedRuntime.version }),
+        };
+      }),
+    );
   });
 
   const issueMcpClientSession = Effect.fn("ssh/tunnel.issueMcpClientSession")(function* (
@@ -4731,7 +5270,12 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     SshEnvironmentEffectError,
     SshEnvironmentEffectContext
   > {
-    const { resolvedTarget, key } = yield* resolveManagedTarget(target);
+    const known = resolvedTargets.get(targetConnectionKey(target)) ?? target;
+    const { resolvedTarget, key } =
+      sessionOptions.requireReady === true
+        ? { resolvedTarget: known, key: targetConnectionKey(known) }
+        : yield* resolveManagedTarget(target);
+    if (sessionOptions.requireReady !== true) yield* validateManagedPin(resolvedTarget);
     const runner =
       options.resolveCliRunner === undefined ? undefined : yield* options.resolveCliRunner;
     if (pendingReplacements.has(key) && !tunnels.has(key)) {
@@ -4741,10 +5285,11 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       });
     }
     // Session preparation waits for a launch in flight and reuses its selection.
-    return yield* withTargetLock(
-      key,
-      runWithSshAuth({
+    const issue = Effect.gen(function* () {
+      if (sessionOptions.requireReady === true) yield* requireReadyEntry(target, key);
+      return yield* runWithSshAuth({
         key,
+        keyOnly: managedAliases.has(resolvedTarget.alias) || sessionOptions.requireReady === true,
         target: resolvedTarget,
         operation: (authOptions) =>
           issueRemoteMcpClientSession(
@@ -4754,7 +5299,12 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
             runner,
             tunnels.get(key)?.selectedRuntime,
           ),
-      }),
+      });
+    });
+    return yield* (
+      sessionOptions.requireReady === true
+        ? withIdleTargetLock(key, target, issue)
+        : withTargetLock(key, issue)
     ).pipe(
       Effect.mapError((error) => {
         const pending = pendingReplacements.get(key)?.pending;
@@ -4785,8 +5335,10 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     SshEnvironmentEffectContext
   > {
     const { resolvedTarget, key } = yield* resolveManagedTarget(target);
+    yield* validateManagedPin(resolvedTarget);
     return yield* runWithSshAuth({
       key,
+      keyOnly: managedAliases.has(resolvedTarget.alias),
       target: resolvedTarget,
       operation: (authOptions) =>
         runSshCommand(resolvedTarget, {
@@ -4802,8 +5354,203 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     });
   });
 
+  const beginSetupOperation: SshEnvironmentManagerShape["beginSetupOperation"] = Effect.fn(
+    "ssh/tunnel.beginSetupOperation",
+  )(function* (target, operationId) {
+    const ticket = yield* takeRequestTicket(target, "ensure");
+    const { resolvedTarget, key } = yield* resolveManagedTarget(target);
+    if (latestRequest.get(ticket.key) !== ticket.sequence)
+      return yield* new SshLaunchError({ message: "SSH setup was cancelled.", stdout: "" });
+    resolvedTargets.set(targetConnectionKey(target), resolvedTarget);
+    const generation = (generations.get(key) ?? 0) + 1;
+    generations.set(key, generation);
+    pendingReplacements.delete(key);
+    forgotten.delete(key);
+    const setup: SshHostSetupProgress = { operationId, generation, stage: "runtime" };
+    setupOperations.set(key, setup);
+    const previous = statuses.get(key)?.status;
+    statuses.set(key, {
+      kind: "ok",
+      status: {
+        host: target.alias || target.hostname,
+        requestedVersion: previous?.requestedVersion ?? "",
+        runtimeVersion: previous?.runtimeVersion ?? null,
+        state: "stopped",
+        setup,
+      },
+    });
+    return setup;
+  });
+  const publishSetupOutcome: SshEnvironmentManagerShape["publishSetupOutcome"] = (
+    target,
+    operation,
+    outcome,
+  ) =>
+    Effect.sync(() => {
+      const known = resolvedTargets.get(targetConnectionKey(target)) ?? target;
+      const key = targetConnectionKey(known);
+      const setup = setupOperations.get(key);
+      const previous = statuses.get(key);
+      const snapshot =
+        previous?.status ??
+        (previous?.kind === "error"
+          ? {
+              host: target.alias || target.hostname,
+              requestedVersion: "",
+              runtimeVersion: null,
+              state: "failed" as const,
+              failure: {
+                reason: "operation_failed" as const,
+                fix: previous.fix ?? { actor: "agent" as const, instruction: "Try again" },
+              },
+              detail: previous.message,
+            }
+          : undefined);
+      if (
+        closed ||
+        setup?.operationId !== operation.operationId ||
+        setup.generation !== operation.generation ||
+        (generations.get(key) ?? 0) !== operation.generation ||
+        snapshot === undefined
+      )
+        return false;
+      // Failed runtime acquisition and replacement waits keep their own recovery.
+      // Expired/revoked key-auth approvals instead become one terminal setup failure.
+      const keepRecovery = [
+        "failed",
+        "update_waiting",
+        "update_blocked",
+        "providers_not_ready",
+      ].includes(snapshot.state);
+      if (outcome.kind === "complete" || keepRecovery) {
+        if (outcome.kind === "complete" && snapshot.state === "preparing") return false;
+        setupOperations.set(key, { ...setup, diagnosisRequired: false });
+        statuses.set(key, { kind: "ok", status: { ...snapshot, ...setupFields(key, "complete") } });
+      } else {
+        const {
+          phase: _phase,
+          waitingReason: _waiting,
+          publicKey: _publicKey,
+          keyAuth: _keyAuth,
+          failure: _failure,
+          ...base
+        } = snapshot;
+        statuses.set(key, {
+          kind: "ok",
+          status: {
+            ...base,
+            state: "failed",
+            detail: outcome.message,
+            failure: { reason: outcome.reason, fix: outcome.fix },
+            ...setupFields(key, "complete"),
+          },
+        });
+      }
+      return true;
+    });
+  const publishProviderDiagnosis: SshEnvironmentManagerShape["publishProviderDiagnosis"] = (
+    target,
+    operation,
+    providers,
+  ) =>
+    Effect.sync(() => {
+      // A stale publisher must not resolve or contact a host forgotten in the meantime.
+      const known = resolvedTargets.get(targetConnectionKey(target)) ?? target;
+      const key = targetConnectionKey(known);
+      const setup = setupOperations.get(key);
+      const previous = statuses.get(key)?.status;
+      if (
+        closed ||
+        setup?.operationId !== operation.operationId ||
+        setup.generation !== operation.generation ||
+        (generations.get(key) ?? 0) !== operation.generation ||
+        previous === undefined ||
+        (previous.state !== "ready" && previous.state !== "providers_not_ready")
+      )
+        return false;
+      statuses.set(key, {
+        kind: "ok",
+        status: {
+          ...previous,
+          state: providers.ready ? "ready" : "providers_not_ready",
+          providers,
+          ...setupFields(key, "complete"),
+        },
+      });
+      return true;
+    });
+  const forgetEnvironment: SshEnvironmentManagerShape["forgetEnvironment"] = Effect.fn(
+    "ssh/tunnel.forgetEnvironment",
+  )(function* (target, forgetOptions) {
+    const ticket = yield* takeRequestTicket(target, "disconnect");
+    const requestKey = targetConnectionKey(target);
+    const resolvedTarget =
+      resolvedTargets.get(requestKey) ?? (yield* resolveManagedTarget(target)).resolvedTarget;
+    const key = targetConnectionKey(resolvedTarget);
+    const generation = (generations.get(key) ?? 0) + 1;
+    generations.set(key, generation);
+    pendingReplacements.delete(key);
+    acquisitionFailures.delete(key);
+    setupOperations.delete(key);
+    forgotten.add(key);
+    observedPins.delete(target.alias);
+    let result: SshHostResult = {
+      kind: "ok",
+      status: {
+        host: target.alias || target.hostname,
+        requestedVersion: statuses.get(key)?.status?.requestedVersion ?? "",
+        runtimeVersion: statuses.get(key)?.status?.runtimeVersion ?? null,
+        state: "untrusted",
+      },
+    };
+    // Publish the fence before waiting on a long upload's lock.
+    statuses.set(key, result);
+    yield* withTargetLock(
+      key,
+      Effect.gen(function* () {
+        if (disconnectSuperseded(ticket)) return;
+        if (forgetOptions.stopRuntime === "if_idle") {
+          const stopped = yield* Effect.result(
+            stopRemoteServer(resolvedTarget, {
+              batchMode: "yes",
+              interactiveAuth: false,
+              ownedOnly: true,
+            }),
+          );
+          if (stopped._tag === "Failure")
+            result = {
+              ...result,
+              status: { ...result.status!, detail: "Runtime stop was not confirmed." },
+            };
+        }
+      }).pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            const entry = tunnels.get(key);
+            if (entry !== undefined) {
+              tunnels.delete(key);
+              yield* closeTunnelEntry(entry);
+            }
+            cancelledLaunches.delete(key);
+            authSecrets.delete(key);
+            for (const decision of firstConnectionDecisions)
+              if (decision.startsWith(`${key}:`)) firstConnectionDecisions.delete(decision);
+            if ((generations.get(key) ?? 0) === generation) statuses.set(key, result);
+          }),
+        ),
+        Effect.uninterruptible,
+      ),
+    );
+    return result;
+  });
+
   return SshEnvironmentManager.of({
     status,
+    readyEnvironment,
+    beginSetupOperation,
+    publishProviderDiagnosis,
+    publishSetupOutcome,
+    forgetEnvironment,
     ensureEnvironment,
     disconnectEnvironment,
     revalidateTunnels,

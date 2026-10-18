@@ -109,6 +109,11 @@ export function sshRuntimeStatusText(status: SshHostStatus): string {
             status.detail ??
             `${status.host} is missing required tools. Install them on the host, then try again.`
           );
+        case "approval_expired":
+        case "authorization_revoked":
+        case "diagnosis_failed":
+        case "operation_failed":
+          return status.detail ?? failure.fix.instruction;
         case "unsupported_platform":
           return (
             status.detail ??
@@ -141,11 +146,13 @@ export function sshRuntimeRecoveryText(status: SshHostStatus) {
           ? `Another computer is updating ${status.host}. GOAT will retry.`
           : null;
     case "untrusted":
-      return "Approve the host fingerprint before connecting.";
+      return "Add this host again to review its fingerprint.";
     case "trust_pending":
       return "Open the host approval card.";
     case "auth_failed":
-      return "Register your public SSH key on the host, then try again.";
+      return status.publicKey
+        ? `GOAT created a key for ${status.host}. Add this public key to the server. Most providers ask for it when you create a server.`
+        : "Register your public SSH key on the host, then try again.";
     case "providers_not_ready":
       return status.providers?.fixes[0]?.instruction ?? null;
     case "ready":

@@ -291,3 +291,38 @@ describe("Desktop SSH runtime state", () => {
     ).toBe("GOAT 1.2.3 for Linux (x64) isn't available to install.");
   });
 });
+
+describe("SSH host recovery", () => {
+  it("offers a fresh review for untrusted hosts and exposes only public-key registration guidance", () => {
+    const base = { host: "vps-1", runtimeVersion: null, requestedVersion: "0.4.2" };
+    expect(sshRuntimeRecoveryText({ ...base, state: "untrusted" })).toBe(
+      "Add this host again to review its fingerprint.",
+    );
+    expect(sshRuntimeRecoveryText({ ...base, state: "auth_failed" })).toBe(
+      "Register your public SSH key on the host, then try again.",
+    );
+    expect(
+      sshRuntimeRecoveryText({ ...base, state: "auth_failed", publicKey: "ssh-ed25519 public" }),
+    ).toContain("GOAT created a key for vps-1.");
+  });
+});
+
+it.each([
+  "approval_expired",
+  "authorization_revoked",
+  "diagnosis_failed",
+  "operation_failed",
+] as const)("keeps the server's terminal %s explanation and a single recovery line", (reason) => {
+  const status: SshHostStatus = {
+    host: "vps-1",
+    state: "failed",
+    runtimeVersion: "0.4.2",
+    requestedVersion: "0.4.2",
+    failure: { reason, fix: { actor: "human", instruction: "Ask the agent again." } },
+  };
+  expect(sshRuntimeStatusText(status)).toBe("Ask the agent again.");
+  expect(sshRuntimeStatusText({ ...status, detail: "The setup request could not continue." })).toBe(
+    "The setup request could not continue.",
+  );
+  expect(sshRuntimeRecoveryText(status)).toBeNull();
+});

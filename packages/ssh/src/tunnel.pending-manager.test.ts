@@ -1,14 +1,17 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as NetService from "@goat/shared/Net";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
+import { ORCHESTRATION_PROTOCOL_VERSION, IsoDateTime } from "@goat/contracts";
 import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as FileSystem from "effect/FileSystem";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 import { HttpClient, HttpClientResponse } from "effect/http";
@@ -24,6 +27,7 @@ import {
   uploadTarget,
 } from "./tunnel.fixture.ts";
 
+const operationDate = Schema.decodeSync(IsoDateTime)("2026-10-18T00:00:00.000Z");
 const pending = {
   reason: "busy",
   replacement: "incompatible",
@@ -38,7 +42,22 @@ const ready = {
   refresh: "replaced",
 } as const;
 const fixture = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-managed-pin-" });
+  const directory = `${home}/.ssh/goat-hosts`;
+  const confPath = `${directory}/devbox.conf`;
+  const pinPath = `${directory}/devbox.known_hosts`;
+  const installPin = (key = "AAAA") =>
+    Effect.gen(function* () {
+      yield* fs.makeDirectory(directory, { recursive: true });
+      yield* fs.writeFileString(pinPath, `devbox ssh-ed25519 ${key}\n`);
+      yield* fs.writeFileString(
+        confPath,
+        `Host devbox\n  HostName devbox.example.com\n  User julius\n  Port 2222\n  HostKeyAlias devbox\n  UserKnownHostsFile "${pinPath}"\n  GlobalKnownHostsFile /dev/null\n  StrictHostKeyChecking yes\n  UpdateHostKeys no\n  HostKeyAlgorithms ssh-ed25519\n`,
+      );
+    });
   const forwarded = yield* Deferred.make<void>();
+  const staleProbeEntered = yield* Deferred.make<void>();
   const launchEntered = yield* Deferred.make<void>();
   const releaseLaunch = yield* Deferred.make<void>();
   const count = { launches: 0, forwards: 0, pairings: 0, stops: 0, kills: 0, prompts: 0 };
@@ -46,10 +65,12 @@ const fixture = Effect.gen(function* () {
   let stale = false;
   let resolutionFails = false;
   let pairingFails = false;
+  let stopFails = false;
   let forwardFails = false;
   let versionNewer = false;
   let liveProbe = false;
   const launchScripts: string[] = [];
+  const sshCalls: Array<ReadonlyArray<string>> = [];
   // One-shot: the next alias resolution waits until the test releases it.
   let resolutionGate: {
     entered: Deferred.Deferred<void>;
@@ -58,6 +79,7 @@ const fixture = Effect.gen(function* () {
   const spawner = ChildProcessSpawner.make((command) =>
     Effect.gen(function* () {
       if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected command");
+      sshCalls.push(command.args);
       if (command.args.includes("-G")) {
         const gate = resolutionGate;
         resolutionGate = null;
@@ -70,7 +92,12 @@ const fixture = Effect.gen(function* () {
             ...makeSuccessfulProcess(""),
             exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
           };
-        return makeSuccessfulProcess("hostname devbox.example.com\nuser julius\nport 2222\n");
+        return makeSuccessfulProcess(
+          "hostname devbox.example.com\nuser julius\nport 2222\n" +
+            ((yield* fs.exists(confPath))
+              ? `hostkeyalias devbox\nuserknownhostsfile ${pinPath}\nglobalknownhostsfile /dev/null\nstricthostkeychecking yes\nupdatehostkeys no\nhostkeyalgorithms ssh-ed25519\n`
+              : ""),
+        );
       }
       if (command.args.includes("-N")) {
         count.forwards++;
@@ -122,6 +149,11 @@ const fixture = Effect.gen(function* () {
       }
       if (script.includes('"stopped":true')) {
         count.stops++;
+        if (stopFails)
+          return {
+            ...makeSuccessfulProcess(""),
+            exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(255)),
+          };
         return makeSuccessfulProcess('{"stopped":true}');
       }
       count.launches++;
@@ -162,12 +194,13 @@ const fixture = Effect.gen(function* () {
   );
   const layer = Layer.mergeAll(
     NodeServices.layer,
+    ConfigProvider.layer(ConfigProvider.fromUnknown({ HOME: home })),
     Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
     Layer.succeed(
       HttpClient.HttpClient,
       HttpClient.make((request) =>
         stale
-          ? Effect.never
+          ? Deferred.succeed(staleProbeEntered, undefined).pipe(Effect.andThen(Effect.never))
           : Effect.succeed(HttpClientResponse.fromWeb(request, new Response("", { status: 200 }))),
       ),
     ),
@@ -192,12 +225,18 @@ const fixture = Effect.gen(function* () {
   );
   return {
     layer,
+    home,
+    confPath,
+    pinPath,
+    installPin,
     count,
     launchScripts,
+    sshCalls,
     useLiveProbe: () => {
       liveProbe = true;
     },
     forwarded,
+    staleProbeEntered,
     launchEntered,
     releaseLaunch,
     setMode: (value: typeof mode) => {
@@ -215,6 +254,9 @@ const fixture = Effect.gen(function* () {
     refuseNewer: () => {
       versionNewer = true;
     },
+    failStop: () => {
+      stopFails = true;
+    },
     failPairing: (value: boolean) => {
       pairingFails = value;
     },
@@ -224,9 +266,166 @@ const fixture = Effect.gen(function* () {
       return gate;
     }),
   };
-});
+}).pipe(Effect.provide(NodeServices.layer));
 
 describe("SSH pending replacement reconciliation", () => {
+  it.effect("forget still closes its tunnel and reports an unconfirmed remote stop", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.setMode("ready");
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        yield* manager.ensureEnvironment(uploadTarget);
+        f.failStop();
+        const result = yield* manager.forgetEnvironment(uploadTarget, { stopRuntime: "if_idle" });
+        assert.equal(result.status?.state, "untrusted");
+        assert.equal(result.status?.detail, "Runtime stop was not confirmed.");
+        assert.equal(f.count.kills, 1);
+        assert.equal(f.count.stops, 1);
+        assert.equal((yield* manager.status(uploadTarget)).status?.detail, result.status?.detail);
+      }).pipe(Effect.provide(f.layer), Effect.scoped);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect.each(["no", "if_idle"] as const)(
+    "forget %s fences blocked launch and late publications before releasing it",
+    (stopRuntime) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        f.setMode("blocked");
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          const operation = yield* manager.beginSetupOperation(uploadTarget, "blocked-setup");
+          const launch = yield* Effect.forkChild(
+            Effect.result(manager.ensureEnvironment(uploadTarget)),
+          );
+          yield* Deferred.await(f.launchEntered);
+          assert.isFalse(
+            yield* manager.publishSetupOutcome(uploadTarget, operation, { kind: "complete" }),
+          );
+          const forget = yield* Effect.forkChild(
+            manager.forgetEnvironment(uploadTarget, { stopRuntime }),
+          );
+          yield* TestClock.adjust(0);
+          assert.equal((yield* manager.status(uploadTarget)).status?.state, "untrusted");
+          assert.isFalse(
+            yield* manager.publishSetupOutcome(uploadTarget, operation, {
+              kind: "error",
+              reason: "diagnosis_failed",
+              message: "Old result",
+              fix: { actor: "agent", instruction: "Try again" },
+            }),
+          );
+          assert.isFalse(
+            yield* manager.publishProviderDiagnosis(uploadTarget, operation, {
+              checkedAt: operationDate,
+              ready: true,
+              fixes: [],
+            }),
+          );
+          assert.isTrue(
+            Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+          );
+          assert.equal(f.count.forwards, 0);
+          yield* Deferred.succeed(f.releaseLaunch, undefined);
+          assert.isTrue(Result.isFailure(yield* Fiber.join(launch)));
+          yield* Fiber.join(forget);
+          assert.equal((yield* manager.status(uploadTarget)).status?.state, "untrusted");
+          yield* TestClock.adjust("20 minutes");
+          assert.equal(f.count.launches, 1);
+          assert.equal(f.count.forwards, 0);
+          assert.equal(f.count.stops, stopRuntime === "no" ? 0 : 1);
+        }).pipe(Effect.provide(f.layer), Effect.scoped);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("ready-only session admission fails before a blocked installation finishes", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.setMode("blocked");
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        const launch = yield* Effect.forkChild(manager.ensureEnvironment(uploadTarget));
+        yield* Deferred.await(f.launchEntered);
+        assert.isTrue(
+          Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+        );
+        assert.isTrue(
+          Result.isFailure(
+            yield* Effect.result(
+              manager.issueMcpClientSession(uploadTarget, {
+                requireReady: true,
+                label: "diagnose",
+                ttl: "1h",
+                runtimeModeCeiling: null,
+              }),
+            ),
+          ),
+        );
+        assert.equal(f.count.pairings, 0);
+        assert.equal(f.count.launches, 1);
+        f.setMode("ready");
+        yield* Deferred.succeed(f.releaseLaunch, undefined);
+        yield* Fiber.join(launch);
+      }).pipe(Effect.provide(f.layer), Effect.scoped);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect.each(["key", "conf-missing", "pin-missing", "mtime"] as const)(
+    "managed retry drops its old snapshot after %s changes",
+    (change) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.installPin();
+        const fs = yield* FileSystem.FileSystem;
+        const invalidated = yield* Deferred.make<void>();
+        const tracer = Tracer.make({
+          span(options) {
+            const span = new Tracer.NativeSpan(options);
+            const end = span.end.bind(span);
+            span.end = (at, exit) => {
+              end(at, exit);
+              if (options.name === "ssh/tunnel.publishFailure")
+                Deferred.doneUnsafe(invalidated, Effect.void);
+            };
+            return span;
+          },
+        });
+        yield* Effect.gen(function* () {
+          const desktop = yield* SshTunnel.SshEnvironmentManager;
+          yield* desktop.ensureEnvironment(uploadTarget);
+          assert.equal((yield* desktop.status(uploadTarget)).status?.state, "update_waiting");
+          // An independent server manager forgets while Desktop keeps its pending retry.
+          yield* Effect.gen(function* () {
+            const server = yield* SshTunnel.SshEnvironmentManager;
+            yield* server.forgetEnvironment(uploadTarget, { stopRuntime: "no" });
+          }).pipe(Effect.provide(SshTunnel.SshEnvironmentManager.layer()), Effect.scoped);
+          const beforeRetry = f.sshCalls.length;
+          if (change === "key") yield* f.installPin("AAAB");
+          else if (change === "conf-missing") yield* fs.remove(f.confPath);
+          else if (change === "pin-missing") yield* fs.remove(f.pinPath);
+          else yield* fs.utimes(f.confPath, 0, 0);
+          f.setMode("ready");
+          yield* TestClock.adjust("10 minutes");
+          yield* Deferred.await(invalidated);
+          const result = yield* desktop.status(uploadTarget);
+          assert.equal(result.status?.state, change === "key" ? "failed" : "untrusted");
+          assert.equal(
+            result.status?.failure?.reason,
+            change === "key" ? "host_key_changed" : undefined,
+          );
+          assert.equal(f.count.launches, 1);
+          assert.equal(f.count.forwards, 0);
+          assert.equal(f.count.stops, 0);
+          assert.equal(f.sshCalls.length, beforeRetry);
+        }).pipe(
+          Effect.provide(f.layer),
+          Effect.provideService(Tracer.Tracer, tracer),
+          Effect.scoped,
+        );
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it.effect(
     "manual refresh runs after the first connection decision and bypasses pending-forward reuse",
     () =>
@@ -394,7 +593,11 @@ describe("SSH pending replacement reconciliation", () => {
               ? manager.disconnectEnvironment(uploadTarget)
               : manager.ensureEnvironment(uploadTarget);
           }).pipe(Effect.provideService(Tracer.Tracer, tracer), Effect.forkChild);
-          if (action === "stale") yield* TestClock.adjust("2 seconds");
+          if (action === "stale") {
+            // ssh -G and managed-pin checks now await real file I/O before the probe starts.
+            yield* Deferred.await(f.staleProbeEntered);
+            yield* TestClock.adjust("2 seconds");
+          }
           assert.isTrue(Exit.isFailure(yield* Fiber.await(closing)));
           assert.isTrue(interrupted);
           assert.equal(f.count.kills, 1);
@@ -436,6 +639,7 @@ describe("SSH pending replacement reconciliation", () => {
         const reconnect = yield* Effect.forkChild(
           Effect.result(manager.ensureEnvironment(uploadTarget)),
         );
+        yield* Deferred.await(f.staleProbeEntered);
         yield* TestClock.adjust("2 seconds");
         assert.isTrue(Result.isFailure(yield* Fiber.join(reconnect)));
         yield* manager.disconnectEnvironment(uploadTarget);

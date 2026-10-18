@@ -42,6 +42,11 @@ const withDispatch = <A, E>(
         Effect.sync(() => void events.push(`ensureEnvironment:${target.alias}`)).pipe(
           Effect.andThen(Effect.fail(sshFailure)),
         ),
+      readyEnvironment: () => Effect.die("Unexpected ready environment"),
+      beginSetupOperation: () => Effect.die("Unexpected setup operation"),
+      publishSetupOutcome: () => Effect.succeed(true),
+      publishProviderDiagnosis: () => Effect.die("Unexpected provider publication"),
+      forgetEnvironment: () => Effect.die("Unexpected forget"),
       disconnectEnvironment: (target) =>
         Effect.sync(() => void events.push(`disconnect:${target.alias}`)),
       revalidateTunnels: () => Effect.void,

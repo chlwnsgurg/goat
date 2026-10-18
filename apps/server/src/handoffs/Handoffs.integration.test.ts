@@ -1,5 +1,10 @@
+import * as Context from "effect/Context";
+import * as FileSystem from "effect/FileSystem";
+import * as ServerConfig from "../config.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import { AuthSessionId, type AuthClientSession } from "@goat/contracts";
+import * as Environment from "../environment/ServerEnvironment.ts";
+import { transitionHandoff } from "../orchestration-v2/handoffState.ts";
 import * as Handoffs from "./Handoffs.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as SecretStore from "../auth/ServerSecretStore.ts";
@@ -494,4 +499,176 @@ it.effect("declined and failed outcomes are durable and terminal", () =>
       );
     }),
   ),
+);
+
+it.effect(
+  "SSH approvals retain their encrypted approver and progress binding across ack and restart",
+  () =>
+    withHarness(({ orchestrator, worker }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-handoff-store-" });
+        const store = Context.get(
+          yield* Layer.build(
+            SecretStore.layer.pipe(
+              Layer.provide(ServerConfig.layerTest(home, { prefix: "ssh-handoff-store-" })),
+            ),
+          ),
+          SecretStore.ServerSecretStore,
+        );
+        const now = yield* DateTime.now;
+        const sessionId = AuthSessionId.make("ssh-reviewer");
+        let permissions: AuthClientSession["scopes"] = [
+          "orchestration:operate",
+          "orchestration:read",
+          "environment:maintain",
+        ];
+        const domainDependencies = Layer.mergeAll(
+          Layer.mock(Environment.ServerEnvironment)({
+            getEnvironmentId: Effect.succeed(EnvironmentId.make("ssh-origin")),
+          }),
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            dispatch: orchestrator.dispatch,
+            getThreadRecords: orchestrator.getThreadRecords,
+          }),
+          Layer.mock(SessionStore.SessionStore)({
+            cookieName: "test",
+            legacyCookieName: undefined,
+            listActive: () =>
+              Effect.succeed([
+                {
+                  sessionId,
+                  subject: "test",
+                  method: "browser-session-cookie",
+                  scopes: permissions,
+                  permissions,
+                  client: { label: "Review tablet", deviceType: "unknown" },
+                  issuedAt: now,
+                  expiresAt: DateTime.add(now, { days: 2 }),
+                  lastConnectedAt: now,
+                  connected: true,
+                  current: true,
+                },
+              ]),
+          }),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.succeed(SecretStore.ServerSecretStore, store),
+        );
+        const run = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+        const environmentId = EnvironmentId.make("ssh-origin");
+        const binding = {
+          host: "box",
+          aliasGeneration: 3,
+          operationId: "setup-3",
+          environmentId,
+          threadId,
+        };
+        yield* Effect.gen(function* () {
+          const service = yield* Handoffs.Handoffs;
+          const summary = yield* service.create({
+            kind: "approval",
+            title: "Update box?",
+            reason: "Replaces the runtime",
+            requestedBy: { threadId, providerInstanceId: instanceId, path: "ssh.runtime_update" },
+            target: { environmentId, path: "ssh.runtime_update" },
+            runId: run.id,
+            nodeId: run.rootNodeId!,
+            human: { location: "box", fingerprint: "SHA256:private-review" },
+            args: { version: 1, host: "box", secretArgument: "private-args" },
+            expiresAt: DateTime.add(now, { hours: 24 }),
+            sshProgress: binding,
+          });
+          yield* worker.drain();
+          const input = { threadId, handoffId: summary.handoffId };
+          assert.isNotNull((yield* service.read(input)).expiresAt);
+          permissions = ["orchestration:operate"];
+          assert.equal((yield* service.open(input, sessionId).pipe(Effect.result))._tag, "Failure");
+          permissions = ["environment:maintain"];
+          assert.equal((yield* service.open(input, sessionId).pipe(Effect.result))._tag, "Failure");
+          permissions = ["orchestration:operate", "orchestration:read", "environment:maintain"];
+          assert.equal(
+            (yield* service.open(input, sessionId)).human?.fingerprint,
+            "SHA256:private-review",
+          );
+          yield* service.respond({ ...input, action: "completed" }, sessionId);
+          const continuations = yield* service.completedSshContinuations;
+          assert.lengthOf(continuations, 1);
+          assert.equal(continuations[0]?.approvedBySessionId, sessionId);
+          assert.deepEqual(continuations[0]?.sshProgress, binding);
+          assert.deepEqual(yield* service.readSshProgressBinding(input, sessionId), binding);
+          yield* service.finishSshContinuation(input);
+          assert.lengthOf(yield* service.completedSshContinuations, 0);
+          assert.deepEqual(yield* service.readSshProgressBinding(input, sessionId), binding);
+          assert.isNull((yield* service.open(input, sessionId)).human);
+          assert.isDefined(store.directory);
+          for (const file of yield* fs.readDirectory(store.directory!)) {
+            const value = yield* fs.readFile(`${store.directory!}/${file}`);
+            assert.notInclude(new TextDecoder().decode(value), "private-review");
+            assert.notInclude(new TextDecoder().decode(value), "private-args");
+          }
+          yield* Effect.gen(function* () {
+            const restarted = yield* Handoffs.Handoffs;
+            assert.deepEqual(yield* restarted.readSshProgressBinding(input, sessionId), binding);
+            assert.lengthOf(yield* restarted.completedSshContinuations, 0);
+          }).pipe(Effect.provide(Handoffs.layer.pipe(Layer.provide(domainDependencies))));
+          const expired = yield* service.create({
+            kind: "approval",
+            title: "Update box?",
+            reason: "Update",
+            requestedBy: { threadId, providerInstanceId: instanceId, path: "ssh.runtime_update" },
+            target: { environmentId, path: "ssh.runtime_update" },
+            runId: run.id,
+            nodeId: run.rootNodeId!,
+            human: { location: "box" },
+            args: { version: 1, request: "expires" },
+            expiresAt: DateTime.add(now, { minutes: 1 }),
+            sshProgress: binding,
+          });
+          yield* TestClock.adjust("1 minute");
+          yield* service.sweep;
+          const outcomes = yield* service.resolvedSshOutcomes;
+          assert.lengthOf(outcomes, 1);
+          assert.equal(outcomes[0]?.handoff.state, "expired");
+          assert.deepEqual(outcomes[0]?.sshProgress, binding);
+          assert.notProperty(outcomes[0], "args");
+          yield* service.finishSshContinuation({ threadId, handoffId: expired.handoffId });
+          assert.lengthOf(yield* service.resolvedSshOutcomes, 0);
+          assert.lengthOf(yield* service.completedSshContinuations, 0);
+          yield* TestClock.adjust("24 hours");
+          assert.isNull(yield* service.readSshProgressBinding(input, sessionId));
+        }).pipe(Effect.provide(Handoffs.layer.pipe(Layer.provide(domainDependencies))));
+      }),
+    ),
+);
+
+it.effect(
+  "an SSH approval can complete after its requesting run ends, while ordinary approvals expire",
+  () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const record: Handoff = {
+        handoffId: TurnItemId.make("ssh:after-run"),
+        kind: "approval",
+        title: "Update box?",
+        reason: "Replace the runtime",
+        requestedBy: { threadId, providerInstanceId: instanceId, path: "ssh.runtime_update" },
+        target: { environmentId: EnvironmentId.make("origin"), path: "ssh.runtime_update" },
+        dedupeKey: "ssh",
+        state: "pending",
+        expiresAt: DateTime.add(now, { hours: 24 }),
+        createdAt: now,
+        actor: { type: "agent", threadId },
+      };
+      const actor = { type: "client" as const, label: "Reviewer" };
+      const ssh = yield* transitionHandoff(record, "completed", actor, now, true);
+      assert.equal(ssh.state, "completed");
+      const ordinary = yield* transitionHandoff(
+        { ...record, target: { ...record.target, path: "provider.verify" } },
+        "completed",
+        actor,
+        now,
+        true,
+      );
+      assert.equal(ordinary.state, "expired");
+    }),
 );
