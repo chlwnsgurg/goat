@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   connectPairing: vi.fn(),
+  connectSshEnvironment: vi.fn(),
   sshHosts: null as unknown,
 }));
 
@@ -21,7 +22,7 @@ vi.mock("../../state/environments", () => ({
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: (command: unknown) => command }));
 vi.mock("../../connection/onboarding", () => ({
   connectPairing: state.connectPairing,
-  connectSshEnvironment: vi.fn(),
+  connectSshEnvironment: state.connectSshEnvironment,
 }));
 vi.mock("../../connection/catalog", () => ({
   environmentCatalog: { remove: vi.fn(), register: vi.fn(), setEnabled: vi.fn() },
@@ -69,6 +70,7 @@ let root: Root;
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   state.connectPairing.mockReset();
+  state.connectSshEnvironment.mockReset();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -163,6 +165,7 @@ it("keeps the dialog open with the error when pairing fails", async () => {
 });
 
 it("keeps thread jump chords inside the SSH host suggestions", async () => {
+  state.connectSshEnvironment.mockResolvedValue({ _tag: "Success", value: undefined });
   const resolveSshHost = vi.fn(async () => ({
     alias: "devbox",
     hostname: "devbox.local",
@@ -205,4 +208,7 @@ it("keeps thread jump chords inside the SSH host suggestions", async () => {
   });
   await flush();
   expect(resolveSshHost).toHaveBeenCalledWith("devbox");
+  expect(state.connectSshEnvironment).toHaveBeenCalledWith(
+    expect.objectContaining({ target: expect.objectContaining({ alias: "devbox" }) }),
+  );
 });
