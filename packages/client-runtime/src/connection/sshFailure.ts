@@ -4,18 +4,24 @@ import {
   ConnectionTransientError,
 } from "./model.ts";
 
-// Mirrors isSshAuthFailure in @goat/ssh/auth, which is Node-only.
+// Mirrors isSshAuthFailure in @goat/ssh/auth, which is Node-only, plus the
+// sentence @goat/ssh/tunnel writes when a key-only (agent) login is rejected.
 const AUTH_FAILURE_RE =
-  /permission denied \((?:publickey|password|keyboard-interactive|hostbased|gssapi-with-mic)[^)]*\)|authentication failed|too many authentication failures/iu;
+  /permission denied \((?:publickey|password|keyboard-interactive|hostbased|gssapi-with-mic)[^)]*\)|authentication failed|too many authentication failures|Key-based login failed for /iu;
 const HOST_KEY_FAILURE_RE =
-  /REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|host key for \S+ has changed/iu;
-// `describeSshConnectionFailure` in @goat/ssh/command: ssh never reached the host.
-const UNREACHABLE_RE = /\bCannot reach .+ over SSH \(/u;
+  /REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|host key for \S+ has changed|Managed SSH host key changed/iu;
+// ssh never reached the host. `describeSshConnectionFailure` in @goat/ssh/command
+// rewrites these as "Cannot reach …"; the tunnel step passes ssh's own stderr.
+const UNREACHABLE_RE =
+  /\bCannot reach .+ over SSH \(|ssh: connect to host \S+ port \d+: |ssh: Could not resolve hostname |Connection timed out during banner exchange|Connection to \S+ port \d+ timed out/u;
+// The desktop's own cancellation sentences: a dismissed password prompt, a
+// closed window, or an ensure superseded by a newer one.
+const CANCELLED_RE = /^SSH (?:authentication|connection|setup)(?: was)? cancel/iu;
 // The remote runtime refused this client and will keep refusing until someone
 // updates this app or stops the remote server (see the launch script in
 // @goat/ssh/tunnel). Retrying on a timer cannot fix it.
 const RUNTIME_REFUSAL_RE =
-  /runs a newer GOAT|Remote runtime is newer than this app|is incompatible; it was left running|cannot be ordered against this app|cannot drain for a replacement|can only be replaced by a GOAT release/u;
+  /runs a newer GOAT|Remote runtime is newer than this app|is incompatible; it was left running|cannot be ordered against this app|cannot drain for a replacement|can only be replaced by a GOAT release|Cannot verify remote version ordering/u;
 
 function cleanMessage(cause: unknown): string {
   const raw = cause instanceof Error ? cause.message : String(cause);
@@ -39,7 +45,7 @@ function cleanMessage(cause: unknown): string {
  */
 export function sshPreparationFailure(cause: unknown): ConnectionAttemptError {
   const message = cleanMessage(cause);
-  if (message.toLowerCase().includes("cancel")) {
+  if (CANCELLED_RE.test(message)) {
     return new ConnectionBlockedError({ reason: "authentication", detail: message });
   }
   // The tunnel opened but the server answered too late; say so instead of

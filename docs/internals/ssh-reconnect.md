@@ -59,11 +59,13 @@ classifier's tests use the real strings.
 
 - **Unreachable.** ssh exited before it reached the host: connect timeout, no
   route, refused, could not resolve, or a banner timeout. `describeSshConnectionFailure`
-  rewrites these as "Cannot reach <alias> over SSH (...)". This is the normal
+  rewrites these as "Cannot reach <alias> over SSH (...)"; the tunnel step
+  passes ssh's own stderr, which the classifier also reads. This is the normal
   state of a closed laptop or a dropped VPN, so it is `host-unreachable`.
-- **Login rejected.** `Permission denied (publickey…)` and similar are
-  `authentication`. A locked ssh-agent after wake produces the same message,
-  which is why blocked states still retry on wake and network change.
+- **Login rejected.** `Permission denied (publickey…)`, a rejected key-only
+  login, and a cancelled password prompt are `authentication`. A locked
+  ssh-agent after wake produces the same message, which is why blocked states
+  still retry on wake and network change.
 - **Host key.** A changed or unverifiable host key is `configuration`. The fix
   is to forget the host and review the new fingerprint; GOAT never replaces a
   pinned key automatically.
@@ -106,7 +108,9 @@ reset the ladder to its first rung:
 - **Retry now** or **Reconnect**.
 
 A connected session receiving one of these is probed, not replaced, so a
-healthy tunnel survives a spurious offline report.
+healthy tunnel survives a spurious offline report. A long sleep is the
+exception: it replaces the session at once, because the OS may have killed the
+socket without reporting it.
 
 ## What each surface shows
 
