@@ -441,6 +441,9 @@ export const layerExecutor: Layer.Layer<
                     threadId: effect.threadId,
                     runId: effect.request.runId,
                     willRetry,
+                    workspaceLeaseDeadline: DateTime.add(DateTime.makeUnsafe(effect.createdAt), {
+                      milliseconds: WORKSPACE_LEASE_WAIT_MS,
+                    }),
                   }),
                 ),
                 Effect.mapError(
@@ -826,7 +829,8 @@ export const layerWithOptions = (
           // durable schedule and refund only that claim, preserving earlier
           // real failures and leaving all other effect retry policies alone.
           const busy =
-            effect.request.type === "provider-turn.start"
+            effect.request.type === "provider-turn.start" ||
+            effect.request.type === "provider-turn.restart"
               ? workspaceLeaseBusy(exit.cause)
               : undefined;
           if (busy !== undefined) {

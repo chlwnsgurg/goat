@@ -10,6 +10,7 @@ import {
   NodeId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSetupError,
@@ -679,114 +680,142 @@ function makeLocalCommandHarness(input: {
 }
 
 /** Real SQL scheduling and executor; only provider I/O and the projection fixture are substituted. */
-const leaseWorker = Effect.gen(function* () {
-  const worktreePath = "/tmp/contended-provider-turn-start";
-  const harness = makeLocalCommandHarness({
-    text: "Continue",
-    worktreePath,
-    failReadsAfterRunning: true,
-  });
-  const held = yield* Deferred.make<void>();
-  const release = yield* Deferred.make<void>();
-  const holder = yield* WorkspaceLease.withWorkspaceLease(
-    worktreePath,
-    Deferred.succeed(held, undefined).pipe(Effect.andThen(Deferred.await(release))),
-  ).pipe(Effect.forkChild);
-  yield* Deferred.await(held);
-  const outboxLayer = EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory));
-  const cleanupTerminals = vi.fn(() => Effect.void);
-  const executorLayer = EffectWorker.layerExecutor.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        harness.layer,
-        Layer.succeed(ResourceCleanup.ResourceCleanupService, {
-          cleanupTerminals,
-          cleanupPreviews: () => Effect.void,
-          cleanupAttachments: () => Effect.void,
-        }),
-        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
-        Layer.mock(CheckpointRollback.CheckpointRollbackServiceV2)({}),
-        Layer.mock(RunFinalization.RunFinalizationService)({}),
-        Layer.mock(ProviderTurnControl.ProviderTurnControlServiceV2)({}),
-        Layer.mock(RuntimeRequest.RuntimeRequestServiceV2)({}),
-        Layer.mock(ThreadTitleRegeneration.ThreadTitleRegenerationService)({}),
-        Layer.mock(ThreadManagement.ThreadManagementService)({}),
-        ServerSettings.layerTest(),
+const leaseWorker = (
+  type: "provider-turn.start" | "provider-turn.restart" = "provider-turn.start",
+) =>
+  Effect.gen(function* () {
+    const worktreePath = "/tmp/contended-provider-turn-start";
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      worktreePath,
+      failReadsAfterRunning: true,
+    });
+    const held = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const holder = yield* WorkspaceLease.withWorkspaceLease(
+      worktreePath,
+      Deferred.succeed(held, undefined).pipe(Effect.andThen(Deferred.await(release))),
+    ).pipe(Effect.forkChild);
+    yield* Deferred.await(held);
+    const outboxLayer = EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory));
+    const cleanupTerminals = vi.fn(() => Effect.void);
+    const interruptAndAwaitTerminal = vi.fn(() => Effect.void);
+    const detach = vi.fn(() => Effect.void);
+    const executorLayer = EffectWorker.layerExecutor.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          harness.layer,
+          Layer.succeed(ResourceCleanup.ResourceCleanupService, {
+            cleanupTerminals,
+            cleanupPreviews: () => Effect.void,
+            cleanupAttachments: () => Effect.void,
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ detach }),
+          Layer.mock(CheckpointRollback.CheckpointRollbackServiceV2)({}),
+          Layer.mock(RunFinalization.RunFinalizationService)({}),
+          Layer.mock(ProviderTurnControl.ProviderTurnControlServiceV2)({
+            interruptAndAwaitTerminal,
+          }),
+          Layer.mock(RuntimeRequest.RuntimeRequestServiceV2)({}),
+          Layer.mock(ThreadTitleRegeneration.ThreadTitleRegenerationService)({}),
+          Layer.mock(ThreadManagement.ThreadManagementService)({}),
+          ServerSettings.layerTest(),
+        ),
       ),
-    ),
-  );
-  const workerLayer = EffectWorker.layerWithOptions({ workerId: "lease-test" }).pipe(
-    Layer.provide(executorLayer),
-    Layer.provideMerge(outboxLayer),
-  );
-  const services = yield* Layer.build(workerLayer);
-  const outbox = Context.get(services, EffectOutbox.EffectOutboxV2);
-  const worker = Context.get(services, EffectWorker.OrchestrationEffectWorkerV2);
-  const effectId = "effect:contended-start";
-  yield* outbox.enqueue([
-    {
-      id: effectId,
-      commandId: CommandId.make("command:contended-start"),
-      threadId: harness.threadId,
-      request: { type: "provider-turn.start", runId: harness.runId },
-    },
-  ]);
-  const row = outbox.get(effectId).pipe(Effect.map(Option.getOrThrow));
-  return {
-    ...harness,
-    outbox,
-    worker,
-    effectId,
-    row,
-    cleanupTerminals,
-    release: Deferred.succeed(release, undefined).pipe(Effect.andThen(Fiber.join(holder))),
-  };
-});
+    );
+    const workerLayer = EffectWorker.layerWithOptions({ workerId: "lease-test" }).pipe(
+      Layer.provide(executorLayer),
+      Layer.provideMerge(outboxLayer),
+    );
+    const services = yield* Layer.build(workerLayer);
+    const outbox = Context.get(services, EffectOutbox.EffectOutboxV2);
+    const worker = Context.get(services, EffectWorker.OrchestrationEffectWorkerV2);
+    const effectId = "effect:contended-start";
+    yield* outbox.enqueue([
+      {
+        id: effectId,
+        commandId: CommandId.make("command:contended-start"),
+        threadId: harness.threadId,
+        request:
+          type === "provider-turn.start"
+            ? { type, runId: harness.runId }
+            : {
+                type,
+                runId: harness.runId,
+                providerSessionId: ProviderSessionId.make("old-provider-session"),
+                providerThreadId: ProviderThreadId.make("old-provider-thread"),
+                providerTurnId: ProviderTurnId.make("old-provider-turn"),
+                interruptedAttemptId: RunAttemptId.make("old-attempt"),
+                sessionTransition: { type: "detach" },
+              },
+      },
+    ]);
+    const row = outbox.get(effectId).pipe(Effect.map(Option.getOrThrow));
+    return {
+      ...harness,
+      outbox,
+      worker,
+      effectId,
+      row,
+      cleanupTerminals,
+      interruptAndAwaitTerminal,
+      detach,
+      release: Deferred.succeed(release, undefined).pipe(Effect.andThen(Fiber.join(holder))),
+    };
+  });
 
-effectIt.effect(
-  "reclaims a contended start after five minutes while freeing the only worker slot",
-  () =>
-    Effect.gen(function* () {
-      const h = yield* leaseWorker;
-      expect(yield* h.worker.runOnce).toBe(true);
-      expect(yield* h.row).toMatchObject({ status: "pending", attemptCount: 0 });
-      expect(yield* h.worker.runOnce).toBe(false);
-      yield* h.outbox.enqueue([
-        {
-          id: "effect:unrelated",
-          commandId: CommandId.make("command:unrelated"),
-          threadId: ThreadId.make("thread:unrelated"),
-          request: { type: "terminal.cleanup" },
-        },
-      ]);
-      expect(yield* h.worker.runOnce).toBe(true);
-      expect(Option.getOrThrow(yield* h.outbox.get("effect:unrelated")).status).toBe("succeeded");
-      expect(h.cleanupTerminals).toHaveBeenCalledExactlyOnceWith(ThreadId.make("thread:unrelated"));
-      // Explicit worker reclaims, no sleeps or manual start calls. Each one is
-      // beyond the old 1.5-second failure budget, including the 5-minute git limit.
-      for (let n = 0; n < 6; n++) {
-        yield* TestClock.adjust("1 minute");
+for (const type of ["provider-turn.start", "provider-turn.restart"] as const) {
+  effectIt.effect(
+    `reclaims a contended ${type} after five minutes while freeing the only worker slot`,
+    () =>
+      Effect.gen(function* () {
+        const h = yield* leaseWorker(type);
         expect(yield* h.worker.runOnce).toBe(true);
         expect(yield* h.row).toMatchObject({ status: "pending", attemptCount: 0 });
-        const shell = ProjectionStore.threadShellFromProjection(h.projection());
-        expect(shell.activeRunId).toBe(h.runId);
-        expect(shell.status).toBe("starting");
-        expect(worktreeThreadBusy(shell, DateTime.toEpochMillis(yield* DateTime.now))).toBe(true);
-      }
-      expect(h.open).not.toHaveBeenCalled();
-      expect(h.writeIfRunCurrent).not.toHaveBeenCalled();
-      yield* h.release;
-      yield* TestClock.adjust("1 second");
-      expect(yield* h.worker.runOnce).toBe(true);
-      expect(yield* h.row).toMatchObject({ status: "succeeded", attemptCount: 1 });
-      expect(h.projection().runs.at(-1)?.status).toBe("running");
-      expect(h.startRootRun).toHaveBeenCalledOnce();
-    }).pipe(Effect.scoped),
-);
+        expect(yield* h.worker.runOnce).toBe(false);
+        yield* h.outbox.enqueue([
+          {
+            id: "effect:unrelated",
+            commandId: CommandId.make("command:unrelated"),
+            threadId: ThreadId.make("thread:unrelated"),
+            request: { type: "terminal.cleanup" },
+          },
+        ]);
+        expect(yield* h.worker.runOnce).toBe(true);
+        expect(Option.getOrThrow(yield* h.outbox.get("effect:unrelated")).status).toBe("succeeded");
+        expect(h.cleanupTerminals).toHaveBeenCalledExactlyOnceWith(
+          ThreadId.make("thread:unrelated"),
+        );
+        // Explicit worker reclaims, no sleeps or manual start calls. Each one is
+        // beyond the old 1.5-second failure budget, including the 5-minute git limit.
+        for (let n = 0; n < 6; n++) {
+          yield* TestClock.adjust("1 minute");
+          expect(yield* h.worker.runOnce).toBe(true);
+          expect(yield* h.row).toMatchObject({ status: "pending", attemptCount: 0 });
+          const shell = ProjectionStore.threadShellFromProjection(h.projection());
+          expect(shell.activeRunId).toBe(h.runId);
+          expect(shell.status).toBe("starting");
+          expect(worktreeThreadBusy(shell, DateTime.toEpochMillis(yield* DateTime.now))).toBe(true);
+        }
+        expect(h.open).not.toHaveBeenCalled();
+        expect(h.writeIfRunCurrent).not.toHaveBeenCalled();
+        yield* h.release;
+        yield* TestClock.adjust("1 second");
+        expect(yield* h.worker.runOnce).toBe(true);
+        expect(yield* h.row).toMatchObject({ status: "succeeded", attemptCount: 1 });
+        expect(h.projection().runs.at(-1)?.status).toBe("running");
+        expect(h.startRootRun).toHaveBeenCalledOnce();
+        if (type === "provider-turn.restart") {
+          expect(h.interruptAndAwaitTerminal).toHaveBeenCalledTimes(8);
+          expect(h.detach).toHaveBeenCalledTimes(8);
+        }
+      }).pipe(Effect.scoped),
+  );
+}
 
 effectIt.effect("preserves earlier failures and defers even the final normal attempt", () =>
   Effect.gen(function* () {
-    const h = yield* leaseWorker;
+    const h = yield* leaseWorker();
     // Seed four normal failures through the real claim/retry API. Deferral
     // must refund its own claim, never reset these previous attempts.
     for (let n = 0; n < 4; n++) {
@@ -811,7 +840,7 @@ effectIt.effect("preserves earlier failures and defers even the final normal att
 
 effectIt.effect("fails a still-contended start only at its ten-minute deadline", () =>
   Effect.gen(function* () {
-    const h = yield* leaseWorker;
+    const h = yield* leaseWorker();
     yield* h.worker.runOnce;
     yield* TestClock.adjust("599 seconds");
     yield* h.worker.runOnce;

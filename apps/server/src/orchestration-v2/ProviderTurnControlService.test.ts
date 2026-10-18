@@ -165,6 +165,7 @@ it.effect(
         makeProjection({ now, threadId, providerThread, providerTurnId, attemptId }),
       );
       const interruptedThread = yield* Ref.make<OrchestrationV2ProviderThread | null>(null);
+      const interruptCount = yield* Ref.make(0);
       const providerSession = {
         id: oldSessionId,
         driver,
@@ -190,6 +191,7 @@ it.effect(
         interruptTurn: ({ providerThread: target }) =>
           Effect.all(
             [
+              Ref.update(interruptCount, (count) => count + 1),
               Ref.set(interruptedThread, target),
               Ref.update(projection, (current) => ({
                 ...current,
@@ -325,8 +327,18 @@ it.effect(
           providerTurnId,
           interruptedAttemptId: attemptId,
         });
+        // A contended restart reclaims the same effect after the old turn ended.
+        yield* control.interruptAndAwaitTerminal({
+          threadId,
+          providerSessionId: oldSessionId,
+          replacementProviderSessionId: replacementSessionId,
+          providerThreadId,
+          providerTurnId,
+          interruptedAttemptId: attemptId,
+        });
       }).pipe(Effect.provide(layerControl));
 
+      assert.equal(yield* Ref.get(interruptCount), 1);
       const interrupted = yield* Ref.get(interruptedThread);
       assert.isNotNull(interrupted);
       assert.equal(interrupted?.providerSessionId, oldSessionId);
