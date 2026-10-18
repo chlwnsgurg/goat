@@ -301,6 +301,14 @@ export type MemoryPayloadSelection = {
   readonly revisionIds?: ReadonlyArray<M.MemoryRevisionId>;
   readonly when?: (revision: M.MemoryRevision) => boolean;
 };
+/**
+ * Admission needs at most the claimed conflict and the reverted resolution. Omit this
+ * selection for full history; `{}` skips both histories without reading their rows.
+ */
+export type MemoryHistorySelection = {
+  readonly conflictId?: M.MemoryConflictId;
+  readonly resolutionId?: M.MemoryResolutionId;
+};
 /** A published boundary is not proof that an arbitrary unknown UUID was compacted. */
 export type MemoryParentState =
   | {
@@ -1385,6 +1393,7 @@ export class MemoryStore extends Context.Service<
       space: M.MemorySpaceId,
       id: M.MemoryId,
       payloads?: MemoryPayloadSelection,
+      history?: MemoryHistorySelection,
     ) => Effect.Effect<MemoryAggregate, MemoryStorageError>;
     readonly apply: (
       decision: MemoryDecision,
@@ -3149,6 +3158,7 @@ const make = Effect.gen(function* () {
     space: M.MemorySpaceId,
     id: M.MemoryId,
     payloads?: MemoryPayloadSelection,
+    history?: MemoryHistorySelection,
   ) {
     const item = yield* readItem(space, id);
     const visible = item?.item.status !== "forgotten";
@@ -3195,15 +3205,19 @@ const make = Effect.gen(function* () {
           }),
         )
       : undefined;
-    const conflictRows = yield* stored(
-      "conflicts",
-      sql<{
-        conflict_id: string;
-        heads_json: string;
-        status: string;
-        failure_code: string | null;
-      }>`SELECT * FROM memory_conflicts WHERE space=${space} AND memory_id=${id}`,
-    );
+    const conflictRows =
+      history !== undefined && history.conflictId === undefined
+        ? []
+        : yield* stored(
+            "conflicts",
+            sql<{
+              conflict_id: string;
+              heads_json: string;
+              status: string;
+              failure_code: string | null;
+            }>`SELECT * FROM memory_conflicts WHERE space=${space} AND memory_id=${id}
+        ${history === undefined ? sql`` : sql`AND conflict_id=${history.conflictId}`}`,
+          );
     const conflicts = yield* stored(
       "conflict-codec",
       Effect.forEach(conflictRows, (row) =>
@@ -3222,12 +3236,16 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
-    const resolutionRows = yield* stored(
-      "resolutions",
-      sql<{
-        resolution_json: string;
-      }>`SELECT resolution_json FROM memory_resolutions WHERE space=${space} AND memory_id=${id}`,
-    );
+    const resolutionRows =
+      history !== undefined && history.resolutionId === undefined
+        ? []
+        : yield* stored(
+            "resolutions",
+            sql<{
+              resolution_json: string;
+            }>`SELECT resolution_json FROM memory_resolutions WHERE space=${space} AND memory_id=${id}
+        ${history === undefined ? sql`` : sql`AND resolution_id=${history.resolutionId}`}`,
+          );
     const resolutions = yield* stored(
       "resolution-codec",
       Effect.forEach(resolutionRows, (row) => resolutionCodec.decode(row.resolution_json, strict)),
@@ -3796,8 +3814,12 @@ const make = Effect.gen(function* () {
             accepted && !tombstones.length && op.kind !== "forget"
               ? yield* reservationForRevisions(
                   op,
-                  (yield* loadAggregate(op.memorySpaceId, op.memoryId, { when: hasSourceEvidence }))
-                    .revisions,
+                  (yield* loadAggregate(
+                    op.memorySpaceId,
+                    op.memoryId,
+                    { when: hasSourceEvidence },
+                    {},
+                  )).revisions,
                   false,
                 )
               : { bytes: M.MEMORY_PAYLOAD_MAX_UTF8_BYTES, keys: 0 };
@@ -6735,9 +6757,14 @@ const make = Effect.gen(function* () {
     op: M.MemoryOperation,
   ) {
     // Only source-attributed revisions contribute payload evidence to the reservation.
-    const current = yield* loadAggregate(op.memorySpaceId, op.memoryId, {
-      when: hasSourceEvidence,
-    });
+    const current = yield* loadAggregate(
+      op.memorySpaceId,
+      op.memoryId,
+      {
+        when: hasSourceEvidence,
+      },
+      {},
+    );
     return yield* reservationForRevisions(op, [
       ...current.revisions,
       ...(op.kind === "forget" ? [] : [{ revision: op.revision, payload: op.payload }]),
@@ -7669,7 +7696,7 @@ const make = Effect.gen(function* () {
       // Check every matching identity's delete fence before choosing a live exact-copy target.
       for (const row of rows) {
         const memoryId = M.MemoryId.make(row.memory_id);
-        const current = yield* loadAggregate(input.memorySpaceId, memoryId);
+        const current = yield* loadAggregate(input.memorySpaceId, memoryId, { heads: true }, {});
         if (current.tombstone)
           return {
             kind:
@@ -8063,7 +8090,14 @@ const make = Effect.gen(function* () {
             return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
           return;
         }
-        const current = yield* loadAggregate(op.memorySpaceId, op.memoryId);
+        const current = yield* loadAggregate(
+          op.memorySpaceId,
+          op.memoryId,
+          {},
+          {
+            resolutionId: op.revertsResolutionId,
+          },
+        );
         if (current.tombstone || current.pendingForget)
           return yield* new MemoryStoreConflict({ code: "forgotten" });
         const resolution = current.resolutions.find(
@@ -8420,7 +8454,12 @@ const make = Effect.gen(function* () {
     );
     const row = rows[0];
     if (!row || row.memory_id === null) return null;
-    const current = yield* loadAggregate(input.memorySpaceId, M.MemoryId.make(row.memory_id));
+    const current = yield* loadAggregate(
+      input.memorySpaceId,
+      M.MemoryId.make(row.memory_id),
+      {},
+      {},
+    );
     if (
       !sameHeadSet(current.heads, input.conflictHeads) ||
       current.item?.localAvailability.reasons.some((r) =>
@@ -11148,7 +11187,7 @@ const make = Effect.gen(function* () {
         return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
       return old;
     }
-    const aggregate = yield* loadAggregate(op.memorySpaceId, op.memoryId);
+    const aggregate = yield* loadAggregate(op.memorySpaceId, op.memoryId, {}, {});
     const reservedDelete =
       op.kind === "forget" &&
       aggregate.identity !== undefined &&
@@ -11225,8 +11264,8 @@ const make = Effect.gen(function* () {
       revertsResolutionId: op.kind === "revert" ? op.revertsResolutionId : null,
       attemptId:
         op.kind === "resolve"
-          ? ((yield* loadAggregate(op.memorySpaceId, op.memoryId)).fence?.activeLease?.attemptId ??
-            op.operationId)
+          ? ((yield* loadAggregate(op.memorySpaceId, op.memoryId, {}, {})).fence?.activeLease
+              ?.attemptId ?? op.operationId)
           : null,
       fencingToken: op.kind === "resolve" ? op.fencingToken : null,
       reportGuard:
@@ -11316,7 +11355,12 @@ const make = Effect.gen(function* () {
     const action = input.action;
     const space = member.memorySpaceId;
     const memoryId = action.kind === "invalidate" ? action.memoryId : action.request.memoryId;
-    const current = yield* loadAggregate(space, memoryId);
+    const current = yield* loadAggregate(
+      space,
+      memoryId,
+      {},
+      action.kind === "claim" ? { conflictId: action.request.conflictId } : {},
+    );
     const rows = yield* stored(
       "hub-lease",
       sql<{
@@ -11505,7 +11549,12 @@ const make = Effect.gen(function* () {
         revision.operationId !== entry.receipt.operationId
       )
         return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
-      const current = yield* loadAggregate(input.memorySpaceId, entry.memoryId);
+      const current = yield* loadAggregate(
+        input.memorySpaceId,
+        entry.memoryId,
+        { revisionIds: [revision.revisionId] },
+        {},
+      );
       if (current.identity) yield* persistImportLineageTx(lineageForRevision(revision));
       if (
         !canonicalReplay &&
@@ -11911,7 +11960,8 @@ const make = Effect.gen(function* () {
     readResolutionInputsPage,
     readResolutionSnapshot,
     readResolutionHeads,
-    loadAggregate: (space, id, payloads) => transact(loadAggregate(space, id, payloads)),
+    loadAggregate: (space, id, payloads, history) =>
+      transact(loadAggregate(space, id, payloads, history)),
     apply: (decision) =>
       decision.admission.kind === "hubAdmission" && decision.operation.kind !== "forget"
         ? transact(withHubBudget(applyDecision(decision)))

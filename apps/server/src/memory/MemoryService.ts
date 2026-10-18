@@ -631,11 +631,13 @@ const make = Effect.fnUntraced(function* (
           )
             return old;
         }
-        // The decider reads the whole DAG but only the head and restored payloads.
-        const current = yield* store.loadAggregate(op.memorySpaceId, op.memoryId, {
-          heads: true,
-          revisionIds: op.kind === "revert" ? [op.restoredRevisionId] : [],
-        });
+        // The decider needs the DAG, head/restored payloads, and only the reverted resolution.
+        const current = yield* store.loadAggregate(
+          op.memorySpaceId,
+          op.memoryId,
+          { heads: true, revisionIds: op.kind === "revert" ? [op.restoredRevisionId] : [] },
+          op.kind === "revert" ? { resolutionId: op.revertsResolutionId } : {},
+        );
         if (admission.kind !== "approvedReplica" && current.pendingForget && op.kind !== "forget")
           return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
         let ancestry: Store.MemoryAncestry | undefined;
@@ -849,7 +851,12 @@ const make = Effect.fnUntraced(function* (
               return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
             return;
           }
-          const current = yield* store.loadAggregate(batch.memorySpaceId, next.memoryId);
+          const current = yield* store.loadAggregate(
+            batch.memorySpaceId,
+            next.memoryId,
+            undefined,
+            {},
+          );
           if (current.identity && !NodeUtil.isDeepStrictEqual(current.identity.scope, next.scope))
             return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
           if (current.tombstone) return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
@@ -1051,7 +1058,12 @@ const make = Effect.fnUntraced(function* (
         permit,
         Effect.gen(function* () {
           yield* requireScope(input.scope);
-          const current = yield* store.loadAggregate(input.memorySpaceId, input.memoryId);
+          const current = yield* store.loadAggregate(
+            input.memorySpaceId,
+            input.memoryId,
+            undefined,
+            {},
+          );
           if (current.identity && !NodeUtil.isDeepStrictEqual(current.identity.scope, input.scope))
             return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
           const acceptedParent =
@@ -1294,7 +1306,14 @@ const make = Effect.fnUntraced(function* (
         Effect.gen(function* () {
           yield* permit;
           yield* requireSharing(value.memorySpaceId);
-          const current = yield* store.loadAggregate(value.memorySpaceId, value.memoryId);
+          const current = yield* store.loadAggregate(
+            value.memorySpaceId,
+            value.memoryId,
+            {
+              when: Store.hasSourceEvidence,
+            },
+            {},
+          );
           if (current.identity) yield* requireScope(current.identity.scope);
           const old = yield* store.readOperation(value.memorySpaceId, value.operationId);
           if (
@@ -1471,7 +1490,7 @@ const make = Effect.fnUntraced(function* (
     yield* store
       .transact(
         Effect.gen(function* () {
-          const current = yield* store.loadAggregate(intent.memorySpaceId, intent.memoryId);
+          const current = yield* store.loadAggregate(intent.memorySpaceId, intent.memoryId, {}, {});
           if (current.identity) yield* requireScope(current.identity.scope);
           const decision = yield* decide(current, operation, Store.localIntent);
           const receipt = {
@@ -1507,7 +1526,12 @@ const make = Effect.fnUntraced(function* (
         yield* permit;
         yield* requireSharing(value.memorySpaceId);
         yield* requireCaller(sourceThread);
-        const current = yield* store.loadAggregate(value.memorySpaceId, value.memoryId);
+        const current = yield* store.loadAggregate(
+          value.memorySpaceId,
+          value.memoryId,
+          { revisionIds: [value.restoredRevisionId] },
+          { resolutionId: value.resolutionId },
+        );
         if (current.identity) yield* requireScope(current.identity.scope);
         const resolution = current.resolutions.find((r) => r.resolutionId === value.resolutionId);
         if (!resolution) return yield* new Store.MemoryStoreConflict({ code: "not_found" });
@@ -1848,7 +1872,12 @@ const make = Effect.fnUntraced(function* (
     if (op.kind === "forget") return false;
     return yield* store.transact(
       Effect.gen(function* () {
-        const current = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);
+        const current = yield* store.loadAggregate(
+          op.memorySpaceId,
+          op.memoryId,
+          { heads: true },
+          {},
+        );
         const old = yield* store.receipt(op.memorySpaceId, op.operationId);
         if (!old || !("hubSequence" in old.receipt)) return false;
         const ancestry = yield* store.readAncestry(
@@ -1897,6 +1926,8 @@ const make = Effect.fnUntraced(function* (
         const current = yield* store.loadAggregate(
           M.MemorySpaceId.make(work.space),
           work.memoryId!,
+          {},
+          {},
         );
         if (current.tombstone || current.pendingForget)
           return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
@@ -2219,15 +2250,20 @@ const make = Effect.fnUntraced(function* (
       return replay.entry.receipt;
     }
     // Resolve recomputes lineage from its input payloads; the decider needs heads and restored.
-    const current = yield* store.loadAggregate(op.memorySpaceId, op.memoryId, {
-      heads: true,
-      revisionIds:
-        op.kind === "resolve"
-          ? op.expectedHeads
-          : op.kind === "revert"
-            ? [op.restoredRevisionId]
-            : [],
-    });
+    const current = yield* store.loadAggregate(
+      op.memorySpaceId,
+      op.memoryId,
+      {
+        heads: true,
+        revisionIds:
+          op.kind === "resolve"
+            ? op.expectedHeads
+            : op.kind === "revert"
+              ? [op.restoredRevisionId]
+              : [],
+      },
+      op.kind === "revert" ? { resolutionId: op.revertsResolutionId } : {},
+    );
     // Only the read-only semantic decision is caught; every subsequent write can fail the outer transaction.
     const prepared = yield* Effect.gen(function* () {
       yield* requireImportNotSuppressed(op);
