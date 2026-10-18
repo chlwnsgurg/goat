@@ -4,7 +4,7 @@ A desktop SSH connection fails for reasons that need opposite responses. A
 laptop asleep in a bag needs patience and silence. A rejected key, a changed
 host key, or a runtime that refuses this app needs a person, and retrying on a
 timer only repeats the same error. This page records how GOAT tells them apart
-and what each surface shows. The retry loop itself is the shared
+and how it presents each case. The retry loop itself is the shared
 [connection runtime](connection-runtime.md); SSH adds classification and
 presentation on top of it, not a second loop.
 
@@ -112,7 +112,7 @@ healthy tunnel survives a spurious offline report. A long sleep is the
 exception: it replaces the session at once, because the OS may have killed the
 socket without reporting it.
 
-## What each surface shows
+## Notifications
 
 GOAT sends no notification when a connection drops or returns, and SSH keeps it
 that way: the user closed that laptop and does not need to hear about it.
@@ -120,23 +120,6 @@ Agent dispatch to an SSH host is a server-side path with its own failure,
 `host_unavailable` (see
 [remote dispatch](../../structure/launch-and-remote-dispatch.md)); it does not
 use this client state.
-
-- **Connections and Fleet** (one shared section): an unreachable host shows a
-  muted "Unreachable" with a static dot. Reconnecting after the host answered
-  stays in the error tone. The full reason is in the status tooltip.
-- **Thread view**: the banner above the composer names the host and the
-  countdown. For an unreachable host it uses the default tone without the raw
-  ssh error; otherwise it is a warning. It offers **Retry now** while retrying
-  and **Reconnect** when blocked. It waits 2 s before appearing so a brief blip
-  shows nothing.
-- **Sidebar**: the environment's dot pings only while an attempt can plausibly
-  succeed soon. An unreachable host gets a static dot; a continuous animation
-  for a host that is away for hours costs GPU time and says nothing.
-
-Codex's app follows the same idea in its remote connection badge: each failure
-names one action (Reconnect, Sign in, Update, Restart), and a chat on an
-unavailable host reads "Remote host unavailable" with a link to manage the
-connection rather than an error.
 
 ## In-flight work
 
