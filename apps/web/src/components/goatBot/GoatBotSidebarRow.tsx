@@ -17,6 +17,7 @@ import { useGoatBotPreferred } from "./GoatBotModeButton";
 import { GoatBotChannelContext } from "./goatBotChannelPort";
 import { useGoatBotHome } from "./useGoatBotHome";
 import { useGoatBotWaitingCount } from "./useGoatBotWaitingCount";
+import { useGoatBotReadMenu } from "./useGoatBotReadMenu";
 import { Badge } from "../ui/badge";
 
 /** GOAT Bot's pinned place at the top of the thread list, hidden in thread mode. */
@@ -33,6 +34,7 @@ export function GoatBotSidebarRow() {
  */
 function GoatBotSidebarObserver() {
   const count = useGoatBotWaitingCount();
+  const readMenu = useGoatBotReadMenu(count);
   const botRef = useGlobalAgentStore((state) => state.botRef);
   const pathname = useLocation({ select: (location) => location.pathname });
   const params = useParams({ strict: false });
@@ -49,6 +51,7 @@ function GoatBotSidebarObserver() {
             isActive={active}
             aria-current={active ? "page" : undefined}
             onClick={handleClick}
+            {...readMenu}
             render={<Link to={GOAT_BOT_PATH} />}
           >
             <GoatBotAvatar size="sm" />

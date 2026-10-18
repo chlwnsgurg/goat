@@ -294,6 +294,61 @@ describe("GOAT bot boundary (scenario 6)", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.effect("visiting the bot thread marks waiting tasks read until a new one asks", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-10-12T00:00:00.000Z"));
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const reports = yield* ChannelWorkerReports.ChannelWorkerReports;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const bots = yield* ChannelBotRegistry.ChannelBotRegistry;
+      yield* gateway.ingest(goatInput("do: first question", "read-first"), rpcContext);
+      yield* gateway.ingest(goatInput("do: second question", "read-second"), rpcContext);
+      yield* runtime.drain;
+      const { tasks } = yield* ledger.listTasks({ ownerId, limit: 10 });
+      assert.lengthOf(tasks, 2);
+      const ask = (task: (typeof tasks)[number], eventId: string) =>
+        reports.report(
+          {
+            taskId: task.taskId,
+            eventId: ChannelTaskEventId.make(eventId),
+            generation: task.generation,
+            status: "waiting_input",
+            summary: "Choose",
+            question: `Which one? (${eventId})`,
+          },
+          task.worker!.threadId,
+        );
+      for (const task of tasks) yield* ask(task, "read-question-" + task.taskId);
+      yield* runtime.drain;
+      assert.strictEqual((yield* bots.status(owner)).waitingCount, 2);
+
+      // Mark all as read is the sidebar's thread.visit, sent to the bot thread.
+      yield* orchestrator.dispatch({
+        type: "thread.visit",
+        commandId: CommandId.make("visit-goat-bot"),
+        threadId: botThreadId,
+        visitedAt: "2026-10-12T00:01:00.000Z",
+      });
+      assert.strictEqual((yield* bots.status(owner)).waitingCount, 0);
+      // The tasks still wait; only the badge treats them as read.
+      assert.strictEqual(yield* ledger.countWaitingTasks(ownerId), 2);
+
+      yield* TestClock.setTime(Date.parse("2026-10-12T00:02:00.000Z"));
+      yield* gateway.ingest(goatInput("do: later question", "read-later"), rpcContext);
+      yield* runtime.drain;
+      const later = (yield* ledger.listTasks({ ownerId, limit: 10 })).tasks.find(
+        (task) => !tasks.some((earlier) => earlier.taskId === task.taskId),
+      );
+      yield* ask(later!, "read-question-later");
+      yield* runtime.drain;
+      assert.strictEqual((yield* bots.status(owner)).waitingCount, 1);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("keeps work started from a deleted bot reporting to its replacement", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
