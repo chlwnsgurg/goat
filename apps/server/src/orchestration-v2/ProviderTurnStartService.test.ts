@@ -4,6 +4,7 @@ import type { MemoryTaskGrantCeiling } from "@goat/contracts";
 import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
+  CommandId,
   CheckpointScopeId,
   MessageId,
   NodeId,
@@ -34,6 +35,8 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
+import * as EffectWorker from "./EffectWorker.ts";
 import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -46,141 +49,135 @@ import * as WorkspaceLease from "../workspace/workspaceLease.ts";
 
 const isDomainEvent = Schema.is(OrchestrationV2DomainEvent);
 
+function makeWorktreeStartHarness(branch: string | null) {
+  const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
+  const runId = RunId.make("run_provider_turn_start_projection_failure");
+  const attemptId = RunAttemptId.make("attempt_provider_turn_start_projection_failure");
+  const rootNodeId = NodeId.make("node_provider_turn_start_projection_failure");
+  const providerThreadId = ProviderThreadId.make(
+    "provider_thread_provider_turn_start_projection_failure",
+  );
+  const providerSessionId = ProviderSessionId.make(
+    "provider_session_provider_turn_start_projection_failure",
+  );
+  const messageId = MessageId.make("message_provider_turn_start_projection_failure");
+  const checkpointScopeId = CheckpointScopeId.make(
+    "checkpoint_scope_provider_turn_start_projection_failure",
+  );
+  const projection = {
+    thread: {
+      id: threadId,
+      projectId: ProjectId.make("project_provider_turn_start_projection_failure"),
+      branch,
+      worktreePath: "/tmp/missing-provider-turn-start-worktree",
+    },
+    runs: [
+      {
+        id: runId,
+        status: "starting",
+        rootNodeId,
+        activeAttemptId: attemptId,
+        providerThreadId,
+        userMessageId: messageId,
+        ordinal: 2,
+      },
+    ],
+    nodes: [{ id: rootNodeId, checkpointScopeId }],
+    attempts: [{ id: attemptId }],
+    providerThreads: [{ id: providerThreadId, providerSessionId }],
+    providerSessions: [],
+    messages: [{ id: messageId, text: "Continue", attachments: [] }],
+    checkpointScopes: [{ id: checkpointScopeId }],
+    contextHandoffs: [],
+    contextTransfers: [],
+    turnItems: [],
+  } as unknown as OrchestrationV2ThreadProjection;
+  let projectionReadCount = 0;
+  const writeIfRunCurrent = vi.fn(() =>
+    Effect.succeed({ committed: true, storedEvents: [] } as never),
+  );
+  const startRootRun = vi.fn(() => Effect.void);
+  const pruneWorktrees = vi.fn(() => Effect.void);
+  const createWorktree = vi.fn(() => Effect.succeed({} as never));
+  const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
+        Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
+        IdAllocator.layer,
+        Layer.succeed(FileSystem.FileSystem, { exists: () => Effect.succeed(false) } as never),
+        Layer.mock(GitWorkflow.GitWorkflowService)({ pruneWorktrees, createWorktree }),
+        Layer.mock(ProjectService.ProjectService)({
+          getById: () =>
+            Effect.succeed(
+              Option.some({ workspaceRoot: "/tmp/provider-turn-start-project" } as never),
+            ),
+        }),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getTurnStartContext: () => {
+            projectionReadCount += 1;
+            return Effect.succeed({
+              ...projection,
+              hasConversation: projection.messages.some(
+                (m) =>
+                  m.role === "user" &&
+                  (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
+              ),
+            });
+          },
+          getRuntimeRecoveryProjection: () => {
+            projectionReadCount += 1;
+            return Effect.fail(
+              new ProjectionStore.ProjectionStoreReadError({
+                threadId,
+                cause: "simulated inherited-background projection failure",
+              }),
+            );
+          },
+        }),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
+        Layer.mock(ProviderAuthService.ProviderAuthService)({
+          tryHandlePromptCommand: () => Effect.succeed(false),
+        }),
+        Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
+        Layer.mock(RuntimePolicy.RuntimePolicyV2)({}),
+      ),
+    ),
+  );
+
+  return {
+    layer,
+    threadId,
+    runId,
+    pruneWorktrees,
+    createWorktree,
+    writeIfRunCurrent,
+    startRootRun,
+    projectionReadCount: () => projectionReadCount,
+  };
+}
+
 it.each([
   { label: "with a branch", branch: "feature/restore" },
   { label: "without a branch", branch: null },
 ])(
-  "waits for worktree removal and fails safely on a broken projection, $label",
+  "recreates the checkout when possible and fails safely on a broken projection, $label",
   async ({ branch }) => {
-    const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
-    const runId = RunId.make("run_provider_turn_start_projection_failure");
-    const attemptId = RunAttemptId.make("attempt_provider_turn_start_projection_failure");
-    const rootNodeId = NodeId.make("node_provider_turn_start_projection_failure");
-    const providerThreadId = ProviderThreadId.make(
-      "provider_thread_provider_turn_start_projection_failure",
-    );
-    const providerSessionId = ProviderSessionId.make(
-      "provider_session_provider_turn_start_projection_failure",
-    );
-    const messageId = MessageId.make("message_provider_turn_start_projection_failure");
-    const checkpointScopeId = CheckpointScopeId.make(
-      "checkpoint_scope_provider_turn_start_projection_failure",
-    );
-    const projection = {
-      thread: {
-        id: threadId,
-        projectId: ProjectId.make("project_provider_turn_start_projection_failure"),
-        branch,
-        worktreePath: "/tmp/missing-provider-turn-start-worktree",
-      },
-      runs: [
-        {
-          id: runId,
-          status: "starting",
-          rootNodeId,
-          activeAttemptId: attemptId,
-          providerThreadId,
-          userMessageId: messageId,
-          ordinal: 2,
-        },
-      ],
-      nodes: [{ id: rootNodeId, checkpointScopeId }],
-      attempts: [{ id: attemptId }],
-      providerThreads: [{ id: providerThreadId, providerSessionId }],
-      providerSessions: [],
-      messages: [{ id: messageId, text: "Continue", attachments: [] }],
-      checkpointScopes: [{ id: checkpointScopeId }],
-      contextHandoffs: [],
-      contextTransfers: [],
-      turnItems: [],
-    } as unknown as OrchestrationV2ThreadProjection;
-    let projectionReadCount = 0;
-    const writeIfRunCurrent = vi.fn(() =>
-      Effect.succeed({ committed: true, storedEvents: [] } as never),
-    );
-    const startRootRun = vi.fn(() => Effect.void);
-    const pruneWorktrees = vi.fn(() => Effect.void);
-    const createWorktree = vi.fn(() => Effect.succeed({} as never));
-    const layer = ProviderTurnStart.layer.pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
-          Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
-          IdAllocator.layer,
-          Layer.succeed(FileSystem.FileSystem, { exists: () => Effect.succeed(false) } as never),
-          Layer.mock(GitWorkflow.GitWorkflowService)({ pruneWorktrees, createWorktree }),
-          Layer.mock(ProjectService.ProjectService)({
-            getById: () =>
-              Effect.succeed(
-                Option.some({ workspaceRoot: "/tmp/provider-turn-start-project" } as never),
-              ),
-          }),
-          Layer.mock(ProjectionStore.ProjectionStoreV2)({
-            getTurnStartContext: () => {
-              projectionReadCount += 1;
-              return Effect.succeed({
-                ...projection,
-                hasConversation: projection.messages.some(
-                  (m) =>
-                    m.role === "user" &&
-                    (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
-                ),
-              });
-            },
-            getRuntimeRecoveryProjection: () => {
-              projectionReadCount += 1;
-              return Effect.fail(
-                new ProjectionStore.ProjectionStoreReadError({
-                  threadId,
-                  cause: "simulated inherited-background projection failure",
-                }),
-              );
-            },
-          }),
-          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
-          Layer.mock(ProviderAuthService.ProviderAuthService)({
-            tryHandlePromptCommand: () => Effect.succeed(false),
-          }),
-          Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
-          Layer.mock(RuntimePolicy.RuntimePolicyV2)({}),
-        ),
-      ),
-    );
-
+    const harness = makeWorktreeStartHarness(branch);
+    const {
+      threadId,
+      runId,
+      layer,
+      createWorktree,
+      pruneWorktrees,
+      writeIfRunCurrent,
+      startRootRun,
+    } = harness;
     await Effect.gen(function* () {
-      // A worktree removal holds the lease; the turn must not recreate the
-      // checkout until that removal is done with it.
-      const held = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const removal = yield* WorkspaceLease.withWorkspaceLease(
-        "/tmp/missing-provider-turn-start-worktree",
-        Deferred.succeed(held, undefined).pipe(Effect.andThen(Deferred.await(release))),
-      ).pipe(Effect.forkChild);
-      yield* Deferred.await(held);
-      const startAtLock = yield* Deferred.make<void>();
-      const withWorkspaceLease = WorkspaceLease.withWorkspaceLease;
-      const gatedLease: typeof withWorkspaceLease = (cwd, effect) =>
-        Deferred.succeed(startAtLock, undefined).pipe(
-          Effect.andThen(withWorkspaceLease(cwd, effect)),
-        );
-      yield* Effect.acquireRelease(
-        Effect.sync(() =>
-          vi.spyOn(WorkspaceLease, "withWorkspaceLease").mockImplementation(gatedLease),
-        ),
-        (spy) => Effect.sync(() => spy.mockRestore()),
-      );
-      const start = yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2)
-        .start({ threadId, runId })
-        .pipe(Effect.flip, Effect.forkChild);
-      yield* Deferred.await(startAtLock);
-      expect(createWorktree).not.toHaveBeenCalled();
-      expect(projectionReadCount).toBe(1);
-      yield* Deferred.succeed(release, undefined);
-      yield* Fiber.join(removal);
-      const error = yield* Fiber.join(start);
-
+      const service = yield* ProviderTurnStart.ProviderTurnStartServiceV2;
+      const error = yield* service.start({ threadId, runId }).pipe(Effect.flip);
       expect(error._tag).toBe("ProviderTurnStartError");
-      expect(projectionReadCount).toBe(2);
+      expect(harness.projectionReadCount()).toBe(2);
       if (branch === null) {
         expect(createWorktree).not.toHaveBeenCalled();
       } else {
@@ -193,9 +190,158 @@ it.each([
       }
       expect(writeIfRunCurrent).not.toHaveBeenCalled();
       expect(startRootRun).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(layer), Effect.runPromise);
+  },
+);
+
+it.each([
+  { label: "with a branch", branch: "feature/restore" },
+  { label: "without a branch", branch: null },
+])(
+  "requeues a contended turn start and frees the worker for unrelated effects, $label",
+  async ({ branch }) => {
+    const harness = makeWorktreeStartHarness(branch);
+    const { threadId, runId, layer, createWorktree, writeIfRunCurrent, startRootRun } = harness;
+    await Effect.gen(function* () {
+      const service = yield* ProviderTurnStart.ProviderTurnStartServiceV2;
+      const held = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const removal = yield* WorkspaceLease.withWorkspaceLease(
+        "/tmp/missing-provider-turn-start-worktree",
+        Deferred.succeed(held, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(held);
+      const unrelatedDone = yield* Deferred.make<void>();
+      const timestamp = DateTime.formatIso(yield* DateTime.now);
+      const startEffect: EffectOutbox.OrchestrationEffectV2 = {
+        id: "effect:contended-start",
+        commandId: CommandId.make("command:contended-start"),
+        threadId,
+        request: { type: "provider-turn.start", runId },
+        status: "running",
+        attemptCount: 1,
+        availableAt: timestamp,
+        leaseOwner: "lease-test",
+        leaseExpiresAt: timestamp,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        completedAt: null,
+        lastError: null,
+      };
+      const effects: Array<EffectOutbox.OrchestrationEffectV2> = [
+        startEffect,
+        {
+          ...startEffect,
+          id: "effect:unrelated",
+          threadId: ThreadId.make("thread:unrelated"),
+          request: { type: "terminal.cleanup" },
+        },
+      ];
+      const retry = vi.fn(() => Effect.succeed(true));
+      const outbox = Layer.mock(EffectOutbox.EffectOutboxV2)({
+        claimNext: () => Effect.sync(() => Option.fromUndefinedOr(effects.shift())),
+        get: () => Effect.succeed(Option.some(startEffect)),
+        awaitCancellation: () => Effect.never,
+        clearCancellation: () => Effect.void,
+        retry,
+        succeed: () => Effect.succeed(true),
+      });
+      // Run the actual start service inside a real single-worker drain. Only
+      // the outbox and unrelated effect are fixtures; lease admission is real.
+      const executor = Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, {
+        execute: (effect, options) =>
+          effect.request.type === "provider-turn.start"
+            ? service
+                .start({
+                  threadId: effect.threadId,
+                  runId: effect.request.runId,
+                  willRetry: options?.willRetry ?? false,
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new EffectWorker.OrchestrationEffectExecutionError({
+                        effectId: effect.id,
+                        effectType: effect.request.type,
+                        cause,
+                      }),
+                  ),
+                )
+            : Deferred.succeed(unrelatedDone, undefined).pipe(Effect.asVoid),
+      });
+      const workerLayer = EffectWorker.layerWithOptions({ workerId: "lease-test" }).pipe(
+        Layer.provide(Layer.merge(outbox, executor)),
+      );
+      expect(
+        yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+          Effect.flatMap((worker) => worker.drain(2)),
+          Effect.provide(workerLayer),
+        ),
+      ).toBe(2);
+      yield* Deferred.await(unrelatedDone);
+      expect(retry).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          effectId: startEffect.id,
+          delayMs: 100,
+          error: expect.stringContaining("workspace is busy"),
+        }),
+      );
+      expect(harness.projectionReadCount()).toBe(1);
+      expect(createWorktree).not.toHaveBeenCalled();
+      expect(writeIfRunCurrent).not.toHaveBeenCalled();
+      expect(startRootRun).not.toHaveBeenCalled();
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(removal);
+      yield* service.start({ threadId, runId, willRetry: true }).pipe(Effect.flip);
+      expect(harness.projectionReadCount()).toBe(3);
+      expect(createWorktree).toHaveBeenCalledTimes(branch === null ? 0 : 1);
     }).pipe(Effect.scoped, Effect.provide(layer), Effect.runPromise);
   },
 );
+
+it("settles the last contended start attempt instead of leaving its run starting", async () => {
+  const { layer, threadId, runId, writeIfRunCurrent, createWorktree, startRootRun } =
+    makeWorktreeStartHarness(null);
+  await Effect.gen(function* () {
+    const held = yield* Deferred.make<void>();
+    yield* WorkspaceLease.withWorkspaceLease(
+      "/tmp/missing-provider-turn-start-worktree",
+      Deferred.succeed(held, undefined).pipe(Effect.andThen(Effect.never)),
+    ).pipe(Effect.forkChild);
+    yield* Deferred.await(held);
+    const service = yield* ProviderTurnStart.ProviderTurnStartServiceV2;
+    yield* service.start({ threadId, runId, willRetry: false });
+    expect(writeIfRunCurrent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        runId,
+        expectedStatus: "starting",
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            type: "run.updated",
+            payload: expect.objectContaining({ status: "failed" }),
+          }),
+          expect.objectContaining({
+            type: "run-attempt.updated",
+            payload: expect.objectContaining({ status: "failed" }),
+          }),
+          expect.objectContaining({
+            type: "node.updated",
+            payload: expect.objectContaining({ status: "failed" }),
+          }),
+          expect.objectContaining({
+            type: "turn-item.updated",
+            payload: expect.objectContaining({
+              type: "error",
+              failure: expect.objectContaining({ message: expect.stringContaining("Retry") }),
+            }),
+          }),
+        ]),
+      }),
+    );
+    expect(createWorktree).not.toHaveBeenCalled();
+    expect(startRootRun).not.toHaveBeenCalled();
+  }).pipe(Effect.scoped, Effect.provide(layer), Effect.runPromise);
+});
 
 function makeLocalCommandHarness(input: {
   readonly text: string;
