@@ -81,7 +81,6 @@ function countLabel(label: string, count: number | undefined) {
   return count !== undefined && count > 0 ? `${label}, ${count} waiting` : label;
 }
 
-const FLEET_RAIL_ROWS = 3;
 const FLEET_TOOLTIP_ROWS = 8;
 
 const machineBusy = (machine: FleetMachineSummary) => machine.running + machine.attention > 0;
@@ -95,9 +94,10 @@ function machineWork(machine: FleetMachineSummary) {
 }
 
 /**
- * Live glance at everything running on connected machines: one dot and count per machine,
- * busy machines first. Subscribes to the fleet summary alone, which keeps its
- * object while counts hold, so streamed thread updates do not repaint the rail.
+ * Live glance at everything running on connected machines: the rail shows one total count,
+ * and the tooltip names each machine, busy machines first. Subscribes to the fleet summary
+ * alone, which keeps its object while counts hold, so streamed thread updates do not repaint
+ * the rail.
  */
 const FleetRailItem = memo(function FleetRailItem({ active }: { active: boolean }) {
   const summary = useFleetSummary();
@@ -106,8 +106,6 @@ const FleetRailItem = memo(function FleetRailItem({ active }: { active: boolean 
     ...summary.machines.filter(machineBusy),
     ...summary.machines.filter((machine) => !machineBusy(machine)),
   ];
-  const rows = ranked.slice(0, FLEET_RAIL_ROWS);
-  const hiddenRows = ranked.length - rows.length;
   const tooltipRows = ranked.slice(0, FLEET_TOOLTIP_ROWS);
   const label =
     live === 0 ? "Fleet" : `Fleet, ${summary.running} running, ${summary.attention} need you`;
@@ -120,34 +118,10 @@ const FleetRailItem = memo(function FleetRailItem({ active }: { active: boolean 
             aria-label={label}
             activeOptions={EXACT_MATCH}
             aria-current={active ? "page" : undefined}
-            className={railItemClassName(active, "w-10 flex-col gap-1 pt-2.5 pb-2")}
+            className={railItemClassName(active)}
           >
             <ActivityIcon aria-hidden />
-            {rows.length > 0 ? (
-              <span aria-hidden className="flex w-full flex-col items-center gap-0.5">
-                {rows.map((machine) => (
-                  <span
-                    key={machine.environmentId}
-                    className="flex h-2.5 items-center gap-1 text-3xs leading-none tabular-nums"
-                  >
-                    <span
-                      className={cn(
-                        "size-1.5 rounded-full",
-                        machine.attention > 0
-                          ? "bg-warning"
-                          : machine.running > 0
-                            ? "bg-info"
-                            : "bg-muted-foreground/40",
-                      )}
-                    />
-                    {machineBusy(machine) ? machine.running + machine.attention : null}
-                  </span>
-                ))}
-                {hiddenRows > 0 ? (
-                  <span className="text-3xs leading-none tabular-nums">+{hiddenRows}</span>
-                ) : null}
-              </span>
-            ) : null}
+            <RailCount count={live} />
           </Link>
         }
       />
