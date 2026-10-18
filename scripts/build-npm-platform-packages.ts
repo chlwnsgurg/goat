@@ -45,6 +45,13 @@ import { windowsSystemTar } from "./build-cli-archive.ts";
 
 export const NPM_PLATFORM_PACKAGE_SCOPE = "@goat";
 export const NPM_LAUNCHER_PACKAGE_NAME = "goat";
+// Kept here rather than in apps/server/package.json: the desktop bundle inlines that
+// file, and shipped artifacts must not carry the private repository's URL.
+const NPM_REPOSITORY = {
+  type: "git",
+  url: "https://github.com/goat-si/goat",
+  directory: "apps/server",
+} as const;
 
 const encodePackageJson = Schema.encodeEffect(fromJsonStringPretty(Schema.Unknown));
 
@@ -109,7 +116,7 @@ export function npmPlatformPackageManifest(
     version,
     description: `GOAT CLI executable for ${platformKey}`,
     license: serverPackageJson.license,
-    repository: serverPackageJson.repository,
+    repository: NPM_REPOSITORY,
     os: [os],
     cpu: [cpu],
     files: ["goat", "goat.exe", "client", "resource-monitor", "node_modules"],
@@ -178,7 +185,7 @@ export function npmLauncherPackageManifest(
     version,
     description: "GOAT CLI. Installs the self-contained executable for this platform.",
     license: serverPackageJson.license,
-    repository: serverPackageJson.repository,
+    repository: NPM_REPOSITORY,
     bin: { goat: "./bin/goat.js", t3: "./bin/goat.js" },
     files: ["bin", "dist"],
     optionalDependencies: Object.fromEntries(

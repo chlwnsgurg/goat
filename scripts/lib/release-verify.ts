@@ -156,7 +156,11 @@ export function isMachO(bytes: Uint8Array): boolean {
 // framework) legitimately ships its own TypeScript, source maps and its CI's paths, so
 // source checks and generic path patterns apply to GOAT code only. Paths of this build
 // machine (its home, workspace and checkout) fail anywhere they appear.
-const thirdParty = /(?:^|\/)node_modules\/|\/Contents\/Frameworks\//;
+// On Windows and Linux, Electron's runtime (the renamed electron executable, its
+// libraries, .pak files and locales) sits beside resources/ in the unpacked app;
+// GOAT's own code lives under resources/.
+const thirdParty =
+  /(?:^|\/)node_modules\/|\/Contents\/Frameworks\/|(?:^|\/)(?:(?:win|linux)(?:-[a-z0-9]+)?-unpacked|__appImage-[a-z0-9]+)\/(?!resources\/)/;
 // GOAT's own workspace packages stay GOAT code even when they land in node_modules.
 const goatPackage = /(?:^|\/)node_modules\/@goat\//;
 const buildPath =

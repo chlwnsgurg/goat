@@ -182,6 +182,21 @@ describe("release payload helpers", () => {
       ["goat: absolute build path"],
     );
     expect(exposureProblems("main.js", "'C:\\a\\b\\c'")).toEqual([]);
+    // Electron's own executable and libraries carry Chromium's inline source maps.
+    for (const name of [
+      "win-arm64-unpacked/GOAT (Nightly).exe",
+      "win-unpacked/ffmpeg.dll",
+      "linux-unpacked/goat",
+      "__appImage-arm64/locales/en-US.pak",
+    ])
+      expect(exposureProblems(name, "sourceMappingURL=data:x", [])).toEqual([]);
+    // GOAT code under resources/ is still checked, and so are this machine's paths.
+    expect(
+      exposureProblems("win-unpacked/resources/app/main.js", "sourceMappingURL=data:x", []),
+    ).toEqual(["win-unpacked/resources/app/main.js: inline source map"]);
+    expect(
+      exposureProblems("win-unpacked/GOAT.exe", "D:\\a\\goat\\goat\\x", ["D:\\a\\goat\\goat"]),
+    ).toEqual(["win-unpacked/GOAT.exe: absolute build path"]);
     expect(exposureProblems("main.js", "C:\\a\\b\\c\\build")).not.toEqual([]);
   });
   it("rejects unsafe archive members before extraction", () => {
