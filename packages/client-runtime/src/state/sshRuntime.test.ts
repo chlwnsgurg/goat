@@ -6,6 +6,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   createSshRuntimeState,
+  sshRuntimeBuildOrder,
   sshRuntimeRecoveryText,
   sshRuntimeStatusText,
 } from "./sshRuntime.ts";
@@ -31,6 +32,46 @@ function harness(reply: SshHostResult = waiting) {
 }
 
 describe("Desktop SSH runtime state", () => {
+  it.each([
+    ["0.4.2", "0.4.3", "Update available", null, -1],
+    ["0.5.0", "0.4.3", "Newer than this app", "Update this app to manage it.", 1],
+    [
+      "0.1.0-dev.b1dc5be3d",
+      "0.1.0-dev.1792290331.g52be2c095",
+      "Kept",
+      "GOAT can't tell whether 0.1.0-dev.b1dc5be3d is older than this app's build, so it leaves it running. Stop it on macmini-cf when its work is done, then reconnect to move it to 0.1.0-dev.1792290331.g52be2c095.",
+      undefined,
+    ],
+    [
+      "0.1.0-dev.1792290330.gabcdef0",
+      "0.1.0-dev.1792290331.gdef0123",
+      "Update available",
+      null,
+      -1,
+    ],
+    [
+      "0.1.0-dev.1792290332.gabcdef0",
+      "0.1.0-dev.1792290331.gdef0123",
+      "Newer than this app",
+      "Update this app to manage it.",
+      1,
+    ],
+    ["0.4.3", "0.4.3", "Up to date", null, 0],
+  ] as const)(
+    "explains ready runtime %s against app %s",
+    (runtimeVersion, requestedVersion, label, recovery, order) => {
+      const status = {
+        host: "macmini-cf",
+        state: "ready",
+        runtimeVersion,
+        requestedVersion,
+      } as const;
+      expect(sshRuntimeStatusText(status)).toBe(`${label} · Runtime ${runtimeVersion}`);
+      expect(sshRuntimeRecoveryText(status)).toBe(recovery);
+      const actualOrder = sshRuntimeBuildOrder(status);
+      expect(actualOrder === undefined ? undefined : Math.sign(actualOrder)).toBe(order);
+    },
+  );
   it("names the available owner version and keeps setup titles out of phase copy", () => {
     const base = { host: "vps-1", runtimeVersion: "0.4.2", requestedVersion: "0.4.3" };
     expect(sshRuntimeStatusText({ ...base, state: "ready" })).toBe(

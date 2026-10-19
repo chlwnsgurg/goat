@@ -1,5 +1,6 @@
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
+  sshRuntimeBuildOrder,
   sshRuntimeRecoveryText,
   sshRuntimeStatusText,
   sshRuntimeTargetKey,
@@ -114,7 +115,7 @@ function SshRuntimeSettingsRowContent({
     (status.state === "update_waiting" ||
       status.state === "failed" ||
       status.state === "stopped" ||
-      (status.state === "ready" && status.runtimeVersion !== status.requestedVersion));
+      (status.state === "ready" && (sshRuntimeBuildOrder(status) ?? 0) < 0));
   const authInstructions =
     status?.keyAuth ??
     (status?.state === "auth_failed" && originLabel
