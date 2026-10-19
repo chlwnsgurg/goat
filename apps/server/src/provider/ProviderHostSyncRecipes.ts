@@ -33,6 +33,8 @@ interface Recipe {
     readonly args: ReadonlyArray<string>;
     readonly hosts: ReadonlyArray<string>;
   };
+  /** Vendor sign-in pages that finish without a callback to the target machine. */
+  readonly browserHosts?: ReadonlyArray<string>;
   /** What a person runs on that machine when GOAT cannot drive sign-in. */
   readonly terminalLogin: string;
 }
@@ -68,6 +70,7 @@ const RECIPES: Record<ProviderHostSyncDriver, Recipe> = {
       script: "irm 'https://cursor.com/install?win32=true' | iex",
       pinnable: false,
     },
+    browserHosts: ["cursor.com"],
     terminalLogin: "cursor-agent login",
   },
   grok: {
@@ -174,7 +177,8 @@ export function parseDeviceLogin(
   for (const match of text.matchAll(/https:\/\/[^\s"'<>]+/gu)) {
     const url = safeUrl(match[0]);
     if (url !== null && device.hosts.includes(url.hostname)) {
-      return { type: "device_code", url: url.toString(), userCode: code };
+      // The page itself is all a person needs; query and fragment could carry state.
+      return { type: "device_code", url: `${url.origin}${url.pathname}`, userCode: code };
     }
   }
   return null;
@@ -190,19 +194,24 @@ const safeUrl = (raw: string): URL | null => {
 };
 
 const LOOPBACK = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\]|0\.0\.0\.0)$/iu;
+const SECRET_PARAM = /token|secret|verifier|password|session|auth_?code|^code$/iu;
 
 /**
- * A GOAT sign-in page another machine can finish: https on the vendor's host,
- * with no redirect back to the target host's loopback and no pasted callback.
+ * A GOAT sign-in page another machine can finish: https on that driver's
+ * allowlisted vendor host, with no redirect back to the target host's
+ * loopback, no pasted callback, no fragment, and no credential-like parameter.
  */
 export function relayableBrowserUrl(
+  driver: ProviderHostSyncDriver,
   raw: string,
   acceptsCallback: boolean | undefined,
 ): string | null {
   if (acceptsCallback === true) return null;
   const url = safeUrl(raw);
-  if (url === null || LOOPBACK.test(url.hostname)) return null;
+  const hosts = RECIPES[driver].browserHosts ?? [];
+  if (url === null || url.hash !== "" || !hosts.includes(url.hostname)) return null;
   for (const [key, value] of url.searchParams) {
+    if (SECRET_PARAM.test(key)) return null;
     if (!/redirect|callback|return/iu.test(key)) continue;
     const target =
       safeUrl(value) ??

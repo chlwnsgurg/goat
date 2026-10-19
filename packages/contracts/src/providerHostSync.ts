@@ -183,7 +183,7 @@ export const ProviderSyncResult = Schema.Union([
     handoff: HandoffSummary,
     next: Schema.Struct({
       after: Schema.Literal("approval"),
-      call: Schema.Literal("goat_provider_host_matrix"),
+      call: Schema.Literal("goat_provider_sync_status"),
     }),
   }),
 ]);
@@ -191,7 +191,14 @@ export type ProviderSyncResult = typeof ProviderSyncResult.Type;
 /** MCP success schema: HandoffSummary contains a DateTime that must encode as JSON. */
 export const ProviderSyncResultJson = Schema.toCodecJson(ProviderSyncResult);
 
-export const ProviderSyncStatusInput = Schema.Struct({ syncId: SyncId });
+export const ProviderSyncStatusInput = Schema.Struct({
+  syncId: Schema.optional(SyncId).annotate({
+    description: "The syncId goat_provider_sync returned.",
+  }),
+  handoffId: Schema.optional(SyncId).annotate({
+    description: "The approval handoffId from a needs_human result; finds the sync it started.",
+  }),
+});
 export type ProviderSyncStatusInput = typeof ProviderSyncStatusInput.Type;
 export const ProviderSyncCancelInput = Schema.Struct({ syncId: SyncId });
 export type ProviderSyncCancelInput = typeof ProviderSyncCancelInput.Type;

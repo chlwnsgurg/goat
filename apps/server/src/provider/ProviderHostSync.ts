@@ -40,6 +40,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -68,9 +69,9 @@ import {
 } from "./ProviderHostSyncRecipes.ts";
 
 export const HOST_SYNC_PATH = "provider.host_sync";
-const MATRIX_TOOL = "goat_provider_host_matrix" as const;
+const MATRIX_TOOL = "goat_provider_host_matrix";
 const SYNC_TOOL = "goat_provider_sync";
-const STATUS_TOOL = "goat_provider_sync_status";
+const STATUS_TOOL = "goat_provider_sync_status" as const;
 const CANCEL_TOOL = "goat_provider_sync_cancel";
 const MATRIX_DEADLINE_MS = 20_000;
 const CALL_DEADLINE_MS = 60_000;
@@ -80,6 +81,8 @@ const REMOTE_POLL = Duration.seconds(3);
 const REMOTE_DEADLINE_MS = 30 * 60_000;
 const SYNC_RETENTION_MS = 2 * 60 * 60_000;
 const OUTPUT_LIMIT = 16_384;
+const MAX_ACTIVE_SYNCS = 8;
+const MAX_CONCURRENT_INSTALLERS = 2;
 
 const decodeMatrix = Schema.decodeUnknownEffect(ProviderHostMatrixResult);
 const decodeSyncResult = Schema.decodeUnknownEffect(ProviderSyncResultJson);
@@ -137,10 +140,13 @@ interface SyncOperation {
   readonly startedAt: string;
   readonly startedAtMs: number;
   readonly hosts: Array<HostTask>;
+  /** Callers who may cancel and see sign-in codes: requester, approver, outside client. */
+  readonly owners: Set<string>;
   fibers: Array<Fiber.Fiber<unknown, unknown>>;
 }
 interface PendingApproval {
   readonly input: ProviderSyncInput;
+  readonly requester: string;
   readonly expiresAtMs: number;
 }
 
@@ -191,6 +197,8 @@ export const make = Effect.gen(function* () {
   const platform = hostPlatform(process.platform);
   const operations = new Map<string, SyncOperation>();
   const approvals = new Map<string, PendingApproval>();
+  const approvedSyncs = new Map<string, string>();
+  const installers = yield* Semaphore.make(MAX_CONCURRENT_INSTALLERS);
 
   // ---- authority -------------------------------------------------------
 
@@ -234,6 +242,19 @@ export const make = Effect.gen(function* () {
 
   const ownerSession = (caller: SshHostCaller): string =>
     caller.kind === "client" ? caller.sessionId : (caller.scope.client?.sessionId ?? "mcp");
+
+  const callerKey = (caller: SshHostCaller): string =>
+    caller.kind === "client"
+      ? `session:${caller.sessionId}`
+      : caller.scope.thread !== undefined
+        ? `thread:${caller.scope.thread.threadId}`
+        : `session:${caller.scope.client?.sessionId ?? "unknown"}`;
+
+  const canManage = (caller: SshHostCaller) =>
+    writeCeiling(caller).pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    );
 
   // ---- this machine ----------------------------------------------------
 
@@ -300,12 +321,22 @@ export const make = Effect.gen(function* () {
       readonly arguments: Readonly<Record<string, unknown>>;
       readonly writes: boolean;
       readonly timeoutMs: number;
+      /** Following a sync this machine started reuses the session that started it. */
+      readonly asOwner?: boolean;
     },
   ) =>
     dispatch
       .callHostTool(
-        { ...call, approvals: false, requireReady: true },
-        call.writes ? writeCeiling(caller) : readCeiling(caller),
+        {
+          host: call.host,
+          tool: call.tool,
+          arguments: call.arguments,
+          writes: call.writes,
+          timeoutMs: call.timeoutMs,
+          approvals: false,
+          requireReady: true,
+        },
+        call.writes || call.asOwner === true ? writeCeiling(caller) : readCeiling(caller),
       )
       .pipe(Effect.mapError(classify));
 
@@ -404,9 +435,30 @@ export const make = Effect.gen(function* () {
     version: string | null,
     login: boolean,
     hosts: ReadonlyArray<string | null>,
+    owners: ReadonlyArray<string>,
   ) =>
     Effect.gen(function* () {
       yield* prune;
+      const active = [...operations.values()].filter((operation) =>
+        operation.hosts.some((task) => !task.finished),
+      );
+      const same = active.find(
+        (operation) =>
+          operation.driver === driver &&
+          operation.version === version &&
+          operation.login === login &&
+          operation.hosts.length === hosts.length &&
+          operation.hosts.every((task) => hosts.includes(task.state.host)),
+      );
+      if (same !== undefined) {
+        for (const owner of owners) same.owners.add(owner);
+        return { operation: same, fresh: false };
+      }
+      if (active.length >= MAX_ACTIVE_SYNCS)
+        return yield* fail(
+          "unavailable",
+          "Several provider syncs are already running here. Wait for one to finish.",
+        );
       const now = yield* DateTime.now;
       const operation: SyncOperation = {
         syncId: `sync_${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`,
@@ -419,10 +471,11 @@ export const make = Effect.gen(function* () {
           state: { host, phase: "queued", version: null },
           finished: false,
         })),
+        owners: new Set(owners),
         fibers: [],
       };
       operations.set(operation.syncId, operation);
-      return operation;
+      return { operation, fresh: true };
     });
 
   const fork = (
@@ -505,7 +558,7 @@ export const make = Effect.gen(function* () {
         if (interaction?.type === "deviceCode")
           return { type: "device_code", url: interaction.url, userCode: interaction.userCode };
         if (interaction?.type === "browser") {
-          const url = relayableBrowserUrl(interaction.url, interaction.acceptsCallback);
+          const url = relayableBrowserUrl(driver, interaction.url, interaction.acceptsCallback);
           if (url !== null && !interaction.requiresConsent) return { type: "browser", url };
         }
         return openHost;
@@ -634,7 +687,9 @@ export const make = Effect.gen(function* () {
             ? { message: `${recipe.displayName}'s installer always installs the latest release.` }
             : {}),
         });
-        const result = yield* runInstaller(command.command, command.args);
+        const result = yield* installers.withPermits(1)(
+          runInstaller(command.command, command.args),
+        );
         if (result.exitCode !== 0)
           return yield* update(
             task,
@@ -731,6 +786,7 @@ export const make = Effect.gen(function* () {
           tool: STATUS_TOOL,
           arguments: { syncId: started.sync.syncId },
           writes: false,
+          asOwner: true,
           timeoutMs: MATRIX_DEADLINE_MS,
         }).pipe(
           Effect.flatMap((raw) => decodeSyncState(raw).pipe(Effect.mapError(unreadable(host)))),
@@ -762,7 +818,11 @@ export const make = Effect.gen(function* () {
     message: `GOAT on ${host} returned an unreadable sync state.`,
   });
 
-  const start = (input: ProviderSyncInput, caller: SshHostCaller) =>
+  const start = (
+    input: ProviderSyncInput,
+    caller: SshHostCaller,
+    alsoOwnedBy: ReadonlyArray<string> = [],
+  ) =>
     Effect.gen(function* () {
       const login = input.login ?? true;
       const localVersion = (yield* localProviders).find(
@@ -771,7 +831,11 @@ export const make = Effect.gen(function* () {
       const requested = input.version ?? (localVersion ? versionCore(localVersion) : "latest");
       const version = requested === "latest" || requested === null ? null : requested;
       const hosts = input.hosts === undefined ? [null] : [...new Set(input.hosts)];
-      const operation = yield* newOperation(input.driver, version, login, hosts);
+      const { operation, fresh } = yield* newOperation(input.driver, version, login, hosts, [
+        callerKey(caller),
+        ...alsoOwnedBy,
+      ]);
+      if (!fresh) return { kind: "started" as const, sync: view(operation) };
       const owner = ownerSession(caller);
       yield* Effect.forEach(
         operation.hosts,
@@ -829,18 +893,26 @@ export const make = Effect.gen(function* () {
           human: {
             location: `Each machine runs ${name}'s own installer and sign-in. Sign in with your own account; GOAT never copies credentials between machines.`,
           },
-          args: { driver: input.driver, hosts: input.hosts ?? [] },
+          // The card describes exactly this input; it is what runs once approved.
+          args: {
+            driver: input.driver,
+            hosts: input.hosts ?? [],
+            version: input.version ?? null,
+            login: input.login ?? true,
+          },
           expiresAt: DateTime.add(yield* DateTime.now, { minutes: 15 }),
         })
         .pipe(Effect.mapError(() => fail("unavailable", "Could not ask for approval. Try again.")));
-      approvals.set(handoff.handoffId, {
-        input,
-        expiresAtMs: (yield* Clock.currentTimeMillis) + 15 * 60_000,
-      });
+      if (!approvals.has(handoff.handoffId))
+        approvals.set(handoff.handoffId, {
+          input,
+          requester: callerKey(caller),
+          expiresAtMs: (yield* Clock.currentTimeMillis) + 15 * 60_000,
+        });
       return {
         kind: "needs_human" as const,
         handoff,
-        next: { after: "approval" as const, call: MATRIX_TOOL },
+        next: { after: "approval" as const, call: STATUS_TOOL },
       };
     });
 
@@ -869,16 +941,35 @@ export const make = Effect.gen(function* () {
     caller: SshHostCaller,
   ) {
     yield* readCeiling(caller);
-    return view(yield* find(input.syncId));
+    const syncId =
+      input.syncId ??
+      (input.handoffId === undefined ? undefined : approvedSyncs.get(input.handoffId));
+    if (syncId === undefined)
+      return yield* fail(
+        input.handoffId === undefined ? "invalid_request" : "not_found",
+        input.handoffId === undefined
+          ? "Pass syncId or handoffId."
+          : "That approval has not started a sync yet. Ask the person to approve it.",
+      );
+    const operation = yield* find(syncId);
+    const state = view(operation);
+    if (operation.owners.has(callerKey(caller)) || (yield* canManage(caller))) return state;
+    // Sign-in codes go only to whoever started or approved the sync.
+    return {
+      ...state,
+      hosts: state.hosts.map(({ login: _login, ...host }) => host),
+    };
   });
 
   const cancel = Effect.fn("ProviderHostSync.cancel")(function* (
     input: ProviderSyncCancelInput,
     caller: SshHostCaller,
   ) {
-    // Stopping is always safe, so an agent may stop what it started.
-    yield* authorizeSshHost(sessions, caller, "orchestration:operate");
     const operation = yield* find(input.syncId);
+    // An agent may stop a sync it asked for; anyone else needs to manage providers.
+    if (operation.owners.has(callerKey(caller)))
+      yield* authorizeSshHost(sessions, caller, "orchestration:operate");
+    else yield* writeCeiling(caller);
     yield* Effect.forEach(operation.fibers, Fiber.interrupt, { discard: true });
     yield* Effect.forEach(
       operation.hosts.filter((task) => !task.finished),
@@ -903,22 +994,27 @@ export const make = Effect.gen(function* () {
     input: HandoffRespondInput,
     sessionId: AuthSessionId,
   ) {
+    if (input.action !== "completed") {
+      const handoff = yield* handoffs.respond(input, sessionId);
+      if (handoff.state !== "opened") approvals.delete(input.handoffId);
+      return handoff;
+    }
+    yield* authorizeSshHost(sessions, { kind: "client", sessionId }, "providers:manage");
+    // Taken before any further wait, so two concurrent approvals start one sync.
+    const now = yield* Clock.currentTimeMillis;
     const pending = approvals.get(input.handoffId);
-    if (
-      input.action === "completed" &&
-      (pending === undefined || pending.expiresAtMs < (yield* Clock.currentTimeMillis))
-    )
-      return yield* new HandoffError({ reason: "expired" });
-    if (input.action === "completed")
-      yield* authorizeSshHost(sessions, { kind: "client", sessionId }, "providers:manage");
-    const handoff = yield* handoffs.respond(input, sessionId);
-    if (handoff.state === "opened") return handoff;
     approvals.delete(input.handoffId);
-    if (handoff.state === "completed" && pending !== undefined)
-      yield* start(pending.input, { kind: "client", sessionId }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("Approved provider sync did not start.", cause),
+    if (pending === undefined || pending.expiresAtMs < now)
+      return yield* new HandoffError({ reason: "expired" });
+    const handoff = yield* handoffs
+      .respond(input, sessionId)
+      .pipe(Effect.tapError(() => Effect.sync(() => approvals.set(input.handoffId, pending))));
+    if (handoff.state === "completed")
+      yield* start(pending.input, { kind: "client", sessionId }, [pending.requester]).pipe(
+        Effect.tap((started) =>
+          Effect.sync(() => approvedSyncs.set(input.handoffId, started.sync.syncId)),
         ),
+        Effect.catchCause(() => Effect.logWarning("Approved provider sync did not start.")),
       );
     return handoff;
   });

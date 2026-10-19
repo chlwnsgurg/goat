@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "@effect/vitest";
 
 import { describeInstallFailure } from "./ProviderHostSync.ts";
 import {
@@ -50,7 +50,7 @@ describe("installCommand", () => {
     "latest|id",
     "1.0.0' | iex #",
     "../../etc",
-  ])("refuses a version that is not a plain release: %s", (version) => {
+  ])("refuses a version that is not a plain release: %s", (version: string) => {
     for (const platform of ["darwin", "linux", "win32"] as const) {
       expect(installCommand("claudeAgent", platform, version)).toBeNull();
       expect(installCommand("opencode", platform, version)).toBeNull();
@@ -83,21 +83,36 @@ describe("parseDeviceLogin", () => {
 });
 
 describe("relayableBrowserUrl", () => {
-  it("relays a vendor-hosted approval page", () => {
-    expect(relayableBrowserUrl("https://cursor.com/loginDeepControl?challenge=abc", false)).toBe(
-      "https://cursor.com/loginDeepControl?challenge=abc",
-    );
+  it("relays only the driver's own vendor-hosted approval page", () => {
+    expect(
+      relayableBrowserUrl("cursor", "https://cursor.com/loginDeepControl?challenge=abc", false),
+    ).toBe("https://cursor.com/loginDeepControl?challenge=abc");
+    expect(
+      relayableBrowserUrl("cursor", "https://evil.example/login?challenge=abc", false),
+    ).toBeNull();
+    expect(relayableBrowserUrl("codex", "https://cursor.com/loginDeepControl", false)).toBeNull();
+  });
+
+  it("never relays a page that carries a credential", () => {
+    for (const url of [
+      "https://cursor.com/login?access_token=FAKE",
+      "https://cursor.com/login?code_verifier=FAKE",
+      "https://cursor.com/login?code=FAKE",
+      "https://cursor.com/login#code_verifier=FAKE",
+    ])
+      expect(relayableBrowserUrl("cursor", url, false)).toBeNull();
   });
 
   it("keeps flows that call back to the target machine on that machine", () => {
     expect(
       relayableBrowserUrl(
-        "https://auth.openai.com/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback",
+        "cursor",
+        "https://cursor.com/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback",
         false,
       ),
     ).toBeNull();
-    expect(relayableBrowserUrl("http://127.0.0.1:8080/login", false)).toBeNull();
-    expect(relayableBrowserUrl("https://cursor.com/login", true)).toBeNull();
+    expect(relayableBrowserUrl("cursor", "http://127.0.0.1:8080/login", false)).toBeNull();
+    expect(relayableBrowserUrl("cursor", "https://cursor.com/login", true)).toBeNull();
   });
 });
 
