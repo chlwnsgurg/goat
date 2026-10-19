@@ -211,12 +211,11 @@ already published by the nightly workflow.
 
 Every build that names a published version can be found there: nightly and stable
 come from the same workflow and publish the archives with the apps, and dev and PR
-builds never publish, so they upload. Nightlies are pruned after 30 releases or 30
-days. An app older than that can't have its host download its own runtime and
-falls back to uploading its bundled archive. The release repository is the single
-constant `CLI_RELEASE_REPOSITORY`; goat-si/goat already receives the same archives
-(see [release channels](./release-channels.md#where-releases-go)), so moving there
-once it is public changes only that line.
+builds never publish, so they upload. A nightly is pruned once it is both outside
+the newest 30 and older than 30 days; an app on such a nightly falls back to
+uploading its bundled archive. The release repository is the single constant
+`CLI_RELEASE_REPOSITORY`, so moving to goat-si/goat changes only that line once it
+carries the archives (see [release channels](./release-channels.md#where-releases-go)).
 
 Upstream T3 Code (`pingdotgg/t3code` at `771fd93f`) only downloads on the host,
 with a single attempt and no upload. GOAT kept that download block in `run-t3.sh`
