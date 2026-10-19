@@ -411,8 +411,14 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
                       <span className="max-w-40 truncate">{environment.label}</span>
                       {environment.connection.phase !== "connected" ? (
                         <ConnectionStatusDot
-                          dotClassName={connectionPhaseDotClassName(environment.connection.phase)}
-                          pingClassName={connectionPhasePingClassName(environment.connection.phase)}
+                          dotClassName={connectionPhaseDotClassName(
+                            environment.connection.phase,
+                            environment.connection.unreachable,
+                          )}
+                          pingClassName={connectionPhasePingClassName(
+                            environment.connection.phase,
+                            environment.connection.unreachable,
+                          )}
                         />
                       ) : null}
                       <span className="sr-only">

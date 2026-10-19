@@ -38,6 +38,20 @@ describe("saved cloud environment connection presentation", () => {
     });
   });
 
+  it("keeps a host that is away idle instead of connecting", () => {
+    expect(
+      presentSavedCloudEnvironmentConnection({
+        ...connection("reconnecting", "Cannot reach mbp over SSH (Operation timed out)."),
+        unreachable: true,
+      }),
+    ).toEqual({
+      buttonLabel: "Unreachable",
+      statusText:
+        "Host unreachable. Reconnecting... Reason: Cannot reach mbp over SSH (Operation timed out).",
+      tone: "idle",
+    });
+  });
+
   it.each([
     ["error", "Connection failed", "Connection failed. Reason: Access denied.", "error"],
     ["unsupported", "Client not supported", "Client not supported", "idle"],

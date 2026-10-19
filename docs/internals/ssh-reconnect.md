@@ -121,6 +121,26 @@ Agent dispatch to an SSH host is a server-side path with its own failure,
 [remote dispatch](../../structure/launch-and-remote-dispatch.md)); it does not
 use this client state.
 
+## What each surface shows
+
+- **Connections and Fleet** (one shared section): an unreachable host's status
+  reads a muted "Unreachable". Reconnecting after the host answered stays in
+  the error tone. The full reason is in the status tooltip.
+- **Thread view**: the banner above the composer names the host and the
+  countdown. For an unreachable host it uses the default tone and says the host
+  may be asleep or off the network, without the raw ssh error; otherwise it is a
+  warning with the reason. It offers **Retry now** while retrying and
+  **Reconnect** when blocked. It waits 2 s before appearing so a brief blip shows
+  nothing.
+- **Sidebar and provider settings**: an unreachable host's dot is the idle gray,
+  with no ping. A continuous animation for a host that is away for hours costs
+  GPU time and says nothing.
+
+Codex's app follows the same idea in its remote connection badge: each failure
+names one action (Reconnect, Sign in, Update, Restart), and a chat on an
+unavailable host reads "Remote host unavailable" with a link to manage the
+connection rather than an error.
+
 ## In-flight work
 
 Turns run on the remote GOAT server, so a client disconnect does not stop

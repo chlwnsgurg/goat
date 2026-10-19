@@ -3,7 +3,11 @@ import { shellSyncMessage } from "@goat/client-runtime/state/presentation";
 
 import { cn } from "~/lib/utils";
 import { useEnvironment } from "../../state/environments";
-import { useEnvironmentConnectionPhase, useEnvironmentShellSync } from "../../state/presentation";
+import {
+  useEnvironmentConnectionPhase,
+  useEnvironmentConnectionUnreachable,
+  useEnvironmentShellSync,
+} from "../../state/presentation";
 import { connectionPhaseDotClassName } from "../ConnectionStatusDot";
 import { EnvironmentConnectionProgressLabel } from "../EnvironmentConnectionProgress";
 
@@ -18,6 +22,7 @@ export function SidebarEnvironmentConnectionDot({
   environmentId: EnvironmentId;
 }) {
   const phase = useEnvironmentConnectionPhase(environmentId);
+  const unreachable = useEnvironmentConnectionUnreachable(environmentId);
   const syncMessage = shellSyncMessage(useEnvironmentShellSync(environmentId));
   if (phase === null || (phase === "connected" && syncMessage === null)) return null;
   return (
@@ -25,7 +30,7 @@ export function SidebarEnvironmentConnectionDot({
       aria-label={phase === "connected" ? (syncMessage ?? undefined) : undefined}
       className={cn(
         "size-1.5 shrink-0 rounded-full",
-        connectionPhaseDotClassName(phase === "connected" ? "reconnecting" : phase),
+        connectionPhaseDotClassName(phase === "connected" ? "reconnecting" : phase, unreachable),
       )}
     />
   );

@@ -31,6 +31,14 @@ export function presentSavedCloudEnvironmentConnection(
         tone: "connecting",
       };
     case "reconnecting":
+      // A host that is away (asleep, off the network) reads as idle: it is
+      // expected, retries on its own, and must not animate for hours.
+      if (connection.unreachable)
+        return {
+          buttonLabel: "Unreachable",
+          statusText: connectionStatusText(connection),
+          tone: "idle",
+        };
       return {
         buttonLabel: "Reconnecting…",
         statusText: connectionStatusText(connection),
