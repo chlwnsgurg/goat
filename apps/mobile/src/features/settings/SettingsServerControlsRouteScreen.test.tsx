@@ -9,6 +9,13 @@ const { Children, mocks } = vi.hoisted(() => ({
   Children: ({ children }: { children?: ReactNode }) => children,
   mocks: {
     branchNaming: { onChange: (_patch: ServerSettingsPatch) => {} },
+    switches: [] as Array<{
+      label: string;
+      subtitle?: string;
+      value: boolean | null;
+      disabled?: boolean;
+      onValueChange: (value: boolean) => void;
+    }>,
     updateSettings: vi.fn(),
   },
 }));
@@ -35,7 +42,18 @@ vi.mock("./components/SettingsEnvironmentFilterHeader", () => ({
 vi.mock("./components/DatabaseStorageNotice", () => ({ DatabaseStorageNotice: () => null }));
 vi.mock("./components/SettingsSection", () => ({ SettingsSection: Children }));
 vi.mock("./components/SettingsChoiceRow", () => ({ SettingsChoiceRow: () => null }));
-vi.mock("./components/SettingsSwitchRow", () => ({ SettingsSwitchRow: () => null }));
+vi.mock("./components/SettingsSwitchRow", () => ({
+  SettingsSwitchRow: (props: {
+    label: string;
+    subtitle?: string;
+    value: boolean | null;
+    disabled?: boolean;
+    onValueChange: (value: boolean) => void;
+  }) => {
+    mocks.switches.push(props);
+    return null;
+  },
+}));
 vi.mock("./components/SettingsRow", () => ({ SettingsRow: () => null }));
 vi.mock("./components/SettingsProjectOverridesSection", () => ({
   SettingsProjectOverridesSection: () => null,
@@ -62,13 +80,17 @@ vi.mock("./settings-environment-filter", () => ({
   }),
 }));
 
-import { SettingsEnvironmentSourceControlRouteScreen } from "./SettingsServerControlsRouteScreen";
+import {
+  SettingsEnvironmentMaintenanceRouteScreen,
+  SettingsEnvironmentSourceControlRouteScreen,
+} from "./SettingsServerControlsRouteScreen";
 
 let root: Root;
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   root = createRoot(document.createElement("div"));
+  mocks.switches = [];
   mocks.updateSettings.mockReset();
 });
 
@@ -97,6 +119,28 @@ describe("SettingsServerControlsRouteScreen", () => {
       environmentId: "local",
       input: {
         patch: { branchNamingMode: "custom", branchNameInstructions: "Use issue IDs." },
+      },
+    });
+  });
+
+  it("toggles automatic server updates on the maintenance page", async () => {
+    mocks.updateSettings.mockResolvedValue(undefined);
+    act(() => root.render(<SettingsEnvironmentMaintenanceRouteScreen />));
+
+    const row = mocks.switches.find((entry) => entry.label === "Automatic server updates");
+    expect(row).toMatchObject({
+      label: "Automatic server updates",
+      subtitle:
+        "When this server runs as a background service, install new releases from its channel while no threads are running. A failed update rolls back.",
+      value: true,
+      disabled: false,
+    });
+
+    await act(async () => row?.onValueChange(false));
+    expect(mocks.updateSettings).toHaveBeenCalledWith({
+      environmentId: "local",
+      input: {
+        patch: { automaticServerUpdates: false },
       },
     });
   });
