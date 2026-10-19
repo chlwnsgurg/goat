@@ -108,6 +108,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.scheduledTasksGetWebhookDelivery]: "scheduledTasks",
   [WS_METHODS.remoteLaunchesList]: "remoteLaunches",
   [WS_METHODS.cloudMachinesList]: "cloudMachines",
+  [WS_METHODS.cloudAgentsListRuns]: "cloudAgents",
   [WS_METHODS.cloudMachinesConfigure]: "cloudMachines",
   [WS_METHODS.cloudMachinesDisconnect]: "cloudMachines",
   [WS_METHODS.cloudMachinesCreate]: "cloudMachines",

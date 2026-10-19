@@ -17,7 +17,7 @@ export type AccessibleWindowIdentity = {
   readonly title: string;
   readonly bounds: Electron.Rectangle;
   readonly clientBounds?: Electron.Rectangle;
-  readonly owner: { readonly processId: number };
+  readonly owner: { readonly processId: number; readonly bundleId?: string };
   readonly accessibilityBoundsReliable?: boolean;
 };
 
@@ -131,6 +131,8 @@ async function readCapturedWindowAccessibility(
     sourceTitle,
     bounds: active.bounds,
     clientBounds: active.clientBounds,
+    platform,
+    bundleId: pidWindows.length > 0 ? active.owner.bundleId : undefined,
   };
   const window = findAccessibleWindow(
     pidWindows.length > 0 || foreground !== undefined ? pidWindows : await windowsFromAppList(App),

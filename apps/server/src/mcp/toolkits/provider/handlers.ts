@@ -1,6 +1,7 @@
 import * as HomeRequests from "../../../provider/CodexHomeRequests.ts";
 import { OrchestratorMcpFailure } from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as CloudAgents from "../../../cloudAgents/CloudAgentService.ts";
 import * as Routing from "../../../provider/ProviderDiagnosisRouting.ts";
 import * as HostSync from "../../../provider/ProviderHostSync.ts";
 import * as Onboarding from "../../../provider/ProviderOnboarding.ts";
@@ -47,6 +48,31 @@ const onboarding = <A>(
     return yield* run(yield* Onboarding.ProviderOnboarding, scope);
   });
 
+const cloud = <A>(
+  run: (
+    service: CloudAgents.CloudAgentServiceShape,
+    scope: McpInvocation.McpInvocationScope,
+  ) => Effect.Effect<A, OrchestratorMcpFailure>,
+) =>
+  Effect.gen(function* () {
+    const scope = yield* McpInvocation.McpInvocationContext;
+    return yield* run(yield* CloudAgents.CloudAgentService, scope);
+  });
+
+/**
+ * Holder probing and the registration lock can wait, and the caller's modes can drop meanwhile,
+ * so the full-access check runs again right before a thread starts, with the modes it finds.
+ */
+const modesAfter = <R>(
+  check: Effect.Effect<{ readonly limits: CloudAgents.StartModes }, OrchestratorMcpFailure, R>,
+) =>
+  Effect.map(Effect.context<R>(), (context) =>
+    check.pipe(
+      Effect.map((caller) => caller.limits),
+      Effect.provideContext(context),
+    ),
+  );
+
 export const layer = McpToolAccess.toLayer(ProviderToolkit, {
   goat_provider_host_matrix: McpToolAccess.readsOrReachesHost(
     (input) => input.localOnly !== true,
@@ -73,6 +99,24 @@ export const layer = McpToolAccess.toLayer(ProviderToolkit, {
   ),
   goat_provider_login_cancel: McpToolAccess.writes((input) =>
     onboarding((service, scope) => service.loginCancel(input, scope)),
+  ),
+  goat_cloud_holders: McpToolAccess.readsOrReachesHost(
+    (input) => input.local !== true,
+    (input) => cloud((service, scope) => service.holders(scope, input)),
+  ),
+  goat_cloud_launch: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.flatMap(modesAfter(check), (modes) =>
+      cloud((service, scope) => service.launch(scope, input, modes)),
+    ),
+  ),
+  goat_cloud_run_register: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.flatMap(modesAfter(check), (modes) =>
+      cloud((service, scope) => service.register(scope, input, modes)),
+    ),
+  ),
+  goat_cloud_run_list: McpToolAccess.reads((input) => cloud((service) => service.list(input))),
+  goat_cloud_run_forget: McpToolAccess.destructive(
+    McpToolAccess.writesEnvironment((input) => cloud((service) => service.forget(input))),
   ),
   goat_provider_home_request: McpToolAccess.writes((input) =>
     Effect.gen(function* () {

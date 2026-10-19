@@ -1,8 +1,8 @@
-import lineageMigration from "../persistence/Migrations/076_MemoryImportLineage.ts";
-import checkpointMigration from "../persistence/Migrations/077_MemoryCheckpointAccounting.ts";
-import reportMigration from "../persistence/Migrations/078_MemoryReportLifecycle.ts";
-import usageMigration from "../persistence/Migrations/079_MemoryUsageCounters.ts";
-import revertMigration from "../persistence/Migrations/080_MemoryRevertResults.ts";
+import lineageMigration from "../persistence/Migrations/077_MemoryImportLineage.ts";
+import checkpointMigration from "../persistence/Migrations/078_MemoryCheckpointAccounting.ts";
+import reportMigration from "../persistence/Migrations/079_MemoryReportLifecycle.ts";
+import usageMigration from "../persistence/Migrations/080_MemoryUsageCounters.ts";
+import revertMigration from "../persistence/Migrations/081_MemoryRevertResults.ts";
 import { assert, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -12,8 +12,8 @@ import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
-import migration from "../persistence/Migrations/072_Memory.ts";
-import hubMigration from "../persistence/Migrations/073_MemoryHubSync.ts";
+import migration from "../persistence/Migrations/073_Memory.ts";
+import hubMigration from "../persistence/Migrations/074_MemoryHubSync.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Auth from "./MemoryHubAuth.ts";
 

@@ -8,6 +8,7 @@
  */
 import type {
   OrchestrationV2Subagent,
+  ChannelTaskApprovalRef,
   ChannelTaskNeedsYou,
   ChannelTaskNeedsYouKind,
   ChannelTaskPullRequest,
@@ -16,6 +17,7 @@ import type {
   OrchestrationV2Run,
   OrchestrationV2RuntimeRequest,
   OrchestrationV2ThreadShell,
+  ThreadId,
   ThreadPullRequestLink,
 } from "@goat/contracts";
 import { derivePendingBackgroundWork } from "@goat/shared/orchestrationV2PendingBackgroundWork";
@@ -42,22 +44,45 @@ export const needsYouKindOf = (
   }
 };
 
-export const needsYouFromRuntimeRequests = (
-  requests: ReadonlyArray<Pick<OrchestrationV2RuntimeRequest, "kind" | "status" | "createdAt">>,
+/**
+ * Pending person-facing requests, oldest first. With `threadOf`, an approval names its request
+ * and thread so GOAT Bot can answer it; callers on another machine leave it out.
+ */
+export const needsYouFromRuntimeRequests = <
+  T extends Pick<OrchestrationV2RuntimeRequest, "id" | "kind" | "status" | "createdAt">,
+>(
+  requests: ReadonlyArray<T>,
+  threadOf?: (request: T) => ThreadId,
 ): ReadonlyArray<ChannelTaskNeedsYou> =>
   requests
-    .flatMap((request) => {
+    .flatMap((request): ReadonlyArray<ChannelTaskNeedsYou> => {
       if (request.status !== "pending") return [];
       const kind = needsYouKindOf(request.kind);
-      return kind === undefined ? [] : [{ kind, since: DateTime.formatIso(request.createdAt) }];
+      if (kind === undefined) return [];
+      const since = DateTime.formatIso(request.createdAt);
+      return kind === "approval" && threadOf !== undefined
+        ? [{ kind, since, approval: { requestId: request.id, threadId: threadOf(request) } }]
+        : [{ kind, since }];
     })
     .toSorted((left, right) =>
       left.since === right.since
-        ? left.kind.localeCompare(right.kind)
+        ? left.kind.localeCompare(right.kind) ||
+          (left.approval?.requestId ?? "").localeCompare(right.approval?.requestId ?? "")
         : left.since < right.since
           ? -1
           : 1,
     );
+
+/** Approvals in `next` that `previous` did not list: each gets one card. */
+export const newApprovals = (
+  previous: ReadonlyArray<ChannelTaskNeedsYou> | undefined,
+  next: ReadonlyArray<ChannelTaskNeedsYou>,
+): ReadonlyArray<ChannelTaskApprovalRef> => {
+  const known = new Set((previous ?? []).flatMap((need) => need.approval?.requestId ?? []));
+  return next.flatMap((need) =>
+    need.approval === undefined || known.has(need.approval.requestId) ? [] : [need.approval],
+  );
+};
 
 export const pullRequestsFromLinks = (
   links: ReadonlyArray<ThreadPullRequestLink> | undefined,
@@ -195,9 +220,13 @@ export const subagentRequests = <E, R>(
     E,
     R
   >,
-): Effect.Effect<ReadonlyArray<OrchestrationV2RuntimeRequest>, never, R> =>
+): Effect.Effect<
+  ReadonlyArray<OrchestrationV2RuntimeRequest & { readonly threadId: ThreadId }>,
+  never,
+  R
+> =>
   Effect.gen(function* () {
-    const found: Array<OrchestrationV2RuntimeRequest> = [];
+    const found: Array<OrchestrationV2RuntimeRequest & { readonly threadId: ThreadId }> = [];
     const visited = new Set<string>();
     let level = subagents;
     for (let depth = 0; depth < SUBAGENT_DEPTH && level.length > 0; depth += 1) {
@@ -216,7 +245,12 @@ export const subagentRequests = <E, R>(
         visited.add(childThreadId);
         const child = yield* read(childThreadId).pipe(Effect.option);
         if (child._tag === "None") continue;
-        found.push(...child.value.runtimeRequests);
+        found.push(
+          ...child.value.runtimeRequests.map((request) => ({
+            ...request,
+            threadId: childThreadId,
+          })),
+        );
         next.push(...child.value.subagents);
       }
       level = next;

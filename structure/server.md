@@ -159,6 +159,9 @@ releases observation without cancelling remote work. Unknown submission outcomes
 must never retry a create operation. See the optional `resumeTurn` contract in
 `packages/provider-core/src/server/ProviderAdapter.ts` and the read-only source service
 in `apps/server/src/orchestration-v2/CloudTaskSourceService.ts`.
+`apps/server/src/cloudAgents/CloudAgentService.ts` routes cloud launches to an environment that
+holds the provider's sign-in and registers runs other agents started; a registered task's first run
+attaches through `resumeTurn` and never submits. See `docs/internals/cloud-credential-holders.md`.
 `docs/internals/providers.md` and `docs/internals/adding-a-provider.md` are the contributor
 procedures. This page is the inventory.
 

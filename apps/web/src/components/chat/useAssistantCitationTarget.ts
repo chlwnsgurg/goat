@@ -2,7 +2,7 @@ import type { LegendListRef } from "@legendapp/list/react";
 import type { RunId } from "@goat/contracts";
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { TimelineEntry } from "../../session-logic";
-import { timelineEntryTurnFoldRunId, type MessagesTimelineRow } from "./MessagesTimeline.logic";
+import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
 import type { AssistantCitationRequest, AssistantCitationTarget } from "./AssistantCitationSource";
 import { toastManager } from "../ui/toast";
 
@@ -21,7 +21,7 @@ export function useAssistantCitationTarget({
   viewport,
   historyLoading,
   loadEarlier,
-  foldInput,
+  getTurnFoldRunId,
   onExpandTurn,
   onManualNavigation,
 }: {
@@ -32,11 +32,10 @@ export function useAssistantCitationTarget({
   viewport: HTMLElement | null;
   historyLoading: boolean;
   loadEarlier: CitationHistoryPage | null;
-  foldInput: Omit<Parameters<typeof timelineEntryTurnFoldRunId>[0], "timelineEntries">;
+  getTurnFoldRunId: (entryId: string) => RunId | undefined;
   onExpandTurn: (runId: RunId) => void;
   onManualNavigation: () => void;
 }) {
-  const { latestRun = null, runningRunId = null, isWorking, runlessWorkActive = false } = foldInput;
   const [ready, setReady] = useState<AssistantCitationTarget | null>(null);
   const [finishedKey, setFinishedKey] = useState<string | null>(null);
   const [listLoaded, setListLoaded] = useState(false);
@@ -137,10 +136,7 @@ export function useAssistantCitationTarget({
       (row) => row.kind === "message" && row.message.id === navigation.target.citation.messageId,
     );
     if (index < 0) {
-      const foldRunId = timelineEntryTurnFoldRunId(
-        { latestRun, runningRunId, isWorking, runlessWorkActive, timelineEntries: entries },
-        source.id,
-      );
+      const foldRunId = getTurnFoldRunId(source.id);
       if (foldRunId) {
         onExpandTurn(foldRunId);
       } else {
@@ -154,10 +150,7 @@ export function useAssistantCitationTarget({
     if (listLoaded && listRef.current) setReady(navigation.target);
   }, [
     entries,
-    latestRun,
-    runningRunId,
-    isWorking,
-    runlessWorkActive,
+    getTurnFoldRunId,
     historyLoading,
     listLoaded,
     listRef,

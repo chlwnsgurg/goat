@@ -398,6 +398,12 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     "environment-update",
   ),
   goat_host_status: tool(["Read", "Reading", "Read", "host status"], "host-status"),
+  goat_scheduler_status: tool(["Read", "Reading", "Read", "scheduler status"], "host-status"),
+  goat_fallback_chain_get: tool(["Read", "Reading", "Read", "fallback chains"], "environment-read"),
+  goat_fallback_chain_set: tool(
+    ["Set", "Setting", "Set", "a fallback chain"],
+    "environment-update",
+  ),
   goat_provider_home_request: tool(
     ["Request", "Requesting", "Requested", "Codex Home approval"],
     "provider-diagnose",
@@ -494,6 +500,17 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     ["Resume", "Resuming", "Resumed", "a cloud machine"],
     "cloud-machine-change",
   ),
+  goat_cloud_holders: tool(
+    ["List", "Listing", "Listed", "cloud credential holders"],
+    "provider-diagnose",
+  ),
+  goat_cloud_launch: tool(["Launch", "Launching", "Launched", "a cloud agent"], "thread-create"),
+  goat_cloud_run_register: tool(
+    ["Register", "Registering", "Registered", "a cloud run"],
+    "thread-create",
+  ),
+  goat_cloud_run_list: tool(["List", "Listing", "Listed", "cloud runs"], "thread-list"),
+  goat_cloud_run_forget: tool(["Forget", "Forgetting", "Forgot", "a cloud run"], "thread-update"),
   goat_connection_list: tool(["List", "Listing", "Listed", "saved connections"], "connection-list"),
   goat_connection_add_ssh: tool(["Add", "Adding", "Added", "an SSH device"], "connection-add"),
   goat_connection_remove: tool(
