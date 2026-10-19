@@ -582,6 +582,11 @@ export const layerMemorySourceReadBinding = Layer.effect(
     });
   }),
 );
+// One layer reference for the worker and layerMemorySync, so the worker, conflict resolution and
+// the status read share one set of holds. The registry supplies the provider version in each key.
+const layerMemoryGenerationHold = MemoryGenerationHold.layer.pipe(
+  Layer.provide(ProviderRegistry.layer),
+);
 const layerMemoryQuota = MemoryQuota.layer.pipe(Layer.provideMerge(MemoryStore.layer));
 export const layerMemorySourceReadService = Layer.unwrap(
   Effect.gen(function* () {
@@ -606,6 +611,7 @@ const layerMemoryWorker = Layer.mergeAll(
   Layer.provide(RuntimeLayer.layerEventSink),
   Layer.provide(layerTextGeneration),
   Layer.provide(RuntimeIdentity.layer),
+  Layer.provide(layerMemoryGenerationHold),
 );
 const layerMemoryStarted = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -769,6 +775,7 @@ const layerMemorySync = layerMemorySyncStarted.pipe(
   Layer.provide(layerMemoryHub),
   Layer.provide(layerTextGeneration),
   Layer.provide(ServerEnvironment.layerIdentity),
+  Layer.provide(layerMemoryGenerationHold),
 );
 
 /** Acquisition is isolated from the core graph; only a fully acquired reader publishes the tag. */
@@ -1117,8 +1124,6 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
   Layer.provideMerge(layerServerSettings),
   Layer.provideMerge(layerSourceControlProviderRegistry),
-  // One set of memory generation holds for the worker, conflict resolution and status.
-  Layer.provideMerge(MemoryGenerationHold.layer),
   Layer.provideMerge(layerGit),
   Layer.provideMerge(layerVcs),
   Layer.provideMerge(Layer.mergeAll(layerTerminal, layerPreview, layerDevice)),
