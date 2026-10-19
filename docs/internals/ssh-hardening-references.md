@@ -173,8 +173,8 @@ are relative to the bundle's `snapshots/vite-build-beautified/`.
 | Stalled link                 | ServerAlive + RPC silence budget; real loopback stall tests cover RPC timeout and forward revalidation               | cmux blocked-write and carrier-cut fixtures                     | none              |
 | Abandoned server sockets     | not measured; the server sets no idle option (`apps/server/src/ws.ts:3430`)                                          | herdr bridge idles out at 60 s; cmux lease evicts older bridges | P1, measure first |
 | Git over SSH                 | `GIT_SSH_COMMAND` has no keepalive; 120 s transfer cap (`apps/server/src/sshRemote/SshWorkspaceSync.ts:116`)         | every other SSH path carries ServerAlive                        | P2                |
-| Error detail                 | tooltip; menu copies a trace ID only (`ConnectionEnvironmentsSection.tsx:675`)                                       | cmux Copy SSH Error; herdr-web-ui last 8 lines                  | P2                |
-| Frozen timers (web, mobile)  | long-resume path replaces the session                                                                                | herdr-web-ui treats a late deadline as a freeze                 | P2, verify        |
+| Error detail                 | tooltip; connection menu and thread banner copy a sanitized public diagnostic                                        | cmux Copy SSH Error; herdr-web-ui last 8 lines                  | none              |
+| Frozen timers (web, mobile)  | long resume replaces the session; timers over 2 s late restart the RPC silence budget                                | herdr-web-ui treats a late deadline as a freeze                 | none              |
 | Archive pinning              | SHA-256 locally and on the host                                                                                      | same                                                            | none              |
 | Session resume               | server owns turns and state; subscriptions replay from cursor; mutations never replayed                              | cmux keeps replay state 120 s; herdr keeps panes running        | none              |
 | Forward lifetime             | owner-death fence on POSIX, 2 s bounded teardown (#378); Windows unfenced                                            | herdr-web-ui and Codex kill by captured PID                     | none on POSIX     |
@@ -286,24 +286,6 @@ cap. Add `SSH_KEEPALIVE_ARGS`. Test in `SshWorkspaceSync.test.ts`. Real app:
 during agent dispatch to `mac-studio` over the stall relay, stall it mid-fetch
 and record how long the failure takes before and after.
 
-**P2-3. Copy the SSH diagnostic.** cmux offers Copy SSH Error
-(`TabItemView+WorkspaceContextMenu.swift:204`); herdr-web-ui shows the last 8
-sanitized lines (`server/ssh.ts:46`). GOAT's connection menu copies only a
-trace ID. Add "Copy diagnostic" with the classified reason and the bounded
-public diagnostic tail already kept for status. Files:
-`apps/web/src/components/settings/ConnectionEnvironmentsSection.tsx`, the
-thread banner in `ChatView.tsx`. Needs before/after screenshots. Real app:
-against `jun-macbookpro`, copy and paste the diagnostic; it names the host and
-the timeout and contains no askpass secret.
-
-**P2-4. Late timers on web and mobile.** herdr-web-ui restarts a deadline that
-fired more than 2 s late instead of counting it as a miss
-(`herdr-web-ui:src/lib/ws.ts:484`). Verify whether the 15 s RPC ping budget
-fires spuriously when a mobile app or background tab resumes; fix only if it
-does. Real app: background the mobile app for 2 min with `mac-studio`
-connected; one reconnect is expected, a reconnect followed by a second drop is
-the bug.
-
 ## Bundles
 
 Each remaining bundle is one PR. Use the loopback stall fixture and
@@ -314,6 +296,4 @@ changing reconnect policy or connection sharing.
    `SshWorkspaceSync` keepalive; land after the cost logs show the real-host baseline.
 4. **Server socket hygiene** (P1-4). Measurement, then the idle close if the
    counts justify it.
-5. **Diagnostic copy and late timers** (P2-3, P2-4). UI plus a verified-only
-   mobile fix.
-6. **Probe cost** (P0-3). The `packages/ssh` runtime probe; rerun the baseline.
+5. **Probe cost** (P0-3). The `packages/ssh` runtime probe; rerun the baseline.
