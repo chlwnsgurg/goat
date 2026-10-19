@@ -498,6 +498,11 @@ export class ChannelRemoteWorkers extends Context.Service<
      * the latest copy of its work. Starts the next generation, so the machine it leaves can
      * never report into the task again; that machine's own work is left where it is.
      */
+    /** Stops a stopped task's worker on its machine; the forward is done once it is stopped. */
+    readonly stop: (
+      pending: ChannelLedger.ChannelPendingEvent,
+      owner: string,
+    ) => Effect.Effect<void, ChannelLedger.ChannelLedgerError>;
     readonly move: (input: {
       readonly taskId: ChannelTaskId;
       readonly host: string;
@@ -2169,6 +2174,63 @@ const make = Effect.gen(function* () {
       yield* ledger.completeForward({ owner, sequence: pending.sequence });
     });
 
+  const stop: ChannelRemoteWorkers["Service"]["stop"] = (pending, owner) =>
+    background(
+      "stop:" + pending.event.eventId,
+      serialized(pending.event.taskId)(
+        Effect.gen(function* () {
+          const stored = yield* ledger.getTask(pending.event.taskId);
+          const state = yield* readState(pending.event.taskId);
+          const done = ledger.completeForward({ owner, sequence: pending.sequence });
+          if (stored === undefined || state === undefined) return yield* done;
+          const authorize = authorityFor(stored.task.taskId, stored.task.generation, owner);
+          let threadId = state.remoteThreadId ?? stored.task.worker?.threadId;
+          if (threadId === undefined) {
+            // The launch may have been in flight when the stop was asked, and its binding never
+            // committed here. The remote stores the binding before it creates the thread, so
+            // ask it; a binding it still does not know after the grace means no launch landed.
+            const seen = yield* probe(state, authorize).pipe(Effect.result);
+            if (seen._tag === "Success") {
+              threadId = seen.success.threadId;
+            } else {
+              // Only the remote saying there is no such binding shows no launch landed; any
+              // other failure says nothing, so the stop keeps looking.
+              if (remoteCode(seen.failure) !== "thread_not_found") return;
+              const age = (yield* Clock.currentTimeMillis) - Date.parse(pending.event.occurredAt);
+              if (age > 120_000) yield* done;
+              return;
+            }
+          }
+          // The remote interrupt stops the running run there. Async subagents it started keep
+          // running on that machine until they finish; GOAT has no remote thread stop yet.
+          const stopped = yield* callHost(
+            {
+              host: state.host,
+              tool: "goat_thread_interrupt",
+              arguments: {
+                threadId,
+                reason: "Stopped from GOAT Bot.",
+                clientRequestId: "channel-stop:" + pending.event.eventId,
+              },
+              writes: true,
+              timeoutMs: SEND_TIMEOUT_MS,
+            },
+            authorize,
+          ).pipe(Effect.result);
+          if (stopped._tag === "Failure" && remoteCode(stopped.failure) !== "thread_not_found") {
+            if (stopped.failure instanceof Superseded) return;
+            // Unreachable or refused for now: left pending, so the next pass stops it.
+            yield* Effect.logWarning("channel remote worker stop failed; retrying", {
+              taskId: stored.task.taskId,
+              host: state.host,
+            });
+            return;
+          }
+          yield* done;
+        }),
+      ),
+    );
+
   const forward: ChannelRemoteWorkers["Service"]["forward"] = (pending, owner) =>
     background(
       "forward:" + pending.event.eventId,
@@ -2481,6 +2543,7 @@ const make = Effect.gen(function* () {
     launch,
     dispatch,
     forward,
+    stop,
     ensure,
     attemptedElsewhere,
     move,

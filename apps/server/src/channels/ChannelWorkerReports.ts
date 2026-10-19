@@ -23,7 +23,9 @@ import {
   channelWorkerObservationEquals,
   CommandId,
   type ChannelTaskEventId,
+  type ChannelTask,
   type ChannelTaskReportInput,
+  type ChannelWorkerRunStatus,
   type OrchestrationV2Run,
   type ThreadId,
 } from "@goat/contracts";
@@ -37,17 +39,42 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { readStoredThreadResultReport } from "../threadResults/ThreadResultService.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
-import { questionIdFor } from "./channelIds.ts";
+import { questionIdFor, workerLaunchIdsFor } from "./channelIds.ts";
 import { settleCompletedRun } from "./channelRunOutcome.ts";
 import { commitTransition } from "./channelTaskWrites.ts";
 import {
   completionHoldCount,
+  isThreadMissing,
   needsYouFromRuntimeRequests,
   observeWorker,
   pullRequestsFromLinks,
   usageLimitWait,
   type UsageLimitWait,
 } from "./channelWorkerObservation.ts";
+
+/** A worker run's own state, apart from the task it serves. */
+const workerRunStatus = (
+  status: OrchestrationV2Run["status"],
+  needsYou: boolean,
+): ChannelWorkerRunStatus => {
+  switch (status) {
+    case "completed":
+      return "finished";
+    case "cancelled":
+      return "stopped";
+    case "failed":
+    case "interrupted":
+      return "failed";
+    default:
+      return needsYou ? "waiting" : "running";
+  }
+};
+
+/** How far back, and how many per pass, finished tasks have their runs read into history. */
+const RUN_HISTORY_DAYS = 7;
+const RUN_HISTORY_PER_PASS = 20;
+/** How long a finished task without a thread waits for a launch that may still land. */
+const NO_THREAD_GRACE_MS = 120_000;
 
 const TERMINAL_RUN_STATUSES = new Set([
   "completed",
@@ -134,6 +161,49 @@ const make = Effect.gen(function* () {
     });
 
   /** One task against its worker's current runs. True when the ledger changed. */
+  /**
+   * Records the task's runs from the one it is bound to onward, each with its own state. A run is
+   * written only when its state changed, so a quiet worker costs no writes.
+   */
+  const recordRuns = (
+    task: ChannelTask,
+    runs: ReadonlyArray<OrchestrationV2Run>,
+    floor: number,
+    needsYou: boolean,
+  ) =>
+    Effect.gen(function* () {
+      const worker = task.worker;
+      if (worker === undefined) return true;
+      const known = new Map(
+        (yield* ledger.listWorkerRuns([task.taskId])).map((run) => [run.runId, run]),
+      );
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const latestOrdinal = runs.at(-1)?.ordinal;
+      for (const run of runs) {
+        if (run.ordinal < floor) continue;
+        // Only the newest run can be waiting on a person; earlier ones have ended.
+        const status = workerRunStatus(run.status, needsYou && run.ordinal === latestOrdinal);
+        const before = known.get(run.id);
+        if (before?.status === status) continue;
+        const ended = status === "running" || status === "waiting" ? undefined : now;
+        yield* ledger.upsertWorkerRun({
+          runId: run.id,
+          taskId: task.taskId,
+          generation: worker.generation,
+          threadId: worker.threadId,
+          status,
+          startedAt: before?.startedAt ?? DateTime.formatIso(run.requestedAt),
+          updatedAt: now,
+          ...(ended === undefined ? {} : { endedAt: before?.endedAt ?? ended }),
+        });
+      }
+      return true;
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("channel worker run not recorded", { cause }).pipe(Effect.as(false)),
+      ),
+    );
+
   const reconcileTask = (stored: ChannelLedger.ChannelStoredTask, owner: string) =>
     Effect.gen(function* () {
       const task = stored.task;
@@ -214,6 +284,18 @@ const make = Effect.gen(function* () {
         if (reread.task.version !== wrote.version) return true;
         latest = reread;
       }
+
+      // From the generation's first run, so a run rebound past before it was seen ending still
+      // gets its final state.
+      const launched = runs.find(
+        (run) => run.userMessageId === workerLaunchIdsFor(task.taskId, worker.generation).messageId,
+      );
+      yield* recordRuns(
+        latest.task,
+        runs,
+        launched?.ordinal ?? bound?.ordinal ?? 0,
+        observed.needsYou.length > 0,
+      );
 
       if (!TERMINAL_RUN_STATUSES.has(current.status)) return latest !== stored;
       // A follow-up or answer recorded but not yet sent belongs to this work; the run read above
@@ -311,6 +393,76 @@ const make = Effect.gen(function* () {
       let changed = 0;
       for (const stored of active) {
         if (yield* reconcileTask(stored, owner)) changed += 1;
+      }
+      // A finished task's runs are read into history until all of them have ended, even when
+      // the task ended first (stopped, or settled by the worker's own report) or its launch
+      // never bound a worker, in which case its thread is the one the generation derives.
+      const now = yield* DateTime.now;
+      const since = DateTime.formatIso(DateTime.subtract(now, { days: RUN_HISTORY_DAYS }));
+      for (const finished of yield* ledger.listUnsettledRunHistory({
+        since,
+        limit: RUN_HISTORY_PER_PASS,
+      })) {
+        const generation = finished.worker?.generation ?? finished.generation;
+        const ids = workerLaunchIdsFor(finished.taskId, generation);
+        const worker = finished.worker ?? {
+          environmentId: finished.target!.environmentId,
+          threadId: ids.threadId,
+          generation,
+        };
+        const settle = ledger.settleRunHistory({
+          taskId: finished.taskId,
+          now: DateTime.formatIso(now),
+        });
+        const records = yield* threads
+          .getThreadRecords(worker.threadId, ["runs"])
+          .pipe(Effect.result);
+        if (records._tag === "Failure") {
+          // Only a thread that does not exist means the launch never landed; any other failed
+          // read is tried again next pass.
+          if (
+            isThreadMissing(records.failure) &&
+            DateTime.toEpochMillis(now) - Date.parse(finished.updatedAt) > NO_THREAD_GRACE_MS
+          ) {
+            yield* settle;
+          }
+          continue;
+        }
+        const runs = records.success.runs.toSorted((left, right) => left.ordinal - right.ordinal);
+        const launched = runs.find((run) => run.userMessageId === ids.messageId);
+        const recorded = yield* recordRuns(
+          { ...finished, worker },
+          runs,
+          launched?.ordinal ?? 0,
+          false,
+        );
+        if (recorded && runs.every((run) => TERMINAL_RUN_STATUSES.has(run.status))) {
+          yield* settle;
+        }
+      }
+      // Runs recorded as running or waiting whose task has ended (stopped, or settled by the
+      // worker's own report) still end on their own; record how.
+      const activeIds = new Set(active.map((stored) => stored.task.taskId as string));
+      const open = (yield* ledger.listOpenWorkerRuns()).filter(
+        (run) => !activeIds.has(run.taskId) && run.host === undefined,
+      );
+      for (const threadId of new Set(open.map((run) => run.threadId))) {
+        const records = yield* threads
+          .getThreadRecords(threadId as ThreadId, ["runs"])
+          .pipe(Effect.option);
+        if (records._tag === "None") continue;
+        const now = DateTime.formatIso(yield* DateTime.now);
+        for (const recorded of open.filter((run) => run.threadId === threadId)) {
+          const run = records.value.runs.find((candidate) => candidate.id === recorded.runId);
+          const status = run === undefined ? "stopped" : workerRunStatus(run.status, false);
+          if (status === recorded.status) continue;
+          yield* ledger.upsertWorkerRun({
+            ...recorded,
+            status,
+            updatedAt: now,
+            ...(status === "running" || status === "waiting" ? {} : { endedAt: now }),
+          });
+        }
       }
       return changed;
     });
