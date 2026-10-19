@@ -784,6 +784,13 @@ goat_runtime_ready() {
 }
 if ! goat_runtime_ready; then
   mkdir -p "$HOME/.goat/runtime/goat/versions"
+  # Cleanup takes this mutex exclusively; installs may still run concurrently.
+  if [ "$(uname -s)" = Linux ] && command -v flock >/dev/null 2>&1; then
+    GOAT_MAINTENANCE="$HOME/.goat/runtime/goat/versions/.maintenance.lock"
+    [ ! -L "$GOAT_MAINTENANCE" ] || exit 1
+    exec 9>"$GOAT_MAINTENANCE"
+    flock -w @@GOAT_ARCHIVE_LOCK_WAIT_SECONDS@@ -s 9
+  fi
   GOAT_LOCK="$HOME/.goat/runtime/goat/versions/.$GOAT_ARCHIVE_VERSION.install.lock"
   # Publish a nonempty directory with an immutable pid and unique token by
   # same-filesystem rename. mv can nest it in an existing lock: only a token
@@ -923,6 +930,7 @@ if [ -n "\${GOAT_LOCK:-}" ]; then
   goat_lock_cleanup
   trap - 0 1 2 3 15
 fi
+exec 9>&-
 exec "$GOAT_RUNTIME_DIR/goat" "$@"
 `;
 
@@ -1598,6 +1606,101 @@ elif [ "$LIVE_OWNED" = 1 ] && ! verify_owned_identity "$LIVE_PID" "$LIVE_PORT"; 
   printf 'GOAT ownership could not be verified for PID %s: persisted launch identity is missing or mismatched; process, runner and ownership files were preserved.\\n' "$LIVE_PID" >&2
   exit 1
 fi`;
+
+// The caller holds the replacement mutex after readiness, outside any supervisor trial.
+export const REMOTE_RUNTIME_CLEANUP_SCRIPT = String.raw`cleanup_runtime_versions() {
+  [ "$GOAT_HOST_WINDOWS" = 0 ] && [ "$GOAT_ARCHIVE_MODE" = 1 ] || return 0
+  [ "$LOCK_HELD" = 1 ] && [ -z "${"${UPGRADE_VERSION:-}"}" ] || return 0
+  [ "$(readlink "$LOCK" 2>/dev/null)" = "$OWNER" ] || return 1
+  # A detached supervisor can outlive the SSH shell that owned the replacement lock.
+  [ ! -e "$STATE_DIR/run-t3.previous" ] && [ ! -L "$STATE_DIR/run-t3.previous" ] || return 1
+  for parent in "$HOME" "$HOME/.goat" "$HOME/.goat/runtime" "$HOME/.goat/runtime/goat" "$HOME/.goat/runtime/goat/versions"; do
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  done
+  versions="$HOME/.goat/runtime/goat/versions"
+  [ -d /proc/self ] && command -v flock >/dev/null 2>&1 || return 1
+  [ ! -L "$versions/.maintenance.lock" ] || return 1
+  exec 9>"$versions/.maintenance.lock" || return 1
+  flock -n -x 9 || return 1
+  set +f
+  # Older clients do not take the maintenance mutex; their install locks still veto cleanup.
+  for install in "$versions"/.*.install.lock*; do
+    [ ! -e "$install" ] && [ ! -L "$install" ] || return 1
+  done
+  retained="$(read_runner_hint "$RUNNER_FILE" GOAT_ARCHIVE_VERSION T3_ARCHIVE_VERSION)" || return 1
+  valid_version "$retained" && valid_version "$SELECTED_VERSION" || return 1
+  live_binary="$versions/$SELECTED_VERSION/goat"
+  [ ! -L "$versions/$SELECTED_VERSION" ] && [ ! -L "$live_binary" ] || return 1
+  # Revalidate the descriptor under both mutexes, after the readiness handshake.
+  live="$("$live_binary" __ssh-helper protocol --runtime-file "$DEFAULT_RUNTIME_FILE" --port-file "$PORT_FILE" --pid-file "$PID_FILE" --shell)" || return 1
+  set -f; set -- $live; set +f
+  valid_live_tokens "$@" && [ "$1" = live ] && [ "$2" = "$SELECTED_VERSION" ] &&
+    [ "$6" = "$REMOTE_PORT" ] || return 1
+  cleanup_process_paths() {
+    commands="$(ps -axo command=)" && pids="$(ps -axo pid=)" || return 1
+    [ -n "$commands" ] && [ -n "$pids" ] || return 1
+    paths="$commands"
+    # ps alone misses chdir and exec with a custom argv[0]. Any unreadable process vetoes deletion.
+    for pid in $pids; do
+      case "$pid" in *[!0-9]*|'') return 1 ;; esac
+      executable="$(readlink "/proc/$pid/exe")" && cwd="$(readlink "/proc/$pid/cwd")" || return 1
+      paths="$paths
+$executable
+$cwd"
+    done
+  }
+  cleanup_process_paths || return 1
+  cleanup_commit() {
+    binary="$versions/$1/goat"
+    [ ! -L "$binary" ] && [ ! -L "$versions/$1/.install-record" ] || return 1
+    record="$(cat "$versions/$1/.install-record" 2>/dev/null)" || return 1
+    set -f; set -- $record; set +f
+    [ "$#" = 4 ] && [ "$versions/$1/goat" = "$binary" ] || return 1
+    [ "$(runner_sha256 "$binary")" = "$3" ] || return 1
+    build_commit_time "$binary"
+  }
+  cleanup_order() {
+    first="$1"; second="$2"; set --
+    if first_time="$(cleanup_commit "$first")" && second_time="$(cleanup_commit "$second")"; then
+      set -- --live-commit-time "$first_time" --requested-commit-time "$second_time"
+    fi
+    "$live_binary" __ssh-helper compare-version "$@" "$first" "$second" 2>/dev/null
+  }
+  older=
+  for dir in "$versions"/*; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    [ -x "$dir/goat" ] && [ ! -L "$dir/goat" ] || continue
+    version="${"${dir##*/}"}"
+    valid_version "$version" || continue
+    [ ! -L "$dir/.install-complete" ] &&
+      [ "$(cat "$dir/.install-complete" 2>/dev/null)" = "$version" ] || continue
+    [ "$version" != "$SELECTED_VERSION" ] || continue
+    [ "$(cleanup_order "$SELECTED_VERSION" "$version")" = newer ] || continue
+    older="$older $version"
+  done
+  for version in $older; do
+    [ "$version" != "$retained" ] && [ "$version" != "$REQUESTED_VERSION" ] || continue
+    # Preserve every maximal older build when the rollback candidates cannot be totally ordered.
+    removable=0
+    for other in $older; do
+      if [ "$(cleanup_order "$other" "$version")" = newer ]; then removable=1; break; fi
+    done
+    [ "$removable" = 1 ] || continue
+    dir="$versions/$version"
+    cleanup_process_paths || return 1
+    case "$paths" in *"$dir/"*|*"$dir
+"*|*"$dir") continue ;; esac
+    [ ! -L "$dir" ] || return 1
+    [ ! -e "$versions/.$version.install.lock" ] && [ ! -L "$versions/.$version.install.lock" ] || return 1
+    trash="$(mktemp -d "$versions/.trash-XXXXXXXX")" || return 1
+    # Moving into an owned empty sibling keeps a failed recursive delete out of runtime discovery.
+    mv "$dir" "$trash/runtime" || return 1
+    rm -rf "$trash" || return 1
+    printf 'ssh.runtime.cleanup.removed version=%s\n' "$version" >&2
+  done
+}
+(cleanup_runtime_versions) || { printf 'ssh.runtime.cleanup.skipped inspection, lock, or cleanup failed\n' >&2 || true; }
+`;
 
 const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@GOAT_NODE_ENV_SCRIPT@@
@@ -3054,6 +3157,55 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       refresh: parsed.refresh ?? null,
       stateKey,
     });
+    if (
+      !isNodeScriptRunner(selected.runner) &&
+      parsed.pending === undefined &&
+      parsed.refresh === undefined &&
+      parsed.selectedVersion === selected.version
+    ) {
+      // A separate round trip makes even a hung cleanup or a dropped SSH connection best-effort.
+      yield* Effect.gen(function* () {
+        const cleanup = yield* runSshCommand(target, {
+          ...input,
+          remoteCommandArgs: ["sh", "-l", "-s"],
+          timeoutMs: 10_000,
+          stdin: `set -eu
+DEFAULT_SERVER_HOME="$HOME/.goat"
+STATE_DIR="$DEFAULT_SERVER_HOME/ssh-launch/${stateKey}"
+DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"
+PID_FILE="$STATE_DIR/pid"; PORT_FILE="$STATE_DIR/port"; RUNNER_FILE="$STATE_DIR/run-t3.sh"
+SELECTED_VERSION=${shellSingleQuote(selected.version ?? "")}
+REQUESTED_VERSION=${shellSingleQuote(selected.requestedVersion ?? "")}
+REMOTE_PORT=${parsed.remotePort}; GOAT_ARCHIVE_MODE=1
+${REMOTE_PROTOCOL_TOKEN_SCRIPT}
+${REMOTE_RUNNER_HINT_SCRIPT}
+${REMOTE_REPLACEMENT_LOCK_SCRIPT}
+trap 'release_recovery_lock; release_replacement_lock' EXIT
+trap 'exit 1' HUP INT TERM
+if [ "$GOAT_HOST_WINDOWS" = 1 ]; then exit 0; fi
+if [ -e "$LOCK" ] || [ -L "$LOCK" ] || ! acquire_replacement_lock; then
+  printf 'ssh.runtime.cleanup.skipped replacement lock held\\n' >&2
+  exit 0
+fi
+${REMOTE_RUNTIME_CLEANUP_SCRIPT}`,
+        });
+        for (const line of cleanup.stderr.split(/\r?\n/u)) {
+          if (line.startsWith("ssh.runtime.cleanup.")) {
+            yield* Effect.logInfo("ssh.runtime.cleanup.result", {
+              ...sshTargetLogFields(target),
+              detail: line,
+            });
+          }
+        }
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("ssh.runtime.cleanup.failed", {
+            ...sshTargetLogFields(target),
+            cause,
+          }),
+        ),
+      );
+    }
     const reusedVersion = parsed.selectedVersion;
     const cachedSelection: PreparedRemoteRuntime =
       reusedVersion === selected.version || isNodeScriptRunner(selected.runner)

@@ -148,8 +148,12 @@ replacement needs a person's confirmation bound to that environment and target.
   its own release even when `run-t3.sh` names an older compatible one; an older
   retained runtime wins only when the client's archive cannot be acquired, and
   then a recorded newer install beats it.
-- **Cleanup** follows Zed: remove versions older than the selected one that no
-  process uses, keeping the rollback target. Not yet implemented.
+- **Cleanup** follows Zed after a successful SSH launch/attach under the replacement
+  lock, outside installs, drains and rollback windows: delete only proven older,
+  unused versions, preserving live, retained, requested and the newest older rollback
+  build. Unknown ordering or incomplete process inspection preserves the directory;
+  unsupported hosts keep everything. Victims are renamed into sibling trash directories
+  before deletion; cleanup errors only log and never fail the connection.
 
 ## Who may update what
 
@@ -245,8 +249,7 @@ migration check, never a stale client reconnecting.
    so it can update without the app, preserving its identity, data, and port
    (this also narrows issue #1, where the desktop and SSH servers on one host are
    separate environments); serve the previous protocol only when a protocol bump
-   needs it; a consented, idle-only update scheduler on servers; and cleanup of
-   old runtime versions.
+   needs it; and a consented, idle-only update scheduler on servers.
 
 ## Test plan
 

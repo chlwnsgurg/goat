@@ -139,6 +139,16 @@ desktop and the server's SSH dispatch (`resolveSshCliRunner` in
   answers `idle` (see [Replacement](#replacement)). While it is busy, the client attaches to it,
   logs `ssh.runtime.refresh.deferred` with the reason, and retries every 10 minutes.
 
+After a successful launch or attach, cleanup runs under the host replacement lock, never
+on a drain/replacement or rollback connection, and excludes concurrent installs. It uses the
+live binary's `__ssh-helper compare-version` to remove only proven older, unused directories,
+keeping the live, retained and requested versions and the newest older rollback build (all
+unordered rollback candidates are preserved). It checks process commands, executable paths and
+cwd, renames victims into sibling `.trash-*` directories before deleting, and never follows
+symlinks. Errors only log `ssh.runtime.cleanup.*`. Windows is skipped because its process and
+shell utilities differ; hosts without readable `/proc` executable/cwd links or `flock`, including
+macOS, conservatively keep everything.
+
 Runtime supply targets the owning process's exact release and platform, not the
 latest published build. The acquisition order in
 [`packages/ssh/src/tunnel.ts`](../packages/ssh/src/tunnel.ts) is bundle, local cache,
