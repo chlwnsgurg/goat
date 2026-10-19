@@ -1164,6 +1164,9 @@ export const OrchestratorMcpFailureCode = Schema.Literals([
   "thread_credential_required",
   "target_required",
   "host_unavailable",
+  // A fleet goal (or another named record) that does not exist, or a stale expectedGeneration.
+  "not_found",
+  "conflict",
   // GOAT Bot runs on another environment in this cluster; the message names it.
   "not_home",
 ]);

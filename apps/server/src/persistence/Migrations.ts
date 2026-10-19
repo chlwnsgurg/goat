@@ -91,6 +91,7 @@ import Migration0081 from "./Migrations/081_HandoffLookupIndex.ts";
 import Migration0082 from "./Migrations/082_MemoryLastReadySpace.ts";
 import Migration0083 from "./Migrations/083_MemoryHubAdministered.ts";
 import Migration0084 from "./Migrations/084_MemoryCheckpointLifecycle.ts";
+import Migration0085 from "./Migrations/085_FleetGoals.ts";
 
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -180,6 +181,7 @@ export const migrationEntries = [
   [82, "MemoryLastReadySpace", Migration0082],
   [83, "MemoryHubAdministered", Migration0083],
   [84, "MemoryCheckpointLifecycle", Migration0084],
+  [85, "FleetGoals", Migration0085],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

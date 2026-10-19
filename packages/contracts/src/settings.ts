@@ -804,6 +804,15 @@ export const GitHubHost = TrimmedNonEmptyString.pipe(
 export const SourceControlHostSettings = Schema.Record(Schema.String, Schema.Unknown);
 export type SourceControlHostSettings = typeof SourceControlHostSettings.Type;
 
+/**
+ * Fleet controllers (docs/internals/agentic-k8s.md). Off by default: no goal acts until
+ * someone turns this on. The resources work adds limits and fallback chains here.
+ */
+export const FleetSettings = Schema.Struct({
+  controllerEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+});
+export type FleetSettings = typeof FleetSettings.Type;
+
 export const ObservabilitySettings = Schema.Struct({
   otlpTracesUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   otlpMetricsUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -1465,6 +1474,7 @@ export const ServerSettings = Schema.Struct({
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   completionWebhook: CompletionWebhookSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  fleet: FleetSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   sourceControlHosts: Schema.Record(Schema.String, SourceControlHostSettings).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1813,6 +1823,9 @@ const ServerSettingsPatchFields = Schema.Struct({
   reviewGuideModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   reviewGuideInstructions: Schema.optionalKey(TrimmedString),
   pullRequestMergeMethod: Schema.optionalKey(Schema.NullOr(PullRequestMergeMethod)),
+  fleet: Schema.optionalKey(
+    Schema.Struct({ controllerEnabled: Schema.optionalKey(Schema.Boolean) }),
+  ),
   observability: Schema.optionalKey(
     Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(TrimmedString),

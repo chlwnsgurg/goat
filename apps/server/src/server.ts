@@ -51,6 +51,7 @@ import * as RuntimeControl from "./runtimeControl.ts";
 import * as RuntimeIdentity from "./runtimeIdentity.ts";
 import * as SshRemoteDispatch from "./sshRemote/SshRemoteDispatch.ts";
 import * as HandoffExpiry from "./handoffs/HandoffExpiry.ts";
+import * as GoalLayers from "./fleet/goals/GoalLayers.ts";
 import * as HostThreadsMcpService from "./mcp/HostThreadsMcpService.ts";
 import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as ThreadResultService from "./threadResults/ThreadResultService.ts";
@@ -1246,6 +1247,8 @@ const layerMakeRoutes = Layer.mergeAll(
     layerMemoryToolkits,
     McpHttpServer.layerProviderToolkit,
     HandoffExpiry.layer,
+    // Fleet goals act through the same launch, watch and dispatch services as these tools.
+    McpHttpServer.layerFleetToolkit.pipe(Layer.provide(GoalLayers.layer)),
   ).pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
