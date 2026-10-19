@@ -1,6 +1,7 @@
 import type { FleetMachine } from "@goat/client-runtime/state/fleet";
 import type { EnvironmentThreadShell } from "@goat/client-runtime/state/models";
 import {
+  FLEET_HEAT_LABEL,
   FLEET_HEAT_THRESHOLDS,
   fleetMachineHeat,
   matchFleetHostEntries,
@@ -234,6 +235,13 @@ export interface HottestHost {
   readonly tier: FleetHeatTier;
   readonly cpu: number | null;
   readonly loadPerCore: number | null;
+}
+
+/** The hottest host's headline reading: CPU, else load per core, else the tier memory or quota set. */
+export function hottestReading(hottest: HottestHost): string {
+  if (hottest.cpu !== null) return hottest.cpu + "%";
+  if (hottest.loadPerCore !== null) return hottest.loadPerCore.toFixed(1) + "/core";
+  return FLEET_HEAT_LABEL[hottest.tier];
 }
 
 /** The reachable host working hardest: highest heat tier, then CPU, then load per core. */

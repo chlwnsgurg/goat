@@ -7,6 +7,7 @@ import {
   RunId,
   ThreadId,
 } from "@goat/contracts";
+import { cpuPercent } from "@goat/client-runtime/state/host-metrics";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { FleetConnection } from "./fleetConnection";
@@ -16,6 +17,7 @@ import {
   fleetThroughput,
   hostSourceKey,
   hottestHost,
+  hottestReading,
   pushBounded,
   quotaRows,
   recordHostSamples,
@@ -218,6 +220,8 @@ describe("signalTier", () => {
     expect(signalTier("cpu", 60)).toBe("warm");
     expect(signalTier("load", 1)).toBe("hot");
     expect(signalTier("memory", 95)).toBe("burning");
+    // CPU 59.6% shows as 60% and is warm on the graph; the HUD colors the rounded value.
+    expect(signalTier("cpu", cpuPercent({ cpuUtilization: 0.596 }))).toBe("warm");
   });
 });
 
@@ -240,6 +244,36 @@ describe("hottestHost", () => {
     expect(hottest?.row.label).toBe("b");
     expect(hottest?.loadPerCore).toBeCloseTo(0.95);
     expect(hottestHost([], new Map())).toBeNull();
+  });
+});
+
+describe("hottestReading", () => {
+  it("names the tier when a host reports neither CPU nor load", () => {
+    const rows = fleetHostRows({
+      machines: [],
+      sshAliases: new Map(),
+      reports: reportsOf({
+        environmentId: studio,
+        hosts: [
+          {
+            ...entry("win", { cpu: null }),
+            metrics: {
+              ...entry("win", { cpu: null }).metrics!,
+              loadAvg: null,
+              availableMemoryBytes: 1,
+              totalMemoryBytes: 100,
+            },
+          },
+        ],
+      }),
+      primaryEnvironmentId: studio,
+    });
+    const hottest = hottestHost(rows, new Map())!;
+    expect([hottest.cpu, hottest.loadPerCore, hottestReading(hottest)]).toEqual([
+      null,
+      null,
+      "Burning",
+    ]);
   });
 });
 

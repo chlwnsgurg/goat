@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { FleetSnapshot } from "@goat/client-runtime/state/fleet";
 import type { FleetHeatTier, FleetMachineHeat } from "@goat/client-runtime/state/fleet-heat";
+import { cpuPercent, memoryPercent } from "@goat/client-runtime/state/host-metrics";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 import { memo, useEffect, useRef } from "react";
@@ -25,6 +26,7 @@ import {
   fleetThroughput,
   fleetHostRows,
   hottestHost,
+  hottestReading,
   signalTier,
   quotaRows,
   sparklinePath,
@@ -165,11 +167,9 @@ function HostRow({
         : metrics === undefined
           ? "Unreachable"
           : null;
-  const cpu = metrics?.cpuUtilization == null ? null : metrics.cpuUtilization * 100;
-  const memory =
-    metrics === undefined || metrics.totalMemoryBytes <= 0
-      ? null
-      : (1 - metrics.availableMemoryBytes / metrics.totalMemoryBytes) * 100;
+  // The graph's rounded helpers, so a reading on a threshold gets the same color as the ring.
+  const cpu = metrics === undefined ? null : cpuPercent(metrics);
+  const memory = metrics === undefined ? null : memoryPercent(metrics);
   const load = metrics?.loadAvg?.oneMinute ?? null;
   const cores = metrics?.cpuCount ?? 1;
   const loadMax = Math.max(cores, ...samples.map((sample) => sample.load ?? 0));
@@ -358,9 +358,7 @@ function FleetConsoleExpanded(props: {
             <Label>Hottest</Label>
             <span className="truncate text-xs font-medium">{hottest.row.label}</span>
             <span className={cn("font-mono text-xs tabular-nums", TONE_TEXT[hottest.tier])}>
-              {hottest.cpu === null
-                ? hottest.loadPerCore!.toFixed(1) + "/core"
-                : Math.round(hottest.cpu) + "%"}
+              {hottestReading(hottest)}
             </span>
           </span>
         )}
