@@ -488,6 +488,8 @@ test("pushes snapshot then launches remote owned worktree", (f) =>
     });
     const log = yield* f.fs.readFileString(f.sshLog);
     assert.include(log, "BatchMode=yes");
+    assert.include(log, "ServerAliveInterval=15");
+    assert.include(log, "ServerAliveCountMax=3");
     assert.include(log, "runner@buildbox");
     assert.include(log, "2222");
   }));

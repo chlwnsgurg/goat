@@ -162,23 +162,23 @@ are relative to the bundle's `snapshots/vite-build-beautified/`.
 
 ## Gap table
 
-| Concern                      | GOAT today                                                                                                              | Best reference practice                                         | Gap           |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------- |
-| Backoff and jitter           | 1 s→5 min, upper-half jitter, 30 s stable reset                                                                         | cmux full jitter; herdr resets on 60 s _ready_                  | none          |
-| Post-wake retries            | flat 2 s for 30 s after long resume, failure count held at zero                                                         | herdr caps at 2 s for 30 s after wake                           | none          |
-| Suspend                      | cancels establishment and retry timers until wake                                                                       | herdr cancels in-flight attempts; cmux cancels timers           | none          |
-| Blocked recovery             | local proxy re-checks every 60 s while staying blocked; other blocks wait for a signal                                  | herdr re-checks every 30 s                                      | none          |
-| SSH handshakes per reconnect | 4 standalone ssh processes per reconnect direct, 5 behind `cloudflared` (3.3 s each); `ssh.reconnect.cost` logs them    | one scoped master per host in cmux, herdr, herdr-web-ui (POSIX) | P1            |
-| Setup deadline               | launch plus runtime probe take 17–25 s, so every reconnect's first attempt times out at 15 s                            | none of the references probe a runtime on each reconnect        | P0            |
-| Stalled link                 | ServerAlive + RPC silence budget; real loopback stall tests cover RPC timeout and forward revalidation                  | cmux blocked-write and carrier-cut fixtures                     | none          |
-| Abandoned server sockets     | 120 s inbound idle timeout tolerates throttled hidden tabs; clients ping every 5 s (`apps/server/src/wsIdleTimeout.ts`) | herdr bridge idles out at 60 s; cmux lease evicts older bridges | none          |
-| Git over SSH                 | `GIT_SSH_COMMAND` has no keepalive; 120 s transfer cap (`apps/server/src/sshRemote/SshWorkspaceSync.ts:116`)            | every other SSH path carries ServerAlive                        | P2            |
-| Error detail                 | tooltip; connection menu and thread banner copy a sanitized public diagnostic                                           | cmux Copy SSH Error; herdr-web-ui last 8 lines                  | none          |
-| Frozen timers (web, mobile)  | long resume replaces the session; timers over 2 s late restart the RPC silence budget                                   | herdr-web-ui treats a late deadline as a freeze                 | none          |
-| Archive pinning              | SHA-256 locally and on the host                                                                                         | same                                                            | none          |
-| Session resume               | server owns turns and state; subscriptions replay from cursor; mutations never replayed                                 | cmux keeps replay state 120 s; herdr keeps panes running        | none          |
-| Forward lifetime             | owner-death fence on POSIX, 2 s bounded teardown (#378); Windows unfenced                                               | herdr-web-ui and Codex kill by captured PID                     | none on POSIX |
-| Roaming transport (Mosh)     | none                                                                                                                    | cmux uses it for the terminal only                              | non-goal      |
+| Concern                      | GOAT today                                                                                                                                                      | Best reference practice                                         | Gap           |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------- |
+| Backoff and jitter           | 1 s→5 min, upper-half jitter, 30 s stable reset                                                                                                                 | cmux full jitter; herdr resets on 60 s _ready_                  | none          |
+| Post-wake retries            | flat 2 s for 30 s after long resume, failure count held at zero                                                                                                 | herdr caps at 2 s for 30 s after wake                           | none          |
+| Suspend                      | cancels establishment and retry timers until wake                                                                                                               | herdr cancels in-flight attempts; cmux cancels timers           | none          |
+| Blocked recovery             | local proxy re-checks every 60 s while staying blocked; other blocks wait for a signal                                                                          | herdr re-checks every 30 s                                      | none          |
+| SSH handshakes per reconnect | one owned POSIX master per target; commands and the forward reuse it; the user's own sharing is left alone; the cost log separates masters and control commands | one scoped master per host in cmux, herdr, herdr-web-ui (POSIX) | none          |
+| Setup deadline               | launch plus runtime probe take 17–25 s, so every reconnect's first attempt times out at 15 s                                                                    | none of the references probe a runtime on each reconnect        | P0            |
+| Stalled link                 | ServerAlive + RPC silence budget; real loopback stall tests cover RPC timeout and forward revalidation                                                          | cmux blocked-write and carrier-cut fixtures                     | none          |
+| Abandoned server sockets     | 120 s inbound idle timeout tolerates throttled hidden tabs; clients ping every 5 s (`apps/server/src/wsIdleTimeout.ts`)                                         | herdr bridge idles out at 60 s; cmux lease evicts older bridges | none          |
+| Git over SSH                 | `GIT_SSH_COMMAND` carries ServerAliveInterval=15 / ServerAliveCountMax=3 under the 120 s transfer cap                                                           | every other SSH path carries ServerAlive                        | none          |
+| Error detail                 | tooltip; connection menu and thread banner copy a sanitized public diagnostic                                                                                   | cmux Copy SSH Error; herdr-web-ui last 8 lines                  | none          |
+| Frozen timers (web, mobile)  | long resume replaces the session; timers over 2 s late restart the RPC silence budget                                                                           | herdr-web-ui treats a late deadline as a freeze                 | none          |
+| Archive pinning              | SHA-256 locally and on the host                                                                                                                                 | same                                                            | none          |
+| Session resume               | server owns turns and state; subscriptions replay from cursor; mutations never replayed                                                                         | cmux keeps replay state 120 s; herdr keeps panes running        | none          |
+| Forward lifetime             | owner-death fence on POSIX, 2 s bounded teardown (#378); Windows unfenced                                                                                       | herdr-web-ui and Codex kill by captured PID                     | none on POSIX |
+| Roaming transport (Mosh)     | none                                                                                                                                                            | cmux uses it for the terminal only                              | non-goal      |
 
 Two reference behaviors are deliberately not adopted. cmux's older coordinator
 parks a session after a bounded number of failures; GOAT never gives up on a
@@ -215,6 +215,10 @@ Through the stall relay, the Connections row left `Connected` a median 20.5 s
 after the stall (15.4–20.7 s) and was back a median 34 s after the relay
 resumed (26–47 s).
 
+With one owned SSH master per target, a reconnect authenticates once and took
+a median 25.0 s on `mac-studio` and 36.8 s on `macmini-cf`. What remains is
+mostly the remote probe below.
+
 ### P0
 
 **P0-3. Keep one reconnect inside the setup deadline.**
@@ -234,48 +238,10 @@ raise the timeout, which also bounds a dead host.
 Test: a preparation-timing test in `packages/ssh`.
 Real app: rerun the reconnect baseline; the first attempt no longer times out.
 
-### P1
-
-**P1-3. One scoped master per host.**
-Problem: when cost logs show several handshakes per reconnect, each one repeats
-ProxyCommand startup, key exchange, and authentication; behind
-`cloudflared` that is seconds each, and an askpass prompt can repeat.
-Evidence: on POSIX, cmux, herdr, and herdr-web-ui each run one private master
-per host or route (`SSHConnectionSharingOptions.swift:274`,
-`herdr:src/remote/attach.rs:1433`, `herdr-web-ui:server/ssh.ts:203`). cmux and
-herdr-web-ui add forwards to it with `-O forward`
-(`ReverseRelayControlMaster.swift:45`, `herdr-web-ui:server/ssh.ts:324`); herdr
-pins the control socket before `-O stop` so it never stops a newer master
-(`herdr:src/platform/unix_common.rs:768`, `herdr:src/remote/attach.rs:953`).
-Change: on POSIX, start a GOAT-owned master per resolved target under the
-owner fence from #378 (`-M -N -S <private dir>/<hash>`,
-`ControlPersist=no`), run commands with `-S` and `ControlMaster=no`, add the
-forward with `-O forward` and remove it with `-O cancel`. A failed master falls
-back to today's standalone processes. Keepalive moves to the master; the
-existing RPC ping still detects a dead master within its budget. Windows keeps
-standalone processes.
-Files: `packages/ssh/src/command.ts`, `tunnel.ts`, `tunnelOwner.ts`,
-`structure/ssh.md`.
-Test: fake-ssh tests that commands carry `-S`; teardown cancels the forward
-and kills the master; a master that dies mid-session falls back.
-Real app: rerun cost and stalled-link measurements; the PR states spawn and auth counts before and
-after, and that killing the master by its captured PID reconnects within the
-stalled-link baseline.
-
-### P2
-
-**P2-2. Keepalive for Git over SSH.** `GIT_SSH_COMMAND` omits ServerAlive
-(`SshWorkspaceSync.ts:116`), so a stalled fetch waits out the 120 s transfer
-cap. Add `SSH_KEEPALIVE_ARGS`. Test in `SshWorkspaceSync.test.ts`. Real app:
-during agent dispatch to `mac-studio` over the stall relay, stall it mid-fetch
-and record how long the failure takes before and after.
-
 ## Bundles
 
 Each remaining bundle is one PR. Use the loopback stall fixture and
 `ssh.reconnect.cost` logs to collect real-host baseline numbers before
 changing reconnect policy or connection sharing.
 
-3. **Scoped SSH master** (P1-3, P2-2). `packages/ssh` only, plus
-   `SshWorkspaceSync` keepalive; land after the cost logs show the real-host baseline.
-4. **Probe cost** (P0-3). The `packages/ssh` runtime probe; rerun the baseline.
+1. **Probe cost** (P0-3). The `packages/ssh` runtime probe; rerun the baseline.

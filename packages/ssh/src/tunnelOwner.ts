@@ -1,11 +1,11 @@
 import { ChildProcess } from "effect/process";
 
-// The scoped temp directory auth.ts creates for one forward's askpass helper.
+// Both forwards and masters keep askpass inside a private scoped runtime directory.
 const OWNED_AUTH_DIRECTORY = /^(.*\/goat-ssh-runtime-[^/]+)\/t3code-ssh-askpass\/[^/]+$/u;
 
 /**
  * The directory the supervisor may delete when the owner dies. Anything other than GOAT's
- * own per-forward temp directory yields "", so a crash can never remove a shared directory.
+ * own per-session temp directory yields "", so a crash can never remove a shared directory.
  */
 export function ownedAuthDirectory(askpassPath: string | undefined): string {
   return askpassPath === undefined ? "" : (OWNED_AUTH_DIRECTORY.exec(askpassPath)?.[1] ?? "");

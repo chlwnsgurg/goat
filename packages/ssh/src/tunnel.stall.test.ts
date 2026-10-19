@@ -186,6 +186,8 @@ it.effect("emits one timed cost summary when target resolution fails", () =>
         {
           spawns: 1,
           authentications: 1,
+          mastersStarted: 0,
+          controlCommands: 0,
           wallMs: 7_000,
           steps: { "ssh/command.resolveSshTarget": 7_000 },
         },
