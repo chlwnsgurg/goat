@@ -615,6 +615,14 @@ describe("MemoryStore", () => {
         )).items.length,
         0,
       );
+      assert.strictEqual(
+        (yield* store.search(
+          { memorySpaceId: space, scope: { kind: "user" }, limit: 100 },
+          '홍길동" OR *',
+          "fts",
+        )).items.length,
+        0,
+      );
     }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rejected unknown forget survives restart and late upsert", () =>

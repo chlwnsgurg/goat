@@ -386,6 +386,122 @@ describe("MemoryService", () => {
       assert.deepStrictEqual(page.items, []);
     }).pipe(checkUsage, Effect.provide(live)),
   );
+  it.effect("returns an empty page with available index coverage on a no-match control query", () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const readPermit = memoryAccessPermit(
+        {
+          grantedScopes: ["memory:read"],
+          reauthorize: () => Effect.void,
+          readOnly: true,
+        },
+        "read",
+      );
+      const first = input(30);
+      const second: M.MemoryUpsertInput = {
+        ...input(31),
+        memoryId: M.MemoryId.make(id(21)),
+        payload: {
+          text: "홍길동 담당",
+          evidence: [],
+          derivedFromMemoryRevisions: [],
+        },
+      };
+      for (const entry of [first, second]) {
+        yield* service.upsert(entry, Effect.void);
+        const current = yield* store.loadAggregate(space, entry.memoryId);
+        assert.isTrue(
+          yield* store.index({
+            memorySpaceId: space,
+            memoryId: entry.memoryId,
+            revisionId: current.heads[0]!,
+            generation: current.generation,
+          }),
+        );
+      }
+      for (const mode of ["fts", "substring"] as const) {
+        const page = yield* service.search(
+          { memorySpaceId: space, query: "unmatched-control-token", limit: 20, mode },
+          readPermit,
+        );
+        assert.deepStrictEqual(page, {
+          items: [],
+          projectionWatermark: page.projectionWatermark,
+          nextCursor: null,
+          indexCoverage: {
+            status: "available",
+            eligibleItems: 2,
+            indexedItems: 2,
+            unindexedItems: 0,
+            projectionWatermark: page.projectionWatermark,
+          },
+        });
+      }
+    }).pipe(checkUsage, Effect.provide(live)),
+  );
+  it.effect("matches Korean proper nouns with attached particles in both directions", () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const readPermit = memoryAccessPermit(
+        {
+          grantedScopes: ["memory:read"],
+          reauthorize: () => Effect.void,
+          readOnly: true,
+        },
+        "read",
+      );
+      const upsertAndIndex = (n: number, itemMemoryId: M.MemoryId, text: string) =>
+        Effect.gen(function* () {
+          yield* service.upsert(
+            {
+              ...input(n),
+              memoryId: itemMemoryId,
+              payload: { text, evidence: [], derivedFromMemoryRevisions: [] },
+            },
+            Effect.void,
+          );
+          const current = yield* store.loadAggregate(space, itemMemoryId);
+          assert.isTrue(
+            yield* store.index({
+              memorySpaceId: space,
+              memoryId: itemMemoryId,
+              revisionId: current.heads[0]!,
+              generation: current.generation,
+            }),
+          );
+        });
+      const bareId = M.MemoryId.make(id(40));
+      const particleId = M.MemoryId.make(id(41));
+      yield* upsertAndIndex(40, bareId, "홍길동 담당");
+      const fromParticleQuery = yield* service.search(
+        { memorySpaceId: space, query: "홍길동님이", limit: 20, mode: "fts" },
+        readPermit,
+      );
+      assert.deepStrictEqual(
+        fromParticleQuery.items.map((item) => item.memoryId),
+        [bareId],
+      );
+      yield* upsertAndIndex(41, particleId, "홍길동님이 배포를 맡았다");
+      const fromBareQuery = yield* service.search(
+        { memorySpaceId: space, query: "홍길동", limit: 20, mode: "fts" },
+        readPermit,
+      );
+      assert.deepStrictEqual(
+        fromBareQuery.items.map((item) => item.memoryId),
+        [bareId, particleId],
+      );
+      const bothFromParticleQuery = yield* service.search(
+        { memorySpaceId: space, query: "홍길동님이", limit: 20, mode: "fts" },
+        readPermit,
+      );
+      assert.deepStrictEqual(
+        bothFromParticleQuery.items.map((item) => item.memoryId),
+        [bareId, particleId],
+      );
+    }).pipe(checkUsage, Effect.provide(live)),
+  );
   it.effect("forget removes bodies and blocks late local writes", () =>
     Effect.gen(function* () {
       const service = yield* Service.MemoryService;
