@@ -36,7 +36,12 @@ import { CloudEnvironmentRows } from "./CloudEnvironmentRows";
 import { splitEnvironmentSections } from "./environmentSections";
 import { environmentCatalog } from "../../connection/catalog";
 import { useConnectionController } from "./useConnectionController";
-import { CONNECT_HUB_COPY, finishHubPairing, resolveConnectHubIntent } from "./connectHubIntent";
+import {
+  CONNECT_HUB_COPY,
+  type ConnectHubIntent,
+  finishHubPairing,
+  resolveConnectHubIntent,
+} from "./connectHubIntent";
 import { rememberHubEnvironment, selectHubEnvironmentId } from "./hubEnvironment";
 import { useStoredHubEnvironment } from "./useStoredHubEnvironment";
 import { useConnectionsReady } from "../../state/workspace";
@@ -73,10 +78,15 @@ export function ConnectionsNewRouteScreen({
     connectedEnvironments,
     cloudEnvironments: null,
   });
-  const intent = resolveConnectHubIntent({
+  const resolvedIntent = resolveConnectHubIntent({
     ...params,
     savedEnvironmentCount: localEnvironments.length,
   });
+  // Fixed once the saved environments are known, so a hub paired elsewhere while this sheet is
+  // open cannot turn "Connect hub" into "Change hub" and remove that hub on the next success.
+  const [openedIntent, setOpenedIntent] = useState<ConnectHubIntent | null>(null);
+  if (pairingReady && openedIntent === null) setOpenedIntent(resolvedIntent);
+  const intent = openedIntent ?? resolvedIntent;
   const copy = CONNECT_HUB_COPY[intent];
   const replaceEnvironmentId =
     params.replaceEnvironmentId ?? selectHubEnvironmentId(localEnvironments, savedHub.storedHubId);
