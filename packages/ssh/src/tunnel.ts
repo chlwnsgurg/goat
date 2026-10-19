@@ -1,4 +1,10 @@
 import {
+  isSshHostUnreachable,
+  sshAuthenticationFailure,
+  sshFailureDiagnostic,
+  sshLocalProxyFailure,
+} from "@goat/shared/sshFailure";
+import {
   LEGACY_SSH_ARCHIVE_VERSION_KEY,
   LEGACY_SSH_NODE_SCRIPT_PATH_KEY,
 } from "@goat/contracts/legacyT3Names";
@@ -78,6 +84,8 @@ import {
   resolveSshTarget,
   runSshCommand,
   SSH_KEEPALIVE_ARGS,
+  sshDiagnosticChunks,
+  SSH_DIAGNOSTIC_ARGS,
   targetConnectionKey,
 } from "./command.ts";
 import {
@@ -2729,6 +2737,7 @@ export const prepareRemoteRuntime = (
       yield* runSshCommand(target, {
         ...authOptions,
         ...remoteUploadCommand(script, archive.bytes, probe.platform),
+        timeoutStage: "runtime-install",
         timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
       }).pipe(
         // A remote reader that exits early (full disk, failed checksum) fails only
@@ -2901,6 +2910,7 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
     const result = yield* runSshCommand(target, {
       remoteCommandArgs: ["sh", "-l", "-s", "--", stateKey],
       stdin: buildRemoteLaunchScript(selected.runner, selected),
+      timeoutStage: "runtime-launch",
       timeoutMs: isNodeScriptRunner(selected.runner)
         ? REMOTE_LAUNCH_TIMEOUT_MS
         : REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
@@ -3005,6 +3015,7 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
     ));
   const result = yield* runSshCommand(target, {
     remoteCommandArgs: ["sh", "-s"],
+    timeoutStage: "pairing",
     stdin: buildRemotePairingScript(stateKey, selected.runner, {
       ...selected,
       mayUpgradeOwnedServer: false,
@@ -3071,6 +3082,7 @@ export const issueRemoteMcpClientSession = Effect.fn("ssh/tunnel.issueRemoteMcpC
       ));
     const result = yield* runSshCommand(target, {
       remoteCommandArgs: ["sh", "-s"],
+      timeoutStage: "pairing",
       stdin: buildRemoteMcpSessionScript(stateKey, sessionOptions, selected.runner, {
         ...selected,
         mayUpgradeOwnedServer: false,
@@ -3353,6 +3365,7 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
     ),
   );
   const args = [
+    ...SSH_DIAGNOSTIC_ARGS,
     ...baseSshArgs(input.resolvedTarget, {
       batchMode: input.authOptions.batchMode ?? "no",
     }),
@@ -3444,8 +3457,7 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
   };
   // Readiness cancels the exit waiter, but diagnostics must drain until the tunnel closes.
   let stderrTail = "";
-  const stderrDrain = yield* child.stderr.pipe(
-    Stream.decodeText(),
+  const stderrDrain = yield* sshDiagnosticChunks(child.stderr).pipe(
     Stream.runForEach((chunk) =>
       Effect.sync(() => {
         stderrTail = (stderrTail + chunk).slice(-TUNNEL_STDERR_TAIL_CHARS);
@@ -3586,12 +3598,13 @@ function archiveFailure(error: SshLaunchError): SshHostFailure | undefined {
   };
 }
 
-// Only the final diagnostic line crosses the public boundary, with credentials removed.
+// A timeout headline and a local proxy diagnosis outrank incidental warnings
+// and OpenSSH's trailing generic closure. Only one sanitized line is public.
 function publicSshDiagnostic(error: SshEnvironmentEffectError) {
   return (
-    (
-      getLastNonEmptyOutputLine(error instanceof SshCommandError ? error.stderr : error.message) ||
-      error.message
+    sshFailureDiagnostic(
+      error.message,
+      error instanceof SshCommandError ? error.stderr : error.message,
     )
       // oxlint-disable-next-line no-control-regex -- strips ANSI escape sequences
       .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, "")
@@ -3630,6 +3643,16 @@ function runtimeFailureResult(
       return { kind: "ok", status: { ...base, state: "update_blocked", detail: diagnostic } };
     }
   }
+  const source = `${error.message}\n${evidence}`;
+  const proxy = sshLocalProxyFailure(source);
+  if (proxy !== undefined) {
+    return {
+      kind: "error",
+      code: "operation_failed",
+      message: `${host}: ${diagnostic}`,
+      fix: { actor: "human", instruction: proxy.fix },
+    };
+  }
   if (
     /REMOTE HOST IDENTIFICATION HAS CHANGED|host key.*changed|offending .* key/iu.test(evidence)
   ) {
@@ -3649,13 +3672,14 @@ function runtimeFailureResult(
   }
   if (
     error instanceof SshPasswordPromptError ||
-    /permission denied|authentication failed/iu.test(diagnostic)
+    sshAuthenticationFailure(source) !== undefined ||
+    /permission denied|authentication failed|SSH authentication timed out for /iu.test(diagnostic)
   ) {
     return { kind: "ok", status: { ...base, state: "auth_failed", detail: diagnostic } };
   }
   if (
     error instanceof SshReadinessError ||
-    /GOAT.*(?:did not become ready|start.*timed out)/iu.test(diagnostic)
+    /GOAT.*(?:did not become ready|(?:start|launch).*timed out)/iu.test(diagnostic)
   ) {
     return failed({ reason: "start_timeout", fix: { actor: "agent", instruction: "Try again" } });
   }
@@ -3676,10 +3700,7 @@ function runtimeFailureResult(
   return {
     kind: "error",
     code:
-      error instanceof SshCommandError &&
-      /cannot reach|connection (?:refused|timed out)|operation timed out|no route to host|could not resolve hostname|network is unreachable/iu.test(
-        `${error.message} ${diagnostic}`,
-      )
+      error instanceof SshCommandError && isSshHostUnreachable(source)
         ? "host_unreachable"
         : "operation_failed",
     message: `${host}: ${diagnostic}`,

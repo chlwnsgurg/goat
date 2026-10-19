@@ -1,29 +1,23 @@
 import {
+  isSshHostUnreachable,
+  sshAuthenticationFailure,
+  isSshRuntimeAcquisitionFailure,
+  sshLocalProxyFailure,
+} from "@goat/shared/sshFailure";
+import {
   ConnectionBlockedError,
   type ConnectionAttemptError,
   ConnectionTransientError,
 } from "./model.ts";
 
-// Mirrors isSshAuthFailure in @goat/ssh/auth, which is Node-only, plus the
-// sentence @goat/ssh/tunnel writes when a key-only (agent) login is rejected.
-const AUTH_FAILURE_RE =
-  /permission denied \((?:publickey|password|keyboard-interactive|hostbased|gssapi-with-mic)[^)]*\)|authentication failed|too many authentication failures|Key-based login failed for /iu;
 const HOST_KEY_FAILURE_RE =
-  /REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|host key for \S+ has changed|Managed SSH host key changed/iu;
-// ssh never reached the host. `describeSshConnectionFailure` in @goat/ssh/command
-// rewrites these as "Cannot reach …"; the tunnel step passes ssh's own stderr.
-const UNREACHABLE_RE =
-  /\bCannot reach .+ over SSH \(|ssh: connect to host \S+ port \d+: |ssh: Could not resolve hostname |Connection timed out during banner exchange|Connection to \S+ port \d+ timed out/u;
+  /REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|host key for \S+ has changed|Managed SSH host key changed|No \S+ host key is known for .+ and you have requested strict checking/iu;
 // The desktop's own prompt endings (DesktopSshPasswordPrompts): dismissed,
 // timed out, expired, the window closed, or the prompt service stopped; and an
-// ensure superseded by a newer one. Retrying on a timer would reopen the prompt.
+// ensure superseded by a newer one; also runSshCommand's authentication-stage
+// timeout. Retrying on a timer would reopen the prompt.
 const CANCELLED_RE =
   /^SSH (?:authentication|connection|setup)(?: was)? cancel|^SSH authentication timed out for |^SSH password prompt (?:service stopped|expired)/iu;
-// The one runtime download error that quotes gh's stderr (runtimeArchiveGh.ts),
-// possibly inside the launch's "Cannot prepare GOAT …" wrappers. It happens on
-// this machine after the SSH login, so gh's "authentication failed" must not
-// read as a rejected SSH login.
-const RUNTIME_ACQUISITION_RE = /Local gh release download failed \(exit /u;
 // The remote runtime refused this client and will keep refusing until someone
 // updates this app or stops the remote server (see the launch script in
 // @goat/ssh/tunnel). Retrying on a timer cannot fix it.
@@ -55,6 +49,26 @@ export function sshPreparationFailure(cause: unknown): ConnectionAttemptError {
   if (CANCELLED_RE.test(message)) {
     return new ConnectionBlockedError({ reason: "authentication", detail: message });
   }
+  const acquisition = isSshRuntimeAcquisitionFailure(message);
+  const proxy = sshLocalProxyFailure(message);
+  if (proxy !== undefined) {
+    return new ConnectionBlockedError({
+      reason: "configuration",
+      detail: `${proxy.fix} (${message})`,
+    });
+  }
+  if (!acquisition && HOST_KEY_FAILURE_RE.test(message)) {
+    return new ConnectionBlockedError({
+      reason: "configuration",
+      detail: `SSH could not verify this host's key. Forget the host and add it again to review its fingerprint. (${message})`,
+    });
+  }
+  if (sshAuthenticationFailure(message) !== undefined) {
+    return new ConnectionBlockedError({
+      reason: "authentication",
+      detail: `The SSH host rejected the login. Check your SSH key or ssh-agent, then reconnect. (${message})`,
+    });
+  }
   // The tunnel opened but the server answered too late; say so instead of
   // reading like a stopped server.
   if (message.includes("(high latency)")) {
@@ -64,21 +78,8 @@ export function sshPreparationFailure(cause: unknown): ConnectionAttemptError {
         "The SSH host is reachable, but the network to it is too slow (high latency) for GOAT to finish connecting. Retrying.",
     });
   }
-  if (UNREACHABLE_RE.test(message)) {
+  if (isSshHostUnreachable(message)) {
     return new ConnectionTransientError({ reason: "host-unreachable", detail: message });
-  }
-  const acquisition = RUNTIME_ACQUISITION_RE.test(message);
-  if (!acquisition && AUTH_FAILURE_RE.test(message)) {
-    return new ConnectionBlockedError({
-      reason: "authentication",
-      detail: `The SSH host rejected the login. Check your SSH key or ssh-agent, then reconnect. (${message})`,
-    });
-  }
-  if (!acquisition && HOST_KEY_FAILURE_RE.test(message)) {
-    return new ConnectionBlockedError({
-      reason: "configuration",
-      detail: `SSH could not verify this host's key. Forget the host and add it again to review its fingerprint. (${message})`,
-    });
   }
   if (RUNTIME_REFUSAL_RE.test(message)) {
     return new ConnectionBlockedError({ reason: "configuration", detail: message });

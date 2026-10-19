@@ -712,3 +712,41 @@ it.effect(
     }).pipe(Effect.provide(f.layer), Effect.scoped);
   },
 );
+
+it.effect.each([
+  "Connection closed by UNKNOWN port 65535",
+  "kex_exchange_identification: Connection closed by remote host",
+  "kex_exchange_identification: Connection reset by remote host",
+  "kex_exchange_identification: read: Connection reset by peer",
+  'Dial("remote.invalid", 22): no such host',
+  "dial tcp: lookup remote.invalid: no such host",
+  "cloudflared: 404 Not Found\nConnection closed by UNKNOWN port 65535",
+])("reports quiet unreachable runtime status for %s", (stderr) => {
+  const f = fixture(stopped);
+  f.failProbe(stderr);
+  return Effect.gen(function* () {
+    const manager = yield* SshTunnel.SshEnvironmentManager;
+    const result = yield* manager.status(uploadTarget);
+    assert.equal(result.kind, "error");
+    if (result.kind === "error") assert.equal(result.code, "host_unreachable");
+  }).pipe(Effect.provide(f.layer), Effect.scoped);
+});
+
+it.effect.each(["Tailscale is stopped.", "Logged out."])(
+  "keeps the specific local proxy status: %s",
+  (status) => {
+    const f = fixture(stopped);
+    f.failProbe(
+      `debug1: kex_exchange_identification: banner line 0: ${status}\nConnection closed by UNKNOWN port 65535`,
+    );
+    return Effect.gen(function* () {
+      const manager = yield* SshTunnel.SshEnvironmentManager;
+      const result = yield* manager.status(uploadTarget);
+      assert.equal(result.kind, "error");
+      if (result.kind === "error") {
+        assert.equal(result.code, "operation_failed");
+        assert.include(result.message, `Tailscale proxy status: ${status}`);
+      }
+    }).pipe(Effect.provide(f.layer), Effect.scoped);
+  },
+);

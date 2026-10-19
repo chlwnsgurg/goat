@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./sshFailure": {
+      "types": "./src/sshFailure.ts",
+      "import": "./src/sshFailure.ts"
+    },
     "./githubMarkdownLinks": {
       "types": "./src/githubMarkdownLinks.ts",
       "import": "./src/githubMarkdownLinks.ts"

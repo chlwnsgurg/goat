@@ -15,6 +15,7 @@ import { SshCommandError, SshInvalidTargetError } from "./errors.ts";
 const DEFAULT_SSH_COMMAND_TIMEOUT_MS = 60_000;
 const SSH_COMMAND_SHUTDOWN_TIMEOUT_MS = 2_000;
 const MAX_SSH_ERROR_OUTPUT_LENGTH = 4_000;
+const MAX_SSH_DIAGNOSTIC_PREFIX_LENGTH = 512;
 
 /**
  * ssh is a real executable everywhere (`ssh.exe` on Windows), so it is always
@@ -38,6 +39,7 @@ export interface RunSshCommandOptions extends SshAuthOptions {
   readonly remoteCommandArgs?: ReadonlyArray<string>;
   readonly stdin?: string | Uint8Array;
   readonly timeoutMs?: number;
+  readonly timeoutStage?: "runtime-install" | "runtime-launch" | "pairing";
 }
 
 export function parseSshResolveOutput(alias: string, stdout: string): DesktopSshEnvironmentTarget {
@@ -145,6 +147,73 @@ export const collectProcessOutput = <E>(
     ),
   );
 
+// DEBUG1 is needed for auth milestones and proxy status banners; lower levels
+// omit them. Unlike -v, LogLevel does not enable verbose logging in ProxyJump's
+// child ssh. LogVerbose's source/function overrides are version-dependent.
+export const SSH_DIAGNOSTIC_ARGS = ["-o", "LogLevel=DEBUG1"] as const;
+
+const SSH_CHATTER_RE =
+  /^(?:debug[123]:|Authenticated (?:to |using )|Transferred: sent |Bytes per second: sent |OpenSSH_\S+|Pseudo-terminal will not be allocated because stdin is not a terminal\.)/u;
+
+// Preserve remote stderr's bytes, including a final fragment before a read
+// failure. Buffer only short prefixes so a long line cannot grow without bound.
+export const sshDiagnosticChunks = <E>(
+  stream: Stream.Stream<Uint8Array, E>,
+  observeLine?: (line: string) => void,
+): Stream.Stream<string, E> =>
+  Stream.unwrap(
+    Effect.sync(() => {
+      let pending = "";
+      let mode: "buffer" | "keep" | "drop" = "buffer";
+      const diagnostic = (line: string) => {
+        observeLine?.(line.replace(/\r?\n$/u, ""));
+        const text = line.replace(
+          /^debug1: (?:kex_exchange_identification|ssh_exchange_identification): banner line \d+: (Tailscale is stopped\.|Logged out\.|Machine is not yet approved by tailnet admin\.)(\r?\n)?$/u,
+          "Tailscale proxy status: $1$2",
+        );
+        return SSH_CHATTER_RE.test(text) ? "" : text;
+      };
+      const flush = () => {
+        const text = diagnostic(pending);
+        pending = "";
+        return text;
+      };
+      return stream.pipe(
+        Stream.decodeText(),
+        Stream.flatMap((chunk) => {
+          const output: string[] = [];
+          let offset = 0;
+          while (offset < chunk.length) {
+            const end = chunk.indexOf("\n", offset);
+            const part = chunk.slice(offset, end < 0 ? undefined : end + 1);
+            if (mode === "keep") output.push(part);
+            else if (mode === "buffer") {
+              pending += part;
+              if (end >= 0) output.push(flush());
+              else if (pending.length > MAX_SSH_DIAGNOSTIC_PREFIX_LENGTH) {
+                const text = flush();
+                output.push(text);
+                mode = text.length > 0 ? "keep" : "drop";
+              }
+            }
+            if (end < 0) break;
+            mode = "buffer";
+            offset = end + 1;
+          }
+          return Stream.fromIterable(output);
+        }),
+        Stream.catchCause((cause) =>
+          Stream.concat(
+            Stream.suspend(() => Stream.make(flush())),
+            Stream.failCause(cause),
+          ),
+        ),
+        Stream.concat(Stream.suspend(() => Stream.make(flush()))),
+        Stream.filter((chunk) => chunk.length > 0),
+      );
+    }),
+  );
+
 function redactSshErrorOutput(output: string): string {
   const redacted = output.replace(
     /("(?:access_token|bearerToken|credential|pairingToken|token)"\s*:\s*")[^"]+(")/giu,
@@ -232,6 +301,12 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
   target: DesktopSshEnvironmentTarget,
   input: RunSshCommandOptions,
   commandScope: Scope.Scope,
+  progress: {
+    authenticating: boolean;
+    authenticated: boolean;
+    proxyPending: boolean;
+    stderr: string;
+  },
 ): Effect.fn.Return<
   SshCommandResult,
   SshCommandError | SshInvalidTargetError,
@@ -255,6 +330,7 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
     ),
   );
   const args = [
+    ...SSH_DIAGNOSTIC_ARGS,
     ...baseSshArgs(target, {
       batchMode: input.batchMode ?? (input.interactiveAuth ? "no" : "yes"),
     }),
@@ -305,7 +381,41 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
   const [stdout, stderr, exitCode] = yield* Effect.all(
     [
       collectProcessOutput(child.stdout),
-      collectProcessOutput(child.stderr),
+      sshDiagnosticChunks(child.stderr, (line) => {
+        // A VERBOSE jump can report success without DEBUG1 forwarding details.
+        // Ignore its auth milestones until the final target starts its own login.
+        if (
+          /^debug1: (?:Setting implicit ProxyCommand from ProxyJump:|Executing proxy command:|channel_connect_stdio_fwd:)/u.test(
+            line,
+          )
+        ) {
+          progress.proxyPending = true;
+          progress.authenticating = false;
+          progress.authenticated = false;
+        }
+        if (line.startsWith("debug1: Authenticating to ")) {
+          progress.proxyPending = false;
+          progress.authenticating = false;
+          progress.authenticated = false;
+        }
+        if (!progress.proxyPending) {
+          progress.authenticating ||=
+            /^debug1: (?:SSH2_MSG_SERVICE_ACCEPT received|Authentications that can continue:|Next authentication method:)/u.test(
+              line,
+            );
+          progress.authenticated ||=
+            /^(?:Authenticated to |debug1: Authentication succeeded|debug1: mux_client_request_session: master session id:)/u.test(
+              line,
+            );
+        }
+      }).pipe(
+        Stream.runForEach((line) =>
+          Effect.sync(() => {
+            progress.stderr += line;
+          }),
+        ),
+        Effect.map(() => progress.stderr),
+      ),
       child.exitCode.pipe(Effect.map(Number)),
     ],
     { concurrency: "unbounded" },
@@ -362,8 +472,9 @@ export const runSshCommand = Effect.fn("ssh/command.runSshCommand")(function* (
   SshCommandError | SshInvalidTargetError,
   ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
 > {
+  const progress = { authenticating: false, authenticated: false, proxyPending: false, stderr: "" };
   return yield* Effect.scopedWith((commandScope) =>
-    runSshCommandInScope(target, input, commandScope),
+    runSshCommandInScope(target, input, commandScope, progress),
   ).pipe(
     Effect.timeoutOption(Duration.millis(input.timeoutMs ?? DEFAULT_SSH_COMMAND_TIMEOUT_MS)),
     Effect.flatMap((result) =>
@@ -378,11 +489,26 @@ export const runSshCommand = Effect.fn("ssh/command.runSshCommand")(function* (
               preHostArgs: input.preHostArgs ?? [],
               hasStdin: input.stdin !== undefined,
             });
+            const host = describeSshTarget(target);
+            const elapsed = `${input.timeoutMs ?? DEFAULT_SSH_COMMAND_TIMEOUT_MS}ms`;
+            const operation =
+              input.timeoutStage === "runtime-install"
+                ? "GOAT runtime install/download"
+                : input.timeoutStage === "runtime-launch"
+                  ? "GOAT runtime launch"
+                  : input.timeoutStage === "pairing"
+                    ? "GOAT pairing"
+                    : "Remote SSH command";
+            const message = progress.authenticated
+              ? `${operation} on ${host} timed out after ${elapsed}.`
+              : progress.authenticating
+                ? `SSH authentication timed out for ${host} after ${elapsed}. Unlock your SSH key or ssh-agent, then reconnect.`
+                : `SSH connection to ${host} timed out after ${elapsed} before authentication began. Check the network or SSH ProxyCommand.`;
             return yield* new SshCommandError({
               command: ["ssh"],
               exitCode: null,
-              stderr: "",
-              message: `SSH command to ${describeSshTarget(target)} timed out after ${input.timeoutMs ?? DEFAULT_SSH_COMMAND_TIMEOUT_MS}ms.`,
+              stderr: progress.stderr,
+              message: progress.stderr.trim() ? `${message}\n${progress.stderr.trim()}` : message,
             });
           }),
       }),

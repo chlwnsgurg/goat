@@ -23,11 +23,11 @@ What GOAT is, which process owns the workspace, and the invariants nothing may b
 
 Wire schemas and the libraries web, desktop, and mobile share.
 
-| Doc                                      | Scope                                                                                          |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| [`contracts.md`](contracts.md)           | Effect Schema wire types shared by the server and every client.                                |
-| [`client-runtime.md`](client-runtime.md) | Connection, RPC session, and GOAT Bot helpers shared by web and mobile.                        |
-| [`shared.md`](shared.md)                 | Subpath helpers for settings merge, worktree homes, mobile identity, and SSH runtime archives. |
+| Doc                                      | Scope                                                                                                                  |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| [`contracts.md`](contracts.md)           | Effect Schema wire types shared by the server and every client.                                                        |
+| [`client-runtime.md`](client-runtime.md) | Connection, RPC session, and GOAT Bot helpers shared by web and mobile.                                                |
+| [`shared.md`](shared.md)                 | Subpath helpers for settings merge, worktree homes, mobile identity, SSH failure classification, and runtime archives. |
 
 ### Tier 3 — Server
 
@@ -233,6 +233,7 @@ the repository is organised by package. Changing an area requires review of ever
 | `packages/shared/src/mobileAppIdentity.ts`                              | [`shared.md`](shared.md)<br>[`mobile.md`](mobile.md)                                                                                                   |
 | `packages/shared/src/path.ts`                                           | [`shared.md`](shared.md)                                                                                                                               |
 | `packages/shared/src/serverSettings.ts`                                 | [`shared.md`](shared.md)                                                                                                                               |
+| `packages/shared/src/sshFailure.ts`                                     | [`shared.md`](shared.md)                                                                                                                               |
 | `packages/shared/src/sshRuntimeProtocol.ts`                             | [`shared.md`](shared.md)<br>[`ssh.md`](ssh.md)                                                                                                         |
 | `packages/shared/src/themePalettes.ts`                                  | [`shared.md`](shared.md)                                                                                                                               |
 | `packages/source-control-azure-devops`                                  | [`server.md`](server.md)                                                                                                                               |
