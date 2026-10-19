@@ -181,6 +181,26 @@ const DARK_PAIRS: ReadonlyArray<Pair> = [
     minimum: 3,
   },
   {
+    // Labels on interactive rows (branch badges, sidebar thread times) sit on
+    // lighter hover/selected fills, so they step up to 70% instead.
+    label: "muted 70% / highlighted menu item",
+    scope: "root",
+    foreground: muted(70),
+    background: ["var(--background)", "var(--popover)", "var(--accent)"],
+    minimum: 3,
+  },
+  {
+    label: "muted 70% / selected menu item",
+    scope: "root",
+    foreground: muted(70),
+    background: [
+      "var(--background)",
+      "var(--popover)",
+      "color-mix(in oklab, var(--contrast-foreground) 8%, transparent)",
+    ],
+    minimum: 3,
+  },
+  {
     label: "muted 50% / canvas (separators, illustrations, disabled)",
     scope: "root",
     foreground: muted(50),
@@ -341,6 +361,20 @@ const DARK_PAIRS: ReadonlyArray<Pair> = [
     scope: "sidebar",
     foreground: muted(70),
     background: ["var(--sidebar)"],
+    minimum: 3,
+  },
+  {
+    label: "sidebar muted 70% / hovered row",
+    scope: "sidebar",
+    foreground: muted(70),
+    background: ["var(--sidebar)", "var(--sidebar-row-hover)"],
+    minimum: 3,
+  },
+  {
+    label: "sidebar muted 70% / active row",
+    scope: "sidebar",
+    foreground: muted(70),
+    background: ["var(--sidebar)", "var(--sidebar-row-active)"],
     minimum: 3,
   },
   {
