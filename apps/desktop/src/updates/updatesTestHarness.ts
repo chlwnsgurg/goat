@@ -41,6 +41,8 @@ export interface UpdatesHarnessOptions {
   readonly platform?: NodeJS.Platform;
   readonly appPath?: string;
   readonly unwritablePaths?: ReadonlyArray<string>;
+  /** Paths whose filesystem is mounted read-only (access fails with EROFS). */
+  readonly readOnlyPaths?: ReadonlyArray<string>;
   readonly packageType?: string | undefined;
   readonly installRecord?: string | undefined;
 }
@@ -275,13 +277,17 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     path.endsWith(DesktopUpdates.DESKTOP_UPDATE_INSTALL_RECORD_FILE);
   const layerFileSystem = FileSystem.layerNoop({
     access: (path, accessOptions) =>
-      accessOptions?.writable && options.unwritablePaths?.includes(path)
+      accessOptions?.writable &&
+      (options.unwritablePaths?.includes(path) || options.readOnlyPaths?.includes(path))
         ? Effect.fail(
             PlatformError.systemError({
               module: "FileSystem",
               method: "access",
-              _tag: "PermissionDenied",
+              _tag: options.readOnlyPaths?.includes(path) ? "Unknown" : "PermissionDenied",
               pathOrDescriptor: path,
+              ...(options.readOnlyPaths?.includes(path)
+                ? { cause: Object.assign(new Error("read-only file system"), { code: "EROFS" }) }
+                : {}),
             }),
           )
         : Effect.void,
