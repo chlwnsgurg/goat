@@ -36,10 +36,11 @@ startup rather than guessing which runtime to boot.
 
 The trial must finish migrations, acquire dependencies, bind HTTP, and park every
 long-running root at the activation gate before reporting `prepared` with the bound
-HTTP port. The descriptor route already serves while those roots are parked:
+HTTP host and port. The descriptor route already serves while those roots are parked:
 `routesReady` is part of the prepared barrier, and metadata does not wait for
-activation. The launcher probes `/.well-known/goat/environment` over IPv4 loopback
-with a 30-second deadline covering connection through the complete JSON body. It
+activation. The launcher probes `/.well-known/goat/environment` on the bound address
+(loopback of the same family for a wildcard listener, IPv4 loopback when a trial reports no
+host) with a 30-second deadline covering connection through the complete JSON body. It
 requires HTTP 200, the exact target `serverVersion`, and valid SSH and orchestration
 ranges using the shared protocol comparator. The launcher's own older protocol
 versions do not constrain the ranges the new build may serve.
@@ -90,8 +91,9 @@ lifetime, and each acquisition appends its owner to a generation log in that
 file. The launcher copies only while it holds the lock, so a busy lock fails the
 update with `db-owner-busy` before anything is copied, and it records the
 generation with the snapshot. Before restoring, it reads every owner since that
-generation. If any is not this update's launcher or its trial
-(`service-trial:<updateId>`), the snapshot is kept and the reason gains
+generation. If any is not this update's launcher, its trial
+(`service-trial:<updateId>`), or the target restarted during its probation
+(`service-probation:<updateId>`), the snapshot is kept and the reason gains
 `;db-kept-for-other-server`, because restoring would erase that server's writes.
 A rollback that finds the lock busy stays pending and retries, across launcher
 restarts too. Servers older than the lock do not record themselves, so they stay
