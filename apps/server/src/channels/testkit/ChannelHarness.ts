@@ -348,6 +348,7 @@ export function makeHarness(
             },
             runs,
             runtimeRequests: world.runtimeRequests.get(threadId) ?? [],
+            turnItems: [],
             providerThreads: [
               ...(world.background.has(threadId)
                 ? [{ pendingBackgroundTasks: [{ taskId: "background" }] }]

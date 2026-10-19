@@ -247,6 +247,11 @@ export const ChannelTask = Schema.Struct({
   observed: Schema.optional(ChannelWorkerObservation),
   /** Set when the task continued here from a machine that stopped answering. */
   movedFrom: Schema.optional(ChannelTaskMove),
+  /**
+   * The fleet goal this work item belongs to, once goals exist for GOAT Bot's work. Set by the
+   * goals controller; the ledger only carries it.
+   */
+  goalRef: Schema.optional(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   completedAt: Schema.optional(IsoDateTime),
