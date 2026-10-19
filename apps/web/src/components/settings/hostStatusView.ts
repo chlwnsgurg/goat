@@ -1,4 +1,5 @@
 import type { HostStatusEntry, HostStatusMetrics, HostStatusQuota } from "@goat/contracts";
+import { cpuPercent, diskPercent, memoryPercent } from "@goat/client-runtime/state/host-metrics";
 
 import { formatBytes } from "~/lib/formatBytes";
 import { formatElapsedDurationLabel } from "~/timestampFormat";
@@ -42,20 +43,11 @@ export function platformLabel(platform: string | undefined): string | null {
   return PLATFORM_LABELS[platform] ?? platform;
 }
 
-const clampPercent = (value: number) => Math.min(100, Math.max(0, Math.round(value)));
-
-/** Used share of a total from what is still free. Null when the total is unknown. */
-function usedShare(availableBytes: number, totalBytes: number): number | null {
-  if (!(totalBytes > 0)) return null;
-  return clampPercent((1 - availableBytes / totalBytes) * 100);
-}
-
 export function hostMeters(metrics: HostStatusMetrics): ReadonlyArray<HostMeterView> {
-  const cpu = metrics.cpuUtilization === null ? null : clampPercent(metrics.cpuUtilization * 100);
+  const cpu = cpuPercent(metrics);
   const cores = `${metrics.cpuCount} ${metrics.cpuCount === 1 ? "core" : "cores"}`;
-  const memory = usedShare(metrics.availableMemoryBytes, metrics.totalMemoryBytes);
-  const disk =
-    metrics.disk === null ? null : usedShare(metrics.disk.availableBytes, metrics.disk.totalBytes);
+  const memory = memoryPercent(metrics);
+  const disk = diskPercent(metrics);
   return [
     {
       label: "CPU",

@@ -9,7 +9,7 @@ import { useContext } from "react";
 
 import { useLiveRefresh } from "~/hooks/useLiveRefresh";
 import { cn } from "~/lib/utils";
-import { serverEnvironment } from "~/state/server";
+import { HOST_STATUS_REFRESH_MS, hostStatusAtom, refreshHostStatus } from "~/state/hostStatus";
 import { useEnvironmentScope } from "~/state/session";
 import { Badge } from "../ui/badge";
 import { LimitWindows } from "../usage/UsageLimits";
@@ -18,9 +18,6 @@ import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { type HostCardView, type HostMeterView, hostCards, NOT_AVAILABLE } from "./hostStatusView";
 import { providerClients } from "./providerDriverMeta";
 import { searchableSetting } from "./settingsSearch";
-
-/** Each read samples CPU for 200ms and asks every SSH host; quota refresh is capped server-side. */
-const HOST_STATUS_REFRESH_MS = 15_000;
 
 const TONE_BADGE = {
   ok: "success",
@@ -137,10 +134,11 @@ function HostsPanel({
   readonly localKind: EnvironmentMachineKind;
 }) {
   const registry = useContext(RegistryContext);
-  const atom = serverEnvironment.hostStatus({ environmentId, input: {} });
+  // Settings shows the primary environment, whose read fans out like Fleet's.
+  const atom = hostStatusAtom(environmentId, environmentId);
   const result = useAtomValue(atom);
   const reachesHosts = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
-  useLiveRefresh(() => registry.refresh(atom), {
+  useLiveRefresh(() => refreshHostStatus(registry, atom), {
     key: `host-status:${environmentId}`,
     intervalMs: HOST_STATUS_REFRESH_MS,
   });
