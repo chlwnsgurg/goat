@@ -453,8 +453,12 @@ export const make = (
         ...input,
         algorithm: input.algorithm ?? input.endpoint.hostKey.split(" ")[0],
       };
+      // Name the host the person entered; the managed alias is GOAT's bookkeeping.
+      const entered = parseSshDestination({ host: input.input.address });
+      const shown = entered.ok ? entered.destination.hostname : challenge.host;
+      const saved = shown === challenge.host ? "" : ` and save it as ${challenge.host}`;
       return {
-        location: `${challenge.host} presented this key. GOAT will connect as ${challenge.endpoint.user}.${challenge.includeRequired ? " Approving also adds one Include line to ~/.ssh/config." : ""}`,
+        location: `${shown} presented this key. GOAT will connect as ${challenge.endpoint.user}${saved}.${challenge.includeRequired ? " Approving also adds one Include line to ~/.ssh/config." : ""}`,
         fingerprint: `${challenge.fingerprint} (${challenge.algorithm})`,
       };
     };

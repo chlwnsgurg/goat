@@ -1618,6 +1618,9 @@ it.effect.each([true, false])(
           },
           probeSessionId,
         );
+        expect(probe.human.location).toMatch(
+          /^cursor-2 presented this key\. GOAT will connect as ubuntu and save it as goat-cursor-2-e25449c9\./u,
+        );
         approving = true;
         const result = yield* setup.trust(
           { probeId: probe.probeId, accepted: true },
