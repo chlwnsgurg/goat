@@ -67,6 +67,7 @@ const fixture = Effect.gen(function* () {
     | "pending"
     | "ready-pending"
     | "ready"
+    | "ready-reused"
     | "older-attached"
     | "blocked"
     | "timeout"
@@ -214,20 +215,22 @@ const fixture = Effect.gen(function* () {
       }
       return makeSuccessfulProcess(
         JSON.stringify(
-          mode === "older-attached"
-            ? {
-                ...ready,
-                selectedVersion: "1.2.2",
-                refresh: undefined,
-                pending: { ...pending, replacement: "older" },
-              }
-            : mode === "pending"
-              ? { status: "pending", pending }
-              : mode === "ready-pending"
-                ? { ...ready, selectedVersion: "1.2.2", refresh: undefined, pending }
-                : mode === "archive" || mode === "attached"
-                  ? { ...ready, selectedVersion: "1.2.2", refresh: undefined }
-                  : ready,
+          mode === "ready-reused"
+            ? { ...ready, refresh: undefined }
+            : mode === "older-attached"
+              ? {
+                  ...ready,
+                  selectedVersion: "1.2.2",
+                  refresh: undefined,
+                  pending: { ...pending, replacement: "older" },
+                }
+              : mode === "pending"
+                ? { status: "pending", pending }
+                : mode === "ready-pending"
+                  ? { ...ready, selectedVersion: "1.2.2", refresh: undefined, pending }
+                  : mode === "archive" || mode === "attached"
+                    ? { ...ready, selectedVersion: "1.2.2", refresh: undefined }
+                    : ready,
         ),
       );
     }),
@@ -599,9 +602,11 @@ describe("SSH pending replacement reconciliation", () => {
             ),
           );
           const attempts = f.count.launches;
-          f.setMode("ready");
+          f.setMode("ready-reused");
           yield* manager.ensureEnvironment(uploadTarget);
           assert.equal(f.count.launches, attempts + 1);
+          if (initial === "ready") assert.equal(f.count.forwards, 1);
+          assert.equal((yield* manager.status(uploadTarget)).status?.state, "ready");
           yield* manager.readyEnvironment(uploadTarget);
           yield* manager.issueMcpClientSession(uploadTarget, {
             requireReady: true,
