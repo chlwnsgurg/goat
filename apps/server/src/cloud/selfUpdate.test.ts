@@ -12,6 +12,10 @@ import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
+import * as Layer from "effect/Layer";
+import * as MaintenanceAudit from "../maintenance/MaintenanceAudit.ts";
+import * as RuntimeAdmission from "../runtimeAdmission.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -20,6 +24,7 @@ import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 import * as ServerSelfUpdate from "./selfUpdate.ts";
 
 interface HarnessOptions {
+  readonly activity?: () => "idle" | "busy";
   readonly mode?: "web" | "desktop";
   readonly managed?: boolean;
   readonly preflight?: "ready" | "blocked";
@@ -109,7 +114,21 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   const config = yield* ServerConfig.ServerConfig.pipe(
     Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
   );
+  const admission = yield* RuntimeAdmission.RuntimeAdmission.pipe(
+    Effect.provide(RuntimeAdmission.layer),
+  );
+  const audit = yield* MaintenanceAudit.MaintenanceAudit.pipe(
+    Effect.provide(MaintenanceAudit.layer),
+    Effect.provideService(ServerConfig.ServerConfig, config),
+  );
   const selfUpdate = yield* ServerSelfUpdate.make().pipe(
+    Effect.provideService(RuntimeAdmission.RuntimeAdmission, admission),
+    Effect.provideService(MaintenanceAudit.MaintenanceAudit, audit),
+    Effect.provide(
+      Layer.mock(ProjectionStore.ProjectionStoreV2)({
+        getServerActivity: () => Effect.sync(() => options.activity?.() ?? "idle"),
+      }),
+    ),
     Effect.provideService(ProcessRunner.ProcessRunner, runner),
     Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, launcher),
     Effect.provideService(
@@ -124,10 +143,114 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
     Effect.provideService(HostProcess.Architecture, "x64"),
     Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
   );
-  return { selfUpdate, order };
+  return {
+    selfUpdate,
+    order,
+    admission,
+    journal: path.join(config.stateDir, "maintenance-audit.jsonl"),
+  };
 });
 
 it.layer(NodeServices.layer)("server self update", (it) => {
+  it.effect(
+    "refuses a busy unconfirmed service without downloading or contacting the launcher",
+    () =>
+      Effect.gen(function* () {
+        const { selfUpdate, order, admission } = yield* makeHarness({ activity: () => "busy" });
+        const error = yield* selfUpdate
+          .update({ targetVersion: "1.1.0", continueRunningThreads: true })
+          .pipe(Effect.flip);
+        expect(error.reason).toContain("running threads");
+        expect(order).toEqual([]);
+        yield* admission.admit(Effect.void);
+      }),
+  );
+
+  it.effect("records the confirmed requester durably before launcher handoff", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      let journal = "";
+      const harness = yield* makeHarness({
+        activity: () => "busy",
+        requestUpdate: () =>
+          Effect.gen(function* () {
+            const lines = (yield* fs.readFileString(journal).pipe(Effect.orDie))
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line));
+            expect(lines).toHaveLength(1);
+            expect(lines[0]).toMatchObject({
+              operation: "server-update",
+              actor: { kind: "browser-session", sessionId: "requester" },
+              targetVersion: "1.1.0",
+              mode: "confirmed",
+              outcome: "requested",
+            });
+            return "launcher-id";
+          }),
+      });
+      journal = harness.journal;
+      yield* harness.selfUpdate.update(
+        { targetVersion: "1.1.0", confirmReplacement: true },
+        undefined,
+        undefined,
+        { kind: "browser-session", sessionId: "requester" },
+      );
+      const lines = (yield* fs.readFileString(journal).pipe(Effect.orDie))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(lines[1]).toMatchObject({
+        operationId: lines[0].operationId,
+        updateId: "launcher-id",
+        outcome: "accepted",
+      });
+      expect(yield* harness.admission.admit(Effect.void).pipe(Effect.flip)).toMatchObject({
+        _tag: "ServerDrainingError",
+      });
+    }),
+  );
+
+  it.effect("rechecks activity after staging and reopens admission on refusal", () =>
+    Effect.gen(function* () {
+      let activity: "idle" | "busy" = "idle";
+      const { selfUpdate, order, admission } = yield* makeHarness({
+        activity: () => activity,
+        beforeDownload: Effect.sync(() => {
+          activity = "busy";
+        }),
+      });
+      expect(
+        (yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip)).reason,
+      ).toContain("running threads");
+      expect(order).toEqual(["download", "extract", "preflight"]);
+      yield* admission.admit(Effect.void);
+    }),
+  );
+
+  it.effect("refuses handoff when the journal cannot be written and reopens admission", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { selfUpdate, journal, admission, order } = yield* makeHarness();
+      yield* fs.makeDirectory(journal, { recursive: true });
+      const error = yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip);
+      expect(error.reason).toBe("Could not record the update request.");
+      expect(order).toEqual(["download", "extract", "preflight"]);
+      yield* admission.admit(Effect.void);
+    }),
+  );
+
+  it.effect("idle projections do not bypass an admitted dispatch", () =>
+    Effect.gen(function* () {
+      const { selfUpdate, admission, order } = yield* makeHarness();
+      const error = yield* admission.admit(
+        selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip),
+      );
+      expect(error.reason).toContain("running threads");
+      expect(order).toEqual([]);
+    }),
+  );
+
   it.effect("marks running threads at the boot-service handoff", () =>
     Effect.gen(function* () {
       const events: string[] = [];

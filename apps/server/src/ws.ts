@@ -2625,9 +2625,16 @@ const layerWsRpc = (
         [WS_METHODS.providerInstallCancel]: (input) => providerInstallation.cancel(input),
         [WS_METHODS.providerInstallSubscribe]: (input) => providerInstallation.subscribe(input),
         [WS_METHODS.providerInstallRemove]: (input) => providerInstallation.remove(input),
-        [WS_METHODS.serverUpdateServer]: (input) => serverSelfUpdate.update(input),
+        [WS_METHODS.serverUpdateServer]: (input) =>
+          serverSelfUpdate.update(input, undefined, undefined, {
+            kind: currentSession.method,
+            sessionId: currentSessionId,
+          }),
         [WS_METHODS.serverUpdateServerWithProgress]: (input) =>
-          ServerSelfUpdate.updateProgressStream(serverSelfUpdate, input),
+          ServerSelfUpdate.updateProgressStream(serverSelfUpdate, input, {
+            kind: currentSession.method,
+            sessionId: currentSessionId,
+          }),
         [WS_METHODS.serverCommitDesktopUpdate]: (input) =>
           serverSelfUpdate.commitDesktopUpdate(input.requestId),
         [WS_METHODS.serverUpsertKeybinding]: (rule) =>

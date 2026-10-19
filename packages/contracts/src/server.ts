@@ -879,6 +879,9 @@ export const ServerSelfUpdateInput = Schema.Struct({
       the server and the acknowledging client agree on what was requested). */
   targetVersion: TrimmedNonEmptyString,
   continueRunningThreads: Schema.optionalKey(Schema.Boolean),
+  /** Omission preserves desktop app updates; boot-service activation requires idle.
+      Continuation records recovery intent, not consent to interrupt running work. */
+  confirmReplacement: Schema.optionalKey(Schema.Boolean),
 });
 export type ServerSelfUpdateInput = typeof ServerSelfUpdateInput.Type;
 

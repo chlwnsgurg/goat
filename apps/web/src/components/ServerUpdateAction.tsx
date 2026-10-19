@@ -84,6 +84,8 @@ export function useServerUpdate() {
       environmentId,
       input: {
         targetVersion,
+        // A person pressed Update, so running work may be replaced; omitting this waits for idle.
+        confirmReplacement: true,
         ...(target.threadContinuation && target.continueThreadsAfterServerUpdate
           ? { continueRunningThreads: true }
           : {}),
@@ -352,7 +354,7 @@ export function OutdatedServerUpdateAction({
     pendingUpdateEnvironmentIds.add(environmentId);
     const result = await update({
       environmentId,
-      input: { targetVersion },
+      input: { targetVersion, confirmReplacement: true },
       ...(fromVersion === undefined ? {} : { fromVersion }),
     });
     pendingUpdateEnvironmentIds.delete(environmentId);

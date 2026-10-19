@@ -1,3 +1,5 @@
+import packageJson from "../../package.json" with { type: "json" };
+import * as MaintenanceAudit from "../maintenance/MaintenanceAudit.ts";
 import * as HomeRequests from "../provider/CodexHomeRequests.ts";
 import {
   EnvironmentAuthorizationError,
@@ -172,6 +174,7 @@ const decodeAlias = Schema.decodeUnknownEffect(SshHostAlias);
 export const make = (options: { readonly home?: string } = {}) =>
   Effect.gen(function* () {
     const home = options.home ?? NodeOS.homedir();
+    const audit = yield* MaintenanceAudit.MaintenanceAudit;
     const dispatch = yield* Dispatch.SshRemoteDispatch;
     const sessions = yield* SessionStore.SessionStore;
     const handoffs = yield* Handoffs.Handoffs;
@@ -723,6 +726,29 @@ export const make = (options: { readonly home?: string } = {}) =>
           if ((aliasGenerations.get(host) ?? 0) !== requestGeneration)
             return yield* new HandoffError({ reason: "expired" });
           if (beforeRun) yield* beforeRun;
+          if (update) {
+            const current = yield* status({ host });
+            yield* audit
+              .append({
+                operationId: operation.operationId,
+                operation: "ssh-runtime-update",
+                destination: host,
+                actor:
+                  caller.kind === "client"
+                    ? { kind: "client", sessionId: caller.sessionId }
+                    : {
+                        kind: "mcp",
+                        sessionId:
+                          caller.scope.client?.sessionId ?? caller.scope.thread?.providerSessionId,
+                        threadId: caller.scope.thread?.threadId,
+                      },
+                fromVersion: current.status?.runtimeVersion ?? null,
+                targetVersion: packageJson.version,
+                mode: confirmReplacement ? "confirmed" : "idle",
+                outcome: "requested",
+              })
+              .pipe(Effect.mapError((cause) => new HandoffError({ reason: "unavailable", cause })));
+          }
           let result = yield* update
             ? dispatch.runtimeUpdate(host, { confirmReplacement, onPhase, ...operation })
             : dispatch.prepareRuntime(host, { ...operation, onPhase });

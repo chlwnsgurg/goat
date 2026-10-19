@@ -8,6 +8,8 @@ import {
   type ThreadId,
 } from "@goat/contracts";
 import * as HostProcess from "@goat/shared/HostProcess";
+import packageJson from "../../package.json" with { type: "json" };
+import * as Crypto from "effect/Crypto";
 import * as Cause from "effect/Cause";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
@@ -25,6 +27,9 @@ import { HttpClient } from "effect/http";
 
 import { CLI_RELEASE_BASE_URL_ENV } from "@goat/shared/cliRelease";
 
+import * as MaintenanceAudit from "../maintenance/MaintenanceAudit.ts";
+import * as RuntimeAdmission from "../runtimeAdmission.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -57,6 +62,7 @@ export class ServerSelfUpdate extends Context.Service<
         stage: ServerSelfUpdateProgressStage,
       ) => Effect.Effect<void, ServerSelfUpdateError>,
       onHandoffAccepted?: () => Effect.Effect<void>,
+      actor?: MaintenanceAudit.MaintenanceActor,
     ) => Effect.Effect<ServerSelfUpdateResult, ServerSelfUpdateError>;
     readonly commitDesktopUpdate: (
       requestId: string,
@@ -93,6 +99,8 @@ export const withRunningThreadContinuation = Effect.fn(
   const update: ServerSelfUpdate["Service"]["update"] = (
     request,
     reportProgress = () => Effect.void,
+    _onHandoffAccepted,
+    actor,
   ) => {
     let prepared = false;
     let handoffAccepted = false;
@@ -121,6 +129,7 @@ export const withRunningThreadContinuation = Effect.fn(
             Effect.sync(() => {
               handoffAccepted = true;
             }),
+          actor,
         )
         .pipe(
           Effect.tap((result) => {
@@ -186,6 +195,21 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
     yield* Config.String(CLI_RELEASE_BASE_URL_ENV).pipe(Config.option),
   );
   const inFlight = yield* Ref.make(false);
+  const audit = yield* MaintenanceAudit.MaintenanceAudit;
+  const admission = yield* RuntimeAdmission.RuntimeAdmission;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const crypto = yield* Crypto.Crypto;
+  const requireIdle = Effect.gen(function* () {
+    const activity = yield* projections
+      .getServerActivity()
+      .pipe(Effect.orElseSucceed(() => "busy" as const));
+    if ((yield* admission.inFlight) !== 0 || activity !== "idle") {
+      return yield* new ServerSelfUpdateError({
+        reason:
+          "GOAT is running threads on this server, so the update waits. Try again when they finish, or update from a GOAT app that can confirm interrupting them.",
+      });
+    }
+  });
 
   const capability: ServerSelfUpdateCapability | null =
     serverConfig.mode === "desktop" ? "desktop-managed" : launcher.managed ? "boot-service" : null;
@@ -196,7 +220,12 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
 
   const update: ServerSelfUpdate["Service"]["update"] = Effect.fn(
     "cloud.server_self_update.update",
-  )(function* (input, reportProgress = () => Effect.void, onHandoffAccepted = () => Effect.void) {
+  )(function* (
+    input,
+    reportProgress = () => Effect.void,
+    onHandoffAccepted = () => Effect.void,
+    actor = { kind: "internal" },
+  ) {
     if (capability === "desktop-managed") {
       if (desktopAppUpdate.available) {
         return yield* desktopAppUpdate.run(reportProgress);
@@ -220,6 +249,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
     }
 
     return yield* Effect.gen(function* () {
+      if (input.confirmReplacement !== true) yield* requireIdle;
       yield* reportProgress("downloading");
       const paths = yield* ensurePinnedRuntimeInstalled({
         baseDir: serverConfig.baseDir,
@@ -308,19 +338,60 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
         ),
       );
 
-      yield* reportProgress("installing");
-      const updateId = yield* Effect.uninterruptible(
-        launcher.requestUpdate({ targetVersion, dbPath: serverConfig.dbPath }).pipe(
-          Effect.mapError((error) =>
-            failWith(
-              error._tag === "ServiceLauncherRejectedError"
-                ? error.reason
-                : "Could not ask the service launcher to activate the prepared update.",
-              error,
-            ),
-          ),
-          Effect.tap(() => onHandoffAccepted()),
-        ),
+      const operationId = yield* crypto
+        .randomUUIDv4()
+        .pipe(
+          Effect.mapError((cause) => failWith("Could not allocate an update operation ID.", cause)),
+        );
+      const entry = {
+        operationId,
+        operation: "server-update" as const,
+        actor,
+        fromVersion: packageJson.version,
+        targetVersion,
+        mode: input.confirmReplacement === true ? ("confirmed" as const) : ("idle" as const),
+      };
+      let accepted = false;
+      const updateId = yield* Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          yield* admission.beginDrain;
+          return yield* Effect.gen(function* () {
+            // Recheck after staging with admission closed so a new turn cannot race activation.
+            if (input.confirmReplacement !== true) yield* requireIdle;
+            yield* restore(reportProgress("installing"));
+            yield* audit
+              .append({ ...entry, outcome: "requested" })
+              .pipe(
+                Effect.mapError((cause) => failWith("Could not record the update request.", cause)),
+              );
+            return yield* launcher
+              .requestUpdate({ targetVersion, dbPath: serverConfig.dbPath })
+              .pipe(
+                Effect.mapError((error) =>
+                  failWith(
+                    error._tag === "ServiceLauncherRejectedError"
+                      ? error.reason
+                      : "Could not ask the service launcher to activate the prepared update.",
+                    error,
+                  ),
+                ),
+                Effect.tap(() => {
+                  accepted = true;
+                  return onHandoffAccepted();
+                }),
+                Effect.tap((updateId) =>
+                  audit
+                    .append({ ...entry, updateId, outcome: "accepted" })
+                    .pipe(Effect.ignore({ log: true })),
+                ),
+                Effect.onError(() =>
+                  audit.append({ ...entry, outcome: "failed" }).pipe(Effect.ignore({ log: true })),
+                ),
+              );
+          }).pipe(
+            Effect.ensuring(Effect.suspend(() => (accepted ? Effect.void : admission.resume))),
+          );
+        }),
       );
 
       yield* Effect.logInfo("Server update prepared; handing off to the service launcher.", {
@@ -341,6 +412,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
 
 export const layer = Layer.effect(ServerSelfUpdate, make()).pipe(
   Layer.provide(ProcessRunner.layer),
+  Layer.provide(MaintenanceAudit.layer),
 );
 
 // The RPC stream used to own this fiber, so a dropped client socket interrupted
@@ -349,13 +421,14 @@ export const layer = Layer.effect(ServerSelfUpdate, make()).pipe(
 export const updateProgressStream = (
   selfUpdate: ServerSelfUpdate["Service"],
   input: ServerSelfUpdateInput,
+  actor?: MaintenanceAudit.MaintenanceActor,
 ) =>
   Stream.callback<ServerSelfUpdateProgressEvent, ServerSelfUpdateError>((queue) => {
     const offer = (event: ServerSelfUpdateProgressEvent) =>
       Queue.offer(queue, event).pipe(Effect.ignore);
 
     return selfUpdate
-      .update(input, (stage) => offer({ type: "progress", stage }))
+      .update(input, (stage) => offer({ type: "progress", stage }), undefined, actor)
       .pipe(
         Effect.flatMap((result) => offer({ type: "complete", result })),
         Effect.catchTags({

@@ -32,6 +32,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient } from "effect/http";
 
+import * as MaintenanceAudit from "../maintenance/MaintenanceAudit.ts";
 import * as ServerConfig from "../config.ts";
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { dependencies } from "./testkit/SshHostSetupTestkit.ts";
@@ -60,22 +61,55 @@ const fixture = Effect.gen(function* () {
   let snapshot: SshHostResult = { kind: "ok", status: stopped };
   const events: string[] = [];
   const updates: { host: string; confirmReplacement: boolean }[] = [];
+  const fs = yield* FileSystem.FileSystem.pipe(Effect.provide(NodeServices.layer));
+  const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-ssh-audit-" });
+  const config = yield* ServerConfig.ServerConfig.pipe(
+    Effect.provide(
+      ServerConfig.layerTest(process.cwd(), baseDir).pipe(Layer.provide(NodeServices.layer)),
+    ),
+  );
+  const audit = yield* MaintenanceAudit.MaintenanceAudit.pipe(
+    Effect.provide(
+      MaintenanceAudit.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(NodeServices.layer, Layer.succeed(ServerConfig.ServerConfig, config)),
+        ),
+      ),
+    ),
+  );
   const dispatch = Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
     publishSetupOutcome: () => Effect.succeed(true),
     runtimeStatus: () => Effect.sync(() => snapshot),
     beginSetupOperation: (_host, { operationId }) =>
       Effect.succeed({ operationId, generation: 1, stage: "runtime" }),
     runtimeUpdate: (host, options) =>
-      Effect.sync(() => {
-        events.push("update");
-        updates.push({ host, confirmReplacement: options.confirmReplacement });
-        snapshot = { kind: "ok", status: { ...stopped, state: "update_waiting" } };
-        return snapshot;
-      }),
+      fs.readFileString(`${config.stateDir}/maintenance-audit.jsonl`).pipe(
+        Effect.orDie,
+        Effect.tap((line) =>
+          Effect.sync(() => {
+            expect(JSON.parse(line.trim())).toMatchObject({
+              operationId: options.operationId,
+              outcome: "requested",
+            });
+          }),
+        ),
+        Effect.andThen(
+          Effect.sync(() => {
+            events.push("update");
+            updates.push({ host, confirmReplacement: options.confirmReplacement });
+            snapshot = { kind: "ok", status: { ...stopped, state: "update_waiting" } };
+            return snapshot;
+          }),
+        ),
+      ),
   });
   const setup = Context.get(
     yield* Layer.build(
-      SshHostSetup.layer.pipe(Layer.provide(dispatch), Layer.provide(dependencies)),
+      SshHostSetup.layer.pipe(
+        Layer.provide(Layer.succeed(MaintenanceAudit.MaintenanceAudit, audit)),
+        Layer.provide(dispatch),
+        Layer.provide(dependencies),
+      ),
     ),
     SshHostSetup.SshHostSetup,
   );
@@ -87,7 +121,7 @@ const fixture = Effect.gen(function* () {
         events.push("authorize");
       }),
   };
-  return { setup, scope, events, updates };
+  return { setup, scope, events, updates, journal: `${config.stateDir}/maintenance-audit.jsonl` };
 });
 
 it.effect("uses the dispatch owner version", () =>
@@ -112,6 +146,26 @@ it.effect.each([undefined, "when_idle"] as const)(
       expect(f.events).toEqual(["authorize", "authorize", "authorize", "update"]);
       expect(f.updates).toEqual([{ host: "box", confirmReplacement: false }]);
     }),
+);
+
+it.effect("journals an SSH update actor", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    yield* f.setup.update({ host: "box" }, { kind: "mcp", scope: f.scope });
+    const fs = yield* FileSystem.FileSystem;
+    const entry = JSON.parse((yield* fs.readFileString(f.journal)).trim());
+    expect(entry).toMatchObject({
+      operation: "ssh-runtime-update",
+      operationId: expect.any(String),
+      ts: expect.any(String),
+      actor: { kind: "mcp", sessionId: "client" },
+      destination: "box",
+      fromVersion: "0.4.2",
+      targetVersion: expect.any(String),
+      mode: "idle",
+      outcome: "requested",
+    });
+  }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.effect.each([false, true])(
@@ -296,7 +350,7 @@ it.effect("shares the dispatch manager", () =>
         expect(yield* dispatch.runtimeStatus("box")).toEqual(result);
         expect(yield* setup.status({ host: "box" })).toEqual(result);
         expect(ensures).toBe(1);
-        expect(statusReads).toBe(6);
+        expect(statusReads).toBe(7);
         expect(
           yield* setup.update({ host: "unknown" }, { kind: "mcp", scope: invocation }),
         ).toMatchObject({ kind: "error", code: "host_unknown" });

@@ -26,14 +26,15 @@ export class RuntimeAdmission extends Context.Service<
 >()("goat/runtimeAdmission") {}
 
 const make = Effect.sync(() => {
-  let draining = false;
+  // A refused launcher update must not reopen admission held by an SSH drain.
+  let drains = 0;
   let inFlight = 0;
   return RuntimeAdmission.of({
     beginDrain: Effect.sync(() => {
-      draining = true;
+      drains++;
     }),
     resume: Effect.sync(() => {
-      draining = false;
+      drains = Math.max(0, drains - 1);
     }),
     inFlight: Effect.sync(() => inFlight),
     admit: <A, E, R>(
@@ -42,7 +43,7 @@ const make = Effect.sync(() => {
     ) =>
       Effect.uninterruptibleMask((restore) =>
         Effect.suspend<A, E | ServerDrainingError, R>(() => {
-          if (draining && options?.continuation !== true)
+          if (drains > 0 && options?.continuation !== true)
             return Effect.fail(new ServerDrainingError({}));
           inFlight++;
           return restore(effect).pipe(

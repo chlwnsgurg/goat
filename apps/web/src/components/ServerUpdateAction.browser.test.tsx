@@ -257,7 +257,7 @@ describe("ServerUpdateAction", () => {
 
     expect(testState.updateServer).toHaveBeenCalledWith({
       environmentId: "env-test",
-      input: { targetVersion: "0.0.31" },
+      input: { targetVersion: "0.0.31", confirmReplacement: true },
     });
     expect(testState.toast).toHaveBeenCalledWith({
       type: "success",
@@ -320,7 +320,7 @@ describe("ServerUpdateAction", () => {
 
     expect(testState.updateServer).toHaveBeenCalledWith({
       environmentId: "env-test",
-      input: { targetVersion: "0.0.31" },
+      input: { targetVersion: "0.0.31", confirmReplacement: true },
     });
     expect(testState.toast).toHaveBeenCalledWith({
       type: "success",
@@ -337,7 +337,7 @@ describe("ServerUpdateAction", () => {
 
     expect(testState.updateServer).toHaveBeenCalledWith({
       environmentId: "env-test",
-      input: { targetVersion: "0.0.31" },
+      input: { targetVersion: "0.0.31", confirmReplacement: true },
     });
   });
 
@@ -350,7 +350,7 @@ describe("ServerUpdateAction", () => {
 
     expect(testState.updateServer).toHaveBeenCalledWith({
       environmentId: "env-test",
-      input: { targetVersion: "0.0.31", continueRunningThreads: true },
+      input: { targetVersion: "0.0.31", confirmReplacement: true, continueRunningThreads: true },
     });
   });
 });
@@ -391,9 +391,9 @@ describe("ServerUpdatesAction", () => {
     expect(testState.updateServer.mock.calls.map(([target]) => target)).toEqual([
       {
         environmentId: "batch-a",
-        input: { targetVersion: "0.0.31", continueRunningThreads: true },
+        input: { targetVersion: "0.0.31", confirmReplacement: true, continueRunningThreads: true },
       },
-      { environmentId: "batch-b", input: { targetVersion: "0.0.31" } },
+      { environmentId: "batch-b", input: { targetVersion: "0.0.31", confirmReplacement: true } },
     ]);
     expect(testState.toast.mock.calls.map(([toast]) => toast.title)).toEqual([
       "Laptop updated",

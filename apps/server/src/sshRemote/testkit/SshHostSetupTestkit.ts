@@ -1,3 +1,4 @@
+import * as MaintenanceAudit from "../../maintenance/MaintenanceAudit.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
@@ -65,6 +66,7 @@ export const projection: OrchestrationV2ThreadProjection = {
 };
 export const dependencies = Layer.mergeAll(
   NodeServices.layer,
+  Layer.succeed(MaintenanceAudit.MaintenanceAudit, { append: () => Effect.void }),
   ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer)),
   Layer.mock(SessionStore.SessionStore)({
     cookieName: "test",

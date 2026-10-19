@@ -8,12 +8,14 @@ import {
   resolveEnvironmentMachineKind,
   ServerConfig,
   ServerObservability,
+  ServerSelfUpdateInput,
   ServerProvider,
   ServerProviders,
   ServerUpsertKeybindingResult,
 } from "./server.ts";
 import { ServerSettings } from "./settings.ts";
 
+const decodeServerSelfUpdateInput = Schema.decodeSync(ServerSelfUpdateInput);
 const decodeServerProvider = Schema.decodeUnknownSync(ServerProvider);
 const decodeServerProviders = Schema.decodeUnknownSync(ServerProviders);
 const decodeServerObservability = Schema.decodeUnknownSync(ServerObservability);
@@ -316,4 +318,17 @@ describe("OpenCodex Home routing", () => {
       codexRoute,
     );
   });
+});
+
+describe("ServerSelfUpdateInput", () => {
+  it.each([undefined, false, true])(
+    "accepts old clients and explicit confirmation=%s",
+    (confirmation) => {
+      const input = {
+        targetVersion: "1.1.0",
+        ...(confirmation === undefined ? {} : { confirmReplacement: confirmation }),
+      };
+      expect(decodeServerSelfUpdateInput(input)).toEqual(input);
+    },
+  );
 });
