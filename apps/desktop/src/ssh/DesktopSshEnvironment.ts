@@ -195,25 +195,33 @@ export const make = Effect.gen(function* () {
     ensureEnvironment: (target, ensureOptions) =>
       Effect.gen(function* () {
         const onAnswered = yield* SshHostAnswered;
-        const listener = () => onAnswered?.();
+        const listener = () => {
+          try {
+            onAnswered?.();
+          } catch {
+            // A destroyed renderer must not prevent other requests from observing authentication.
+          }
+        };
         const key = targetKey(target);
         return yield* Effect.acquireUseRelease(
           Effect.sync(() => {
             const preparation = preparations.get(key) ?? { answered: false, listeners: new Set() };
             preparations.set(key, preparation);
             preparation.listeners.add(listener);
-            // A renderer retry can join while the original IPC request holds the target lock.
-            if (preparation.answered) listener();
             return preparation;
           }),
           (preparation) =>
-            manager.ensureEnvironment(target, ensureOptions).pipe(
-              Effect.provideService(SshHostAnswered, () => {
-                if (preparations.get(key) !== preparation || preparation.answered) return;
-                preparation.answered = true;
-                for (const notify of preparation.listeners) notify();
-              }),
-            ),
+            Effect.gen(function* () {
+              // Replay only after acquisition so notification failures cannot bypass cleanup.
+              if (preparation.answered) listener();
+              return yield* manager.ensureEnvironment(target, ensureOptions).pipe(
+                Effect.provideService(SshHostAnswered, () => {
+                  if (preparations.get(key) !== preparation || preparation.answered) return;
+                  preparation.answered = true;
+                  for (const notify of preparation.listeners) notify();
+                }),
+              );
+            }),
           (preparation) =>
             Effect.sync(() => {
               preparation.listeners.delete(listener);

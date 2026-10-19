@@ -372,6 +372,91 @@ describe("desktop SSH runtime status", () => {
 });
 
 describe("sshEnvironment", () => {
+  it.effect("isolates a throwing authentication listener from other pending requests", () =>
+    Effect.gen(function* () {
+      const entered = yield* Queue.unbounded<() => void>();
+      const finish = yield* Deferred.make<void>();
+      const service = yield* DesktopSshEnvironment.make.pipe(
+        Effect.provideService(SshTunnel.SshEnvironmentManager, {
+          ...unusedManager,
+          ensureEnvironment: () =>
+            Effect.gen(function* () {
+              const answer = yield* SshHostAnswered;
+              yield* Queue.offer(entered, () => answer?.());
+              yield* Deferred.await(finish);
+              return pendingRuntime;
+            }),
+        }),
+      );
+      let liveAnswers = 0;
+      const dead = yield* service.ensureEnvironment(runtimeTarget).pipe(
+        Effect.provideService(SshHostAnswered, () => {
+          throw new Error("Object has been destroyed");
+        }),
+        Effect.forkChild,
+      );
+      const authenticate = yield* Queue.take(entered);
+      const live = yield* service.ensureEnvironment(runtimeTarget).pipe(
+        Effect.provideService(SshHostAnswered, () => {
+          liveAnswers++;
+        }),
+        Effect.forkChild,
+      );
+      yield* Queue.take(entered);
+      assert.doesNotThrow(authenticate);
+      assert.equal(liveAnswers, 1);
+      yield* Deferred.succeed(finish, undefined);
+      assert.deepEqual(yield* Fiber.join(dead), pendingRuntime);
+      assert.deepEqual(yield* Fiber.join(live), pendingRuntime);
+    }).pipe(Effect.provide(desktopRuntimeLayer)),
+  );
+
+  it.effect("clears authentication state after a replay listener throws", () =>
+    Effect.gen(function* () {
+      const entered = yield* Queue.unbounded<() => void>();
+      const replayed = yield* Deferred.make<void>();
+      const finish = yield* Deferred.make<void>();
+      const service = yield* DesktopSshEnvironment.make.pipe(
+        Effect.provideService(SshTunnel.SshEnvironmentManager, {
+          ...unusedManager,
+          ensureEnvironment: () =>
+            Effect.gen(function* () {
+              const answer = yield* SshHostAnswered;
+              yield* Queue.offer(entered, () => answer?.());
+              yield* Deferred.await(finish);
+              return pendingRuntime;
+            }),
+        }),
+      );
+      const original = yield* service.ensureEnvironment(runtimeTarget).pipe(Effect.forkChild);
+      (yield* Queue.take(entered))();
+      let replayAnswers = 0;
+      const replay = yield* service.ensureEnvironment(runtimeTarget).pipe(
+        Effect.provideService(SshHostAnswered, () => {
+          replayAnswers++;
+          Deferred.doneUnsafe(replayed, Effect.void);
+          throw new Error("Object has been destroyed");
+        }),
+        Effect.exit,
+        Effect.forkChild,
+      );
+      yield* Deferred.await(replayed);
+      yield* Deferred.succeed(finish, undefined);
+      yield* Fiber.join(original);
+      const replayResult = yield* Fiber.join(replay);
+      let freshAnswers = 0;
+      yield* service.ensureEnvironment(runtimeTarget).pipe(
+        Effect.provideService(SshHostAnswered, () => {
+          freshAnswers++;
+        }),
+      );
+      assert.equal(freshAnswers, 0);
+      assert.equal(replayAnswers, 1);
+      assert(Exit.isSuccess(replayResult));
+      assert.deepEqual(replayResult.value, pendingRuntime);
+    }).pipe(Effect.provide(desktopRuntimeLayer)),
+  );
+
   it.effect(
     "limits authentication replay to pending requests for the same target and generation",
     () =>
