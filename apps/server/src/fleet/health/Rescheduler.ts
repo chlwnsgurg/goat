@@ -163,21 +163,28 @@ export const make = Effect.gen(function* () {
         }),
       );
 
-  const schedulableHosts = (exclude: string | null) =>
+  /**
+   * Hosts that answer, and those of them that can take work. Connected hosts never contacted are
+   * Unknown; reading their conditions probes them.
+   */
+  const surveyHosts = (exclude: string | null) =>
     Effect.gen(function* () {
-      // Connected hosts that were never contacted are Unknown; reading their conditions probes them.
       const known = yield* monitor.known;
       const connected = yield* dispatch.connectedHosts;
       const samples = new Map(known.map((entry) => [entry.host, entry.sample] as const));
-      const hosts: Array<{ readonly host: string; readonly sample: HostStatusEntry | null }> = [];
+      const answering: Array<string> = [];
+      const schedulable: Array<{ readonly host: string; readonly sample: HostStatusEntry | null }> =
+        [];
       for (const host of new Set([...samples.keys(), ...connected])) {
         if (host === exclude) continue;
         const set = yield* monitor.conditions(host);
+        if (set.conditions.some((condition) => condition.type === "Unreachable")) continue;
+        answering.push(host);
         if (!isSchedulable(set.conditions)) continue;
         const sample = (yield* monitor.known).find((entry) => entry.host === host)?.sample ?? null;
-        hosts.push({ host, sample });
+        schedulable.push({ host, sample });
       }
-      return hosts;
+      return { answering, schedulable };
     });
 
   /** A thread this request already launched, found by its title on any candidate host. */
@@ -292,13 +299,13 @@ export const make = Effect.gen(function* () {
             : request.replica !== null
               ? "replica"
               : "base";
-        const candidates = yield* schedulableHosts(from);
+        const survey = yield* surveyHosts(from);
+        const candidates = survey.schedulable;
         const requested = request.targetHost ?? null;
+        // Every answering host, cordoned or not: a launch whose answer was lost may sit on a host
+        // that was cordoned since.
         const lookIn = [
-          ...new Set([
-            ...(requested === null ? [] : [requested]),
-            ...candidates.map((entry) => entry.host),
-          ]),
+          ...new Set([...(requested === null ? [] : [requested]), ...survey.answering]),
         ];
         const already = yield* findLaunched(lookIn, title, request.runtimeMode);
         if (already !== null) {

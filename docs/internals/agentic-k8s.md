@@ -322,8 +322,8 @@ field, and `goat_host_cordon`, `goat_host_uncordon`, `goat_host_drain` and `goat
 live in `apps/server/src/mcp/toolkits/fleet/`. Cordons persist in `fleet_host_states`. Moving work
 off a goal attempt still needs the goal controller: until it lands, drain only cordons and marks the
 host Draining, and `goat_thread_reschedule` takes the branch and folder from its caller. Channel
-tasks still heal through `ChannelRemoteWorkers.ts`; the replica helpers moved to
-`fleet/health/replica.ts` behind a re-export, so channel behavior is unchanged.
+tasks still heal through `ChannelRemoteWorkers.ts`. Moving the replica helpers out of channels waits
+for replica capture of goal attempts (#525); `fleet_replicas` already exists for it.
 
 Where the code departs from the text below, and why:
 
