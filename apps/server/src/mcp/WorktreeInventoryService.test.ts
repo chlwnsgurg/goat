@@ -10,6 +10,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import * as ServerConfig from "../config.ts";
 import * as GitManager from "../git/GitManager.ts";
@@ -17,6 +18,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { tryWithWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as WorktreeInventoryService from "./WorktreeInventoryService.ts";
 
 interface ThreadFixture {
@@ -66,7 +68,7 @@ const fixture = Effect.gen(function* () {
   let threads: Array<ThreadFixture> = [];
   let mergedPullRequest: { branch: string; headSha: string } | null = null;
   // Runs while removal waits on the pull request lookup, between its checks and the deletion.
-  let duringPullRequestLookup: () => void = () => {};
+  let duringPullRequestLookup: Effect.Effect<void> = Effect.void;
 
   const addWorktree = (branch: string, at = worktreesDir + "/" + branch) =>
     run(repo, ["worktree", "add", "-b", branch, at]).pipe(Effect.as(at));
@@ -97,17 +99,20 @@ const fixture = Effect.gen(function* () {
     } as unknown as ProjectService.ProjectService["Service"]),
     Effect.provideService(GitManager.GitManager, {
       branchPullRequest: (input: { branch: string }) =>
-        Effect.sync(() => {
-          duringPullRequestLookup();
-          return mergedPullRequest?.branch === input.branch
-            ? {
-                number: 7,
-                state: "merged",
-                headRef: input.branch,
-                headSha: mergedPullRequest.headSha,
-              }
-            : null;
-        }),
+        duringPullRequestLookup.pipe(
+          Effect.andThen(
+            Effect.sync(() =>
+              mergedPullRequest?.branch === input.branch
+                ? {
+                    number: 7,
+                    state: "merged",
+                    headRef: input.branch,
+                    headSha: mergedPullRequest.headSha,
+                  }
+                : null,
+            ),
+          ),
+        ),
     } as unknown as GitManager.GitManager["Service"]),
   );
   const service = Context.get(context, WorktreeInventoryService.WorktreeInventoryService);
@@ -125,7 +130,7 @@ const fixture = Effect.gen(function* () {
     setMergedPullRequest: (next: { branch: string; headSha: string } | null) => {
       mergedPullRequest = next;
     },
-    setDuringPullRequestLookup: (next: () => void) => {
+    setDuringPullRequestLookup: (next: Effect.Effect<void>) => {
       duringPullRequestLookup = next;
     },
     root,
@@ -423,6 +428,55 @@ describe("WorktreeInventoryService", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
+  it.live("a thread bound through a symlink cannot remove a checkout another thread is using", () =>
+    Effect.gen(function* () {
+      const {
+        service,
+        fs,
+        root,
+        addWorktree,
+        commit,
+        setThreads,
+        setMergedPullRequest,
+        setDuringPullRequestLookup,
+      } = yield* fixture;
+      const path = yield* addWorktree("shared");
+      const alias = root + "/shared-alias";
+      yield* fs.symlink(path, alias);
+      setMergedPullRequest({ branch: "shared", headSha: yield* commit(path) });
+      setThreads([
+        { id: "owner", worktreePath: path, status: "running", activeRunId: "run-1" },
+        { id: "linked", worktreePath: alias, status: "completed" },
+      ]);
+
+      // The alias resolves to the owner's checkout, so the owner's run blocks removal.
+      expect(
+        yield* refusal(service.remove({ threadId: ThreadId.make("linked"), force: true })),
+      ).toContain("thread owner (Thread owner) is running or has pending work");
+      expect(yield* fs.exists(path)).toBe(true);
+
+      setThreads([
+        { id: "owner", worktreePath: path, status: "completed" },
+        { id: "linked", worktreePath: alias, status: "completed" },
+      ]);
+      // A turn start leases its thread's recorded path, so both must be held while removing.
+      const leased: Array<boolean> = [];
+      setDuringPullRequestLookup(
+        Effect.forEach([path, alias], (key) =>
+          tryWithWorkspaceLease(key, Effect.void).pipe(
+            Effect.map((acquired) => leased.push(Option.isNone(acquired))),
+          ),
+        ),
+      );
+      const removed = yield* service.remove({ threadId: ThreadId.make("linked") });
+      expect(removed.path).toBe(path);
+      expect(leased.length).toBeGreaterThan(0);
+      expect(leased.every(Boolean)).toBe(true);
+      expect(removed.notes).toContainEqual(expect.stringContaining("owner"));
+      expect(yield* fs.exists(path)).toBe(false);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
   it.live("rechecks the thread right before deleting, after the slow commit checks", () =>
     Effect.gen(function* () {
       const {
@@ -439,8 +493,10 @@ describe("WorktreeInventoryService", () => {
       setMergedPullRequest({ branch: "racing", headSha: head });
       setThreads([{ id: "t1", worktreePath: path, status: "completed" }]);
       // The thread starts while removal waits on the pull request lookup.
-      setDuringPullRequestLookup(() =>
-        setThreads([{ id: "t1", worktreePath: path, status: "starting", activeRunId: "run-2" }]),
+      setDuringPullRequestLookup(
+        Effect.sync(() =>
+          setThreads([{ id: "t1", worktreePath: path, status: "starting", activeRunId: "run-2" }]),
+        ),
       );
 
       expect(yield* refusal(service.remove({ path }))).toContain(

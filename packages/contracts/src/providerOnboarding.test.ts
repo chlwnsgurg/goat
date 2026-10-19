@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { ProviderInstanceId } from "./providerInstance.ts";
 import { redactProviderAuthState } from "./providerOnboarding.ts";

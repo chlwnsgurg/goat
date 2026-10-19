@@ -79,7 +79,6 @@ const HtmlRenderTool = Tool.make(agentSurfaceRegistry["html.render"].name, {
       title: Schema.String,
       height: Schema.Number,
       heights: Schema.optional(Schema.Array(Schema.Tuple([Schema.Int, Schema.Int]))),
-      outline: Schema.optional(Schema.String),
     }),
     message: Schema.String,
   }),

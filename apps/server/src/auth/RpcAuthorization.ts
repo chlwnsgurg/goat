@@ -155,6 +155,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.scheduledTasksGetWebhookDelivery]: AuthOrchestrationOperateScope,
   [WS_METHODS.remoteLaunchesList]: AuthOrchestrationReadScope,
   [WS_METHODS.cloudMachinesList]: AuthOrchestrationReadScope,
+  [WS_METHODS.cloudAgentsListRuns]: AuthOrchestrationReadScope,
   [WS_METHODS.cloudMachinesConfigure]: AuthSettingsWriteScope,
   [WS_METHODS.cloudMachinesDisconnect]: AuthSettingsWriteScope,
   [WS_METHODS.cloudMachinesCreate]: AuthSettingsWriteScope,
@@ -361,9 +362,19 @@ export const authorizeRpcCall = (
     return missing === undefined ? Effect.void : Effect.fail(rpcAuthorizationError(missing));
   });
 
-export const layer = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
+/** Observes successful authorized calls, including completion of streaming RPCs. */
+export const layer = (
+  scopes: ReadonlyArray<AuthEnvironmentScope>,
+  onAuthorized?: (method: string, payload: unknown) => Effect.Effect<void>,
+) =>
   Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) =>
-    authorizeRpcCall(scopes, rpc._tag, payload).pipe(Effect.andThen(effect)),
+    authorizeRpcCall(scopes, rpc._tag, payload).pipe(
+      Effect.andThen(
+        onAuthorized === undefined
+          ? effect
+          : Effect.tap(effect, () => onAuthorized(rpc._tag, payload)),
+      ),
+    ),
   );
 
 /** Retrying can install or restart tools even though ordinary listing is readable. */

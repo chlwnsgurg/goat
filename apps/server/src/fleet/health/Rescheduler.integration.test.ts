@@ -12,7 +12,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as HostPowerMonitor from "../../background/HostPowerMonitor.ts";
 import * as ThreadManagementService from "../../orchestration-v2/ThreadManagementService.ts";
-import Migration0085 from "../../persistence/Migrations/085_FleetHealth.ts";
+import Migration0086 from "../../persistence/Migrations/086_FleetHealth.ts";
 import * as SshRemoteDispatch from "../../sshRemote/SshRemoteDispatch.ts";
 import * as FleetHostStates from "./FleetHostStates.ts";
 import * as Health from "./Health.ts";
@@ -256,7 +256,7 @@ const layerFor = (
     Layer.provideMerge(Layer.mergeAll(FleetHostStates.layer, FleetHostStates.layerClaims)),
     Layer.provideMerge(
       // A restart reopens the same file; the tables already exist then.
-      Layer.effectDiscard(Effect.ignore(Migration0085)).pipe(
+      Layer.effectDiscard(Effect.ignore(Migration0086)).pipe(
         Layer.provideMerge(NodeSqliteClient.layer({ filename })),
       ),
     ),

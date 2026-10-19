@@ -61,7 +61,16 @@ describe("GOAT Bot sees approvals its workers' subagents wait on", () => {
       yield* reports.reconcile(runtime.ownerToken);
       const waiting = yield* onlyTask;
       assert.strictEqual(waiting.status, "running");
-      assert.deepStrictEqual(waiting.observed?.needsYou, [{ kind: "approval", since }]);
+      assert.deepStrictEqual(waiting.observed?.needsYou, [
+        {
+          kind: "approval",
+          since,
+          approval: {
+            requestId: RuntimeRequestId.make("approval:grandchild"),
+            threadId: ThreadId.make("thread:grandchild"),
+          },
+        },
+      ]);
       assert.strictEqual(yield* ledger.countWaitingTasks(ownerId), 1);
 
       harness.world.runtimeRequests.set("thread:grandchild", []);

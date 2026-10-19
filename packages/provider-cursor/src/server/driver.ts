@@ -1,4 +1,4 @@
-import { ProviderDriverKind, ProviderSetupError } from "@goat/contracts";
+import { ProviderDriverKind, ProviderSetupError, type ServerProviderModel } from "@goat/contracts";
 import { CursorSettings } from "../settings.ts";
 import * as Effect from "effect/Effect";
 import * as Crypto from "effect/Crypto";
@@ -10,7 +10,7 @@ import { readCursorUsageLimits } from "./usageLimits.ts";
 
 import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import { makeCursorTextGeneration } from "./textGeneration.ts";
-import { CursorAdapterV2Driver, type CursorAdapterV2DriverEnv } from "./adapter.ts";
+import { makeCursorAdapterV2, type CursorAdapterV2DriverEnv } from "./adapter.ts";
 import { ProviderDriverError } from "@goat/provider-core/server/errors";
 import { buildInitialCursorProviderSnapshot, checkCursorProviderStatus } from "./status.ts";
 import * as CursorSdkCatalog from "./CursorSdkCatalog.ts";
@@ -154,13 +154,12 @@ export const CursorDriver: ProviderDriver<
           },
         });
 
-      const orchestrationAdapter = yield* CursorAdapterV2Driver.create({
+      let catalogModels: ReadonlyArray<ServerProviderModel> = [];
+      const orchestrationAdapter = yield* makeCursorAdapterV2({
         instanceId,
-        displayName,
-        accentColor,
-        environment,
-        enabled,
-        config,
+        settings: effectiveConfig,
+        environment: processEnv,
+        getModels: () => catalogModels,
       }).pipe(
         Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
           ...sdkRunner,
@@ -243,6 +242,14 @@ export const CursorDriver: ProviderDriver<
         Effect.provideService(Path.Path, path),
         Effect.provideService(CursorKeychain.CursorKeychain, keychain),
         Effect.map(stampSnapshot),
+        Effect.tap((provider) =>
+          Effect.sync(() => {
+            // A failed check lists only custom models, so keep the last loaded catalog.
+            if (provider.models.some((model) => !model.isCustom)) {
+              catalogModels = provider.models;
+            }
+          }),
+        ),
         Effect.provide(CursorSdkCatalog.layer),
       );
 
