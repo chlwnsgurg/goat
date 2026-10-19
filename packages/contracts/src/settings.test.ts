@@ -16,6 +16,7 @@ import {
   CodexSettings,
   ServerSettingsError,
   DEFAULT_SERVER_SETTINGS,
+  PROJECT_SCOPED_SERVER_SETTING_KEYS,
   implicitDefaultInstance,
   isDevinAcpRegistryInstance,
   requiredScopesForProjectMutation,
@@ -1510,5 +1511,35 @@ describe("OpenCodex Home routing", () => {
     });
     expect(restored.code).toBeUndefined();
     expect(restored.message).toBe("Server settings write-file failed at /sandbox/settings.json.");
+  });
+});
+
+describe("automatic server updates", () => {
+  it("defaults existing settings to enabled", () => {
+    expect(decodeServerSettings({}).automaticServerUpdates).toBe(true);
+    expect(DEFAULT_SERVER_SETTINGS.automaticServerUpdates).toBe(true);
+  });
+
+  it.each([true, false])("round-trips %s in environment patches", (automaticServerUpdates) => {
+    const input = { automaticServerUpdates };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    expect(requiredScopesForServerSettingsPatch(input)).toContain("settings:write");
+  });
+
+  // The scheduler reads one environment value; a project override would show but do nothing.
+  it("cannot be overridden per project", () => {
+    expect(PROJECT_SCOPED_SERVER_SETTING_KEYS).not.toContain("automaticServerUpdates");
+    const decoded = decodeServerSettings({
+      projectSettingsOverrides: { project: { automaticServerUpdates: false } },
+    });
+    expect(decoded.projectSettingsOverrides[ProjectId.make("project")]).not.toHaveProperty(
+      "automaticServerUpdates",
+    );
+  });
+
+  it.each(["false", null, 0])("rejects a non-boolean value %s", (automaticServerUpdates) => {
+    expect(() => decodeServerSettings({ automaticServerUpdates })).toThrow();
+    expect(() => decodeServerSettingsPatch({ automaticServerUpdates })).toThrow();
   });
 });

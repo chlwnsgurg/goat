@@ -5,6 +5,7 @@ import {
   goatBotHomeAttemptKey,
   newGoatBotHomeClaim,
   pickGoatBotHomeCandidate,
+  pickGoatBotHomeMoveTarget,
   planGoatBotHomeSync,
   reduceGoatBotHomeAttempts,
   resolveGoatBotHome,
@@ -36,6 +37,7 @@ const target = (
 const resolved = (winner = claim(), staleTargetIds = [b, c]): GoatBotHomeResolution => ({
   state: "claimed",
   claim: winner,
+  homeKnown: true,
   homeConnected: true,
   homeSupportsBot: true,
   staleTargetIds,
@@ -103,6 +105,7 @@ describe("resolveGoatBotHome", () => {
     ).toEqual({
       state: "claimed",
       claim: winner,
+      homeKnown: true,
       homeConnected: true,
       homeSupportsBot: true,
       staleTargetIds: [a, c],
@@ -154,6 +157,7 @@ describe("resolveGoatBotHome", () => {
     ).toEqual({
       state: "claimed",
       claim: winner,
+      homeKnown: true,
       homeConnected: false,
       homeSupportsBot: true,
       staleTargetIds: [a],
@@ -164,6 +168,7 @@ describe("resolveGoatBotHome", () => {
     expect(resolveGoatBotHome({ targets: [target(a, { home: claim(b) })] })).toEqual({
       state: "claimed",
       claim: claim(b),
+      homeKnown: false,
       homeConnected: false,
       homeSupportsBot: false,
       staleTargetIds: [],
@@ -181,6 +186,7 @@ describe("resolveGoatBotHome", () => {
     ).toEqual({
       state: "claimed",
       claim: claim(),
+      homeKnown: true,
       homeConnected: true,
       homeSupportsBot: false,
       staleTargetIds: [b],
@@ -530,4 +536,51 @@ describe("cluster convergence", () => {
       resolved(winner, []),
     );
   });
+});
+
+describe("explicit home move targets", () => {
+  it("prefers the primary, else the first connected capable writable target", () => {
+    const targets = [target(c), target(b), target(a)];
+    expect(
+      pickGoatBotHomeMoveTarget({
+        targets,
+        writableIds: new Set([a, b, c]),
+        primaryEnvironmentId: b,
+      }),
+    ).toBe(b);
+    expect(
+      pickGoatBotHomeMoveTarget({ targets, writableIds: new Set([a, c]), primaryEnvironmentId: b }),
+    ).toBe(c);
+  });
+  it.each([{ connected: false }, { supportsHome: false }, { supportsBot: false }])(
+    "excludes ineligible targets: %j",
+    (overrides) => {
+      expect(
+        pickGoatBotHomeMoveTarget({
+          targets: [target(a, overrides), target(b)],
+          writableIds: new Set([a]),
+          primaryEnvironmentId: a,
+        }),
+      ).toBeNull();
+    },
+  );
+  it.each([true, false])(
+    "replicates an offline home claim without moving it (known: %s)",
+    (known) => {
+      const winner = claim(b);
+      const targets = [
+        target(a, { home: winner }),
+        target(c),
+        ...(known ? [target(b, { home: winner, connected: false })] : []),
+      ];
+      const resolution = resolveGoatBotHome({ targets });
+      expect(resolution).toMatchObject({
+        state: "claimed",
+        homeKnown: known,
+        homeConnected: false,
+        claim: winner,
+      });
+      expect(plan(resolution).writes).toEqual([{ environmentId: c, claim: winner }]);
+    },
+  );
 });

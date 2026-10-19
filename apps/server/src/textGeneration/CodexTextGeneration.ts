@@ -28,7 +28,7 @@ import { codexExecLaunchArgs, resolveCodexLaunchArgs } from "../provider/codexLa
 import * as TextGenerationOperations from "@goat/provider-core/server/textGenerationOperations";
 import {
   normalizeCliError,
-  toJsonSchemaObject,
+  toStrictJsonSchemaObject,
 } from "@goat/provider-core/server/textGenerationUtils";
 import { codexModelFamily, getModelSelectionStringOptionValue } from "@goat/shared/model";
 import { getCodexServiceTierOptionValue } from "../codexModelOptions.ts";
@@ -317,7 +317,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     const imagePaths = yield* materializeImageAttachments(attachments);
     const schemaJson = yield* encodeJsonForOperation(
       operation,
-      toJsonSchemaObject(outputSchemaJson),
+      yield* toStrictJsonSchemaObject(operation, outputSchemaJson),
     );
     const schemaPath = yield* writeTempFile(operation, "codex-schema", schemaJson);
     const outputPath = yield* writeTempFile(operation, "codex-output", "").pipe(
@@ -519,7 +519,11 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         ),
       );
 
-      const decodeOutput = Schema.decodeEffect(Schema.fromJsonString(outputSchemaJson));
+      const decodeOutput = (json: string) =>
+        Schema.decodeEffect(Schema.fromJsonString(outputSchemaJson))(
+          json,
+          TextGenerationOperations.outputDecodeOptions(operation),
+        );
 
       const result = yield* fileSystem.readFileString(outputPath).pipe(
         Effect.mapError(

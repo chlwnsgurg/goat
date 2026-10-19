@@ -488,6 +488,7 @@ export interface DesktopSshEnvironmentBootstrap {
 export const SshRuntimePendingReplacementSchema = Schema.Struct({
   reason: Schema.Literals(["busy", "unknown", "contended"]),
   detail: Schema.optionalKey(Schema.Literal("recovery-stale")),
+  refreshCause: Schema.optionalKey(Schema.Literal("drain_unavailable")),
   /** `capability`: the live runtime cannot issue sessions this app needs, such as memory scopes. */
   replacement: Schema.Literals(["older", "legacy", "incompatible", "capability"]),
   requestedVersion: Schema.String,
@@ -1257,6 +1258,8 @@ export interface DesktopBridge {
   onQuitShortcut?: (listener: (event: QuitShortcutHintEvent) => void) => () => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
+  /** App window zoom; older desktop shells omit this method. */
+  getWindowZoomFactor?: () => number;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   setUpdateInstallPolicy: (policy: DesktopUpdateInstallPolicy) => Promise<DesktopUpdateState>;

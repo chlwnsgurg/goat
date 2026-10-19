@@ -285,13 +285,15 @@ function parseAppUpdateYml(raw: string): Effect.Effect<Option.Option<AppUpdateYm
 
 function createBaseUpdateState(
   channel: DesktopUpdateChannel,
-  enabled: boolean,
+  disabledReason: Option.Option<string>,
   environment: DesktopEnvironment.DesktopEnvironment["Service"],
 ): DesktopUpdateState {
+  const enabled = Option.isNone(disabledReason);
   return {
     ...createInitialDesktopUpdateState(environment.appVersion, environment.runtimeInfo, channel),
     enabled,
     status: enabled ? "idle" : "disabled",
+    message: Option.getOrNull(disabledReason),
   };
 }
 
@@ -545,8 +547,6 @@ export const make = Effect.gen(function* () {
     });
   });
 
-  const shouldEnableAutoUpdates = resolveDisabledReason.pipe(Effect.map(Option.isNone));
-
   const checkForUpdates = Effect.fn("desktop.updates.checkForUpdates")(function* (
     reason: string,
     actionReservation: "acquire" | "held" = "acquire",
@@ -774,13 +774,11 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  const baseUpdateState = (channel: DesktopUpdateChannel, enabled: boolean) =>
+  const baseUpdateState = (channel: DesktopUpdateChannel, disabledReason: Option.Option<string>) =>
     Effect.gen(function* () {
       const notAppliedVersion = yield* Ref.get(notAppliedVersionRef);
-      const disabledReason = yield* resolveDisabledReason;
       return {
-        ...createBaseUpdateState(channel, enabled, environment),
-        message: Option.getOrNull(disabledReason),
+        ...createBaseUpdateState(channel, disabledReason, environment),
         ...(installationReason === "needs-admin" && installationMessage
           ? { installationNotice: installationMessage }
           : {}),
@@ -1391,9 +1389,10 @@ export const make = Effect.gen(function* () {
         if (Exit.isSuccess(cleared)) settings = cleared.value.settings;
         else pendingPersistenceFailed = true;
       }
-      const enabled = yield* shouldEnableAutoUpdates;
+      const disabledReason = yield* resolveDisabledReason;
+      const enabled = Option.isNone(disabledReason);
       yield* setState({
-        ...(yield* baseUpdateState(settings.updateChannel, enabled)),
+        ...(yield* baseUpdateState(settings.updateChannel, disabledReason)),
         installPolicy: settings.updateInstallPolicy,
         pendingUpdate: settings.pendingUpdate,
         pendingRestartReason:
@@ -1506,13 +1505,13 @@ export const make = Effect.gen(function* () {
           );
 
         const settings = yield* desktopSettings.get;
-        const enabled = yield* shouldEnableAutoUpdates;
+        const disabledReason = yield* resolveDisabledReason;
         yield* setState({
-          ...(yield* baseUpdateState(nextChannel, enabled)),
+          ...(yield* baseUpdateState(nextChannel, disabledReason)),
           installPolicy: settings.updateInstallPolicy,
         });
 
-        if (!enabled || !(yield* Ref.get(updaterConfiguredRef))) {
+        if (Option.isSome(disabledReason) || !(yield* Ref.get(updaterConfiguredRef))) {
           return yield* Ref.get(updateStateRef);
         }
 

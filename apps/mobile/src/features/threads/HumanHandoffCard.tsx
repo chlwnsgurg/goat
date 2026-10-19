@@ -16,6 +16,7 @@ import {
   AuthProvidersManageScope,
   AuthOrchestrationReadScope,
   isHandoffPending,
+  isProviderHandoffPath,
   type EnvironmentId,
   type Handoff,
   type HandoffHuman,
@@ -26,7 +27,7 @@ import { AppText as Text } from "../../components/ui/AppText";
 import { useEnvironmentScope } from "../../state/session";
 import { serverEnvironment, sshHost } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { RequestActionButton } from "./RequestActionButton";
+import { Button } from "../../components/ui/Button";
 
 type HumanHandoffCardProps = {
   environmentId: EnvironmentId;
@@ -44,7 +45,7 @@ export function HumanHandoffCard(props: HumanHandoffCardProps) {
     AuthProvidersManageScope,
   );
   const canTargetPermission = useAtomValue(
-    (props.handoff.target.path === "provider.home_request"
+    (isProviderHandoffPath(props.handoff.target.path)
       ? serverEnvironment.mutateProviderInstance
       : props.handoff.target.path === "ssh.host_add"
         ? serverEnvironment.trustSshHost
@@ -53,7 +54,7 @@ export function HumanHandoffCard(props: HumanHandoffCardProps) {
   );
   const canTarget =
     canTargetPermission &&
-    (props.handoff.target.path !== "provider.home_request" || canManageProviders);
+    (!isProviderHandoffPath(props.handoff.target.path) || canManageProviders);
   return (
     <HumanHandoffCardContent
       key={`${props.environmentId}:${props.handoff.handoffId}:${canOpen}:${canRespond}:${canTarget}`}
@@ -65,11 +66,12 @@ export function HumanHandoffCard(props: HumanHandoffCardProps) {
 function HumanHandoffCardContent(props: HumanHandoffCardProps) {
   const { handoff } = props;
   const isSsh = handoff.target.path.startsWith("ssh.");
+  const isProvider = isProviderHandoffPath(handoff.target.path);
   const isProviderHome = handoff.target.path === "provider.home_request";
   const isKeyAuth = handoff.kind === "terminal" && handoff.target.path === "ssh.host_prepare";
   const canCancel = handoff.target.path !== "ssh.host_add" && !isKeyAuth;
   const resolvedLabel =
-    isSsh || isProviderHome
+    isSsh || isProvider
       ? {
           completed: "Approved",
           declined: "Declined",
@@ -87,14 +89,14 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
     AuthProvidersManageScope,
   );
   const canTargetPermission = useAtomValue(
-    (isProviderHome
+    (isProvider
       ? serverEnvironment.mutateProviderInstance
       : handoff.target.path === "ssh.host_add"
         ? serverEnvironment.trustSshHost
         : serverEnvironment.prepareSshHost
     ).permissionAtom(handoff.target.environmentId),
   );
-  const canTarget = canTargetPermission && (!isProviderHome || canManageProviders);
+  const canTarget = canTargetPermission && (!isProvider || canManageProviders);
   const canOpen = useAtomValue(serverEnvironment.openHandoff.permissionAtom(props.environmentId));
   const allowed = useAtomValue(
     serverEnvironment.respondHandoff.permissionAtom(props.environmentId),
@@ -146,7 +148,7 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
   const act = async (action: "opened" | "completed" | "declined" | "cancelled") => {
     if (
       inFlight.current ||
-      (isProviderHome && (!canTarget || !(action === "opened" ? canOpen : allowed)))
+      (isProvider && (!canTarget || !(action === "opened" ? canOpen : allowed)))
     )
       return;
     inFlight.current = true;
@@ -185,7 +187,7 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
     <View className="mb-3 gap-3 rounded-[20px] border border-border bg-card-alt p-4">
       <Text className="font-goat-bold text-base text-foreground">{handoff.title}</Text>
       <Text className="font-sans text-sm text-foreground-muted">{handoff.reason}</Text>
-      {isSsh || isProviderHome ? (
+      {isSsh || isProvider ? (
         pending && handoff.expiresAt ? (
           <Text className="font-sans text-xs text-foreground-muted">
             Expires {DateTime.toDate(handoff.expiresAt).toLocaleTimeString()}
@@ -207,9 +209,10 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
       ) : (
         <>
           {human === null ? (
-            <RequestActionButton
+            <Button
+              tone="primary"
               label="Review request"
-              disabled={busy || !canOpen || ((isSsh || isProviderHome) && !canTarget)}
+              disabled={busy || !canOpen || ((isSsh || isProvider) && !canTarget)}
               onPress={() => void act("opened")}
             />
           ) : (
@@ -226,7 +229,8 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
                 </>
               ) : null}
               {human.url ? (
-                <RequestActionButton
+                <Button
+                  tone="primary"
                   label="Open sign-in page"
                   onPress={() =>
                     void Linking.openURL(human.url!).catch(() =>
@@ -254,7 +258,8 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
               <Text className="font-sans text-xs text-foreground-muted">
                 Only you see these details. The agent never does.
               </Text>
-              <RequestActionButton
+              <Button
+                tone="primary"
                 label={
                   isRuntimeUpdate
                     ? "Update now"
@@ -264,22 +269,24 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
                         ? "I've added the key"
                         : "I've completed this step"
                 }
-                disabled={busy || !allowed || ((isSsh || isProviderHome) && !canTarget)}
+                disabled={busy || !allowed || ((isSsh || isProvider) && !canTarget)}
                 onPress={() => void act("completed")}
               />
             </>
           )}
           {!isRuntimeUpdate ? (
-            <RequestActionButton
+            <Button
+              tone="primary"
               label="Decline"
-              disabled={busy || !allowed || ((isSsh || isProviderHome) && !canTarget)}
+              disabled={busy || !allowed || ((isSsh || isProvider) && !canTarget)}
               onPress={() => void act("declined")}
             />
           ) : null}
           {canCancel ? (
-            <RequestActionButton
+            <Button
+              tone="primary"
               label={isRuntimeUpdate ? "Cancel" : "Cancel request"}
-              disabled={busy || !allowed || ((isSsh || isProviderHome) && !canTarget)}
+              disabled={busy || !allowed || ((isSsh || isProvider) && !canTarget)}
               onPress={() => void act("cancelled")}
             />
           ) : null}
@@ -292,7 +299,8 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
               {routeCheck}
             </Text>
           ) : null}
-          <RequestActionButton
+          <Button
+            tone="primary"
             label="Check provider status"
             disabled={busy || !canRefresh}
             onPress={() => void checkProviderRoute()}
@@ -406,7 +414,8 @@ function VisibleSshHandoffProgress({
         </View>
       ) : null}
       {progress.kind === "available" ? (
-        <RequestActionButton
+        <Button
+          tone="primary"
           label="Refresh host status"
           disabled={query.waiting}
           onPress={() => sshHost.refreshHandoffProgress(registry, target)}

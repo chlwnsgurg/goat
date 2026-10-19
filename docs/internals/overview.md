@@ -145,5 +145,15 @@ lazily inside `WindowsForeground.ts` for a handful of Win32 calls. macOS window 
 to `osascript` instead of a native addon. A crash or stall in any of these must not take the app
 down, so new native capability goes in a child with a deadline, not an `import` in main.
 
+Goals, self-healing across hosts, placement limits and model fallback chains are proposed in
+[agentic Kubernetes](./agentic-k8s.md).
+
+## Upstream T3 Code
+
+GOAT is a git fork of pingdotgg/t3code and takes upstream only through real merge commits, so
+`git merge-base origin/dev upstream/main` is how far upstream has been reviewed. A squash or rebase
+drops the upstream parent, and the next sync meets the same conflicts again. Where GOAT deliberately
+differs, and how each area's conflicts are resolved, is in [devlog/_chase](../../devlog/_chase/README.md).
+
 See the [glossary](./glossary.md) for shared terms and the
 [development runbook](../operations/development.md) for setup and checks.

@@ -130,6 +130,7 @@ Effect.runPromise(Effect.gen(function* () {
       const lines = NodeReadline.createInterface({ input: owner.stdout! });
       let supervisorPid: number | undefined;
       let connection: NodeNet.Socket | undefined;
+      let verified = false;
       try {
         const signal = AbortSignal.timeout(5_000);
         const message = NodeEvents.EventEmitter.once(owner, "message", { signal });
@@ -156,20 +157,24 @@ Effect.runPromise(Effect.gen(function* () {
           });
         } else await listen(replacement, Number(port));
         await new Promise<void>((resolve) => replacement.close(() => resolve()));
+        verified = true;
       } finally {
         owner.kill("SIGKILL");
-        if (supervisorPid !== undefined) {
-          // Captured from spawn via IPC, never discovered by matching argv.
-          try {
-            process.kill(-supervisorPid, "SIGKILL");
-          } catch (error) {
-            assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+        try {
+          if (!verified && supervisorPid !== undefined) {
+            // Failure cleanup only: successful teardown already proved this group stopped.
+            try {
+              process.kill(-supervisorPid, "SIGKILL");
+            } catch (error) {
+              assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+            }
           }
+        } finally {
+          connection?.destroy();
+          lines.close();
+          await new Promise<void>((resolve) => control.close(() => resolve()));
+          await NodeFSP.rm(directory, { recursive: true, force: true });
         }
-        connection?.destroy();
-        lines.close();
-        await new Promise<void>((resolve) => control.close(() => resolve()));
-        await NodeFSP.rm(directory, { recursive: true, force: true });
       }
     },
   );
@@ -194,8 +199,11 @@ async function startSupervisor(shell: string) {
     ["-c", OWNER_PIPE_SUPERVISOR, "goat-ssh-forward", "", process.execPath, script],
     { detached: true, stdio: ["pipe", "pipe", "inherit"] },
   );
-  const lines = NodeReadline.createInterface({ input: child.stdout! });
   const signal = AbortSignal.timeout(5_000);
+  const closed = NodeEvents.EventEmitter.once(child, "close", { signal });
+  // Socket assertions run first; retain a close failure until the test awaits it.
+  void closed.catch(() => undefined);
+  const lines = NodeReadline.createInterface({ input: child.stdout! });
   const nextLine = async () =>
     (await NodeEvents.EventEmitter.once(lines, "line", { signal }))[0] as string;
   const port = Number(await nextLine());
@@ -204,17 +212,22 @@ async function startSupervisor(shell: string) {
   const greeting = NodeReadline.createInterface({ input: socket });
   assert.equal((await NodeEvents.EventEmitter.once(greeting, "line", { signal }))[0], "alive");
   const died = NodeEvents.EventEmitter.once(socket, "close", { signal });
-  const cleanup = async () => {
+  const cleanup = async (verified: boolean) => {
     socket.destroy();
     lines.close();
     try {
-      process.kill(-child.pid!, "SIGKILL");
-    } catch (error) {
-      assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+      if (!verified) {
+        try {
+          process.kill(-child.pid!, "SIGKILL");
+        } catch (error) {
+          assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+        }
+      }
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
     }
-    await NodeFSP.rm(directory, { recursive: true, force: true });
   };
-  return { child, nextLine, died, cleanup };
+  return { child, nextLine, died, closed, cleanup };
 }
 
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
@@ -224,11 +237,14 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       "keeps the forward while the owner holds the pipe, and ends it on EOF; %s",
       async (shell) => {
         const run = await startSupervisor(shell);
+        let verified = false;
         try {
           run.child.stdin!.end();
           await run.died;
+          await run.closed;
+          verified = true;
         } finally {
-          await run.cleanup();
+          await run.cleanup(verified);
         }
       },
     );
@@ -237,6 +253,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       "stays the fence through repeated SIGTERM to a resistant ssh; %s",
       async (shell) => {
         const run = await startSupervisor(shell);
+        let verified = false;
         try {
           process.kill(run.child.pid!, "SIGTERM");
           assert.equal(await run.nextLine(), "term");
@@ -244,8 +261,10 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           assert.equal(await run.nextLine(), "term");
           run.child.stdin!.end();
           await run.died;
+          await run.closed;
+          verified = true;
         } finally {
-          await run.cleanup();
+          await run.cleanup(verified);
         }
       },
     );
@@ -273,6 +292,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           ["-c", OWNER_PIPE_SUPERVISOR, "goat-ssh-forward", "", process.execPath, "-e", ssh],
           { detached: true, stdio: ["pipe", "pipe", "inherit"] },
         );
+        let verified = false;
         try {
           const signal = AbortSignal.timeout(5_000);
           const closed = NodeEvents.EventEmitter.once(child, "close", { signal });
@@ -283,11 +303,14 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           }
           const [code] = await closed;
           assert.equal(code, 23);
+          verified = true;
         } finally {
-          try {
-            process.kill(-child.pid!, "SIGKILL");
-          } catch (error) {
-            assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+          if (!verified) {
+            try {
+              process.kill(-child.pid!, "SIGKILL");
+            } catch (error) {
+              assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+            }
           }
         }
       },
@@ -309,16 +332,20 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           ["-c", script, "goat-ssh-forward", "", process.execPath, "-e", "process.exit(23)"],
           { detached: true, stdio: ["pipe", "ignore", "inherit"] },
         );
+        let verified = false;
         try {
           const [code] = await NodeEvents.EventEmitter.once(child, "close", {
             signal: AbortSignal.timeout(5_000),
           });
           assert.equal(code, 23);
+          verified = true;
         } finally {
-          try {
-            process.kill(-child.pid!, "SIGKILL");
-          } catch (error) {
-            assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+          if (!verified) {
+            try {
+              process.kill(-child.pid!, "SIGKILL");
+            } catch (error) {
+              assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+            }
           }
         }
       },

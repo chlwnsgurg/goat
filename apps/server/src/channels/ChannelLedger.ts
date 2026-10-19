@@ -30,6 +30,7 @@ import {
   ChannelTask,
   ChannelTaskEvent,
   ChannelTaskLedgerExportRow,
+  ChannelWorkerRun,
   type ChannelTaskBrief,
   type ChannelTaskExportInput,
   type ChannelTaskExportResult,
@@ -193,7 +194,24 @@ export class ChannelLedger extends Context.Service<
       conversationId: ChannelConversationId,
       limit: number,
     ) => Effect.Effect<ReadonlyArray<ChannelTailEntry>, ChannelLedgerError>;
+    /**
+     * Inputs in one conversation, accepted before `beforeInputId`, whose text or reply contains
+     * `query`, newest first. The asking input and anything after it are never their own history.
+     */
+    readonly searchConversation: (
+      conversationId: ChannelConversationId,
+      query: string,
+      limit: number,
+      beforeInputId: ChannelInputId,
+    ) => Effect.Effect<ReadonlyArray<ChannelTailEntry>, ChannelLedgerError>;
     readonly listConversationTasks: (
+      conversationId: ChannelConversationId,
+    ) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
+    /**
+     * Every running task in the conversation its worker shows as needing a person, however old:
+     * an open approval must stay answerable past the recent-task window.
+     */
+    readonly listConversationNeedsYou: (
       conversationId: ChannelConversationId,
     ) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
     readonly getTask: (
@@ -270,6 +288,86 @@ export class ChannelLedger extends Context.Service<
     readonly listPendingForwards: (
       limit: number,
     ) => Effect.Effect<ReadonlyArray<ChannelPendingEvent>, ChannelLedgerError>;
+    /** Records one worker run as it stands now; the newest write for a run wins. */
+    readonly upsertWorkerRun: (run: ChannelWorkerRun) => Effect.Effect<void, ChannelLedgerError>;
+    /** The recorded runs of these tasks, oldest first per task. */
+    readonly listWorkerRuns: (
+      taskIds: ReadonlyArray<ChannelTaskId>,
+    ) => Effect.Effect<ReadonlyArray<ChannelWorkerRun>, ChannelLedgerError>;
+    /**
+     * An owner's finished tasks whose newest outcome has not been delivered to where the work
+     * came from: not written yet, still sending, given up, or unknown after a crash.
+     */
+    readonly listUndeliveredOutcomes: (
+      ownerId: string,
+    ) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
+    /**
+     * Local tasks claimed for a launch that finished since `since` and whose runs are not yet
+     * all recorded as ended, newest first, at most `limit`.
+     */
+    readonly listUnsettledRunHistory: (input: {
+      readonly since: string;
+      readonly limit: number;
+    }) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
+    /** Marks a finished task's runs as all recorded as ended. */
+    readonly settleRunHistory: (input: {
+      readonly taskId: ChannelTaskId;
+      readonly now: string;
+    }) => Effect.Effect<void, ChannelLedgerError>;
+    /** Which attempt a recorded stop is on; it starts at 0. */
+    readonly stopAttempt: (eventId: string) => Effect.Effect<number, ChannelLedgerError>;
+    /**
+     * The code an approval card goes by in its conversation: "A1", "A2", … in the order cards were
+     * first issued there, never reused, so a code names one request for good. Asking again for the
+     * same request returns its code.
+     */
+    readonly issueApprovalCode: (input: {
+      readonly conversationId: ChannelConversationId;
+      readonly requestId: string;
+      readonly now: string;
+    }) => Effect.Effect<string, ChannelLedgerError>;
+    /** The request a code was issued for in this conversation, if any. */
+    readonly approvalRequestForCode: (input: {
+      readonly conversationId: ChannelConversationId;
+      readonly code: string;
+    }) => Effect.Effect<string | undefined, ChannelLedgerError>;
+    /** Moves a stop to its next attempt after the orchestrator refused the current one. */
+    readonly advanceStopAttempt: (input: {
+      readonly eventId: string;
+      readonly from: number;
+      readonly now: string;
+    }) => Effect.Effect<void, ChannelLedgerError>;
+    /** Recorded runs still running or waiting, across tasks, for reconciliation. */
+    readonly listOpenWorkerRuns: () => Effect.Effect<
+      ReadonlyArray<ChannelWorkerRun>,
+      ChannelLedgerError
+    >;
+    /**
+     * How many of a person's tasks hold a worker now: dispatching, running, waiting on a person
+     * with a worker, or stopped while the stop has not gone through. Questions asked before any
+     * worker exists hold none.
+     */
+    readonly countBusyTasks: (input: {
+      readonly ownerId: string;
+      readonly principalId: string;
+    }) => Effect.Effect<number, ChannelLedgerError>;
+    /**
+     * How each task's outcome (result, failure or stop) reached its requester: the delivery state
+     * of the narration of the task's newest terminal event to where the work came from, or none
+     * when that narration was not written yet.
+     */
+    readonly outcomeDeliveries: (
+      taskIds: ReadonlyArray<ChannelTaskId>,
+    ) => Effect.Effect<ReadonlyMap<string, string>, ChannelLedgerError>;
+    /** Whether any recorded answer or follow-up for this task is still waiting to be sent. */
+    readonly hasPendingForward: (
+      taskId: ChannelTaskId,
+    ) => Effect.Effect<boolean, ChannelLedgerError>;
+    /** Whether a forward for this task was recorded before `sequence` and is still waiting. */
+    readonly hasEarlierPendingForward: (input: {
+      readonly taskId: ChannelTaskId;
+      readonly sequence: number;
+    }) => Effect.Effect<boolean, ChannelLedgerError>;
     readonly completeForward: (input: {
       readonly owner: string;
       readonly sequence: number;
@@ -424,6 +522,8 @@ const decodeRequester = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelRe
 const encodeDecision = Schema.encodeSync(Schema.fromJsonString(ChannelReceptionResult));
 const decodeDecision = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelReceptionResult));
 const encodeTask = Schema.encodeSync(Schema.fromJsonString(ChannelTask));
+const encodeWorkerRun = Schema.encodeSync(Schema.fromJsonString(ChannelWorkerRun));
+const decodeWorkerRun = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelWorkerRun));
 const decodeTask = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelTask));
 const encodeEvent = Schema.encodeSync(Schema.fromJsonString(ChannelTaskEvent));
 const decodeEvent = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelTaskEvent));
@@ -435,6 +535,15 @@ const decodeBot = Schema.decodeUnknownSync(Schema.fromJsonString(BotState));
 const encodeScopes = Schema.encodeSync(Schema.fromJsonString(AuthEnvironmentScopes));
 const decodeScopes = Schema.decodeUnknownSync(Schema.fromJsonString(AuthEnvironmentScopes));
 const encodeStrings = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
+const ApprovalCodeCount = Schema.fromJsonString(Schema.Struct({ n: Schema.Number }));
+const ApprovalCodeOf = Schema.fromJsonString(Schema.Struct({ code: Schema.String }));
+const ApprovalCodeTarget = Schema.fromJsonString(Schema.Struct({ requestId: Schema.String }));
+const encodeApprovalCount = Schema.encodeSync(ApprovalCodeCount);
+const decodeApprovalCount = Schema.decodeUnknownSync(ApprovalCodeCount);
+const encodeApprovalOf = Schema.encodeSync(ApprovalCodeOf);
+const decodeApprovalOf = Schema.decodeUnknownSync(ApprovalCodeOf);
+const encodeApprovalTarget = Schema.encodeSync(ApprovalCodeTarget);
+const decodeApprovalTarget = Schema.decodeUnknownSync(ApprovalCodeTarget);
 const decodeStrings = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 const encodeReply = Schema.encodeSync(Schema.fromJsonString(ReplyState));
 const decodeReply = Schema.decodeUnknownSync(Schema.fromJsonString(ReplyState));
@@ -706,6 +815,8 @@ const make = Effect.gen(function* () {
       `;
     });
 
+  const workerRunKey = (taskId: string, runId: string) => "worker-run:" + taskId + ":" + runId;
+
   const upsertCursor = (cursor: number, now: string) => sql`
     INSERT INTO channel_runtime_state (key, value_json, updated_at)
     VALUES (${CURSOR_KEY}, ${encodeCursor({ cursor })}, ${now})
@@ -910,6 +1021,37 @@ const make = Effect.gen(function* () {
         Effect.mapError(toLedgerError("readConversationTail")),
       ),
 
+    searchConversation: (conversationId, query, limit, beforeInputId) => {
+      const pattern = "%" + query.replace(/[\\%_]/gu, (char) => "\\" + char) + "%";
+      return sql<{
+        readonly input_id: ChannelInputId;
+        readonly message_json: string;
+        readonly accepted_at: string;
+        readonly reply_json: string | null;
+      }>`
+        SELECT input_id, message_json, accepted_at, reply_json FROM channel_inbox
+        WHERE conversation_id = ${conversationId} AND state != 'rejected'
+          -- Rows are stored in the order inputs were accepted, so rowid orders them without ties.
+          AND EXISTS (
+            SELECT 1 FROM channel_inbox AS asking WHERE asking.input_id = ${beforeInputId}
+              AND channel_inbox.rowid < asking.rowid
+          )
+          AND (json_extract(message_json, '$.text') LIKE ${pattern} ESCAPE '\\'
+            OR json_extract(reply_json, '$.text') LIKE ${pattern} ESCAPE '\\')
+        ORDER BY accepted_at DESC, input_id DESC LIMIT ${limit}
+      `.pipe(
+        Effect.map((rows) =>
+          rows.map((row) => ({
+            inputId: row.input_id,
+            text: decodeInbound(row.message_json).text,
+            receivedAt: row.accepted_at,
+            replyText: row.reply_json === null ? undefined : decodeReply(row.reply_json).text,
+          })),
+        ),
+        Effect.mapError(toLedgerError("searchConversation")),
+      );
+    },
+
     listConversationTasks: (conversationId) =>
       sql<TaskRow>`
         SELECT owner_id, task_json, pending_answer_message_id, completion_hold FROM channel_tasks
@@ -917,6 +1059,18 @@ const make = Effect.gen(function* () {
       `.pipe(
         Effect.map((rows) => rows.map((row) => storedTask(row).task)),
         Effect.mapError(toLedgerError("listConversationTasks")),
+      ),
+
+    listConversationNeedsYou: (conversationId) =>
+      sql<TaskRow>`
+        SELECT owner_id, task_json, pending_answer_message_id, completion_hold FROM channel_tasks
+        WHERE conversation_id = ${conversationId}
+          AND status IN ('running', 'waiting_input')
+          AND COALESCE(json_array_length(task_json, '$.observed.needsYou'), 0) > 0
+        ORDER BY created_at DESC
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => storedTask(row).task)),
+        Effect.mapError(toLedgerError("listConversationNeedsYou")),
       ),
 
     getTask: (taskId) =>
@@ -1213,6 +1367,230 @@ const make = Effect.gen(function* () {
           rows.map((row) => ({ sequence: row.sequence, event: decodeEvent(row.event_json) })),
         ),
         Effect.mapError(toLedgerError("listPendingForwards")),
+      ),
+
+    upsertWorkerRun: (run) =>
+      sql`
+        INSERT INTO channel_runtime_state (key, value_json, updated_at)
+        VALUES (${workerRunKey(run.taskId, run.runId)}, ${encodeWorkerRun(run)}, ${run.updatedAt})
+        ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+      `.pipe(Effect.asVoid, Effect.mapError(toLedgerError("upsertWorkerRun"))),
+
+    listWorkerRuns: (taskIds) =>
+      taskIds.length === 0
+        ? Effect.succeed([])
+        : Effect.forEach(
+            taskIds,
+            (taskId) =>
+              sql<{ readonly value_json: string }>`
+              SELECT value_json FROM channel_runtime_state
+              WHERE key >= ${"worker-run:" + taskId + ":"} AND key < ${"worker-run:" + taskId + ";"}
+            `,
+          ).pipe(
+            Effect.map((pages) =>
+              pages
+                .flat()
+                .map((row) => decodeWorkerRun(row.value_json))
+                .toSorted((left, right) =>
+                  left.taskId === right.taskId
+                    ? left.startedAt.localeCompare(right.startedAt)
+                    : left.taskId.localeCompare(right.taskId),
+                ),
+            ),
+            Effect.mapError(toLedgerError("listWorkerRuns")),
+          ),
+
+    listUndeliveredOutcomes: (ownerId) =>
+      sql<TaskRow>`
+        SELECT task.owner_id, task.task_json, task.pending_answer_message_id, task.completion_hold
+        FROM channel_tasks AS task
+        JOIN channel_task_events AS outcome ON outcome.task_id = task.task_id
+        LEFT JOIN channel_outbox AS delivery
+          ON delivery.cause_key = 'narration:' || outcome.event_id || ':origin'
+        WHERE task.owner_id = ${ownerId}
+          AND task.status IN ('completed', 'failed', 'cancelled')
+          AND outcome.sequence = (
+            SELECT MAX(latest.sequence) FROM channel_task_events AS latest
+            WHERE latest.task_id = task.task_id
+              AND latest.type IN ('task.completed', 'task.failed', 'task.cancelled')
+          )
+          AND (delivery.state IS NULL OR delivery.state != 'delivered')
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => storedTask(row).task)),
+        Effect.mapError(toLedgerError("listUndeliveredOutcomes")),
+      ),
+
+    listUnsettledRunHistory: (input) =>
+      sql<TaskRow>`
+        SELECT owner_id, task_json, pending_answer_message_id, completion_hold FROM channel_tasks
+        WHERE status IN ('completed', 'failed', 'cancelled') AND updated_at >= ${input.since}
+          AND json_extract(task_json, '$.target') IS NOT NULL
+          AND json_extract(task_json, '$.target.remote') IS NULL
+          AND json_extract(task_json, '$.worker.host') IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM channel_runtime_state WHERE key = 'runs-final:' || channel_tasks.task_id
+          )
+        ORDER BY updated_at DESC LIMIT ${input.limit}
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => storedTask(row).task)),
+        Effect.mapError(toLedgerError("listUnsettledRunHistory")),
+      ),
+
+    settleRunHistory: (input) =>
+      sql`
+        INSERT INTO channel_runtime_state (key, value_json, updated_at)
+        VALUES (${"runs-final:" + input.taskId}, '{}', ${input.now})
+        ON CONFLICT (key) DO NOTHING
+      `.pipe(Effect.asVoid, Effect.mapError(toLedgerError("settleRunHistory"))),
+
+    issueApprovalCode: (input) =>
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const ofKey = "approval-code-of:" + input.requestId;
+            const issued = yield* sql<{ readonly value_json: string }>`
+              SELECT value_json FROM channel_runtime_state WHERE key = ${ofKey}
+            `;
+            if (issued[0] !== undefined) {
+              return decodeApprovalOf(issued[0].value_json).code;
+            }
+            const counterKey = "approval-codes:" + input.conversationId;
+            const counter = yield* sql<{ readonly value_json: string }>`
+              SELECT value_json FROM channel_runtime_state WHERE key = ${counterKey}
+            `;
+            const next =
+              (counter[0] === undefined ? 0 : decodeApprovalCount(counter[0].value_json).n) + 1;
+            const code = "A" + next;
+            yield* sql`
+              INSERT INTO channel_runtime_state (key, value_json, updated_at)
+              VALUES (${counterKey}, ${encodeApprovalCount({ n: next })}, ${input.now})
+              ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json,
+                updated_at = excluded.updated_at
+            `;
+            yield* sql`
+              INSERT INTO channel_runtime_state (key, value_json, updated_at)
+              VALUES (
+                ${"approval-code:" + code + ":" + input.conversationId},
+                ${encodeApprovalTarget({ requestId: input.requestId })},
+                ${input.now}
+              )
+            `;
+            yield* sql`
+              INSERT INTO channel_runtime_state (key, value_json, updated_at)
+              VALUES (
+                ${ofKey},
+                ${encodeApprovalOf({ code })},
+                ${input.now}
+              )
+            `;
+            return code;
+          }),
+        )
+        .pipe(Effect.mapError(toLedgerError("issueApprovalCode"))),
+
+    approvalRequestForCode: (input) =>
+      sql<{ readonly value_json: string }>`
+        SELECT value_json FROM channel_runtime_state
+        WHERE key = ${"approval-code:" + input.code + ":" + input.conversationId}
+      `.pipe(
+        Effect.map((rows) =>
+          rows[0] === undefined ? undefined : decodeApprovalTarget(rows[0].value_json).requestId,
+        ),
+        Effect.mapError(toLedgerError("approvalRequestForCode")),
+      ),
+
+    stopAttempt: (eventId) =>
+      sql<{ readonly value_json: string }>`
+        SELECT value_json FROM channel_runtime_state WHERE key = ${"stop-attempt:" + eventId}
+      `.pipe(
+        Effect.map((rows) =>
+          rows[0] === undefined
+            ? 0
+            : (JSON.parse(rows[0].value_json) as { attempt: number }).attempt,
+        ),
+        Effect.mapError(toLedgerError("stopAttempt")),
+      ),
+
+    advanceStopAttempt: (input) =>
+      sql`
+        INSERT INTO channel_runtime_state (key, value_json, updated_at)
+        VALUES (${"stop-attempt:" + input.eventId}, ${JSON.stringify({ attempt: input.from + 1 })}, ${input.now})
+        ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+        WHERE json_extract(channel_runtime_state.value_json, '$.attempt') = ${input.from}
+      `.pipe(Effect.asVoid, Effect.mapError(toLedgerError("advanceStopAttempt"))),
+
+    listOpenWorkerRuns: () =>
+      sql<{ readonly value_json: string }>`
+        SELECT value_json FROM channel_runtime_state
+        WHERE key >= 'worker-run:' AND key < 'worker-run;'
+          AND json_extract(value_json, '$.status') IN ('running', 'waiting')
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => decodeWorkerRun(row.value_json))),
+        Effect.mapError(toLedgerError("listOpenWorkerRuns")),
+      ),
+
+    countBusyTasks: (input) =>
+      sql<{ readonly busy: number }>`
+        SELECT COUNT(*) AS busy FROM channel_tasks
+        WHERE owner_id = ${input.ownerId}
+          AND json_extract(task_json, '$.requester.principalId') = ${input.principalId}
+          AND (status IN ('dispatching', 'running')
+            OR (status = 'waiting_input' AND json_extract(task_json, '$.worker') IS NOT NULL)
+            -- Stopped, but its worker may still run until the stop goes through.
+            OR (status = 'cancelled' AND EXISTS (
+              SELECT 1 FROM channel_task_events AS stop
+              WHERE stop.task_id = channel_tasks.task_id AND stop.type = 'task.cancelled'
+                AND stop.forward_state = 'pending'
+            )))
+      `.pipe(
+        Effect.map((rows) => rows[0]?.busy ?? 0),
+        Effect.mapError(toLedgerError("countBusyTasks")),
+      ),
+
+    outcomeDeliveries: (taskIds) =>
+      taskIds.length === 0
+        ? Effect.succeed(new Map())
+        : sql<{ readonly task_id: string; readonly state: string | null }>`
+            SELECT outcome.task_id, delivery.state FROM channel_task_events AS outcome
+            LEFT JOIN channel_outbox AS delivery
+              ON delivery.cause_key = 'narration:' || outcome.event_id || ':origin'
+            WHERE outcome.task_id IN ${sql.in(taskIds)}
+              AND outcome.type IN ('task.completed', 'task.failed', 'task.cancelled')
+              AND outcome.sequence = (
+                SELECT MAX(latest.sequence) FROM channel_task_events AS latest
+                WHERE latest.task_id = outcome.task_id
+                  AND latest.type IN ('task.completed', 'task.failed', 'task.cancelled')
+              )
+          `.pipe(
+            Effect.map(
+              (rows) =>
+                new Map(
+                  rows.flatMap((row) => (row.state === null ? [] : [[row.task_id, row.state]])),
+                ),
+            ),
+            Effect.mapError(toLedgerError("outcomeDeliveries")),
+          ),
+
+    hasPendingForward: (taskId) =>
+      sql<{ readonly found: number }>`
+        SELECT 1 AS found FROM channel_task_events
+        WHERE task_id = ${taskId} AND forward_state = 'pending' LIMIT 1
+      `.pipe(
+        Effect.map((rows) => rows.length > 0),
+        Effect.mapError(toLedgerError("hasPendingForward")),
+      ),
+
+    hasEarlierPendingForward: (input) =>
+      sql<{ readonly found: number }>`
+        SELECT 1 AS found FROM channel_task_events
+        WHERE task_id = ${input.taskId} AND forward_state = 'pending'
+          AND sequence < ${input.sequence}
+        LIMIT 1
+      `.pipe(
+        Effect.map((rows) => rows.length > 0),
+        Effect.mapError(toLedgerError("hasEarlierPendingForward")),
       ),
 
     completeForward: (input) =>

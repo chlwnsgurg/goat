@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ForwardCompatibleOptional, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { RuntimeProtocolRanges } from "./environment.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits } from "./providerUsageLimits.ts";
 import { HostResourcesSnapshot } from "./resourceTelemetry.ts";
@@ -78,6 +79,13 @@ export const HostStatusReachability = Schema.Literals(["ok", "unreachable", "uns
 export type HostStatusReachability = typeof HostStatusReachability.Type;
 
 /**
+ * A reachable host relative to the machine that fanned out, from the protocol ranges it serves.
+ * `degraded` means it answered but cannot show compatibility (it predates reporting ranges).
+ */
+export const HostCompatibility = Schema.Literals(["compatible", "degraded", "incompatible"]);
+export type HostCompatibility = typeof HostCompatibility.Type;
+
+/**
  * One machine. `host` null is the machine that answered. `unsupported` means
  * that machine's GOAT is too old to report this payload. `unreachable` with
  * `lastKnown: true` repeats the last successful metrics.
@@ -89,11 +97,18 @@ export const HostStatusEntry = Schema.Struct({
   metrics: Schema.optional(HostStatusMetrics),
   /** GOAT version that machine runs. Older hosts omit it. */
   serverVersion: Schema.optional(TrimmedNonEmptyString),
+  /** Protocol ranges that machine serves. Older hosts omit it. Partial or malformed ranges decode
+      away, so a host that sends them stays reachable and is judged `degraded`. */
+  protocol: ForwardCompatibleOptional(RuntimeProtocolRanges),
   /**
-   * The host answered, but runs a different GOAT version than the machine that
-   * fanned out, or does not say which. `message` then explains what to update.
+   * The host runs a different GOAT build than the machine that fanned out, or does not say
+   * which. Informational: builds of different versions work together while `compatibility`
+   * is `compatible`. Kept for clients and agents that predate `compatibility`.
    */
   versionMismatch: Schema.optional(Schema.Literal(true)),
+  /** Set by the machine that fanned out, for reachable remote hosts. A verdict a client does not
+      know decodes away, so a later verdict cannot break an older client. */
+  compatibility: ForwardCompatibleOptional(HostCompatibility),
   message: Schema.optional(Schema.String),
 });
 export type HostStatusEntry = typeof HostStatusEntry.Type;

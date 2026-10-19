@@ -6,11 +6,56 @@ import {
   isUncPath,
   isWindowsAbsolutePath,
   isWindowsDrivePath,
+  isWindowsShellOs,
+  msysDrivePathToWindows,
   newProjectFolderName,
   normalizeProjectPathForComparison,
   normalizeProjectPathForDispatch,
   resolveWorkspaceFilePath,
+  toWindowsHostPath,
+  windowsHostPathKey,
 } from "./path.ts";
+
+describe("Windows host paths", () => {
+  it.each([
+    ["/c/Users/x", "C:\\Users\\x"],
+    ["/C/Users/x/", "C:\\Users\\x"],
+    ["/c", "C:\\"],
+    ["/c/", "C:\\"],
+    ["/cygdrive/d/a b", "D:\\a b"],
+    ["/cygdrive/d", "D:\\"],
+    ["C:/Users/x", "C:\\Users\\x"],
+    ["c:\\Users\\x\\", "C:\\Users\\x"],
+    ["C:\\", "C:\\"],
+    ["\\\\server\\share", "\\\\server\\share"],
+    ["/tmp/x", "/tmp/x"],
+    ["/cygdrive", "/cygdrive"],
+    ["/cd/x", "/cd/x"],
+  ])("toWindowsHostPath(%j) is %j", (input, expected) => {
+    expect(toWindowsHostPath(input)).toBe(expected);
+  });
+
+  it("recognizes only drive mounts as MSYS drive paths", () => {
+    expect(msysDrivePathToWindows("/home/x")).toBeNull();
+    expect(msysDrivePathToWindows("C:\\x")).toBeNull();
+    expect(msysDrivePathToWindows("relative/c/x")).toBeNull();
+  });
+
+  it("keys every shell form of one folder the same", () => {
+    const key = windowsHostPathKey("C:\\Users\\Super\\Dev");
+    for (const form of ["/c/users/super/dev/", "/cygdrive/C/Users/Super/Dev", "c:/users/super/dev"])
+      expect(windowsHostPathKey(form)).toBe(key);
+    expect(windowsHostPathKey("D:\\Users\\Super\\Dev")).not.toBe(key);
+  });
+
+  it("detects Git Bash, MSYS2, and Cygwin unames", () => {
+    expect(isWindowsShellOs("MINGW64_NT-10.0-26200")).toBe(true);
+    expect(isWindowsShellOs("MSYS_NT-10.0")).toBe(true);
+    expect(isWindowsShellOs("CYGWIN_NT-10.0")).toBe(true);
+    expect(isWindowsShellOs("Linux")).toBe(false);
+    expect(isWindowsShellOs(null)).toBe(false);
+  });
+});
 
 describe("path helpers", () => {
   it.each([

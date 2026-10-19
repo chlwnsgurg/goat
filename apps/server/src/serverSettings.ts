@@ -800,6 +800,8 @@ export class ServerSettingsService extends Context.Service<
 
     readonly updateSettings: (
       patch: ServerSettingsPatch,
+      /** Runs inside the write lock before the patch applies, so a revoked grant cannot commit. */
+      authorizeAtCommit?: Effect.Effect<void, ServerSettingsError>,
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
     readonly updateProviderInstance: (
@@ -929,9 +931,10 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
       start: Effect.void,
       ready: Effect.void,
       getSettings,
-      updateSettings: (patch) =>
+      updateSettings: (patch, authorizeAtCommit) =>
         updateTestSettings((currentSettings) =>
-          rejectMemoryHubSettingsPatch(patch, "test settings").pipe(
+          (authorizeAtCommit ?? Effect.void).pipe(
+            Effect.andThen(rejectMemoryHubSettingsPatch(patch, "test settings")),
             Effect.map(() => applyServerSettingsPatch(currentSettings, patch)),
           ),
         ),
@@ -1195,6 +1198,7 @@ const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set([
   "sourceControlWriterModelSelection",
   "reviewGuideModelSelection",
   "memoryModelSelection",
+  "goatBotModelSelection",
   "textGenerationModelSelection",
   "pullRequestMergeMethod",
 ]);
@@ -1542,8 +1546,7 @@ const make = Effect.gen(function* () {
     let settings: ServerSettings = DEFAULT_SERVER_SETTINGS;
     let legacyProviders: Readonly<Record<string, unknown>> | undefined;
     let legacySourceControl: Parameters<typeof migrateLegacySourceControlSettings>[1] = {};
-    // A file that failed to decode must stay on disk for the user to repair;
-    // the fold below only writes when it started from the file's real contents.
+    let parseFailure = Option.none<unknown>();
     let settingsFileTrusted = true;
 
     const settingsExists = yield* readConfigExists;
@@ -1560,11 +1563,12 @@ const make = Effect.gen(function* () {
         };
       }
       if (decoded._tag === "Failure" || legacySettings._tag === "Failure") {
-        const failure = decoded._tag === "Failure" ? decoded : legacySettings;
         settingsFileTrusted = false;
+        const failure = decoded._tag === "Failure" ? decoded : legacySettings;
         // The file may hold an opt-out we can no longer read; never resume threads on a guess.
         settings = { ...DEFAULT_SERVER_SETTINGS, continueThreadsAfterServerUpdate: false };
         if (failure._tag === "Failure") {
+          parseFailure = Option.some(Cause.squash(failure.cause));
           yield* Effect.logWarning("failed to parse settings.json, using defaults", {
             path: settingsPath,
             issues: Cause.pretty(failure.cause),
@@ -1712,18 +1716,20 @@ const make = Effect.gen(function* () {
         yield* secretStore.remove(move.from).pipe(Effect.ignore);
       }
     }
-    return migrated;
+    return { settings: migrated, parseFailure };
   });
 
-  const settingsCache = yield* Cache.makeWith<typeof cacheKey, ServerSettings, ServerSettingsError>(
-    () => loadSettingsFromDisk,
-    {
-      capacity: 1,
-      timeToLive: (exit) => (Exit.isSuccess(exit) ? Duration.infinity : Duration.zero),
-    },
-  );
+  const settingsCache = yield* Cache.makeWith((_key: typeof cacheKey) => loadSettingsFromDisk, {
+    capacity: 1,
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? Duration.infinity : Duration.zero),
+  });
 
-  const getSettingsFromCache = Cache.get(settingsCache, cacheKey);
+  const getSettingsFromCache = Cache.get(settingsCache, cacheKey).pipe(
+    Effect.map((loaded) => loaded.settings),
+  );
+  const reloadSettings = Cache.invalidate(settingsCache, cacheKey).pipe(
+    Effect.andThen(Cache.get(settingsCache, cacheKey)),
+  );
 
   const materializeSettingsSecrets = (
     settings: ServerSettings,
@@ -1926,7 +1932,14 @@ const make = Effect.gen(function* () {
     transition?: HubTransitionMarker,
   ): Effect.Effect<ServerSettings, E | ServerSettingsError, R> =>
     Effect.gen(function* () {
-      const current = yield* getSettingsFromCache;
+      const { settings: current, parseFailure } = yield* reloadSettings;
+      if (Option.isSome(parseFailure)) {
+        return yield* new ServerSettingsError({
+          settingsPath,
+          operation: "read-file",
+          cause: parseFailure.value,
+        });
+      }
       const updated = yield* update(current);
       if (Option.isSome(routeState)) yield* routeState.value.validate(current, updated);
       if (CodexRoute.instanceFingerprint(current) === CodexRoute.instanceFingerprint(updated))
@@ -1950,7 +1963,10 @@ const make = Effect.gen(function* () {
           }
           if (transition) yield* Ref.set(hubMarkerRef, transition);
           // Once the file commits, cancellation must not leave the CAS cache or subscribers behind.
-          yield* Cache.set(settingsCache, cacheKey, next);
+          yield* Cache.set(settingsCache, cacheKey, {
+            settings: next,
+            parseFailure: Option.none(),
+          });
           if (Option.isSome(routeState)) yield* routeState.value.committed(current, next);
           yield* emitChange(next);
           return materializedExit.value;
@@ -1968,7 +1984,7 @@ const make = Effect.gen(function* () {
     const routes = routeState.value;
     const commit = writeSemaphore.withPermits(1)(
       Effect.gen(function* () {
-        const current = yield* getSettingsFromCache;
+        const { settings: current } = yield* reloadSettings;
         const settings = yield* updateSettingsWhileLocked(update);
         const changed = [
           ...new Set([
@@ -2030,8 +2046,7 @@ const make = Effect.gen(function* () {
   const revalidateAndEmit = writeSemaphore.withPermits(1)(
     Effect.gen(function* () {
       yield* refreshCommittedHub;
-      yield* Cache.invalidate(settingsCache, cacheKey);
-      const settings = yield* getSettingsFromCache;
+      const { settings } = yield* reloadSettings;
       yield* emitChange(settings);
     }),
   );
@@ -2121,8 +2136,7 @@ const make = Effect.gen(function* () {
     const startup = writeSemaphore.withPermits(1)(
       Effect.gen(function* () {
         yield* startWatcher;
-        yield* Cache.invalidate(settingsCache, cacheKey);
-        yield* getSettingsFromCache;
+        yield* reloadSettings;
       }),
     );
 
@@ -2151,10 +2165,11 @@ const make = Effect.gen(function* () {
       Effect.flatMap(materializeSettingsSecrets),
       Effect.map(resolveTextGenerationProvider),
     ),
-    updateSettings: (patch) =>
+    updateSettings: (patch, authorizeAtCommit) =>
       updateAndPersistSettings(
         (current) =>
-          rejectMemoryHubSettingsPatch(patch, settingsPath).pipe(
+          (authorizeAtCommit ?? Effect.void).pipe(
+            Effect.andThen(rejectMemoryHubSettingsPatch(patch, settingsPath)),
             Effect.map(() => applyServerSettingsPatch(current, patch)),
           ),
         Object.keys(patch.providerInstances ?? {}).map((id) => id as ProviderInstanceId),

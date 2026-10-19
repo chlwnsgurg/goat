@@ -1,3 +1,5 @@
+import * as NodeURL from "node:url";
+
 import {
   AbsolutePath,
   Agent,
@@ -14,6 +16,7 @@ import {
 import { Mcp } from "@opencode/schema/mcp";
 import {
   isOrchestrationV2WorkActive,
+  type ChatAttachment,
   type OrchestrationV2AppThread,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2ExecutionNode,
@@ -39,6 +42,7 @@ import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
@@ -61,7 +65,10 @@ import * as KeyedLock from "@goat/shared/KeyedLock";
 import { getModelSelectionStringOptionValue, modelSelectionsEqual } from "@goat/shared/model";
 import { causeErrorTag } from "@goat/shared/observability";
 
-import { providerMessageTextWithAttachmentPaths } from "@goat/provider-core/server/attachmentPrompt";
+import {
+  isProviderNativeImageAttachment,
+  providerMessageTextWithAttachmentPaths,
+} from "@goat/provider-core/server/attachmentPrompt";
 import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import {
   backgroundWorkNotification,
@@ -681,6 +688,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const fileSystem = yield* FileSystem.FileSystem;
   const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
   const crypto = yield* Crypto.Crypto;
   const driver = OPENCODE_PROVIDER;
@@ -2099,7 +2107,11 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             failure: makeProviderFailure({
               message: event.data.error.message,
               code: event.data.error.type,
-              class: "provider_error",
+              class:
+                event.data.error.type === "provider.quota" ||
+                event.data.error.type === "provider.rate-limit"
+                  ? "usage_limit"
+                  : "provider_error",
             }),
           });
         default:
@@ -2946,6 +2958,21 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         resolveAttachmentPath: host.resolveAttachmentPath,
       }).trim();
 
+    const promptFiles = Effect.fnUntraced(function* (attachments: ReadonlyArray<ChatAttachment>) {
+      const files: Array<{ uri: string; name: string }> = [];
+      // An external server may not share T3's attachment directory.
+      if (connection.external) return files;
+      for (const attachment of attachments) {
+        if (!isProviderNativeImageAttachment(attachment)) continue;
+        const path = host.resolveAttachmentPath(attachment);
+        if (path === null) continue;
+        // OpenCode rejects the whole prompt if an attached file is missing.
+        const exists = yield* fileSystem.exists(path).pipe(Effect.orElseSucceed(() => false));
+        if (exists) files.push({ uri: NodeURL.pathToFileURL(path).href, name: attachment.name });
+      }
+      return files;
+    });
+
     const removeMcp = (mcp: { readonly name: string; readonly directory: string }) =>
       Effect.suspend(() =>
         client.mcp.remove({ server: mcp.name, location: { directory: mcp.directory } }),
@@ -2993,8 +3020,11 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           .pipe(Effect.timeout(INVENTORY_TIMEOUT));
         state.mcp = undefined;
       }
-      if (wanted !== undefined && state.mcp === undefined) {
-        const added = yield* client.mcp
+      // Idle Location eviction drops runtime MCP servers without clearing T3's cache.
+      // Re-adding an unchanged config keeps its existing connection.
+      let mcpAvailable = false;
+      if (wanted !== undefined) {
+        mcpAvailable = yield* client.mcp
           .add({
             server: name,
             location: { directory },
@@ -3014,10 +3044,11 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               ),
             ),
           );
-        if (added) state.mcp = wanted;
+        if (mcpAvailable) state.mcp = wanted;
       }
       const availability = McpProviderSession.memoryToolAvailability(
-        state.mcp !== undefined &&
+        mcpAvailable &&
+          state.mcp !== undefined &&
           state.mcp.directory === directory &&
           state.mcp.endpoint === mcpSession?.endpoint &&
           state.mcp.credential === mcpSession?.authorizationHeader
@@ -3026,7 +3057,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       );
       const instructions = [
         buildRuntimeInstructions({ harness: "OpenCode", model: turnInput.modelSelection.model }),
-        goatOrchestrationSystemPrompt(state.mcp !== undefined),
+        goatOrchestrationSystemPrompt(mcpAvailable),
         availability.read || availability.write || availability.source
           ? `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`
           : undefined,
@@ -3340,12 +3371,14 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         : [];
       if (state.active !== turn || turn.interrupted) return;
       yield* prepareMemory(sessionId, state, turnInput);
+      const files = yield* promptFiles(turnInput.message.attachments);
       if (!sending()) return;
       return yield* client.session
         .prompt({
           sessionID,
           id,
           text: promptText(turnInput),
+          ...(files.length === 0 ? {} : { files }),
           ...(skills.length === 0
             ? {}
             : { skills: skills.map((id) => ({ id: Skill.ID.make(id) })) }),
@@ -3521,6 +3554,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                 return yield* new ProviderAdapter.ProviderAdapterProtocolError({
                   driver: OPENCODE_PROVIDER,
                   detail: `OpenCode session ${sessionId} already has an active turn`,
+                  reason: "previous_turn_active",
                 });
               }
               if (isContinuation(turnInput)) return yield* runWake(state, turnInput);
@@ -3667,6 +3701,26 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           if (turn.settledInbox.has(inboxID)) return;
           turn.steers.add(inboxID);
           state.strandedSteers.delete(inboxID);
+          const files = yield* promptFiles(steerInput.message.attachments);
+          if (state.active !== turn || turn.interrupted) {
+            yield* lock.withPermit(
+              Effect.gen(function* () {
+                turn.steers.delete(inboxID);
+                // Stop may have stranded this steer, but it never reached OpenCode.
+                state.strandedSteers.delete(inboxID);
+                if (state.active === turn) {
+                  if (turn.interrupted && turn.heldEnd !== undefined) {
+                    turn.heldEnd = { status: "interrupted" };
+                  }
+                  yield* endIfSettled(state, turn);
+                }
+              }),
+            );
+            return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+              driver: OPENCODE_PROVIDER,
+              detail: `OpenCode turn ${steerInput.providerTurnId} is not active`,
+            });
+          }
           yield* client.session
             .prompt({
               sessionID: Session.ID.make(sessionId),
@@ -3676,6 +3730,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                 attachments: steerInput.message.attachments,
                 resolveAttachmentPath: host.resolveAttachmentPath,
               }).trim(),
+              ...(files.length === 0 ? {} : { files }),
               delivery: "steer",
             })
             .pipe(
