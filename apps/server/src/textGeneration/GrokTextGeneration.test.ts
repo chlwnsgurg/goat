@@ -1,6 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
+import * as NodeReadline from "node:readline";
 import * as NodeURL from "node:url";
 import * as NodeFS from "node:fs";
 
@@ -38,11 +40,14 @@ function makeAcpGrokWrapper(dir: string, env: Record<string, string>): string {
     .replace(
       'const sessionId = "grok-text-session";',
       `NodeFS.writeFileSync(process.env.GOAT_ACP_PID_PATH, String(process.pid));
+const requestFeed = (await import("node:net")).createConnection(process.env.GOAT_ACP_REQUEST_FEED_PATH);
+requestFeed.unref();
 const sessionId = "grok-text-session";`,
     )
     .replace(
       "if (request.id === undefined) continue;",
-      `if (request.method === undefined) continue;
+      `requestFeed.write(line + "\\n");
+    if (request.method === undefined) continue;
     if (request.method === "session/cancel" && globalThis.stalledPromptId !== undefined && !process.env.GOAT_MEMORY_IGNORE_CANCEL) {
       write({ jsonrpc: "2.0", id: globalThis.stalledPromptId, result: { stopReason: "cancelled" } });
       globalThis.stalledPromptId = undefined;
@@ -83,6 +88,7 @@ function withFakeAcpGrok<A, E, R>(
   effectFn: (
     textGeneration: TextGeneration.TextGeneration["Service"],
     tempDir: string,
+    feed: RequestFeed,
   ) => Effect.Effect<A, E, R>,
   memoryRunnerContext?: MemoryGenerationRunnerContext,
 ) {
@@ -96,8 +102,11 @@ function withFakeAcpGrok<A, E, R>(
     );
     const log = NodePath.join(tempDir, "requests.ndjson");
     NodeFS.writeFileSync(log, "");
+    const feedPath = NodePath.join(tempDir, "requests.sock");
+    const feed = yield* makeRequestFeed(feedPath);
     const binaryPath = makeAcpGrokWrapper(tempDir, {
       GOAT_ACP_REQUEST_LOG_PATH: log,
+      GOAT_ACP_REQUEST_FEED_PATH: feedPath,
       GOAT_ACP_PID_PATH: NodePath.join(tempDir, "acp.pid"),
       ...(memoryRunnerContext === undefined ? {} : { GOAT_MEMORY_RUN: "1" }),
       ...env,
@@ -108,7 +117,7 @@ function withFakeAcpGrok<A, E, R>(
       { HOME: tempDir, GROK_HOME: NodePath.join(tempDir, "profile") },
       memoryRunnerContext === undefined ? {} : { memoryRunnerContext },
     );
-    return yield* effectFn(textGeneration, tempDir);
+    return yield* effectFn(textGeneration, tempDir, feed);
   }).pipe(Effect.scoped);
 }
 
@@ -122,43 +131,51 @@ function readJsonRpcRequests(
     .map((line) => JSON.parse(line) as { method?: string; params?: Record<string, unknown> });
 }
 
-function waitForJsonRpcRequest(filePath: string, method: string) {
-  return Effect.callback<void>((resume) => {
-    // The watcher must close as soon as the request is seen: the scope removes the
-    // fixture directory afterwards, and a live watcher would then read a missing file.
-    let settled = false;
-    let watcher: NodeFS.FSWatcher | undefined;
-    const close = () => {
-      settled = true;
-      watcher?.close();
-    };
-    const check = () => {
-      if (settled) return;
-      let requests: ReturnType<typeof readJsonRpcRequests>;
-      try {
-        requests = readJsonRpcRequests(filePath);
-      } catch (error) {
-        // A missing file or a half-written line resolves on a later change event.
-        if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) {
-          return;
-        }
-        throw error;
-      }
-      if (requests.some((request) => request.method === method)) {
-        close();
-        resume(Effect.void);
-      }
-    };
-    watcher = NodeFS.watch(filePath, check);
-    watcher.on("error", (error) => {
-      if (settled) return;
-      close();
-      resume(Effect.die(error));
+interface RequestFeed {
+  /** Resolves once the fake agent has received a request with this method. */
+  readonly received: (method: string) => Effect.Effect<void>;
+}
+
+/**
+ * The fake agent sends each request line over a Unix socket after logging it.
+ * Watching the log with fs.watch missed the agent's last append on macOS under
+ * load, which left the timeout tests waiting until the test timeout.
+ */
+function makeRequestFeed(socketPath: string) {
+  const seen = new Set<string>();
+  const waiters = new Map<string, Set<() => void>>();
+  const sockets = new Set<NodeNet.Socket>();
+  const server = NodeNet.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    NodeReadline.createInterface({ input: socket }).on("line", (line) => {
+      const method = (JSON.parse(line) as { method?: unknown }).method;
+      if (typeof method !== "string" || seen.has(method)) return;
+      seen.add(method);
+      for (const wake of waiters.get(method) ?? []) wake();
+      waiters.delete(method);
     });
-    // Also check after subscribing so an already-written request cannot be missed.
-    check();
-    return Effect.sync(close);
   });
+  const received = (method: string) =>
+    Effect.callback<void>((resume) => {
+      if (seen.has(method)) return resume(Effect.void);
+      const wake = () => resume(Effect.void);
+      const pending = waiters.get(method) ?? new Set();
+      pending.add(wake);
+      waiters.set(method, pending);
+      return Effect.sync(() => pending.delete(wake));
+    });
+  return Effect.acquireRelease(
+    Effect.callback<RequestFeed>((resume) => {
+      server.once("error", (error) => resume(Effect.die(error)));
+      server.listen(socketPath, () => resume(Effect.succeed({ received })));
+    }),
+    () =>
+      Effect.callback<void>((resume) => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => resume(Effect.void));
+      }),
+  );
 }
 
 it.layer(layerGrokTextGenerationTest)("GrokTextGeneration", (it) => {
@@ -505,14 +522,13 @@ it.layer(layerGrokTextGenerationTest)("Grok memory generation", (it) => {
       Effect.gen(function* () {
         const removedTempDir = yield* withFakeAcpGrok(
           { GOAT_MEMORY_STALL: "1", ...(ignoreCancel ? { GOAT_MEMORY_IGNORE_CANCEL: "1" } : {}) },
-          (generation, tempDir) =>
+          (generation, tempDir, feed) =>
             Effect.gen(function* () {
               const log = NodePath.join(tempDir, "requests.ndjson");
               const ready = yield* Deferred.make<void>();
-              yield* waitForJsonRpcRequest(log, "session/prompt").pipe(
-                Effect.andThen(Deferred.succeed(ready, undefined)),
-                Effect.forkChild,
-              );
+              yield* feed
+                .received("session/prompt")
+                .pipe(Effect.andThen(Deferred.succeed(ready, undefined)), Effect.forkChild);
               const fiber = yield* (
                 operation === "resolveMemoryConflict"
                   ? generation.resolveMemoryConflict!(memoryConflict)
@@ -520,7 +536,7 @@ it.layer(layerGrokTextGenerationTest)("Grok memory generation", (it) => {
               ).pipe(Effect.flip, Effect.forkChild);
               yield* Deferred.await(ready);
               yield* TestClock.adjust(180_000);
-              yield* waitForJsonRpcRequest(log, "session/cancel");
+              yield* feed.received("session/cancel");
               // The request timeout starts a separate bounded cancellation wait.
               // Advance it too when the ACP peer never acknowledges cancellation.
               if (ignoreCancel) yield* TestClock.adjust(2_000);
