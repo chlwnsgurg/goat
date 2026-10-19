@@ -20,6 +20,8 @@ import {
   SshHostState,
   SshHostStatus,
   SshHostStatusInput,
+  SshPreflightReport,
+  SSH_PREFLIGHT_STEP_ORDER,
   SshRuntimePhase,
   SshRuntimeUpdateInput,
   validateSshHostStatus,
@@ -599,4 +601,52 @@ it.each([
   { refreshDeferred: { ...refreshDeferred, requestedVersion: "other" } },
 ])("rejects an unusable or inconsistent deferred snapshot %j", (invalid) => {
   expect(() => decodeStatus({ ...stopped, state: "ready", refreshDeferred, ...invalid })).toThrow();
+});
+
+describe("SshPreflightReport", () => {
+  const destination = { hostname: "box.example", user: "jun", port: 22 };
+  const steps = (state: "passed" | "failed") =>
+    SSH_PREFLIGHT_STEP_ORDER.map((id) => ({ id, state, summary: id + " " + state }));
+  const decode = Schema.decodeUnknownExit(SshPreflightReport);
+
+  it("is ready only when no step failed or waits for review", () => {
+    expect(decode({ host: "box", destination, steps: steps("passed"), ready: true })._tag).toBe(
+      "Success",
+    );
+    expect(decode({ host: "box", destination, steps: steps("failed"), ready: true })._tag).toBe(
+      "Failure",
+    );
+    const review = steps("passed").map((step) =>
+      step.id === "host_key" ? { ...step, state: "needs_review" } : step,
+    );
+    expect(decode({ host: "box", destination, steps: review, ready: false })._tag).toBe("Success");
+    expect(decode({ host: "box", destination, steps: review, ready: true })._tag).toBe("Failure");
+  });
+
+  it("keeps every step once, in display order", () => {
+    const shuffled = [...steps("passed")].reverse();
+    expect(decode({ host: "box", destination, steps: shuffled, ready: true })._tag).toBe("Failure");
+    expect(
+      decode({ host: "box", destination, steps: steps("passed").slice(1), ready: true })._tag,
+    ).toBe("Failure");
+  });
+});
+
+describe("SshHostStatus upload counters", () => {
+  const preparing = {
+    host: "box",
+    state: "preparing",
+    runtimeVersion: null,
+    requestedVersion: "1.0.0",
+  } as const;
+  const decode = Schema.decodeUnknownExit(SshHostStatus);
+
+  it("appear only while uploading", () => {
+    const upload = { sentBytes: 5, totalBytes: 10 };
+    expect(decode({ ...preparing, phase: "uploading", upload })._tag).toBe("Success");
+    expect(decode({ ...preparing, phase: "starting", upload })._tag).toBe("Failure");
+    expect(
+      decode({ ...preparing, phase: "uploading", upload: { sentBytes: 11, totalBytes: 10 } })._tag,
+    ).toBe("Failure");
+  });
 });
