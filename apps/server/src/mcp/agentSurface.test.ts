@@ -1,3 +1,4 @@
+import * as SshDeviceAdd from "../sshRemote/SshDeviceAdd.ts";
 import * as HomeRequests from "../provider/CodexHomeRequests.ts";
 import * as ProviderDiagnosisRouting from "../provider/ProviderDiagnosisRouting.ts";
 import { ProviderToolkit } from "./toolkits/provider/tools.ts";
@@ -156,6 +157,7 @@ const dependencies = Layer.mergeAll(
   Layer.mock(Orchestrator.OrchestratorV2)({}),
   Layer.mock(RemoteReportService.RemoteReportService)({}),
   Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
+  Layer.mock(SshDeviceAdd.SshDeviceAdd)({}),
   Layer.mock(SshHostSetup.SshHostSetup)({}),
   Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
   Layer.mock(LaunchWatchService.LaunchWatchService)({}),

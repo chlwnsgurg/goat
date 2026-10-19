@@ -8,6 +8,8 @@ import {
   SshHostAddInput,
   SshHostAlias,
   buildSshKeyAuthInstructions,
+  type SshPreflightInput,
+  type SshPreflightReport,
   type AuthSessionId,
   type Handoff,
   type HandoffRespondInput,
@@ -23,6 +25,10 @@ import {
   type SshHostSetupProgress,
 } from "@goat/contracts";
 import { discoverSshHosts } from "@goat/ssh/config";
+import { parseSshDestination } from "@goat/shared/sshDestination";
+import { runSshPreflight } from "@goat/ssh/preflight";
+import { FetchHttpClient } from "effect/http";
+import * as ServerConfig from "../config.ts";
 import { probeHostKey } from "@goat/ssh/hostKey";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- opaque IDs and stable alias hashes, never credentials.
 import * as NodeCrypto from "node:crypto";
@@ -59,6 +65,13 @@ type Failure = EnvironmentAuthorizationError | HandoffError;
 export class SshHostSetup extends Context.Service<
   SshHostSetup,
   {
+    readonly preflight: (
+      input: SshPreflightInput,
+      caller: SshHostCaller,
+    ) => Effect.Effect<SshPreflightReport, EnvironmentAuthorizationError | SshHostProbeError>;
+    readonly resolveDestination: (
+      input: SshHostAddInput,
+    ) => Effect.Effect<{ input: SshHostAddInput; host?: string }, SshHostProbeError>;
     readonly status: (input: SshHostStatusInput) => Effect.Effect<SshHostResult>;
     readonly update: (
       input: SshRuntimeUpdateInput,
@@ -170,9 +183,13 @@ const isProbeError = Schema.is(SshHostProbeError);
 const isHandoffError = Schema.is(HandoffError);
 const isAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 const decodeAlias = Schema.decodeUnknownEffect(SshHostAlias);
+const isAlias = Schema.is(SshHostAlias);
 
-export const make = (options: { readonly home?: string } = {}) =>
+export const make = (
+  options: { readonly home?: string; readonly runPreflight?: typeof runSshPreflight } = {},
+) =>
   Effect.gen(function* () {
+    const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
     const home = options.home ?? NodeOS.homedir();
     const audit = yield* MaintenanceAudit.MaintenanceAudit;
     const dispatch = yield* Dispatch.SshRemoteDispatch;
@@ -338,7 +355,7 @@ export const make = (options: { readonly home?: string } = {}) =>
         )
           return yield* new HandoffError({ reason: "conflict" });
         if (pin === null) {
-          const known = yield* discoverSshHosts({}).pipe(Effect.provide(runtime));
+          const known = yield* discoverSshHosts({ homeDir: home }).pipe(Effect.provide(runtime));
           if (
             known.some(
               (entry) =>
@@ -431,6 +448,106 @@ export const make = (options: { readonly home?: string } = {}) =>
         fingerprint: `${challenge.fingerprint} (${challenge.algorithm})`,
       };
     };
+    const resolveDestination: SshHostSetup["Service"]["resolveDestination"] = (input) =>
+      Effect.gen(function* () {
+        const parsed = parseSshDestination({
+          host: input.address,
+          user: input.user,
+          port: input.port,
+        });
+        const invalid = (message: string) =>
+          new SshHostProbeError({ host: input.address, reason: "invalid_request", message });
+        if (!parsed.ok) return yield* invalid(parsed.message);
+        const target = parsed.destination;
+        const hosts = yield* discoverSshHosts({ homeDir: home }).pipe(Effect.provide(runtime));
+        const configured = hosts.find(
+          (entry) =>
+            entry.source === "ssh-config" &&
+            entry.alias.toLowerCase() === target.hostname.toLowerCase(),
+        );
+        if (configured) {
+          if (target.user !== null || target.port !== null || input.identityFile !== undefined)
+            return yield* invalid(
+              `Set User, Port and IdentityFile for ${configured.alias} in ${path.join(home, ".ssh", "config")}; configured aliases cannot have overrides.`,
+            );
+          return { input: { ...input, address: configured.alias }, host: configured.alias };
+        }
+        const normalized = {
+          ...input,
+          address: target.hostname,
+          ...(target.user === null ? {} : { user: target.user }),
+          ...(target.port === null ? {} : { port: target.port }),
+        };
+        const host = aliasFor(normalized);
+        if (yield* fs.exists(path.join(directory, `${host}.known_hosts`)))
+          return { input: normalized, host };
+        if (input.alias === undefined && (yield* fs.exists(directory))) {
+          const matches: string[] = [];
+          for (const file of yield* fs.readDirectory(directory)) {
+            if (!file.endsWith(".conf")) continue;
+            const alias = file.slice(0, -5);
+            if (
+              !isAlias(alias) ||
+              !(yield* fs.exists(path.join(directory, `${alias}.known_hosts`)))
+            )
+              continue;
+            const config = yield* fs.readFileString(path.join(directory, file));
+            const fields = new Map(
+              config.split(/\r?\n/u).flatMap((line) => {
+                const match = /^\s*(\S+)\s+(.+?)\s*$/u.exec(line);
+                return match ? [[match[1]!.toLowerCase(), match[2]!.replace(/^"|"$/gu, "")]] : [];
+              }),
+            );
+            if (
+              fields.get("hostname") === normalized.address &&
+              Number(fields.get("port")) === (normalized.port ?? 22) &&
+              (normalized.user === undefined || fields.get("user") === normalized.user) &&
+              (normalized.identityFile === undefined ||
+                fields.get("identityfile") === normalized.identityFile)
+            )
+              matches.push(alias);
+          }
+          if (matches.length === 1) return { input: normalized, host: matches[0]! };
+        }
+        return { input: normalized };
+      }).pipe(
+        Effect.mapError((cause) =>
+          isProbeError(cause)
+            ? cause
+            : new SshHostProbeError({
+                host: input.address,
+                reason: "operation_failed",
+                message: "Could not resolve SSH configuration.",
+              }),
+        ),
+      );
+    const preflight: SshHostSetup["Service"]["preflight"] = (input, caller) =>
+      Effect.gen(function* () {
+        yield* authorize(caller, "settings:write");
+        const resolved = yield* resolveDestination({ ...input, address: input.host });
+        const owner = yield* environment.getDescriptor;
+        const cliRunner = yield* Dispatch.resolveSshCliRunner(
+          Option.isSome(config) ? config.value.baseDir : home,
+        );
+        const target = resolved.host
+          ? { host: resolved.host }
+          : { ...resolved.input, host: resolved.input.address };
+        return yield* (options.runPreflight ?? runSshPreflight)(target, {
+          ownerLabel: owner.label,
+          runner: cliRunner,
+          ...(resolved.host ? { alias: resolved.host } : {}),
+        }).pipe(Effect.provide(runtime), Effect.provide(FetchHttpClient.layer));
+      }).pipe(
+        Effect.mapError((cause) =>
+          isAuthorizationError(cause) || isProbeError(cause)
+            ? cause
+            : new SshHostProbeError({
+                host: input.host,
+                reason: "operation_failed",
+                message: "Could not check the SSH host.",
+              }),
+        ),
+      );
     const probe: SshHostSetup["Service"]["probe"] = (input, sessionId) =>
       Effect.gen(function* () {
         yield* authorize({ kind: "client", sessionId }, "settings:write");
@@ -934,7 +1051,28 @@ export const make = (options: { readonly home?: string } = {}) =>
       Effect.gen(function* () {
         yield* authorize(caller, "environment:maintain");
         const generation = aliasGenerations.get(input.host) ?? 0;
-        yield* validateManaged(input.host);
+        const managedConfig = yield* readOptional(path.join(directory, `${input.host}.conf`)).pipe(
+          Effect.mapError((cause) => new HandoffError({ reason: "unavailable", cause })),
+        );
+        if (managedConfig !== null) {
+          yield* validateManaged(input.host);
+        } else {
+          const destination = yield* resolveDestination({ address: input.host });
+          if (destination.host !== input.host)
+            return yield* new HandoffError({ reason: "not_found" });
+          const report = yield* preflight({ host: input.host }, caller);
+          if (!report.ready) {
+            const step = report.steps.find(
+              (step) => step.state === "failed" || step.state === "needs_review",
+            );
+            return {
+              kind: "error",
+              code: "operation_failed",
+              message: step?.summary ?? "Complete SSH preflight before preparing this host.",
+              ...(step?.fix ? { fix: step.fix } : {}),
+            } satisfies SshHostResult;
+          }
+        }
         return yield* Deferred.await(
           yield* startJob(
             input.host,
@@ -950,6 +1088,7 @@ export const make = (options: { readonly home?: string } = {}) =>
         );
       }).pipe(
         Effect.catchTags({
+          SshHostProbeError: (error) => Effect.succeed(errorResult(error.message)),
           HandoffError: (error) => Effect.succeed(setupFailure(input.host, error)),
         }),
       );
@@ -989,7 +1128,7 @@ export const make = (options: { readonly home?: string } = {}) =>
         const pin = yield* readOptional(path.join(directory, `${challenge.host}.known_hosts`)).pipe(
           Effect.mapError((cause) => new HandoffError({ reason: "unavailable", cause })),
         );
-        if (pin !== null) return yield* prepare({ host: challenge.host }, caller);
+        if (pin !== null) return yield* status({ host: challenge.host });
         return yield* createHandoff(
           caller,
           challenge.host,
@@ -1159,6 +1298,10 @@ export const make = (options: { readonly home?: string } = {}) =>
               admission.withPermits(1),
             );
             if (trusted.kind === "error") return yield* discard;
+            return yield* handoffs.finishSshContinuation({
+              threadId: entry.handoff.requestedBy.threadId,
+              handoffId: id,
+            });
           } else {
             const current = yield* status({ host: args.host });
             if (
@@ -1319,6 +1462,8 @@ export const make = (options: { readonly home?: string } = {}) =>
       });
     return SshHostSetup.of({
       status,
+      resolveDestination,
+      preflight,
       update,
       probe,
       trust,

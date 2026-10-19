@@ -1,3 +1,5 @@
+import * as ConnectionCatalogBroker from "../../../connections/ConnectionCatalogBroker.ts";
+import * as SshDeviceAdd from "../../../sshRemote/SshDeviceAdd.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
 import * as DateTime from "effect/DateTime";
@@ -147,6 +149,7 @@ const launchRaw = (options: LaunchOptions = {}) =>
         getThreadShell: () => Effect.succeed(caller),
       }),
       Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
+      Layer.mock(SshDeviceAdd.SshDeviceAdd)({}),
       Layer.mock(SshHostSetup.SshHostSetup)({}),
       Layer.mock(CloudMachineService.CloudMachineService)({}),
       Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
@@ -533,6 +536,7 @@ const fixture = (sourceFault?: "missing" | "size") =>
             getThreadShell: () => Ref.get(shell),
           }),
           Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
+          Layer.mock(SshDeviceAdd.SshDeviceAdd)({}),
           Layer.mock(SshHostSetup.SshHostSetup)({}),
           Layer.mock(CloudMachineService.CloudMachineService)({}),
           Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
@@ -806,6 +810,7 @@ it.effect.each([undefined, 2])("passes the SSH report limit to the coordinator (
       Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
       Layer.mock(LaunchWatchService.LaunchWatchService)({}),
       Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
+      Layer.mock(SshDeviceAdd.SshDeviceAdd)({}),
       Layer.mock(SshHostSetup.SshHostSetup)({}),
       Layer.mock(CloudMachineService.CloudMachineService)({}),
       Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
@@ -893,7 +898,12 @@ const handoff = (
       Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({}),
     );
     const registered = McpHttpServer.toolkitRegistration(SshToolkit, SshHandlers.layer).pipe(
-      Layer.provide(Layer.mock(SshHostSetup.SshHostSetup)({})),
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(SshHostSetup.SshHostSetup)({}),
+          Layer.mock(SshDeviceAdd.SshDeviceAdd)({}),
+        ),
+      ),
       Layer.provideMerge(McpServer.McpServer.layer),
       Layer.provide(dependencies),
     );
@@ -1104,6 +1114,7 @@ const createCloudMachine = (grant: {
       }),
       Layer.mock(ServerEnvironment.ServerEnvironment)({}),
       Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
+      Layer.mock(SshDeviceAdd.SshDeviceAdd)({}),
       Layer.mock(SshHostSetup.SshHostSetup)({}),
       Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
       Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({}),
@@ -1236,6 +1247,11 @@ const runtimeFixture = (
     Layer.mock(LaunchWatchService.LaunchWatchService)({}),
   );
   const registered = McpHttpServer.toolkitRegistration(SshToolkit, SshHandlers.layer).pipe(
+    Layer.provide(
+      SshDeviceAdd.layer.pipe(
+        Layer.provide(Layer.mock(ConnectionCatalogBroker.ConnectionCatalogBroker)({})),
+      ),
+    ),
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provide(
       Layer.unwrap(

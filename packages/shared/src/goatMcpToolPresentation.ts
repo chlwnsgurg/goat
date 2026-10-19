@@ -408,7 +408,7 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     ["Launch", "Launching", "Launched", "a project thread"],
     "thread-create",
   ),
-  goat_ssh_host_add: tool(["Add", "Adding", "Added", "an SSH host"], "ssh-host-list"),
+  goat_ssh_host_add: tool(["Add", "Adding", "Added", "an SSH device"], "connection-add"),
   goat_ssh_host_prepare: tool(
     ["Prepare", "Preparing", "Prepared", "an SSH host"],
     "environment-update",
@@ -457,7 +457,7 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     "cloud-machine-change",
   ),
   goat_connection_list: tool(["List", "Listing", "Listed", "saved connections"], "connection-list"),
-  goat_connection_add_ssh: tool(["Save", "Saving", "Saved", "an SSH connection"], "connection-add"),
+  goat_connection_add_ssh: tool(["Add", "Adding", "Added", "an SSH device"], "connection-add"),
   goat_connection_remove: tool(
     ["Remove", "Removing", "Removed", "a saved connection"],
     "connection-remove",

@@ -1,3 +1,4 @@
+import * as SshDeviceAdd from "./sshRemote/SshDeviceAdd.ts";
 import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { desiredLinkReconcileStartup } from "./cloud/DesiredLinkReconcile.ts";
 import * as HomeRoute from "./provider/OpenCodexRoute.ts";
@@ -1249,7 +1250,11 @@ const layerMakeRoutes = Layer.mergeAll(
   // status, and the remote-launch catalog: they all follow runs and wake launchers.
   // The coordinator re-arms watches after a relayed send, so the store comes after it.
   Layer.provide(layerSshWorkspace),
-  Layer.provide(SshHostSetup.layer.pipe(Layer.provide(MaintenanceAudit.layer))),
+  Layer.provide(
+    SshDeviceAdd.layer.pipe(
+      Layer.provideMerge(SshHostSetup.layer.pipe(Layer.provide(MaintenanceAudit.layer))),
+    ),
+  ),
   Layer.provide(HomeRequests.layer.pipe(Layer.provideMerge(CodexRoutes.layer))),
   Layer.provide(
     ProviderDiagnosisRouting.layer.pipe(

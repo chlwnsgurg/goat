@@ -1,9 +1,9 @@
+import { addDevice } from "../ssh/addDevice.ts";
 import {
   type ConnectionCatalogOperation,
   type ConnectionCatalogResult,
   OrchestratorMcpFailure,
 } from "@goat/contracts";
-import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
 import * as ConnectionCatalogBroker from "../../../connections/ConnectionCatalogBroker.ts";
@@ -12,7 +12,6 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import { ConnectionToolkit } from "./tools.ts";
 
 const CATALOG_TIMEOUT_MS = 30_000;
-const SSH_ADD_TIMEOUT_MS = 10 * 60_000;
 const NO_HOST_MESSAGE =
   "No GOAT desktop app is serving saved connections for this environment. Saved connections belong to the desktop app that runs this environment as its main local environment: open it on this machine, or add the host in Settings → Connections → SSH. Web-only, mobile and desktop WSL-backend environments cannot save SSH connections through agents.";
 
@@ -57,37 +56,7 @@ export const layer = McpToolAccess.toLayer(ConnectionToolkit, {
       Effect.map((result) => ({ connections: [...result.connections] })),
     ),
   ),
-  goat_connection_add_ssh: McpToolAccess.writesEnvironment((input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      if (!scope.capabilities.has("orchestration")) {
-        return yield* new OrchestratorMcpFailure({
-          code: "capability_denied",
-          message: "This credential cannot reach other machines.",
-        });
-      }
-      const result = yield* invoke(
-        {
-          type: "add_ssh",
-          host: input.host,
-          ...(input.label === undefined ? {} : { label: input.label }),
-          addedBy: {
-            kind: "agent",
-            ...(scope.thread === undefined ? {} : { threadId: scope.thread.threadId }),
-            ...(scope.client === undefined ? {} : { client: scope.client.label }),
-            at: DateTime.formatIso(yield* DateTime.now),
-          },
-        },
-        SSH_ADD_TIMEOUT_MS,
-      );
-      yield* Effect.logInfo("Saved desktop SSH connection", {
-        caller: callerIdentity(scope),
-        host: input.host,
-        created: result.created,
-      });
-      return { created: result.created, connection: result.connection };
-    }),
-  ),
+  goat_connection_add_ssh: addDevice,
   goat_connection_remove: McpToolAccess.destructive(
     McpToolAccess.writesEnvironment((input) =>
       Effect.gen(function* () {

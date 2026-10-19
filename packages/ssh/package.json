@@ -26,6 +26,10 @@
     "./tunnel": {
       "types": "./src/tunnel.ts",
       "import": "./src/tunnel.ts"
+    },
+    "./preflight": {
+      "types": "./src/preflight.ts",
+      "import": "./src/preflight.ts"
     }
   },
   "scripts": {

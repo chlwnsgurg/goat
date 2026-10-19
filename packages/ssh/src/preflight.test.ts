@@ -1,0 +1,238 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { expect, it } from "@effect/vitest";
+import { SshPreflightReport, SSH_PREFLIGHT_STEP_ORDER } from "@goat/contracts";
+import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
+import * as FileSystem from "effect/FileSystem";
+import { TestClock } from "effect/testing";
+import { FetchHttpClient } from "effect/http";
+import { ChildProcessSpawner } from "effect/process";
+import { RuntimeReleaseHead } from "./runtimeAvailability.ts";
+import type { RemoteGoatRunnerOptions } from "./tunnel.ts";
+import { runPreflightProcess } from "./preflightProcess.ts";
+import { runSshPreflight } from "./preflight.ts";
+import { makeSuccessfulProcess } from "./tunnel.fixture.ts";
+import stderr from "./fixtures/preflight-stderr.json" with { type: "json" };
+
+const isReport = Schema.is(SshPreflightReport);
+const facts =
+  "GOAT_OS=Linux\nGOAT_ARCH=aarch64\nGOAT_FREE_KIB=1048576\nGOAT_FACTS_DONE=yes\nGOAT_INSTALLED=0.1.0\n";
+const fixture = (
+  input: {
+    handshake?: string;
+    auth?: string;
+    facts?: string;
+    none?: boolean;
+    alias?: boolean;
+    host?: string;
+    runner?: RemoteGoatRunnerOptions;
+  } = {},
+) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const calls: ReadonlyArray<string>[] = [];
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.gen(function* () {
+        if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected pipeline");
+        calls.push(command.args);
+        if (command.args.includes("-G"))
+          return makeSuccessfulProcess(
+            `hostname ${input.host ?? "build.example"}\nuser deploy\nport 22\nidentityfile /keys/id_ed25519\nproxyjump bastion\n`,
+          );
+        if (command.args.includes("-lf"))
+          return makeSuccessfulProcess(`256 SHA256:${"a".repeat(43)} build.example (ED25519)\n`);
+        const knownHosts = command.args.find((arg) => arg.startsWith("UserKnownHostsFile="));
+        if (knownHosts) {
+          const file = knownHosts.slice("UserKnownHostsFile=".length).replace(/^"|"$/gu, "");
+          yield* fs.writeFileString(file, "build.example ssh-ed25519 AAAA\n");
+          return makeSuccessfulProcess("");
+        }
+        const auth = command.args.some(
+          (arg) =>
+            arg === "PreferredAuthentications=publickey" ||
+            arg === "PreferredAuthentications=none,publickey",
+        );
+        const error = auth ? (input.auth ?? "") : (input.handshake ?? stderr.keyAndPassword);
+        return {
+          ...makeSuccessfulProcess(auth ? (input.facts ?? facts) : ""),
+          exitCode: Effect.succeed(
+            ChildProcessSpawner.ExitCode(auth ? (input.auth ? 255 : 0) : input.none ? 0 : 255),
+          ),
+          stderr: Stream.make(new TextEncoder().encode(error)),
+        };
+      }),
+    );
+    const report = yield* runSshPreflight(
+      { host: input.host ?? "build" },
+      {
+        ownerLabel: "Origin",
+        runner: input.runner ?? { archiveVersion: "0.1.0" },
+        ...(input.alias === false ? {} : { alias: "build" }),
+      },
+    ).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provide(FetchHttpClient.layer),
+      Effect.provideService(RuntimeReleaseHead, () => Effect.succeed("present")),
+    );
+    expect(isReport(report)).toBe(true);
+    expect(report.steps.map((step) => step.id)).toEqual(SSH_PREFLIGHT_STEP_ORDER);
+    return { report, calls };
+  });
+it.effect(
+  "resolves once, disables sharing, uses key-only authentication and reads installed facts",
+  () =>
+    Effect.gen(function* () {
+      const { report, calls } = yield* fixture();
+      expect(report.ready).toBe(true);
+      expect(report.platformKey).toBe("linux-arm64");
+      expect(calls.filter((args) => args.includes("-G"))).toHaveLength(1);
+      for (const args of calls) {
+        expect(args).toContain("ControlMaster=no");
+        expect(args).toContain("ControlPath=none");
+        expect(args).toContain("BatchMode=yes");
+        expect(args.filter((arg) => arg.startsWith("LogLevel="))).toEqual(["LogLevel=VERBOSE"]);
+      }
+      expect(calls[2]).toContain("PreferredAuthentications=publickey");
+      expect(report.steps[5]?.summary).toContain("already installed");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["refused", "dns", "proxy", "jumpDenied"] as const)(
+  "classifies %s without contacting the destination again",
+  (kind) =>
+    Effect.gen(function* () {
+      const { report, calls } = yield* fixture({ handshake: stderr[kind] });
+      expect(report.ready).toBe(false);
+      expect(report.steps[0]?.state).toBe("failed");
+      expect(calls).toHaveLength(2);
+      expect(
+        report.steps
+          .slice(1)
+          .every((step) => step.state === "skipped" && step.summary.includes("reachability")),
+      ).toBe(true);
+      if (kind === "refused") expect(report.steps[0]?.fix?.instruction).toContain("Remote Login");
+      if (kind === "proxy") expect(report.steps[0]?.fix?.instruction).toContain("Tailscale");
+      if (kind === "jumpDenied")
+        expect(report.steps[0]?.summary).toContain("jump hop bastion.example");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["node", "node.tail.ts.net", "100.64.0.2", "100.127.255.254"])(
+  "offers Tailscale guidance for %s",
+  (host) =>
+    Effect.gen(function* () {
+      const { report } = yield* fixture({ host, handshake: stderr.dns });
+      expect(report.steps[0]?.fix?.instruction).toContain("Tailscale");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["unknownKey", "changedKey"] as const)("stops after %s", (kind) =>
+  Effect.gen(function* () {
+    const { report } = yield* fixture({ handshake: stderr[kind] });
+    expect(report.steps[0]?.state).toBe("passed");
+    expect(report.steps[1]?.state).toBe(kind === "unknownKey" ? "needs_review" : "failed");
+    if (kind === "unknownKey") expect(report.steps[1]?.fingerprint).toContain("SHA256:");
+    expect(report.steps[2]?.state).toBe("skipped");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect("requires a managed pin even when known_hosts already matches", () =>
+  Effect.gen(function* () {
+    const { report, calls } = yield* fixture({ alias: false });
+    expect(report.steps[1]?.state).toBe("needs_review");
+    expect(report.steps[1]?.detail).toContain("already matches");
+    expect(calls.filter((args) => args.includes("-G"))).toHaveLength(1);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["keyAndPassword", "passwordOnly", "partial"] as const)(
+  "explains %s authentication",
+  (kind) =>
+    Effect.gen(function* () {
+      const { report } = yield* fixture({
+        auth: `Offering public key: /keys/id_ed25519 SHA256:key\n${stderr[kind]}`,
+      });
+      expect(report.steps[2]?.state).toBe("failed");
+      if (kind === "keyAndPassword") {
+        expect(report.steps[2]?.summary).toContain("Origin's SSH keys");
+        expect(report.steps[2]?.fix?.command).toContain("ssh-copy-id");
+      }
+      if (kind === "passwordOnly")
+        expect(report.steps[2]?.fix?.instruction).toContain("PubkeyAuthentication yes");
+      if (kind === "partial")
+        expect(report.steps[2]?.fix?.instruction).toContain("AuthenticationMethods publickey");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect("accepts none authentication", () =>
+  Effect.gen(function* () {
+    const { report } = yield* fixture({
+      none: true,
+      handshake: "Authenticated to build.example using none.",
+    });
+    expect(report.ready).toBe(true);
+    expect(report.steps[2]?.summary).toContain("none");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each([
+  ["GOAT_OS=Darwin\nGOAT_ARCH=x86_64\nGOAT_FACTS_DONE=yes\n", "does not support"],
+  ["GOAT_OS=MINGW64_NT\nGOAT_ARCH=x86_64\nGOAT_FACTS_DONE=yes\n", "cygpath"],
+  ["GOAT_OS=MINGW64_NT\nGOAT_ARCH=x86_64\nGOAT_CYGPATH=yes\nGOAT_FACTS_DONE=yes\n", "System32 tar"],
+  ["unexpected shell output", "POSIX default shell"],
+] as const)("reports unsupported or incomplete platform %s", ([facts, message]) =>
+  Effect.gen(function* () {
+    const { report } = yield* fixture({ facts });
+    expect(report.steps[3]?.state).toBe("failed");
+    expect(report.steps[3]?.summary).toContain(message);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect("bounds a stalled handshake with TestClock", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.gen(function* () {
+        if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected pipeline");
+        if (command.args.includes("-G"))
+          return makeSuccessfulProcess("hostname build.example\nuser deploy\nport 22\n");
+        yield* Deferred.succeed(entered, undefined);
+        return { ...makeSuccessfulProcess(""), exitCode: Effect.never };
+      }),
+    );
+    const fiber = yield* runSshPreflight(
+      { host: "build" },
+      { ownerLabel: "Origin", alias: "build", runner: {} },
+    ).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provide(FetchHttpClient.layer),
+      Effect.forkChild,
+    );
+    yield* Deferred.await(entered);
+    yield* TestClock.adjust("20 seconds");
+    const report = yield* Fiber.join(fiber);
+    expect(report.steps[0]?.summary).toContain("timed out");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([true, false])("low disk space blocks only a required transfer (%s)", (transfer) =>
+  Effect.gen(function* () {
+    const { report } = yield* fixture({
+      facts: `GOAT_OS=Linux\nGOAT_ARCH=aarch64\nGOAT_FREE_KIB=1024\nGOAT_FACTS_DONE=yes\n${transfer ? "" : "GOAT_INSTALLED=0.1.0\n"}`,
+    });
+    expect(report.steps[4]?.state).toBe(transfer ? "failed" : "passed");
+    if (transfer) expect(report.steps[4]?.summary).toContain("512 MiB");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect("bounds both process streams to 64 KiB while draining the child", () =>
+  Effect.gen(function* () {
+    const process = ChildProcessSpawner.make(() =>
+      Effect.succeed({
+        ...makeSuccessfulProcess("a".repeat(200_000)),
+        stderr: Stream.make(new TextEncoder().encode("b".repeat(200_000))),
+      }),
+    );
+    const output = yield* runPreflightProcess("ssh", []).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, process),
+    );
+    expect(output.exitCode).toBe(0);
+    expect(output.stdout.length).toBe(64 * 1024);
+    expect(output.stderr.length).toBe(64 * 1024);
+  }),
+);

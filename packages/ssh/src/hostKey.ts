@@ -3,7 +3,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { collectProcessOutput, resolveSshCommand } from "./command.ts";
+import { resolveSshCommand } from "./command.ts";
+import { collectPreflightOutput } from "./preflightProcess.ts";
 import { SshHostKeyProbeError } from "./errors.ts";
 
 /** Collects the destination key OpenSSH negotiated, using only a disposable known_hosts. */
@@ -11,6 +12,7 @@ export const probeHostKey = Effect.fn("ssh/hostKey.probeHostKey")(function* (inp
   readonly target: string;
   readonly user?: string;
   readonly port?: number;
+  readonly resolvedSettings?: ReadonlyMap<string, string>;
 }) {
   return yield* Effect.scoped(
     Effect.gen(function* () {
@@ -37,8 +39,8 @@ export const probeHostKey = Effect.fn("ssh/hostKey.probeHostKey")(function* (inp
             const child = yield* spawner.spawn(ChildProcess.make(command, commandArgs));
             const [stdout, stderr, code] = yield* Effect.all(
               [
-                collectProcessOutput(child.stdout),
-                collectProcessOutput(child.stderr),
+                collectPreflightOutput(child.stdout),
+                collectPreflightOutput(child.stderr),
                 child.exitCode,
               ],
               { concurrency: "unbounded" },
@@ -47,15 +49,19 @@ export const probeHostKey = Effect.fn("ssh/hostKey.probeHostKey")(function* (inp
           }),
         ).pipe(Effect.timeout("20 seconds"));
       // Resolving and connecting use the same original alias and overrides, preserving jump rules.
-      const resolved = yield* run(ssh, ["-G", ...args, input.target]);
+      const resolved = input.resolvedSettings
+        ? { code: 0, stdout: "" }
+        : yield* run(ssh, ["-G", ...args, input.target]);
       if (resolved.code !== 0)
         return yield* new SshHostKeyProbeError({ message: "Could not resolve SSH settings." });
-      const settings = new Map(
-        resolved.stdout.split(/\r?\n/u).map((line) => {
-          const [key = "", ...value] = line.trim().split(/\s+/u);
-          return [key.toLowerCase(), value.join(" ")] as const;
-        }),
-      );
+      const settings =
+        input.resolvedSettings ??
+        new Map(
+          resolved.stdout.split(/\r?\n/u).map((line) => {
+            const [key = "", ...value] = line.trim().split(/\s+/u);
+            return [key.toLowerCase(), value.join(" ")] as const;
+          }),
+        );
       const hostname = settings.get("hostname");
       const port = settings.get("port");
       if (!hostname || !port)
@@ -67,6 +73,12 @@ export const probeHostKey = Effect.fn("ssh/hostKey.probeHostKey")(function* (inp
       yield* fs.chmod(knownHosts, 0o600);
       const probe = yield* run(ssh, [
         ...args,
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
+        "-o",
+        "LogLevel=VERBOSE",
         "-o",
         "BatchMode=yes",
         "-o",

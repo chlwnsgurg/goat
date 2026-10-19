@@ -1,3 +1,4 @@
+import * as SshDeviceAdd from "../../../sshRemote/SshDeviceAdd.ts";
 import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
 import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import { RemoteReportDeliveryMode, RemoteDispatchView } from "@goat/contracts";
@@ -18,7 +19,6 @@ import {
   TrimmedNonEmptyString,
   SshLaunchWorkspace,
   SshWorkspaceCode,
-  SshHostAddInput,
   SshHostPrepareInput,
   SshHostForgetInput,
   SshHostStatusInput,
@@ -149,8 +149,9 @@ const SshHostStatusTool = Tool.make(agentSurfaceRegistry["ssh.host_status"].name
 const SshHostAddTool = Tool.make(agentSurfaceRegistry["ssh.host_add"].name, {
   ...shared,
   description: agentSurfaceRegistry["ssh.host_add"].description,
-  parameters: SshHostAddInput,
-  success: SshHostResultJson,
+  dependencies: [...shared.dependencies, SshDeviceAdd.SshDeviceAdd],
+  parameters: SshDeviceAdd.SshDeviceAddInput,
+  success: Schema.toCodecJson(SshDeviceAdd.SshDeviceAddResult),
 }).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["ssh.host_add"]));
 const SshHostPrepareTool = Tool.make(agentSurfaceRegistry["ssh.host_prepare"].name, {
   ...shared,

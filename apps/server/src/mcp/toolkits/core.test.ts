@@ -1,3 +1,4 @@
+import * as SshDeviceAdd from "../../sshRemote/SshDeviceAdd.ts";
 import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import * as RemoteDispatchCoordinator from "../../remoteReports/RemoteDispatchCoordinator.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -1456,6 +1457,7 @@ it.effect.each([false, true])(
             }),
         }),
         Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
+        Layer.mock(SshDeviceAdd.SshDeviceAdd)({}),
         Layer.mock(SshHostSetup.SshHostSetup)({}),
         Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
           validateLaunchAttachments: (attachments) => Effect.succeed(attachments),

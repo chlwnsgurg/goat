@@ -1,3 +1,4 @@
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it, vi } from "@effect/vitest";
 import {
@@ -12,6 +13,8 @@ import {
   ProviderInstanceId,
   ProviderDriverKind,
   ThreadId,
+  type SshPreflightReport,
+  SSH_PREFLIGHT_STEP_ORDER,
   type SshHostResult,
   type SshHostStatus,
 } from "@goat/contracts";
@@ -1085,4 +1088,313 @@ it.effect(
         ),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("host trust approval pins the alias and finishes without starting setup", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pin-only-" });
+    const finished = yield* Deferred.make<void>();
+    let created: Parameters<Handoffs.Handoffs["Service"]["create"]>[0] | undefined;
+    let completed = false;
+    const record: Handoff = {
+      handoffId: TurnItemId.make("pin-only"),
+      kind: "approval",
+      title: "Trust build?",
+      reason: "Review key",
+      requestedBy: {
+        threadId: ThreadId.make("caller"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        path: "ssh.host_add",
+      },
+      target: { environmentId: EnvironmentId.make("owner"), path: "ssh.host_add" },
+      dedupeKey: "pin-only",
+      state: "completed",
+      expiresAt: null,
+      createdAt: yield* DateTime.now,
+      actor: { type: "client", label: "Reviewer" },
+    };
+    const key = vi
+      .spyOn(HostKey, "probeHostKey")
+      .mockReturnValue(
+        Effect.succeed({ algorithm: "ssh-ed25519", key: "AAAA", fingerprint: "SHA256:review" }),
+      );
+    const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(Effect.succeed([]));
+    yield* Effect.gen(function* () {
+      const layer = Layer.effect(SshHostSetup.SshHostSetup, SshHostSetup.make({ home })).pipe(
+        Layer.provide(probeClient),
+        Layer.provide(
+          Layer.mock(Handoffs.Handoffs)({
+            create: (input) =>
+              Effect.sync(() => {
+                created = input;
+                return handoffSummary({ ...record, state: "pending" });
+              }),
+            resolvedSshOutcomes: Effect.succeed([]),
+            completedSshContinuations: Effect.sync(() =>
+              completed || !created
+                ? []
+                : [{ handoff: record, approvedBySessionId: probeSessionId, args: created!.args }],
+            ),
+            finishSshContinuation: () =>
+              Effect.gen(function* () {
+                completed = true;
+                yield* Deferred.succeed(finished, undefined);
+              }),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ProcessRunner.ProcessRunner)({
+            run: () =>
+              Effect.succeed(
+                processOutput(
+                  `hostname build.example\nuser deploy\nport 22\nhostkeyalias build\nuserknownhostsfile ${home}/.ssh/goat-hosts/build.known_hosts\nglobalknownhostsfile /dev/null\nstricthostkeychecking yes\nupdatehostkeys no\nhostkeyalgorithms ssh-ed25519\nidentityfile /fixture/key\nidentitiesonly yes\n`,
+                ),
+              ),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+            runtimeStatus: () =>
+              Effect.succeed({ kind: "ok", status: { ...stopped, host: "build" } }),
+            beginSetupOperation: () => Effect.die("Approval started a setup operation"),
+            prepareRuntime: () => Effect.die("Approval installed a runtime"),
+          }),
+        ),
+        Layer.provide(dependencies),
+      );
+      const setup = Context.get(yield* Layer.build(layer), SshHostSetup.SshHostSetup);
+      const caller: SshHostSetup.SshHostCaller = {
+        kind: "mcp",
+        scope: {
+          ...invocation,
+          grantedScopes: ["settings:write"],
+          thread: {
+            threadId: ThreadId.make("caller"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            providerSessionId: "provider",
+          },
+        },
+      };
+      expect(
+        yield* setup.add(
+          {
+            address: "build.example",
+            user: "deploy",
+            alias: "build",
+            identityFile: "/fixture/key",
+          },
+          caller,
+        ),
+      ).toMatchObject({ kind: "needs_human" });
+      yield* setup.resumeContinuations;
+      yield* Deferred.await(finished);
+      expect(yield* fs.readFileString(`${home}/.ssh/goat-hosts/build.known_hosts`)).toBe(
+        "build ssh-ed25519 AAAA\n",
+      );
+      expect(yield* fs.readFileString(`${home}/.ssh/goat-hosts/build.conf`)).toContain(
+        "IdentityFile",
+      );
+      yield* setup.resumeContinuations;
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          key.mockRestore();
+          discover.mockRestore();
+        }),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("preflight normalizes typed destinations and rejects configured alias overrides", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-preflight-setup-" });
+    const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(
+      Effect.succeed([
+        {
+          alias: "configured",
+          hostname: "build.example",
+          username: "deploy",
+          port: 22,
+          source: "ssh-config",
+        },
+      ]),
+    );
+    yield* Effect.gen(function* () {
+      const layer = Layer.effect(SshHostSetup.SshHostSetup, SshHostSetup.make({ home })).pipe(
+        Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+        Layer.provide(dependencies),
+      );
+      const setup = Context.get(yield* Layer.build(layer), SshHostSetup.SshHostSetup);
+      expect(yield* setup.resolveDestination({ address: "deploy@[2001:db8::1]:2222" })).toEqual({
+        input: { address: "2001:db8::1", user: "deploy", port: 2222 },
+      });
+      expect(yield* setup.resolveDestination({ address: "configured" })).toEqual({
+        host: "configured",
+        input: { address: "configured" },
+      });
+      yield* fs.makeDirectory(`${home}/.ssh/goat-hosts`, { recursive: true });
+      yield* fs.writeFileString(
+        `${home}/.ssh/goat-hosts/custom.conf`,
+        "Host custom\n  HostName build.example\n  User deploy\n  Port 2222\n",
+      );
+      yield* fs.writeFileString(
+        `${home}/.ssh/goat-hosts/custom.known_hosts`,
+        "custom ssh-ed25519 AAAA\n",
+      );
+      expect(
+        yield* setup.resolveDestination({ address: "deploy@build.example:2222" }),
+      ).toMatchObject({
+        host: "custom",
+        input: { address: "build.example", user: "deploy", port: 2222 },
+      });
+      for (const overrides of [{ user: "root" }, { port: 2222 }, { identityFile: "/keys/id" }]) {
+        expect(
+          yield* setup
+            .resolveDestination({ address: "configured", ...overrides })
+            .pipe(Effect.flip),
+        ).toMatchObject({
+          reason: "invalid_request",
+          message: expect.stringContaining(`${home}/.ssh/config`),
+        });
+      }
+    }).pipe(Effect.ensuring(Effect.sync(() => discover.mockRestore())));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "preflight passes the environment label and source runner through the injected runner",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-preflight-runner-" });
+      const report: SshPreflightReport = {
+        host: "configured",
+        destination: { alias: "configured", hostname: "build.example", user: "deploy", port: 22 },
+        ready: true,
+        steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({ id, state: "passed", summary: "Passed." })),
+      };
+      const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(
+        Effect.succeed([
+          {
+            alias: "configured",
+            hostname: "build.example",
+            username: "deploy",
+            port: 22,
+            source: "ssh-config",
+          },
+        ]),
+      );
+      yield* Effect.gen(function* () {
+        const layer = Layer.effect(
+          SshHostSetup.SshHostSetup,
+          SshHostSetup.make({
+            home,
+            runPreflight: (input, options) => {
+              expect(input).toEqual({ host: "configured" });
+              expect(options.ownerLabel).toBe("Origin");
+              expect(options.runner.nodeScriptPath).toBe("/src/server.ts");
+              expect(options.runner.nodeEngineRange).toBeTruthy();
+              return Effect.succeed(report);
+            },
+          }),
+        ).pipe(
+          Layer.provide(probeClient),
+          Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+          Layer.provide(dependencies),
+        );
+        const setup = Context.get(yield* Layer.build(layer), SshHostSetup.SshHostSetup);
+        expect(
+          yield* setup.preflight(
+            { host: "configured" },
+            { kind: "client", sessionId: probeSessionId },
+          ),
+        ).toEqual(report);
+      }).pipe(
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromEnvRecord({ GOAT_DEV_REMOTE_SERVER_ENTRY_PATH: "/src/server.ts" }),
+        ),
+        Effect.ensuring(Effect.sync(() => discover.mockRestore())),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("a configured alias can prepare after preflight without creating managed SSH files", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-configured-prepare-" });
+    const completed = yield* Deferred.make<void>();
+    const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(
+      Effect.succeed([
+        {
+          alias: "configured",
+          hostname: "build.example",
+          username: "deploy",
+          port: 22,
+          source: "ssh-config",
+        },
+      ]),
+    );
+    yield* Effect.gen(function* () {
+      const layer = Layer.effect(
+        SshHostSetup.SshHostSetup,
+        SshHostSetup.make({
+          home,
+          runPreflight: () =>
+            Effect.succeed({
+              host: "configured",
+              destination: {
+                alias: "configured",
+                hostname: "build.example",
+                user: "deploy",
+                port: 22,
+              },
+              ready: true,
+              steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({
+                id,
+                state: "passed",
+                summary: "Passed.",
+              })),
+            }),
+        }),
+      ).pipe(
+        Layer.provide(
+          Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+            beginSetupOperation: (_host, { operationId }) =>
+              Effect.succeed({ operationId, generation: 1, stage: "runtime" }),
+            prepareRuntime: () =>
+              Effect.gen(function* () {
+                yield* Deferred.succeed(completed, undefined);
+                return {
+                  kind: "ok",
+                  status: { ...stopped, host: "configured", state: "preparing" },
+                };
+              }),
+            runtimeStatus: () =>
+              Effect.succeed({
+                kind: "ok",
+                status: { ...stopped, host: "configured", state: "preparing" },
+              }),
+            publishSetupOutcome: () => Effect.succeed(true),
+          }),
+        ),
+        Layer.provide(dependencies),
+      );
+      const setup = Context.get(yield* Layer.build(layer), SshHostSetup.SshHostSetup);
+      expect(
+        yield* setup.prepare(
+          { host: "configured" },
+          {
+            kind: "mcp",
+            scope: { ...invocation, grantedScopes: ["settings:write", "environment:maintain"] },
+          },
+        ),
+      ).toMatchObject({ kind: "ok", status: { host: "configured" } });
+      yield* Deferred.await(completed);
+      expect(yield* fs.exists(`${home}/.ssh`)).toBe(false);
+    }).pipe(Effect.ensuring(Effect.sync(() => discover.mockRestore())));
+  }).pipe(Effect.provide(NodeServices.layer)),
 );
