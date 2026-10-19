@@ -472,9 +472,17 @@ export interface SshEnvironmentManagerOptions {
   readonly leaveRemoteServerRunning?: boolean;
 }
 
+interface ReconnectSelection {
+  readonly runtime: PreparedRemoteRuntime;
+  readonly generation: number;
+  readonly revision: number;
+  readonly identity: string;
+}
+
 interface SshTunnelEntry {
   readonly master?: SshMasterConnection;
   selectedRuntime: PreparedRemoteRuntime;
+  reconnectSelection?: ReconnectSelection;
   attachmentInvalidated?: boolean;
   // Status can revalidate an attachment, but cannot prove a submitted drain was cancelled.
   uncertainDrain?: boolean;
@@ -4894,6 +4902,20 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     masters: new Map<string, SshMasterConnection>(),
   };
   const tunnels = new Map<string, SshTunnelEntry>();
+  // One slot per target, consumed by the next ensure attempt.
+  const reconnectSelections = new Map<string, ReconnectSelection>();
+  const selectionRevisions = new Map<string, number>();
+  const takeReconnectSelection = (key: string) => {
+    const selection = reconnectSelections.get(key);
+    reconnectSelections.delete(key);
+    return selection;
+  };
+  const invalidateReconnectSelection = (key: string) => {
+    selectionRevisions.set(key, (selectionRevisions.get(key) ?? 0) + 1);
+    reconnectSelections.delete(key);
+    const entry = tunnels.get(key);
+    if (entry !== undefined) delete entry.reconnectSelection;
+  };
   const firstConnectionDecisions = new Set<string>();
   const generations = new Map<string, number>();
   const resolvedTargets = new Map<string, DesktopSshEnvironmentTarget>();
@@ -4987,6 +5009,20 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     Effect.mapError((error) => (error instanceof SshCommandError ? error : pinError())),
   );
   type ManagedPin = NonNullable<Effect.Success<ReturnType<typeof readManagedPin>>>;
+  const reconnectIdentity = (
+    target: DesktopSshEnvironmentTarget,
+    runner: RemoteGoatRunnerOptions | undefined,
+    pin: ManagedPin | undefined,
+  ) =>
+    JSON.stringify([
+      targetConnectionKey(target),
+      sharing.configurations.get(target.alias),
+      pin,
+      runner?.archiveVersion?.trim(),
+      runner?.archiveCommitTime,
+      runner?.nodeScriptPath,
+      runner?.keepExistingRunner === true,
+    ]);
   const samePin = (left: ManagedPin | undefined, right: ManagedPin | undefined) =>
     left === undefined
       ? right === undefined
@@ -5285,7 +5321,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       generation: number;
       managedPin?: ManagedPin;
       nextAttemptAt: number;
-      selectedRuntime: PreparedRemoteRuntime | undefined;
+      reconnectSelection: ReconnectSelection | undefined;
     } & (
       | { pending: SshRuntimePendingReplacement; archiveFailure?: never }
       | { pending?: never; archiveFailure: SshHostFailure }
@@ -5389,6 +5425,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     managerScope,
     Effect.sync(() => {
       closed = true;
+      reconnectSelections.clear();
       resolvedTargets.clear();
       statuses.clear();
       acquisitionFailures.clear();
@@ -5544,7 +5581,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     readonly runner?: RemoteGoatRunnerOptions;
     readonly previous?: SshTunnelEntry;
     readonly previousLocalPort?: number;
-    readonly previousSelection?: PreparedRemoteRuntime;
+    readonly previousSelection?: ReconnectSelection;
     readonly background?: boolean;
     readonly onPhase?: SshRuntimeProgressCallback;
   }): Effect.fn.Return<
@@ -5558,7 +5595,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       key: input.key,
     });
     const generation = generations.get(input.key) ?? 0;
+    const previousSelection =
+      input.previousSelection?.revision === (selectionRevisions.get(input.key) ?? 0)
+        ? input.previousSelection
+        : undefined;
+    invalidateReconnectSelection(input.key);
+    const revision = selectionRevisions.get(input.key) ?? 0;
     const managedPin = yield* validateManagedPin(input.resolvedTarget);
+    const identity = reconnectIdentity(input.resolvedTarget, input.runner, managedPin);
     if (closed || (generations.get(input.key) ?? 0) !== generation)
       return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
     const phase: SshRuntimeProgressCallback = ({ phase }) => {
@@ -5578,12 +5622,18 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     const operation = (authOptions: SshAuth.SshAuthOptions) =>
       Effect.gen(function* () {
         yield* ensureSshMaster(input.resolvedTarget, authOptions, managerScope);
+        const currentPin = yield* readManagedPin(input.resolvedTarget);
         return yield* launchOrReuseRemoteServer(
           input.resolvedTarget,
           authOptions,
           input.runner,
           phase,
-          input.previousSelection,
+          (selectionRevisions.get(input.key) ?? 0) === revision &&
+            previousSelection?.generation === (generations.get(input.key) ?? 0) &&
+            previousSelection.identity ===
+              reconnectIdentity(input.resolvedTarget, input.runner, currentPin)
+            ? previousSelection.runtime
+            : undefined,
         );
       });
     const launchStartedAt = yield* Clock.currentTimeMillis;
@@ -5649,6 +5699,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       !samePin(managedPin, currentPin)
     ) {
       generations.set(input.key, (generations.get(input.key) ?? 0) + 1);
+      invalidateReconnectSelection(input.key);
       pendingReplacements.delete(input.key);
       setupOperations.delete(input.key);
       const error = pinError(
@@ -5691,12 +5742,10 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         nextAttemptAt: sameIntent
           ? previousIntent.nextAttemptAt
           : (yield* Clock.currentTimeMillis) + 600_000,
-        selectedRuntime:
+        reconnectSelection:
           remoteLaunch.status === "ready"
-            ? remoteLaunch.selectedRuntime
-            : (input.previousSelection ??
-              input.previous?.selectedRuntime ??
-              previousIntent?.selectedRuntime),
+            ? { runtime: remoteLaunch.selectedRuntime, generation, revision, identity }
+            : undefined,
       };
       if (remoteLaunch.pending !== undefined) {
         yield* Effect.logWarning("ssh.runtime.refresh.deferred", {
@@ -5727,6 +5776,12 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       if (previous !== undefined) previous.attachmentInvalidated = true;
       return pendingResult(input.resolvedTarget, remoteLaunch.pending);
     }
+    const reconnectSelection = {
+      runtime: remoteLaunch.selectedRuntime,
+      generation,
+      revision,
+      identity,
+    };
     if (
       input.previous !== undefined &&
       remoteLaunch.refresh !== "replaced" &&
@@ -5739,6 +5794,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       input.previous.selectedRuntime = remoteLaunch.selectedRuntime;
       input.previous.attachmentInvalidated = false;
       input.previous.uncertainDrain = false;
+      input.previous.reconnectSelection = reconnectSelection;
       return input.previous;
     }
     if (input.previous !== undefined) {
@@ -5811,6 +5867,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
     }
     tunnels.set(input.key, tunnelEntry);
+    tunnelEntry.reconnectSelection = reconnectSelection;
     if (remoteLaunch.pending === undefined && !needsArchiveRetry)
       pendingReplacements.delete(input.key);
     const spawnerService = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -5902,6 +5959,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
   const keepAnsweringTunnel = Effect.fn("ssh/tunnel.keepAnsweringTunnel")(function* (
     key: string,
     entry: SshTunnelEntry,
+    retainSelection = false,
   ) {
     const logFields = {
       ...sshTargetLogFields(entry.target),
@@ -5933,6 +5991,22 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     }
     yield* Effect.gen(function* () {
       if (tunnels.get(key) === entry) {
+        const selection = entry.reconnectSelection;
+        // Wake cleanup may finish before reconnect reaches the lock. Keep only launch proof,
+        // whose host-side fingerprint is still checked by the folded command.
+        if (
+          retainSelection &&
+          !closed &&
+          !forgotten.has(key) &&
+          entry.attachmentInvalidated !== true &&
+          entry.uncertainDrain !== true &&
+          selection !== undefined &&
+          selection.revision === (selectionRevisions.get(key) ?? 0) &&
+          selection.generation === (generations.get(key) ?? 0)
+        )
+          reconnectSelections.set(key, selection);
+        if (entry.attachmentInvalidated === true || entry.uncertainDrain === true)
+          invalidateReconnectSelection(key);
         tunnels.delete(key);
       }
       yield* closeTunnelEntry(entry);
@@ -5949,14 +6023,32 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     reuseWhileRefreshPending: boolean = false,
     onPhase?: SshRuntimeProgressCallback,
     allowFoldedProbe = true,
+    capturedSelection?: ReconnectSelection,
   ): Effect.fn.Return<
     SshTunnelEntry | DesktopSshRuntimePendingResult,
     SshEnvironmentEffectError,
     SshEnvironmentEffectContext
   > {
+    const entry = tunnels.get(key);
+    const retainedSelection = takeReconnectSelection(key);
+    const selection =
+      entry?.reconnectSelection ??
+      retainedSelection ??
+      capturedSelection ??
+      pendingReplacements.get(key)?.reconnectSelection;
+    if (entry !== undefined) delete entry.reconnectSelection;
     const managedPin = yield* validateManagedPin(resolvedTarget);
     keyOnly = keyOnly || managedPin !== undefined;
-    const entry = tunnels.get(key);
+    const previousSelection =
+      allowFoldedProbe &&
+      entry?.attachmentInvalidated !== true &&
+      entry?.uncertainDrain !== true &&
+      runner?.refreshOwnedRuntimeOnFirstConnection !== true &&
+      selection?.revision === (selectionRevisions.get(key) ?? 0) &&
+      selection?.generation === (generations.get(key) ?? 0) &&
+      selection.identity === reconnectIdentity(resolvedTarget, runner, managedPin)
+        ? selection
+        : undefined;
     if (entry !== undefined) {
       if (entry.attachmentInvalidated === true || entry.uncertainDrain === true)
         allowFoldedProbe = false;
@@ -5967,7 +6059,15 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         entry.attachmentInvalidated !== true &&
         entry.uncertainDrain !== true
       ) {
-        if (yield* keepAnsweringTunnel(key, entry)) return entry;
+        if (yield* keepAnsweringTunnel(key, entry)) {
+          if (
+            previousSelection !== undefined &&
+            selection !== undefined &&
+            selection.revision === (selectionRevisions.get(key) ?? 0)
+          )
+            entry.reconnectSelection = selection;
+          return entry;
+        }
         // The stale forward is closed; connect anew, refreshing if the host is idle now.
         return yield* createTunnelEntry({
           key,
@@ -5975,7 +6075,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           keyOnly,
           ...(runner === undefined ? {} : { runner }),
           previousLocalPort: entry.localPort,
-          ...(allowFoldedProbe ? { previousSelection: entry.selectedRuntime } : {}),
+          ...(previousSelection === undefined ? {} : { previousSelection }),
           background,
           ...(onPhase === undefined ? {} : { onPhase }),
         });
@@ -5985,14 +6085,22 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         pendingReplacements.has(key) &&
         runner?.refreshOwnedRuntimeOnFirstConnection !== true
       ) {
-        if (yield* keepAnsweringTunnel(key, entry)) return entry;
+        if (yield* keepAnsweringTunnel(key, entry)) {
+          if (
+            previousSelection !== undefined &&
+            selection !== undefined &&
+            selection.revision === (selectionRevisions.get(key) ?? 0)
+          )
+            entry.reconnectSelection = selection;
+          return entry;
+        }
         return yield* createTunnelEntry({
           key,
           resolvedTarget,
           keyOnly,
           ...(runner === undefined ? {} : { runner }),
           previousLocalPort: entry.localPort,
-          previousSelection: entry.selectedRuntime,
+          ...(previousSelection === undefined ? {} : { previousSelection }),
           background,
           ...(onPhase === undefined ? {} : { onPhase }),
         });
@@ -6002,7 +6110,15 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         entry.uncertainDrain === true ||
         pendingReplacements.has(key) ||
         runner?.refreshOwnedRuntimeOnFirstConnection === true;
-      if (!replace && (yield* keepAnsweringTunnel(key, entry))) return entry;
+      if (!replace && (yield* keepAnsweringTunnel(key, entry))) {
+        if (
+          previousSelection !== undefined &&
+          selection !== undefined &&
+          selection.revision === (selectionRevisions.get(key) ?? 0)
+        )
+          entry.reconnectSelection = selection;
+        return entry;
+      }
       if (replace) {
         const readiness = yield* Effect.exit(waitForHttpReady(existingTunnelCheck(entry, 2_000)));
         if (Exit.isSuccess(readiness)) {
@@ -6022,19 +6138,16 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         }).pipe(Effect.uninterruptible);
       }
     }
-    const previousSelection =
-      entry?.selectedRuntime ?? pendingReplacements.get(key)?.selectedRuntime;
     return yield* createTunnelEntry({
       key,
       resolvedTarget,
       keyOnly: keyOnly === true,
       ...(runner === undefined ? {} : { runner }),
       ...(entry === undefined ? {} : { previousLocalPort: entry.localPort }),
-      ...(allowFoldedProbe &&
-      previousSelection !== undefined &&
-      runner?.refreshOwnedRuntimeOnFirstConnection !== true
-        ? { previousSelection }
-        : {}),
+      ...(previousSelection === undefined ||
+      selection?.revision !== (selectionRevisions.get(key) ?? 0)
+        ? {}
+        : { previousSelection }),
       background,
       ...(onPhase === undefined ? {} : { onPhase }),
     });
@@ -6067,6 +6180,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
                 if (!samePin(intent.managedPin, current)) {
                   pendingReplacements.delete(key);
                   generations.set(key, (generations.get(key) ?? 0) + 1);
+                  invalidateReconnectSelection(key);
                   setupOperations.delete(key);
                   acquisitionFailures.delete(key);
                   forgotten.add(key);
@@ -6137,6 +6251,12 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     const requestKey = targetConnectionKey(target);
     const knownKey = targetConnectionKey(resolvedTargets.get(requestKey) ?? target);
     const requestGeneration = generations.get(knownKey) ?? 0;
+    const knownEntry = tunnels.get(knownKey);
+    const retainedSelection = takeReconnectSelection(knownKey);
+    const reconnectSelection = knownEntry?.reconnectSelection ?? retainedSelection;
+    if (knownEntry !== undefined) delete knownEntry.reconnectSelection;
+    if (requestOptions?.refreshRuntime === true || requestOptions?.confirmReplacement === true)
+      invalidateReconnectSelection(knownKey);
     const runner =
       options.resolveCliRunner === undefined ? undefined : yield* options.resolveCliRunner;
     if (ensureSuperseded(ticket) || (generations.get(knownKey) ?? 0) !== requestGeneration)
@@ -6176,6 +6296,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     if (ensureSuperseded(ticket) || (generations.get(knownKey) ?? 0) !== requestGeneration)
       return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
     const key = targetConnectionKey(resolvedTarget);
+    if (key !== knownKey) invalidateReconnectSelection(knownKey);
     const admittedGeneration = generations.get(key) ?? 0;
     resolvedTargets.set(targetConnectionKey(target), resolvedTarget);
     if (key !== knownKey && !statuses.has(key)) {
@@ -6239,6 +6360,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
             requestOptions.refreshRuntime !== true,
           requestOptions?.onPhase,
           requestOptions?.refreshRuntime !== true && requestOptions?.confirmReplacement !== true,
+          reconnectSelection,
         );
         if (ensureSuperseded(ticket) || (generations.get(key) ?? 0) !== ensureGeneration)
           return yield* new SshLaunchError({
@@ -6295,7 +6417,18 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
             : {}),
           ...(pendingReplacement === undefined ? {} : { pendingReplacement }),
         };
-      }),
+      }).pipe(
+        Effect.onExit((exit) =>
+          Effect.sync(() => {
+            if (
+              Exit.isFailure(exit) &&
+              !ensureSuperseded(ticket) &&
+              (generations.get(key) ?? 0) === admittedGeneration
+            )
+              invalidateReconnectSelection(key);
+          }),
+        ),
+      ),
     ).pipe(
       Effect.tapError((error) =>
         Effect.suspend(() =>
@@ -6319,7 +6452,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           key,
           Effect.suspend(() => {
             const entry = tunnels.get(key);
-            return entry === undefined ? Effect.void : keepAnsweringTunnel(key, entry);
+            return entry === undefined ? Effect.void : keepAnsweringTunnel(key, entry, true);
           }),
         ),
       { concurrency: "unbounded", discard: true },
@@ -6353,6 +6486,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     }
     const hadPending = pendingReplacements.has(key);
     generations.set(key, (generations.get(key) ?? 0) + 1);
+    invalidateReconnectSelection(key);
     pendingReplacements.delete(key);
     statuses.delete(key);
     acquisitionFailures.delete(key);
@@ -6635,6 +6769,15 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       )
         pendingReplacements.delete(key);
     }
+    const selected = tunnels.get(key)?.reconnectSelection ?? reconnectSelections.get(key);
+    if (
+      tunnels.get(key)?.attachmentInvalidated === true ||
+      tunnels.get(key)?.uncertainDrain === true ||
+      enriched.kind !== "ok" ||
+      (enriched.status?.state !== "ready" && enriched.status?.state !== "providers_not_ready") ||
+      enriched.status.runtimeVersion !== selected?.runtime.version
+    )
+      invalidateReconnectSelection(key);
     statuses.set(key, enriched);
     return enriched;
   });
@@ -6784,6 +6927,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     resolvedTargets.set(targetConnectionKey(target), resolvedTarget);
     const generation = (generations.get(key) ?? 0) + 1;
     generations.set(key, generation);
+    invalidateReconnectSelection(key);
     pendingReplacements.delete(key);
     forgotten.delete(key);
     const setup: SshHostSetupProgress = { operationId, generation, stage: "runtime" };
@@ -6849,6 +6993,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       } else {
         pendingReplacements.delete(key);
         generations.set(key, operation.generation + 1);
+        invalidateReconnectSelection(key);
         const {
           phase: _phase,
           waitingReason: _waiting,
@@ -6912,6 +7057,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     const key = targetConnectionKey(resolvedTarget);
     const generation = (generations.get(key) ?? 0) + 1;
     generations.set(key, generation);
+    invalidateReconnectSelection(key);
     pendingReplacements.delete(key);
     acquisitionFailures.delete(key);
     setupOperations.delete(key);
