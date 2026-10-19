@@ -274,8 +274,9 @@ export const make = Effect.gen(function* () {
         const onPath =
           snapshot?.installed === true
             ? true
-            : (yield* resolveCommandPath(recipe.binary).pipe(Effect.orElseSucceed(() => null))) !==
-              null;
+            : yield* Effect.forEach([recipe.binary, ...(recipe.aliases ?? [])], (name) =>
+                resolveCommandPath(name).pipe(Effect.orElseSucceed(() => null)),
+              ).pipe(Effect.map((found) => found.some((path) => path !== null)));
         const authStatus = snapshot?.auth.status;
         return {
           driver: ProviderDriverKind.make(driver),

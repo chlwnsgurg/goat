@@ -21,7 +21,10 @@ export interface InstallCommand {
 
 interface Recipe {
   readonly displayName: string;
+  /** Executable a device login runs; also the first name probed on PATH. */
   readonly binary: string;
+  /** Other names the same CLI installs under, probed after `binary`. */
+  readonly aliases?: ReadonlyArray<string>;
   readonly npmPackage: string | null;
   readonly npmArgs?: ReadonlyArray<string>;
   /** Posix install script, run as `bash -c script goat-install <version>`. */
@@ -63,7 +66,9 @@ const RECIPES: Record<ProviderHostSyncDriver, Recipe> = {
   },
   cursor: {
     displayName: "Cursor",
-    binary: "cursor-agent",
+    // Cursor's installer now links `agent`; older installs only have `cursor-agent`.
+    binary: "agent",
+    aliases: ["cursor-agent"],
     npmPackage: null,
     posixScript: { script: "curl https://cursor.com/install -fsS | bash", pinnable: false },
     windowsScript: {
@@ -71,7 +76,7 @@ const RECIPES: Record<ProviderHostSyncDriver, Recipe> = {
       pinnable: false,
     },
     browserHosts: ["cursor.com"],
-    terminalLogin: "cursor-agent login",
+    terminalLogin: "agent login",
   },
   grok: {
     displayName: "Grok",
