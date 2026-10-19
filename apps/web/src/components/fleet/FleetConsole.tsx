@@ -32,7 +32,7 @@ import {
   type FleetHostRow,
   type FleetThroughput,
   lastKnownLabel,
-  type HostHistory,
+  type HostLastSeen,
   type HostSample,
 } from "./fleetTelemetry";
 
@@ -120,12 +120,12 @@ function formatPercent(value: number | null) {
 }
 
 /** "macmini · macOS · 10 cores", with how old the numbers are when the host stopped answering. */
-function hostDetail(row: FleetHostRow, history: HostHistory, now: number): string {
+function hostDetail(row: FleetHostRow, lastSeen: HostLastSeen, now: number): string {
   const metrics = row.entry?.metrics;
   const parts = [row.label, platformLabel(metrics?.platform)];
   if (metrics !== undefined)
     parts.push(metrics.cpuCount + (metrics.cpuCount === 1 ? " core" : " cores"));
-  parts.push(lastKnownLabel(row, history, now));
+  parts.push(lastKnownLabel(row, lastSeen, now));
   if (row.tone === "none") parts.push("no host status describes this machine");
   return parts.filter((part) => part !== null).join(" · ");
 }
@@ -133,12 +133,12 @@ function hostDetail(row: FleetHostRow, history: HostHistory, now: number): strin
 function HostRow({
   row,
   samples,
-  history,
+  lastSeen,
   observedAt,
 }: {
   readonly row: FleetHostRow;
   readonly samples: ReadonlyArray<HostSample>;
-  readonly history: HostHistory;
+  readonly lastSeen: HostLastSeen;
   readonly observedAt: number;
 }) {
   const metrics = row.entry?.metrics;
@@ -180,7 +180,7 @@ function HostRow({
           >
             {row.label}
           </TooltipTrigger>
-          <TooltipPopup side="top">{hostDetail(row, history, observedAt)}</TooltipPopup>
+          <TooltipPopup side="top">{hostDetail(row, lastSeen, observedAt)}</TooltipPopup>
         </Tooltip>
       </span>
       {statusText !== null ? (
@@ -328,7 +328,7 @@ function FleetConsoleExpanded(props: {
   }));
   const alerts = fleetAlerts(rows, connections, status.observedAt, {
     unreadable,
-    history: status.history,
+    lastSeen: status.lastSeen,
   });
   const hottest = hottestHost(rows);
   const quotas = quotaRows(rows).slice(0, 3);
@@ -410,7 +410,7 @@ function FleetConsoleExpanded(props: {
                 <HostRow
                   key={row.key}
                   row={row}
-                  history={status.history}
+                  lastSeen={status.lastSeen}
                   observedAt={status.observedAt}
                   samples={
                     (row.sourceKey === null ? undefined : status.history.get(row.sourceKey)) ??

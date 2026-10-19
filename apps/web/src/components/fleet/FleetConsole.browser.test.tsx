@@ -34,6 +34,7 @@ vi.mock(import("./fleetHostStatus"), async (original) => ({
       reads: [{ environmentId, hosts: [host] }],
       sources: [],
       history: new Map(),
+      lastSeen: new Map(),
       loading: false,
       failed: [],
       sampledAt: SAMPLED_AT,

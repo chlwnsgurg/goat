@@ -20,6 +20,7 @@ import {
   pushBounded,
   quotaRows,
   recordHostSamples,
+  recordLastSeen,
   sparklinePath,
   type FleetHostRead,
   type ThroughputShell,
@@ -142,9 +143,9 @@ describe("recordHostSamples with host clocks that disagree", () => {
     expect(recordHostSamples(history, [], NOW + 11 * 60_000).size).toBe(0);
   });
 
-  it("times a lost host from when this client last saw it answer", () => {
+  it("times a lost host from when this client last saw it answer, past the sparkline's life", () => {
     const ahead = NOW + 60 * 60_000;
-    const seen = recordHostSamples(
+    const seen = recordLastSeen(
       new Map(),
       [{ environmentId: studio, hosts: [entry("box", { at: ahead })] }],
       NOW,
@@ -160,11 +161,10 @@ describe("recordHostSamples with host clocks that disagree", () => {
       ],
       primaryEnvironmentId: studio,
     });
-    expect(
-      fleetAlerts(rows, new Map(), NOW + 5 * 60_000, { history: seen }).map(
-        (alert) => alert.detail,
-      ),
-    ).toEqual(["Unreachable, last known 5m ago"]);
+    const detail = (now: number) =>
+      fleetAlerts(rows, new Map(), now, { lastSeen: seen }).map((alert) => alert.detail);
+    expect(detail(NOW + 5 * 60_000)).toEqual(["Unreachable, last known 5m ago"]);
+    expect(detail(NOW + 25 * 60_000)).toEqual(["Unreachable, last known 25m ago"]);
   });
 });
 

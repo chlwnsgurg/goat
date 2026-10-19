@@ -13,8 +13,10 @@ import { HOST_STATUS_REFRESH_MS } from "../settings/hostStatusView";
 import {
   asLastKnown,
   recordHostSamples,
+  recordLastSeen,
   type FleetHostRead,
   type HostHistory,
+  type HostLastSeen,
 } from "./fleetTelemetry";
 
 /*
@@ -27,6 +29,7 @@ export interface FleetHostStatus {
   /** Environments being read, for their refreshers. */
   readonly sources: ReadonlyArray<EnvironmentId>;
   readonly history: HostHistory;
+  readonly lastSeen: HostLastSeen;
   readonly loading: boolean;
   /** Environments whose read failed with no earlier answer to fall back on. */
   readonly failed: ReadonlyArray<EnvironmentId>;
@@ -45,6 +48,7 @@ const hostStatusAtom = (environmentId: EnvironmentId) =>
  * bounded in length and age, so recomputing the atom cannot grow it.
  */
 let hostHistory: HostHistory = new Map();
+let hostLastSeen: HostLastSeen = new Map();
 
 export const fleetHostStatusAtom = Atom.make((get): FleetHostStatus => {
   const environments = get(fleetEnvironmentsAtom);
@@ -96,7 +100,9 @@ export const fleetHostStatusAtom = Atom.make((get): FleetHostStatus => {
     if (covered !== true) read(environment.environmentId);
   }
 
-  hostHistory = recordHostSamples(hostHistory, reads, Date.now());
+  const now = Date.now();
+  hostHistory = recordHostSamples(hostHistory, reads, now);
+  hostLastSeen = recordLastSeen(hostLastSeen, reads, now);
   const sampledAt = reads.reduce(
     (newest, { hosts }) =>
       hosts.reduce((latest, entry) => Math.max(latest, entry.metrics?.sampledAt ?? 0), newest),
@@ -110,13 +116,23 @@ export const fleetHostStatusAtom = Atom.make((get): FleetHostStatus => {
     previous.observedAt === observedAt &&
     previous.failed.join("\n") === failed.join("\n") &&
     previous.history === hostHistory &&
+    previous.lastSeen === hostLastSeen &&
     previous.sources.join("\n") === sources.join("\n") &&
     previous.reads.length === reads.length &&
     previous.reads.every((entry, index) => entry.hosts === reads[index]!.hosts)
   ) {
     return previous;
   }
-  return { reads, sources, history: hostHistory, loading, failed, sampledAt, observedAt };
+  return {
+    reads,
+    sources,
+    history: hostHistory,
+    lastSeen: hostLastSeen,
+    loading,
+    failed,
+    sampledAt,
+    observedAt,
+  };
 }).pipe(Atom.withLabel("fleet-host-status"));
 
 export function useFleetHostStatus(): FleetHostStatus {

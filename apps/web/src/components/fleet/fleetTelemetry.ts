@@ -92,19 +92,41 @@ export function recordHostSamples(
   return next ?? history;
 }
 
+/** When this client last received a new reading from each host, kept after its sparkline expires. */
+export type HostLastSeen = ReadonlyMap<string, { readonly at: number; readonly seenAt: number }>;
+
+/** Like the history, a repeated sample changes nothing and returns the same map. */
+export function recordLastSeen(
+  lastSeen: HostLastSeen,
+  reads: ReadonlyArray<FleetHostRead>,
+  now: number,
+): HostLastSeen {
+  let next: Map<string, { readonly at: number; readonly seenAt: number }> | null = null;
+  for (const read of reads) {
+    for (const entry of read.hosts) {
+      if (entry.reachability !== "ok" || entry.metrics === undefined) continue;
+      const key = hostSourceKey(read.environmentId, entry.host);
+      if ((next ?? lastSeen).get(key)?.at === entry.metrics.sampledAt) continue;
+      next ??= new Map(lastSeen);
+      next.set(key, { at: entry.metrics.sampledAt, seenAt: now });
+    }
+  }
+  return next ?? lastSeen;
+}
+
 /**
  * "last known 4m ago" for a host that stopped answering, timed from when this client last saw
- * it answer; the host's own sample time is used only once that has left the history.
+ * it answer. The host's own sample time is used only for a host this client never saw answer.
  */
 export function lastKnownLabel(
   row: FleetHostRow,
-  history: HostHistory,
+  lastSeen: HostLastSeen,
   now: number,
 ): string | null {
   const sampledAt = row.entry?.metrics?.sampledAt;
   if (row.tone !== "stale" || sampledAt === undefined) return null;
   const seenAt =
-    (row.sourceKey === null ? undefined : history.get(row.sourceKey)?.at(-1)?.seenAt) ?? sampledAt;
+    (row.sourceKey === null ? undefined : lastSeen.get(row.sourceKey)?.seenAt) ?? sampledAt;
   const age = formatElapsedDurationLabel(new Date(Math.min(seenAt, now)).toISOString(), now);
   return age === "just now" ? "last known just now" : "last known " + age + " ago";
 }
@@ -300,11 +322,11 @@ export function fleetAlerts(
   options: {
     /** Environments whose last host-status read failed. */
     readonly unreadable?: ReadonlyArray<{ readonly key: string; readonly label: string }>;
-    readonly history?: HostHistory;
+    readonly lastSeen?: HostLastSeen;
   } = {},
 ): ReadonlyArray<FleetAlert> {
   const unreadable = options.unreadable ?? [];
-  const history = options.history ?? new Map();
+  const lastSeen = options.lastSeen ?? new Map();
   const alerts: FleetAlert[] = unreadable.map(({ key, label }) => ({
     key: key + ":unreadable",
     tone: "warning",
@@ -320,7 +342,7 @@ export function fleetAlerts(
     const entry = row.entry;
     if (entry === null) continue;
     if (fromConnection === null && (row.tone === "stale" || row.tone === "unreachable")) {
-      const lastKnown = lastKnownLabel(row, history, now);
+      const lastKnown = lastKnownLabel(row, lastSeen, now);
       alerts.push({
         key: row.key + ":reach",
         tone: "warning",
