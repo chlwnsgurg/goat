@@ -3788,7 +3788,7 @@ if launch_output="$(reconnect_launch "$1")"; then
 else
   launch_status=$?
   if [ "$launch_status" -ne ${REMOTE_RECONNECT_REPROBE_EXIT_CODE} ]; then exit "$launch_status"; fi
-  printf 'GOAT_RECONNECT_PROBE=%s\\n' "\${probe_output:-}"
+  # A guard can fail after the probe; selection must observe that race afresh.
   printf '{"status":"reprobe"}\\n'
   exit 0
 fi
