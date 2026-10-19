@@ -171,6 +171,7 @@ are relative to the bundle's `snapshots/vite-build-beautified/`.
 | Suspend                      | only timestamps the sleep (`apps/desktop/src/app/DesktopSystemWake.ts:48`)                                         | herdr cancels in-flight attempts; cmux cancels timers           | P2                                    |
 | Blocked recovery             | waits for wake, network change, or click (`supervisor.ts:972`)                                                     | herdr re-checks every 30 s                                      | P1 (local proxy only)                 |
 | SSH handshakes per reconnect | one owned POSIX master per target; commands and forwards reuse it; cost log separates masters and control commands | one scoped master per host in cmux, herdr, herdr-web-ui (POSIX) | none; real-host remeasurement pending |
+| Setup deadline               | launch plus runtime probe take 17–25 s, so every reconnect's first attempt times out at 15 s                       | none of the references probe a runtime on each reconnect        | P0                                    |
 | Stalled link                 | ServerAlive + RPC silence budget; real loopback stall tests cover RPC timeout and forward revalidation             | cmux blocked-write and carrier-cut fixtures                     | none                                  |
 | Abandoned server sockets     | not measured; the server sets no idle option (`apps/server/src/ws.ts:3430`)                                        | herdr bridge idles out at 60 s; cmux lease evicts older bridges | P1, measure first                     |
 | Git over SSH                 | `GIT_SSH_COMMAND` uses ServerAliveInterval=15 / ServerAliveCountMax=3, plus the 120 s transfer cap                 | every other SSH path carries ServerAlive                        | none; stall timing pending            |
@@ -178,7 +179,7 @@ are relative to the bundle's `snapshots/vite-build-beautified/`.
 | Frozen timers (web, mobile)  | long-resume path replaces the session                                                                              | herdr-web-ui treats a late deadline as a freeze                 | P2, verify                            |
 | Archive pinning              | SHA-256 locally and on the host                                                                                    | same                                                            | none                                  |
 | Session resume               | server owns turns and state; subscriptions replay from cursor; mutations never replayed                            | cmux keeps replay state 120 s; herdr keeps panes running        | none                                  |
-| Forward lifetime             | forwards and masters share the POSIX owner-death fence and 2 s bounded teardown; Windows stays standalone          | herdr-web-ui and Codex kill by captured PID                     | none on POSIX                         |
+| Forward lifetime             | owner-death fence on POSIX, 2 s bounded teardown (#378); Windows unfenced                                          | herdr-web-ui and Codex kill by captured PID                     | none on POSIX                         |
 | Roaming transport (Mosh)     | none                                                                                                               | cmux uses it for the terminal only                              | non-goal                              |
 
 Two reference behaviors are deliberately not adopted. cmux's older coordinator
@@ -202,6 +203,38 @@ evidence over plain `ssh`. A stalled link is simulated with a loopback relay
 in the path (for example a `ProxyCommand` through a relay that can stop
 forwarding), never by stopping ssh itself: a stopped ssh also stops its
 keepalive.
+
+Baseline from 2026-10-19, measured with a development desktop at `466596748`
+attached to each host's existing runtime. Each reconnect was triggered by
+killing the app's forward:
+
+| Host         | Handshake | Reconnect (median of 5) | ssh spawns | First attempt     |
+| ------------ | --------- | ----------------------- | ---------- | ----------------- |
+| `mac-studio` | 0.17 s    | 26.5 s                  | 4          | times out at 15 s |
+| `macmini-cf` | 3.3 s     | 57.5 s                  | 5          | times out at 15 s |
+
+Through the stall relay, the Connections row left `Connected` a median 20.5 s
+after the stall (15.4–20.7 s) and was back a median 34 s after the relay
+resumed (26–47 s).
+
+### P0
+
+**P0-3. Keep one reconnect inside the setup deadline.**
+Problem: on both hosts the launch step (`sh -l -s`, 6–10 s) and the runtime
+probe (`sh -l -s -- runtime`, 11–15 s) together exceed the supervisor's 15 s
+establishment timeout (`supervisor.ts:44`), so the first attempt of every
+reconnect fails with "did not respond during connection setup" and the next
+attempt joins the preparation that is still running.
+Evidence: every measured reconnect above. Each `goat` start on the host costs
+about 0.42 s, and the probe starts it repeatedly (`binary_json`,
+`build_commit_time`, `lacks_memory_scopes`, `__ssh-helper protocol` and
+`compat`) and hashes the runner and executables
+(`packages/ssh/src/tunnel.ts:2273`, `tunnel.ts:2316`).
+Change: answer the probe with one helper invocation, or skip it when the live
+server the client last attached to still reports the same identity. Do not
+raise the timeout, which also bounds a dead host.
+Test: a preparation-timing test in `packages/ssh`.
+Real app: rerun the reconnect baseline; the first attempt no longer times out.
 
 ### P1
 
@@ -303,10 +336,8 @@ changing reconnect policy or connection sharing.
 2. **Wake and blocked recovery** (P1-1, P1-2, P2-1). Supervisor policy and the
    desktop wake source; updates the States and Backoff sections of
    [SSH reconnect](ssh-reconnect.md).
-3. **Scoped SSH master** (P1-3, P2-2), implemented. POSIX sharing and Git
-   keepalive have fixture coverage; real-host reconnect and stalled-fetch
-   measurements remain to be collected against bundle 1.
-4. **Server socket hygiene** (P1-4). Measurement, then the idle close if the
+3. **Server socket hygiene** (P1-4). Measurement, then the idle close if the
    counts justify it.
-5. **Diagnostic copy and late timers** (P2-3, P2-4). UI plus a verified-only
+4. **Diagnostic copy and late timers** (P2-3, P2-4). UI plus a verified-only
    mobile fix.
+5. **Probe cost** (P0-3). The `packages/ssh` runtime probe; rerun the baseline.
