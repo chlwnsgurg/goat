@@ -292,6 +292,7 @@ import {
   MessageCircleIcon,
   PaperclipIcon,
   ChevronDownIcon,
+  CopyIcon,
   DownloadIcon,
   GitBranchIcon,
   ShieldQuestionIcon,
@@ -2427,9 +2428,21 @@ export default function ChatView(props: ChatViewProps) {
               {environmentReconnecting ? "Retry now" : "Reconnect"}
             </Button>
             {disconnectAction}
-            <Button size="xs" variant="ghost" onClick={copyConnectionDiagnostic}>
-              Copy diagnostic
-            </Button>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    size="icon-xs"
+                    variant="ghost"
+                    aria-label="Copy diagnostic"
+                    onClick={copyConnectionDiagnostic}
+                  />
+                }
+              >
+                <CopyIcon />
+              </TooltipTrigger>
+              <TooltipPopup side="top">Copy diagnostic</TooltipPopup>
+            </Tooltip>
           </>
         ),
       });
