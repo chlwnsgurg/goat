@@ -10,7 +10,12 @@ import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
 import { serverEnvironment } from "~/state/server";
 
 import { HOST_STATUS_REFRESH_MS } from "../settings/hostStatusView";
-import { recordHostSamples, type FleetHostRead, type HostHistory } from "./fleetTelemetry";
+import {
+  asLastKnown,
+  recordHostSamples,
+  type FleetHostRead,
+  type HostHistory,
+} from "./fleetTelemetry";
 
 /*
  * The Fleet console's one source of host metrics: the same host-status query and 15 s cadence
@@ -54,17 +59,20 @@ export const fleetHostStatusAtom = Atom.make((get): FleetHostStatus => {
     sources.push(environmentId);
     const result = get(hostStatusAtom(environmentId));
     const hosts = Option.getOrNull(AsyncResult.value(result))?.hosts ?? null;
-    if (hosts !== null) {
-      reads.push({ environmentId, hosts });
-      if (AsyncResult.isSuccess(result)) observedAt = Math.max(observedAt, result.timestamp);
-      return hosts;
-    }
     if (AsyncResult.isFailure(result)) {
+      // A failed refresh keeps its last answer; show it as last known, and let it vouch for
+      // nothing so other environments are asked directly.
       failed.push(environmentId);
+      if (hosts !== null) reads.push({ environmentId, hosts: asLastKnown(hosts) });
       return [];
     }
-    loading = true;
-    return null;
+    if (hosts === null) {
+      loading = true;
+      return null;
+    }
+    reads.push({ environmentId, hosts });
+    if (AsyncResult.isSuccess(result)) observedAt = Math.max(observedAt, result.timestamp);
+    return hosts;
   };
 
   // The primary environment answers for itself and every SSH host it holds open. Another

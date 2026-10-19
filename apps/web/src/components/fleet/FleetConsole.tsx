@@ -13,8 +13,6 @@ import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
 import { environmentThreadShells } from "~/state/threads";
 import { useUiStateStore } from "~/uiStateStore";
 
-import { formatElapsedDurationLabel } from "~/timestampFormat";
-
 import { platformLabel } from "../settings/hostStatusView";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -33,6 +31,8 @@ import {
   type FleetAlertTone,
   type FleetHostRow,
   type FleetThroughput,
+  lastKnownLabel,
+  type HostHistory,
   type HostSample,
 } from "./fleetTelemetry";
 
@@ -120,15 +120,12 @@ function formatPercent(value: number | null) {
 }
 
 /** "macmini · macOS · 10 cores", with how old the numbers are when the host stopped answering. */
-function hostDetail(row: FleetHostRow, now: number): string {
+function hostDetail(row: FleetHostRow, history: HostHistory, now: number): string {
   const metrics = row.entry?.metrics;
   const parts = [row.label, platformLabel(metrics?.platform)];
   if (metrics !== undefined)
     parts.push(metrics.cpuCount + (metrics.cpuCount === 1 ? " core" : " cores"));
-  if (row.tone === "stale" && metrics !== undefined) {
-    const age = formatElapsedDurationLabel(new Date(metrics.sampledAt).toISOString(), now);
-    parts.push(age === "just now" ? "last known just now" : "last known " + age + " ago");
-  }
+  parts.push(lastKnownLabel(row, history, now));
   if (row.tone === "none") parts.push("no host status describes this machine");
   return parts.filter((part) => part !== null).join(" · ");
 }
@@ -136,10 +133,12 @@ function hostDetail(row: FleetHostRow, now: number): string {
 function HostRow({
   row,
   samples,
+  history,
   observedAt,
 }: {
   readonly row: FleetHostRow;
   readonly samples: ReadonlyArray<HostSample>;
+  readonly history: HostHistory;
   readonly observedAt: number;
 }) {
   const metrics = row.entry?.metrics;
@@ -181,7 +180,7 @@ function HostRow({
           >
             {row.label}
           </TooltipTrigger>
-          <TooltipPopup side="top">{hostDetail(row, observedAt)}</TooltipPopup>
+          <TooltipPopup side="top">{hostDetail(row, history, observedAt)}</TooltipPopup>
         </Tooltip>
       </span>
       {statusText !== null ? (
@@ -327,7 +326,10 @@ function FleetConsoleExpanded(props: {
     key: environmentId,
     label: environments.find((env) => env.environmentId === environmentId)?.label ?? environmentId,
   }));
-  const alerts = fleetAlerts(rows, connections, status.observedAt, unreadable);
+  const alerts = fleetAlerts(rows, connections, status.observedAt, {
+    unreadable,
+    history: status.history,
+  });
   const hottest = hottestHost(rows);
   const quotas = quotaRows(rows).slice(0, 3);
   const { totals } = snapshot;
@@ -408,6 +410,7 @@ function FleetConsoleExpanded(props: {
                 <HostRow
                   key={row.key}
                   row={row}
+                  history={status.history}
                   observedAt={status.observedAt}
                   samples={
                     (row.sourceKey === null ? undefined : status.history.get(row.sourceKey)) ??

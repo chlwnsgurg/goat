@@ -11,6 +11,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { FleetConnection } from "./fleetConnection";
 import {
+  asLastKnown,
   fleetAlerts,
   fleetThroughput,
   hostSourceKey,
@@ -102,7 +103,7 @@ describe("recordHostSamples", () => {
   it("appends a new sample once and ignores a repeated sampledAt", () => {
     const first = recordHostSamples(new Map(), [read(NOW)], NOW);
     expect(first.get(hostSourceKey(studio, null))).toEqual([
-      { at: NOW, cpu: 50, memory: 75, load: 1 },
+      { at: NOW, seenAt: NOW, cpu: 50, memory: 75, load: 1 },
     ]);
     expect(recordHostSamples(first, [read(NOW)], NOW)).toBe(first);
     const second = recordHostSamples(first, [read(NOW + 15_000, 0.9)], NOW + 15_000);
@@ -117,6 +118,68 @@ describe("recordHostSamples", () => {
     expect(history.get(hostSourceKey(studio, null))).toHaveLength(3);
     const later = NOW + 12 * 60_000;
     expect(recordHostSamples(history, [], later).size).toBe(0);
+  });
+});
+
+describe("recordHostSamples with host clocks that disagree", () => {
+  it("keeps and expires samples by this client's clock, and skips last-known metrics", () => {
+    const behind = NOW - 30 * 60_000;
+    const history = recordHostSamples(
+      new Map(),
+      [
+        {
+          environmentId: studio,
+          hosts: [
+            entry(null, { at: behind }),
+            entry("gone", { at: behind, reachability: "unreachable", lastKnown: true }),
+          ],
+        },
+      ],
+      NOW,
+    );
+    expect(history.get(hostSourceKey(studio, null))).toHaveLength(1);
+    expect(history.has(hostSourceKey(studio, "gone"))).toBe(false);
+    expect(recordHostSamples(history, [], NOW + 11 * 60_000).size).toBe(0);
+  });
+
+  it("times a lost host from when this client last saw it answer", () => {
+    const ahead = NOW + 60 * 60_000;
+    const seen = recordHostSamples(
+      new Map(),
+      [{ environmentId: studio, hosts: [entry("box", { at: ahead })] }],
+      NOW,
+    );
+    const rows = matchHostRows({
+      machines: [],
+      aliasesByEnvironment: new Map(),
+      reads: [
+        {
+          environmentId: studio,
+          hosts: [entry("box", { at: ahead, reachability: "unreachable", lastKnown: true })],
+        },
+      ],
+      primaryEnvironmentId: studio,
+    });
+    expect(
+      fleetAlerts(rows, new Map(), NOW + 5 * 60_000, { history: seen }).map(
+        (alert) => alert.detail,
+      ),
+    ).toEqual(["Unreachable, last known 5m ago"]);
+  });
+});
+
+describe("asLastKnown", () => {
+  it("turns a failed refresh's cached answer into last-known hosts, once per answer", () => {
+    const cached = [
+      entry(null),
+      entry("ancient", { reachability: "unsupported", noMetrics: true }),
+    ];
+    const stale = asLastKnown(cached);
+    expect(stale.map((host) => [host.reachability, host.lastKnown])).toEqual([
+      ["unreachable", true],
+      ["unsupported", undefined],
+    ]);
+    expect(asLastKnown(cached)).toBe(stale);
   });
 });
 
@@ -249,11 +312,9 @@ describe("fleetAlerts", () => {
       ["mini", { state: "attention", label: "Needs attention", reason: "Tailscale is off" }],
     ]);
     expect(
-      fleetAlerts(rows, connections, NOW, [{ key: "remote", label: "remote" }]).map((alert) => [
-        alert.label,
-        alert.tone,
-        alert.detail,
-      ]),
+      fleetAlerts(rows, connections, NOW, { unreadable: [{ key: "remote", label: "remote" }] }).map(
+        (alert) => [alert.label, alert.tone, alert.detail],
+      ),
     ).toEqual([
       ["mini", "destructive", "Tailscale is off"],
       ["remote", "warning", "Could not read host status"],

@@ -26,9 +26,14 @@ export function pushBounded<T>(
   return [...list.slice(Math.max(0, list.length + 1 - capacity)), item];
 }
 
-/** Percentages from 0 to 100; load is the one-minute average. Null where the host sent none. */
+/**
+ * Percentages from 0 to 100; load is the one-minute average. Null where the host sent none.
+ * `at` is the host's own clock and only tells samples apart; `seenAt` is this client's clock,
+ * so retention and ages hold when a host's clock is off.
+ */
 export interface HostSample {
   readonly at: number;
+  readonly seenAt: number;
   readonly cpu: number | null;
   readonly memory: number | null;
   readonly load: number | null;
@@ -41,9 +46,10 @@ export const hostSourceKey = (environmentId: EnvironmentId, host: string | null)
 
 const percent = (value: number) => Math.min(100, Math.max(0, value * 100));
 
-function sampleOf(metrics: NonNullable<HostStatusEntry["metrics"]>): HostSample {
+function sampleOf(metrics: NonNullable<HostStatusEntry["metrics"]>, seenAt: number): HostSample {
   return {
     at: metrics.sampledAt,
+    seenAt,
     cpu: metrics.cpuUtilization === null ? null : percent(metrics.cpuUtilization),
     memory:
       metrics.totalMemoryBytes > 0
@@ -54,9 +60,9 @@ function sampleOf(metrics: NonNullable<HostStatusEntry["metrics"]>): HostSample 
 }
 
 /**
- * Appends each host's newest sample. A repeated `sampledAt` (a cached read, or an unreachable
- * host's last-known metrics) adds nothing, so recording the same reads twice is a no-op and
- * returns the same map.
+ * Appends each reachable host's newest sample. A repeated `sampledAt` (a cached read) adds
+ * nothing, so recording the same reads twice is a no-op and returns the same map. Last-known
+ * metrics of an unreachable host are not new readings and are not recorded.
  */
 export function recordHostSamples(
   history: HostHistory,
@@ -67,23 +73,66 @@ export function recordHostSamples(
   let next: Map<string, ReadonlyArray<HostSample>> | null = null;
   const cutoff = now - HOST_HISTORY_MAX_AGE_MS;
   for (const [key, samples] of history) {
-    if (samples.length > 0 && samples[0]!.at >= cutoff) continue;
-    const kept = samples.filter((sample) => sample.at >= cutoff);
+    if (samples.length > 0 && samples[0]!.seenAt >= cutoff) continue;
+    const kept = samples.filter((sample) => sample.seenAt >= cutoff);
     next ??= new Map(history);
     if (kept.length === 0) next.delete(key);
     else next.set(key, kept);
   }
   for (const read of reads) {
     for (const entry of read.hosts) {
-      if (entry.metrics === undefined || entry.metrics.sampledAt < cutoff) continue;
+      if (entry.reachability !== "ok" || entry.metrics === undefined) continue;
       const key = hostSourceKey(read.environmentId, entry.host);
       const samples = (next ?? history).get(key) ?? [];
       if (samples.some((sample) => sample.at === entry.metrics!.sampledAt)) continue;
       next ??= new Map(history);
-      next.set(key, pushBounded(samples, sampleOf(entry.metrics), capacity));
+      next.set(key, pushBounded(samples, sampleOf(entry.metrics, now), capacity));
     }
   }
   return next ?? history;
+}
+
+/**
+ * "last known 4m ago" for a host that stopped answering, timed from when this client last saw
+ * it answer; the host's own sample time is used only once that has left the history.
+ */
+export function lastKnownLabel(
+  row: FleetHostRow,
+  history: HostHistory,
+  now: number,
+): string | null {
+  const sampledAt = row.entry?.metrics?.sampledAt;
+  if (row.tone !== "stale" || sampledAt === undefined) return null;
+  const seenAt =
+    (row.sourceKey === null ? undefined : history.get(row.sourceKey)?.at(-1)?.seenAt) ?? sampledAt;
+  const age = formatElapsedDurationLabel(new Date(Math.min(seenAt, now)).toISOString(), now);
+  return age === "just now" ? "last known just now" : "last known " + age + " ago";
+}
+
+const lastKnownByAnswer = new WeakMap<
+  ReadonlyArray<HostStatusEntry>,
+  ReadonlyArray<HostStatusEntry>
+>();
+
+/**
+ * A cached answer from a refresh that failed: reachable hosts become last known. One stable list
+ * per answer, so a failing refresh does not re-render the console each time.
+ */
+export function asLastKnown(hosts: ReadonlyArray<HostStatusEntry>): ReadonlyArray<HostStatusEntry> {
+  let stale = lastKnownByAnswer.get(hosts);
+  if (stale === undefined) {
+    stale = hosts.map((entry): HostStatusEntry =>
+      entry.reachability === "ok"
+        ? {
+            ...entry,
+            reachability: "unreachable",
+            ...(entry.metrics === undefined ? {} : { lastKnown: true as const }),
+          }
+        : entry,
+    );
+    lastKnownByAnswer.set(hosts, stale);
+  }
+  return stale;
 }
 
 export type FleetHostTone = "ok" | "stale" | "unreachable" | "unsupported" | "none";
@@ -244,9 +293,14 @@ export function fleetAlerts(
   rows: ReadonlyArray<FleetHostRow>,
   connections: ReadonlyMap<string, FleetConnection>,
   now: number,
-  /** Environments whose host-status read failed with nothing cached. */
-  unreadable: ReadonlyArray<{ readonly key: string; readonly label: string }> = [],
+  options: {
+    /** Environments whose last host-status read failed. */
+    readonly unreadable?: ReadonlyArray<{ readonly key: string; readonly label: string }>;
+    readonly history?: HostHistory;
+  } = {},
 ): ReadonlyArray<FleetAlert> {
+  const unreadable = options.unreadable ?? [];
+  const history = options.history ?? new Map();
   const alerts: FleetAlert[] = unreadable.map(({ key, label }) => ({
     key: key + ":unreadable",
     tone: "warning",
@@ -262,20 +316,12 @@ export function fleetAlerts(
     const entry = row.entry;
     if (entry === null) continue;
     if (fromConnection === null && (row.tone === "stale" || row.tone === "unreachable")) {
-      const age =
-        row.tone === "stale"
-          ? formatElapsedDurationLabel(new Date(entry.metrics!.sampledAt).toISOString(), now)
-          : null;
+      const lastKnown = lastKnownLabel(row, history, now);
       alerts.push({
         key: row.key + ":reach",
         tone: "warning",
         label: row.label,
-        detail:
-          age === null
-            ? "Unreachable"
-            : age === "just now"
-              ? "Unreachable, last known just now"
-              : "Unreachable, last known " + age + " ago",
+        detail: lastKnown === null ? "Unreachable" : "Unreachable, " + lastKnown,
       });
     }
     if (row.tone === "unsupported") {
