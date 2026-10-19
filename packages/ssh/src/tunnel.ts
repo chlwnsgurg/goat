@@ -268,6 +268,26 @@ exec_fact_key() {
   case "$fact_via" in exe) FACT_NAME="$fact_version.exe" ;; *) FACT_NAME="$fact_version.runner" ;; esac
   FACT_KEY="$fact_exe $fact_sig $fact_via"
 }
+prune_removed_facts() (
+  [ -n "$GOAT_FACTS_DIR" ] || exit 0
+  # A missing version is enough to discard answers; incomplete installs and links are not.
+  for fact_parent in "$HOME" "$HOME/.goat" "$HOME/.goat/ssh-launch" "$GOAT_FACTS_DIR" \
+    "$HOME/.goat/runtime" "$HOME/.goat/runtime/goat" "$HOME/.goat/runtime/goat/versions"; do
+    [ ! -L "$fact_parent" ] && [ -d "$fact_parent" ] && [ -r "$fact_parent" ] && [ -x "$fact_parent" ] || exit 0
+  done
+  set +f
+  for fact_file in "$GOAT_FACTS_DIR"/*; do
+    [ ! -L "$fact_file" ] && [ -f "$fact_file" ] || continue
+    fact_base="\${fact_file##*/}"
+    case "$fact_base" in version.*|own.*|commit.*|scopes.*|live.*|compat.*) ;; *) continue ;; esac
+    case "$fact_base" in *.exe|*.runner) ;; *) continue ;; esac
+    fact_version="\${fact_base#*.}"; fact_version="\${fact_version%.*}"
+    valid_version "$fact_version" || continue
+    fact_dir="$HOME/.goat/runtime/goat/versions/$fact_version"
+    [ ! -L "$fact_dir" ] && [ ! -e "$fact_dir" ] || continue
+    rm -f "$fact_file" || true
+  done
+) 2>/dev/null || true
 # A recorded value must parse as an answer of its kind (the name's first word); anything else,
 # such as a damaged file, is a miss and is asked again.
 fact_valid() {
@@ -1777,6 +1797,33 @@ elif [ "$LIVE_OWNED" = 1 ] && ! verify_owned_identity "$LIVE_PID" "$LIVE_PORT"; 
   exit 1
 fi`;
 
+// Use the existing post-install round trip: young executables remain unkeyed everywhere else.
+const REMOTE_RUNTIME_FACT_WARMUP_SCRIPT = String.raw`warm_runtime_facts() (
+  [ -n "$GOAT_FACTS_DIR" ] || exit 0
+  # Skip an observed rollback window; concurrent changes are covered by each fact's keys.
+  [ ! -e "$STATE_DIR/run-t3.previous" ] && [ ! -L "$STATE_DIR/run-t3.previous" ] || exit 1
+  warm_exe="$HOME/.goat/runtime/goat/versions/$SELECTED_VERSION/goat"
+  warm_sig="$(file_sig "$warm_exe")" || exit 1
+  warm_age=$(( $(date +%s) - ${"${warm_sig##*:}"} ))
+  # A clock behind ctime is not a reason to extend the cleanup's deadline.
+  [ "$warm_age" -ge 0 ] || exit 1
+  if [ "$warm_age" -lt 2 ]; then sleep "$(( 2 - warm_age ))"; fi
+  exec_fact_key "$warm_exe" || exit 1
+  for warm_helper in "$warm_exe" "$RUNNER_FILE"; do
+    exec_fact version "$warm_helper" --version >/dev/null 2>&1 || true
+    exec_fact own "$warm_helper" __ssh-helper protocol --shell >/dev/null 2>&1 || true
+    build_commit_time "$warm_helper" >/dev/null 2>&1 || true
+    lacks_memory_scopes "$warm_helper" >/dev/null 2>&1 || true
+    warm_live="$(live_fact "$warm_helper" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" 2>/dev/null)" || continue
+    set -f; set -- $warm_live
+    valid_live_tokens "$@" && [ "$1" = live ] && [ "$2" = "$SELECTED_VERSION" ] &&
+      [ "$6" = "$REMOTE_PORT" ] || continue
+    compat_fact "$warm_helper" "$6" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" "$5" >/dev/null 2>&1 || true
+  done
+)
+warm_runtime_facts >/dev/null 2>&1 || true
+`;
+
 // The caller holds the replacement mutex after readiness, outside any supervisor trial.
 export const REMOTE_RUNTIME_CLEANUP_SCRIPT = String.raw`cleanup_runtime_versions() {
   [ "$GOAT_HOST_WINDOWS" = 0 ] && [ "$GOAT_ARCHIVE_MODE" = 1 ] || return 0
@@ -2532,6 +2579,7 @@ state_key=${shellSingleQuote(stateKey ?? "")}
 state="$HOME/.goat/ssh-launch/$state_key"
 runtime_file="$HOME/.goat/userdata/server-runtime.json"
 ${REMOTE_PROTOCOL_TOKEN_SCRIPT}
+prune_removed_facts
 ready_version() {
   valid_version "$1" && [ -x "$HOME/.goat/runtime/goat/versions/$1/goat" ] &&
     [ "$(cat "$HOME/.goat/runtime/goat/versions/$1/.install-complete" 2>/dev/null)" = "$1" ]
@@ -3392,7 +3440,11 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ] || ! acquire_replacement_lock; then
   printf 'ssh.runtime.cleanup.skipped replacement lock held\\n' >&2
   exit 0
 fi
-${REMOTE_RUNTIME_CLEANUP_SCRIPT}`,
+${REMOTE_RUNTIME_CLEANUP_SCRIPT}
+release_recovery_lock
+release_replacement_lock
+# Cleanup gets the full deadline under the mutex; only optional fact warming uses what remains.
+${REMOTE_RUNTIME_FACT_WARMUP_SCRIPT}`,
         });
         for (const line of cleanup.stderr.split(/\r?\n/u)) {
           if (line.startsWith("ssh.runtime.cleanup.")) {

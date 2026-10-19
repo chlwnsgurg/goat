@@ -83,8 +83,6 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             ssh: SSH_RUNTIME_PROTOCOL_VERSION,
             orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
-          // Each MCP attempt must ask goat again; recorded answers are covered by tunnel.facts.test.ts.
-          yield* f.shiftHostClock(-60);
           let current = { ...f.runner, archiveVersion: String(f.runner.archiveVersion) };
           const layer = Layer.mergeAll(
             NodeServices.layer,
@@ -107,6 +105,15 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             });
             if ("type" in result) throw new Error("Expected a ready environment");
             assert.equal(result.pairingToken, "1.2.2");
+            // Keep executable answers, but force both MCP attempts to ask the live server.
+            const facts = `${f.home}/.goat/ssh-launch/facts`;
+            const unrecordedFacts = `${f.test}/unrecorded-facts`;
+            yield* f.fs.rename(facts, unrecordedFacts);
+            for (const name of yield* f.fs.readDirectory(unrecordedFacts)) {
+              if (name.startsWith("live.") || name.startsWith("compat."))
+                yield* f.fs.remove(`${unrecordedFacts}/${name}`);
+            }
+            yield* f.fs.symlink(unrecordedFacts, facts);
             yield* f.fs.writeFileString(`${f.test}/reject-ceiling`, "1");
             const session = yield* manager.issueMcpClientSession(uploadTarget, {
               label: "fixture",
