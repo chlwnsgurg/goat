@@ -5,6 +5,7 @@ import {
   NodeId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSetupError,
   RunId,
   ThreadId,
   TurnItemId,
@@ -183,12 +184,20 @@ const harness = Effect.gen(function* () {
       listUnavailable: Effect.succeed([]),
     }),
     Layer.mock(ProviderAuthService.ProviderAuthService)({
-      start: (_, owner) =>
-        Effect.sync(() => {
-          starts.push(owner);
-          owners.set("flow-1", owner);
-          return leakyState("flow-1");
-        }),
+      start: (input, owner) =>
+        input.methodId === "leaky-error"
+          ? Effect.fail(
+              new ProviderSetupError({
+                instanceId,
+                operation: "start",
+                detail: `Callback https://localhost/cb?code=${SECRET} failed`,
+              }),
+            )
+          : Effect.sync(() => {
+              starts.push(owner);
+              owners.set("flow-1", owner);
+              return leakyState("flow-1");
+            }),
       // Mirrors ProviderAuthFlow: another session sees no flow id.
       subscribe: (_, owner) =>
         Stream.make(owners.get("flow-1") === owner ? leakyState("flow-1") : leakyState("")).pipe(
@@ -238,6 +247,18 @@ it.effect("a person's client starts its own flow and sees only the redacted stat
     });
     expect(status.structuredContent).toMatchObject({ kind: "flow" });
     expect(JSON.stringify(status)).not.toContain(SECRET);
+  }),
+);
+
+it.effect("a driver's error text never reaches the MCP result", () =>
+  Effect.gen(function* () {
+    const { call } = yield* harness;
+    const result = yield* call(personClient, "goat_provider_login_start", {
+      instanceId,
+      methodId: "leaky-error",
+    });
+    expect(result.structuredContent).toMatchObject({ kind: "error", code: "sign_in_failed" });
+    expect(JSON.stringify(result)).not.toContain(SECRET);
   }),
 );
 

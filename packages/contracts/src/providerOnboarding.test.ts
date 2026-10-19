@@ -64,6 +64,28 @@ describe("redactProviderAuthState", () => {
     expect(JSON.stringify(flow)).not.toContain(SECRET);
   });
 
+  it("keeps only the user code in a device URL query", () => {
+    const flow = redactProviderAuthState({
+      ...base,
+      interaction: {
+        type: "deviceCode",
+        id: "device",
+        url: `https://auth.example.com/device?user_code=ABCD&code=${SECRET}#${SECRET}`,
+        userCode: "ABCD",
+      },
+    });
+    expect(flow.deviceCode?.url).toBe("https://auth.example.com/device?user_code=ABCD");
+  });
+
+  it("replaces driver message text with fixed phase text", () => {
+    const flow = redactProviderAuthState({
+      ...base,
+      phase: "failed",
+      message: `Callback failed: https://localhost/cb?code=${SECRET}`,
+    });
+    expect(flow.message).not.toContain(SECRET);
+  });
+
   it("reports no continuation once the flow has ended", () => {
     expect(redactProviderAuthState({ ...base, phase: "succeeded" }).continueIn).toBeNull();
   });

@@ -210,8 +210,12 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const flowFailure = (cause: { readonly detail?: string }) =>
-    error("sign_in_failed", cause.detail?.trim() || "Sign-in failed. Start again.");
+  // Driver error text is meant for the owning client; agents get a fixed message.
+  const flowFailure = () =>
+    error("sign_in_failed", "Sign-in could not continue. The person can see why in GOAT.", {
+      instruction: "Ask the person to finish setup in GOAT's add-provider window.",
+      path: "provider.setup_open",
+    });
 
   return ProviderOnboarding.of({
     list: Effect.gen(function* () {
@@ -257,7 +261,7 @@ const make = Effect.gen(function* () {
                 kind: "flow" as const,
                 flow: redactProviderAuthState(state),
               })),
-              Effect.catch((cause) => Effect.succeed(flowFailure(cause))),
+              Effect.catch(() => Effect.succeed(flowFailure())),
             );
         }
         const host = yield* HostProcess.Hostname;
@@ -294,7 +298,7 @@ const make = Effect.gen(function* () {
           return error("not_found", "This sign-in is not active for this caller.");
         return yield* auth.cancel(input, session.value).pipe(
           Effect.map((state) => ({ kind: "flow" as const, flow: redactProviderAuthState(state) })),
-          Effect.catch((cause) => Effect.succeed(flowFailure(cause))),
+          Effect.catch(() => Effect.succeed(flowFailure())),
         );
       }),
     setupOpen: (input, scope) =>

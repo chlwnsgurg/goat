@@ -100,21 +100,46 @@ export const ProviderLoginFlow = Schema.Struct({
 });
 export type ProviderLoginFlow = typeof ProviderLoginFlow.Type;
 
-const isHttpsUrl = (value: string) => {
+// verification_uri_complete may repeat the user code; nothing else a device page needs is secret-free.
+const DEVICE_URL_QUERY_KEYS = new Set(["user_code"]);
+
+/** A plain https device page, keeping only the query keys a person needs. */
+const deviceVerificationUrl = (value: string): string | null => {
+  let url: URL;
   try {
-    const url = new URL(value);
-    return url.protocol === "https:" && !url.username && !url.password;
+    url = new URL(value);
   } catch {
-    return false;
+    return null;
   }
+  if (url.protocol !== "https:" || url.username || url.password) return null;
+  const query = new URLSearchParams();
+  for (const [key, entry] of url.searchParams)
+    if (DEVICE_URL_QUERY_KEYS.has(key)) query.append(key, entry);
+  url.search = query.toString();
+  url.hash = "";
+  return url.toString();
+};
+
+// Drivers write free text into state.message. An agent gets this fixed text
+// instead, so no driver can leak a token or URL through it.
+const PHASE_MESSAGES: Record<ProviderLoginFlow["phase"], string | null> = {
+  idle: null,
+  starting: "Sign-in is starting.",
+  waiting: "Waiting for the person to finish signing in.",
+  verifying: "Checking the new sign-in.",
+  succeeded: "Signed in.",
+  failed: "Sign-in failed. The person can see why in GOAT.",
+  cancelled: "Sign-in was cancelled.",
 };
 
 /** Projects a flow state onto the fields an agent may read. */
 export const redactProviderAuthState = (state: ProviderAuthState): ProviderLoginFlow => {
   const interaction = state.interaction ?? null;
+  const deviceUrl =
+    interaction?.type === "deviceCode" ? deviceVerificationUrl(interaction.url) : null;
   const deviceCode =
-    interaction?.type === "deviceCode" && isHttpsUrl(interaction.url)
-      ? { url: interaction.url, userCode: interaction.userCode }
+    interaction?.type === "deviceCode" && deviceUrl !== null
+      ? { url: deviceUrl, userCode: interaction.userCode }
       : null;
   const active =
     state.phase === "starting" || state.phase === "waiting" || state.phase === "verifying";
@@ -125,7 +150,7 @@ export const redactProviderAuthState = (state: ProviderAuthState): ProviderLogin
     continueIn: deviceCode ? "device" : active && interaction !== null ? "app" : null,
     deviceCode,
     expiresAt: state.expiresAt,
-    message: state.message,
+    message: PHASE_MESSAGES[state.phase],
   };
 };
 
