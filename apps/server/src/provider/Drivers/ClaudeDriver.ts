@@ -63,6 +63,8 @@ import {
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
 import * as HostProcess from "@goat/shared/HostProcess";
+import * as PtyAdapter from "@goat/shared/PtyAdapter";
+import { makeClaudeAuth } from "./ClaudeAuth.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
@@ -121,6 +123,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
+      const pty = yield* Effect.serviceOption(PtyAdapter.PtyAdapter);
       // The server cwd is $HOME in packaged desktop builds, and `claude`
       // wrappers that scope themselves to their cwd refuse to run there.
       const { stateDir } = yield* ServerConfig.ServerConfig;
@@ -287,7 +290,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
                   ),
               ),
             ),
-            Effect.map(stampIdentity),
+            Effect.map((provider) =>
+              stampIdentity({
+                ...provider,
+                setup: { canAuthenticate: Option.isSome(pty), canInstall: false },
+              }),
+            ),
           ),
         ),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -304,7 +312,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         initialSnapshot: (settings) =>
           modelCatalog.pipe(
             Effect.flatMap((catalog) => makePendingClaudeProvider(settings.provider, catalog)),
-            Effect.map(stampIdentity),
+            Effect.map((provider) =>
+              stampIdentity({
+                ...provider,
+                setup: { canAuthenticate: Option.isSome(pty), canInstall: false },
+              }),
+            ),
           ),
         checkProvider,
         enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>
@@ -329,6 +342,21 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
             }),
         ),
       );
+
+      const auth = Option.isSome(pty)
+        ? yield* makeClaudeAuth({
+            instanceId,
+            config: effectiveConfig,
+            environment: processEnv,
+            cwd: stateDir,
+            pty: pty.value,
+            onChanged: Effect.gen(function* () {
+              yield* Ref.set(lastGoodCapabilities, undefined);
+              yield* Cache.invalidateAll(capabilitiesProbeCache);
+              yield* snapshot.refresh;
+            }),
+          })
+        : undefined;
 
       // Same rules as Codex: serialised on the config directory that holds the
       // login, one request id kept until Claude answers (a cooldown or rate
@@ -401,6 +429,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         accentColor,
         enabled,
         snapshot,
+        ...(auth ? { auth } : {}),
         invalidateCaches: Cache.invalidateAll(capabilitiesProbeCache),
         snapshotForCwd: (cwd: string) =>
           snapshot.getSnapshot.pipe(

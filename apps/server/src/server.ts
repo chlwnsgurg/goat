@@ -3,6 +3,7 @@ import { desiredLinkReconcileStartup } from "./cloud/DesiredLinkReconcile.ts";
 import * as HomeRoute from "./provider/OpenCodexRoute.ts";
 import * as CodexRoutes from "./provider/CodexRouteService.ts";
 import * as HomeRequests from "./provider/CodexHomeRequests.ts";
+import * as ProviderOnboarding from "./provider/ProviderOnboarding.ts";
 import { resolveCommandPath } from "@goat/shared/shell";
 import * as HostProcess from "@goat/shared/HostProcess";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- the closed import factory requires a synchronous UUID callback.
@@ -1266,7 +1267,12 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provideMerge(ProviderHostSync.layer),
     ),
   ),
-  Layer.provide(HomeRequests.layer.pipe(Layer.provideMerge(CodexRoutes.layer))),
+  Layer.provide(
+    Layer.mergeAll(
+      HomeRequests.layer.pipe(Layer.provideMerge(CodexRoutes.layer)),
+      ProviderOnboarding.layer,
+    ),
+  ),
   Layer.provide(
     ProviderDiagnosisRouting.layer.pipe(
       Layer.provide(ProviderDiagnosisService.layer.pipe(Layer.provide(ProviderHostLive.layer))),
