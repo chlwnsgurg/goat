@@ -222,6 +222,17 @@ page or mobile app may have been frozen: it restarts the silence budget so
 queued replies can arrive before the resumed session is judged unresponsive.
 HTTP checks run on reuse and resume; they are not a second periodic heartbeat.
 
+A reconnect keeps the saved bearer token while the host behind the forward is
+the same environment and answers the token as signed in with the scopes a
+fresh pairing would grant. Every pairing adds a session on the host, so
+minting one per reconnect only fills its client list. A runtime older than
+this app's standard scopes grants the same narrower set to every pairing; the
+client remembers, in memory, what a pairing granted per server instance and
+SSH target, and stops asking that server for scopes it never grants. A server
+restart or upgrade (a new instance), another SSH target, a revoked or expired
+token, or a narrower grant pairs again
+([`prepareDesktopSshEnvironment`](../../apps/web/src/connection/platform.ts)).
+
 The server closes an RPC `/ws` connection after 120 s without inbound transport
 traffic, across local, SSH, relay, and tunnel connections. The budget tolerates
 minute-aligned heartbeat throttling in hidden browser tabs. All shipped RPC
