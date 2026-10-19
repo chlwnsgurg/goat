@@ -1,15 +1,24 @@
 import { describe, expect, it } from "@effect/vitest";
-import { EnvironmentId, type ServerConfig } from "@goat/contracts";
+import { EnvironmentId, type ServerConfig, type SshHostStatus } from "@goat/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
-import { AVAILABLE_CONNECTION_STATE, PrimaryConnectionTarget } from "../connection/model.ts";
+import {
+  AVAILABLE_CONNECTION_STATE,
+  PrimaryConnectionTarget,
+  ConnectionTransientError,
+} from "../connection/model.ts";
 import {
   createEnvironmentPresentationAtoms,
   createEnvironmentSummaryAtoms,
   createEnvironmentShellSyncAtom,
   shellSyncMessage,
 } from "./presentation.ts";
+import {
+  connectionStatusText,
+  connectionStatusTitle,
+  connectionProgressLabel,
+} from "../connection/presentation.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
 import type { EnvironmentShellState } from "./shell.ts";
 import { v2ShellSnapshot } from "./orchestrationV2TestFixtures.ts";
@@ -110,16 +119,26 @@ function harness() {
   });
   const configs = Atom.family((_id: EnvironmentId) => Atom.make<ServerConfig | null>(config()));
   const state = Atom.make(AsyncResult.success(AVAILABLE_CONNECTION_STATE));
+  const runtimeStatus = Atom.make<SshHostStatus | undefined>(undefined);
   const full = createEnvironmentPresentationAtoms({
     catalogValueAtom: catalog,
     stateAtom: () => state,
     serverConfigValueAtom: configs,
+    sshRuntimeStatusAtom: () => runtimeStatus,
   });
   const summaries = createEnvironmentSummaryAtoms({
     catalogValueAtom: catalog,
     presentationAtom: full.presentationAtom,
   });
-  return { catalog, configs, state, full, ...summaries, registry: AtomRegistry.make() };
+  return {
+    catalog,
+    configs,
+    state,
+    runtimeStatus,
+    full,
+    ...summaries,
+    registry: AtomRegistry.make(),
+  };
 }
 
 describe("environment summary subscriptions", () => {
@@ -300,6 +319,69 @@ describe("environment summary subscriptions", () => {
       expect(h.registry.get(h.environmentIdsAtom)).toEqual([]);
       expect(h.registry.get(h.identitiesAtom)).toEqual([]);
       expect(h.registry.get(h.environmentsAtom)).toEqual([]);
+    } finally {
+      stop();
+      h.registry.dispose();
+    }
+  });
+});
+
+describe("shared SSH owner invalidation", () => {
+  it("updates every status consumer on owner failure and keeps attempt provenance", () => {
+    const h = harness();
+    const identity = { supervisorId: "fixture", attemptId: 2, routeId: "ssh:fixture" };
+    const ready = {
+      ...identity,
+      operationId: "op-2",
+      attachmentId: "attachment-2",
+      runtimeStatus: {
+        host: "fixture",
+        state: "ready",
+        runtimeVersion: null,
+        requestedVersion: "1.0.0",
+      } as const,
+    };
+    const failureOrigin = {
+      ...identity,
+      attemptId: 1,
+      stage: "preparing",
+      setupTimeout: true,
+    } as const;
+    const snapshot = {
+      ...AVAILABLE_CONNECTION_STATE,
+      desired: true,
+      phase: "connecting",
+      stage: "opening",
+      attempt: 2,
+      lastFailure: new ConnectionTransientError({
+        reason: "timeout",
+        detail: "Old setup timed out.",
+      }),
+      failureOrigin,
+    } as const;
+    h.registry.set(h.state, AsyncResult.success(snapshot));
+    const atom = h.full.presentationAtom(FIRST);
+    const stop = h.registry.subscribe(atom, () => {});
+    try {
+      expect(h.registry.get(atom)?.connection.error).toBe("Old setup timed out.");
+      h.registry.set(h.state, AsyncResult.success({ ...snapshot, sshRuntimeReady: ready }));
+      const initial = h.registry.get(atom)!.connection;
+      expect(connectionStatusText(initial)).toBe("Runtime ready · Opening connection");
+      expect(initial.sshRuntimeReady).toBe(ready);
+      for (const state of ["failed", "stopped", "untrusted"] as const) {
+        h.registry.set(h.runtimeStatus, { ...ready.runtimeStatus, state });
+        const connection = h.registry.get(atom)!.connection;
+        expect(connectionStatusText(connection)).toContain("Old setup timed out.");
+        expect(connectionStatusTitle(connection)).not.toContain("Runtime ready");
+        expect(connectionProgressLabel(connection, 0)).toBe("Opening connection");
+        expect(connection.sshRuntimeReady).toBeUndefined();
+        expect(connection.failureOrigin).toBe(failureOrigin);
+        expect(connection.failure?.detail).toBe("Old setup timed out.");
+        expect(Option.getOrThrow(AsyncResult.value(h.registry.get(h.state)))).toEqual({
+          ...snapshot,
+          sshRuntimeReady: ready,
+        });
+      }
     } finally {
       stop();
       h.registry.dispose();

@@ -193,9 +193,9 @@ export const nativeScriptsBatch = Effect.fn("test.nativeScriptsBatch")(function*
     input: SshTunnel.RemoteGoatRunnerOptions;
     selection?: SshTunnel.PreparedRemoteRuntime | undefined;
   }>,
+  moduleUrl = new URL("./tunnel.ts", import.meta.url).href,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const moduleUrl = new URL("./tunnel.ts", import.meta.url).href;
   const script = `import * as t from ${JSON.stringify(moduleUrl)};
 const requests = ${JSON.stringify(requests)};
 console.log(JSON.stringify(requests.map(({ input, selection }) => ({ runner: t.buildRemoteGoatRunnerScript(input), launch: t.buildRemoteLaunchScript(input, selection), pairing: t.buildRemotePairingScript(${JSON.stringify(REMOTE_RUNTIME_STATE_KEY)}, input, selection), mcp: t.buildRemoteMcpSessionScript(${JSON.stringify(REMOTE_RUNTIME_STATE_KEY)}, { label: "fixture", ttl: "1h", runtimeModeCeiling: null }, input, selection), probe: t.buildRemoteRuntimeProbeScript(input.archiveVersion ?? "", ${JSON.stringify(REMOTE_RUNTIME_STATE_KEY)}, true), upload: input.nodeScriptPath ? null : t.buildRemoteGoatUploadInstallerScript(input, "A".repeat(64)) }))));`;
@@ -222,7 +222,8 @@ console.log(JSON.stringify(requests.map(({ input, selection }) => ({ runner: t.b
 export const nativeScripts = (
   input: SshTunnel.RemoteGoatRunnerOptions,
   selection?: SshTunnel.PreparedRemoteRuntime,
-) => nativeScriptsBatch([{ input, selection }]).pipe(Effect.map((all) => all[0]!));
+  moduleUrl?: string,
+) => nativeScriptsBatch([{ input, selection }], moduleUrl).pipe(Effect.map((all) => all[0]!));
 
 // Archive doubles are Node scripts; emulate archive ps output only for the captured seed child.
 export const installArchivePsDouble = Effect.fn("test.installArchivePsDouble")(function* (

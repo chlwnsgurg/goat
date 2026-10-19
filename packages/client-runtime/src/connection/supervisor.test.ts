@@ -3529,6 +3529,51 @@ describe("SSH preparation lifetime and provenance", () => {
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect.each(["superseded", "failed"] as const)(
+    "invalidates ready while pairing is pending on %s without renewing opening time",
+    (outcome) =>
+      Effect.gen(function* () {
+        const f = yield* held();
+        yield* f.report(phase());
+        yield* f.report(ready);
+        expect((yield* SubscriptionRef.get(f.supervisor.state)).sshRuntimeReady).toBeDefined();
+        yield* TestClock.adjust("10 seconds");
+        const invalidated = yield* Deferred.make<void>();
+        const invalidate = yield* Deferred.make<void>();
+        yield* Deferred.await(invalidate).pipe(
+          Effect.andThen(f.report(phase({ phase: null, outcome }))),
+          Effect.andThen(Deferred.succeed(invalidated, undefined)),
+          Effect.forkScoped,
+        );
+        yield* Deferred.succeed(invalidate, undefined);
+        yield* Deferred.await(invalidated);
+        expect((yield* SubscriptionRef.get(f.supervisor.state)).sshRuntimeReady).toBeUndefined();
+        yield* f.report(ready);
+        yield* f.report(phase());
+        expect((yield* SubscriptionRef.get(f.supervisor.state)).sshRuntimeReady).toBeUndefined();
+        expect((yield* SubscriptionRef.get(f.supervisor.state)).sshPreparation).toBeUndefined();
+        yield* TestClock.adjust(4_999);
+        expect(yield* Ref.get(f.harness.prepareCount)).toBe(1);
+        yield* TestClock.adjust(1);
+        expect((yield* Queue.take(f.callers)).attempt).toBe(2);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("ignores ended reports once a new operation owns the route", () =>
+    Effect.gen(function* () {
+      const f = yield* held();
+      yield* f.report(phase());
+      yield* f.report(ready);
+      yield* f.report(phase({ operationId: "flight-2" }));
+      yield* f.report({ ...ready, operationId: "flight-2" });
+      yield* f.report(phase({ phase: null, outcome: "superseded" }));
+      yield* f.report(phase());
+      const state = yield* SubscriptionRef.get(f.supervisor.state);
+      expect(state.sshRuntimeReady?.operationId).toBe("flight-2");
+      expect(state.sshPreparation).toBeUndefined();
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect(
     "gives opening its allowance and then keeps the existing 75 second snapshot budget",
     () =>

@@ -167,13 +167,17 @@ export function reconcileSshConnectionPresentation(
 
 export function presentConnectionState(
   state: SupervisorConnectionState,
+  runtimeStatus?: SshHostStatus,
 ): EnvironmentConnectionPresentation {
-  return reconcileSshConnectionPresentation({
-    ...projectConnectionState(state),
-    ...(state.failureOrigin === undefined ? {} : { failureOrigin: state.failureOrigin }),
-    ...(state.sshPreparation === undefined ? {} : { sshPreparation: state.sshPreparation }),
-    ...(state.sshRuntimeReady === undefined ? {} : { sshRuntimeReady: state.sshRuntimeReady }),
-  });
+  return reconcileSshConnectionPresentation(
+    {
+      ...projectConnectionState(state),
+      ...(state.failureOrigin === undefined ? {} : { failureOrigin: state.failureOrigin }),
+      ...(state.sshPreparation === undefined ? {} : { sshPreparation: state.sshPreparation }),
+      ...(state.sshRuntimeReady === undefined ? {} : { sshRuntimeReady: state.sshRuntimeReady }),
+    },
+    runtimeStatus,
+  );
 }
 
 function preparationLabel(connection: EnvironmentConnectionPresentation): string | undefined {
@@ -300,8 +304,9 @@ export function connectionProgressLabel(
 
 export function presentEnvironmentConnection(
   state: SupervisorConnectionState,
+  runtimeStatus?: SshHostStatus,
 ): EnvironmentConnectionPresentation {
-  return presentConnectionState(state);
+  return presentConnectionState(state, runtimeStatus);
 }
 
 /**

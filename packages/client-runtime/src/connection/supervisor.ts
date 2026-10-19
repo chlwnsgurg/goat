@@ -1,3 +1,4 @@
+import type { DesktopSshPreparationProgress } from "@goat/contracts";
 import { withRelayClientTracing } from "@goat/shared/relayTracing";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -313,8 +314,10 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     readonly sshRuntimeReady?: ConnectionSshRuntimeReady;
   }>({});
   // Rejoining or retrying the same native operation cannot renew its lifetime.
-  const preparationDeadlines = new Map<string, bigint>();
-  const endedPreparations = new Set<string>();
+  const preparations = new Map<
+    string,
+    { readonly operationId: string; readonly deadline?: bigint; readonly ended: boolean }
+  >();
   const signals = yield* Queue.unbounded<QueuedSupervisorSignal>();
   const resetRetryState = yield* Ref.make(false);
   const probeUnanswered = yield* Ref.make(false);
@@ -497,7 +500,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     attemptActive: Ref.Ref<boolean>,
   ) {
     const sequence = yield* Ref.get(attemptSequence);
-    const terminalReports = new Set<string>();
+    const terminalReports = new Map<string, DesktopSshPreparationProgress["outcome"]>();
     return yield* driver.connect(
       yield* attemptEntry,
       (progress) =>
@@ -519,11 +522,20 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
             (native !== undefined || progress.hostAnswered)
           )
             return;
+          const recorded = routeId === undefined ? undefined : preparations.get(routeId);
+          const preparation = recorded?.operationId === native?.operationId ? recorded : undefined;
+          const terminal =
+            native === undefined ? undefined : terminalReports.get(native.operationId);
           if (
             native !== undefined &&
             (native.phase !== null
-              ? endedPreparations.has(native.operationId)
-              : terminalReports.has(native.operationId))
+              ? preparation?.ended === true || terminal !== undefined
+              : terminal !== undefined &&
+                !(
+                  terminal === "ready" &&
+                  recorded?.operationId === native.operationId &&
+                  (native.outcome === "superseded" || native.outcome === "failed")
+                ))
           )
             return;
           const identity =
@@ -557,10 +569,14 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
             if (native.phase !== null) {
               const candidate =
                 now + BigInt(Math.min(SSH_PREPARATION_TIMEOUT_MS, native.remainingMs)) * 1_000_000n;
-              const previous = preparationDeadlines.get(native.operationId);
+              const previous = preparation?.deadline;
               const deadline =
                 previous === undefined || candidate < previous ? candidate : previous;
-              preparationDeadlines.set(native.operationId, deadline);
+              preparations.set(identity.routeId, {
+                operationId: native.operationId,
+                deadline,
+                ended: false,
+              });
               next = {
                 ...next,
                 sshPreparation: {
@@ -580,17 +596,25 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
                 },
               };
             } else {
-              terminalReports.add(native.operationId);
-              endedPreparations.add(native.operationId);
+              terminalReports.set(native.operationId, native.outcome);
+              preparations.set(identity.routeId, {
+                ...preparation,
+                operationId: native.operationId,
+                ended: true,
+              });
               const { sshPreparation: _preparation, sshRuntimeReady: _ready, ...rest } = visible;
               visible = rest;
               // Pairing and socket opening start with their ordinary allowance after installation ends.
               next = {
                 ...next,
                 sshPreparation: null,
-                ordinaryStartedAt: now,
-                preparation: { routeId, startedAt: now },
-                setup: null,
+                ...(terminal === undefined
+                  ? {
+                      ordinaryStartedAt: now,
+                      preparation: { routeId, startedAt: now },
+                      setup: null,
+                    }
+                  : {}),
               };
               if (
                 native.outcome === "ready" &&
@@ -613,7 +637,13 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
             const { sshPreparation: _preparation, ...rest } = visible;
             visible = rest;
             if (next.sshPreparation !== null) {
-              endedPreparations.add(next.sshPreparation.operationId);
+              if (routeId !== undefined) {
+                preparations.set(routeId, {
+                  operationId: next.sshPreparation.operationId,
+                  deadline: next.sshPreparation.deadline,
+                  ended: true,
+                });
+              }
               next = {
                 ...next,
                 sshPreparation: null,
@@ -895,6 +925,10 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     setupContinuation: SetupPreparation | undefined,
   ) {
     const sequence = yield* Ref.updateAndGet(attemptSequence, (current) => current + 1);
+    const routes = new Set((yield* currentRoutes).map((route) => connectionRouteId(route.target)));
+    for (const routeId of preparations.keys()) {
+      if (!routes.has(routeId)) preparations.delete(routeId);
+    }
     const ignoreOfflineState = yield* Ref.make(ignoreOffline);
     const attemptActive = yield* Ref.make(true);
     const switchingTo = yield* Ref.get(preferredRouteId);

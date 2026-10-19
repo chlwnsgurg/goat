@@ -501,6 +501,10 @@ function SavedBackendListRow({
             environmentId={environmentId}
             target={savedSshTarget}
             enabled={environment.entry.enabled && !isRemoving}
+            preparationInSubtitle={
+              (!resumingServerUpdate && status.preparationPhase !== undefined) ||
+              (runtimeStatus?.state === "preparing" && status.runtimeText !== null)
+            }
             {...(status.preparationPhase !== undefined
               ? { preparationProgress: { phase: status.preparationPhase } }
               : {})}

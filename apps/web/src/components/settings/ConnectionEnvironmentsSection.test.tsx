@@ -732,111 +732,130 @@ effectIt.effect(
     }),
 );
 
-it("updates an open tooltip and subtitle together from a mounted connection atom", async () => {
-  const registry = AtomRegistry.make();
-  const environmentId = EnvironmentId.make("fixture-vps");
-  const target = { alias: "fixture-vps", hostname: "example.invalid", username: null, port: null };
-  const sshTarget = new SshConnectionTarget({
-    environmentId,
-    connectionId: "fixture-ssh",
-    label: "Fixture VPS",
-  });
-  const routeId = connectionRouteId(sshTarget);
-  const identity = { supervisorId: "fixture-window", attemptId: 2, routeId };
-  const ready = {
-    host: target.alias,
-    state: "ready" as const,
-    runtimeVersion: "0.4.3",
-    requestedVersion: "0.4.3",
-  };
-  const environment: EnvironmentPresentation = {
-    environmentId,
-    label: "Fixture VPS",
-    displayUrl: null,
-    relayManaged: false,
-    serverConfig: null,
-    entry: {
-      enabled: true,
-      target: sshTarget,
-      profile: Option.some(
-        new SshConnectionProfile({
-          environmentId,
-          connectionId: "fixture-ssh",
-          label: "Fixture VPS",
-          target,
-        }),
-      ),
-    },
-    connection: {
-      phase: "reconnecting",
-      stage: "preparing",
-      error: "old setup timeout",
-      traceId: null,
-      failure: { kind: "retrying", reason: "timeout", detail: "old setup timeout" },
-      failureOrigin: { ...identity, attemptId: 1, stage: "preparing", setupTimeout: true },
-      sshPreparation: {
-        ...identity,
-        operationId: "fixture-op",
-        phase: "uploading",
-        hostAnswered: true,
+it.each(["local", "owner"] as const)(
+  "updates an open tooltip and subtitle together from mounted %s progress",
+  async (source) => {
+    const registry = AtomRegistry.make();
+    const environmentId = EnvironmentId.make("fixture-vps");
+    const target = {
+      alias: "fixture-vps",
+      hostname: "example.invalid",
+      username: null,
+      port: null,
+    };
+    const sshTarget = new SshConnectionTarget({
+      environmentId,
+      connectionId: "fixture-ssh",
+      label: "Fixture VPS",
+    });
+    const routeId = connectionRouteId(sshTarget);
+    const identity = { supervisorId: "fixture-window", attemptId: 2, routeId };
+    const ready = {
+      host: target.alias,
+      state: "ready" as const,
+      runtimeVersion: "0.4.3",
+      requestedVersion: "0.4.3",
+    };
+    if (source === "owner") {
+      state.runtimeReply = {
+        kind: "ok",
+        status: { ...ready, state: "preparing", phase: "uploading" },
+      };
+    }
+    const environment: EnvironmentPresentation = {
+      environmentId,
+      label: "Fixture VPS",
+      displayUrl: null,
+      relayManaged: false,
+      serverConfig: null,
+      entry: {
+        enabled: true,
+        target: sshTarget,
+        profile: Option.some(
+          new SshConnectionProfile({
+            environmentId,
+            connectionId: "fixture-ssh",
+            label: "Fixture VPS",
+            target,
+          }),
+        ),
       },
-    },
-  };
-  (window as { desktopBridge?: unknown }).desktopBridge = {};
-  registry.set(state.environments, [environment]);
-  await act(async () =>
-    root.render(
-      <RegistryContext value={registry}>
-        <TooltipProvider delay={0}>
-          <ConnectionEnvironmentsSection title="Connections" searchable={false} />
-        </TooltipProvider>
-      </RegistryContext>,
-    ),
-  );
-  const trigger = [
-    ...container.querySelectorAll<HTMLElement>('[data-slot="tooltip-trigger"]'),
-  ].find((node) => node.textContent?.includes("Installing GOAT"));
-  expect(trigger).toBeDefined();
-  await act(async () => {
-    const pointer = new MouseEvent("pointerover", { bubbles: true });
-    Object.defineProperty(pointer, "pointerType", { value: "mouse" });
-    trigger!.dispatchEvent(pointer);
-    trigger!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false }));
-    trigger!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-    trigger!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
-  });
-  expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
-    "Installing GOAT runtime",
-  );
-  const { sshPreparation: _preparation, ...terminalConnection } = environment.connection;
-  await act(async () =>
-    registry.set(state.environments, [
-      {
-        ...environment,
-        connection: {
-          ...terminalConnection,
-          stage: "opening",
-          sshRuntimeReady: {
-            ...identity,
-            operationId: "fixture-op",
-            attachmentId: "fixture-attachment",
-            runtimeStatus: ready,
+      connection: {
+        phase: "reconnecting",
+        stage: "preparing",
+        error: "old setup timeout",
+        traceId: null,
+        failure: { kind: "retrying", reason: "timeout", detail: "old setup timeout" },
+        failureOrigin: { ...identity, attemptId: 1, stage: "preparing", setupTimeout: true },
+        ...(source === "local"
+          ? {
+              sshPreparation: {
+                ...identity,
+                operationId: "fixture-op",
+                phase: "uploading" as const,
+                hostAnswered: true,
+              },
+            }
+          : {}),
+      },
+    };
+    (window as { desktopBridge?: unknown }).desktopBridge = {};
+    registry.set(state.environments, [environment]);
+    await act(async () =>
+      root.render(
+        <RegistryContext value={registry}>
+          <TooltipProvider delay={0}>
+            <ConnectionEnvironmentsSection title="Connections" searchable={false} />
+          </TooltipProvider>
+        </RegistryContext>,
+      ),
+    );
+    const trigger = [
+      ...container.querySelectorAll<HTMLElement>('[data-slot="tooltip-trigger"]'),
+    ].find((node) => node.textContent?.includes("Installing GOAT"));
+    expect(trigger).toBeDefined();
+    expect(container.textContent?.match(/Installing GOAT runtime/g)).toHaveLength(1);
+    await act(async () => {
+      const pointer = new MouseEvent("pointerover", { bubbles: true });
+      Object.defineProperty(pointer, "pointerType", { value: "mouse" });
+      trigger!.dispatchEvent(pointer);
+      trigger!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false }));
+      trigger!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      trigger!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    });
+    expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
+      "Installing GOAT runtime",
+    );
+    const { sshPreparation: _preparation, ...terminalConnection } = environment.connection;
+    await act(async () =>
+      registry.set(state.environments, [
+        {
+          ...environment,
+          connection: {
+            ...terminalConnection,
+            stage: "opening",
+            sshRuntimeReady: {
+              ...identity,
+              operationId: "fixture-op",
+              attachmentId: "fixture-attachment",
+              runtimeStatus: ready,
+            },
           },
         },
-      },
-    ]),
-  );
-  expect(trigger?.textContent).toContain("Runtime ready · Opening connection");
-  expect(trigger?.className).not.toContain("text-destructive");
-  expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
-    "Runtime ready · Opening connection",
-  );
-  expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).not.toMatch(
-    /old setup timeout|unknown/,
-  );
-  await act(async () => root.render(<div />));
-  registry.dispose();
-});
+      ]),
+    );
+    expect(trigger?.textContent).toContain("Runtime ready · Opening connection");
+    expect(trigger?.className).not.toContain("text-destructive");
+    expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
+      "Runtime ready · Opening connection",
+    );
+    expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).not.toMatch(
+      /old setup timeout|unknown/,
+    );
+    await act(async () => root.render(<div />));
+    registry.dispose();
+  },
+);
 
 effectIt.effect("ignores local Add reports and a failed completion after unmount", () =>
   Effect.gen(function* () {

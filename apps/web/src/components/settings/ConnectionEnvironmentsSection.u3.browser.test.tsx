@@ -379,6 +379,7 @@ it.each(["light", "dark"] as const)(
         "Installing GOAT runtime — first setup can take a few minutes",
       );
       expect(status.textContent).not.toMatch(/did not respond|Runtime unknown/);
+      expect(container.textContent?.match(/Installing GOAT runtime/g)).toHaveLength(1);
     }
     await fixture.capture(theme, "preparing");
     // A page screenshot can move the pointer off the trigger; reopen the tooltip before reading it.

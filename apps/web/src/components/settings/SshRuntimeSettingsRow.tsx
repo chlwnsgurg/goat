@@ -33,6 +33,7 @@ type SshRuntimeSettingsRowProps = {
   readonly enabled: boolean;
   readonly pendingAdd?: boolean;
   readonly connecting?: boolean;
+  readonly preparationInSubtitle?: boolean;
   readonly preparationProgress?: Pick<DesktopSshPreparationProgress, "phase">;
   readonly originLabel?: string;
   readonly onRetry?: () => void;
@@ -60,6 +61,7 @@ function SshRuntimeSettingsRowContent({
   pendingAdd,
   connecting,
   preparationProgress,
+  preparationInSubtitle,
   onReviewTrust,
   onOpenApproval,
 }: SshRuntimeSettingsRowProps) {
@@ -160,9 +162,11 @@ function SshRuntimeSettingsRowContent({
 
   return (
     <div className="mt-1 max-w-lg space-y-1 text-xs text-muted-foreground">
-      <p role="status" aria-live="polite">
-        {phaseText}
-      </p>
+      {!preparationInSubtitle ? (
+        <p role="status" aria-live="polite">
+          {phaseText}
+        </p>
+      ) : null}
       {status ? (
         <div>
           {pendingAdd && status.state !== "preparing" && phaseText === null ? (
