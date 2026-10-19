@@ -60,3 +60,20 @@ GOAT Bot screen shows only a chip for the work and its final report.
 - When you connect to several machines, Slack runs only on the machine GOAT
   Bot lives on. Change it in **Settings → Integrations → GOAT Bot**; set up
   Slack on that machine.
+
+## iMessage (Mac)
+
+GOAT can read direct text messages from allowed iMessage handles on the Mac running its server
+and reply in the same conversation. Group chats and attachments are not supported. Give the app
+that launches the server **Full Disk Access** to read Messages. macOS asks separately for
+**Automation** access when GOAT sends through Messages; Messages must be signed in.
+
+Run `goat imessage enable --allow +15551234567` on that Mac, then
+`goat imessage link-code`. From the allowed phone or email, send `link 123456` to the Mac's
+Messages account, replacing the example with the printed code. The connection starts with an
+approval-required access ceiling; `--full-access` on enable is an explicit opt-in. Restart an
+already running server after enabling. `goat imessage status` shows whether the channel is
+enabled and whether the local database can be opened without printing handles or message text.
+Run `goat imessage disable` to stop it and `goat imessage unlink <handle>` to revoke a linked
+sender. An installed server uses its own data directory; pass `--base-dir` when managing a
+different local server.

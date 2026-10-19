@@ -9,11 +9,63 @@ import {
   ChannelInputSnapshot,
   ChannelListTasksInput,
   ChannelNoticeInput,
+  ChannelOutboundMessage,
+  ChannelRequester,
 } from "./index.ts";
 
 const json = <S extends Schema.Codec<unknown, unknown>>(schema: S) => Schema.toCodecJson(schema);
 
 describe("channel ingest", () => {
+  it("round-trips iMessage input, requester and outbound destination", () => {
+    const address = {
+      kind: "imessage" as const,
+      connectionId: "imessage-000000000001",
+      chatGuid: "iMessage;-;+15550000000",
+    };
+    const inbound = {
+      kind: "imessage" as const,
+      connectionId: address.connectionId,
+      conversationKey: address.chatGuid,
+      externalMessageId: "guid-1",
+      idempotencyKey: "imessage-000000000001:1",
+      actor: { externalActorId: "+15550000000" },
+      replyAddress: address,
+      text: "hello",
+      attachments: [],
+      receivedAt: "2026-10-19T00:00:00.000Z",
+      intent: "message" as const,
+    };
+    expect(
+      Schema.decodeUnknownSync(json(ChannelIngestInput))(
+        Schema.encodeSync(json(ChannelIngestInput))(inbound),
+      ),
+    ).toEqual(inbound);
+    const requester = {
+      ownerId: "owner",
+      principalId: "local-cli",
+      displayName: "Owner",
+      originKind: "imessage" as const,
+      externalActorId: "+15550000000",
+      runtimeModeCeiling: "approval-required" as const,
+      grantedScopes: ["orchestration:operate" as const],
+    };
+    expect(
+      Schema.decodeUnknownSync(json(ChannelRequester))(
+        Schema.encodeSync(json(ChannelRequester))(requester),
+      ),
+    ).toEqual(requester);
+    const outbound = {
+      deliveryId: "delivery" as never,
+      destination: address,
+      kind: "receipt" as const,
+      text: "hello",
+    };
+    expect(
+      Schema.decodeUnknownSync(json(ChannelOutboundMessage))(
+        Schema.encodeSync(json(ChannelOutboundMessage))(outbound),
+      ),
+    ).toEqual(outbound);
+  });
   const input = {
     kind: "slack",
     connectionId: "slack-1",

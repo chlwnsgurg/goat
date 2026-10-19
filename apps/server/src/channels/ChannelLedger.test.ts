@@ -1,3 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off -- cursor recovery test uses an isolated SQLite fixture.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   type ChannelAnswerProjectChoice,
@@ -109,6 +114,90 @@ const claimOwner = (token: string, now: string, staleBefore: string) =>
   ChannelLedger.ChannelLedger.pipe(
     Effect.flatMap((ledger) => ledger.claimOwnership({ token, now, staleBefore })),
   );
+
+describe("iMessage cursor fence", () => {
+  it.effect("reads the same cursor from a fresh ledger connection", () =>
+    Effect.gen(function* () {
+      const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-imsg-ledger-"));
+      try {
+        const dbPath = NodePath.join(dir, "state.sqlite");
+        const layer = ChannelLedger.layer.pipe(
+          Layer.provide(SqlitePersistence.layerFromPath(dbPath)),
+          Layer.provide(NodeServices.layer),
+        );
+        yield* Effect.gen(function* () {
+          const ledger = yield* ChannelLedger.ChannelLedger;
+          yield* ledger.claimOwnership({
+            token: "owner-a",
+            now: NOW,
+            staleBefore: "2026-10-11T00:00:00.000Z",
+          });
+          yield* ledger.checkpointImessageCursor({
+            owner: "owner-a",
+            connectionId: "imessage-000000000001",
+            expected: undefined,
+            next: { cursor: 7, pendingRowIds: [6] },
+            now: NOW,
+          });
+        }).pipe(Effect.provide(layer));
+        const recovered = yield* ChannelLedger.ChannelLedger.pipe(
+          Effect.flatMap((ledger) => ledger.getImessageCursor("imessage-000000000001")),
+          Effect.provide(layer),
+        );
+        assert.deepEqual(recovered, { cursor: 7, pendingRowIds: [6] });
+      } finally {
+        NodeFS.rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+  it.effect("commits cursor and pending atomically under the current owner", () =>
+    Effect.gen(function* () {
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      yield* claimOwner("owner-a", NOW, "2026-10-11T00:00:00.000Z");
+      const first = { cursor: 9, pendingRowIds: [8] };
+      yield* ledger.checkpointImessageCursor({
+        owner: "owner-a",
+        connectionId: "imessage-000000000001",
+        expected: undefined,
+        next: first,
+        now: NOW,
+      });
+      assert.deepEqual(yield* ledger.getImessageCursor("imessage-000000000001"), first);
+      const stale = yield* Effect.result(
+        ledger.checkpointImessageCursor({
+          owner: "owner-a",
+          connectionId: "imessage-000000000001",
+          expected: undefined,
+          next: { cursor: 10, pendingRowIds: [] },
+          now: NOW,
+        }),
+      );
+      assert.strictEqual(stale._tag, "Failure");
+      const lost = yield* Effect.result(
+        ledger.checkpointImessageCursor({
+          owner: "owner-b",
+          connectionId: "imessage-000000000001",
+          expected: first,
+          next: { cursor: 10, pendingRowIds: [] },
+          now: NOW,
+        }),
+      );
+      assert.strictEqual(lost._tag, "Failure");
+      assert.deepEqual(yield* ledger.getImessageCursor("imessage-000000000001"), first);
+      yield* ledger.checkpointImessageCursor({
+        owner: "owner-a",
+        connectionId: "imessage-000000000001",
+        expected: first,
+        next: { cursor: 10, pendingRowIds: [] },
+        now: NOW,
+      });
+      assert.deepEqual(yield* ledger.getImessageCursor("imessage-000000000001"), {
+        cursor: 10,
+        pendingRowIds: [],
+      });
+    }).pipe(Effect.provide(TestLayer)),
+  );
+});
 
 const newTask = (inputId: string, conversationId: string, bindingId: string) => {
   const taskId = taskIdFor(inputId as never, 0);
