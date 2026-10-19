@@ -121,6 +121,8 @@ const environmentId = (stateDir: string) =>
       )
         throw cause;
       const generated = NodeCrypto.randomUUID();
+      // A fresh GOAT home has no userdata directory until the server first starts.
+      await NodeFSP.mkdir(stateDir, { recursive: true, mode: 0o700 });
       try {
         await NodeFSP.writeFile(path, generated, { mode: 0o600, flag: "wx" });
       } catch (writeCause) {
@@ -159,7 +161,7 @@ const enableCommand = Command.make("enable", {
   baseDir: baseDirFlag,
   allow: Flag.String("allow").pipe(Flag.atLeast(1)),
   own: Flag.String("own").pipe(Flag.atLeast(0)),
-  fullAccess: Flag.Boolean("full-access"),
+  fullAccess: Flag.Boolean("full-access").pipe(Flag.withDefault(false)),
 }).pipe(
   Command.withHandler((flags) =>
     Effect.gen(function* () {
