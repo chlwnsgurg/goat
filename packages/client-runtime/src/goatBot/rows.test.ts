@@ -13,6 +13,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildGoatBotTimeline,
+  goatBotConversationPreview,
   goatBotReplyingSince,
   type GoatBotItemReaders,
   type GoatBotMessagePresentation,
@@ -132,6 +133,89 @@ function readers(
 
 const content = (rows: GoatBotRow[]) => rows.filter((row) => row.kind !== "day");
 
+function preview(
+  items: ReadonlyArray<OrchestrationV2TurnItem>,
+  lastVisitedAt: string | null = null,
+  active = false,
+  cards: Record<string, GoatBotTaskCard> = {},
+) {
+  return goatBotConversationPreview({
+    rows: buildGoatBotTimeline({
+      visibleTurnItems: rowsOf(items),
+      pendingInputs: [],
+      readers: readers({}, cards),
+    }),
+    lastVisitedAt,
+    active,
+  });
+}
+
+describe("goatBotConversationPreview", () => {
+  const first = "2026-10-12T12:00:00Z";
+  const visit = "2026-10-12T12:02:00Z";
+  const answer = "2026-10-12T12:03:00Z";
+
+  it("has no preview for an empty conversation", () => {
+    expect(preview([])).toBeNull();
+  });
+
+  it("shows the latest user message without making it unread", () => {
+    expect(preview([user("u", first, "Hello")])).toEqual({
+      text: "You: Hello",
+      at: "2026-10-12T12:00:00.000Z",
+      unread: false,
+    });
+  });
+
+  it("marks a bot reply unread for a never-visited thread, except while open", () => {
+    const items = [bot("b", answer, "On it")];
+    expect(preview(items)).toMatchObject({ text: "On it", unread: true });
+    expect(preview(items, null, true)).toMatchObject({ unread: false });
+  });
+
+  it("clears a reply on visit and marks the next reply unread", () => {
+    const closed = [user("u", first, "Hi"), bot("b1", "2026-10-12T12:01:00Z", "Hello")];
+    expect(preview(closed, first)?.unread).toBe(true);
+    expect(preview(closed, visit)?.unread).toBe(false);
+    expect(preview([...closed, bot("b2", answer, "Again")], visit)).toMatchObject({
+      text: "Again",
+      unread: true,
+    });
+  });
+
+  it("tracks a card revision after visit even when a user message is displayed last", () => {
+    const initial = card("task", 1, "Working");
+    const revised = { ...card("task", 2, "Done"), updatedAt: answer };
+    const items = [notice("n1", first), user("u", visit, "Thanks"), notice("n2", answer)];
+    expect(preview(items, visit, false, { n1: initial, n2: revised })).toEqual({
+      text: "You: Thanks",
+      at: "2026-10-12T12:02:00.000Z",
+      unread: true,
+    });
+    expect(preview([notice("n1", first)], null, false, { n1: revised })).toEqual({
+      text: "Done: Task task",
+      at: answer,
+      unread: true,
+    });
+  });
+
+  it("recomputes the correct latest row and unread state across 75 visible items", () => {
+    const at = (seconds: number) =>
+      DateTime.formatIso(DateTime.add(DateTime.makeUnsafe(first), { seconds }));
+    const items = Array.from({ length: 75 }, (_, index) =>
+      index % 2 === 0
+        ? user(`u${index}`, at(index), `User ${index}`)
+        : bot(`b${index}`, at(index), `Bot ${index}`),
+    );
+    expect(preview(items, at(73))).toEqual({
+      text: "You: User 74",
+      at: at(74),
+      unread: false,
+    });
+    expect(preview(items, at(72))?.unread).toBe(true);
+  });
+});
+
 describe("buildGoatBotTimeline", () => {
   it("keeps only the conversation and work cards, hiding tool calls and reasoning", () => {
     const rows = buildGoatBotTimeline({
@@ -166,7 +250,7 @@ describe("buildGoatBotTimeline", () => {
     });
     expect(content(rows).map((row) => (row.kind === "user" ? row.delivery : null))).toEqual([
       { state: "read", readAt: "2026-10-12T12:00:01Z" },
-      { state: "sent" },
+      { state: "delivered" },
     ]);
   });
 
@@ -221,7 +305,7 @@ describe("buildGoatBotTimeline", () => {
     expect(
       content(rows).map((row) => [row.id, row.kind === "user" ? row.delivery.state : null]),
     ).toEqual([
-      ["u1", "sent"],
+      ["u1", "delivered"],
       ["pending:k2", "sending"],
       ["pending:k3", "failed"],
     ]);
@@ -281,6 +365,77 @@ describe("buildGoatBotTimeline", () => {
     ]);
   });
 
+  it("marks first, middle, last and single bubbles and groups task cards with bot replies", () => {
+    const rows = buildGoatBotTimeline({
+      visibleTurnItems: rowsOf([
+        user("u1", "2026-10-12T12:00:00Z", "a"),
+        user("u2", "2026-10-12T12:01:00Z", "b"),
+        user("u3", "2026-10-12T12:02:00Z", "c"),
+        bot("b1", "2026-10-12T12:03:00Z", "Working"),
+        notice("n1", "2026-10-12T12:04:00Z"),
+        user("u4", "2026-10-12T12:10:00Z", "later"),
+      ]),
+      pendingInputs: [],
+      readers: readers({}, { n1: card("task", 1) }),
+    });
+    expect(content(rows).map((row) => [row.id, row.groupPosition])).toEqual([
+      ["u1", "first"],
+      ["u2", "middle"],
+      ["u3", "last"],
+      ["b1", "first"],
+      ["n1", "last"],
+      ["u4", "single"],
+    ]);
+    expect(
+      content(rows).flatMap((row) => (row.kind === "user" && row.showReceipt ? [row.id] : [])),
+    ).toEqual(["u4"]);
+  });
+
+  it("adds a time stamp at one hour while five-minute pauses only split bubbles", () => {
+    const rows = buildGoatBotTimeline({
+      visibleTurnItems: rowsOf([
+        user("u1", "2026-10-12T12:00:00Z", "a"),
+        user("u2", "2026-10-12T12:06:00Z", "b"),
+        user("u3", "2026-10-12T13:06:00Z", "c"),
+      ]),
+      pendingInputs: [],
+      readers: readers(),
+    });
+    expect(rows.map((row) => row.kind)).toEqual(["day", "user", "user", "day", "user"]);
+    expect(content(rows).map((row) => row.groupPosition)).toEqual(["single", "single", "single"]);
+  });
+
+  it("distinguishes queued and accepted pending sends from committed delivery", () => {
+    const rows = buildGoatBotTimeline({
+      visibleTurnItems: rowsOf([user("u1", "2026-10-12T12:00:00Z", "committed")]),
+      pendingInputs: [
+        {
+          clientKey: "q",
+          text: "wait",
+          createdAt: "2026-10-12T12:00:01Z",
+          state: "queued",
+          requestKey: null,
+        },
+        {
+          clientKey: "a",
+          text: "accepted",
+          createdAt: "2026-10-12T12:00:02Z",
+          state: "accepted",
+          requestKey: "accepted",
+        },
+      ],
+      readers: readers(),
+    });
+    expect(content(rows).map((row) => (row.kind === "user" ? row.delivery.state : null))).toEqual([
+      "delivered",
+      "queued",
+      "sent",
+    ]);
+    expect(
+      content(rows).flatMap((row) => (row.kind === "user" && row.showReceipt ? [row.id] : [])),
+    ).toEqual(["pending:a"]);
+  });
+
   it("takes the bot's tone from its message and skips a reply that has not started", () => {
     const rows = buildGoatBotTimeline({
       visibleTurnItems: rowsOf([
@@ -291,6 +446,49 @@ describe("buildGoatBotTimeline", () => {
       readers: readers({ b1: { tone: "failure", readAt: null, requestKey: null } }),
     });
     expect(content(rows)).toMatchObject([{ id: "b1", kind: "bot", tone: "failure" }]);
+  });
+
+  it("marks a direct reply as non-proactive and splits a later work result into a new group", () => {
+    const rows = content(
+      buildGoatBotTimeline({
+        visibleTurnItems: rowsOf([
+          user("u1", "2026-10-12T12:00:00Z", "Fix the test"),
+          bot("b1", "2026-10-12T12:00:01Z", "On it."),
+          bot("b2", "2026-10-12T12:02:00Z", "The test is fixed."),
+        ]),
+        pendingInputs: [],
+        readers: readers({
+          u1: { tone: "reply", readAt: null, requestKey: "request-1" },
+          b1: { tone: "status", readAt: null, requestKey: null, replyToKey: "request-1" },
+          b2: { tone: "result", readAt: null, requestKey: null },
+        }),
+      }),
+    );
+    expect(rows[1]).toMatchObject({ kind: "bot", proactive: false, groupPosition: "single" });
+    expect(rows[2]).toMatchObject({ kind: "bot", proactive: true, groupPosition: "single" });
+  });
+
+  it("groups consecutive proactive updates and excludes failure replies", () => {
+    const rows = content(
+      buildGoatBotTimeline({
+        visibleTurnItems: rowsOf([
+          bot("b1", "2026-10-12T12:00:00Z", "Status"),
+          bot("b2", "2026-10-12T12:01:00Z", "Result"),
+          bot("b3", "2026-10-12T12:02:00Z", "Failed"),
+        ]),
+        pendingInputs: [],
+        readers: readers({
+          b1: { tone: "status", readAt: null, requestKey: null },
+          b2: { tone: "result", readAt: null, requestKey: null },
+          b3: { tone: "failure", readAt: null, requestKey: null },
+        }),
+      }),
+    );
+    expect(rows.map((row) => row.kind === "bot" && [row.proactive, row.groupPosition])).toEqual([
+      [true, "first"],
+      [true, "middle"],
+      [false, "last"],
+    ]);
   });
 
   it("offers a question's choices only until the user sends something", () => {

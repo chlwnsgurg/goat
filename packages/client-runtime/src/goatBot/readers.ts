@@ -37,6 +37,7 @@ const SOURCE_PREFIX = {
   goat: null,
   slack: "Slack",
   mcp: "Agent",
+  imessage: "iMessage",
 } as const satisfies Record<ChannelKind, string | null>;
 
 /** Before a worker exists the task is still being taken in; afterwards a missing one is unusual. */

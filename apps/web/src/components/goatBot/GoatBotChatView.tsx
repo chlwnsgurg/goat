@@ -1,9 +1,10 @@
 import type { GoatBotRow } from "@goat/client-runtime/goatBot";
 import { Link } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { APP_DISPLAY_NAME } from "~/branding";
 import { isElectron } from "~/env";
+import { ChevronRightIcon } from "~/components/solar";
 import { GOAT_BOT_PATH, type GlobalAgentLegacyRoute } from "~/globalAgentRoute";
 
 import { Button } from "../ui/button";
@@ -20,6 +21,11 @@ import {
 } from "@goat/client-runtime/goatBot";
 
 const GOAT_BOT_TITLE = "GOAT Bot";
+const EXAMPLES = [
+  "Fix the flaky test in my project",
+  "Review the latest changes",
+  "How is the work going?",
+] as const;
 
 export interface GoatBotChatViewProps {
   readonly availability: GoatBotAvailability;
@@ -61,22 +67,29 @@ export function GoatBotChatView({
   const removed = removal !== null;
   const ready = availability.kind === "ready" && !removed;
   const canSend = !removed && canSendToGoatBot(availability, canOperate);
+  const [seed, setSeed] = useState<{ text: string; nonce: number } | null>(null);
+  const headerStatus =
+    removal === "archived"
+      ? "Archived"
+      : removal === "deleted"
+        ? "Deleted"
+        : removal === "unchecked"
+          ? "Couldn't check this chat"
+          : availability.kind === "ready"
+            ? null
+            : statusLine(availability);
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
-      <WorkspacePageHeader electron={isElectron} className="border-b border-border">
-        <div className="flex min-w-0 items-center gap-2.5">
+      <WorkspacePageHeader electron={isElectron} className="surface-glass relative">
+        <div className="absolute left-1/2 flex max-w-[60%] min-w-0 -translate-x-1/2 items-center gap-2">
           <GoatBotAvatar size="md" />
-          <div className="flex min-w-0 flex-col">
-            <h1 className="truncate text-sm font-medium text-foreground">{GOAT_BOT_TITLE}</h1>
-            <p className="truncate text-xs text-muted-foreground">
-              {removal === "archived"
-                ? "Archived"
-                : removal === "deleted"
-                  ? "Deleted"
-                  : removal === "unchecked"
-                    ? "Couldn't check this chat"
-                    : statusLine(availability)}
-            </p>
+          <div className="flex min-w-0 items-center gap-2">
+            <h1 className="goat-name-capsule truncate text-foreground">
+              {GOAT_BOT_TITLE} <ChevronRightIcon aria-hidden className="size-3" />
+            </h1>
+            {headerStatus ? (
+              <p className="truncate text-2xs text-muted-foreground">{headerStatus}</p>
+            ) : null}
           </div>
         </div>
         <div className="ml-auto flex shrink-0 items-center">
@@ -132,6 +145,11 @@ export function GoatBotChatView({
           availability={availability}
           onRetryAvailability={onRetryAvailability}
           legacyAgentRoute={legacyAgentRoute}
+          onSelectExample={
+            canSend
+              ? (text) => setSeed((previous) => ({ text, nonce: (previous?.nonce ?? 0) + 1 }))
+              : undefined
+          }
         />
       )}
       {ready && !canOperate ? (
@@ -140,6 +158,8 @@ export function GoatBotChatView({
         </p>
       ) : null}
       <GoatBotComposer
+        key={seed?.nonce ?? 0}
+        initialText={seed?.text ?? ""}
         disabled={!canSend}
         placeholder={canSend ? "Message GOAT Bot" : "GOAT Bot isn't available"}
         onSend={onSend}
@@ -256,10 +276,12 @@ function GoatBotNotice({
   availability,
   onRetryAvailability,
   legacyAgentRoute,
+  onSelectExample,
 }: {
   readonly availability: GoatBotAvailability;
   readonly onRetryAvailability: (() => void) | undefined;
   readonly legacyAgentRoute: GlobalAgentLegacyRoute | null;
+  readonly onSelectExample?: ((text: string) => void) | undefined;
 }) {
   const { title, description, retryLabel } = noticeCopy(availability);
   const actions: ReactNode[] = [];
@@ -295,19 +317,26 @@ function GoatBotNotice({
     );
   }
   return (
-    <Empty className="min-h-0 flex-1">
+    <Empty size="compact" className="min-h-0 flex-1">
       <EmptyHeader className="max-w-md">
         <GoatBotAvatar size="lg" className="mx-auto mb-4" />
         <EmptyTitle>{title}</EmptyTitle>
         <EmptyDescription>{description}</EmptyDescription>
       </EmptyHeader>
-      {availability.kind === "ready" ? (
+      {availability.kind === "ready" && onSelectExample ? (
         <EmptyContent>
-          <ul className="space-y-1 text-sm text-muted-foreground">
-            <li>Fix the flaky test in my project</li>
-            <li>Review the latest changes</li>
-            <li>How is the work going?</li>
-          </ul>
+          <div className="flex flex-col items-start gap-2 text-left">
+            {EXAMPLES.map((example) => (
+              <button
+                key={example}
+                type="button"
+                className="rounded-full border border-border bg-transparent px-3 py-1.5 text-sm hover:bg-goat-bubble-in"
+                onClick={() => onSelectExample(example)}
+              >
+                {example}
+              </button>
+            ))}
+          </div>
         </EmptyContent>
       ) : null}
       {actions.length > 0 ? (
@@ -327,8 +356,8 @@ function noticeCopy(availability: GoatBotAvailability): {
   switch (availability.kind) {
     case "ready":
       return {
-        title: "Ask GOAT Bot for anything",
-        description: "It answers here and starts the work in its own threads.",
+        title: "GOAT Bot",
+        description: "Text it like a person. It answers here and does the work in its own threads.",
         retryLabel: null,
       };
     case "connecting":

@@ -78,6 +78,7 @@ describe("presentTaskChip", () => {
   it("names where outside requests came from", () => {
     expect(presentTaskChip(chip({ originKind: "slack" })).sourceLabel).toBe("Slack · Jun");
     expect(presentTaskChip(chip({ originKind: "mcp" })).sourceLabel).toBe("Agent · Jun");
+    expect(presentTaskChip(chip({ originKind: "imessage" })).sourceLabel).toBe("iMessage · Jun");
   });
 
   it("names the machine that runs remote work", () => {

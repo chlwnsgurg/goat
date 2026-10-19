@@ -308,6 +308,16 @@ export class ChannelLedger extends Context.Service<
       readonly staleBefore: string;
     }) => Effect.Effect<boolean, ChannelLedgerError>;
     readonly getWorkerCursor: () => Effect.Effect<number | undefined, ChannelLedgerError>;
+    readonly getImessageCursor: (
+      connectionId: string,
+    ) => Effect.Effect<ImessageCursor | undefined, ChannelLedgerError>;
+    readonly checkpointImessageCursor: (input: {
+      readonly owner: string;
+      readonly connectionId: string;
+      readonly expected: ImessageCursor | undefined;
+      readonly next: ImessageCursor;
+      readonly now: string;
+    }) => Effect.Effect<void, ChannelLedgerError>;
     /** Whether `owner` still holds the worker ownership row. */
     readonly isOwner: (owner: string) => Effect.Effect<boolean, ChannelLedgerError>;
     /** The task's remote worker state as stored JSON, if the task ever ran on another machine. */
@@ -434,10 +444,32 @@ const decodeRuntimeMode = Schema.decodeUnknownSync(RuntimeMode);
 const CursorState = Schema.Struct({ cursor: Schema.Number });
 const encodeCursor = Schema.encodeSync(Schema.fromJsonString(CursorState));
 const decodeCursor = Schema.decodeUnknownSync(Schema.fromJsonString(CursorState));
+export interface ImessageCursor {
+  readonly cursor: number;
+  readonly pendingRowIds: ReadonlyArray<number>;
+}
+const ImessageCursorState = Schema.Struct({
+  cursor: Schema.Number,
+  pendingRowIds: Schema.Array(Schema.Number),
+});
+const encodeImessageCursor = Schema.encodeSync(Schema.fromJsonString(ImessageCursorState));
+const decodeImessageCursor = Schema.decodeUnknownSync(Schema.fromJsonString(ImessageCursorState));
+const validImessageCursor = (state: ImessageCursor) =>
+  Number.isSafeInteger(state.cursor) &&
+  state.cursor >= 0 &&
+  state.pendingRowIds.length <= 128 &&
+  state.pendingRowIds.every(
+    (id, index, ids) =>
+      Number.isSafeInteger(id) &&
+      id > 0 &&
+      id <= state.cursor &&
+      (index === 0 || id > ids[index - 1]!),
+  );
 const encodeAddress = Schema.encodeSync(Schema.fromJsonString(ChannelReplyAddress));
 
 const WORKER_KEY = "worker";
 const CURSOR_KEY = "worker-cursor";
+const imessageCursorKey = (connectionId: string) => "imessage-cursor:" + connectionId;
 const botKey = (ownerId: string) => "bot:" + ownerId;
 /** Remote worker rows never carry an owner token, so the ownership fence cannot match them. */
 const remoteWorkerKey = (taskId: ChannelTaskId) => "remote-worker:" + taskId;
@@ -1330,6 +1362,63 @@ const make = Effect.gen(function* () {
         ),
         Effect.mapError(toLedgerError("getWorkerCursor")),
       ),
+
+    getImessageCursor: (connectionId) =>
+      sql<{ readonly value_json: string }>`
+        SELECT value_json FROM channel_runtime_state WHERE key = ${imessageCursorKey(connectionId)}
+      `.pipe(
+        Effect.flatMap((rows) => {
+          if (rows[0] === undefined) return Effect.succeed(undefined);
+          const state = decodeImessageCursor(rows[0].value_json);
+          return validImessageCursor(state)
+            ? Effect.succeed(state)
+            : Effect.fail(
+                new ChannelLedgerError({
+                  reason: "persistence",
+                  detail: "Invalid iMessage cursor state.",
+                }),
+              );
+        }),
+        Effect.mapError(toLedgerError("getImessageCursor")),
+      ),
+
+    checkpointImessageCursor: (input) =>
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* fence(input.owner);
+            const valid =
+              validImessageCursor(input.next) &&
+              (input.expected === undefined || input.next.cursor >= input.expected.cursor) &&
+              (input.expected === undefined || validImessageCursor(input.expected));
+            if (!valid)
+              return yield* new ChannelLedgerError({
+                reason: "version_conflict",
+                detail: "Invalid iMessage cursor.",
+              });
+            const key = imessageCursorKey(input.connectionId);
+            const rows = yield* sql<{ readonly value_json: string }>`
+          SELECT value_json FROM channel_runtime_state WHERE key = ${key}
+        `;
+            const old =
+              rows[0] === undefined ? undefined : decodeImessageCursor(rows[0].value_json);
+            if (
+              (old === undefined ? undefined : encodeImessageCursor(old)) !==
+              (input.expected === undefined ? undefined : encodeImessageCursor(input.expected))
+            )
+              return yield* new ChannelLedgerError({
+                reason: "version_conflict",
+                detail: "iMessage cursor changed.",
+              });
+            yield* sql`
+          INSERT INTO channel_runtime_state (key, value_json, updated_at)
+          VALUES (${key}, ${encodeImessageCursor(input.next)}, ${input.now})
+          ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json,
+            updated_at = excluded.updated_at
+        `;
+          }),
+        )
+        .pipe(Effect.mapError(toLedgerError("checkpointImessageCursor"))),
 
     isOwner: (owner) =>
       sql<{ readonly key: string }>`

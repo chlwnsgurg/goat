@@ -3,9 +3,19 @@
  * the R7 path (GOAT bot and Slack at once) and how Slack sockets end. Real Slack timing and the
  * web and desktop screens are checked by hand in the R7 demo; passing here is not R7.
  */
+// @effect-diagnostics nodeBuiltinImport:off -- synthetic iMessage settings and database path only.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@goat/shared/HostProcess";
 import { assert, describe, it } from "@effect/vitest";
-import { ProjectId, ProviderInstanceId, type SlackChannelDefaultTarget } from "@goat/contracts";
+import {
+  ProjectId,
+  ProviderInstanceId,
+  type ChannelInboundMessage,
+  type SlackChannelDefaultTarget,
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -18,12 +28,19 @@ import * as Stream from "effect/Stream";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ServerConfig from "../config.ts";
 import * as ChannelGateway from "./ChannelGateway.ts";
 import * as ChannelIdentityService from "./ChannelIdentityService.ts";
 import * as ChannelLayers from "./ChannelLayers.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRuntime from "./ChannelRuntime.ts";
 import * as ChannelTransport from "./ChannelTransport.ts";
+import { makeImessageTransport } from "./imessage/imessageSender.ts";
+import { makeLayerLive } from "./imessage/ImessageChannelRuntime.ts";
+import {
+  IMESSAGE_SETTINGS_FILE,
+  type ImessageSettingsFile,
+} from "./imessage/ImessageChannelSettings.ts";
 import * as SlackChannelSettings from "./SlackChannelSettings.ts";
 import { channelMention, directMessage, eventCallback } from "./slack/slackChannelTestSupport.ts";
 import { makeFakeSlackSdk, type FakeSlackSdk } from "./slack/slackSdkFake.ts";
@@ -41,6 +58,104 @@ import {
 } from "./testkit/ChannelHarness.ts";
 
 const missingInstance = ProviderInstanceId.make("missing");
+
+describe("iMessage transport assembly", () => {
+  it.effect.skipIf(HostProcess.Platform.defaultValue() !== "darwin")(
+    "registers the live transport only with enabled Mac settings",
+    () => {
+      const fixtureDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-imsg-layer-"));
+      const sdk = makeFakeSlackSdk();
+      const channelsLayer = liveChannels(
+        sdk,
+        offeredModels,
+        makeLayerLive(NodePath.join(fixtureDir, "absent-chat.db")),
+      );
+      const harness = makeHarness({ channelsLayer, fakeSlackTransport: false });
+      return Effect.gen(function* () {
+        try {
+          const config = yield* ServerConfig.ServerConfig;
+          const registry = yield* ChannelTransport.ChannelTransportRegistry;
+          const runtime = yield* claim;
+          const settings: ImessageSettingsFile = {
+            version: 1,
+            enabled: false,
+            connectionId: "imessage-000000000001",
+            allowedHandles: ["+15550000000"],
+            ownHandles: [],
+            owner,
+          };
+          NodeFS.mkdirSync(config.stateDir, { recursive: true });
+          const settingsPath = NodePath.join(config.stateDir, IMESSAGE_SETTINGS_FILE);
+          NodeFS.writeFileSync(settingsPath, JSON.stringify(settings));
+          yield* runtime.runPass;
+          assert.isTrue(Option.isNone(yield* registry.resolve("imessage")));
+          NodeFS.writeFileSync(settingsPath, JSON.stringify({ ...settings, enabled: true }));
+          yield* runtime.runPass;
+          assert.isTrue(Option.isSome(yield* registry.resolve("imessage")));
+        } finally {
+          NodeFS.rmdirSync(fixtureDir);
+        }
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+  it.effect("requires the trusted transport caller and a linked requester", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const connectionId = "imessage-000000000001";
+      const message: ChannelInboundMessage = {
+        kind: "imessage",
+        connectionId,
+        conversationKey: "iMessage;-;+15550000000",
+        externalMessageId: "guid-1",
+        idempotencyKey: connectionId + ":1",
+        actor: { externalActorId: "+15550000000" },
+        replyAddress: { kind: "imessage", connectionId, chatGuid: "iMessage;-;+15550000000" },
+        text: "hello",
+        attachments: [],
+        receivedAt: "2026-10-19T00:00:00.000Z",
+        intent: "message",
+      };
+      const context = {
+        ...owner,
+        caller: { type: "transport" as const, kind: "imessage" as const, connectionId },
+      };
+      const accepted = yield* gateway.ingest(message, context);
+      assert.strictEqual(accepted.state, "rejected");
+      assert.isUndefined((yield* ledger.getInput(accepted.inputId))?.requester);
+      const wrongKind = yield* Effect.result(
+        gateway.ingest(
+          { ...message, idempotencyKey: connectionId + ":2" },
+          { ...owner, caller: { type: "transport", kind: "slack", connectionId } },
+        ),
+      );
+      assert.strictEqual(wrongKind._tag, "Failure");
+      const wrongConnection = yield* Effect.result(
+        gateway.ingest(
+          { ...message, idempotencyKey: connectionId + ":3" },
+          { ...owner, caller: { type: "transport", kind: "imessage", connectionId: "other" } },
+        ),
+      );
+      assert.strictEqual(wrongConnection._tag, "Failure");
+    }).pipe(Effect.provide(harness.layer));
+  });
+  it.effect("registers only for its scope and releases on close", () =>
+    Effect.gen(function* () {
+      const registry = yield* ChannelTransport.ChannelTransportRegistry;
+      const scope = yield* Scope.make();
+      const transport = makeImessageTransport({
+        connectionId: "imessage-000000000001",
+        sender: { sendText: async () => ({ acceptedAt: "2026-10-19T00:00:00.000Z" }) },
+        isActive: () => Effect.succeed(true),
+      });
+      yield* registry.register(transport).pipe(Effect.provideService(Scope.Scope, scope));
+      assert.isTrue(Option.isSome(yield* registry.resolve("imessage")));
+      yield* Scope.close(scope, Exit.void);
+      assert.isTrue(Option.isNone(yield* registry.resolve("imessage")));
+    }).pipe(Effect.provide(ChannelTransport.layer)),
+  );
+});
 const serverModel = { instanceId: ProviderInstanceId.make("codex"), model: "server-default" };
 /** What the fake providers list; anything else counts as not offered. */
 const offeredModels = ["gpt-6.1-sol", "gpt-other", "server-default"];
@@ -49,8 +164,12 @@ const offeredModels = ["gpt-6.1-sol", "gpt-other", "server-default"];
  * The server's channel graph with the live Slack layers; only the SDK is fake. Providers resolve
  * except the missing instance.
  */
-const liveChannels = (sdk: FakeSlackSdk, offered: ReadonlyArray<string> = offeredModels) =>
-  ChannelLayers.layerServicesWithSlack.pipe(
+const liveChannels = (
+  sdk: FakeSlackSdk,
+  offered: ReadonlyArray<string> = offeredModels,
+  imessageLayer = makeLayerLive(),
+) =>
+  ChannelLayers.makeLayerServicesWithSlack(imessageLayer).pipe(
     Layer.provide(
       Layer.mergeAll(
         sdk.layer,

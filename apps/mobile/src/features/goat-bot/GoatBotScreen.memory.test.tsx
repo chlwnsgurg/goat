@@ -10,6 +10,7 @@ import {
   nativeId,
   type NativeMemoryHarness,
 } from "../../testing/memoryNativeHarness";
+const appearance = vi.hoisted(() => ({ mode: "light" as "light" | "dark" }));
 vi.mock("@legendapp/list/react-native", () => ({ LegendList: () => null }));
 vi.mock("react-native-keyboard-controller", () => ({
   KeyboardAvoidingView: () => null,
@@ -19,12 +20,20 @@ vi.mock("../../native/NativeScrollViewMarker", () => ({ NativeScrollViewMarker: 
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ bottom: 0 }) }));
 vi.mock("./useMobileGoatBotSession", () => ({ useMobileGoatBotSession: () => ({}) }));
 vi.mock("./GoatBotAvatar", () => ({ GoatBotAvatar: () => null }));
+vi.mock("react-native-svg", () => ({ default: () => null, Path: () => null }));
+vi.mock("../settings/appearance/AppearancePreferencesProvider", () => ({
+  useAppearancePreferences: () => ({
+    themeAppearance: appearance.mode,
+    appearance: { baseFontSize: 16 },
+  }),
+}));
 import { GoatBotTimelineRow } from "./GoatBotScreen";
 let h: NativeMemoryHarness;
 let view: ReturnType<typeof renderNative>;
 afterEach(async () => {
   await view?.unmount();
   h?.dispose();
+  appearance.mode = "light";
 });
 it("opens a report's exact memory target and leaves legacy text without an action", async () => {
   h = createNativeMemoryHarness();
@@ -34,7 +43,7 @@ it("opens a report's exact memory target and leaves legacy text without an actio
     kind: "assistant",
     text: "Synthetic resolution report",
     options: [],
-    tone: "normal",
+    tone: "reply",
     firstInGroup: true,
     memory: { environmentId: nativeEnv, memorySpaceId: nativeSpace, memoryId: nativeId },
   } as unknown as GoatBotRow;

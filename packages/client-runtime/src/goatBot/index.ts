@@ -1,4 +1,5 @@
 export * from "./rows.ts";
+export * from "./labels.ts";
 export * from "./readers.ts";
 export * from "./ensure.ts";
 export * from "./sendQueue.ts";

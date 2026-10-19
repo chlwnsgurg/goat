@@ -45,7 +45,7 @@ describe("createGoatBotSendQueue", () => {
     queue.submit("first", bot);
     queue.submit("second", bot);
     expect(calls.map((call) => call.text)).toEqual(["first"]);
-    expect(queue.pendingInputs().map((entry) => entry.state)).toEqual(["sending", "sending"]);
+    expect(queue.pendingInputs().map((entry) => entry.state)).toEqual(["sending", "queued"]);
     calls[0]!.reply.resolve({ requestKey: "in-1" });
     await flush();
     expect(calls.map((call) => call.text)).toEqual(["first", "second"]);

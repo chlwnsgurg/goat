@@ -1,8 +1,8 @@
 # Channels and GOAT Bot
 
 A channel is one inbound conversation the server accepts, answers, and replies to on the same
-path. `ChannelKind` in `packages/contracts/src/channelCommon.ts` is `goat`, `slack`, or `mcp`.
-The three kinds share a ledger. They do not share a thread.
+path. `ChannelKind` in `packages/contracts/src/channelCommon.ts` is `goat`, `slack`, `mcp`, or
+`imessage`. The four kinds share a ledger. They do not share a thread.
 
 The [command commit](server.md#command-commit) still owns coding work. Channel reception can ask
 for a worker thread. It does not run the provider inside the bot thread.
@@ -22,6 +22,12 @@ envelopes into `ChannelGateway.ingest` and posts outbound through the Slack API.
 `apps/server/src/channels/slack/SlackChannelRuntime.ts` holds the socket session per connection.
 Slack settings for that connection are `slack-channel-settings.json` under the state directory
 (`apps/server/src/channels/slack/SlackChannelSettings.live.ts`), not `settings.json`.
+
+The local Mac iMessage adapter in `apps/server/src/channels/imessage/` uses file settings,
+read-only `chat.db` polling with a fenced cursor, and a fixed AppleScript send transport. Its
+poller runs inside the channel worker owner's pass.
+
+> Decision record: [ADR-0015](decisions/ADR-0015-imessage-channel.md)
 
 > Decision record: [ADR-0011](decisions/ADR-0011-channel-ledger.md)
 

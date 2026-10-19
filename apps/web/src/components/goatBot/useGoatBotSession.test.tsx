@@ -583,7 +583,9 @@ it("keeps server reply order, quotes distant input and uses readAt rather than t
     projected("user_message", "A", {
       channel: channel("input-A", { readAt: "2026-10-12T12:07:00.000Z" }),
     }),
-    projected("user_message", "B", { channel: channel("input-B") }),
+    projected("user_message", "B", {
+      channel: channel("input-B", { readAt: "2026-10-12T12:09:00.000Z" }),
+    }),
     projected("assistant_message", "Reply B", {
       channel: channel("reply-B", { kind: "receipt", inReplyToInputId: "input-B" }),
     }),
@@ -603,14 +605,11 @@ it("keeps server reply order, quotes distant input and uses readAt rather than t
   expect(rows.findIndex((row) => row?.includes("Reply B"))).toBeLessThan(
     rows.findIndex((row) => row?.includes("Reply A")),
   );
-  expect(rows.find((row) => row?.endsWith("A"))).toContain(
-    formatShortTimestamp("2026-10-12T12:07:00.000Z", "24-hour"),
-  );
-  expect(container.textContent).toContain("Read");
-  expect(container.textContent).toContain("Sent");
-  expect(container.querySelector(".border-destructive\\/32")?.textContent).toContain(
-    "Intake failed",
-  );
+  // Messages shows one receipt, under the latest outgoing bubble, timed by when the bot read it.
+  const receipt = `Read ${formatShortTimestamp("2026-10-12T12:09:00.000Z", "24-hour")}`;
+  expect(container.textContent).toContain(receipt);
+  expect(container.textContent?.split("Read ").length).toBe(2);
+  expect(container.textContent).toContain("Intake failed");
 });
 
 it("keeps target-specific offline, loading and missing history states with summaries and requester time", async () => {
@@ -664,8 +663,18 @@ it("keeps target-specific offline, loading and missing history states with summa
 
 it("renders an introduction and three actionable examples when ready and empty", async () => {
   await render();
-  expect(container.textContent).toContain("It answers here and starts the work in its own threads");
-  expect(container.querySelectorAll("ul li")).toHaveLength(3);
+  expect(container.textContent).toContain(
+    "Text it like a person. It answers here and does the work in its own threads.",
+  );
+  expect(
+    [...container.querySelectorAll("button")].filter((button) =>
+      [
+        "Fix the flaky test in my project",
+        "Review the latest changes",
+        "How is the work going?",
+      ].includes(button.textContent ?? ""),
+    ),
+  ).toHaveLength(3);
 });
 
 it("respects permission loss without disabling reading", async () => {

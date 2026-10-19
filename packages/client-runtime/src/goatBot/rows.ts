@@ -86,7 +86,7 @@ export interface GoatBotPendingInput {
   readonly clientKey: string;
   readonly text: string;
   readonly createdAt: string;
-  readonly state: "sending" | "accepted" | "failed";
+  readonly state: "queued" | "sending" | "accepted" | "failed";
   /** The server's identity for the input once it has accepted it. */
   readonly requestKey: string | null;
   /** A final rejection cannot be retried with this input's key. */
@@ -94,20 +94,33 @@ export interface GoatBotPendingInput {
 }
 
 export type GoatBotDelivery =
+  | { readonly state: "queued" }
   | { readonly state: "sending" }
   | { readonly state: "failed"; readonly clientKey: string; readonly rejectionReason?: string }
   | { readonly state: "sent" }
+  | { readonly state: "delivered" }
   | { readonly state: "read"; readonly readAt: string };
+
+export type GoatBotGroupPosition = "single" | "first" | "middle" | "last";
 
 export type GoatBotRow =
   | { readonly kind: "day"; readonly id: string; readonly at: string }
   | {
       readonly kind: "user";
       readonly id: string;
+      /** This client's key for a message it is still sending; null once the server row exists. */
+      readonly sendKey: string | null;
+      /**
+       * The server's input id. A pending row gets it when the server accepts the message and the
+       * committed row carries the same id, which lets a view follow one message across both.
+       */
+      readonly requestKey: string | null;
       readonly text: string;
       readonly createdAt: string;
       readonly delivery: GoatBotDelivery;
       readonly firstInGroup: boolean;
+      readonly groupPosition: GoatBotGroupPosition;
+      readonly showReceipt: boolean;
     }
   | {
       readonly kind: "bot";
@@ -115,11 +128,13 @@ export type GoatBotRow =
       readonly text: string;
       readonly createdAt: string;
       readonly tone: GoatBotBotTone;
+      readonly proactive: boolean;
       readonly replyTo: string | null;
       /** Answers to pick, only while nothing has been sent since the question. */
       readonly options: ReadonlyArray<string>;
       readonly memory?: MemoryReportReference;
       readonly firstInGroup: boolean;
+      readonly groupPosition: GoatBotGroupPosition;
     }
   | {
       readonly kind: "task";
@@ -127,17 +142,55 @@ export type GoatBotRow =
       readonly createdAt: string;
       readonly card: GoatBotTaskCard;
       readonly firstInGroup: boolean;
+      readonly groupPosition: GoatBotGroupPosition;
     };
+
+export interface GoatBotConversationPreview {
+  readonly text: string;
+  readonly at: string;
+  readonly unread: boolean;
+}
+
+/** The display row stays at a card's first position while its revision can arrive later. */
+export function goatBotConversationPreview(input: {
+  readonly rows: ReadonlyArray<GoatBotRow>;
+  readonly lastVisitedAt: string | null | undefined;
+  readonly active: boolean;
+}): GoatBotConversationPreview | null {
+  const last = input.rows.findLast((row) => row.kind !== "day");
+  if (!last) return null;
+  const visitedAt = input.lastVisitedAt
+    ? Date.parse(input.lastVisitedAt)
+    : Number.NEGATIVE_INFINITY;
+  const unread =
+    !input.active &&
+    input.rows.some(
+      (row) =>
+        (row.kind === "bot" && Date.parse(row.createdAt) > visitedAt) ||
+        (row.kind === "task" && Date.parse(row.card.updatedAt) > visitedAt),
+    );
+  return {
+    text:
+      last.kind === "user"
+        ? `You: ${last.text}`
+        : last.kind === "bot"
+          ? last.text
+          : `${last.card.statusLabel}: ${last.card.title}`,
+    at: last.kind === "task" ? last.card.updatedAt : last.createdAt,
+    unread,
+  };
+}
 
 /** Messages further apart than this start a new group. */
 const GOAT_BOT_GROUP_GAP_MS = 5 * 60 * 1000;
+const GOAT_BOT_STAMP_GAP_MS = 60 * 60 * 1000;
 const NO_OPTIONS: ReadonlyArray<string> = [];
 
 type ContentRow = Exclude<GoatBotRow, { kind: "day" }>;
 type UngroupedRow =
-  | Omit<Extract<ContentRow, { kind: "user" }>, "firstInGroup">
-  | Omit<Extract<ContentRow, { kind: "bot" }>, "firstInGroup">
-  | Omit<Extract<ContentRow, { kind: "task" }>, "firstInGroup">;
+  | Omit<Extract<ContentRow, { kind: "user" }>, "firstInGroup" | "groupPosition" | "showReceipt">
+  | Omit<Extract<ContentRow, { kind: "bot" }>, "firstInGroup" | "groupPosition">
+  | Omit<Extract<ContentRow, { kind: "task" }>, "firstInGroup" | "groupPosition">;
 
 function itemCreatedAt(item: OrchestrationV2TurnItem): string {
   return DateTime.formatIso(item.startedAt ?? item.updatedAt);
@@ -205,23 +258,29 @@ export function buildGoatBotTimeline(input: {
       committed.push({
         kind: "user",
         id: item.id,
+        sendKey: null,
+        requestKey: presentation?.requestKey ?? null,
         text: item.text,
         createdAt: itemCreatedAt(item),
         delivery: presentation?.readAt
           ? { state: "read", readAt: presentation.readAt }
-          : { state: "sent" },
+          : { state: "delivered" },
       });
       continue;
     }
     if (item.type === "assistant_message") {
       if (item.text.trim().length === 0) continue;
       const presentation = input.readers.message(item);
+      const tone = presentation?.tone ?? "reply";
       committed.push({
         kind: "bot",
         id: item.id,
         text: item.text,
         createdAt: itemCreatedAt(item),
-        tone: presentation?.tone ?? "reply",
+        tone,
+        proactive:
+          !presentation?.replyToKey &&
+          (tone === "status" || tone === "result" || tone === "question"),
         replyTo:
           presentation?.replyToKey && presentation.replyToKey !== previousInputKey
             ? (inputTexts.get(presentation.replyToKey)?.slice(0, 160) ?? null)
@@ -259,6 +318,8 @@ export function buildGoatBotTimeline(input: {
     .map((entry) => ({
       kind: "user",
       id: `pending:${entry.clientKey}`,
+      sendKey: entry.clientKey,
+      requestKey: entry.requestKey,
       text: entry.text,
       createdAt: entry.createdAt,
       delivery:
@@ -272,7 +333,7 @@ export function buildGoatBotTimeline(input: {
             }
           : entry.state === "accepted"
             ? { state: "sent" }
-            : { state: "sending" },
+            : { state: entry.state },
     }));
 
   const ordered = [...committed, ...pending];
@@ -287,22 +348,39 @@ export function buildGoatBotTimeline(input: {
   }
 
   const rows: GoatBotRow[] = [];
-  let previous: UngroupedRow | null = null;
-  for (const row of ordered) {
-    const day = localDayKey(row.createdAt);
-    const newDay = previous === null || localDayKey(previous.createdAt) !== day;
-    if (newDay) rows.push({ kind: "day", id: `day:${day}:${row.id}`, at: row.createdAt });
+  const lastUserIndex = ordered.findLastIndex((row) => row.kind === "user");
+  const breaks = ordered.map((row, index) => {
+    const previous = index === 0 ? null : ordered[index - 1]!;
+    const newDay =
+      previous === null || localDayKey(previous.createdAt) !== localDayKey(row.createdAt);
     const gap =
       previous === null
         ? Number.POSITIVE_INFINITY
         : Date.parse(row.createdAt) - Date.parse(previous.createdAt);
-    const firstInGroup =
-      newDay ||
+    const stamp = newDay || !(gap < GOAT_BOT_STAMP_GAP_MS);
+    const first =
+      stamp ||
       previous === null ||
       side(previous) !== side(row) ||
-      !(gap <= GOAT_BOT_GROUP_GAP_MS);
-    rows.push({ ...row, firstInGroup });
-    previous = row;
+      !(gap <= GOAT_BOT_GROUP_GAP_MS) ||
+      (row.kind === "bot" && row.proactive && !(previous?.kind === "bot" && previous.proactive));
+    return { stamp, first };
+  });
+  for (const [index, row] of ordered.entries()) {
+    const { stamp, first } = breaks[index]!;
+    if (stamp)
+      rows.push({
+        kind: "day",
+        id: `day:${localDayKey(row.createdAt)}:${row.id}`,
+        at: row.createdAt,
+      });
+    const last = index === ordered.length - 1 || breaks[index + 1]!.first;
+    const groupPosition = first ? (last ? "single" : "first") : last ? "last" : "middle";
+    rows.push(
+      row.kind === "user"
+        ? { ...row, firstInGroup: first, groupPosition, showReceipt: index === lastUserIndex }
+        : { ...row, firstInGroup: first, groupPosition },
+    );
   }
   return rows;
 }

@@ -694,13 +694,19 @@ describe("ClientSettings sidebar", () => {
 });
 
 describe("ClientSettings context window meter", () => {
-  it("defaults off and preserves an explicit legacy opt-in", () => {
-    expect(decodeClientSettings({}).contextWindowMeterEnabled).toBe(false);
+  it("shows by default, even for settings persisted with the old default-off flag", () => {
+    expect(decodeClientSettings({}).contextWindowMeterHidden).toBe(false);
     expect(
-      decodeClientSettings({ contextWindowMeterEnabled: true }).contextWindowMeterEnabled,
-    ).toBe(true);
+      decodeClientSettings({ contextWindowMeterEnabled: false }).contextWindowMeterHidden,
+    ).toBe(false);
+  });
+
+  it("preserves an explicit opt-out", () => {
+    expect(decodeClientSettings({ contextWindowMeterHidden: true }).contextWindowMeterHidden).toBe(
+      true,
+    );
     expect(
-      decodeClientSettingsPatch({ contextWindowMeterEnabled: true }).contextWindowMeterEnabled,
+      decodeClientSettingsPatch({ contextWindowMeterHidden: true }).contextWindowMeterHidden,
     ).toBe(true);
   });
 });

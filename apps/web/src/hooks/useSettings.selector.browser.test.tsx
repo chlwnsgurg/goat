@@ -33,8 +33,8 @@ function counted(key: keyof typeof renders, child: ReactNode) {
 }
 
 function MeterReader() {
-  const enabled = useClientSettings((settings) => settings.contextWindowMeterEnabled);
-  return createElement("span", null, String(enabled));
+  const hidden = useClientSettings((settings) => settings.contextWindowMeterHidden);
+  return createElement("span", null, String(hidden));
 }
 
 function GroupingReader() {
@@ -78,7 +78,7 @@ describe("useClientSettings(selector)", () => {
 
     await act(() =>
       persistClientSettingsPatch({
-        contextWindowMeterEnabled: !getClientSettings().contextWindowMeterEnabled,
+        contextWindowMeterHidden: !getClientSettings().contextWindowMeterHidden,
       }),
     );
 
