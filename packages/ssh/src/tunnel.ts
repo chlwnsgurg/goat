@@ -171,6 +171,8 @@ export interface PreparedRemoteRuntime {
   readonly source: "requested" | "retained" | "live" | "installed";
   readonly installedExecutableSha256?: string;
   readonly requireInstalled: boolean;
+  /** This preparation uploaded the archive, so an older runtime may have just become garbage. */
+  readonly uploaded?: boolean;
   readonly mayUpgradeOwnedServer: boolean;
   /** SHA-256 of the retained run-t3.sh observed by preparation; null for other sources. */
   readonly retainedRunnerSha256: string | null;
@@ -2952,7 +2954,7 @@ export const prepareRemoteRuntime = (
         }),
       );
       yield* Effect.annotateCurrentSpan("goat.runtime.upload.installComplete", true);
-      return { ...exact, requireInstalled: true };
+      return { ...exact, requireInstalled: true, uploaded: true };
     }).pipe(
       // Error.message is non-enumerable; adding acquisition context must preserve it explicitly.
       Effect.mapError((error) =>
@@ -3172,6 +3174,8 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
     });
     if (
       !isNodeScriptRunner(selected.runner) &&
+      // Garbage appears only when this launch installed a runtime; skip the round trip otherwise.
+      (selected.uploaded === true || !selected.requireInstalled) &&
       parsed.pending === undefined &&
       parsed.refresh === undefined &&
       parsed.selectedVersion === selected.version
@@ -3180,7 +3184,8 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       yield* Effect.gen(function* () {
         const cleanup = yield* runSshCommand(target, {
           ...input,
-          remoteCommandArgs: ["sh", "-l", "-s"],
+          // The trailing word is only $1 to the script; it names this call in traces and tests.
+          remoteCommandArgs: ["sh", "-l", "-s", "goat-runtime-cleanup"],
           timeoutMs: 10_000,
           stdin: `set -eu
 DEFAULT_SERVER_HOME="$HOME/.goat"

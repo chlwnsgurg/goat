@@ -211,35 +211,29 @@ describe.skipIf(process.platform === "win32")("SSH runtime cleanup", () => {
     } else if (kind !== "parent-symlink") assert.isTrue(existsSync(join(f.versions, "1.5.0")));
   });
 
-  it.live.each(["inspection failure", "replacement lock", "command failure"] as const)(
-    "a real attach preserves runtimes during %s",
-    (kind) =>
-      Effect.gen(function* () {
-        const f = yield* makeProtocolFixture({
-          live: true,
-          kind: "managed",
-          oldVersion: "1.2.3",
-          ssh: SSH_RUNTIME_PROTOCOL_VERSION,
-          orchestration: ORCHESTRATION_PROTOCOL_VERSION,
-        });
-        const old = `${f.home}/.goat/runtime/goat/versions/1.0.0`;
-        yield* f.fs.makeDirectory(old);
-        let cleanupAttempted = false;
-        if (kind === "inspection failure") f.setScriptPrefix("flock() { return 1; }\n");
-        f.setBeforeCommand((script) => {
-          if (!script.includes("cleanup_runtime_versions")) return Effect.void;
-          cleanupAttempted = true;
-          if (kind === "replacement lock")
-            return f.fs.makeDirectory(`${f.home}/.goat/ssh-launch/replacement.lock`);
-          if (kind === "command failure") f.setScriptPrefix("exit 23\n");
-          return Effect.void;
-        });
-        const result = yield* launchOrReuseRemoteServer(uploadTarget, {}, f.runner).pipe(
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport),
-        );
-        assert.equal(result.status, "ready");
-        assert.isTrue(cleanupAttempted);
-        assert.isTrue(yield* f.fs.exists(old));
-      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  it.live("a plain attach skips cleanup and keeps older runtimes", () =>
+    Effect.gen(function* () {
+      const f = yield* makeProtocolFixture({
+        live: true,
+        kind: "managed",
+        oldVersion: "1.2.3",
+        ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+        orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+      });
+      const old = `${f.home}/.goat/runtime/goat/versions/1.0.0`;
+      yield* f.fs.makeDirectory(old);
+      let cleanupAttempted = false;
+      f.setBeforeCommand((script) => {
+        if (script.includes("cleanup_runtime_versions")) cleanupAttempted = true;
+        return Effect.void;
+      });
+      const result = yield* launchOrReuseRemoteServer(uploadTarget, {}, f.runner).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+      );
+      assert.equal(result.status, "ready");
+      // Garbage appears only when a launch installs a runtime, so attaching costs no round trip.
+      assert.isFalse(cleanupAttempted);
+      assert.isTrue(yield* f.fs.exists(old));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });
