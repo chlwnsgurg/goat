@@ -1,9 +1,12 @@
 import { SSH_PREFLIGHT_STEP_ORDER, type SshPreflightReport } from "@goat/contracts";
+import type { ConnectionCatalogEntry } from "@goat/client-runtime/connection";
+import * as Option from "effect/Option";
 import { describe, expect, it } from "vite-plus/test";
 import {
   parseDesktopSshTarget,
   sshPreflightAction,
   sshPreflightFlow,
+  unsavedManagedSshAlias,
 } from "./SshPreflightChecklist.logic";
 
 const ready: SshPreflightReport = {
@@ -87,5 +90,50 @@ describe("desktop SSH destination", () => {
         "SSH port must be between 1 and 65535.",
       );
     }
+  });
+});
+
+describe("unsavedManagedSshAlias", () => {
+  const sshRoute = (alias: string) => ({
+    target: { _tag: "SshConnectionTarget" },
+    profile: Option.some({
+      _tag: "SshConnectionProfile",
+      target: { alias, hostname: alias, username: null, port: null },
+    }),
+  });
+  // Only the route fields the function reads; a full catalog entry carries much more.
+  const entry = (aliases: ReadonlyArray<string>) => {
+    const [first, ...rest] = aliases.map(sshRoute);
+    return { ...first, alternateRoutes: rest } as unknown as ConnectionCatalogEntry;
+  };
+  const pinned = (alias: string, managed: boolean): SshPreflightReport => ({
+    ...withStep("key_auth", "failed"),
+    destination: {
+      alias,
+      hostname: "box.local",
+      user: "dev",
+      port: 22,
+      ...(managed ? { managed: true } : {}),
+    },
+  });
+
+  it("returns a pinned alias that no saved connection uses", () => {
+    expect(unsavedManagedSshAlias(pinned("goat-box-1", true), [entry(["other"])])).toBe(
+      "goat-box-1",
+    );
+  });
+
+  it("never offers a person's own config alias", () => {
+    expect(unsavedManagedSshAlias(pinned("devbox", false), [])).toBeNull();
+    expect(unsavedManagedSshAlias(null, [])).toBeNull();
+  });
+
+  it("keeps a pinned alias saved on any route, including a second SSH route", () => {
+    expect(
+      unsavedManagedSshAlias(pinned("goat-a", true), [entry(["goat-a", "goat-b"])]),
+    ).toBeNull();
+    expect(
+      unsavedManagedSshAlias(pinned("goat-b", true), [entry(["goat-a", "goat-b"])]),
+    ).toBeNull();
   });
 });

@@ -10,6 +10,7 @@ import {
   parseDesktopSshTarget,
   sshPreflightAction,
   sshPreflightFlow,
+  unsavedManagedSshAlias,
 } from "./SshPreflightChecklist.logic";
 import { sshRuntime } from "~/state/sshRuntime";
 import { sshRuntimeStatusText } from "@goat/client-runtime/state/sshRuntime";
@@ -939,16 +940,10 @@ export function ConnectionEnvironmentsSection({
 
   // Approving a key writes a managed alias and pin even when the checks then fail, so the
   // dialog must offer the way back for one that never became a saved connection.
-  const unsavedManagedAlias = (() => {
-    const destination = sshPreflight?.report.destination;
-    if (destination?.managed !== true || destination.alias === undefined) return null;
-    const alias = destination.alias;
-    return savedEnvironments.some(
-      (environment) => savedDesktopSshTarget(environment)?.alias === alias,
-    )
-      ? null
-      : alias;
-  })();
+  const unsavedManagedAlias = unsavedManagedSshAlias(
+    sshPreflight?.report ?? null,
+    savedEnvironments.map((environment) => environment.entry),
+  );
   const forgetUnsavedSshHost = async (alias: string) => {
     if (primaryEnvironmentId === null || !ownsSshConfig || sshAddInFlight.current) return;
     const confirmed = await requestConfirmDialog(
@@ -976,6 +971,7 @@ export function ConnectionEnvironmentsSection({
     setSavedBackendSshHost("");
     setSavedBackendSshUsername("");
     setSavedBackendSshPort("");
+    refreshDesktopSshHosts();
   };
 
   const checkSavedBackendSshTarget = async (target: DesktopSshEnvironmentTarget) => {

@@ -1,5 +1,7 @@
 import type { DesktopSshEnvironmentTarget, SshPreflightReport } from "@goat/contracts";
+import { type ConnectionCatalogEntry, connectionRoutes } from "@goat/client-runtime/connection";
 import { parseSshDestination } from "@goat/shared/sshDestination";
+import * as Option from "effect/Option";
 
 export function parseDesktopSshTarget(input: {
   readonly host: string;
@@ -48,4 +50,26 @@ export function sshPreflightAction(input: {
       flow === "review" ||
       flow === "blocked",
   };
+}
+
+/**
+ * The managed alias a failed or abandoned check left pinned, when no saved connection uses it.
+ * Every route counts: one machine can be saved under several SSH aliases.
+ */
+export function unsavedManagedSshAlias(
+  report: SshPreflightReport | null,
+  savedEntries: ReadonlyArray<ConnectionCatalogEntry>,
+) {
+  const destination = report?.destination;
+  if (destination?.managed !== true || destination.alias === undefined) return null;
+  const alias = destination.alias;
+  const saved = savedEntries.some((entry) =>
+    connectionRoutes(entry).some(
+      (route) =>
+        Option.isSome(route.profile) &&
+        route.profile.value._tag === "SshConnectionProfile" &&
+        route.profile.value.target.alias === alias,
+    ),
+  );
+  return saved ? null : alias;
 }
