@@ -263,3 +263,28 @@ export function matchFleetHostEntries(input: {
   }
   return matched;
 }
+
+/**
+ * Whether Fleet should read an environment's own host status. The primary
+ * always is read; it answers for itself and every SSH host it holds open.
+ * Another environment is read when that answer does not cover it, or when a
+ * machine in the fleet is an SSH or cloud host it dispatched to, whose metrics
+ * only its own answer carries.
+ */
+export function fleetHostStatusNeeded(input: {
+  readonly environmentId: EnvironmentId;
+  readonly sshAliases: ReadonlyArray<string>;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  /** The primary's answer; null while it is on its way or when there is no primary. */
+  readonly primaryHosts: ReadonlyArray<HostStatusEntry> | null;
+  readonly dispatchers: ReadonlySet<EnvironmentId>;
+}): boolean {
+  if (input.environmentId === input.primaryEnvironmentId) return true;
+  if (input.dispatchers.has(input.environmentId)) return true;
+  return !(
+    input.primaryHosts?.some(
+      (entry) =>
+        entry.reachability === "ok" && entry.host !== null && input.sshAliases.includes(entry.host),
+    ) ?? false
+  );
+}

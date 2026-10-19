@@ -11,6 +11,7 @@ import {
   fleetHeatReasons,
   fleetHeatSignals,
   fleetHeatTier,
+  fleetHostStatusNeeded,
   fleetMachineHeat,
   fleetMachineHeatEqual,
   matchFleetHostEntries,
@@ -325,5 +326,43 @@ describe("matchFleetHostEntries", () => {
       primaryEnvironmentId: primary,
     });
     expect(matched.size).toBe(0);
+  });
+});
+
+describe("fleetHostStatusNeeded", () => {
+  const primary = EnvironmentId.make("a");
+  const b = EnvironmentId.make("b");
+  const ok = (host: string | null): HostStatusEntry => ({
+    host,
+    reachability: "ok",
+    metrics: metrics(),
+  });
+  const needed = (overrides: Partial<Parameters<typeof fleetHostStatusNeeded>[0]>) =>
+    fleetHostStatusNeeded({
+      environmentId: b,
+      sshAliases: ["b-ssh"],
+      primaryEnvironmentId: primary,
+      primaryHosts: [ok(null), ok("b-ssh")],
+      dispatchers: new Set(),
+      ...overrides,
+    });
+
+  it("skips an environment the primary already reaches over SSH", () => {
+    expect(needed({})).toBe(false);
+  });
+
+  it("reads it when the primary does not cover it", () => {
+    expect(needed({ primaryHosts: [ok(null)] })).toBe(true);
+    expect(
+      needed({ primaryHosts: [ok(null), { host: "b-ssh", reachability: "unreachable" }] }),
+    ).toBe(true);
+  });
+
+  it("reads a covered environment whose SSH or cloud hosts are in the fleet (A to B to C)", () => {
+    expect(needed({ dispatchers: new Set([b]) })).toBe(true);
+  });
+
+  it("always reads the primary", () => {
+    expect(needed({ environmentId: primary })).toBe(true);
   });
 });

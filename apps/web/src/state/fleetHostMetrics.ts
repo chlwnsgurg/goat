@@ -1,5 +1,6 @@
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
+  fleetHostStatusNeeded,
   fleetMachineHeat,
   fleetMachineHeatEqual,
   matchFleetHostEntries,
@@ -25,9 +26,9 @@ const asLastKnown = (hosts: ReadonlyArray<HostStatusEntry>): ReadonlyArray<HostS
 
 /**
  * Each connected environment's host-status answer, by environment. The primary
- * answers for itself and every SSH host it holds open; another environment is
- * read only when that answer does not cover it, since each read samples CPU and
- * fans out to that machine's own SSH hosts. Sources lists every environment
+ * answers for itself and every SSH host it holds open; see fleetHostStatusNeeded
+ * for when another environment is read, since each read samples CPU and fans out
+ * to that machine's own SSH hosts. Sources lists every environment
  * read, answered or not, for refreshing. Mounting this starts the reads.
  */
 export const fleetHostReportsAtom = Atom.make((get) => {
@@ -47,17 +48,23 @@ export const fleetHostReportsAtom = Atom.make((get) => {
   };
   const hasPrimary = environments.some((environment) => environment.environmentId === primary);
   const primaryHosts = hasPrimary && primary !== null ? read(primary) : null;
+  // Wait for the primary before asking anyone it may already cover.
+  if (hasPrimary && primaryHosts === null) return { reports, sources } as const;
+  const dispatchers = new Set(
+    get(fleetPageAtom).snapshot.machines.flatMap((machine) =>
+      machine.sshHost === null ? [] : [machine.sshHost.via],
+    ),
+  );
   for (const environment of environments) {
     if (environment.environmentId === primary) continue;
-    // Wait for the primary before asking anyone it may already cover.
-    if (hasPrimary && primaryHosts === null) continue;
-    const covered = primaryHosts?.some(
-      (entry) =>
-        entry.reachability === "ok" &&
-        entry.host !== null &&
-        environment.sshAliases.includes(entry.host),
-    );
-    if (covered !== true) read(environment.environmentId);
+    const needed = fleetHostStatusNeeded({
+      environmentId: environment.environmentId,
+      sshAliases: environment.sshAliases,
+      primaryEnvironmentId: primary,
+      primaryHosts,
+      dispatchers,
+    });
+    if (needed) read(environment.environmentId);
   }
   return { reports, sources } as const;
 }).pipe(Atom.withLabel("fleet-host-reports"));
