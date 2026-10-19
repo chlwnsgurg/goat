@@ -8,7 +8,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Result from "effect/Result";
 import { ChildProcessSpawner } from "effect/process";
 import { REMOTE_RUNTIME_STATE_KEY } from "./command.ts";
-import { uploadTarget } from "./tunnel.fixture.ts";
+import { installArchivePsDouble, uploadTarget } from "./tunnel.fixture.ts";
 import { makeProtocolFixture } from "./tunnel.protocol.fixture.ts";
 import { prepareRemoteRuntime } from "./tunnel.ts";
 
@@ -121,29 +121,111 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host facts
     LAUNCHES_TIMEOUT_MS,
   );
 
-  it.live(
-    "records and reuses a freshly installed executable on the first probe",
-    () =>
+  it.live.each([0, 1, 60])(
+    "the first reconnect after an install starts goat only for readiness (age %s s at cleanup)",
+    (age) =>
       Effect.gen(function* () {
-        const f = yield* liveFixture;
-        yield* f.shiftHostClock(0, true);
-        yield* probe(f);
-        const first = yield* recordableAsks(f);
-        assert.isAbove(first.own, 0);
-        yield* probe(f);
-        assert.deepEqual(yield* recordableAsks(f), first);
-        const names = yield* f.fs.readDirectory(`${f.home}/.goat/ssh-launch/facts`);
-        assert.include(names, "version.1.2.2.exe");
-        yield* launch(f);
-        const afterLaunch = yield* recordableAsks(f);
-        yield* launch(f);
-        assert.deepEqual(yield* recordableAsks(f), afterLaunch);
+        const f = yield* makeProtocolFixture({
+          live: false,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          candidateSignals: { ...current, commitTime: 1_700_000_001 },
+          ...current,
+        });
+        yield* f.fs.remove(f.old, { recursive: true });
+        yield* f.fs.remove(`${f.state}/run-t3.sh`);
+        yield* f.shiftHostClock(age, true);
+        const installed = yield* f.run("launch");
+        if (Result.isFailure(installed)) throw installed.failure;
+        assert.equal(installed.success.status, "ready");
+        assert.isAbove(installed.success.port, 0);
+        assert.equal(installed.success.version, f.runner.archiveVersion);
+        assert.isAbove(f.counters().uploads, 0);
+        const runtime = JSON.parse(
+          yield* f.fs.readFileString(`${f.home}/.goat/userdata/server-runtime.json`),
+        ) as { pid: number };
+        yield* installArchivePsDouble(
+          f.home,
+          runtime.pid,
+          installed.success.port,
+          f.runner.archiveVersion,
+        );
+        assert.isTrue(
+          f.remoteCommands.some(
+            (command) =>
+              command._tag === "StandardCommand" && command.args.includes("goat-runtime-cleanup"),
+          ),
+        );
+        const waited = `${f.test}/clock/waits`;
+        if (age < 2) assert.equal(yield* f.fs.readFileString(waited), `${2 - age}\n`);
+        else assert.isFalse(yield* f.fs.exists(waited));
+        const facts = `${f.home}/.goat/ssh-launch/facts`;
+        for (const kind of ["version", "own", "commit", "scopes", "live", "compat"]) {
+          for (const via of ["exe", "runner"]) {
+            assert.isTrue(yield* f.fs.exists(`${facts}/${kind}.${f.runner.archiveVersion}.${via}`));
+          }
+        }
+        const starts = Effect.gen(function* () {
+          const events = (yield* f.fs.readFileString(`${f.test}/events`))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line) as { type: string; args?: string[] });
+          return events.filter((event) => event.type === "exec").map((event) => event.args);
+        });
+        const before = (yield* starts).length;
+        // The next SSH operation observes the same file times, now outside the age gate.
+        yield* f.shiftHostClock(60, true);
+        const reconnected = yield* f.run("launch");
+        if (Result.isFailure(reconnected)) throw reconnected.failure;
+        assert.equal(reconnected.success.port, installed.success.port);
+        const reconnectStarts = (yield* starts).slice(before);
+        yield* Effect.logInfo("first reconnect goat starts", {
+          count: reconnectStarts.length,
+          args: reconnectStarts,
+        });
+        assert.equal(reconnectStarts.length, 1);
+        assert.equal(reconnectStarts[0]?.[1], "wait-ready");
+        if (age === 60) {
+          // Replay the submitted cleanup shell at real fault boundaries; every failure must
+          // preserve the ready server and leave a later reconnect free to discover facts.
+          const cleanup = f.remoteCommands.find(
+            (command) =>
+              command._tag === "StandardCommand" && command.args.includes("goat-runtime-cleanup"),
+          )!;
+          for (const fault of ["lock", "rollback", "wait", "clock", "windows"]) {
+            yield* f.fs.remove(facts, { recursive: true, force: true });
+            yield* f.shiftHostClock(fault === "clock" ? -1 : 0, true);
+            const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
+            const previous = `${f.state}/run-t3.previous`;
+            if (fault === "lock") yield* f.fs.symlink("another-owner", lock);
+            if (fault === "rollback") yield* f.fs.writeFileString(previous, "rollback\n");
+            f.setScriptPrefix(
+              fault === "wait"
+                ? "sleep() { return 1; }\n"
+                : fault === "windows"
+                  ? 'uname() { if [ "$1" = -s ]; then echo MINGW64_NT; else command uname "$@"; fi; }\n'
+                  : "",
+            );
+            const child = yield* f.transport.spawn(cleanup);
+            assert.equal(Number(yield* child.exitCode), 0, fault);
+            assert.isFalse(yield* f.fs.exists(facts), fault);
+            yield* Effect.sync(() => process.kill(runtime.pid, 0));
+            if (fault === "lock") {
+              assert.equal(yield* f.fs.readLink(lock), "another-owner");
+              yield* f.fs.remove(lock);
+            }
+            if (fault === "rollback") {
+              assert.equal(yield* f.fs.readFileString(previous), "rollback\n");
+              yield* f.fs.remove(previous);
+            }
+          }
+        }
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     LAUNCHES_TIMEOUT_MS,
   );
 
   it.live(
-    "a same-size rewrite within the same second misses recorded answers",
+    "a same-size rewrite within the same second stays unkeyed and is asked again",
     () =>
       Effect.gen(function* () {
         const f = yield* liveFixture;
@@ -159,10 +241,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host facts
         const selected = yield* probe(f);
         assert.isAbove((yield* recordableAsks(f)).own, first.own);
         assert.notEqual(selected.source, "retained");
-        const fact = yield* f.fs.readFileString(
-          `${f.home}/.goat/ssh-launch/facts/version.1.2.2.exe`,
-        );
-        assert.include(fact, "\ngoat v1.2.1\n");
+        assert.isFalse(yield* f.fs.exists(`${f.home}/.goat/ssh-launch/facts`));
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     LAUNCHES_TIMEOUT_MS,
   );
@@ -220,6 +299,32 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host facts
         f.setScriptPrefix("rm() { return 1; }\n");
         yield* probe(f);
         assert.equal(yield* f.fs.readFileString(`${facts}/own.1.0.0.exe`), "keep behind link\n");
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    LAUNCHES_TIMEOUT_MS,
+  );
+
+  it.live(
+    "Windows host probes still ask every time and never record or prune facts",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* liveFixture;
+        yield* f.shiftHostClock(60);
+        f.setScriptPrefix(
+          'uname() { if [ "$1" = -s ]; then echo MINGW64_NT; else command uname "$@"; fi; }\n',
+        );
+        yield* probe(f);
+        const first = yield* recordableAsks(f);
+        assert.isAbove(first.own, 0);
+        assert.isFalse(yield* f.fs.exists(`${f.home}/.goat/ssh-launch/facts`));
+        const stale = `${f.home}/.goat/ssh-launch/facts/own.1.0.0.exe`;
+        yield* f.fs.makeDirectory(`${f.home}/.goat/ssh-launch/facts`);
+        yield* f.fs.writeFileString(stale, "untouched\n");
+        yield* probe(f);
+        assert.isAbove((yield* recordableAsks(f)).own, first.own);
+        assert.equal(yield* f.fs.readFileString(stale), "untouched\n");
+        assert.deepEqual(yield* f.fs.readDirectory(`${f.home}/.goat/ssh-launch/facts`), [
+          "own.1.0.0.exe",
+        ]);
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     LAUNCHES_TIMEOUT_MS,
   );

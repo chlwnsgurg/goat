@@ -72,9 +72,10 @@ server's state and every client sees them.
 Each start of `goat` costs about 0.4 s on a host, and the probe, launch, and pairing scripts ask
 the same questions before every use. They record each successful answer in
 `~/.goat/ssh-launch/facts`: an executable's version, protocol, commit time, and memory-scope
-support under its path, inode, size, and times (plus a content digest while younger than 2 s),
-and a live server's protocol and compatibility under its runtime record and the start times of
-the PIDs it names.
+support under its path, inode, size, and times (only once it is 2 s old), and a live server's
+protocol and compatibility under its runtime record and the start times of the PIDs it names.
+The existing best-effort post-install cleanup round trip waits at most 2 s for that age gate,
+then records these answers for the installed executable and runner before the first reconnect.
 A changed, reinstalled, or removed executable, or a replaced or restarted server, misses and is
 asked again, so the rechecks still guard every step. The probe prunes facts only when their
 version path is absent, preserving installed versions and symlinks. Windows hosts record nothing.
@@ -175,7 +176,7 @@ desktop and the server's SSH dispatch (`resolveSshCliRunner` in
   answers `idle` (see [Replacement](#replacement)). While it is busy, the client attaches to it,
   logs `ssh.runtime.refresh.deferred` with the reason, and retries every 10 minutes.
 
-After a successful launch or attach, cleanup runs under the host replacement lock, never
+After a launch that installed a runtime, cleanup runs under the host replacement lock, never
 on a drain/replacement or rollback connection, and excludes concurrent installs. It uses the
 live binary's `__ssh-helper compare-version` to remove only proven older, unused directories,
 keeping the live, retained and requested versions and the newest older rollback build (all

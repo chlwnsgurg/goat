@@ -245,8 +245,8 @@ file_sig() {
   printf '%s' "$sig_value"
 }
 # Sets FACT_NAME and FACT_KEY for running goat as $1: an installed executable, or an archive
-# runner, which execs one. Young executables need a digest too: a second write within the
-# same second can leave inode, size and both timestamps unchanged.
+# runner, which execs one. An executable changed less than 2 s ago is not keyed: a second write
+# within the same second would leave its ctime unchanged.
 exec_fact_key() {
   FACT_NAME=; FACT_KEY=
   [ -n "$GOAT_FACTS_DIR" ] && [ -f "$1" ] || return 1
@@ -262,11 +262,7 @@ exec_fact_key() {
   fact_version="\${fact_exe%/goat}"; fact_version="\${fact_version##*/}"
   valid_version "$fact_version" && [ "$fact_exe" = "$fact_versions/$fact_version/goat" ] || return 1
   fact_sig="$(file_sig "$fact_exe")" || return 1
-  if [ "$(( $(date +%s) - \${fact_sig##*:} ))" -lt 2 ]; then
-    fact_sha="$(runner_sha256 "$fact_exe" 2>/dev/null)" || return 1
-    [ "$(file_sig "$fact_exe")" = "$fact_sig" ] || return 1
-    fact_sig="$fact_sig:$fact_sha"
-  fi
+  [ "$(( $(date +%s) - \${fact_sig##*:} ))" -ge 2 ] || return 1
   # A runner installs a version without its marker instead of running it.
   [ "$(cat "$fact_versions/$fact_version/.install-complete" 2>/dev/null)" = "$fact_version" ] || return 1
   case "$fact_via" in exe) FACT_NAME="$fact_version.exe" ;; *) FACT_NAME="$fact_version.runner" ;; esac
@@ -1800,6 +1796,33 @@ elif [ "$LIVE_OWNED" = 1 ] && ! verify_owned_identity "$LIVE_PID" "$LIVE_PORT"; 
   printf 'GOAT ownership could not be verified for PID %s: persisted launch identity is missing or mismatched; process, runner and ownership files were preserved.\\n' "$LIVE_PID" >&2
   exit 1
 fi`;
+
+// Use the existing post-install round trip: young executables remain unkeyed everywhere else.
+const REMOTE_RUNTIME_FACT_WARMUP_SCRIPT = String.raw`warm_runtime_facts() (
+  [ -n "$GOAT_FACTS_DIR" ] && [ "$LOCK_HELD" = 1 ] || exit 0
+  [ "$(readlink "$LOCK" 2>/dev/null)" = "$OWNER" ] || exit 1
+  [ ! -e "$STATE_DIR/run-t3.previous" ] && [ ! -L "$STATE_DIR/run-t3.previous" ] || exit 1
+  warm_exe="$HOME/.goat/runtime/goat/versions/$SELECTED_VERSION/goat"
+  warm_sig="$(file_sig "$warm_exe")" || exit 1
+  warm_age=$(( $(date +%s) - ${"${warm_sig##*:}"} ))
+  # A clock behind ctime is not a reason to extend the cleanup's deadline.
+  [ "$warm_age" -ge 0 ] || exit 1
+  if [ "$warm_age" -lt 2 ]; then sleep "$(( 2 - warm_age ))"; fi
+  exec_fact_key "$warm_exe" || exit 1
+  for warm_helper in "$warm_exe" "$RUNNER_FILE"; do
+    exec_fact version "$warm_helper" --version >/dev/null 2>&1 || true
+    exec_fact own "$warm_helper" __ssh-helper protocol --shell >/dev/null 2>&1 || true
+    build_commit_time "$warm_helper" >/dev/null 2>&1 || true
+    lacks_memory_scopes "$warm_helper" >/dev/null 2>&1 || true
+    warm_live="$(live_fact "$warm_helper" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" 2>/dev/null)" || continue
+    set -f; set -- $warm_live
+    valid_live_tokens "$@" && [ "$1" = live ] && [ "$2" = "$SELECTED_VERSION" ] &&
+      [ "$6" = "$REMOTE_PORT" ] || continue
+    compat_fact "$warm_helper" "$6" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" "$5" >/dev/null 2>&1 || true
+  done
+)
+warm_runtime_facts >/dev/null 2>&1 || true
+`;
 
 // The caller holds the replacement mutex after readiness, outside any supervisor trial.
 export const REMOTE_RUNTIME_CLEANUP_SCRIPT = String.raw`cleanup_runtime_versions() {
@@ -3417,6 +3440,7 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ] || ! acquire_replacement_lock; then
   printf 'ssh.runtime.cleanup.skipped replacement lock held\\n' >&2
   exit 0
 fi
+${REMOTE_RUNTIME_FACT_WARMUP_SCRIPT}
 ${REMOTE_RUNTIME_CLEANUP_SCRIPT}`,
         });
         for (const line of cleanup.stderr.split(/\r?\n/u)) {

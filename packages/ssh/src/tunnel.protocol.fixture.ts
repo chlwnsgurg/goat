@@ -68,6 +68,7 @@ const flag = name => { const i = args.indexOf(name); return i < 0 ? undefined : 
 const drainCapable = ${JSON.stringify(signals.drain ?? false)};
 const tokenFile = path.join(home, ".goat/userdata/runtime-control.token");
 function event(type, extra = {}) { fs.appendFileSync(path.join(test, "events"), JSON.stringify({type, version, ...extra}) + "\\n"); }
+event("exec", { args });
 if (args[0] === "--version") {
   event("version", { published: fs.existsSync(path.join(state, "run-t3.sh")) ? fs.readFileSync(path.join(state, "run-t3.sh"), "utf8") : "" });
   console.log("goat v" + version);
@@ -529,19 +530,31 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
   };
   // A frozen clock and file times model two same-second writes even when a fixture takes
   // seconds to run. Inode and size still come from the real file.
+  let frozenSecond: number | undefined;
   const shiftHostClock = (seconds: number, freezeFileTimes = false) =>
     Effect.gen(function* () {
       const bin = `${test}/clock`;
-      const second = Math.floor((yield* Clock.currentTimeMillis) / 1000);
+      const now = Math.floor((yield* Clock.currentTimeMillis) / 1000);
+      const second = freezeFileTimes ? (frozenSecond ??= now) : now;
       yield* fs.makeDirectory(bin, { recursive: true });
+      yield* fs.writeFileString(`${bin}/second`, String(second + seconds));
       yield* fs.writeFileString(
         `${bin}/date`,
         `#!/bin/sh
-if [ "$#" = 1 ] && [ "$1" = +%s ]; then echo $(( ${freezeFileTimes ? second : "$(/bin/date +%s)"} + (${seconds}) )); else exec /bin/date "$@"; fi
+if [ "$#" = 1 ] && [ "$1" = +%s ]; then echo $(( ${freezeFileTimes ? '$(cat "$HOME/.test/clock/second")' : `$(/bin/date +%s) + (${seconds})`} )); else exec /bin/date "$@"; fi
 `,
       );
       yield* fs.chmod(`${bin}/date`, 0o700);
       if (freezeFileTimes) {
+        yield* fs.writeFileString(
+          `${bin}/sleep`,
+          `#!/bin/sh
+printf '%s\\n' "$1" >> "$HOME/.test/clock/waits"
+second="$(cat "$HOME/.test/clock/second")"
+echo $(( second + $1 )) > "$HOME/.test/clock/second"
+`,
+        );
+        yield* fs.chmod(`${bin}/sleep`, 0o700);
         yield* fs.writeFileString(
           `${bin}/stat`,
           `#!/bin/sh
