@@ -27,6 +27,27 @@ import {
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const applied = "2026-10-01T00:00:00.000Z";
 const deadline = "2026-10-31T00:00:00.000Z";
+const processing = M.MemoryProcessingStatus.make({
+  lastReceivedHubSequence: 4,
+  receiveLag: null,
+  deferred: 1,
+  oldestDeferredAtUtc: M.MemoryUtcTimestamp.make(applied),
+  unindexedItems: 1,
+  scannerHeldItems: 1,
+  scannerPendingItems: 1,
+  missingParentItems: 1,
+  pendingCleanupItems: 1,
+  reportBacklog: 2,
+  reportFailed: 1,
+  hubAdmissionFailures: 1,
+  indexCoverage: {
+    status: "partial",
+    eligibleItems: 2,
+    indexedItems: 1,
+    unindexedItems: 1,
+    projectionWatermark: 4,
+  },
+});
 const visible = M.MemoryLocalAvailability.make({
   exposure: "visible",
   reasons: [],
@@ -681,28 +702,37 @@ describe("shared memory progress presentation", () => {
       ).label,
     ).toBe("Memory change rejected");
   });
+  it.each([
+    [
+      "schema_rejected",
+      "the model provider rejected GOAT's request format (check for a GOAT update)",
+    ],
+    ["auth", "the model provider needs you to sign in again"],
+    ["unavailable", "the memory model isn't available on this computer"],
+    ["rate_limited", "the model provider's usage limit was reached"],
+  ] as const)("explains a %s generation pause and its retry time", (reason, explanation) => {
+    const nextAttemptAt = M.MemoryUtcTimestamp.make("2026-10-01T14:05:00.000Z");
+    const shown = presentMemoryProcessing(
+      processing,
+      { reason, since: M.MemoryUtcTimestamp.make(applied), nextAttemptAt },
+      (timestamp) =>
+        new Intl.DateTimeFormat("en-GB", {
+          timeZone: "UTC",
+          hour: "2-digit",
+          minute: "2-digit",
+        }).format(Date.parse(timestamp)),
+    );
+    expect(shown.pausedLabel).toBe(`Memory paused: ${explanation}. Next try at 14:05`);
+  });
+  it("clears the paused label when no generation hold is reported", () => {
+    expect(presentMemoryProcessing(processing).pausedLabel).toBeNull();
+    expect(
+      presentMemoryProcessing(processing, undefined, () => {
+        throw new Error("No retry time should be formatted without a hold");
+      }).pausedLabel,
+    ).toBeNull();
+  });
   it("maps processing independently of connection and exposure", () => {
-    const processing = M.MemoryProcessingStatus.make({
-      lastReceivedHubSequence: 4,
-      receiveLag: null,
-      deferred: 1,
-      oldestDeferredAtUtc: M.MemoryUtcTimestamp.make(applied),
-      unindexedItems: 1,
-      scannerHeldItems: 1,
-      scannerPendingItems: 1,
-      missingParentItems: 1,
-      pendingCleanupItems: 1,
-      reportBacklog: 2,
-      reportFailed: 1,
-      hubAdmissionFailures: 1,
-      indexCoverage: {
-        status: "partial",
-        eligibleItems: 2,
-        indexedItems: 1,
-        unindexedItems: 1,
-        projectionWatermark: 4,
-      },
-    });
     for (const work of [
       { scannerPendingItems: 1, unindexedItems: 0, pendingCleanupItems: 0 },
       { scannerPendingItems: 0, unindexedItems: 1, pendingCleanupItems: 0 },

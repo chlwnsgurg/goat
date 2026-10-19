@@ -1644,8 +1644,9 @@ function MemorySourcePage({
 /** Producer helpers keep raw storage fields and timestamps out of Settings. */
 function MemoryStatusRows({ sync }: { sync: MemorySyncStatus }) {
   const storage = presentMemoryStorage(sync.storage);
-  const processing = presentMemoryProcessing(sync.processing);
+  const processing = presentMemoryProcessing(sync.processing, sync.generationHold);
   const labels = [
+    processing.pausedLabel,
     processing.checkingLabel,
     processing.heldLabel,
     processing.waitingLabel,

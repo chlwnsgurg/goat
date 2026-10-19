@@ -1709,7 +1709,7 @@ function MemoryEditor({
 }
 
 function MemoryStatusRows({ status }: { status: MemorySyncStatus }) {
-  const processing = presentMemoryProcessing(status.processing);
+  const processing = presentMemoryProcessing(status.processing, status.generationHold);
   const storage = presentMemoryStorage(status.storage);
   return (
     <SettingsSection title="Memory status">
@@ -1718,6 +1718,7 @@ function MemoryStatusRows({ status }: { status: MemorySyncStatus }) {
         storage.label,
         storage.searchLabel,
         ...storage.reasons,
+        processing.pausedLabel,
         processing.checkingLabel,
         processing.heldLabel,
         processing.waitingLabel,
