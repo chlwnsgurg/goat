@@ -3,6 +3,7 @@ import {
   EnvironmentAuthorizationError,
   AuthSessionId,
   SshHostAlias,
+  SshHostResult,
   EnvironmentId,
   ThreadId,
   type SecretRequestAnswerInput,
@@ -42,6 +43,12 @@ export const SshProgressBinding = Schema.Struct({
   host: SshHostAlias,
   aliasGeneration: Schema.Int,
   operationId: Schema.String,
+  completion: Schema.optional(
+    Schema.Struct({
+      result: SshHostResult,
+      aliasRevision: Schema.optional(Schema.String),
+    }),
+  ),
   environmentId: EnvironmentId,
   threadId: ThreadId,
 });
@@ -150,7 +157,10 @@ export class Handoffs extends Context.Service<
       }>,
       HandoffError
     >;
-    readonly finishSshContinuation: (input: HandoffReadInput) => Effect.Effect<void, HandoffError>;
+    readonly finishSshContinuation: (
+      input: HandoffReadInput,
+      completion?: SshProgressBinding["completion"],
+    ) => Effect.Effect<void, HandoffError>;
     readonly bindSshContinuation: (
       input: HandoffReadInput,
       binding: SshProgressBinding,
@@ -506,7 +516,7 @@ const make = Effect.gen(function* () {
     }
     return results;
   });
-  const finishSshContinuation = (input: HandoffReadInput) =>
+  const finishSshContinuation: Handoffs["Service"]["finishSshContinuation"] = (input, completion) =>
     Effect.gen(function* () {
       const handoff = yield* read(input);
       if (!handoff.target.path.startsWith("ssh.") || isHandoffPending(handoff.state)) return;
@@ -523,7 +533,7 @@ const make = Effect.gen(function* () {
           {
             version: 1,
             kind: "progress_only",
-            sshProgress: payload.sshProgress,
+            sshProgress: { ...payload.sshProgress, ...(completion ? { completion } : {}) },
             retainUntil: DateTime.toEpochMillis(DateTime.add(retainedFrom, { hours: 24 })),
           },
           true,

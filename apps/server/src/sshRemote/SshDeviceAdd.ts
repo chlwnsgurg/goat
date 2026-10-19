@@ -87,7 +87,7 @@ const make = Effect.gen(function* () {
   const addDevice: SshDeviceAdd["Service"]["addDevice"] = (input, caller) =>
     Effect.gen(function* () {
       yield* authorizeSshHost(sessions, caller, "settings:write");
-      if (caller.kind !== "mcp" || !caller.scope.thread)
+      if (caller.kind !== "mcp")
         return {
           saved: false,
           reason: "A thread is required for SSH handoffs.",
@@ -116,6 +116,16 @@ const make = Effect.gen(function* () {
         return { outcome: "failed", preflight };
       const requestTrust = (): ReturnType<SshDeviceAdd["Service"]["addDevice"]> =>
         Effect.gen(function* () {
+          if (!caller.scope.thread)
+            return {
+              saved: false,
+              preflight,
+              reason: "A thread is required for SSH handoffs.",
+              kind: "error",
+              code: "unsupported",
+              message: "Add this host in Settings → Connections.",
+              fix: { actor: "human", instruction: "Add this host in Settings → Connections." },
+            };
           const result = yield* setup.add(resolved.input, caller);
           if (result.kind !== "needs_human")
             return {
@@ -163,7 +173,7 @@ const make = Effect.gen(function* () {
               ...(input.label ? { label: input.label } : {}),
               addedBy: {
                 kind: "agent",
-                threadId: scope.thread!.threadId,
+                ...(scope.thread ? { threadId: scope.thread.threadId } : {}),
                 ...(scope.client ? { client: scope.client.label } : {}),
                 at: DateTime.formatIso(yield* DateTime.now),
               },

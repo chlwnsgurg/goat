@@ -27,10 +27,12 @@ import * as SshConfig from "@goat/ssh/config";
 import { SshLaunchError, SshHostKeyProbeError } from "@goat/ssh/errors";
 import * as SshTunnel from "@goat/ssh/tunnel";
 import * as DateTime from "effect/DateTime";
+import { TestClock } from "effect/testing";
 import * as Handoffs from "../handoffs/Handoffs.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient } from "effect/http";
@@ -1090,121 +1092,226 @@ it.effect(
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.effect("host trust approval pins the alias and finishes without starting setup", () =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pin-only-" });
-    const finished = yield* Deferred.make<void>();
-    let created: Parameters<Handoffs.Handoffs["Service"]["create"]>[0] | undefined;
-    let completed = false;
-    const record: Handoff = {
-      handoffId: TurnItemId.make("pin-only"),
-      kind: "approval",
-      title: "Trust build?",
-      reason: "Review key",
-      requestedBy: {
-        threadId: ThreadId.make("caller"),
-        providerInstanceId: ProviderInstanceId.make("codex"),
-        path: "ssh.host_add",
-      },
-      target: { environmentId: EnvironmentId.make("owner"), path: "ssh.host_add" },
-      dedupeKey: "pin-only",
-      state: "completed",
-      expiresAt: null,
-      createdAt: yield* DateTime.now,
-      actor: { type: "client", label: "Reviewer" },
-    };
-    const key = vi
-      .spyOn(HostKey, "probeHostKey")
-      .mockReturnValue(
-        Effect.succeed({ algorithm: "ssh-ed25519", key: "AAAA", fingerprint: "SHA256:review" }),
-      );
-    const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(Effect.succeed([]));
-    yield* Effect.gen(function* () {
-      const layer = Layer.effect(SshHostSetup.SshHostSetup, SshHostSetup.make({ home })).pipe(
-        Layer.provide(probeClient),
-        Layer.provide(
-          Layer.mock(Handoffs.Handoffs)({
-            create: (input) =>
-              Effect.sync(() => {
-                created = input;
-                return handoffSummary({ ...record, state: "pending" });
-              }),
-            resolvedSshOutcomes: Effect.succeed([]),
-            completedSshContinuations: Effect.sync(() =>
-              completed || !created
-                ? []
-                : [{ handoff: record, approvedBySessionId: probeSessionId, args: created!.args }],
+it.effect.each(["pinned", "key_changed", "expired", "authorization_revoked"] as const)(
+  "host trust approval retains %s without starting setup",
+  (outcome) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pin-only-" });
+      const finished = yield* Deferred.make<void>();
+      const lookupStarted = yield* Deferred.make<void>();
+      let created: Parameters<Handoffs.Handoffs["Service"]["create"]>[0] | undefined;
+      let completed = false;
+      let completion: Handoffs.SshProgressBinding["completion"];
+      let retained: Handoffs.SshProgressBinding | null = null;
+      let revoked = false;
+      const reviewer = yield* SessionStore.SessionStore.pipe(Effect.provide(probeClient));
+      const reviewerLayer = Layer.succeed(SessionStore.SessionStore, {
+        ...reviewer,
+        listActive: () =>
+          reviewer.listActive().pipe(
+            Effect.map((entries) =>
+              entries.map((entry) => ({
+                ...entry,
+                scopes: revoked
+                  ? ["orchestration:read" as const]
+                  : ["settings:write" as const, "orchestration:read" as const],
+              })),
             ),
-            finishSshContinuation: () =>
-              Effect.gen(function* () {
-                completed = true;
-                yield* Deferred.succeed(finished, undefined);
-              }),
-          }),
-        ),
-        Layer.provide(
-          Layer.mock(ProcessRunner.ProcessRunner)({
-            run: () =>
-              Effect.succeed(
-                processOutput(
-                  `hostname build.example\nuser deploy\nport 22\nhostkeyalias build\nuserknownhostsfile ${home}/.ssh/goat-hosts/build.known_hosts\nglobalknownhostsfile /dev/null\nstricthostkeychecking yes\nupdatehostkeys no\nhostkeyalgorithms ssh-ed25519\nidentityfile /fixture/key\nidentitiesonly yes\n`,
-                ),
-              ),
-          }),
-        ),
-        Layer.provide(
-          Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
-            runtimeStatus: () =>
-              Effect.succeed({ kind: "ok", status: { ...stopped, host: "build" } }),
-            beginSetupOperation: () => Effect.die("Approval started a setup operation"),
-            prepareRuntime: () => Effect.die("Approval installed a runtime"),
-          }),
-        ),
-        Layer.provide(dependencies),
-      );
-      const setup = Context.get(yield* Layer.build(layer), SshHostSetup.SshHostSetup);
-      const caller: SshHostSetup.SshHostCaller = {
-        kind: "mcp",
-        scope: {
-          ...invocation,
-          grantedScopes: ["settings:write"],
-          thread: {
-            threadId: ThreadId.make("caller"),
-            providerInstanceId: ProviderInstanceId.make("codex"),
-            providerSessionId: "provider",
-          },
+          ),
+      });
+      const record: Handoff = {
+        handoffId: TurnItemId.make("pin-only"),
+        kind: "approval",
+        title: "Trust build?",
+        reason: "Review key",
+        requestedBy: {
+          threadId: ThreadId.make("caller"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          path: "ssh.host_add",
         },
+        target: { environmentId: EnvironmentId.make("owner"), path: "ssh.host_add" },
+        dedupeKey: "pin-only",
+        state: "completed",
+        expiresAt: null,
+        createdAt: yield* DateTime.now,
+        actor: { type: "client", label: "Reviewer" },
       };
-      expect(
-        yield* setup.add(
-          {
-            address: "build.example",
-            user: "deploy",
-            alias: "build",
-            identityFile: "/fixture/key",
+      const key = vi
+        .spyOn(HostKey, "probeHostKey")
+        .mockReturnValue(
+          Effect.succeed({ algorithm: "ssh-ed25519", key: "AAAA", fingerprint: "SHA256:review" }),
+        );
+      const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(Effect.succeed([]));
+      yield* Effect.gen(function* () {
+        const layer = Layer.effect(SshHostSetup.SshHostSetup, SshHostSetup.make({ home })).pipe(
+          Layer.provide(reviewerLayer),
+          Layer.provide(
+            Layer.mock(Handoffs.Handoffs)({
+              create: (input) =>
+                Effect.sync(() => {
+                  created = input;
+                  return handoffSummary({ ...record, state: "pending" });
+                }),
+              resolvedSshOutcomes: Effect.succeed([]),
+              completedSshContinuations: Effect.sync(() =>
+                completed || !created
+                  ? []
+                  : [
+                      {
+                        handoff: record,
+                        approvedBySessionId: probeSessionId,
+                        args: created!.args,
+                        sshProgress: created!.sshProgress!,
+                      },
+                    ],
+              ),
+              read: () => Effect.succeed(record),
+              readSshProgressBinding: () =>
+                Effect.gen(function* () {
+                  yield* Deferred.succeed(lookupStarted, undefined);
+                  return retained ?? created?.sshProgress ?? null;
+                }),
+              finishSshContinuation: (_input, result) =>
+                Effect.gen(function* () {
+                  completed = true;
+                  completion = result;
+                  retained = {
+                    ...created!.sshProgress!,
+                    ...(result ? { completion: result } : {}),
+                  };
+                  yield* Deferred.succeed(finished, undefined);
+                }),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(ProcessRunner.ProcessRunner)({
+              run: () =>
+                Effect.succeed(
+                  processOutput(
+                    `hostname build.example\nuser deploy\nport 22\nhostkeyalias build\nuserknownhostsfile ${home}/.ssh/goat-hosts/build.known_hosts\nglobalknownhostsfile /dev/null\nstricthostkeychecking yes\nupdatehostkeys no\nhostkeyalgorithms ssh-ed25519\nidentityfile /fixture/key\nidentitiesonly yes\n`,
+                  ),
+                ),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+              publishSetupOutcome: () => Effect.succeed(false),
+              runtimeStatus: () =>
+                Effect.succeed({ kind: "ok", status: { ...stopped, host: "build" } }),
+              beginSetupOperation: () => Effect.die("Approval started a setup operation"),
+              prepareRuntime: () => Effect.die("Approval installed a runtime"),
+            }),
+          ),
+          Layer.provide(dependencies),
+        );
+        const setup = Context.get(yield* Layer.build(layer), SshHostSetup.SshHostSetup);
+        const caller: SshHostSetup.SshHostCaller = {
+          kind: "mcp",
+          scope: {
+            ...invocation,
+            grantedScopes: ["settings:write"],
+            thread: {
+              threadId: ThreadId.make("caller"),
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              providerSessionId: "provider",
+            },
           },
-          caller,
+        };
+        expect(
+          yield* setup.add(
+            {
+              address: "build.example",
+              user: "deploy",
+              alias: "build",
+              identityFile: "/fixture/key",
+            },
+            caller,
+          ),
+        ).toMatchObject({ kind: "needs_human" });
+        if (outcome === "key_changed")
+          key.mockReturnValue(
+            Effect.succeed({
+              algorithm: "ssh-ed25519",
+              key: "BBBB",
+              fingerprint: "SHA256:changed",
+            }),
+          );
+        if (outcome === "expired") yield* TestClock.adjust("24 hours");
+        if (outcome === "authorization_revoked") revoked = true;
+        const address = { threadId: record.requestedBy.threadId, handoffId: record.handoffId };
+        const pinStarted = yield* Deferred.make<void>();
+        const releasePin = yield* Deferred.make<void>();
+        if (outcome === "pinned")
+          key.mockReturnValue(
+            Effect.gen(function* () {
+              yield* Deferred.succeed(pinStarted, undefined);
+              yield* Deferred.await(releasePin);
+              return { algorithm: "ssh-ed25519", key: "AAAA", fingerprint: "SHA256:review" };
+            }),
+          );
+        const worker = yield* setup.resumeContinuations.pipe(Effect.forkChild);
+        if (outcome === "pinned") yield* Deferred.await(pinStarted);
+        const progressRead = yield* setup
+          .handoffProgress(address, {
+            kind: "client",
+            sessionId: probeSessionId,
+          })
+          .pipe(Effect.forkChild);
+        if (outcome === "pinned") {
+          yield* Deferred.await(lookupStarted);
+          expect(completed).toBe(false);
+        }
+        yield* Deferred.succeed(releasePin, undefined);
+        yield* Fiber.join(worker);
+        yield* Deferred.await(finished);
+        const progress = yield* Fiber.join(progressRead);
+        expect(progress).toMatchObject({
+          kind: "available",
+          result: { kind: outcome === "pinned" ? "ok" : "error" },
+        });
+        expect(completion?.result.status?.setup).toBeUndefined();
+        if (outcome !== "pinned") {
+          expect(completion?.result).toMatchObject({
+            kind: "error",
+            message: expect.stringContaining(
+              outcome === "key_changed"
+                ? "changed"
+                : outcome === "expired"
+                  ? "expired"
+                  : "permission",
+            ),
+          });
+          expect(yield* fs.exists(`${home}/.ssh/goat-hosts/build.known_hosts`)).toBe(false);
+          return;
+        }
+        expect(completion?.result).toMatchObject({
+          kind: "ok",
+          status: { host: "build", state: "stopped" },
+        });
+        expect(yield* fs.readFileString(`${home}/.ssh/goat-hosts/build.known_hosts`)).toBe(
+          "build ssh-ed25519 AAAA\n",
+        );
+        expect(yield* fs.readFileString(`${home}/.ssh/goat-hosts/build.conf`)).toContain(
+          "IdentityFile",
+        );
+        yield* setup.resumeContinuations;
+        yield* fs.writeFileString(
+          `${home}/.ssh/goat-hosts/build.known_hosts`,
+          "build ssh-ed25519 BBBB\n",
+        );
+        expect(
+          yield* setup.handoffProgress(address, { kind: "client", sessionId: probeSessionId }),
+        ).toEqual({ kind: "unavailable", reason: "superseded" });
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            key.mockRestore();
+            discover.mockRestore();
+          }),
         ),
-      ).toMatchObject({ kind: "needs_human" });
-      yield* setup.resumeContinuations;
-      yield* Deferred.await(finished);
-      expect(yield* fs.readFileString(`${home}/.ssh/goat-hosts/build.known_hosts`)).toBe(
-        "build ssh-ed25519 AAAA\n",
       );
-      expect(yield* fs.readFileString(`${home}/.ssh/goat-hosts/build.conf`)).toContain(
-        "IdentityFile",
-      );
-      yield* setup.resumeContinuations;
-    }).pipe(
-      Effect.ensuring(
-        Effect.sync(() => {
-          key.mockRestore();
-          discover.mockRestore();
-        }),
-      ),
-    );
-  }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.effect("preflight normalizes typed destinations and rejects configured alias overrides", () =>

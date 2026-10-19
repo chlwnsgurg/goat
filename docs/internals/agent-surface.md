@@ -436,8 +436,8 @@ For SSH setup and runtime updates, the call returns the shared SSH
 resumes approved `ssh.host_prepare` and `ssh.runtime_update` targets after
 rechecking the approving session's target permissions. An approved `ssh.host_add`
 fingerprint only pins the host; the agent calls the tool again, which reruns the
-preflight before anything is installed. Fingerprints
-remain private human data. Key-registration instructions run in the person's
+preflight before anything is installed. The preflight report exposes the public
+host-key fingerprint to the agent; approval remains human-only. Key-registration instructions run in the person's
 terminal on the environment's owning machine; completion triggers another key-auth
 check, not an assumption that registration succeeded.
 

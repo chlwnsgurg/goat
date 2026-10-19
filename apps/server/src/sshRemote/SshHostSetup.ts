@@ -230,6 +230,7 @@ export const make = (
       }
     >();
     const continuing = new Set<string>();
+    const continuationAdmission = yield* Semaphore.make(1);
     const admission = yield* Semaphore.make(1);
     const authorize = (caller: SshHostCaller, scope: Parameters<typeof authorizeSshHost>[2]) =>
       authorizeSshHost(sessions, caller, scope);
@@ -1241,7 +1242,10 @@ export const make = (
                     },
                   },
                 );
-              yield* discard;
+              yield* handoffs.finishSshContinuation(
+                address,
+                args.step === "host_trust" ? { result: errorResult(message) } : undefined,
+              );
             });
           const expectedPath =
             args.step === "runtime_update"
@@ -1288,10 +1292,16 @@ export const make = (
             const trusted = yield* trustChallenge(args.challenge, caller).pipe(
               admission.withPermits(1),
             );
-            if (trusted.kind === "error") return yield* discard;
-            return yield* handoffs.finishSshContinuation({
-              threadId: entry.handoff.requestedBy.threadId,
-              handoffId: id,
+            const revision = trusted.kind === "ok" ? yield* aliasRevision(args.host) : undefined;
+            let result = trusted;
+            if (trusted.kind === "ok") {
+              const snapshot = { ...trusted.status };
+              delete snapshot.setup;
+              result = { ...trusted, status: snapshot };
+            }
+            return yield* handoffs.finishSshContinuation(address, {
+              result,
+              ...(revision === undefined ? {} : { aliasRevision: revision }),
             });
           } else {
             const current = yield* status({ host: args.host });
@@ -1391,10 +1401,21 @@ export const make = (
               ),
               Effect.andThen(
                 handoffs
-                  .finishSshContinuation({
-                    threadId: entry.handoff.requestedBy.threadId,
-                    handoffId: id,
-                  })
+                  .finishSshContinuation(
+                    {
+                      threadId: entry.handoff.requestedBy.threadId,
+                      handoffId: id,
+                    },
+                    entry.handoff.target.path === "ssh.host_add"
+                      ? {
+                          result: errorResult(
+                            isAuthorizationError(cause)
+                              ? "The approving session no longer has permission. Ask again."
+                              : "This SSH approval could not continue. Ask again.",
+                          ),
+                        }
+                      : undefined,
+                  )
                   .pipe(Effect.ignore),
               ),
             ),
@@ -1402,9 +1423,10 @@ export const make = (
           Effect.ensuring(Effect.sync(() => continuing.delete(id))),
           Effect.asVoid,
         );
-        yield* work.pipe(Effect.forkIn(serviceScope));
+        if (entry.handoff.target.path === "ssh.host_add") yield* work;
+        else yield* work.pipe(Effect.forkIn(serviceScope));
       }
-    });
+    }).pipe(continuationAdmission.withPermits(1));
     const respondExisting = (input: HandoffRespondInput, sessionId: AuthSessionId) =>
       handoffs
         .respond(input, sessionId)
@@ -1435,8 +1457,35 @@ export const make = (
         const record = yield* handoffs.read(input);
         if (!record.target.path.startsWith("ssh."))
           return { kind: "unavailable", reason: "not_ssh" } as const;
-        const binding = yield* handoffs.readSshProgressBinding(input, caller.sessionId);
+        let binding = yield* handoffs.readSshProgressBinding(input, caller.sessionId);
+        // The timeline can deliver approval before the pin-only continuation has finished.
+        if (
+          binding &&
+          !binding.completion &&
+          record.target.path === "ssh.host_add" &&
+          record.state === "completed"
+        ) {
+          yield* resumeContinuations;
+          binding = yield* handoffs.readSshProgressBinding(input, caller.sessionId);
+        }
         if (!binding) return { kind: "unavailable", reason: "expired" } as const;
+        if (binding.completion !== undefined) {
+          if (
+            binding.completion.aliasRevision !== undefined &&
+            binding.completion.aliasRevision !==
+              (yield* aliasRevision(binding.host).pipe(
+                Effect.mapError((cause) => new HandoffError({ reason: "unavailable", cause })),
+              ))
+          )
+            return { kind: "unavailable", reason: "superseded" } as const;
+          return {
+            kind: "available",
+            host: binding.host,
+            operationId: binding.operationId,
+            generation: binding.aliasGeneration,
+            result: binding.completion.result,
+          } as const;
+        }
         const result = yield* status({ host: binding.host });
         if (
           result.status?.setup?.operationId !== binding.operationId ||

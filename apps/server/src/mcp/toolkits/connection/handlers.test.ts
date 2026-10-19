@@ -144,13 +144,17 @@ it.effect("attributes a thread add and supplies the ten minute SSH timeout", () 
   ),
 );
 
-it.effect("directs an outside-thread add to Settings", () =>
+it.effect("saves a trusted alias for a full-access outside caller", () =>
   Effect.gen(function* () {
     const toolkit = yield* ConnectionToolkit;
     const result = yield* toolkit
       .handle("goat_connection_add_ssh", { host: "build-host" })
       .pipe(Stream.unwrap, Stream.runCollect);
-    expect(result.at(-1)?.result).toMatchObject({ saved: false, code: "unsupported" });
+    expect(result.at(-1)?.result).toMatchObject({
+      outcome: "connected",
+      created: false,
+      connection: saved,
+    });
   }).pipe(
     Effect.provide(
       testLayer(outsideCaller("full-access"), (operation) => {

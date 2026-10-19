@@ -156,7 +156,13 @@ const fixture = (
                   return yield* new Broker.ConnectionCatalogHostDetached();
                 if (options.catalog === "timeout")
                   return yield* new Broker.ConnectionCatalogTimeout({ timeoutMs: timeout });
-                expect(operation).toMatchObject({ host: "build", addedBy: { threadId } });
+                if (operation.type !== "add_ssh")
+                  return yield* Effect.die("Unexpected catalog operation");
+                expect(operation).toMatchObject({ host: "build", addedBy: { kind: "agent" } });
+                if ("client" in operation.addedBy) {
+                  expect(operation.addedBy).toMatchObject({ client: "Client" });
+                  expect(operation.addedBy).not.toHaveProperty("threadId");
+                } else expect(operation.addedBy).toMatchObject({ threadId });
                 return {
                   type: "add_ssh",
                   created: true,
@@ -248,22 +254,42 @@ it.effect("missing settings authority stops before preflight", () =>
     expect(f.calls).toEqual([]);
   }),
 );
-it.effect("outside-thread callers get the Settings instruction", () =>
-  Effect.gen(function* () {
-    const f = yield* fixture();
-    expect(
-      yield* f.call({
-        ...scope,
-        thread: undefined,
-        client: { sessionId: "client", label: "Client", access: "full-access" },
-      }),
-    ).toMatchObject({
-      saved: false,
-      kind: "error",
-      message: "Add this host in Settings → Connections.",
-    });
-    expect(f.calls).toEqual([]);
-  }),
+it.effect.each([{}, { configured: true }])(
+  "full-access outside callers save a trusted alias (%s)",
+  (options) =>
+    Effect.gen(function* () {
+      const f = yield* fixture(options);
+      expect(
+        yield* f.call({
+          ...scope,
+          thread: undefined,
+          client: { sessionId: "client", label: "Client", access: "full-access" },
+        }),
+      ).toMatchObject({ outcome: "connected", created: true });
+      expect(f.calls).toEqual(["preflight", "broker"]);
+    }),
+);
+it.effect.each([
+  { typed: true, blocked: "needs_review" as const },
+  { configured: true, catalog: "absent" as const },
+])(
+  "outside-thread callers get the Settings instruction only when trust needs a handoff (%s)",
+  (options) =>
+    Effect.gen(function* () {
+      const f = yield* fixture(options);
+      expect(
+        yield* f.call({
+          ...scope,
+          thread: undefined,
+          client: { sessionId: "client", label: "Client", access: "full-access" },
+        }),
+      ).toMatchObject({
+        saved: false,
+        kind: "error",
+        message: "Add this host in Settings → Connections.",
+      });
+      expect(f.calls).toEqual(options.catalog ? ["preflight", "broker"] : ["preflight"]);
+    }),
 );
 
 const isAddInput = Schema.is(DeviceAdd.SshDeviceAddInput);

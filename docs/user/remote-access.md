@@ -368,9 +368,10 @@ connection.
 
 Adding a host and saving its connection are one step for an agent: it runs the
 same checks as **Add device → SSH**, asks you to approve a new fingerprint, and
-saves the connection once the checks pass. Without a desktop app on that machine,
-or from an agent without full access, it prepares the host and tells you the
-connection was not saved.
+saves the connection once the checks pass. A new fingerprint needs approval in a
+GOAT thread; an outside agent can save an already-trusted host. Without a desktop
+app on that machine, or from an agent without full access, it prepares the host
+and tells you the connection was not saved.
 
 The agent that started the thread can follow it from here: it waits for the
 thread to finish, reads its messages and the result its agent recorded (outcome,
