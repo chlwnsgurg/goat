@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import { AuthMcpClientAccess } from "./auth.ts";
 import {
   EnvironmentId,
+  ForwardCompatibleArray,
   IsoDateTime,
   NonNegativeInt,
   PortSchema,
@@ -17,6 +18,9 @@ import { CloudMachineAlias } from "./cloudMachines.ts";
  * `goat serve` serves the same list to every client. A node is one GOAT environment, deduped
  * by environment id, and may be reachable over several routes. Nothing here carries a
  * credential: linked-host tokens stay in the hub's secret store.
+ *
+ * Later builds add route kinds, statuses and notices. The snapshot drops a node or notice a
+ * client cannot decode, so an older client still shows every node it understands.
  */
 
 export const HubNodeRouteKind = Schema.Literals(["ssh", "linked", "cloud"]);
@@ -122,8 +126,8 @@ export const HubNodeNoticeId = HubNodeNotice.fields.id;
 
 export const HubNodesSnapshot = Schema.Struct({
   hubEnvironmentId: EnvironmentId,
-  nodes: Schema.Array(HubNode),
-  notices: Schema.Array(HubNodeNotice),
+  nodes: ForwardCompatibleArray(HubNode),
+  notices: ForwardCompatibleArray(HubNodeNotice),
 });
 export type HubNodesSnapshot = typeof HubNodesSnapshot.Type;
 
