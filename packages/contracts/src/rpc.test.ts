@@ -1,6 +1,7 @@
 import * as RpcSchema from "effect/rpc/RpcSchema";
 import * as Memory from "./memory.ts";
 import {
+  WsHubNodesRpcGroup,
   WsMemoryRpcGroup,
   WsMemoryCoreRpcGroup,
   WsMemoryImportRpcGroup,
@@ -379,4 +380,34 @@ it("installs the complete SSH host transport together while leaving runtimeUpdat
     host: "box",
     stopRuntime: "no",
   });
+});
+
+it("declares all seven authorized hub node RPCs and a typed snapshot stream", () => {
+  expect([...WsHubNodesRpcGroup.requests.keys()]).toEqual([
+    WS_METHODS.hubNodesList,
+    WS_METHODS.hubNodesSubscribe,
+    WS_METHODS.hubNodesAdd,
+    WS_METHODS.hubNodesRemove,
+    WS_METHODS.hubNodesCheck,
+    WS_METHODS.hubNodesImport,
+    WS_METHODS.hubNodesDismissNotice,
+  ]);
+  for (const rpc of WsHubNodesRpcGroup.requests.values()) {
+    expect(rpc.middlewares.has(RpcScopeAuthorization)).toBe(true);
+    const errorSchema = RpcSchema.isStreamSchema(rpc.successSchema)
+      ? rpc.successSchema.error
+      : rpc.errorSchema;
+    expect(
+      Schema.decodeUnknownSync(errorSchema)({
+        _tag: "EnvironmentAuthorizationError",
+        message: "Denied",
+        requiredScope: "settings:write",
+      }),
+    ).toMatchObject({ _tag: "EnvironmentAuthorizationError" });
+  }
+  expect(
+    RpcSchema.isStreamSchema(
+      WsHubNodesRpcGroup.requests.get(WS_METHODS.hubNodesSubscribe)!.successSchema,
+    ),
+  ).toBe(true);
 });

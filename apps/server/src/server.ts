@@ -59,6 +59,8 @@ import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
 import * as BoatClient from "./cloudMachines/BoatClient.ts";
 import * as CloudMachineService from "./cloudMachines/CloudMachineService.ts";
 import * as CloudMachineSsh from "./cloudMachines/sshConfig.ts";
+import * as HubNodes from "./hubNodes/HubNodes.ts";
+import * as HubNodeRepository from "./hubNodes/HubNodeRepository.ts";
 import * as LinkedHosts from "./linkedHosts/LinkedHosts.ts";
 import * as RemoteDispatchCoordinator from "./remoteReports/RemoteDispatchCoordinator.ts";
 import * as LaunchWatchService from "./mcp/LaunchWatchService.ts";
@@ -1087,6 +1089,12 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.provideMerge(
     ChannelLayers.layer.pipe(
       Layer.provide(RuntimeLayer.layerEventSink),
+      Layer.provide(SshRemoteDispatch.layer),
+    ),
+  ),
+  Layer.provideMerge(
+    HubNodes.layer.pipe(
+      Layer.provide(HubNodeRepository.layer),
       Layer.provide(SshRemoteDispatch.layer),
     ),
   ),

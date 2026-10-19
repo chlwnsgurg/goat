@@ -1,11 +1,22 @@
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, type SavedConnection, ThreadId } from "@goat/contracts";
+import {
+  EnvironmentId,
+  HubNodesError,
+  ProviderInstanceId,
+  type HubNode,
+  type SavedConnection,
+  ThreadId,
+} from "@goat/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
-import { McpSchema, McpServer } from "effect/ai";
+import { McpSchema, McpServer, Tool } from "effect/ai";
+import * as Schema from "effect/Schema";
 
 import * as Broker from "../../../connections/ConnectionCatalogBroker.ts";
+import * as HubNodes from "../../../hubNodes/HubNodes.ts";
 import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -15,7 +26,32 @@ import { ConnectionToolkit } from "./tools.ts";
 
 const environmentId = EnvironmentId.make("environment:connections");
 const threadId = ThreadId.make("thread:connections");
-const saved: SavedConnection = { environmentId, label: "Remote", enabled: true, routes: [] };
+const node: HubNode = {
+  nodeId: environmentId,
+  environmentId,
+  label: "Remote",
+  kind: "ssh",
+  status: "online",
+  lastSeenAt: null,
+  addedBy: null,
+  routes: [
+    {
+      routeId: "ssh:build-host",
+      source: "registered",
+      target: { kind: "ssh", alias: "build-host", hostname: null, username: null, port: null },
+      status: "online",
+      checkedAt: null,
+      lastSeenAt: null,
+      lastError: null,
+    },
+  ],
+};
+const saved: SavedConnection = {
+  environmentId,
+  label: "Remote",
+  enabled: true,
+  routes: [{ kind: "ssh", host: "build-host", hostname: "build-host", username: null, port: null }],
+};
 const outsideCaller = (
   access: "read-only" | "full-access" | "approval-required",
 ): McpInvocationContext.McpInvocationScope => ({
@@ -37,179 +73,390 @@ const threadCaller: McpInvocationContext.McpInvocationScope = {
 };
 
 const testLayer = (
-  caller: McpInvocationContext.McpInvocationScope,
-  invoke: Broker.ConnectionCatalogBroker["Service"]["invoke"],
+  caller = outsideCaller("full-access"),
+  hub: Partial<HubNodes.HubNodes["Service"]> = {},
+  broker: Partial<Broker.ConnectionCatalogBroker["Service"]> = {},
 ) =>
   McpToolAccess.HandlersLayer.layer(Handlers.layer).pipe(
     Layer.provideMerge(Layer.succeed(McpInvocationContext.McpInvocationContext, caller)),
     Layer.provideMerge(liveThreadsLayer),
-    Layer.provideMerge(Layer.mock(Broker.ConnectionCatalogBroker)({ invoke })),
+    Layer.provideMerge(Layer.mock(HubNodes.HubNodes)(hub)),
+    Layer.provideMerge(
+      Layer.mock(Broker.ConnectionCatalogBroker)({ hasHost: Effect.succeed(false), ...broker }),
+    ),
   );
 
-it.effect("read-only clients can list saved connections", () =>
+const call = <N extends keyof typeof ConnectionToolkit.tools>(
+  name: N,
+  input: Tool.Parameters<(typeof ConnectionToolkit.tools)[N]>,
+) =>
   Effect.gen(function* () {
     const toolkit = yield* ConnectionToolkit;
-    const result = yield* toolkit
-      .handle("goat_connection_list", {})
-      .pipe(Stream.unwrap, Stream.runCollect);
-    expect(result.at(-1)?.result).toEqual({ connections: [saved] });
-  }).pipe(
+    const result = yield* toolkit.handle(name, input).pipe(Stream.unwrap, Stream.runCollect);
+    return result.at(-1)?.result;
+  });
+
+it.effect("goat serve alone lists nodes and notices without any desktop broker host", () =>
+  call("goat_connection_list", {}).pipe(
+    Effect.tap((result) =>
+      Effect.sync(() =>
+        expect(result).toEqual({
+          connections: [saved],
+          nodes: [node, { ...node, environmentId: null, nodeId: "route:ssh:new" }],
+          notices: [{ id: "desktop-import-locked", at: "2026-10-20T00:00:00.000Z" }],
+        }),
+      ),
+    ),
     Effect.provide(
-      testLayer(outsideCaller("read-only"), (operation, timeoutMs) => {
-        expect(operation).toEqual({ type: "list" });
-        expect(timeoutMs).toBe(30_000);
-        return Effect.succeed({ type: "list", connections: [saved] });
+      testLayer(
+        outsideCaller("read-only"),
+        {
+          snapshot: Effect.succeed({
+            hubEnvironmentId: environmentId,
+            nodes: [node, { ...node, environmentId: null, nodeId: "route:ssh:new" }],
+            notices: [{ id: "desktop-import-locked", at: "2026-10-20T00:00:00.000Z" }],
+          }),
+        },
+        {
+          hasHost: Effect.die("List consulted desktop host"),
+          invoke: () => Effect.die("List reached desktop"),
+        },
+      ),
+    ),
+  ),
+);
+
+it.effect("projects SSH, linked and cloud routes without credentials", () => {
+  const routes: HubNode["routes"] = [
+    {
+      ...node.routes[0]!,
+      target: { kind: "ssh", alias: "custom", hostname: "host.test", username: "jun", port: 2222 },
+    },
+    {
+      ...node.routes[0]!,
+      routeId: "linked:test",
+      source: "linked-host",
+      target: {
+        kind: "linked",
+        name: "test",
+        baseUrl: "https://host.test",
+        access: "read-only",
+        expiresAt: "2026-10-21T00:00:00.000Z",
+      },
+    },
+    {
+      ...node.routes[0]!,
+      routeId: "cloud:boat-bx_23456789",
+      source: "cloud-machine",
+      target: { kind: "cloud", alias: "boat-bx_23456789" },
+    },
+  ];
+  return call("goat_connection_list", {}).pipe(
+    Effect.tap((result) =>
+      Effect.sync(() =>
+        expect(result).toMatchObject({
+          connections: [
+            {
+              routes: [
+                { kind: "ssh", host: "custom", hostname: "host.test", username: "jun", port: 2222 },
+                { kind: "direct", httpBaseUrl: "https://host.test" },
+                {
+                  kind: "ssh",
+                  host: "boat-bx_23456789",
+                  hostname: "boat-bx_23456789",
+                  username: null,
+                  port: null,
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    ),
+    Effect.provide(
+      testLayer(undefined, {
+        snapshot: Effect.succeed({
+          hubEnvironmentId: environmentId,
+          nodes: [{ ...node, routes }],
+          notices: [],
+        }),
+      }),
+    ),
+  );
+});
+
+it.effect.each(["saved", "not_attached", "failed", "refused", "mismatched"] as const)(
+  "saves through the hub with identity required, desktop result %s",
+  (desktop) => {
+    let persisted = false;
+    return call("goat_connection_add_ssh", { host: "build-host", label: "Build" }).pipe(
+      Effect.tap((result) =>
+        Effect.sync(() =>
+          expect(result).toEqual({
+            created: true,
+            node,
+            connection: saved,
+            desktopCatalog: desktop === "refused" || desktop === "mismatched" ? "failed" : desktop,
+          }),
+        ),
+      ),
+      Effect.provide(
+        testLayer(
+          threadCaller,
+          {
+            add: (input, options) =>
+              Effect.gen(function* () {
+                expect(input).toEqual({
+                  kind: "ssh",
+                  alias: "build-host",
+                  hostname: null,
+                  username: null,
+                  port: null,
+                  label: "Build",
+                });
+                expect(options.requireIdentity).toBe(true);
+                expect(options.addedBy).toMatchObject({ kind: "agent", threadId });
+                expect(options.addedBy.client).toBeUndefined();
+                expect(options.addedBy.at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+                yield* options.beforeSave;
+                persisted = true;
+                return { created: true, node };
+              }),
+          },
+          {
+            hasHost: Effect.succeed(desktop !== "not_attached"),
+            invoke: (operation, timeoutMs) => {
+              expect(persisted).toBe(true);
+              expect(timeoutMs).toBe(600_000);
+              expect(operation).toMatchObject({
+                type: "add_ssh",
+                host: "build-host",
+                label: "Build",
+                addedBy: { kind: "agent", threadId },
+              });
+              return desktop === "failed"
+                ? Effect.fail(new Broker.ConnectionCatalogTimeout({ timeoutMs }))
+                : Effect.succeed(
+                    desktop === "refused"
+                      ? { type: "failure", reason: "refused", message: "Locked" }
+                      : desktop === "mismatched"
+                        ? { type: "list", connections: [] }
+                        : { type: "add_ssh", created: true, connection: saved },
+                  );
+            },
+          },
+        ),
+      ),
+    );
+  },
+);
+
+it.effect("awaits the desktop answer synchronously after the hub save", () =>
+  Effect.gen(function* () {
+    const invoked = yield* Deferred.make<void>();
+    const answer = yield* Deferred.make<void>();
+    let completed = false;
+    const fiber = yield* call("goat_connection_add_ssh", { host: "build-host" }).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          completed = true;
+        }),
+      ),
+      Effect.provide(
+        testLayer(
+          undefined,
+          { add: (_input, options) => options.beforeSave.pipe(Effect.as({ created: true, node })) },
+          {
+            hasHost: Effect.succeed(true),
+            invoke: () =>
+              Deferred.succeed(invoked, undefined).pipe(
+                Effect.andThen(Deferred.await(answer)),
+                Effect.as({ type: "add_ssh", created: true, connection: saved }),
+              ),
+          },
+        ),
+      ),
+      Effect.forkChild,
+    );
+    yield* Deferred.await(invoked);
+    expect(completed).toBe(false);
+    yield* Deferred.succeed(answer, undefined);
+    expect(yield* Fiber.join(fiber)).toMatchObject({ desktopCatalog: "saved" });
+    expect(completed).toBe(true);
+  }),
+);
+
+it.effect("attributes an outside client and preserves created:false", () =>
+  call("goat_connection_add_ssh", { host: "build-host" }).pipe(
+    Effect.tap((result) =>
+      Effect.sync(() =>
+        expect(result).toMatchObject({ created: false, desktopCatalog: "not_attached" }),
+      ),
+    ),
+    Effect.provide(
+      testLayer(undefined, {
+        add: (_input, options) => {
+          expect(options.addedBy).toMatchObject({ kind: "agent", client: "Test agent" });
+          expect(options.addedBy.threadId).toBeUndefined();
+          return options.beforeSave.pipe(Effect.as({ created: false, node }));
+        },
       }),
     ),
   ),
 );
 
-it.effect(
-  "refuses read-only and approval-required clients on add and remove before broker invocation",
-  () =>
-    Effect.forEach(["read-only", "approval-required"] as const, (access) =>
-      Effect.gen(function* () {
-        const toolkit = yield* ConnectionToolkit;
-        const add = yield* toolkit
-          .handle("goat_connection_add_ssh", { host: "build-host" })
-          .pipe(Stream.unwrap, Stream.runCollect);
-        const remove = yield* toolkit
-          .handle("goat_connection_remove", { environmentId })
-          .pipe(Stream.unwrap, Stream.runCollect);
-        expect(add.at(-1)?.result).toMatchObject({ code: "capability_denied" });
-        expect(remove.at(-1)?.result).toMatchObject({ code: "capability_denied" });
-      }).pipe(
-        Effect.provide(
-          testLayer(outsideCaller(access), () => Effect.die("Denied caller reached broker")),
+it.effect.each(["read-only", "approval-required"] as const)(
+  "refuses writes by %s callers before hub calls",
+  (access) =>
+    Effect.gen(function* () {
+      for (const result of [
+        yield* call("goat_connection_add_ssh", { host: "build-host" }),
+        yield* call("goat_connection_remove", { environmentId }),
+      ]) {
+        expect(result).toMatchObject({ code: "capability_denied" });
+      }
+    }).pipe(Effect.provide(testLayer(outsideCaller(access)))),
+);
+
+it.effect("refuses add without orchestration capability", () =>
+  call("goat_connection_add_ssh", { host: "build-host" }).pipe(
+    Effect.tap((result) =>
+      Effect.sync(() => expect(result).toMatchObject({ code: "capability_denied" })),
+    ),
+    Effect.provide(testLayer({ ...outsideCaller("full-access"), capabilities: new Set() })),
+  ),
+);
+
+it.effect("rechecks caller authority immediately before saving", () => {
+  const caller = outsideCaller("full-access");
+  return call("goat_connection_add_ssh", { host: "build-host" }).pipe(
+    Effect.tap((result) =>
+      Effect.sync(() => expect(result).toMatchObject({ code: "capability_denied" })),
+    ),
+    Effect.provide(
+      testLayer(caller, {
+        add: (_input, options) =>
+          Effect.gen(function* () {
+            Object.assign(caller.client!, { access: "read-only" });
+            yield* options.beforeSave;
+            return yield* Effect.die("Revoked caller saved a node");
+          }),
+      }),
+    ),
+  );
+});
+
+it.effect.each(["environmentId", "nodeId"] as const)(
+  "removes using %s and forwards the identified environment",
+  (key) =>
+    call("goat_connection_remove", { [key]: environmentId }).pipe(
+      Effect.tap((result) =>
+        Effect.sync(() =>
+          expect(result).toEqual({ node, removed: saved, desktopCatalog: "saved" }),
+        ),
+      ),
+      Effect.provide(
+        testLayer(
+          undefined,
+          {
+            remove: (input) => {
+              expect(input).toEqual({ nodeId: environmentId });
+              return Effect.succeed({ removed: node });
+            },
+          },
+          {
+            hasHost: Effect.succeed(true),
+            invoke: (operation, timeoutMs) => {
+              expect(operation).toEqual({ type: "remove", environmentId });
+              expect(timeoutMs).toBe(30_000);
+              return Effect.succeed({ type: "remove", removed: saved });
+            },
+          },
         ),
       ),
     ),
 );
 
-it.effect("attributes a thread add and supplies the ten minute SSH timeout", () =>
-  Effect.gen(function* () {
-    const toolkit = yield* ConnectionToolkit;
-    const result = yield* toolkit
-      .handle("goat_connection_add_ssh", { host: "build-host", label: "Build" })
-      .pipe(Stream.unwrap, Stream.runCollect);
-    expect(result.at(-1)?.result).toEqual({ created: true, connection: saved });
-  }).pipe(
+it.effect.each(["not_attached", "failed"] as const)(
+  "keeps hub removal successful when desktop is %s",
+  (desktop) =>
+    call("goat_connection_remove", { nodeId: environmentId }).pipe(
+      Effect.tap((result) =>
+        Effect.sync(() =>
+          expect(result).toMatchObject({ node, removed: saved, desktopCatalog: desktop }),
+        ),
+      ),
+      Effect.provide(
+        testLayer(
+          undefined,
+          { remove: () => Effect.succeed({ removed: node }) },
+          {
+            hasHost: Effect.succeed(desktop === "failed"),
+            invoke: () => Effect.fail(new Broker.ConnectionCatalogHostDetached()),
+          },
+        ),
+      ),
+    ),
+);
+
+it.effect("removes unidentified nodes without a legacy projection or desktop forward", () => {
+  const unknown = { ...node, environmentId: null, nodeId: "route:ssh:build-host" };
+  return call("goat_connection_remove", { nodeId: unknown.nodeId }).pipe(
+    Effect.tap((result) =>
+      Effect.sync(() => expect(result).toEqual({ node: unknown, desktopCatalog: "not_attached" })),
+    ),
     Effect.provide(
-      testLayer(threadCaller, (operation, timeoutMs) => {
-        expect(operation).toMatchObject({
-          type: "add_ssh",
-          host: "build-host",
-          label: "Build",
-          addedBy: { kind: "agent", threadId },
+      testLayer(
+        undefined,
+        { remove: () => Effect.succeed({ removed: unknown }) },
+        { hasHost: Effect.die("Unidentified remove reached desktop") },
+      ),
+    ),
+  );
+});
+
+it.effect.each([
+  "not_found",
+  "invalid_request",
+  "refused",
+  "host_unavailable",
+  "storage_failed",
+] as const)("maps hub %s failures on all operations", (reason) =>
+  Effect.gen(function* () {
+    const failure = Effect.fail(new HubNodesError({ reason, detail: "Hub failure" }));
+    yield* Effect.gen(function* () {
+      for (const result of [
+        yield* call("goat_connection_list", {}),
+        yield* call("goat_connection_add_ssh", { host: "build-host" }),
+        yield* call("goat_connection_remove", { nodeId: environmentId }),
+      ]) {
+        expect(result).toMatchObject({
+          code:
+            reason === "storage_failed"
+              ? "orchestration_error"
+              : reason === "host_unavailable"
+                ? reason
+                : "invalid_request",
+          message: "Hub failure",
         });
-        if (operation.type === "add_ssh") {
-          expect(operation.addedBy.client).toBeUndefined();
-          expect(operation.addedBy.at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-        }
-        expect(timeoutMs).toBe(600_000);
-        return Effect.succeed({ type: "add_ssh", created: true, connection: saved });
-      }),
-    ),
-  ),
-);
-
-it.effect("attributes a full-access outside add and returns idempotent created:false", () =>
-  Effect.gen(function* () {
-    const toolkit = yield* ConnectionToolkit;
-    const result = yield* toolkit
-      .handle("goat_connection_add_ssh", { host: "build-host" })
-      .pipe(Stream.unwrap, Stream.runCollect);
-    expect(result.at(-1)?.result).toEqual({ created: false, connection: saved });
-  }).pipe(
-    Effect.provide(
-      testLayer(outsideCaller("full-access"), (operation) => {
-        expect(operation).toMatchObject({ addedBy: { kind: "agent", client: "Test agent" } });
-        if (operation.type === "add_ssh") expect(operation.addedBy.threadId).toBeUndefined();
-        return Effect.succeed({ type: "add_ssh", created: false, connection: saved });
-      }),
-    ),
-  ),
-);
-
-it.effect("refuses an add without the orchestration capability", () =>
-  Effect.gen(function* () {
-    const toolkit = yield* ConnectionToolkit;
-    const result = yield* toolkit
-      .handle("goat_connection_add_ssh", { host: "build-host" })
-      .pipe(Stream.unwrap, Stream.runCollect);
-    expect(result.at(-1)?.result).toMatchObject({ code: "capability_denied" });
-  }).pipe(
-    Effect.provide(
-      testLayer({ ...outsideCaller("full-access"), capabilities: new Set() }, () =>
-        Effect.die("Missing capability reached broker"),
+      }
+    }).pipe(
+      Effect.provide(
+        testLayer(undefined, { snapshot: failure, add: () => failure, remove: () => failure }),
       ),
-    ),
-  ),
+    );
+  }),
 );
 
-it.effect("maps no desktop host to actionable host_unavailable", () =>
-  Effect.gen(function* () {
-    const toolkit = yield* ConnectionToolkit;
-    const result = yield* toolkit
-      .handle("goat_connection_list", {})
-      .pipe(Stream.unwrap, Stream.runCollect);
-    expect(result.at(-1)?.result).toMatchObject({
-      code: "host_unavailable",
-      message:
-        "No GOAT desktop app is serving saved connections for this environment. Saved connections belong to the desktop app that runs this environment as its main local environment: open it on this machine, or add the host in Settings → Connections → SSH. Web-only, mobile and desktop WSL-backend environments cannot save SSH connections through agents.",
-    });
-  }).pipe(
-    Effect.provide(
-      testLayer(outsideCaller("read-only"), () =>
-        Effect.fail(new Broker.ConnectionCatalogHostUnavailable()),
-      ),
-    ),
-  ),
-);
-
-it.effect("maps renderer refusal, failure and mismatched operation responses", () =>
-  Effect.forEach(
-    [
-      [
-        { type: "failure", reason: "refused", message: "Local environment cannot be removed" },
-        "invalid_request",
-      ],
-      [
-        { type: "failure", reason: "connection_failed", message: "Key login failed" },
-        "host_unavailable",
-      ],
-      [{ type: "list", connections: [] }, "invalid_request"],
-    ] as const,
-    ([response, code]) =>
-      Effect.gen(function* () {
-        const toolkit = yield* ConnectionToolkit;
-        const result = yield* toolkit
-          .handle("goat_connection_remove", { environmentId })
-          .pipe(Stream.unwrap, Stream.runCollect);
-        expect(result.at(-1)?.result).toMatchObject({ code });
-      }).pipe(
-        Effect.provide(testLayer(outsideCaller("full-access"), () => Effect.succeed(response))),
-      ),
-  ),
-);
-
-it.effect("removes with a thirty second timeout", () =>
-  Effect.gen(function* () {
-    const toolkit = yield* ConnectionToolkit;
-    const result = yield* toolkit
-      .handle("goat_connection_remove", { environmentId })
-      .pipe(Stream.unwrap, Stream.runCollect);
-    expect(result.at(-1)?.result).toEqual({ removed: saved });
-  }).pipe(
-    Effect.provide(
-      testLayer(outsideCaller("full-access"), (operation, timeoutMs) => {
-        expect(operation).toEqual({ type: "remove", environmentId });
-        expect(timeoutMs).toBe(30_000);
-        return Effect.succeed({ type: "remove", removed: saved });
-      }),
-    ),
-  ),
-);
+it("requires exactly one remove identifier", () => {
+  const decode = Schema.decodeUnknownSync(
+    ConnectionToolkit.tools.goat_connection_remove.parametersSchema,
+  );
+  expect(() => decode({})).toThrow();
+  expect(() => decode({ nodeId: "node", environmentId })).toThrow();
+  expect(decode({ nodeId: "node" })).toEqual({ nodeId: "node" });
+  expect(decode({ environmentId })).toEqual({ environmentId });
+});
 
 it.effect("production registration refuses undeclared arguments before invoking the broker", () =>
   Effect.gen(function* () {
@@ -246,6 +493,7 @@ it.effect("production registration refuses undeclared arguments before invoking 
       McpHttpServer.layerConnectionToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provideMerge(liveThreadsLayer),
+        Layer.provide(Layer.mock(HubNodes.HubNodes)({})),
         Layer.provide(
           Layer.mock(Broker.ConnectionCatalogBroker)({
             invoke: () => Effect.die("Unknown arguments reached broker"),
@@ -255,3 +503,15 @@ it.effect("production registration refuses undeclared arguments before invoking 
     ),
   ),
 );
+
+const decodeAdd = Schema.decodeUnknownSync(
+  ConnectionToolkit.tools.goat_connection_add_ssh.parametersSchema,
+);
+it("rejects SSH aliases and labels beyond the hub contract before saving", () => {
+  expect(() => decodeAdd({ host: "x".repeat(256) })).toThrow();
+  expect(() => decodeAdd({ host: "build-host", label: "x".repeat(121) })).toThrow();
+  expect(decodeAdd({ host: "build-host", label: "x".repeat(120) })).toHaveProperty(
+    "host",
+    "build-host",
+  );
+});

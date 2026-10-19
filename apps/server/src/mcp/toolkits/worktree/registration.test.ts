@@ -2,6 +2,7 @@ import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
 import * as SshHostSetup from "../../../sshRemote/SshHostSetup.ts";
 import * as CloudMachineService from "../../../cloudMachines/CloudMachineService.ts";
 import * as SshWorkspaceSync from "../../../sshRemote/SshWorkspaceSync.ts";
+import * as HubNodes from "../../../hubNodes/HubNodes.ts";
 import * as ConnectionCatalogBroker from "../../../connections/ConnectionCatalogBroker.ts";
 import Migration0062 from "../../../persistence/Migrations/065_RemoteReports.ts";
 import Migration0063 from "../../../persistence/Migrations/066_RemoteDispatches.ts";
@@ -57,6 +58,7 @@ import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
 
 const layerStubServices = Layer.mergeAll(
   Layer.mock(CloudSource.CloudTaskSourceService)({}),
+  Layer.mock(HubNodes.HubNodes)({}),
   Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
   Layer.mock(SshHostSetup.SshHostSetup)({}),
   Layer.mock(CloudMachineService.CloudMachineService)({}),

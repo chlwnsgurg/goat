@@ -238,7 +238,7 @@ export const agentSurfaceRegistry = {
     toolkit: "connection",
     summary: "List saved connections",
     description:
-      "List the connections saved in the GOAT desktop app on this machine: the environments its sidebar shows, with their routes and who added them. No credentials are returned.",
+      "List nodes owned by this GOAT server (the hub), including routes and notices. Works without the desktop app, including goat serve alone. Legacy connections includes only nodes with a known environmentId. No credentials are returned.",
     effect: "read",
     hostRoutable: false,
     requires: "either",
@@ -257,7 +257,7 @@ export const agentSurfaceRegistry = {
     toolkit: "connection",
     summary: "Save an SSH connection",
     description:
-      "Use goat_ssh_host_add first for a new host. Save a prepared, pinned host in Settings → Connections of the GOAT desktop app on this machine so its threads appear in the sidebar. Key-based SSH only (keys or ssh-agent); a password host fails. An already saved machine (by alias or endpoint) is returned with created:false. A machine saved through another route gains this SSH route with created:false. Needs a full-access caller. Requires the GOAT desktop app to be running on this machine.",
+      "Use goat_ssh_host_add first for a new host. Save an SSH node in this GOAT server (the hub). Works without the desktop app. GOAT must have run on the host so the hub can identify it; use goat_ssh_host_prepare first if needed. Key-based SSH only. An existing node gains the route with created:false. Needs a full-access caller. The desktop sidebar is updated when the desktop app is attached; desktopCatalog reports saved, not_attached or failed.",
     effect: "write",
     hostRoutable: false,
     requires: "either",
@@ -276,7 +276,7 @@ export const agentSurfaceRegistry = {
     toolkit: "connection",
     summary: "Remove a saved connection",
     description:
-      "Remove a saved connection like Settings → Remove: forget pairing, credentials and cached threads on this device. GOAT's server keeps running on the host. Use goat_ssh_host_forget to stop it when idle. The local environment and T3 Connect environments are refused.",
+      "Remove a node owned by this GOAT server (the hub), using exactly one of nodeId or the legacy environmentId. Works without the desktop app. Linked credentials are forgotten; cloud nodes must be managed in Settings → Connections → Cloud machines. The remote GOAT server keeps running. The desktop sidebar is updated when the desktop app is attached; desktopCatalog reports saved, not_attached or failed.",
     effect: "destructive",
     hostRoutable: false,
     requires: "either",

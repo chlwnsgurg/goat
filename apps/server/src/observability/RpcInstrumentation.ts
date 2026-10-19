@@ -4,6 +4,7 @@ import {
   SLACK_CHANNEL_WS_METHODS,
   WS_METHODS,
   type WsRpcGroup,
+  type WsHubNodesRpcGroup,
 } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -13,13 +14,20 @@ import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
 
 import { rpcRequestDuration, rpcRequestsTotal, withMetrics } from "./Metrics.ts";
 
-type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
+type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup | typeof WsHubNodesRpcGroup>["_tag"];
 
 /**
  * Trace queries and dashboards group by these labels, so they keep their historical values
  * even where they differ from the method prefix.
  */
 const RPC_AGGREGATES = {
+  [WS_METHODS.hubNodesList]: "hubNodes",
+  [WS_METHODS.hubNodesSubscribe]: "hubNodes",
+  [WS_METHODS.hubNodesAdd]: "hubNodes",
+  [WS_METHODS.hubNodesRemove]: "hubNodes",
+  [WS_METHODS.hubNodesCheck]: "hubNodes",
+  [WS_METHODS.hubNodesImport]: "hubNodes",
+  [WS_METHODS.hubNodesDismissNotice]: "hubNodes",
   [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: "orchestrationV2",
   [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: "orchestration",
