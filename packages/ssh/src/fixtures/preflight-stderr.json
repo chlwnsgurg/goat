@@ -1,5 +1,6 @@
 {
   "keyAndPassword": "deploy@build.example: Permission denied (publickey,password,keyboard-interactive).\r\n",
+  "jumpAuthenticatedDestinationDenied": "Authenticated to bastion.example ([192.0.2.1]:22) using \"publickey\".\r\ndeploy@build.example: Permission denied (publickey,password).\r\n",
   "passwordOnly": "deploy@build.example: Permission denied (password,keyboard-interactive).\r\n",
   "partial": "Authenticated with partial success.\r\nAuthentications that can continue: password\r\ndeploy@build.example: Permission denied (password).\r\n",
   "unknownKey": "No ED25519 host key is known for build.example and you have requested strict checking.\r\nHost key verification failed.\r\n",

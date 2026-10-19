@@ -375,6 +375,7 @@ const quoteShellArgument = (value: string) => `'${value.replaceAll("'", "'\\''")
 export function buildSshKeyAuthInstructions(context: {
   readonly originLabel: string;
   readonly host: string;
+  readonly alias?: string;
   readonly user: string;
   readonly port: number;
   readonly publicKey?: string;
@@ -388,7 +389,9 @@ export function buildSshKeyAuthInstructions(context: {
   const command =
     context.publicKeyPath === undefined
       ? undefined
-      : `ssh-copy-id -i ${quoteShellArgument(context.publicKeyPath)} -p ${quoteShellArgument(String(context.port))} ${quoteShellArgument(`${context.user}@${context.host}`)}`;
+      : context.alias
+        ? `ssh-copy-id -i ${quoteShellArgument(context.publicKeyPath)} ${quoteShellArgument(context.alias)}`
+        : `ssh-copy-id -i ${quoteShellArgument(context.publicKeyPath)} -p ${quoteShellArgument(String(context.port))} ${quoteShellArgument(`${context.user}@${context.host}`)}`;
   return {
     originLabel: context.originLabel,
     instruction: `${introduction} Run this on ${context.originLabel}.`,

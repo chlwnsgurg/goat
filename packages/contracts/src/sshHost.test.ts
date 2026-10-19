@@ -278,6 +278,17 @@ describe("SSH key-auth instructions", () => {
     );
   });
 
+  it("uses the alias for routing and trust while naming the readable host", () => {
+    const result = buildSshKeyAuthInstructions({
+      ...context,
+      host: "private.example",
+      alias: "private'alias",
+      publicKeyPath: "/keys/id_ed25519.pub",
+    });
+    expect(result.instruction).toContain("private.example refused the SSH key");
+    expect(result.command).toBe("ssh-copy-id -i '/keys/id_ed25519.pub' 'private'\\''alias'");
+  });
+
   it("quotes each argument including apostrophes and shell metacharacters", () => {
     const result = buildSshKeyAuthInstructions({
       ...context,

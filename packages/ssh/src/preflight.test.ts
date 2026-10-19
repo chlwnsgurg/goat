@@ -25,6 +25,7 @@ const fixture = (
   input: {
     handshake?: string;
     auth?: string;
+    authExitCode?: number;
     facts?: string;
     none?: boolean;
     alias?: boolean | string;
@@ -75,7 +76,9 @@ const fixture = (
         return {
           ...makeSuccessfulProcess(auth ? (input.facts ?? facts) : ""),
           exitCode: Effect.succeed(
-            ChildProcessSpawner.ExitCode(auth ? (input.auth ? 255 : 0) : input.none ? 0 : 255),
+            ChildProcessSpawner.ExitCode(
+              auth ? (input.authExitCode ?? (input.auth ? 255 : 0)) : input.none ? 0 : 255,
+            ),
           ),
           stderr: Stream.make(new TextEncoder().encode(error)),
         };
@@ -195,6 +198,68 @@ it.effect.each(["keyAndPassword", "passwordOnly", "partial"] as const)(
         expect(report.steps[2]?.fix?.instruction).toContain("AuthenticationMethods publickey");
     }).pipe(Effect.provide(NodeServices.layer)),
 );
+it.effect("does not mistake bastion authentication for destination sign-in", () =>
+  Effect.gen(function* () {
+    const { report } = yield* fixture({
+      auth: stderr.jumpAuthenticatedDestinationDenied,
+      facts: "",
+    });
+    expect(report.ready).toBe(false);
+    expect(report.steps[2]?.state).toBe("failed");
+    expect(report.steps[2]?.summary).toContain("build refused Origin's SSH keys");
+    expect(report.steps[2]?.fix?.command).toContain("ssh-copy-id");
+    expect(report.steps.slice(3).every((step) => step.state === "skipped")).toBe(true);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect("ignores bastion key authentication in the destination's no-key success summary", () =>
+  Effect.gen(function* () {
+    const { report } = yield* fixture({
+      none: true,
+      handshake: "Authenticated to build.example using none.",
+      auth: 'Authenticated to bastion.example using "publickey".\nAuthenticated to build.example using "none".\n',
+      authExitCode: 0,
+    });
+    expect(report.ready).toBe(true);
+    expect(report.steps[2]?.summary).toBe("The host let GOAT in without a key.");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["build.example", "build", "BUILD.EXAMPLE", "[2001:db8::1]"])(
+  "recognizes destination key authentication for %s even if the shell fails",
+  (authenticatedHost) =>
+    Effect.gen(function* () {
+      const { report } = yield* fixture({
+        ...(authenticatedHost.includes(":") ? { resolvedHost: "2001:0db8::1" } : {}),
+        auth: `Authenticated to bastion.example using "publickey".\nAuthenticated to ${authenticatedHost} ([192.0.2.2]:22) using "publickey".\n`,
+        facts: "",
+      });
+      expect(report.steps[2]?.state).toBe("passed");
+      expect(report.steps[2]?.summary).toBe("Signed in using Origin's SSH key.");
+      expect(report.steps[3]?.state).toBe("failed");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["private", "goat-private-12345678"])(
+  "retains %s routing and managed pin in key registration",
+  (alias) =>
+    Effect.gen(function* () {
+      const { report, calls } = yield* fixture({
+        host: alias,
+        alias,
+        resolvedHost: "10.0.0.5",
+        port: 2222,
+        settings: `userknownhostsfile /isolated/pins/${alias}.known_hosts\n`,
+        auth: `Offering public key: /keys/id_ed25519 SHA256:key\n${stderr.jumpAuthenticatedDestinationDenied.replace("build.example", "10.0.0.5")}`,
+        facts: "",
+      });
+      expect(report.steps[2]?.state).toBe("failed");
+      expect(report.steps[2]?.fix?.command).toBe(
+        `ssh-copy-id -i '/keys/id_ed25519.pub' '${alias}'`,
+      );
+      expect(calls[3]?.at(-4)).toBe(alias);
+      expect(
+        calls[3]?.some((arg) => arg.startsWith("ProxyCommand=") && arg.includes("bastion")),
+      ).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
 it.effect.each([
   ["goat-juns-macbook-pro-e6ef0008", "juns-macbook-pro"],
   ["my-macbook", "my-macbook"],
@@ -213,9 +278,7 @@ it.effect.each([
     expect(report.steps[2]?.fix?.instruction).toBe(
       `Add this computer's key to ${displayHost} once: run this command in Terminal on jun’s Mac Studio, enter the password when asked, then choose Check again.`,
     );
-    expect(report.steps[2]?.fix?.command).toBe(
-      "ssh-copy-id -i '/keys/id_ed25519.pub' -p '22' 'deploy@juns-macbook-pro'",
-    );
+    expect(report.steps[2]?.fix?.command).toBe(`ssh-copy-id -i '/keys/id_ed25519.pub' '${host}'`);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 it.effect.each(["handshake", "auth"] as const)(
@@ -475,18 +538,17 @@ it.effect(
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.effect(
-  "provides both key creation and safely quoted installation when no local key exists",
-  () =>
-    Effect.gen(function* () {
-      const { report } = yield* fixture({
-        auth: stderr.keyAndPassword,
-        host: "build'$(false)",
-        user: "deploy'account",
-        port: 2222,
-      }).pipe(Effect.provideService(HostProcess.HomeDirectory, "/isolated owner"));
-      expect(report.steps[2]?.fix?.command).toBe(
-        "ssh-keygen -t ed25519 && ssh-copy-id -i '/isolated owner/.ssh/id_ed25519.pub' -p '2222' 'deploy'\\''account@build'\\''$(false)'",
-      );
-    }).pipe(Effect.provide(NodeServices.layer)),
+it.effect("provides key creation and alias-based installation when no local key exists", () =>
+  Effect.gen(function* () {
+    const { report } = yield* fixture({
+      auth: stderr.keyAndPassword,
+      host: "build",
+      alias: "build",
+      user: "deploy'account",
+      port: 2222,
+    }).pipe(Effect.provideService(HostProcess.HomeDirectory, "/isolated owner"));
+    expect(report.steps[2]?.fix?.command).toBe(
+      "ssh-keygen -t ed25519 && ssh-copy-id -i '/isolated owner/.ssh/id_ed25519.pub' 'build'",
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
 );

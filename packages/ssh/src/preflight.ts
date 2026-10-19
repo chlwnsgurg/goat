@@ -288,10 +288,15 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
     policyFailure();
     return finish();
   }
-  if (
-    facts.exitCode !== 0 &&
-    !/Authenticated .* using ["']?(?:publickey|none)/iu.test(facts.stderr)
-  ) {
+  // Protected jump children share stderr with the destination's SSH process.
+  const authentication = [
+    ...facts.stderr.matchAll(
+      /^(?:debug1: )?Authenticated to (\S+)[^\r\n]* using ["']?(publickey|none)\b/gimu,
+    ),
+  ]
+    .find((match) => !isJumpHop(match[1]!))?.[2]
+    ?.toLowerCase();
+  if (facts.exitCode !== 0 && !authentication) {
     const offered = /Offering public key: (.+?)(?: SHA256:|$)/mu.exec(facts.stderr)?.[1];
     const authMethods = methodList(facts.stderr) || methods;
     const partial = /with partial success/iu.test(facts.stderr);
@@ -310,7 +315,8 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
     }
     const guidance = buildSshKeyAuthInstructions({
       originLabel: options.ownerLabel,
-      host: destination.hostname,
+      host: displayHost,
+      ...(options.alias ? { alias: options.alias } : {}),
       user: destination.user,
       port: destination.port,
       publicKeyPath: publicKeyPath ?? `${home}/.ssh/id_ed25519.pub`,
@@ -351,17 +357,17 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
     });
     return finish();
   }
-  const authenticatedKey = /Authenticated .* using ["']?publickey["']?/iu.test(facts.stderr);
   steps.push({
     id: "key_auth",
     state: "passed",
-    summary: authenticatedKey
-      ? `Signed in using ${/Offering public key: (.+?)(?: SHA256:|$)/mu.exec(facts.stderr)?.[1] ?? `${options.ownerLabel}'s SSH key`}.`
-      : handshake.exitCode === 0
-        ? tailscaleHost(destination.hostname)
-          ? "Signed in through Tailscale SSH; no key needed."
-          : "The host let GOAT in without a key."
-        : "Signed in using an SSH key.",
+    summary:
+      authentication === "publickey"
+        ? `Signed in using ${options.ownerLabel}'s SSH key.`
+        : handshake.exitCode === 0
+          ? tailscaleHost(destination.hostname)
+            ? "Signed in through Tailscale SSH; no key needed."
+            : "The host let GOAT in without a key."
+          : "Signed in using an SSH key.",
   });
   const values = new Map(
     facts.stdout.split(/\r?\n/u).map((line) => {
