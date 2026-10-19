@@ -2576,10 +2576,10 @@ code {
   .fleet-console-leader {
     flex: 1;
     align-self: center;
-    border-top: 1px dotted var(--color-border);
+    border-top: 1px dotted var(--contrast-border);
   }
   .fleet-console-baseline {
-    stroke: var(--color-border);
+    stroke: var(--contrast-border);
     stroke-width: 1;
     stroke-dasharray: 2 3;
     vector-effect: non-scaling-stroke;
