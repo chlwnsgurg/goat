@@ -146,6 +146,7 @@ describe("desktop SSH pairing", () => {
       ).pipe(Effect.flip);
 
       expect(error).toMatchObject({ reason: "configuration" });
+      expect(error.message).toContain("a different machine");
       expect(calls).toEqual(["ensure", "descriptor"]);
     }),
   );
@@ -292,6 +293,7 @@ describe("desktop SSH pairing", () => {
       }).pipe(Effect.flip);
 
       expect(error).toMatchObject({ reason: "configuration" });
+      expect(error.message).toContain("a different machine");
       expect(calls).toEqual(["ensure", "descriptor"]);
     }),
   );

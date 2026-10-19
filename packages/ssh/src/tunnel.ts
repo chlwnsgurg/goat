@@ -107,6 +107,7 @@ import {
 
 const DEFAULT_REMOTE_PORT = 3773;
 const REMOTE_PORT_SCAN_WINDOW = 200;
+const REMOTE_LAUNCH_ATTEMPTS = 3;
 const SSH_READY_TIMEOUT_MS = 20_000;
 const SSH_READY_PROBE_TIMEOUT_MS = 1_000;
 // Ceilings for a slow link. A forwarded probe costs at least one round trip,
@@ -1965,6 +1966,38 @@ $cwd"
 (cleanup_runtime_versions) || { printf 'ssh.runtime.cleanup.skipped inspection, lock, or cleanup failed\n' >&2 || true; }
 `;
 
+// Retained archives have a port-only wait-ready helper. Inspect the kernel's socket owner
+// in the launch shell instead, without adding helper arguments or starts on reconnect.
+export const REMOTE_LAUNCH_LISTENER_SCRIPT = String.raw`server_owns_listener() (
+  # Protocol parsing leaves noglob enabled; socket fd discovery needs expansion.
+  set +f
+  if [ "$GOAT_HOST_WINDOWS" = 1 ]; then
+    GOAT_PROCESS_ID="$1" GOAT_LISTEN_PORT="$2" MSYS2_ARG_CONV_EXCL='*' powershell.exe -NoProfile -NonInteractive -EncodedCommand '${encodePowerShellCommand("$ErrorActionPreference = 'Stop'; $connections = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$env:GOAT_LISTEN_PORT) -ErrorAction Stop); if ($connections | Where-Object { $_.OwningProcess -eq [int]$env:GOAT_PROCESS_ID -and $_.LocalAddress -eq '127.0.0.1' }) { exit 0 }; exit 1")}' </dev/null >/dev/null 2>&1
+  elif [ -d /proc/self/fd ]; then
+    listen_sockets=' '
+    for listen_fd in /proc/"$1"/fd/*; do
+      listen_socket="$(readlink "$listen_fd" 2>/dev/null)" || continue
+      case "$listen_socket" in socket:*) listen_sockets="$listen_sockets$listen_socket " ;; esac
+    done
+    listen_address="$(printf '0100007F:%04X' "$2")" || return 1
+    awk -v address="$listen_address" -v sockets="$listen_sockets" '
+      $2 == address && $4 == "0A" && index(sockets, " socket:[" $10 "] ") { found=1 }
+      END { exit !found }
+    ' /proc/"$1"/net/tcp 2>/dev/null
+  else
+    lsof -nP -a -p "$1" -iTCP@127.0.0.1:"$2" -sTCP:LISTEN -t 2>/dev/null | grep -qx "$1"
+  fi
+)
+wait_launched_listener() {
+  listen_deadline=$(( $(date +%s) + (@@GOAT_READY_TIMEOUT_MS@@ + 999) / 1000 ))
+  while server_alive "$REMOTE_PID" && [ "$(date +%s)" -lt "$listen_deadline" ]; do
+    server_owns_listener "$REMOTE_PID" "$REMOTE_PORT" && return 0
+    sleep 0.1
+  done
+  return 1
+}
+`;
+
 const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@GOAT_NODE_ENV_SCRIPT@@
 STATE_KEY="$1"
@@ -2011,6 +2044,7 @@ wait_ready() {
 @@GOAT_WAIT_READY_SCRIPT@@
 NODE
 }
+${REMOTE_LAUNCH_LISTENER_SCRIPT}
 wait_for_pid_exit() {
   PID_TO_WAIT="$1"
   WAIT_COUNT=0
@@ -2143,7 +2177,12 @@ elif [ "$LIVE_STATUS" = live ]; then
 else
   publish_selected_runner
 fi
-if [ -z "$REMOTE_PORT" ]; then
+LAUNCH_ATTEMPTS=0
+while [ -z "$REMOTE_PORT" ]; do
+  if [ "$GOAT_HOST_WINDOWS" = 0 ] && [ ! -d /proc/self/fd ] && ! command -v lsof >/dev/null 2>&1; then
+    printf 'Cannot verify the launched GOAT listener: this host needs /proc or lsof.\\n' >&2; exit 1
+  fi
+  LAUNCH_ATTEMPTS=$((LAUNCH_ATTEMPTS + 1))
   REMOTE_PORT="$(pick_port)" || true
   if [ -z "$REMOTE_PORT" ]; then
     if [ "$GOAT_ARCHIVE_MODE" = "1" ]; then
@@ -2163,6 +2202,8 @@ if [ -z "$REMOTE_PORT" ]; then
   else
     SPAWN_IDENTITY="$GOAT_NODE_SCRIPT_PATH"
   fi
+  touch "$LOG_FILE"
+  LAUNCH_LOG_OFFSET="$(wc -c <"$LOG_FILE")"
   if [ "$GOAT_HOST_WINDOWS" = 1 ]; then
     # Windows OpenSSH ends every process left in the session, so the server starts outside it.
     if [ "$GOAT_ARCHIVE_MODE" = 1 ]; then set -- "$(cygpath -w "$SPAWN_IDENTITY")"
@@ -2182,19 +2223,32 @@ if [ -z "$REMOTE_PORT" ]; then
   printf '%s\\n' "$REMOTE_PID" >"$PID_FILE"
   printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
   printf 'managed\\n' >"$MANAGED_FILE"
-  if ! wait_ready "@@GOAT_READY_TIMEOUT_MS@@"; then
-    printf 'Remote GOAT server did not become ready on 127.0.0.1:%s.\\n' "$REMOTE_PORT" >&2
+  if ! wait_launched_listener || ! wait_ready "@@GOAT_READY_TIMEOUT_MS@@" ||
+     ! server_owns_listener "$REMOTE_PID" "$REMOTE_PORT"; then
+    # Only this attempt's exited child and bind error authorize another port selection.
+    # Never signal the listener that won the race between pick-port and serve.
+    if ! server_alive "$REMOTE_PID" &&
+       tail -c "+$((LAUNCH_LOG_OFFSET + 1))" "$LOG_FILE" | grep -q EADDRINUSE; then
+      wait "$REMOTE_PID" 2>/dev/null || true
+      rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$STATE_DIR/identity"
+      if [ "$LAUNCH_ATTEMPTS" -lt @@GOAT_LAUNCH_ATTEMPTS@@ ]; then
+        printf 'Remote GOAT port %s was taken during launch; retrying.\\n' "$REMOTE_PORT" >&2
+        REMOTE_PORT=
+        continue
+      fi
+    fi
+    printf 'Remote GOAT server did not become ready with its own listener on 127.0.0.1:%s.\\n' "$REMOTE_PORT" >&2
     if [ -s "$LOG_FILE" ]; then
       tail -n 80 "$LOG_FILE" >&2 2>/dev/null || true
     else
       printf 'It wrote nothing to %s, so it exited before producing any output.\\n' "$LOG_FILE" >&2
     fi
-    server_kill "$REMOTE_PID" || true
+    if server_alive "$REMOTE_PID"; then server_kill "$REMOTE_PID" || true; fi
     wait_for_pid_exit "$REMOTE_PID"
     rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$STATE_DIR/identity"
     exit 1
   fi
-fi
+done
 refresh_fields=
 [ "$REFRESH_DECISION" != replaced ] || refresh_fields=',"refresh":"replaced"'
 printf '{"status":"ready","remotePort":%s,"serverKind":"%s","selectedVersion":"%s"%s}\n' "$REMOTE_PORT" "\${REMOTE_MANAGED:-managed}" "$SELECTED_VERSION" "$refresh_fields"
@@ -2475,6 +2529,7 @@ export function buildRemoteLaunchScript(
     GOAT_WAIT_READY_SCRIPT: stripTrailingNewlines(REMOTE_WAIT_READY_SCRIPT),
     GOAT_DEFAULT_REMOTE_PORT: String(DEFAULT_REMOTE_PORT),
     GOAT_REMOTE_PORT_SCAN_WINDOW: String(REMOTE_PORT_SCAN_WINDOW),
+    GOAT_LAUNCH_ATTEMPTS: String(REMOTE_LAUNCH_ATTEMPTS),
     GOAT_READY_TIMEOUT_MS: String(REMOTE_READY_TIMEOUT_MS),
     GOAT_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
     GOAT_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
