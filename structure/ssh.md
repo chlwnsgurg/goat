@@ -285,6 +285,18 @@ client-owned: local native-primary setup reviews trust through the server but
 installs through the desktop manager. Remote or WSL clients cannot use that local
 ownership path.
 
+Adding a host starts with one read-only preflight shared by Settings and agents:
+`packages/ssh/src/preflight.ts` runs reachability, host key, key sign-in, platform,
+runtime and disk checks with fresh SSH processes (no shared master, strict host keys,
+no host-key updates), and `packages/ssh/src/runtimeAvailability.ts` checks the
+runner's archive sources without downloading. `SshHostSetup.preflight` serves it
+as `sshHost.preflight` with the server's own runner. `apps/server/src/sshRemote/SshDeviceAdd.ts`
+is the one agent path behind `goat_ssh_host_add` and its alias `goat_connection_add_ssh`:
+a failed check stops before any side effect, a new host key becomes a pin-only
+approval, and a passing host is saved through the desktop catalog or, without one,
+prepared on a managed alias. `packages/shared/src/sshDestination.ts` parses typed
+destinations for both.
+
 SSH setup and immediate-update approvals resume through SshHostSetup's shared
 continuation worker. `apps/server/src/handoffs/Handoffs.ts` retains the private
 approved session and execution payload until the result is published and acknowledged;

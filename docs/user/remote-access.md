@@ -180,9 +180,24 @@ On mobile, an IP address entered without a scheme uses HTTP, so include
 ## Desktop-managed SSH
 
 In the desktop app, open **Settings → Connections → Add device**, choose
-**SSH**, and enter a host or SSH alias such as `user@example.com`. GOAT starts
-or reuses a server there and opens the port forward for you. Projects, provider
-credentials, and agent work stay on the remote machine.
+**SSH**, and pick a host from your SSH config or type an address such as
+`user@example.com`. GOAT starts or reuses a server there and opens the port
+forward for you. Projects, provider credentials, and agent work stay on the
+remote machine.
+
+Before it installs anything, GOAT checks the host and shows one line per check:
+whether it answers (including Tailscale), its host key, sign-in with your SSH key,
+the operating system, free disk space, and whether a GOAT runtime is available for
+that platform. A check that fails says what to change, often with a command to
+copy, and **Check again** runs them again. **Connect** turns on once nothing is
+left to fix. A host GOAT has not seen before shows its fingerprint for you to
+approve first. Agents run the same checks and get the same results.
+
+GOAT signs in only with SSH keys or your ssh-agent. If a host turns your key down
+and would ask for a password, the sign-in check says so and offers an
+`ssh-copy-id` command: run it once in a terminal on this computer, enter the
+password there, then choose **Check again**. For a host from your SSH config, the
+user, port and key come from that file; change them there.
 
 The remote host must be Linux, an Apple Silicon Mac, or a Windows machine set up
 as described below, with `tar`, `sha256sum` or `shasum`, and
@@ -257,7 +272,8 @@ For Antigravity's Google callback on a remote host, see
 Open **Settings → Connections → Add device → SSH**, or tell an agent to
 “connect a new SSH host” and give it the address and SSH user. Check the displayed
 host-key fingerprint against your server provider's record before approving.
-The first approval also lets GOAT add its Include line to your SSH config.
+The first approval also lets GOAT add its Include line to your SSH config. Approving
+only pins the key; the checks run again before GOAT installs anything.
 
 GOAT uses SSH keys or your ssh-agent. If it creates a key, register the displayed
 public key with your server provider or add it to the host. If the host only
@@ -349,6 +365,12 @@ adding a host that is already saved returns the saved one. Adding and removing
 need a full-access thread or a full-access outside agent. Settings shows the
 change right away, and the agent's connection list shows which agent added each
 connection.
+
+Adding a host and saving its connection are one step for an agent: it runs the
+same checks as **Add device → SSH**, asks you to approve a new fingerprint, and
+saves the connection once the checks pass. Without a desktop app on that machine,
+or from an agent without full access, it prepares the host and tells you the
+connection was not saved.
 
 The agent that started the thread can follow it from here: it waits for the
 thread to finish, reads its messages and the result its agent recorded (outcome,
