@@ -425,6 +425,19 @@ const GENERATION_HOLD_REASONS = {
   rate_limited: "the model provider's usage limit was reached",
 } satisfies Record<NonNullable<MemorySyncStatus["generationHold"]>["reason"], string>;
 
+/**
+ * When to read status again while a memory model is paused, so its next try shows without
+ * polling: shortly after the scheduled try, or a minute later while that try is still running.
+ */
+export function memoryHoldRefreshDelayMs(
+  generationHold: MemorySyncStatus["generationHold"],
+  nowMs: number,
+): number | null {
+  if (!generationHold) return null;
+  const untilTry = Date.parse(generationHold.nextAttemptAt) - nowMs;
+  return untilTry > 0 ? untilTry + 15_000 : 60_000;
+}
+
 export function presentMemoryProcessing(
   processing: MemoryProcessingStatus,
   generationHold?: MemorySyncStatus["generationHold"],

@@ -11,6 +11,7 @@ import {
   presentMemoryCoverage,
   presentMemoryStorage,
   presentMemoryProcessing,
+  memoryHoldRefreshDelayMs,
   presentMemoryReceipt,
   presentMemoryAvailability,
   presentMemoryForget,
@@ -731,6 +732,17 @@ describe("shared memory progress presentation", () => {
         throw new Error("No retry time should be formatted without a hold");
       }).pausedLabel,
     ).toBeNull();
+  });
+  it("reads a paused status again just after its next try", () => {
+    const hold = {
+      reason: "schema_rejected" as const,
+      since: M.MemoryUtcTimestamp.make(applied),
+      nextAttemptAt: M.MemoryUtcTimestamp.make("2026-10-01T00:10:00.000Z"),
+    };
+    expect(memoryHoldRefreshDelayMs(undefined, Date.parse(applied))).toBeNull();
+    expect(memoryHoldRefreshDelayMs(hold, Date.parse(applied))).toBe(600_000 + 15_000);
+    // The try is due or running: look again in a minute, not continuously.
+    expect(memoryHoldRefreshDelayMs(hold, Date.parse("2026-10-01T00:10:00.000Z"))).toBe(60_000);
   });
   it("maps processing independently of connection and exposure", () => {
     for (const work of [

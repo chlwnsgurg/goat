@@ -29,6 +29,7 @@ import {
   memoryLocalSpace,
   presentMemoryReport,
   presentMemoryStorage,
+  memoryHoldRefreshDelayMs,
   presentMemoryProcessing,
   isMemoryReportRetryCandidate,
   presentMemoryReportReset,
@@ -395,6 +396,13 @@ function MemoryConnected({
       };
     }, [load, readAllowed]),
   );
+  const generationHold = status?.generationHold;
+  useEffect(() => {
+    const delay = memoryHoldRefreshDelayMs(generationHold, Date.now());
+    if (delay === null) return;
+    const timer = setTimeout(() => void load(), delay);
+    return () => clearTimeout(timer);
+  }, [generationHold, load]);
   const readySpace = memoryLocalSpace(status);
   if (readySpace && readySpace !== savedSpace) setSavedSpace(readySpace);
   const space = params.memorySpaceId ?? readySpace ?? savedSpace;

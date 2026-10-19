@@ -44,11 +44,13 @@ import {
   presentMemorySync,
   presentMemoryCoverage,
   presentMemoryStorage,
+  memoryHoldRefreshDelayMs,
   presentMemoryProcessing,
 } from "@goat/client-runtime/memory-presentation";
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { useEnvironment, useEnvironments } from "../../state/environments";
 import { useProjects } from "../../state/entities";
 import {
@@ -227,13 +229,23 @@ function MemoryDestinationContent({
     setSyncReload((value) => value + 1);
   };
 
-  const [syncRequest, setSyncRequest] = useState({ canSync, environmentId, syncReload });
+  // A new memory model clears a pause, so its status is read again.
+  const memoryModel = JSON.stringify(
+    useEnvironmentSettings(environmentId).memoryModelSelection ?? null,
+  );
+  const [syncRequest, setSyncRequest] = useState({
+    canSync,
+    environmentId,
+    syncReload,
+    memoryModel,
+  });
   if (
     syncRequest.canSync !== canSync ||
     syncRequest.environmentId !== environmentId ||
-    syncRequest.syncReload !== syncReload
+    syncRequest.syncReload !== syncReload ||
+    syncRequest.memoryModel !== memoryModel
   ) {
-    setSyncRequest({ canSync, environmentId, syncReload });
+    setSyncRequest({ canSync, environmentId, syncReload, memoryModel });
     setSyncError(null);
     if (!canSync) setSync(null);
   }
@@ -249,6 +261,13 @@ function MemoryDestinationContent({
       current = false;
     };
   }, [getSync, syncRequest]);
+  const generationHold = sync?.generationHold;
+  useEffect(() => {
+    const delay = memoryHoldRefreshDelayMs(generationHold, Date.now());
+    if (delay === null) return;
+    const timer = setTimeout(() => setSyncReload((value) => value + 1), delay);
+    return () => clearTimeout(timer);
+  }, [generationHold]);
   const refreshBootstrap = () => setSyncReload((value) => value + 1);
   const readySpace = memoryLocalSpace(sync);
   const [savedSpace, setSavedSpace] = useState<MemorySpaceId | null>(null);
