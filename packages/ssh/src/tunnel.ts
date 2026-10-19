@@ -2270,7 +2270,6 @@ else
         printf 'GOAT data appeared on this host while it was being set up; reconnect.\\n' >&2; exit 1
       fi
     done
-    rm -f "$HOME/.goat/runtime/goat/held/$SELECTED_VERSION"
   fi
   publish_selected_runner
 fi
@@ -2345,6 +2344,9 @@ while [ -z "$REMOTE_PORT" ]; do
     rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$STATE_DIR/identity"
     exit 1
   fi
+  # A held published fallback becomes an ordinary runtime only once its own server is ready
+  # and owns the port, so it serves this host's data.
+  if [ "@@GOAT_REQUIRE_FRESH_HOST@@" = 1 ]; then rm -f "$HOME/.goat/runtime/goat/held/$SELECTED_VERSION"; fi
 done
 refresh_fields=
 [ "$REFRESH_DECISION" != replaced ] || refresh_fields=',"refresh":"replaced"'
@@ -2919,6 +2921,13 @@ if [ -n "$state_key" ] && [ -f "$state/run-t3.sh" ]; then
   fi
 fi
 retained_fields=
+# A published fallback that has not yet served (pending) or failed verification (rejected).
+# Any marker GOAT cannot read still holds the version.
+held_of() {
+  held_file="$HOME/.goat/runtime/goat/held/$1"
+  [ -e "$held_file" ] || [ -L "$held_file" ] || return 1
+  case "$(cat "$held_file" 2>/dev/null || true)" in rejected) printf rejected ;; *) printf pending ;; esac
+}
 if [ -n "$retained_sha256" ]; then
   retained_fields="$(printf ',"retainedRunnerSha256":"%s"' "$retained_sha256")"
 fi
@@ -2934,6 +2943,9 @@ if ready_version "$retained_version"; then
     fi
     if [ "$retained_version" != "$V" ] && lacks_memory_scopes "$HOME/.goat/runtime/goat/versions/$retained_version/goat"; then
       retained_fields="$retained_fields,\\"retainedLacksMemoryScopes\\":true"
+    fi
+    if retained_held="$(held_of "$retained_version")"; then
+      retained_fields="$retained_fields,\\"retainedHeld\\":\\"$retained_held\\""
     fi
   fi
 fi
@@ -2971,8 +2983,9 @@ collect_installed_candidates() {
     if candidate_commit="$(build_commit_time "$dir/goat")"; then
       candidate_fields="$candidate_fields,\\"commitTime\\":$candidate_commit"
     fi
-    held_state="$(cat "$HOME/.goat/runtime/goat/held/$recorded_version" 2>/dev/null || true)"
-    case "$held_state" in pending | rejected) candidate_fields="$candidate_fields,\\"held\\":\\"$held_state\\"" ;; esac
+    if held_state="$(held_of "$recorded_version")"; then
+      candidate_fields="$candidate_fields,\\"held\\":\\"$held_state\\""
+    fi
     installed_versions="$installed_versions $recorded_version"
     installed_candidates="$installed_candidates\${installed_candidates:+,}$candidate_fields}"
   done
@@ -3001,8 +3014,9 @@ collect_installed_candidates() {
     if candidate_commit="$(build_commit_time "$dir/goat")"; then
       candidate_fields="$candidate_fields,\\"commitTime\\":$candidate_commit"
     fi
-    held_state="$(cat "$HOME/.goat/runtime/goat/held/$candidate_version" 2>/dev/null || true)"
-    case "$held_state" in pending | rejected) candidate_fields="$candidate_fields,\\"held\\":\\"$held_state\\"" ;; esac
+    if held_state="$(held_of "$candidate_version")"; then
+      candidate_fields="$candidate_fields,\\"held\\":\\"$held_state\\""
+    fi
     installed_versions="$installed_versions $candidate_version"
     installed_candidates="$installed_candidates\${installed_candidates:+,}$candidate_fields}"
   done
@@ -3126,6 +3140,8 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
       retainedCommitTime: Schema.optionalKey(Schema.Int),
       /** The installed build's CLI cannot issue memory scopes; absent when it can or is unknown. */
       retainedLacksMemoryScopes: Schema.optionalKey(Schema.Boolean),
+      /** The retained runtime is a held published fallback; see `REMOTE_PUBLISHED_RUNTIME_GATE_SCRIPT`. */
+      retainedHeld: Schema.optionalKey(Schema.Literals(["pending", "rejected"])),
       liveStatus: Schema.optionalKey(Schema.Literals(["none", "live", "unknown"])),
       liveOwned: Schema.optionalKey(Schema.Boolean),
       identityAbsent: Schema.optionalKey(Schema.Boolean),
@@ -3313,7 +3329,9 @@ export const prepareRemoteRuntime = (
       probe.retainedSignals !== undefined &&
       probe.retainedRunnerSha256 !== undefined &&
       probe.retainedSignals.serverVersion === probe.retainedVersion &&
-      matchesSignals(probe.retainedSignals, version);
+      matchesSignals(probe.retainedSignals, version) &&
+      // A held fallback runs only through the published path, which rechecks the host's data.
+      probe.retainedHeld === undefined;
     // No server runs, so no thread can be interrupted: an owning client installs
     // its own release instead of restarting an older retained one. A retained
     // build without a commit time predates stamping, so a stamped client counts it
@@ -3736,7 +3754,7 @@ export const prepareRemoteRuntime = (
     const coldHost =
       probe.liveStatus !== "live" &&
       probe.liveStatus !== "unknown" &&
-      probe.retainedVersion === undefined &&
+      (probe.retainedVersion === undefined || probe.retainedHeld !== undefined) &&
       (probe.installedCandidates ?? []).every((candidate) => candidate.held !== undefined);
     if (
       runner?.publishedFallback !== true ||
@@ -3801,9 +3819,15 @@ export const prepareRemoteRuntime = (
           platformKey: key,
           requestedVersion: version,
           exclude: new Set(
-            (probe.installedCandidates ?? [])
-              .filter((candidate) => candidate.held === "rejected")
-              .map((candidate) => candidate.version),
+            [
+              ...(probe.installedCandidates ?? []).map((candidate) => ({
+                version: candidate.version,
+                held: candidate.held,
+              })),
+              { version: probe.retainedVersion, held: probe.retainedHeld },
+            ].flatMap((runtime) =>
+              runtime.held === "rejected" && runtime.version !== undefined ? [runtime.version] : [],
+            ),
           ),
         }).pipe(
           Effect.catchCause((cause) =>
@@ -3850,7 +3874,20 @@ export const prepareRemoteRuntime = (
           ),
           Effect.mapError(runtimePreparationError),
         );
-        const installed = after.installedCandidates?.find(
+        // A launch that failed after publishing the runner left this version retained.
+        const installed = [
+          ...(after.installedCandidates ?? []),
+          ...(after.retainedVersion === undefined || after.retainedSignals === undefined
+            ? []
+            : [
+                {
+                  version: after.retainedVersion,
+                  signals: after.retainedSignals,
+                  commitTime: after.retainedCommitTime,
+                  held: after.retainedHeld,
+                },
+              ]),
+        ].find(
           (candidate) =>
             candidate.version === published.version &&
             candidate.signals.serverVersion === candidate.version &&
@@ -3955,9 +3992,12 @@ case "$1" in
     case "$("$exe" auth session issue --help 2>/dev/null)" in *memory:read*) echo yes ;; *) echo no ;; esac ;;
   hold | reject)
     case "$2" in '' | */* | . | ..) exit 2 ;; esac
-    mkdir -p "$HOME/.goat/runtime/goat/held" &&
-      if [ "$1" = hold ]; then state=pending; else state=rejected; fi &&
-      printf '%s\\n' "$state" > "$HOME/.goat/runtime/goat/held/$2" && echo yes ;;
+    if [ "$1" = hold ]; then state=pending; else state=rejected; fi
+    held_dir="$HOME/.goat/runtime/goat/held"
+    # Replace atomically: a torn write must never read as anything but held.
+    mkdir -p "$held_dir" &&
+      printf '%s\\n' "$state" > "$held_dir/.$2.$$" &&
+      mv -f "$held_dir/.$2.$$" "$held_dir/$2" && echo yes ;;
   *) exit 2 ;;
 esac
 `;

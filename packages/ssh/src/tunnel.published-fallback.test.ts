@@ -61,6 +61,8 @@ const prepare = (input: {
   dataDuringSearch?: boolean;
   /** Launch the server too, as a connection does. */
   launch?: boolean;
+  /** Launch fails after publishing the runner, before the server starts. */
+  failStart?: boolean;
 }) =>
   Effect.gen(function* () {
     const f = yield* makeProtocolFixture({
@@ -76,6 +78,7 @@ const prepare = (input: {
       yield* f.fs.makeDirectory(`${f.home}/.goat/userdata`, { recursive: true });
       yield* f.fs.writeFileString(`${f.home}/.goat/userdata/statev2.sqlite`, "");
     }
+    if (input.failStart) yield* f.fs.writeFileString(`${f.test}/fail-pick-port-${PUBLISHED}`, "");
     const stem = asset.replace(/\.tar\.gz$/, "");
     const stage = `${f.home}/published/${stem}`;
     yield* f.fs.makeDirectory(stage, { recursive: true });
@@ -183,6 +186,7 @@ const prepare = (input: {
       requests,
       installed: yield* installed,
       uploads: f.counters().uploads,
+      fixture: f,
       /** Connects again to the same host, as the next reconnect would. */
       again: Effect.gen(function* () {
         requests.length = 0;
@@ -324,6 +328,28 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         const next = yield* again;
         assert.isTrue(Result.isFailure(next.result));
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["no data", "data"] as const)(
+      "after a failed first start, reconnects to a host with %s: starts it only without data",
+      (data) =>
+        Effect.gen(function* () {
+          const first = yield* prepare({ release: "manifest", launch: true, failStart: true });
+          assert.isTrue(Result.isFailure(first.result));
+          const f = first.fixture;
+          yield* f.fs.remove(`${f.test}/fail-pick-port-${PUBLISHED}`);
+          if (data === "data") {
+            yield* f.fs.makeDirectory(`${f.home}/.goat/userdata`, { recursive: true });
+            yield* f.fs.writeFileString(`${f.home}/.goat/userdata/statev2.sqlite`, "");
+          }
+          const second = yield* first.again;
+          if (data === "data") assert.isTrue(Result.isFailure(second.result));
+          else {
+            assert.isTrue(Result.isSuccess(second.result));
+            if (Result.isSuccess(second.result))
+              assert.equal(second.result.success.version, PUBLISHED);
+          }
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
     it.live("leaves acquisition alone unless the runner opts in", () =>

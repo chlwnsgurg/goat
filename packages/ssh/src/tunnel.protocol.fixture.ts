@@ -124,6 +124,7 @@ console.log((value.status ? value.status + " " : "") + [value.serverVersion ?? "
   event("supervise", { status: result.status });
   fs.writeFileSync(flag("--result"), result.status + " " + (result.pid ?? 0) + " " + (result.version ?? "-") + "\\n");
 } else if (args[0] === "__ssh-helper" && args[1] === "pick-port") {
+  if (fs.existsSync(path.join(test, "fail-pick-port-" + version))) process.exit(1);
   const contestedPort = ${JSON.stringify(signals.contestedPort ?? null)};
   const picked = path.join(test, "contested-picked");
   const pickCount = fs.existsSync(picked) ? Number(fs.readFileSync(picked, "utf8")) : 0;
