@@ -1342,7 +1342,13 @@ check_live_protocol() {
   DRAIN_UNCERTAIN=0
   if [ -e "$STATE_DIR/draining" ] || [ -L "$STATE_DIR/draining" ]; then
     draining_instance="$(cat "$STATE_DIR/draining" 2>/dev/null || true)"
-    if [ -z "$draining_instance" ] || [ -z "$LIVE_INSTANCE_ID" ] || [ "$draining_instance" = "$LIVE_INSTANCE_ID" ]; then DRAIN_UNCERTAIN=1; fi
+    if [ "$LIVE_STATUS" = none ] ||
+       { [ -n "$draining_instance" ] && [ -n "$LIVE_INSTANCE_ID" ] && [ "$draining_instance" != "$LIVE_INSTANCE_ID" ]; }; then
+      # Only an owner can retire a fence after the live helper proves its start is gone.
+      if [ "$LOCK_HELD" = 1 ] && [ "$(readlink "$LOCK" 2>/dev/null || true)" = "$OWNER" ]; then
+        rm -f "$STATE_DIR/draining"
+      fi
+    else DRAIN_UNCERTAIN=1; fi
   fi
 @@GOAT_RECONNECT_LIVE_GUARD@@  if [ "$ALLOW_LEGACY_ADOPTION" = 1 ] &&
      { [ "$LIVE_STATUS" = unknown ] || { [ "$LIVE_STATUS" = live ] && [ "$LIVE_OWNED" = 1 ] && [ ! -e "$STATE_DIR/identity" ] && [ ! -L "$STATE_DIR/identity" ]; }; }; then
@@ -1638,7 +1644,13 @@ if [ "$OWNING_LAUNCH" = 1 ]; then
   # Classification and ordering must be fresh under the host-wide mutex.
   CHECK_RUNNER="$RUNNER_CANDIDATE_FILE.pin"
   check_live_protocol
-  [ "$DRAIN_UNCERTAIN" = 0 ] || emit_pending unknown
+  RECONCILING_DRAIN=0
+  if [ "$DRAIN_UNCERTAIN" = 1 ]; then
+    [ "$ALLOW_OWNED_UPGRADE" = 1 ] && [ "$LIVE_OWNED" = 1 ] && [ "$LIVE_DRAIN" = 1 ] && [ -n "$LIVE_INSTANCE_ID" ] || emit_pending unknown
+    # Retry the authenticated request: the server joins an active drain, confirms its
+    # cancellation, or exits for the supervisor. HTTP readiness alone proves none of these.
+    RECONCILING_DRAIN=1; NEEDS_OWNED_UPGRADE=1
+  fi
   if [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_VERSION" = "$SELECTED_VERSION" ] &&
      [ "$LIVE_VERSION" = "$REQUESTED_VERSION" ] && [ -n "$REFRESH_LIVE_VERSION" ] &&
      [ "$REFRESH_LIVE_VERSION" != "$LIVE_VERSION" ]; then
@@ -1662,8 +1674,9 @@ if [ "$OWNING_LAUNCH" = 1 ]; then
   check_candidate_protocol
   check_retained_runner
   check_live_protocol
+  [ "$RECONCILING_DRAIN" != 1 ] || NEEDS_OWNED_UPGRADE=1
 @@GOAT_VERIFY_OWNED_BEFORE_PUBLICATION@@
-  if [ "$NEEDS_OWNED_UPGRADE" = 1 ] && [ "$REPLACEMENT_REASON" != incompatible ] && [ "$DRAIN_FORCE" != 1 ]; then
+  if [ "$NEEDS_OWNED_UPGRADE" = 1 ] && [ "$RECONCILING_DRAIN" != 1 ] && [ "$REPLACEMENT_REASON" != incompatible ] && [ "$DRAIN_FORCE" != 1 ]; then
     # An optional refresh waits for idle; launch probes again last, then the server drains.
     activity="$(read_refresh_activity)"
     [ "$activity" = idle ] || emit_pending "$activity"
@@ -2121,6 +2134,7 @@ reuse_live_server() {
     fi
 }
 recheck_selected_before_use
+[ "\${RECONCILING_DRAIN:-0}" != 1 ] || NEEDS_OWNED_UPGRADE=1
 REMOTE_PID=""
 REMOTE_PORT=""
 REMOTE_MANAGED=""
@@ -2140,7 +2154,7 @@ if [ "$NEEDS_OWNED_UPGRADE" = 1 ]; then
   else verify_owned_identity "$LIVE_PID" "$LIVE_PORT" || ownership_unverified; fi
   UPGRADE_START="$(server_start "$UPGRADE_PID")" || ownership_unverified
   [ -n "$UPGRADE_START" ] || ownership_unverified
-  if [ "$REPLACEMENT_REASON" != incompatible ] && [ "$DRAIN_FORCE" != 1 ]; then
+  if [ "$RECONCILING_DRAIN" != 1 ] && [ "$REPLACEMENT_REASON" != incompatible ] && [ "$DRAIN_FORCE" != 1 ]; then
     # An optional refresh drains only an idle server, so its retries never hold up new turns.
     activity="$(read_refresh_activity)"
     [ "$activity" = idle ] || emit_pending "$activity"
@@ -2168,7 +2182,7 @@ if [ "$NEEDS_OWNED_UPGRADE" = 1 ]; then
   drain_result="$("$RUNNER_CANDIDATE_FILE.pin" __ssh-helper drain --port "$UPGRADE_PORT" --instance-id "$UPGRADE_INSTANCE" --target-version "$TARGET_VERSION" --grace-seconds "$DRAIN_GRACE_SECONDS" $drain_force --token-file "$DEFAULT_SERVER_HOME/userdata/runtime-control.token" 2>/dev/null || true)"
   case "$drain_result" in
     drained) ;;
-    cancelled) rm -f "$STATE_DIR/draining" "$PREVIOUS_RUNNER"; emit_pending busy ;;
+    cancelled) rm -f "$STATE_DIR/draining" "$PREVIOUS_RUNNER"; DRAIN_UNCERTAIN=0; emit_pending busy ;;
     *) DRAIN_UNCERTAIN=1; rm -f "$PREVIOUS_RUNNER"; emit_pending unknown ;;
   esac
   LEGACY_TERMINATED=1
@@ -6616,6 +6630,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     if (
       closed ||
       entry === undefined ||
+      entry.attachmentInvalidated === true ||
       (snapshot?.state !== "ready" && snapshot?.state !== "providers_not_ready") ||
       !(yield* entry.process.isRunning.pipe(Effect.orElseSucceed(() => false)))
     )

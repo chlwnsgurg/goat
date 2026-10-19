@@ -93,8 +93,13 @@ refreshes, and Windows hosts keep the separate probe. The cost log names the fol
 
 HTTP readiness does not prove a runtime is accepting work during a drain. Attachment requires
 the current replacement-lock owner, and an instance-bound fence survives a lost drain response
-or dead SSH owner. A confirmed cancellation or replacement resolves that uncertainty; recovering
-the mutex alone does not. Clients predating this fence cannot enforce it.
+or dead SSH owner. Under replacement ownership, the live helper retires the fence when its
+instance is gone.
+For the same live instance, an authenticated drain retry joins the active drain: cancellation
+allows attachment again, a confirmed drain goes through the supervisor, and an unknown answer
+keeps attachment blocked. An attach-only folded launch leaves this recovery to the scheduled
+or explicit refresh. Recovering the mutex or waiting ten minutes alone does not clear the fence.
+Clients predating this fence cannot enforce it.
 
 The runner keeps `run-t3.sh` because independently updated clients and retained supervisors
 use that path for reuse, replacement, and rollback. Its shell variables use `GOAT_*`;

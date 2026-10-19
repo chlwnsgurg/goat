@@ -550,6 +550,45 @@ describe("SSH pending replacement reconciliation", () => {
       }),
   );
 
+  it.effect("status cannot revive a tunnel invalidated by a failed refresh", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.setMode("ready");
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        yield* manager.ensureEnvironment(uploadTarget);
+        f.useLiveProbe();
+        f.setMode("failure");
+        assert.isTrue(
+          Result.isFailure(
+            yield* Effect.result(manager.ensureEnvironment(uploadTarget, { refreshRuntime: true })),
+          ),
+        );
+        assert.equal((yield* manager.status(uploadTarget)).status?.state, "ready");
+        assert.isTrue(
+          Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+        );
+        assert.isTrue(
+          Result.isFailure(
+            yield* Effect.result(
+              manager.issueMcpClientSession(uploadTarget, {
+                requireReady: true,
+                label: "fixture",
+                ttl: "1h",
+                runtimeModeCeiling: null,
+              }),
+            ),
+          ),
+        );
+        const attempts = f.count.launches;
+        f.setMode("ready");
+        yield* manager.ensureEnvironment(uploadTarget);
+        assert.equal(f.count.launches, attempts + 1);
+        yield* manager.readyEnvironment(uploadTarget);
+      }).pipe(Effect.provide(f.layer), Effect.scoped);
+    }),
+  );
+
   it.effect(
     "manual updates serialize per target while status reads preparing without waiting",
     () =>

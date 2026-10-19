@@ -76,6 +76,102 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
+    it.live.each([false, true])(
+      "a lost drain response can be retried after the server resumes, confirmed=%s",
+      (confirmed) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: OLDER,
+            drain: true,
+            ...compatible,
+          });
+          yield* f.fs.writeFileString(`${f.test}/drain`, "response-lost");
+          const first = yield* f.run("launch", false, {
+            refreshOwnedRuntimeOnFirstConnection: true,
+          });
+          assert.isTrue(Result.isSuccess(first), describeFailure(first));
+          if (Result.isSuccess(first)) assert.equal(first.success.status, "pending");
+          yield* f.shiftHostClock(600);
+          yield* f.fs.writeFileString(`${f.test}/drain`, "drained");
+          const recovered = yield* f.run("launch", false, {
+            refreshOwnedRuntimeOnFirstConnection: true,
+            confirmReplacement: confirmed,
+          });
+          assert.isTrue(Result.isSuccess(recovered), describeFailure(recovered));
+          if (Result.isSuccess(recovered)) assert.equal(recovered.success.refresh, "replaced");
+          assert.isFalse(yield* f.fs.exists(`${f.state}/draining`));
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("a cancelled drain retry proves a resumed busy server safe to attach", () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: OLDER,
+          drain: true,
+          ...compatible,
+        });
+        yield* f.fs.writeFileString(`${f.test}/drain`, "response-lost");
+        yield* f.run("launch", false, { refreshOwnedRuntimeOnFirstConnection: true });
+        yield* f.fs.writeFileString(`${f.test}/activity`, "busy");
+        yield* f.fs.writeFileString(`${f.test}/drain`, "cancelled");
+        const recovered = yield* f.run("launch", false, {
+          refreshOwnedRuntimeOnFirstConnection: true,
+        });
+        assert.isTrue(Result.isSuccess(recovered), describeFailure(recovered));
+        if (Result.isSuccess(recovered)) {
+          assert.equal(recovered.success.status, "ready");
+          assert.equal(recovered.success.pending?.reason, "busy");
+          assert.equal(recovered.success.version, OLDER);
+        }
+        assert.isFalse(yield* f.fs.exists(`${f.state}/draining`));
+        assert.isTrue(isAlive(f.pid));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("an orphaned drain fence on a stopped host permits a fresh start", () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: false,
+          kind: "managed",
+          oldVersion: OLDER,
+          drain: true,
+          ...compatible,
+        });
+        yield* f.fs.writeFileString(`${f.state}/draining`, "departed-instance\n");
+        const recovered = yield* f.run("launch");
+        assert.isTrue(Result.isSuccess(recovered), describeFailure(recovered));
+        if (Result.isSuccess(recovered)) assert.equal(recovered.success.status, "ready");
+        assert.isFalse(yield* f.fs.exists(`${f.state}/draining`));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("an active drain remains fenced across owning retries despite HTTP readiness", () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: OLDER,
+          drain: true,
+          ...compatible,
+        });
+        yield* f.fs.writeFileString(`${f.test}/drain`, "response-lost");
+        yield* f.run("launch", false, { refreshOwnedRuntimeOnFirstConnection: true });
+        yield* f.fs.writeFileString(`${f.test}/activity`, "busy");
+        const retried = yield* f.run("launch", false, {
+          refreshOwnedRuntimeOnFirstConnection: true,
+        });
+        assert.isTrue(Result.isSuccess(retried), describeFailure(retried));
+        if (Result.isSuccess(retried)) assert.equal(retried.success.status, "pending");
+        assert.isTrue(yield* f.fs.exists(`${f.state}/draining`));
+        assert.equal((yield* events(f)).filter((e) => e.type === "drain").length, 2);
+        assert.isTrue(isAlive(f.pid));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
     it.live.each(
       (["busy", "unknown"] as const).flatMap((activity) =>
         [false, true].map((confirmed) => ({ activity, confirmed })),
