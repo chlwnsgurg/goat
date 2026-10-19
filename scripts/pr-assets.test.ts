@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - drives real git against throwaway repositories.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -11,6 +12,7 @@ import {
   fetchAssetsTip,
   listAssets,
   markdownFor,
+  patchPrBody,
   planBodyFix,
   rawAssetUrl,
   uploadAssets,
@@ -19,6 +21,9 @@ import {
 
 const SHA = "1".repeat(40);
 const REPO = "goat-si/goat";
+const gate = NodeModule.createRequire(import.meta.url)(
+  "../.github/scripts/pr-screenshot-gate.cjs",
+) as { extractImageEmbeds(body: string): ReadonlyArray<{ readonly url: string }> };
 
 describe("asset URLs", () => {
   it("pins the commit SHA and encodes each path segment", () => {
@@ -33,6 +38,16 @@ describe("asset URLs", () => {
         SHA +
         "/457/after-dark.png)",
     );
+  });
+
+  it("prints markdown the gate reads back as the same URL", () => {
+    const url = rawAssetUrl(REPO, SHA, "457/after (1)!.png");
+    expect(url).toBe(
+      "https://raw.githubusercontent.com/goat-si/goat/" + SHA + "/457/after%20%281%29%21.png",
+    );
+    expect(gate.extractImageEmbeds(markdownFor(REPO, SHA, ["457/after (1)!.png"]))).toMatchObject([
+      { url },
+    ]);
   });
 });
 
@@ -230,6 +245,54 @@ describe("pr-assets plumbing", () => {
     expect(show(sha, "9/mine.png")).toBe("mine");
     expect(show(sha, "10/theirs.png")).toBe("theirs");
     expect(show(sha, "7/before.png")).toBe("before");
+  });
+
+  it("lists non-ASCII asset names as written", () => {
+    const { sha } = uploadAssets({
+      cwd: work,
+      remote: "origin",
+      pr: 11,
+      files: [file("한글 화면.png", "ko")],
+    });
+    expect(listAssets(work, sha, 11)).toEqual(new Set(["11/한글 화면.png"]));
+  });
+
+  it("rewrites the description, and stops if it changed during the image check", async () => {
+    const sha = run(remote, "rev-parse", "refs/heads/pr-assets");
+    const original = "Before\n![before](pr-assets/before.png)\n";
+    let body = original;
+    const writes: string[] = [];
+    const store = {
+      read: () => body,
+      write: (bodyFile: string) => {
+        body = NodeFS.readFileSync(bodyFile, "utf8");
+        writes.push(body);
+      },
+    };
+    const options = {
+      cwd: work,
+      repo: REPO,
+      pr: 7,
+      sha,
+      dryRun: false,
+      backupDir: NodePath.join(root, "backup"),
+      store,
+    };
+    await expect(
+      patchPrBody({
+        ...options,
+        verify: async () => {
+          body = original + "A reviewer's note.\n";
+          return { status: "ok" };
+        },
+      }),
+    ).rejects.toThrow("changed while images were checked");
+    expect(writes).toEqual([]);
+
+    body = original;
+    expect(await patchPrBody({ ...options, verify: async () => ({ status: "ok" }) })).toBe(true);
+    expect(writes).toEqual(["Before\n![before](" + rawAssetUrl(REPO, sha, "7/before.png") + ")\n"]);
+    expect(NodeFS.readFileSync(NodePath.join(root, "backup", "before.md"), "utf8")).toBe(original);
   });
 
   it("refuses two files that would land on the same path", () => {

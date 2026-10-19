@@ -46,7 +46,13 @@ const gate = NodeModule.createRequire(import.meta.url)(
 };
 
 export function rawAssetUrl(repo: string, sha: string, path: string): string {
-  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  // encodeURIComponent keeps !'()*, and a bare ")" would end a markdown image early.
+  const encode = (segment: string) =>
+    encodeURIComponent(segment).replace(
+      /[!'()*]/g,
+      (char) => "%" + char.charCodeAt(0).toString(16).toUpperCase(),
+    );
+  const encoded = path.split("/").map(encode).join("/");
   return "https://raw.githubusercontent.com/" + repo + "/" + sha + "/" + encoded;
 }
 
@@ -174,8 +180,9 @@ export function fetchAssetsTip(cwd: string, remote: string): string | null {
 }
 
 export function listAssets(cwd: string, sha: string, pr: number): ReadonlySet<string> {
-  const out = git(["ls-tree", "-r", "--name-only", sha, "--", pr + "/"], { cwd });
-  return new Set(out ? out.split("\n") : []);
+  // -z: without it git quotes and escapes non-ASCII names.
+  const out = git(["ls-tree", "-r", "-z", "--name-only", sha, "--", pr + "/"], { cwd });
+  return new Set(out.split("\0").filter(Boolean));
 }
 
 /**
@@ -297,26 +304,41 @@ function gh(args: ReadonlyArray<string>): string {
   });
 }
 
-function readPrBody(repo: string, pr: number): string {
-  const { body } = JSON.parse(gh(["pr", "view", String(pr), "-R", repo, "--json", "body"])) as {
-    body: string;
+export interface PrBodyStore {
+  readonly read: () => string;
+  readonly write: (bodyFile: string) => void;
+}
+
+function ghBodyStore(repo: string, pr: number): PrBodyStore {
+  return {
+    read: () => {
+      const out = gh(["pr", "view", String(pr), "-R", repo, "--json", "body"]);
+      return (JSON.parse(out) as { body: string }).body;
+    },
+    write: (bodyFile) => {
+      gh(["pr", "edit", String(pr), "-R", repo, "--body-file", bodyFile]);
+    },
   };
-  return body;
 }
 
 /**
  * Rewrite the PR description's broken embeds, keeping copies of the old and
- * new body, and confirm GitHub stored exactly the new body.
+ * new body, and confirm GitHub stored exactly the new body. GitHub has no
+ * conditional update, so the body is read again just before the write and a
+ * change made while images were being checked stops the rewrite.
  */
-async function patchPrBody(options: {
+export async function patchPrBody(options: {
   readonly cwd: string;
   readonly repo: string;
   readonly pr: number;
   readonly sha: string;
   readonly dryRun: boolean;
   readonly backupDir: string;
+  readonly store?: PrBodyStore;
+  readonly verify?: (url: string) => Promise<ImageCheck>;
 }): Promise<boolean> {
-  const before = readPrBody(options.repo, options.pr);
+  const store = options.store ?? ghBodyStore(options.repo, options.pr);
+  const before = store.read();
   const fix = planBodyFix(before, {
     pr: options.pr,
     repo: options.repo,
@@ -329,7 +351,10 @@ async function patchPrBody(options: {
     console.log("PR #" + options.pr + ": no embed to rewrite");
     return fix.missing.length === 0;
   }
-  const checks = await waitForImages(fix.replaced.map(({ to }) => to));
+  const checks = await waitForImages(
+    fix.replaced.map(({ to }) => to),
+    options.verify ? { verify: options.verify } : {},
+  );
   const failed = checks.filter(({ check }) => check.status !== "ok");
   for (const { url, check } of failed) {
     console.log(
@@ -344,13 +369,18 @@ async function patchPrBody(options: {
     if (options.dryRun) console.log("dry run: PR #" + options.pr + " body left unchanged");
     return failed.length === 0 && fix.missing.length === 0;
   }
+  if (store.read() !== before) {
+    throw new Error(
+      "PR #" + options.pr + " description changed while images were checked; run the command again",
+    );
+  }
   NodeFS.mkdirSync(options.backupDir, { recursive: true });
   const beforeFile = NodePath.join(options.backupDir, "before.md");
   const afterFile = NodePath.join(options.backupDir, "after.md");
   NodeFS.writeFileSync(beforeFile, before);
   NodeFS.writeFileSync(afterFile, fix.body);
-  gh(["pr", "edit", String(options.pr), "-R", options.repo, "--body-file", afterFile]);
-  const stored = readPrBody(options.repo, options.pr);
+  store.write(afterFile);
+  const stored = store.read();
   if (stored !== fix.body) {
     throw new Error("PR #" + options.pr + " body differs from " + afterFile + " after the edit");
   }

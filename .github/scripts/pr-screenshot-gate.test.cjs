@@ -17,6 +17,7 @@ const {
   isMaintainerPermission,
   latestLabelActor,
   decideGate,
+  checkEmbeds,
   main,
 } = require("./pr-screenshot-gate.cjs");
 
@@ -96,6 +97,50 @@ describe("extractImageEmbeds", () => {
         ["reference", "https://example.com/d.png", "https://example.com/d.png"],
       ],
     );
+  });
+
+  it("handles parentheses, &amp;, next-line definitions, and inline code", () => {
+    const body = [
+      "![paren](https://example.com/after(1).png)",
+      "![amp](https://example.com/a.png?x=1&amp;y=2)",
+      "Write \x60![example](pr-assets/x.png)\x60 or \x60\x60![two](pr-assets/y.png)\x60\x60 in prose.",
+      "![ref][shot]",
+      "",
+      "[shot]:",
+      "  https://example.com/d.png",
+    ].join("\n");
+    assert.deepEqual(
+      extractImageEmbeds(body).map((embed) => embed.url),
+      [
+        "https://example.com/after(1).png",
+        "https://example.com/a.png?x=1&y=2",
+        "https://example.com/d.png",
+      ],
+    );
+  });
+});
+
+describe("checkEmbeds", () => {
+  it("applies URL rules to every embed and leaves images past the fetch cap unverified", async () => {
+    const original = global.fetch;
+    const fetched = [];
+    global.fetch = async (url) => {
+      fetched.push(url);
+      return png();
+    };
+    try {
+      const embeds = Array.from({ length: 105 }, (_, i) => ({
+        url: "https://example.com/" + i + ".png",
+      }));
+      embeds.push({ url: "pr-assets/late.png" });
+      const checked = await checkEmbeds(embeds);
+      assert.equal(fetched.length, 100);
+      assert.equal(checked.filter((embed) => embed.status === "ok").length, 100);
+      assert.equal(checked.filter((embed) => embed.status === "unverified").length, 5);
+      assert.equal(checked.at(-1).status, "broken");
+    } finally {
+      global.fetch = original;
+    }
   });
 });
 

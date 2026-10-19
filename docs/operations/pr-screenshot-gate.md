@@ -23,9 +23,10 @@ and new body under `--backup-dir` (a temp folder by default), and confirms GitHu
 body. `fix-body <pr>` does the same for files already on `pr-assets`; add `--dry-run` to preview.
 
 GitHub web loads these URLs directly into `<img src>`, and the mobile app fetches the same URL, so
-an image that loads for an anonymous request renders on both. GitHub user-attachments
-(`github.com/user-attachments/assets/...`) have no documented upload API outside the browser editor,
-which is why command-line uploads use `pr-assets`.
+an image that loads for an anonymous request renders on both. GitHub CLI 2.99.0 and later can
+upload to GitHub user-attachments instead with `gh pr edit <pr> --attach <file>`, which also
+rewrites a body reference to that local path. Those URLs pass the gate as well. The helper keeps
+`pr-assets` because it works with any `gh` version and keeps the files in this repository.
 
 ## What counts
 

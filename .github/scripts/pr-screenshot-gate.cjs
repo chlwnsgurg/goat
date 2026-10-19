@@ -23,19 +23,26 @@ const NON_UI_FILE_RE =
 const HTML_COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
 /** Fenced code blocks (backtick or tilde fences) whose content GitHub does not render. */
 const FENCED_CODE_RE = /(?:^|\n)[ \t]*(\x60{3,}|~{3,})[^\n]*\n[\s\S]*?^[ \t]*\1[ \t]*(?=\n|$)/gm;
-/** Inline markdown image, as GitHub writes for a dropped attachment; the URL may be <wrapped> and titled. */
+/**
+ * Inline markdown image, as GitHub writes for a dropped attachment. The URL may
+ * be <wrapped>, titled, or hold one level of balanced parentheses.
+ */
 const MARKDOWN_IMAGE_RE =
-  /!\[[^\]]*\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/dg;
+  /!\[[^\]]*\]\(\s*(?:<([^>\n]+)>|((?:[^\s()]|\([^\s()]*\))+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/dg;
 /** Reference-style markdown image (full or collapsed). */
 const MARKDOWN_REFERENCE_IMAGE_RE = /!\[([^\]]*)\]\[([^\]]*)\]/g;
-/** Link definitions that reference-style images depend on. */
-const MARKDOWN_REFERENCE_DEF_RE = /^[ \t]*\[([^\]]+)\]:[ \t]*(?:<([^>\n]+)>|(\S+))/dgm;
+/** Link definitions that reference-style images depend on; the URL may start on the next line. */
+const MARKDOWN_REFERENCE_DEF_RE = /^[ \t]*\[([^\]]+)\]:[ \t]*(?:\n[ \t]*)?(?:<([^>\n]+)>|(\S+))/dgm;
+/** Inline code spans: a backtick run closed by a run of the same length, within one paragraph. */
+const INLINE_CODE_RE = /(?<!\x60)(\x60+)(?!\x60)(?:[^\n]|\n(?![ \t]*\n))*?(?<!\x60)\1(?!\x60)/g;
 /** HTML image with a non-empty src. */
 const HTML_IMAGE_RE = /<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>"']+))[^>]*>/dgi;
 
 const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
 const IMAGE_CHECK_TIMEOUT_MS = 5000;
-const MAX_CHECKED_EMBEDS = 40;
+/** Embeds fetched per run, a few at a time; any beyond the cap stay unverified. */
+const MAX_FETCHED_EMBEDS = 100;
+const FETCH_CONCURRENCY = 8;
 const UPLOAD_HINT = "node scripts/pr-assets.ts upload <pr> <files...> --patch-body";
 
 function resolveMode(raw) {
@@ -63,13 +70,23 @@ function isChangedFileListTruncated(changedFilesCount, listedLength) {
 /**
  * Blank out the regions GitHub does not render, keeping every offset so an
  * embed found in the result can be rewritten in the original body. Fenced
- * code goes first (a literal "<!--" inside a fence must not open a comment and
- * swallow the rest), then HTML comments. The PR template's instructions live
- * in comments, so an untouched template never counts as a screenshot.
+ * code goes first and inline code second (a literal "<!--" inside code must
+ * not open a comment and swallow the rest), then HTML comments. The PR
+ * template's instructions live in comments, so an untouched template never
+ * counts as a screenshot. Indented code blocks are left alone: telling them
+ * from list continuation lines needs a full markdown parser.
  */
 function maskNonRenderedRegions(body) {
   const blank = (region) => region.replace(/[^\n]/g, " ");
-  return body.replace(FENCED_CODE_RE, blank).replace(HTML_COMMENT_RE, blank);
+  return body
+    .replace(FENCED_CODE_RE, blank)
+    .replace(INLINE_CODE_RE, blank)
+    .replace(HTML_COMMENT_RE, blank);
+}
+
+/** GitHub decodes &amp; in every image URL before the browser requests it. */
+function decodeAmpersands(url) {
+  return url.replace(/&amp;/g, "&");
 }
 
 /** First participating capture group and its [start, end) span. */
@@ -98,7 +115,7 @@ function extractImageEmbeds(body) {
     embeds.push({
       kind: "markdown",
       source: match[0],
-      url: url.text,
+      url: decodeAmpersands(url.text),
       start: url.start,
       end: url.end,
     });
@@ -108,7 +125,7 @@ function extractImageEmbeds(body) {
     embeds.push({
       kind: "html",
       source: match[0],
-      url: url.text.replace(/&amp;/g, "&"),
+      url: decodeAmpersands(url.text),
       start: url.start,
       end: url.end,
     });
@@ -127,7 +144,7 @@ function extractImageEmbeds(body) {
     embeds.push({
       kind: "reference",
       source: match[0],
-      url: url.text,
+      url: decodeAmpersands(url.text),
       start: url.start,
       end: url.end,
     });
@@ -258,16 +275,30 @@ async function verifyImageUrl(url, { attempts = 3, sleep: wait = sleep } = {}) {
  * embeds annotated with status "ok", "broken", or "unverified".
  */
 async function checkEmbeds(embeds, options = {}) {
-  const checked = embeds.slice(0, MAX_CHECKED_EMBEDS);
-  const byUrl = new Map();
-  return Promise.all(
-    checked.map(async (embed) => {
-      const problem = staticEmbedProblem(embed.url);
-      if (problem) return { ...embed, status: "broken", reason: problem };
-      if (!byUrl.has(embed.url)) byUrl.set(embed.url, verifyImageUrl(embed.url, options));
-      return { ...embed, ...(await byUrl.get(embed.url)) };
-    }),
-  );
+  const problems = embeds.map((embed) => staticEmbedProblem(embed.url));
+  const urls = [
+    ...new Set(embeds.filter((_, index) => !problems[index]).map((embed) => embed.url)),
+  ];
+  const fetched = urls.slice(0, MAX_FETCHED_EMBEDS);
+  const results = new Map();
+  let next = 0;
+  const worker = async () => {
+    while (next < fetched.length) {
+      const url = fetched[next++];
+      results.set(url, await verifyImageUrl(url, options));
+    }
+  };
+  await Promise.all(Array.from({ length: FETCH_CONCURRENCY }, worker));
+  return embeds.map((embed, index) => {
+    if (problems[index]) return { ...embed, status: "broken", reason: problems[index] };
+    return {
+      ...embed,
+      ...(results.get(embed.url) ?? {
+        status: "unverified",
+        reason: "not fetched; the description has more than " + MAX_FETCHED_EMBEDS + " images",
+      }),
+    };
+  });
 }
 
 /**
