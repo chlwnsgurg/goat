@@ -682,11 +682,23 @@ export const makeCursorCloudAdapter = Effect.fn("makeCursorCloudAdapter")(functi
             }),
           resumeTurn: (input) =>
             Effect.gen(function* () {
-              const task = input.cloudTask;
+              let task = input.cloudTask;
               const agentId = input.providerThread.nativeThreadRef?.nativeId;
-              const runId = task.taskId;
               if (!task || !input.commitCloudTask)
                 return yield* protocol("Persisted cloud state is unavailable.");
+              // A registered agent is known by its agent id; follow its latest run.
+              if (task.attach === "registered" && agentId && task.taskId === agentId) {
+                if (!sdk.listRuns)
+                  return yield* protocol("This Cursor SDK cannot list an agent's runs.");
+                const apiKey = yield* key;
+                const latest = (yield* call("list", () =>
+                  sdk.listRuns!(agentId, { runtime: "cloud", agentId, apiKey }),
+                )).items[0];
+                if (!latest) return yield* protocol("The Cursor agent has no runs to follow.");
+                task = { ...task, taskId: latest.id };
+                yield* input.commitCloudTask(task);
+              }
+              const runId = task.taskId;
               if (
                 !agentId ||
                 task.status === "submitting" ||

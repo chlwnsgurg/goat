@@ -46,11 +46,11 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Coordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
 import * as LaunchWatchService from "../mcp/LaunchWatchService.ts";
-import Migration0062 from "../persistence/Migrations/065_RemoteReports.ts";
-import Migration0063 from "../persistence/Migrations/066_RemoteDispatches.ts";
-import Migration0065 from "../persistence/Migrations/068_RemoteDispatchQuestions.ts";
-import Migration0068 from "../persistence/Migrations/070_RemoteReportRelay.ts";
-import Migration0073 from "../persistence/Migrations/075_MemoryTaskGrantCeiling.ts";
+import Migration0062 from "../persistence/Migrations/066_RemoteReports.ts";
+import Migration0063 from "../persistence/Migrations/067_RemoteDispatches.ts";
+import Migration0065 from "../persistence/Migrations/069_RemoteDispatchQuestions.ts";
+import Migration0068 from "../persistence/Migrations/071_RemoteReportRelay.ts";
+import Migration0073 from "../persistence/Migrations/076_MemoryTaskGrantCeiling.ts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
@@ -3903,7 +3903,7 @@ describe("SSH launcher transport", () => {
       }
       if (result._tag === "Success")
         expect(result.success.notes).toContain(
-          `GOAT on box runs 0.0.1-older; this machine runs ${packageJson.version}. Tools and launch options can differ between them; update GOAT on the older machine if this thread misbehaves.`,
+          `GOAT on box runs 0.0.1-older; this machine runs ${packageJson.version}. Both speak the same protocols, but a tool or launch option added in the newer build can be missing on the older one.`,
         );
       expect(creates).toBe(scenario.success || scenario.name === "ambiguous" ? 1 : 0);
     }),

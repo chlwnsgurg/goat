@@ -8,6 +8,11 @@ import {
   type FleetSnapshot,
   type FleetSummary,
 } from "@goat/client-runtime/state/fleet";
+import {
+  type FleetCloudAgentGroup,
+  type FleetCloudRunSource,
+  groupCloudAgentRuns,
+} from "@goat/client-runtime/state/fleet-cloud-agents";
 import { resolveProviderInstanceDisplayName } from "@goat/client-runtime/state/provider-instance-display";
 import type { CloudMachine, EnvironmentId, RemoteLaunch } from "@goat/contracts";
 import * as Option from "effect/Option";
@@ -146,6 +151,26 @@ const fleetRemoteAtom = Atom.make((get) => {
   }
   return { sources, loading };
 }).pipe(Atom.withLabel("fleet-remote"));
+
+/**
+ * Cloud agent runs each connected environment follows or links. Only the Fleet page reads it,
+ * so the queries mount, and revalidate, when the page opens.
+ */
+const fleetCloudAgentsAtom = Atom.make((get): ReadonlyArray<FleetCloudAgentGroup> => {
+  const sources: FleetCloudRunSource[] = [];
+  for (const { environmentId, label } of get(fleetEnvironmentsAtom)) {
+    const result = get(serverEnvironment.cloudAgentRuns({ environmentId, input: {} }));
+    const runs = Option.getOrNull(AsyncResult.value(result))?.runs ?? EMPTY;
+    if (runs.length > 0) sources.push({ environmentId, label, runs });
+  }
+  const next = groupCloudAgentRuns(sources);
+  const previous = Option.getOrNull(get.self<ReadonlyArray<FleetCloudAgentGroup>>());
+  return previous !== null && JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+}).pipe(Atom.withLabel("fleet-cloud-agents"));
+
+export function useFleetCloudAgents(): ReadonlyArray<FleetCloudAgentGroup> {
+  return useAtomValue(fleetCloudAgentsAtom);
+}
 
 /** What the page draws, so streamed thread updates that change none of it keep one snapshot. */
 function snapshotKey(

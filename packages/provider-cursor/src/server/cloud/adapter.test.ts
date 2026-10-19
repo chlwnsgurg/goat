@@ -159,11 +159,16 @@ const harness = Effect.gen(function* () {
     result = { id: runId, status: "cancelled" };
     release();
   });
+  let listedRuns: Array<Run> = [nativeRun];
+  const listRuns = vi.fn(async (_agentId: string, _options: CursorCloudSdk.CloudRunOptions) => ({
+    items: listedRuns,
+  }));
   const sdk = CursorCloudSdk.CursorCloudSdk.of({
     create,
     resume,
     getRun,
     cancelRun,
+    listRuns,
     checkAccess: () => Effect.void,
     readModels: () => Effect.succeed([]),
   });
@@ -248,6 +253,10 @@ const harness = Effect.gen(function* () {
     close,
     getRun,
     cancelRun,
+    listRuns,
+    setListedRuns: (value: Array<Run>) => {
+      listedRuns = value;
+    },
     nativeRun,
     streamStarted,
     streamWaiting,
@@ -419,6 +428,62 @@ describe("Cursor Cloud adapter", () => {
       expect(h.send).not.toHaveBeenCalled();
       expect(h.cancelRun).not.toHaveBeenCalled();
       expect(h.nativeRun.stream).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(IdAllocator.layer), Effect.scoped),
+  );
+  effectIt.effect("follows a registered agent's latest run without sending to it", () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      const { message: _message, cloudLaunchSource: _launchSource, ...attach } = h.input;
+      const registered: Task = {
+        ...task(),
+        taskId: agentId,
+        tracking: "polled",
+        attach: "registered",
+      };
+      yield* h.runtime.resumeTurn!({
+        ...attach,
+        cloudTask: registered,
+        providerThread: {
+          ...h.thread,
+          nativeThreadRef: { driver: DRIVER, nativeId: agentId, strength: "strong" },
+          cloudTask: registered,
+        },
+      });
+      yield* collectTerminal(h.runtime);
+      expect(h.listRuns).toHaveBeenCalledWith(agentId, {
+        runtime: "cloud",
+        agentId,
+        apiKey: "key-fixture",
+      });
+      expect(h.commits[0]).toMatchObject({ taskId: runId, attach: "registered" });
+      expect(h.getRun).toHaveBeenCalledWith(runId, expect.objectContaining({ agentId }));
+      expect(h.create).not.toHaveBeenCalled();
+      expect(h.send).not.toHaveBeenCalled();
+      expect(h.cancelRun).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(IdAllocator.layer), Effect.scoped),
+  );
+  effectIt.effect("refuses to follow a registered agent with no visible runs", () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      h.setListedRuns([]);
+      const { message: _message, cloudLaunchSource: _launchSource, ...attach } = h.input;
+      const registered: Task = {
+        ...task(),
+        taskId: agentId,
+        tracking: "polled",
+        attach: "registered",
+      };
+      const failure = yield* h.runtime.resumeTurn!({
+        ...attach,
+        cloudTask: registered,
+        providerThread: {
+          ...h.thread,
+          nativeThreadRef: { driver: DRIVER, nativeId: agentId, strength: "strong" },
+          cloudTask: registered,
+        },
+      }).pipe(Effect.flip);
+      expect(String(failure.cause ?? failure.message)).toMatch(/no runs to follow/u);
+      expect(h.getRun).not.toHaveBeenCalled();
     }).pipe(Effect.provide(IdAllocator.layer), Effect.scoped),
   );
   effectIt.effect.each(["absent", "previous"] as const)(

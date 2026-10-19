@@ -4,12 +4,14 @@ import * as NoteWorkService from "./notes/NoteWorkService.ts";
 import * as CodexRoutes from "./provider/CodexRouteService.ts";
 import * as SshHostSetup from "./sshRemote/SshHostSetup.ts";
 import * as Handoffs from "./handoffs/Handoffs.ts";
+import * as ProviderHostSync from "./provider/ProviderHostSync.ts";
 import { ProviderMemoryImportRuntime } from "./memory/imports/MemoryImportTypes.ts";
 import * as MemoryService from "./memory/MemoryService.ts";
 import * as MemorySyncService from "./memory/MemorySyncService.ts";
 import { memoryError } from "./mcp/toolkits/memory/handlers.ts";
 import * as SshWorkspaceSync from "./sshRemote/SshWorkspaceSync.ts";
 import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
+import * as CloudAgentService from "./cloudAgents/CloudAgentService.ts";
 import * as CloudMachineService from "./cloudMachines/CloudMachineService.ts";
 import {
   CHANNEL_GATEWAY_WS_METHODS,
@@ -195,6 +197,7 @@ import * as AcpRegistrySupport from "@goat/provider-acp-registry/server/AcpRegis
 import * as AcpRegistryRuntimeCoordinator from "@goat/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
 import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as ProviderLatestVersions from "@goat/provider-core/server/ProviderLatestVersions";
+import { latestProviderVersionCacheKeys } from "@goat/provider-core/server/maintenanceResolver";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ProviderAuthService from "./provider/ProviderAuthService.ts";
 import { makeProviderInstallation } from "./provider/providerInstallation.ts";
@@ -263,6 +266,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
 import * as HostStatusMcpService from "./mcp/HostStatusMcpService.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
+import { featureUsage } from "./telemetry/FeatureUsage.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
@@ -1316,6 +1320,7 @@ const layerWsRpc = (
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const handoffs = yield* Handoffs.Handoffs;
       const sshHostSetup = yield* SshHostSetup.SshHostSetup;
+      const providerHostSync = yield* ProviderHostSync.ProviderHostSync;
       const codexRoutes = yield* CodexRoutes.CodexRouteService;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
@@ -2351,6 +2356,10 @@ const layerWsRpc = (
           ),
         [WS_METHODS.remoteLaunchesList]: (input) => remoteLaunchCatalog.list(input),
         [WS_METHODS.cloudMachinesList]: () => cloudMachines.list(),
+        [WS_METHODS.cloudAgentsListRuns]: (input) =>
+          CloudAgentService.listCloudRuns(input).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+          ),
         [WS_METHODS.cloudMachinesConfigure]: (input) => cloudMachines.configure(input),
         [WS_METHODS.cloudMachinesDisconnect]: () => cloudMachines.disconnect(),
         [WS_METHODS.cloudMachinesCreate]: (input) => cloudMachines.create(input),
@@ -2486,10 +2495,16 @@ const layerWsRpc = (
                   Effect.gen(function* () {
                     yield* instance.invalidateCaches ?? Effect.void;
                     const maintenance = yield* instance.snapshot.resolveMaintenance({
-                      fresh: true,
+                      fresh:
+                        input.instanceId !== undefined &&
+                        input.cwd !== undefined &&
+                        input.fresh !== true,
                     });
-                    if (maintenance.packageName)
-                      yield* providerLatestVersions.invalidate(maintenance.packageName);
+                    yield* Effect.forEach(
+                      latestProviderVersionCacheKeys(maintenance),
+                      providerLatestVersions.invalidate,
+                      { discard: true },
+                    );
                   }),
                 { concurrency: "unbounded", discard: true },
               );
@@ -2643,6 +2658,14 @@ const layerWsRpc = (
         [WS_METHODS.providerInstallCancel]: (input) => providerInstallation.cancel(input),
         [WS_METHODS.providerInstallSubscribe]: (input) => providerInstallation.subscribe(input),
         [WS_METHODS.providerInstallRemove]: (input) => providerInstallation.remove(input),
+        [WS_METHODS.providerHostMatrix]: (input) =>
+          providerHostSync.matrix(input, { kind: "client", sessionId: currentSessionId }),
+        [WS_METHODS.providerHostSyncStart]: (input) =>
+          providerHostSync.sync(input, { kind: "client", sessionId: currentSessionId }),
+        [WS_METHODS.providerHostSyncStatus]: (input) =>
+          providerHostSync.status(input, { kind: "client", sessionId: currentSessionId }),
+        [WS_METHODS.providerHostSyncCancel]: (input) =>
+          providerHostSync.cancel(input, { kind: "client", sessionId: currentSessionId }),
         [WS_METHODS.serverUpdateServer]: (input) =>
           serverSelfUpdate.update(input, undefined, undefined, {
             kind: currentSession.method,
@@ -3442,6 +3465,7 @@ export const layer = Layer.unwrap(
     const sshHostSetup = yield* SshHostSetup.SshHostSetup;
     const codexRoutes = yield* CodexRoutes.CodexRouteService;
     const sshWorkspace = yield* SshWorkspaceSync.SshWorkspaceSync;
+    const providerHostSync = yield* ProviderHostSync.ProviderHostSync;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const notes = yield* NotesService.NotesService;
     const noteWork = yield* NoteWorkService.NoteWorkService;
@@ -3487,7 +3511,24 @@ export const layer = Layer.unwrap(
           yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
             Effect.provideService(RpcServer.Protocol, withTerminalOutputWindow(protocol)),
             Effect.provide(
-              Layer.merge(RpcAuthorization.layer(session.scopes), rpcInstrumentationLayer),
+              Layer.merge(
+                RpcAuthorization.layer(session.scopes, (method, payload) => {
+                  // Anonymous product signal: the feature and its enum variant,
+                  // credited to the connecting client's surface only.
+                  const usage = featureUsage(method, payload);
+                  return usage === undefined
+                    ? Effect.void
+                    : analytics
+                        .record("feature.used", {
+                          ...usage,
+                          ...(clientAnalyticsProps.surface === undefined
+                            ? {}
+                            : { surface: clientAnalyticsProps.surface }),
+                        })
+                        .pipe(Effect.ignore);
+                }),
+                rpcInstrumentationLayer,
+              ),
             ),
             Effect.forkScoped,
           );
@@ -3516,6 +3557,7 @@ export const layer = Layer.unwrap(
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
               Layer.provide(Layer.succeed(SshWorkspaceSync.SshWorkspaceSync, sshWorkspace)),
               Layer.provide(Layer.succeed(SshHostSetup.SshHostSetup, sshHostSetup)),
+              Layer.provide(Layer.succeed(ProviderHostSync.ProviderHostSync, providerHostSync)),
               Layer.provide(Layer.succeed(CodexRoutes.CodexRouteService, codexRoutes)),
               Layer.provide(OtlpEndpointCheck.layer),
               Layer.provide(

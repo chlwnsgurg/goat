@@ -355,6 +355,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   terminalOpen: boolean;
   onRequestClose?: () => void;
   onOpenProviderSetup?: (instanceId: ProviderInstanceId) => void;
+  onAddProvider?: () => void;
+  addProviderDisabledReason?: string | null;
+  /** Rail selection to open with, such as a provider that was just added. */
+  initialSelectedInstanceId?: ProviderInstanceId | null;
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
@@ -419,6 +423,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     );
   const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | "favorites">(
     () => {
+      if (props.initialSelectedInstanceId) {
+        return props.initialSelectedInstanceId;
+      }
       if (
         props.lockedProvider !== null ||
         activeInstanceHasSelectableUnavailableModel ||
@@ -429,12 +436,12 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       return favorites.length > 0 ? "favorites" : props.activeInstanceId;
     },
   );
+  const favoritesSet = new Set(favorites.map((fav) => providerModelKey(fav.provider, fav.model)));
   const [expandedLegacyInstances, setExpandedLegacyInstances] = useState(
     () =>
       new Set<ProviderInstanceId>(
-        modelOptionsByInstance
-          .get(props.activeInstanceId)
-          ?.some((model) => model.slug === activeModelSlug && model.isLegacy)
+        activeModel?.isLegacy &&
+          !favoritesSet.has(providerModelKey(props.activeInstanceId, activeModelSlug))
           ? [props.activeInstanceId]
           : [],
       ),
@@ -515,9 +522,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const lockedProvider = props.lockedProvider;
   const lockedContinuationGroupKey = props.lockedContinuationGroupKey;
   const canOpenProviderSetup = onOpenProviderSetup !== undefined;
-  const favoritesSet = (() => {
-    return new Set(favorites.map((fav) => providerModelKey(fav.provider, fav.model)));
-  })();
 
   const entryByInstanceId = new Map(instanceEntries.map((entry) => [entry.instanceId, entry]));
   const matchesLockedProvider = (
@@ -617,7 +621,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     }
     return [...available, ...disabled];
   })();
-  const showSidebar = !isSearching && sidebarInstanceEntries.length > 0;
+  const showSidebar =
+    !isSearching && (sidebarInstanceEntries.length > 0 || props.onAddProvider !== undefined);
   const instanceOrder = instanceEntries.map((entry) => entry.instanceId);
 
   const filteredModels = (() => {
@@ -660,8 +665,13 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     if (isSearching || selectedInstanceId === "favorites") {
       return null;
     }
-    const currentModels = filteredModels.filter((model) => !model.isLegacy);
-    const legacyModels = filteredModels.filter((model) => model.isLegacy);
+    const currentModels: ModelPickerItem[] = [];
+    const legacyModels: ModelPickerItem[] = [];
+    for (const model of filteredModels) {
+      const isLegacy =
+        model.isLegacy && !favoritesSet.has(providerModelKey(model.instanceId, model.slug));
+      (isLegacy ? legacyModels : currentModels).push(model);
+    }
     if (legacyModels.length === 0) {
       return null;
     }
@@ -807,6 +817,12 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             onFocusSearch={focusSearchInput}
             instanceEntries={sidebarInstanceEntries}
             showFavorites
+            {...(props.onAddProvider
+              ? {
+                  onAddProvider: props.onAddProvider,
+                  addProviderDisabledReason: props.addProviderDisabledReason ?? null,
+                }
+              : {})}
             {...(selectableUnavailableInstanceIds ? { selectableUnavailableInstanceIds } : {})}
             {...(lockedDisabledInstanceIds
               ? {

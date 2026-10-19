@@ -43,6 +43,9 @@ import { decodeServicePreflightResult } from "./servicePreflight.ts";
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
 import { isExactServiceVersion, SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 
+export const SERVER_UPDATE_BUSY_REASON =
+  "GOAT is running threads on this server, so the update waits. Try again when they finish, or update from a GOAT app that can confirm interrupting them.";
+
 const PREFLIGHT_TIMEOUT = Duration.seconds(30);
 
 export function resolveServerSelfUpdateCapability(input: {
@@ -56,6 +59,9 @@ export function resolveServerSelfUpdateCapability(input: {
 export class ServerSelfUpdate extends Context.Service<
   ServerSelfUpdate,
   {
+    readonly capability: ServerSelfUpdateCapability | null;
+    readonly isUpdating: Effect.Effect<boolean>;
+    readonly prepare: (targetVersion: string) => Effect.Effect<void, ServerSelfUpdateError>;
     readonly update: (
       input: ServerSelfUpdateInput,
       reportProgress?: (
@@ -149,6 +155,7 @@ export const withRunningThreadContinuation = Effect.fn(
   };
 
   return ServerSelfUpdate.of({
+    ...input.selfUpdate,
     update,
     commitDesktopUpdate: (requestId) =>
       Effect.gen(function* () {
@@ -205,8 +212,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       .pipe(Effect.orElseSucceed(() => "busy" as const));
     if ((yield* admission.inFlight) !== 0 || activity !== "idle") {
       return yield* new ServerSelfUpdateError({
-        reason:
-          "GOAT is running threads on this server, so the update waits. Try again when they finish, or update from a GOAT app that can confirm interrupting them.",
+        reason: SERVER_UPDATE_BUSY_REASON,
       });
     }
   });
@@ -217,6 +223,100 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
     cause === undefined
       ? new ServerSelfUpdateError({ reason })
       : new ServerSelfUpdateError({ reason, cause });
+
+  const prepareRuntime = Effect.fn("cloud.server_self_update.prepare_runtime")(function* (
+    targetVersion: string,
+  ) {
+    return yield* ensurePinnedRuntimeInstalled({
+      baseDir: serverConfig.baseDir,
+      version: targetVersion,
+      fs,
+      path,
+      runner,
+      httpClient,
+      platform,
+      arch,
+      releaseBaseUrl,
+      // A cached target runs unattended after activation, so its bytes must match the verified
+      // install. Never for the running version, whose directory a mismatch would remove.
+      verifyCachedInstall: targetVersion !== packageJson.version,
+      validate: (runtime) =>
+        runner
+          .run({
+            command: pinnedRuntimeCommand(runtime).command,
+            args: [
+              ...pinnedRuntimeCommand(runtime).args,
+              "__service-preflight",
+              "--database-path",
+              serverConfig.dbPath,
+              "--launcher-protocol",
+              String(SERVICE_LAUNCHER_PROTOCOL),
+            ],
+            timeout: PREFLIGHT_TIMEOUT,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new PinnedRuntimeInstallError({
+                  step: "running the staged service preflight",
+                  cause,
+                }),
+            ),
+            Effect.flatMap(
+              (
+                result,
+              ): Effect.Effect<
+                void,
+                PinnedRuntimeInstallError | PinnedRuntimePreflightBlockedError
+              > => {
+                if (result.code !== 0) {
+                  return Effect.fail(
+                    new PinnedRuntimeInstallError({
+                      step: "running the staged service preflight",
+                      exitCode: Number(result.code),
+                      stdoutLength: result.stdout.length,
+                      stderrLength: result.stderr.length,
+                    }),
+                  );
+                }
+                let parsed: unknown;
+                try {
+                  parsed = JSON.parse(result.stdout.trim());
+                } catch (cause) {
+                  return Effect.fail(
+                    new PinnedRuntimeInstallError({
+                      step: "decoding the staged service preflight",
+                      cause,
+                    }),
+                  );
+                }
+                const preflight = decodeServicePreflightResult(parsed);
+                if (preflight === undefined || preflight.version !== targetVersion) {
+                  return Effect.fail(
+                    new PinnedRuntimeInstallError({
+                      step: "verifying the staged service preflight",
+                    }),
+                  );
+                }
+                return preflight.status === "ready"
+                  ? Effect.void
+                  : Effect.fail(
+                      new PinnedRuntimePreflightBlockedError({
+                        version: targetVersion,
+                        reason: preflight.reason,
+                      }),
+                    );
+              },
+            ),
+          ),
+    }).pipe(
+      Effect.mapError((error) =>
+        error._tag === "PinnedRuntimePreflightBlockedError"
+          ? failWith(error.reason, error)
+          : failWith(`Could not prepare goat@${targetVersion}.`, error),
+      ),
+    );
+  });
 
   const update: ServerSelfUpdate["Service"]["update"] = Effect.fn(
     "cloud.server_self_update.update",
@@ -251,92 +351,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
     return yield* Effect.gen(function* () {
       if (input.confirmReplacement !== true) yield* requireIdle;
       yield* reportProgress("downloading");
-      const paths = yield* ensurePinnedRuntimeInstalled({
-        baseDir: serverConfig.baseDir,
-        version: targetVersion,
-        fs,
-        path,
-        runner,
-        httpClient,
-        platform,
-        arch,
-        releaseBaseUrl,
-        validate: (runtime) =>
-          runner
-            .run({
-              command: pinnedRuntimeCommand(runtime).command,
-              args: [
-                ...pinnedRuntimeCommand(runtime).args,
-                "__service-preflight",
-                "--database-path",
-                serverConfig.dbPath,
-                "--launcher-protocol",
-                String(SERVICE_LAUNCHER_PROTOCOL),
-              ],
-              timeout: PREFLIGHT_TIMEOUT,
-            })
-            .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new PinnedRuntimeInstallError({
-                    step: "running the staged service preflight",
-                    cause,
-                  }),
-              ),
-              Effect.flatMap(
-                (
-                  result,
-                ): Effect.Effect<
-                  void,
-                  PinnedRuntimeInstallError | PinnedRuntimePreflightBlockedError
-                > => {
-                  if (result.code !== 0) {
-                    return Effect.fail(
-                      new PinnedRuntimeInstallError({
-                        step: "running the staged service preflight",
-                        exitCode: Number(result.code),
-                        stdoutLength: result.stdout.length,
-                        stderrLength: result.stderr.length,
-                      }),
-                    );
-                  }
-                  let parsed: unknown;
-                  try {
-                    parsed = JSON.parse(result.stdout.trim());
-                  } catch (cause) {
-                    return Effect.fail(
-                      new PinnedRuntimeInstallError({
-                        step: "decoding the staged service preflight",
-                        cause,
-                      }),
-                    );
-                  }
-                  const preflight = decodeServicePreflightResult(parsed);
-                  if (preflight === undefined || preflight.version !== targetVersion) {
-                    return Effect.fail(
-                      new PinnedRuntimeInstallError({
-                        step: "verifying the staged service preflight",
-                      }),
-                    );
-                  }
-                  return preflight.status === "ready"
-                    ? Effect.void
-                    : Effect.fail(
-                        new PinnedRuntimePreflightBlockedError({
-                          version: targetVersion,
-                          reason: preflight.reason,
-                        }),
-                      );
-                },
-              ),
-            ),
-      }).pipe(
-        Effect.mapError((error) =>
-          error._tag === "PinnedRuntimePreflightBlockedError"
-            ? failWith(error.reason, error)
-            : failWith(`Could not prepare goat@${targetVersion}.`, error),
-        ),
-      );
+      const paths = yield* prepareRuntime(targetVersion);
 
       const operationId = yield* crypto
         .randomUUIDv4()
@@ -404,6 +419,25 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   });
 
   return ServerSelfUpdate.of({
+    capability,
+    isUpdating: Ref.get(inFlight),
+    prepare: (targetVersion) =>
+      Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          if (capability !== "boot-service" || !isExactServiceVersion(targetVersion)) {
+            return yield* failWith(
+              "Background preparation requires a launcher-managed server and an exact goat version.",
+            );
+          }
+          if (yield* Ref.getAndSet(inFlight, true)) {
+            return yield* failWith("A server update is already in progress.");
+          }
+          return yield* restore(prepareRuntime(targetVersion)).pipe(
+            Effect.asVoid,
+            Effect.ensuring(Ref.set(inFlight, false)),
+          );
+        }),
+      ),
     update,
     commitDesktopUpdate: (requestId, onHandoffAccepted) =>
       desktopAppUpdate.commit(requestId, onHandoffAccepted),

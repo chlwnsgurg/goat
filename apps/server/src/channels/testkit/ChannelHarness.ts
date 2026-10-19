@@ -18,6 +18,7 @@ import {
   MessageId,
   type OrchestrationV2Run,
   type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2Subagent,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadShell,
   ProjectId,
@@ -103,6 +104,10 @@ export class WorkerWorld {
   readonly background = new Set<string>();
   readonly pullRequests = new Map<string, ReadonlyArray<ThreadPullRequestLink>>();
   readonly runtimeRequests = new Map<string, ReadonlyArray<OrchestrationV2RuntimeRequest>>();
+  /** Approval prompts by request id, served as the thread's approval_request turn items. */
+  readonly approvalPrompts = new Map<string, string>();
+  /** Subagents a worker (or a subagent) thread started, by parent thread id. */
+  readonly subagents = new Map<string, ReadonlyArray<OrchestrationV2Subagent>>();
   readonly shells = new Map<
     string,
     Partial<
@@ -348,7 +353,12 @@ export function makeHarness(
             },
             runs,
             runtimeRequests: world.runtimeRequests.get(threadId) ?? [],
-            turnItems: [],
+            turnItems: (world.runtimeRequests.get(threadId) ?? []).flatMap((request) => {
+              const prompt = world.approvalPrompts.get(request.id);
+              return prompt === undefined
+                ? []
+                : [{ type: "approval_request", requestId: request.id, prompt }];
+            }),
             providerThreads: [
               ...(world.background.has(threadId)
                 ? [{ pendingBackgroundTasks: [{ taskId: "background" }] }]
@@ -357,6 +367,7 @@ export function makeHarness(
                 ? [{ cloudTask: { status: world.cloudTasks.get(threadId) } }]
                 : []),
             ],
+            subagents: world.subagents.get(threadId) ?? [],
             messages: runs
               .filter((run) => messageRunIds === undefined || messageRunIds.includes(run.id))
               .flatMap((run) => {
@@ -406,8 +417,43 @@ export function makeHarness(
           if (world.rejectedCommands.has(command.commandId)) {
             return Effect.fail({ _tag: "OrchestratorCommandPreviouslyRejectedError" } as never);
           }
+          // An answer resolves a pending request once; the orchestrator refuses a later one, and a
+          // repeated command id returns what the first one did, as command receipts do.
+          if (command.type === "runtime-request.respond") {
+            const target = (world.runtimeRequests.get(command.threadId) ?? []).find(
+              (request) => request.id === command.requestId,
+            );
+            const repeated = world.commands.some((sent) => sent.commandId === command.commandId);
+            if (repeated) return Effect.succeed({ sequence: 0, storedEvents: [] });
+            if (target?.status !== "pending") {
+              return Effect.fail(
+                new Orchestrator.OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                }),
+              );
+            }
+          }
           return Effect.sync(() => {
             world.commands.push(command);
+            if (command.type === "runtime-request.respond") {
+              const requests = world.runtimeRequests.get(command.threadId) ?? [];
+              world.runtimeRequests.set(
+                command.threadId,
+                requests.map((request) =>
+                  request.id === command.requestId
+                    ? {
+                        ...request,
+                        status: "resolved" as const,
+                        ...(command.decision === undefined ? {} : { decision: command.decision }),
+                        ...(command.respondedBy === undefined
+                          ? {}
+                          : { respondedBy: command.respondedBy }),
+                      }
+                    : request,
+                ),
+              );
+            }
             // A thread stop ends the running run and holds the queue, as the orchestrator does.
             if (command.type === "thread.stop") {
               world.interrupts.push(command.threadId);
@@ -560,6 +606,7 @@ export function makeHarness(
       ensureScratchProject: Effect.succeed({ projectId: scratchProjectId }),
       ensureBotProject: Effect.succeed({ projectId: scratchProjectId }),
       folderForThread: () => Effect.succeed(Option.none()),
+      isScratchProject: () => Effect.succeed(false),
     }),
     layerSettings,
   ).pipe(

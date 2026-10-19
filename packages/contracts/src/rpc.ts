@@ -41,6 +41,16 @@ import {
   ChatGptHandoffInput,
   ChatGptHandoffState,
 } from "./providerSetup.ts";
+import {
+  ProviderHostMatrixInput,
+  ProviderHostMatrixResult,
+  ProviderHostSyncError,
+  ProviderSyncCancelInput,
+  ProviderSyncInput,
+  ProviderSyncResultJson,
+  ProviderSyncState,
+  ProviderSyncStatusInput,
+} from "./providerHostSync.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
@@ -474,6 +484,7 @@ import {
   CloudMachinesListInput,
   CloudMachinesListResult,
 } from "./cloudMachines.ts";
+import { CloudRunListInput, CloudRunListResult } from "./cloudAgents.ts";
 
 export const WS_METHODS = {
   memoryProjectBindingGet: "memory.projectBinding.get",
@@ -541,6 +552,10 @@ export const WS_METHODS = {
   providerInstallCancel: "provider.install.cancel",
   providerInstallSubscribe: "provider.install.subscribe",
   providerInstallRemove: "provider.install.remove",
+  providerHostMatrix: "provider.hostSync.matrix",
+  providerHostSyncStart: "provider.hostSync.start",
+  providerHostSyncStatus: "provider.hostSync.status",
+  providerHostSyncCancel: "provider.hostSync.cancel",
 
   vcsPull: "vcs.pull",
   vcsRefreshStatus: "vcs.refreshStatus",
@@ -666,6 +681,7 @@ export const WS_METHODS = {
 
   // Boat cloud machines this environment manages as SSH hosts
   cloudMachinesList: "cloudMachines.list",
+  cloudAgentsListRuns: "cloudAgents.listRuns",
   cloudMachinesConfigure: "cloudMachines.configure",
   cloudMachinesDisconnect: "cloudMachines.disconnect",
   cloudMachinesCreate: "cloudMachines.create",
@@ -860,6 +876,31 @@ const WsProviderInstallCancelRpc = Rpc.make(WS_METHODS.providerInstallCancel, {
   payload: ProviderInstallCancelInput,
   success: ProviderInstallState,
   error: ProviderSetupRpcError,
+});
+
+const ProviderHostSyncRpcError = Schema.Union([
+  ProviderHostSyncError,
+  EnvironmentAuthorizationError,
+]);
+export const WsProviderHostMatrixRpc = Rpc.make(WS_METHODS.providerHostMatrix, {
+  payload: ProviderHostMatrixInput,
+  success: ProviderHostMatrixResult,
+  error: ProviderHostSyncRpcError,
+});
+export const WsProviderHostSyncStartRpc = Rpc.make(WS_METHODS.providerHostSyncStart, {
+  payload: ProviderSyncInput,
+  success: ProviderSyncResultJson,
+  error: ProviderHostSyncRpcError,
+});
+export const WsProviderHostSyncStatusRpc = Rpc.make(WS_METHODS.providerHostSyncStatus, {
+  payload: ProviderSyncStatusInput,
+  success: ProviderSyncState,
+  error: ProviderHostSyncRpcError,
+});
+export const WsProviderHostSyncCancelRpc = Rpc.make(WS_METHODS.providerHostSyncCancel, {
+  payload: ProviderSyncCancelInput,
+  success: ProviderSyncState,
+  error: ProviderHostSyncRpcError,
 });
 
 const WsProviderInstallSubscribeRpc = Rpc.make(WS_METHODS.providerInstallSubscribe, {
@@ -2065,6 +2106,13 @@ const WsRemoteLaunchesListRpc = Rpc.make(WS_METHODS.remoteLaunchesList, {
   error: Schema.Union([RemoteLaunchesError, EnvironmentAuthorizationError]),
 });
 
+/** Cloud agent runs this environment follows or links, for Fleet. */
+const WsCloudAgentsListRunsRpc = Rpc.make(WS_METHODS.cloudAgentsListRuns, {
+  payload: CloudRunListInput,
+  success: CloudRunListResult,
+  error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
+});
+
 const CloudMachineRpcError = Schema.Union([CloudMachineError, EnvironmentAuthorizationError]);
 const WsCloudMachinesListRpc = Rpc.make(WS_METHODS.cloudMachinesList, {
   payload: CloudMachinesListInput,
@@ -2266,6 +2314,10 @@ export const WsCoreServerRpcGroup = RpcGroup.make(
   WsProviderInstallCancelRpc,
   WsProviderInstallSubscribeRpc,
   WsProviderInstallRemoveRpc,
+  WsProviderHostMatrixRpc,
+  WsProviderHostSyncStartRpc,
+  WsProviderHostSyncStatusRpc,
+  WsProviderHostSyncCancelRpc,
   WsServerUpdateServerRpc,
   WsServerUpdateServerWithProgressRpc,
   WsServerCommitDesktopUpdateRpc,
@@ -2314,6 +2366,7 @@ export const WsCoreServerRpcGroup = RpcGroup.make(
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsRemoteLaunchesListRpc,
   WsCloudMachinesListRpc,
+  WsCloudAgentsListRunsRpc,
   WsCloudMachinesConfigureRpc,
   WsCloudMachinesDisconnectRpc,
   WsCloudMachinesCreateRpc,

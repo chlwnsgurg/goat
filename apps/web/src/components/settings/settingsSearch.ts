@@ -519,6 +519,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     scope: "environment-defaults",
   },
   {
+    id: "automatic-server-updates",
+    title: "Automatic server updates",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["background service stable nightly channel idle automatic update"],
+  },
+  {
     id: "continue-threads-after-server-update",
     title: "Continue threads after restarts",
     to: "/settings/general",
@@ -872,6 +879,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["links default browser in-app browser external open"],
   },
   {
+    id: "browser-search-engine",
+    title: "Search engine",
+    to: "/settings/integrations",
+    searchTerms: ["address bar duckduckgo google bing brave kagi ecosia custom"],
+  },
+  {
     id: "pull-request-links-open-in-app",
     title: "Open pull requests in GOAT",
     to: "/settings/integrations",
@@ -1100,6 +1113,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [
       "add device environment pair backend host code ssh config agent tunnel saved goat connect tailscale server",
     ],
+  },
+  {
+    id: "provider-host-matrix",
+    title: "Providers on your machines",
+    to: "/settings/connections",
+    searchTerms: ["hosts ssh sync install sign in codex claude cursor grok opencode pi versions"],
   },
   {
     id: "hosts",

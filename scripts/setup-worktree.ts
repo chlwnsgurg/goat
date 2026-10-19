@@ -21,7 +21,7 @@ function mainWorktree(): string {
   return first.slice("worktree ".length);
 }
 const projectRoot =
-  process.env.GOAT_PROJECT_ROOT || process.env.T3CODE_PROJECT_ROOT || mainWorktree();
+  process.env.GOAT_PROJECT_ROOT || process.env.T3CODE_PROJECT_ROOT || mainWorktree(); // goat-rename: legacy
 
 // `shell` resolves `vp` through PATH, including Windows command shims.
 // Setup has no one answering install prompts. Pass pnpm's confirmation flag

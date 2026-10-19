@@ -10,6 +10,7 @@ import {
   type ServerProviderUsageLimits,
 } from "@goat/contracts";
 import * as HostProcess from "@goat/shared/HostProcess";
+import { servedRuntimeProtocolRanges } from "@goat/shared/sshRuntimeProtocol";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -243,49 +244,58 @@ it.effect("fans out to this machine and each connected host, sorted", () =>
   }),
 );
 
-it.effect("reports each machine's GOAT version and flags a host on another build", () =>
+it.effect("judges each host by the protocols it serves, not by its version string", () =>
   Effect.gen(function* () {
-    const withVersion = (serverVersion: string | undefined) => {
-      const answer = remoteOk(3);
-      return {
-        hosts: answer.hosts.map((entry) =>
-          serverVersion === undefined ? entry : { ...entry, serverVersion },
-        ),
-      };
+    const served = servedRuntimeProtocolRanges();
+    const answers: Record<string, { serverVersion?: string; protocol?: unknown }> = {
+      same: { serverVersion: packageJson.version, protocol: served },
+      // Another channel's build that serves the same protocols works with this machine.
+      nightly: { serverVersion: "0.1.0-nightly.20261019.195", protocol: served },
+      // Older than protocol reporting: it answers, but cannot show compatibility.
+      old: {},
+      ancient: {
+        serverVersion: "0.0.9",
+        protocol: { ssh: served.ssh, orchestration: { min: 1, max: 1 } },
+      },
     };
     const { value } = yield* run(
       {
-        hosts: ["same", "newer", "old"],
-        hostCall: (call) =>
-          Effect.succeed(
-            withVersion(
-              call.host === "same"
-                ? packageJson.version
-                : call.host === "newer"
-                  ? "99.0.0"
-                  : undefined,
-            ),
-          ),
+        hosts: Object.keys(answers),
+        hostCall: (call) => {
+          const answer = remoteOk(3);
+          return Effect.succeed({
+            hosts: answer.hosts.map((entry) => ({ ...entry, ...answers[call.host] })),
+          });
+        },
       },
       (service) => service.read(scope, {}),
     );
     expect(value._tag).toBe("Success");
     if (value._tag !== "Success") return;
-    const [local, newer, old, same] = decode(value.success).hosts;
-    expect(local).toMatchObject({ host: null, serverVersion: packageJson.version });
+    const byHost = new Map(decode(value.success).hosts.map((entry) => [entry.host, entry]));
+    const local = byHost.get(null);
+    expect(local).toMatchObject({ serverVersion: packageJson.version, protocol: served });
+    expect(local?.compatibility).toBeUndefined();
     expect(local?.versionMismatch).toBeUndefined();
-    expect(same).toMatchObject({ host: "same", serverVersion: packageJson.version });
+
+    const same = byHost.get("same");
+    expect(same).toMatchObject({ compatibility: "compatible" });
     expect(same?.versionMismatch).toBeUndefined();
     expect(same?.message).toBeUndefined();
-    expect(newer).toMatchObject({
-      host: "newer",
-      reachability: "ok",
-      serverVersion: "99.0.0",
-      versionMismatch: true,
-      message: `newer runs GOAT 99.0.0; this machine runs GOAT ${packageJson.version}. Tools and launch options can differ between them. Update GOAT on the older machine.`,
-    });
-    expect(old).toMatchObject({ host: "old", versionMismatch: true });
-    expect(old?.message).toContain("does not report its version");
+
+    const nightly = byHost.get("nightly");
+    expect(nightly).toMatchObject({ compatibility: "compatible", versionMismatch: true });
+    expect(nightly?.message).toBeUndefined();
+
+    const old = byHost.get("old");
+    expect(old).toMatchObject({ compatibility: "degraded", versionMismatch: true });
+    expect(old?.message).toContain("does not report the protocols it serves");
+    expect(old?.message).toContain("update GOAT on old");
+
+    const ancient = byHost.get("ancient");
+    expect(ancient).toMatchObject({ compatibility: "incompatible", versionMismatch: true });
+    expect(ancient?.message).toContain("serving orchestration 1, SSH");
+    expect(ancient?.message).toMatch(/Update GOAT on ancient\.$/);
   }),
 );
 

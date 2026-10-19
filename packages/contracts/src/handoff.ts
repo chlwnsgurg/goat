@@ -68,6 +68,17 @@ export const handoffSummary = (record: Handoff): HandoffSummary => ({
   targetPath: record.target.path,
 });
 export const isHandoffPending = (state: HandoffState) => state === "pending" || state === "opened";
+const PROVIDER_SETTINGS_HANDOFF_PATHS: ReadonlySet<string> = new Set([
+  "provider.home_request",
+  "provider.host_sync",
+  "provider.setup",
+]);
+/**
+ * Handoffs a person resolves by changing this environment's providers: they
+ * belong to their origin environment and expire on a clock, since the person
+ * often finishes after the requesting turn ends.
+ */
+export const isProviderHandoffPath = (path: string) => PROVIDER_SETTINGS_HANDOFF_PATHS.has(path);
 
 /** Returned only through authenticated client RPC, never a thread projection or MCP result. */
 export const HandoffHuman = Schema.Struct({
@@ -76,6 +87,13 @@ export const HandoffHuman = Schema.Struct({
   url: Schema.optional(TrimmedNonEmptyString),
   userCode: Schema.optional(TrimmedNonEmptyString),
   command: Schema.optional(TrimmedNonEmptyString),
+  /** For `provider.setup`: what the add-provider popup preselects. */
+  providerSetup: Schema.optional(
+    Schema.Struct({
+      driver: Schema.optional(TrimmedNonEmptyString),
+      instanceId: Schema.optional(ProviderInstanceId),
+    }),
+  ),
 });
 export type HandoffHuman = typeof HandoffHuman.Type;
 export const HandoffReadInput = Schema.Struct({ threadId: ThreadId, handoffId: TurnItemId });

@@ -484,6 +484,8 @@ export interface ThreadManagementServiceShape {
    * just refuse a retry the project's settings no longer allow fresh.
    */
   readonly hasReceipt: (commandId: CommandId) => Effect.Effect<boolean>;
+  /** Whether a command was accepted or rejected; null when it never ran or cannot be read. */
+  readonly receiptStatus: (commandId: CommandId) => Effect.Effect<"accepted" | "rejected" | null>;
   readonly waitForThread: (
     input: ThreadManagementWaitInput,
   ) => Effect.Effect<ThreadManagementWaitResult, ThreadManagementError>;
@@ -843,6 +845,12 @@ const make = Effect.gen(function* () {
     receipts.getByCommandId(commandId).pipe(
       Effect.orElseSucceed(() => Option.none()),
       Effect.map(Option.isSome),
+    );
+
+  const receiptStatus: ThreadManagementServiceShape["receiptStatus"] = (commandId) =>
+    receipts.getByCommandId(commandId).pipe(
+      Effect.map((receipt) => (Option.isSome(receipt) ? receipt.value.status : null)),
+      Effect.orElseSucceed(() => null),
     );
 
   const ensureLegacyTranscript = Effect.fn(
@@ -1878,6 +1886,7 @@ const make = Effect.gen(function* () {
     assertProviderInstanceEnabled,
     isProviderInstanceEnabledForProject,
     hasReceipt,
+    receiptStatus,
     waitForThread,
     settleAfterRun,
     settleThread,

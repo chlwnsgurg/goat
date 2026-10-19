@@ -34,6 +34,7 @@ import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import * as Launch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as Persistence from "../persistence/Sqlite.ts";
 import * as Projects from "../project/ProjectService.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Providers from "../provider/ProviderRegistry.ts";
 import * as Adapters from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as Remote from "../remoteReports/RemoteDispatchCoordinator.ts";
@@ -238,6 +239,10 @@ it.effect(
           Layer.mock(Providers.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
           Layer.mock(Adapters.ProviderAdapterRegistryV2)({ list: () => Effect.succeed([]) }),
           Layer.mock(Remote.RemoteDispatchCoordinator)({}),
+          Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+            namedProjectsRoot: "/projects",
+            isScratchProject: () => Effect.succeed(false),
+          }),
           Layer.mock(Ssh.SshRemoteDispatch)({}),
         );
         const tasks = Tasks.layer.pipe(Layer.provideMerge(dependencies));
