@@ -381,6 +381,8 @@ it.each(["light", "dark"] as const)(
       expect(status.textContent).not.toMatch(/did not respond|Runtime unknown/);
     }
     await fixture.capture(theme, "preparing");
+    // A page screenshot can move the pointer off the trigger; reopen the tooltip before reading it.
+    await act(() => userEvent.hover(page.elementLocator(status)));
     fixture.release();
     await preparation;
     expect(fixture.progress?.phase).toBeNull();
