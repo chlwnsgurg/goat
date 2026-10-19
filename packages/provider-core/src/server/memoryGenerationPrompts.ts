@@ -65,18 +65,63 @@ const allowedOrigins = (sources: ReadonlyArray<M.MemoryEvidence>, base: MemoryOr
     (origin) => base.includes(origin) || sources.some((source) => source.origin === origin),
   );
 
-/** The contract-shaped (still undecoded) result: null references become absent keys. */
+/**
+ * The evidence a result may cite: the supplied messages as one thread source, then evidence
+ * already in the input (the previous summary, or the conflicting heads).
+ */
+export function memoryEvidenceSources(
+  input: M.GenerateMemorySummaryInput | M.ResolveMemoryConflictInput,
+): ReadonlyArray<M.MemoryEvidence> {
+  if ("heads" in input) return input.heads.flatMap((head) => head.payload.evidence);
+  return [
+    {
+      origin: "thread",
+      sourceThread: input.sourceThread,
+      watermark: input.sourceWatermark,
+      messageIds: input.messages.filter((message) => message.completed).map((m) => m.messageId),
+    },
+    ...(input.previousSummary?.evidence ?? []),
+  ];
+}
+
+/**
+ * The contract-shaped (still undecoded) result. Null references become absent keys, and an
+ * entry whose origin and message ids match exactly one source takes that source's references:
+ * models miscopy long opaque event ids, and validation accepts nothing but the source's own
+ * values anyway. Validation still decides whether the result cites only supplied evidence.
+ */
 export function memoryResultFromModelOutput(
   output: MemorySummaryModelOutput | MemoryConflictModelOutput,
+  sources: ReadonlyArray<M.MemoryEvidence>,
 ): unknown {
   return {
     ...output,
-    evidence: output.evidence.map(({ sourceThread, watermark, importSourceId, ...rest }) => ({
-      ...rest,
-      ...(sourceThread === null ? {} : { sourceThread }),
-      ...(watermark === null ? {} : { watermark }),
-      ...(importSourceId === null ? {} : { importSourceId }),
-    })),
+    evidence: output.evidence.map(({ sourceThread, watermark, importSourceId, ...rest }) => {
+      const matches =
+        rest.origin === "model" || rest.messageIds.length === 0
+          ? []
+          : sources.filter(
+              (source) =>
+                source.origin === rest.origin &&
+                rest.messageIds.every((id) =>
+                  (source.messageIds as ReadonlyArray<string>).includes(id),
+                ),
+            );
+      const [source] = matches;
+      if (matches.length === 1 && source)
+        return {
+          ...rest,
+          ...(source.sourceThread ? { sourceThread: source.sourceThread } : {}),
+          ...(source.watermark ? { watermark: source.watermark } : {}),
+          ...(source.importSourceId === undefined ? {} : { importSourceId: source.importSourceId }),
+        };
+      return {
+        ...rest,
+        ...(sourceThread === null ? {} : { sourceThread }),
+        ...(watermark === null ? {} : { watermark }),
+        ...(importSourceId === null ? {} : { importSourceId }),
+      };
+    }),
   };
 }
 
@@ -126,10 +171,7 @@ export const buildMemoryConflictPrompt = Effect.fn("buildMemoryConflictPrompt")(
   return {
     prompt: yield* render("resolveMemoryConflict", json),
     outputSchema: memoryConflictModelOutput(
-      allowedOrigins(
-        checked.heads.flatMap((head) => head.payload.evidence),
-        ["model"],
-      ),
+      allowedOrigins(memoryEvidenceSources(checked), ["model"]),
     ),
   };
 });
@@ -145,7 +187,7 @@ export const buildMemorySummaryPrompt = Effect.fn("buildMemorySummaryPrompt")(fu
   return {
     prompt: yield* render("generateMemorySummary", json),
     outputSchema: memorySummaryModelOutput(
-      allowedOrigins(checked.previousSummary?.evidence ?? [], ["thread", "model"]),
+      allowedOrigins(memoryEvidenceSources(checked), ["model"]),
     ),
   };
 });

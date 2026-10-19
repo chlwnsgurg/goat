@@ -62,6 +62,8 @@ const result = { text: "Synthetic result", assertionKind: "inference" as const, 
 import {
   buildMemoryConflictPrompt,
   buildMemorySummaryPrompt,
+  memoryEvidenceSources,
+  memoryResultFromModelOutput,
   partitionMemorySummary,
   MEMORY_GENERATION_PROMPT_MAX_UTF8_BYTES,
 } from "./memoryGenerationPrompts.ts";
@@ -127,6 +129,32 @@ describe("memory generation prompts", () => {
       expect(strictOutputSchemaViolations(toJsonSchemaObject(resolution))).toEqual([]);
     }),
   );
+  it("takes references from the one source an entry cites, never from the model", () => {
+    // A real Codex run dropped a segment from a 290-character toEventId, so validation refused
+    // the whole summary.
+    const cited = {
+      origin: "thread" as const,
+      sourceThread: summary.sourceThread,
+      watermark: { ...summary.sourceWatermark, toEventId: "e2-miscopied" },
+      messageIds: ["m1"],
+      importSourceId: null,
+    };
+    const decide = (evidence: ReadonlyArray<typeof cited>) =>
+      Schema.decodeUnknownSync(M.GenerateMemorySummaryResult)(
+        memoryResultFromModelOutput(
+          { ...result, assertionKind: "fact", evidence },
+          memoryEvidenceSources(summary),
+        ),
+      );
+    const repaired = decide([cited]);
+    expect(repaired.evidence[0]?.watermark).toEqual(summary.sourceWatermark);
+    expect(M.validateMemoryGenerationResult(summary, repaired)).toBe(true);
+    // A message the input does not contain matches no source: the entry stays as written and
+    // validation refuses it.
+    const unknown = decide([{ ...cited, messageIds: ["m-unknown"] }]);
+    expect(unknown.evidence[0]?.watermark?.toEventId).toBe("e2-miscopied");
+    expect(M.validateMemoryGenerationResult(summary, unknown)).toBe(false);
+  });
   it.effect("rejects oversize input output and unknown evidence", () =>
     Effect.gen(function* () {
       const candidate = {
