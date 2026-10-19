@@ -3659,13 +3659,13 @@ function runtimeFailureResult(
   }
   if (
     error instanceof SshPasswordPromptError ||
-    /permission denied|authentication failed/iu.test(diagnostic)
+    /permission denied|authentication failed|SSH authentication timed out for /iu.test(diagnostic)
   ) {
     return { kind: "ok", status: { ...base, state: "auth_failed", detail: diagnostic } };
   }
   if (
     error instanceof SshReadinessError ||
-    /GOAT.*(?:did not become ready|start.*timed out)/iu.test(diagnostic)
+    /GOAT.*(?:did not become ready|(?:start|launch).*timed out)/iu.test(diagnostic)
   ) {
     return failed({ reason: "start_timeout", fix: { actor: "agent", instruction: "Try again" } });
   }
@@ -3687,7 +3687,7 @@ function runtimeFailureResult(
     kind: "error",
     code:
       error instanceof SshCommandError &&
-      /cannot reach|connection (?:refused|timed out)|operation timed out|no route to host|could not resolve hostname|network is unreachable/iu.test(
+      /cannot reach|SSH connection to .+ timed out after \d+ms before authentication began|connection (?:refused|timed out)|operation timed out|no route to host|could not resolve hostname|network is unreachable/iu.test(
         `${error.message} ${diagnostic}`,
       )
         ? "host_unreachable"

@@ -137,3 +137,63 @@ it.effect("retains a stopped local Tailscale proxy in tunnel diagnostics", () =>
     ),
   ),
 );
+
+it.effect.each(["authentication", "connection", "runtime-launch"] as const)(
+  "keeps the %s timeout consistent in runtime status",
+  (stage) =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const spawner = ChildProcessSpawner.make((command) => {
+        const args = command._tag === "StandardCommand" ? command.args : [];
+        if (args.includes("-G"))
+          return Effect.succeed(makeSuccessfulProcess("hostname fixture\nuser fixture\nport 22\n"));
+        if (stage === "runtime-launch")
+          return Effect.succeed({
+            ...makeSuccessfulProcess(""),
+            stderr: Stream.make(
+              new TextEncoder().encode("GOAT runtime launch on fixture timed out after 90000ms."),
+            ),
+            exitCode: Deferred.succeed(started, undefined).pipe(
+              Effect.as(ChildProcessSpawner.ExitCode(1)),
+            ),
+          });
+        return Effect.succeed({
+          ...makeSuccessfulProcess(""),
+          stderr: Stream.make(
+            new TextEncoder().encode(
+              stage === "authentication" ? "debug1: SSH2_MSG_SERVICE_ACCEPT received\n" : "",
+            ),
+          ),
+          exitCode: Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+        });
+      });
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        const fiber = yield* manager.status(uploadTarget).pipe(Effect.forkChild);
+        yield* Deferred.await(started);
+        yield* TestClock.adjust(Duration.minutes(1));
+        const result = yield* Fiber.join(fiber);
+        if (stage === "authentication") {
+          assert.equal(result.status?.state, "auth_failed");
+        } else if (stage === "runtime-launch") {
+          assert.equal(result.status?.failure?.reason, "start_timeout");
+        } else {
+          assert.equal(result.kind, "error");
+          if (result.kind === "error") assert.equal(result.code, "host_unreachable");
+        }
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Layer.succeed(NetService.NetService, testNetService),
+            Layer.succeed(HttpClient.HttpClient, hangingHttpClient),
+            SshAuth.SshPasswordPrompt.disabledLayer,
+            SshTunnel.SshEnvironmentManager.layer({
+              resolveCliRunner: Effect.succeed(NODE_SCRIPT),
+              leaveRemoteServerRunning: true,
+            }),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, TestClock.layer()))),
+);
