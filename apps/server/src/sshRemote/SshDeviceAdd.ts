@@ -131,6 +131,13 @@ const make = Effect.gen(function* () {
       let saveBlocked: string | undefined;
       const deniedReason = (message: string) =>
         saveBlocked === undefined ? message : `${saveBlocked} ${message}`;
+      // The grant name alone does not tell an agent what to do next.
+      const nextStep = (scope: string) =>
+        scope === "settings:write"
+          ? " A person must approve this host's key: ask them to add it in Settings → Connections → Add device → SSH, or call goat_ssh_host_add from a GOAT thread with a live settings:write grant so they can approve it there."
+          : scope === "environment:maintain"
+            ? " Ask the person to connect it in Settings → Connections, or use a caller allowed to maintain environments."
+            : "";
       return yield* Effect.gen(function* () {
         const requestTrust = (): ReturnType<SshDeviceAdd["Service"]["addDevice"]> =>
           Effect.gen(function* () {
@@ -249,7 +256,7 @@ const make = Effect.gen(function* () {
               outcome: "capability_denied" as const,
               preflight,
               saved: false as const,
-              reason: deniedReason(error.message),
+              reason: deniedReason(error.message + nextStep(error.requiredScope)),
             }),
           OrchestratorMcpFailure: (error) =>
             error.code === "capability_denied"

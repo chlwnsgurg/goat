@@ -356,7 +356,9 @@ it.effect("a new fingerprint returns preflight when an outside client lacks sett
     expect(result).toMatchObject({
       outcome: "capability_denied",
       saved: false,
-      reason: expect.stringContaining("settings:write"),
+      reason: expect.stringMatching(
+        /settings:write grant\. A person must approve this host's key: ask them to add it in Settings → Connections/u,
+      ),
       preflight: {
         ready: false,
         steps: expect.arrayContaining([
@@ -375,7 +377,9 @@ it.effect("headless preparation returns preflight when environment:maintain is m
       outcome: "capability_denied",
       saved: false,
       preflight: readyPreflight,
-      reason: expect.stringContaining("environment:maintain"),
+      reason: expect.stringMatching(
+        /environment:maintain grant\. Ask the person to connect it in Settings → Connections/u,
+      ),
     });
     expect(f.calls).toEqual(["preflight", "broker"]);
   }),
