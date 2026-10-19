@@ -476,6 +476,8 @@ interface SshTunnelEntry {
   readonly master?: SshMasterConnection;
   selectedRuntime: PreparedRemoteRuntime;
   attachmentInvalidated?: boolean;
+  // Status can revalidate an attachment, but cannot prove a submitted drain was cancelled.
+  uncertainDrain?: boolean;
   readonly key: string;
   readonly target: DesktopSshEnvironmentTarget;
   readonly remotePort: number;
@@ -2544,6 +2546,8 @@ acquire_replacement_lock() {
   LOCK_HELD=1
 }
 release_replacement_lock() { LOCK_HELD=0; }
+# The outer command already spent the lock wait budget. A borrowed owner cannot be reacquired.
+wait_for_replacement_lock() { return 1; }
 `
         : "") +
       (captureBaseline
@@ -5610,7 +5614,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           ? Effect.void
           : Effect.sync(() => {
               const previous = input.previous ?? tunnels.get(input.key);
-              if (previous !== undefined) previous.attachmentInvalidated = true;
+              if (previous !== undefined) previous.uncertainDrain = true;
             }),
       ),
     );
@@ -5734,6 +5738,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       // Keep the forward's identity for its finalizer while updating the latest selection.
       input.previous.selectedRuntime = remoteLaunch.selectedRuntime;
       input.previous.attachmentInvalidated = false;
+      input.previous.uncertainDrain = false;
       return input.previous;
     }
     if (input.previous !== undefined) {
@@ -5953,12 +5958,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     keyOnly = keyOnly || managedPin !== undefined;
     const entry = tunnels.get(key);
     if (entry !== undefined) {
-      if (entry.attachmentInvalidated === true) allowFoldedProbe = false;
+      if (entry.attachmentInvalidated === true || entry.uncertainDrain === true)
+        allowFoldedProbe = false;
       // The background retry owns a deferred refresh; this caller only needs a forward.
       if (
         reuseWhileRefreshPending &&
         pendingReplacements.has(key) &&
-        entry.attachmentInvalidated !== true
+        entry.attachmentInvalidated !== true &&
+        entry.uncertainDrain !== true
       ) {
         if (yield* keepAnsweringTunnel(key, entry)) return entry;
         // The stale forward is closed; connect anew, refreshing if the host is idle now.
@@ -5992,6 +5999,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       }
       const replace =
         entry.attachmentInvalidated === true ||
+        entry.uncertainDrain === true ||
         pendingReplacements.has(key) ||
         runner?.refreshOwnedRuntimeOnFirstConnection === true;
       if (!replace && (yield* keepAnsweringTunnel(key, entry))) return entry;
@@ -6641,6 +6649,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       closed ||
       entry === undefined ||
       entry.attachmentInvalidated === true ||
+      entry.uncertainDrain === true ||
       (snapshot?.state !== "ready" && snapshot?.state !== "providers_not_ready") ||
       !(yield* entry.process.isRunning.pipe(Effect.orElseSucceed(() => false)))
     )

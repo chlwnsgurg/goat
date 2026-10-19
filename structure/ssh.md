@@ -162,9 +162,10 @@ at most 300 s. What happens next depends on the user's confirmation:
 - On completion the server answers `drained` and sends itself `SIGTERM`. Normal shutdown
   persists restart continuations, and the successor's startup recovery restores those threads.
 
-An automatic refresh of an older compatible runtime drains only a server that answered `idle`, so
-its retries never hold up new turns. An incompatible runtime, which the client cannot use at all,
-drains for the full window.
+An automatic refresh of an older compatible runtime normally drains only a server that answered
+`idle`. Recovering an uncertain drain is the exception: the authenticated reconciliation can start
+a new drain if the earlier one cancelled, closing admission for the grace period even on a busy server. An
+incompatible runtime, which the client cannot use at all, drains for the full window.
 
 After `drained`, the script runs `__ssh-helper supervise` under `nohup` so a dropped SSH
 session cannot strand the host. The supervisor:

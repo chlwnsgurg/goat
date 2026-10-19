@@ -67,6 +67,7 @@ const fixture = Effect.gen(function* () {
     | "pending"
     | "ready-pending"
     | "ready"
+    | "older-attached"
     | "blocked"
     | "timeout"
     | "failure"
@@ -149,6 +150,7 @@ const fixture = Effect.gen(function* () {
               ? {
                   liveStatus: "live",
                   liveVersion: "1.2.2",
+                  livePort: 3773,
                   liveOwned: true,
                   liveDrain: true,
                   liveSignals: {
@@ -165,6 +167,8 @@ const fixture = Effect.gen(function* () {
               : {}),
           }),
         );
+      if (script.includes("\nset -- auth session issue --base-dir "))
+        return makeSuccessfulProcess('{"token":"agent-session","expiresAt":null}');
       if (script.includes("auth pairing create")) {
         count.pairings++;
         return pairingFails
@@ -210,13 +214,20 @@ const fixture = Effect.gen(function* () {
       }
       return makeSuccessfulProcess(
         JSON.stringify(
-          mode === "pending"
-            ? { status: "pending", pending }
-            : mode === "ready-pending"
-              ? { ...ready, selectedVersion: "1.2.2", refresh: undefined, pending }
-              : mode === "archive" || mode === "attached"
-                ? { ...ready, selectedVersion: "1.2.2", refresh: undefined }
-                : ready,
+          mode === "older-attached"
+            ? {
+                ...ready,
+                selectedVersion: "1.2.2",
+                refresh: undefined,
+                pending: { ...pending, replacement: "older" },
+              }
+            : mode === "pending"
+              ? { status: "pending", pending }
+              : mode === "ready-pending"
+                ? { ...ready, selectedVersion: "1.2.2", refresh: undefined, pending }
+                : mode === "archive" || mode === "attached"
+                  ? { ...ready, selectedVersion: "1.2.2", refresh: undefined }
+                  : ready,
         ),
       );
     }),
@@ -550,43 +561,56 @@ describe("SSH pending replacement reconciliation", () => {
       }),
   );
 
-  it.effect("status cannot revive a tunnel invalidated by a failed refresh", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture;
-      f.setMode("ready");
-      yield* Effect.gen(function* () {
-        const manager = yield* SshTunnel.SshEnvironmentManager;
-        yield* manager.ensureEnvironment(uploadTarget);
-        f.useLiveProbe();
-        f.setMode("failure");
-        assert.isTrue(
-          Result.isFailure(
-            yield* Effect.result(manager.ensureEnvironment(uploadTarget, { refreshRuntime: true })),
-          ),
-        );
-        assert.equal((yield* manager.status(uploadTarget)).status?.state, "ready");
-        assert.isTrue(
-          Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
-        );
-        assert.isTrue(
-          Result.isFailure(
-            yield* Effect.result(
-              manager.issueMcpClientSession(uploadTarget, {
-                requireReady: true,
-                label: "fixture",
-                ttl: "1h",
-                runtimeModeCeiling: null,
-              }),
+  it.effect.each(["ready", "older-attached"] as const)(
+    "status cannot revive a tunnel after a failed refresh (initial=%s)",
+    (initial) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        f.setMode(initial);
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          yield* manager.ensureEnvironment(uploadTarget);
+          f.useLiveProbe();
+          f.setMode("failure");
+          assert.isTrue(
+            Result.isFailure(
+              yield* Effect.result(
+                manager.ensureEnvironment(uploadTarget, { refreshRuntime: true }),
+              ),
             ),
-          ),
-        );
-        const attempts = f.count.launches;
-        f.setMode("ready");
-        yield* manager.ensureEnvironment(uploadTarget);
-        assert.equal(f.count.launches, attempts + 1);
-        yield* manager.readyEnvironment(uploadTarget);
-      }).pipe(Effect.provide(f.layer), Effect.scoped);
-    }),
+          );
+          assert.isTrue(
+            Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+          );
+          assert.equal((yield* manager.status(uploadTarget)).status?.state, "ready");
+          assert.isTrue(
+            Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+          );
+          assert.isTrue(
+            Result.isFailure(
+              yield* Effect.result(
+                manager.issueMcpClientSession(uploadTarget, {
+                  requireReady: true,
+                  label: "fixture",
+                  ttl: "1h",
+                  runtimeModeCeiling: null,
+                }),
+              ),
+            ),
+          );
+          const attempts = f.count.launches;
+          f.setMode("ready");
+          yield* manager.ensureEnvironment(uploadTarget);
+          assert.equal(f.count.launches, attempts + 1);
+          yield* manager.readyEnvironment(uploadTarget);
+          yield* manager.issueMcpClientSession(uploadTarget, {
+            requireReady: true,
+            label: "fixture",
+            ttl: "1h",
+            runtimeModeCeiling: null,
+          });
+        }).pipe(Effect.provide(f.layer), Effect.scoped);
+      }),
   );
 
   it.effect(

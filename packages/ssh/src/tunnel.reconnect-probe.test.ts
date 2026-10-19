@@ -1,9 +1,13 @@
+// @effect-diagnostics nodeBuiltinImport:off - host identity is fixture data for POSIX lock owners.
+import * as NodeOS from "node:os";
+import * as NodeChildProcess from "node:child_process";
 import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
 import * as HostProcess from "@goat/shared/HostProcess";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as NetService from "@goat/shared/Net";
@@ -413,7 +417,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       180_000,
     );
 
-    it.live.each([false, true])(
+    it.live.each(["none", "foreign", "live"] as const)(
       "a stale manager entry reconnects and creates a forward (replacement lock held=%s)",
       (contended) =>
         Effect.gen(function* () {
@@ -448,15 +452,28 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             const manager = yield* SshEnvironmentManager;
             yield* manager.ensureEnvironment(uploadTarget);
             const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
-            const owner = "other-client|0|1|old|fixture";
-            if (contended) yield* f.fs.symlink(owner, lock);
-            const ordinary = contended ? yield* launch(f) : undefined;
+            const owner =
+              contended === "live"
+                ? `${NodeOS.hostname()}|${process.getuid!()}|${process.pid}|${NodeChildProcess.execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } }).replace(/\n$/, "")}|fixture`
+                : "other-client|0|1|old|fixture";
+            if (contended !== "none") yield* f.fs.symlink(owner, lock);
+            if (contended === "live") {
+              // Account for the production waits without sleeping in the test. An executable
+              // double is inherited by both shells, so a repeated nested wait is observable.
+              yield* f.fs.writeFileString(
+                `${f.test}/identity-bin/sleep`,
+                '#!/bin/sh\nprintf "%s\\n" "$1" >> "$HOME/.test/lock-waits"\n',
+              );
+              yield* f.fs.chmod(`${f.test}/identity-bin/sleep`, 0o700);
+            }
+            const ordinary = contended !== "none" ? yield* launch(f) : undefined;
             if (ordinary !== undefined) {
               assert.equal(ordinary.status, "ready");
               assert.isUndefined(ordinary.pending);
             }
             const snapshot = yield* f.snapshot;
             const commands = f.remoteCommands.length;
+            if (contended === "live") yield* f.fs.writeFileString(`${f.test}/lock-waits`, "");
             forwardAlive = false;
             const cost = {
               active: true,
@@ -464,6 +481,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               authentications: 0,
               steps: {} as Record<string, number>,
             };
+            const startedAt = yield* Clock.currentTimeMillis;
             const result = yield* manager
               .ensureEnvironment(uploadTarget)
               .pipe(Effect.provideService(SshReconnectCost, cost));
@@ -475,7 +493,21 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             assert.equal(f.remoteCommands.length - commands, 1);
             assert.property(cost.steps, "runtime-probe-folded");
             assert.deepEqual(yield* f.snapshot, snapshot);
-            if (contended) {
+            if (contended === "live") {
+              const waits = (yield* f.fs.readFileString(`${f.test}/lock-waits`))
+                .trim()
+                .split("\n")
+                .map(Number);
+              assert.lengthOf(waits, 50, "the folded command shares one lock wait budget");
+              const transportMs = (f.remoteCommands.length - commands) * 2_000;
+              const elapsedMs =
+                (yield* Clock.currentTimeMillis) -
+                startedAt +
+                waits.reduce((sum, seconds) => sum + seconds * 1_000, 0) +
+                transportMs;
+              assert.isAtMost(elapsedMs, 15_000, "fits initial setup with 2 s per command latency");
+            }
+            if (contended !== "none") {
               assert.equal(yield* f.fs.readLink(lock), owner);
               yield* f.fs.remove(lock);
             }
