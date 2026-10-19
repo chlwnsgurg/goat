@@ -7,10 +7,13 @@ import {
 } from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Stream from "effect/Stream";
 import { ConnectionBlockedError, ConnectionTransientError } from "@goat/client-runtime/connection";
 
 import {
   desktopOwnsSshHostConfig,
+  networkPathChangesFrom,
   readDesktopSshRuntime,
   canRetainCachedPlatformRegistrationAfterRefreshFailure,
   canReuseCachedPlatformRegistration,
@@ -557,5 +560,57 @@ describe("managed SSH host trust boundary", () => {
         fix: { actor: "human", instruction: "Try again" },
       });
     }),
+  );
+});
+
+describe("networkPathChangesFrom", () => {
+  it.effect.each(["wifi", undefined])(
+    "tracks interface switches and drop-reconnect with initial type %s",
+    (initialType) =>
+      Effect.gen(function* () {
+        let currentType: string | undefined = initialType;
+        const target = new EventTarget();
+        const connection = Object.defineProperty(target, "type", {
+          get: () => currentType,
+        }) as EventTarget & { readonly type?: string };
+        const seen: Array<"network-changed"> = [];
+        const fiber = yield* networkPathChangesFrom(() => connection).pipe(
+          Stream.runForEach((event) => Effect.sync(() => seen.push(event))),
+          Effect.forkChild,
+        );
+        for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+
+        // An initially unavailable type must still install the listener.
+        currentType = "wifi";
+        target.dispatchEvent(new Event("change"));
+        // Same-type estimate updates do not count as a path change.
+        target.dispatchEvent(new Event("change"));
+        for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+        expect(seen).toEqual([]);
+
+        // Wi-Fi -> Ethernet switch emits once.
+        currentType = "ethernet";
+        target.dispatchEvent(new Event("change"));
+        for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+        expect(seen).toEqual(["network-changed"]);
+
+        // Dropping to none/undefined and reconnecting to the same interface emits once on return.
+        currentType = "none";
+        target.dispatchEvent(new Event("change"));
+        currentType = undefined;
+        target.dispatchEvent(new Event("change"));
+        for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+        expect(seen).toEqual(["network-changed"]);
+
+        currentType = "ethernet";
+        target.dispatchEvent(new Event("change"));
+        for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+        expect(seen).toEqual(["network-changed", "network-changed"]);
+
+        yield* Fiber.interrupt(fiber);
+        currentType = "wifi";
+        target.dispatchEvent(new Event("change"));
+        expect(seen).toHaveLength(2);
+      }),
   );
 });

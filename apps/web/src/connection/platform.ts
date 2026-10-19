@@ -99,37 +99,58 @@ const layerConnectivity = Connectivity.layer({
   ),
 });
 
-interface NetworkInformationLike extends EventTarget {
+export interface NetworkInformationLike extends EventTarget {
   readonly type?: string;
+}
+
+function activeNetworkPathType(type: string | undefined): string | undefined {
+  return type === undefined || type === "none" || type === "unknown" ? undefined : type;
 }
 
 /**
  * `change` also fires for bandwidth and latency estimates on the same network,
- * so only a type change counts.
+ * so only a path change or a drop-and-reconnect counts.
  */
-const networkPathChanges = Stream.callback<"network-changed">((queue) =>
-  Effect.acquireRelease(
-    Effect.sync(() => {
-      const connection =
-        typeof navigator === "undefined"
-          ? undefined
-          : (navigator as Navigator & { readonly connection?: NetworkInformationLike }).connection;
-      if (connection?.type === undefined) return undefined;
-      let previous = connection.type;
-      const listener = () => {
-        const type = connection.type;
-        if (type === undefined || type === previous) return;
-        previous = type;
-        Queue.offerUnsafe(queue, "network-changed");
-      };
-      connection.addEventListener("change", listener);
-      return { connection, listener };
-    }),
-    (subscription) =>
-      Effect.sync(() =>
-        subscription?.connection.removeEventListener("change", subscription.listener),
-      ),
-  ).pipe(Effect.asVoid),
+export function networkPathChangesFrom(
+  readConnection: () => NetworkInformationLike | undefined,
+): Stream.Stream<"network-changed"> {
+  return Stream.callback<"network-changed">((queue) =>
+    Effect.acquireRelease(
+      Effect.sync(() => {
+        const connection = readConnection();
+        if (connection === undefined) return undefined;
+        let previous = activeNetworkPathType(connection.type);
+        let disconnected = false;
+        const listener = () => {
+          const type = activeNetworkPathType(connection.type);
+          if (type === undefined) {
+            if (previous !== undefined) {
+              disconnected = true;
+            }
+            return;
+          }
+          const changed = previous !== undefined && (type !== previous || disconnected);
+          previous = type;
+          disconnected = false;
+          if (changed) {
+            Queue.offerUnsafe(queue, "network-changed");
+          }
+        };
+        connection.addEventListener("change", listener);
+        return { connection, listener };
+      }),
+      (subscription) =>
+        Effect.sync(() =>
+          subscription?.connection.removeEventListener("change", subscription.listener),
+        ),
+    ).pipe(Effect.asVoid),
+  );
+}
+
+const networkPathChanges = networkPathChangesFrom(() =>
+  typeof navigator === "undefined"
+    ? undefined
+    : (navigator as Navigator & { readonly connection?: NetworkInformationLike }).connection,
 );
 
 // Without a desktop bridge that reports sleep (a browser tab, an older

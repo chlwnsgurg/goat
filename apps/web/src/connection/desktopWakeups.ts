@@ -44,6 +44,8 @@ export function desktopWakeups(sources: DesktopWakeupSources): Stream.Stream<Des
     Effect.acquireRelease(
       Effect.sync(() => {
         let lastWakeupAtMs = Number.NEGATIVE_INFINITY;
+        let lastSystemWakeAtMs = Number.NEGATIVE_INFINITY;
+        let lastSystemWakeup: DesktopWakeup | null = null;
         const emit = (wakeup: DesktopWakeup) => {
           lastWakeupAtMs = sources.nowMs();
           Queue.offerUnsafe(queue, wakeup);
@@ -54,7 +56,20 @@ export function desktopWakeups(sources: DesktopWakeupSources): Stream.Stream<Des
           }
         };
         const onOnline = () => emit("application-active-probe");
-        const unsubscribe = sources.onSystemWake((event) => emit(desktopSystemWakeup(event)));
+        const unsubscribe = sources.onSystemWake((event) => {
+          const now = sources.nowMs();
+          const wakeup = desktopSystemWakeup(event);
+          if (
+            now - lastSystemWakeAtMs < DESKTOP_SLEEP_RECONNECT_AFTER_MS &&
+            (lastSystemWakeup === "application-active-reconnect" || lastSystemWakeup === wakeup)
+          ) {
+            lastWakeupAtMs = now;
+            return;
+          }
+          lastSystemWakeAtMs = now;
+          lastSystemWakeup = wakeup;
+          emit(wakeup);
+        });
         sources.window.addEventListener("focus", onFocus);
         sources.window.addEventListener("online", onOnline);
         return () => {

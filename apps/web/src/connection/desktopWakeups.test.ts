@@ -94,4 +94,46 @@ describe("desktop wakeups", () => {
       expect(seen).toHaveLength(3);
     }),
   );
+
+  it.effect(
+    "deduplicates repeated macOS system wake events while allowing a short probe to upgrade to a reconnect",
+    () =>
+      Effect.gen(function* () {
+        const shell = makeDesktopShell();
+        const seen: Array<DesktopWakeup> = [];
+        const fiber = yield* desktopWakeups(shell.sources).pipe(
+          Stream.runForEach((wakeup) => Effect.sync(() => seen.push(wakeup))),
+          Effect.forkChild,
+        );
+        yield* settle;
+
+        // macOS emits duplicate resume events and unlock-screen within seconds of lid open.
+        shell.wake({ reason: "resume", asleepMs: 5 * 60_000 });
+        shell.advance(200);
+        shell.wake({ reason: "resume", asleepMs: null });
+        shell.advance(300);
+        shell.wake({ reason: "unlock-screen", asleepMs: null });
+        shell.dispatch("focus");
+        yield* settle;
+        expect(seen).toEqual(["application-active-reconnect"]);
+
+        // After the sleep window, an early unlock probe still upgrades when a long resume arrives.
+        shell.advance(DESKTOP_SLEEP_RECONNECT_AFTER_MS);
+        shell.wake({ reason: "unlock-screen", asleepMs: null });
+        shell.advance(100);
+        shell.wake({ reason: "unlock-screen", asleepMs: null });
+        shell.advance(100);
+        shell.wake({ reason: "resume", asleepMs: DESKTOP_SLEEP_RECONNECT_AFTER_MS });
+        shell.advance(100);
+        shell.wake({ reason: "resume", asleepMs: DESKTOP_SLEEP_RECONNECT_AFTER_MS });
+        yield* settle;
+        expect(seen).toEqual([
+          "application-active-reconnect",
+          "application-active-probe",
+          "application-active-reconnect",
+        ]);
+
+        yield* Fiber.interrupt(fiber);
+      }),
+  );
 });
