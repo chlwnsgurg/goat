@@ -15,6 +15,54 @@ import {
 const runCli = Command.runWith(mergeUpdateManifestsCommand, { version: "0.0.0" });
 
 describe("merge-update-manifests", () => {
+  it("keeps electron-builder's per-file blockMapSize and isAdminRightsRequired", () => {
+    const source = `version: 0.1.0-nightly.20261019.1
+files:
+  - url: GOAT-0.1.0-nightly.20261019.1-arm64.AppImage
+    sha512: appimage
+    size: 152000000
+    blockMapSize: 452698
+  - url: GOAT-0.1.0-nightly.20261019.1-arm64-setup.exe
+    sha512: setup
+    size: 120000000
+    isAdminRightsRequired: true
+path: GOAT-0.1.0-nightly.20261019.1-arm64.AppImage
+sha512: appimage
+releaseDate: '2026-10-19T02:00:00.000Z'
+`;
+    const parsed = parsePlatformUpdateManifest("win", source, "nightly-linux-arm64.yml");
+    assert.deepStrictEqual(parsed.files, [
+      {
+        url: "GOAT-0.1.0-nightly.20261019.1-arm64.AppImage",
+        sha512: "appimage",
+        size: 152000000,
+        blockMapSize: 452698,
+      },
+      {
+        url: "GOAT-0.1.0-nightly.20261019.1-arm64-setup.exe",
+        sha512: "setup",
+        size: 120000000,
+        isAdminRightsRequired: true,
+      },
+    ]);
+    const serialized = serializePlatformUpdateManifest("win", parsed);
+    assert.include(serialized, "    blockMapSize: 452698\n");
+    assert.include(serialized, "    isAdminRightsRequired: true\n");
+    assert.deepStrictEqual(
+      parsePlatformUpdateManifest("win", serialized, "round-trip.yml").files,
+      parsed.files,
+    );
+    const other = parsePlatformUpdateManifest(
+      "win",
+      source.replace("blockMapSize: 452698", "blockMapSize: 1"),
+      "other.yml",
+    );
+    assert.throws(
+      () => mergePlatformUpdateManifests("win", parsed, other),
+      /conflicting file entry/,
+    );
+  });
+
   it("merges arm64 and x64 macOS update manifests into one multi-arch manifest", () => {
     const arm64 = parsePlatformUpdateManifest(
       "mac",
