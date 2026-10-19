@@ -62,6 +62,44 @@ it.layer(NodeServices.layer)("OpenCode memory server isolation", (it) => {
       Effect.scoped,
     ),
   );
+  it.effect("isolates outside the home on Windows, whose TEMP sits under it", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const fixture = yield* fs.realPath(
+        yield* fs.makeTempDirectoryScoped({ prefix: "goat-memory-win32-" }),
+      );
+      // Like C:\Users\<user> with AppData\Local\Temp below it and the user's .claude in it.
+      const home = path.join(fixture, "home");
+      const userTemp = path.join(home, "AppData", "Local", "Temp");
+      const systemRoot = path.join(fixture, "Windows");
+      yield* fs.makeDirectory(path.join(home, ".claude"), { recursive: true });
+      yield* fs.makeDirectory(userTemp, { recursive: true });
+      yield* fs.makeDirectory(path.join(systemRoot, "Temp"), { recursive: true });
+      const windowsTemp = FileSystem.FileSystem.of({
+        ...fs,
+        makeTempDirectoryScoped: (options) =>
+          fs.makeTempDirectoryScoped({ ...options, directory: options?.directory ?? userTemp }),
+      });
+      const prepare = (platform: NodeJS.Platform) =>
+        prepareMemoryServer(
+          "generateMemorySummary",
+          "openai",
+          { SystemRoot: systemRoot, OPENAI_API_KEY: "synthetic-openai" },
+          1,
+        ).pipe(
+          Effect.provideService(HostProcess.Platform, platform),
+          Effect.provideService(FileSystem.FileSystem, windowsTemp),
+          Effect.scoped,
+        );
+
+      const isolated = yield* prepare("win32");
+      expect(isolated.directory.startsWith(path.join(systemRoot, "Temp") + path.sep)).toBe(true);
+      // Without a folder outside the home, the walk still finds the user's .claude and refuses.
+      const refused = yield* prepare("linux").pipe(Effect.flip);
+      expect(refused.cause).toMatchObject({ code: "unavailable" });
+    }).pipe(Effect.scoped),
+  );
   it.effect("refuses system plugin discovery before preparing a server", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
