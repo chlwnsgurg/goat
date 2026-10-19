@@ -965,6 +965,13 @@ export function ConnectionEnvironmentsSection({
     if (result._tag === "Success") {
       const report = result.value;
       const destination = report.destination;
+      // Later checks and Connect must reach the alias this check resolved, not reparse
+      // the typed address without the separate user and port it was checked with.
+      if (destination.alias !== undefined && destination.alias !== target.alias) {
+        setSavedBackendSshHost(destination.alias);
+        setSavedBackendSshUsername("");
+        setSavedBackendSshPort("");
+      }
       setSshPreflight({
         report,
         target: {

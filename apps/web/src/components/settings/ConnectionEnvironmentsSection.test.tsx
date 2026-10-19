@@ -476,3 +476,30 @@ it("shows resolved configured User and Port read-only and sends no overrides on 
     input: { host: "build.example", user: "deploy", port: 2200 },
   });
 });
+it("keeps checking the managed alias a typed address with its own user and port resolved to", async () => {
+  state.preflightSshHost.mockResolvedValue({
+    _tag: "Success",
+    value: {
+      ...readyReport,
+      destination: {
+        alias: "goat-build-1a2b3c4d",
+        hostname: "build.example",
+        user: "deploy",
+        port: 2222,
+      },
+    },
+  });
+  const dialog = await openSshDialog();
+  type(input("Search hosts or type devbox"), "build.example");
+  type(input("root"), "deploy");
+  type(input("22"), "2222");
+  await act(async () => button("Check", dialog).click());
+  expect(input("Search hosts or type devbox").value).toBe("goat-build-1a2b3c4d");
+  expect(input("root").value).toBe("deploy");
+  expect(input("22").value).toBe("2222");
+  await act(async () => button("Check again", dialog).click());
+  expect(state.preflightSshHost.mock.calls.map(([call]) => call.input)).toEqual([
+    { host: "build.example", user: "deploy", port: 2222 },
+    { host: "goat-build-1a2b3c4d" },
+  ]);
+});
