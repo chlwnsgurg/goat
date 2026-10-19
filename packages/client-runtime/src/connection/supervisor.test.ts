@@ -313,6 +313,8 @@ describe("retryDelayMs", () => {
     expect(EnvironmentSupervisor.retryDelayMs(0, -1)).toBe(1_000);
     expect(EnvironmentSupervisor.retryDelayMs(0, 2)).toBe(2_000);
     expect(EnvironmentSupervisor.retryDelayMs(0, Number.NaN)).toBe(1_000);
+    expect(EnvironmentSupervisor.retryDelayMs(0, Number.POSITIVE_INFINITY)).toBe(2_000);
+    expect(EnvironmentSupervisor.retryDelayMs(0, Number.NEGATIVE_INFINITY)).toBe(1_000);
   });
 });
 

@@ -130,7 +130,7 @@ export function retryDelayMs(failureCount: number, random: number): number {
       : failureCount >= 9
         ? 9
         : Math.trunc(failureCount);
-  const clampedRandom = Number.isFinite(random) ? Math.min(1, Math.max(0, random)) : 0;
+  const clampedRandom = Number.isNaN(random) ? 0 : Math.min(1, Math.max(0, random));
   const ceiling = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (step + 1));
   return Math.round(ceiling / 2 + (ceiling / 2) * clampedRandom);
 }
