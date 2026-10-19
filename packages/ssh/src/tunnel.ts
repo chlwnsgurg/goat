@@ -461,6 +461,7 @@ export interface SshEnvironmentManagerOptions {
 interface SshTunnelEntry {
   readonly master?: SshMasterConnection;
   selectedRuntime: PreparedRemoteRuntime;
+  attachmentInvalidated?: boolean;
   readonly key: string;
   readonly target: DesktopSshEnvironmentTarget;
   readonly remotePort: number;
@@ -4700,6 +4701,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     const base = { host, runtimeVersion, requestedVersion };
     const drainAttached =
       !("type" in result) &&
+      result.attachmentInvalidated !== true &&
       pending?.detail === "drain-unavailable" &&
       (pending.replacement === "older" || pending.replacement === "capability") &&
       pending.liveVersion === runtimeVersion &&
@@ -5198,6 +5200,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         pendingReplacements.delete(input.key);
       // Keep the forward's identity for its finalizer while updating the latest selection.
       input.previous.selectedRuntime = remoteLaunch.selectedRuntime;
+      input.previous.attachmentInvalidated = false;
       return input.previous;
     }
     if (input.previous !== undefined) {
@@ -5417,7 +5420,11 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     const entry = tunnels.get(key);
     if (entry !== undefined) {
       // The background retry owns a deferred refresh; this caller only needs a forward.
-      if (reuseWhileRefreshPending && pendingReplacements.has(key)) {
+      if (
+        reuseWhileRefreshPending &&
+        pendingReplacements.has(key) &&
+        entry.attachmentInvalidated !== true
+      ) {
         if (yield* keepAnsweringTunnel(key, entry)) return entry;
         // The stale forward is closed; connect anew, refreshing if the host is idle now.
         return yield* createTunnelEntry({
@@ -5431,7 +5438,9 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         });
       }
       const replace =
-        pendingReplacements.has(key) || runner?.refreshOwnedRuntimeOnFirstConnection === true;
+        entry.attachmentInvalidated === true ||
+        pendingReplacements.has(key) ||
+        runner?.refreshOwnedRuntimeOnFirstConnection === true;
       if (!replace && (yield* keepAnsweringTunnel(key, entry))) return entry;
       if (replace) {
         const readiness = yield* Effect.exit(waitForHttpReady(existingTunnelCheck(entry, 2_000)));
@@ -5874,6 +5883,9 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     let clearArchiveDeferral:
       | { readonly failure: SshHostFailure | undefined; readonly intent: unknown }
       | undefined;
+    let drainAttachment:
+      | { entry: SshTunnelEntry; intent: NonNullable<ReturnType<typeof pendingReplacements.get>> }
+      | undefined;
     let verifiedDrainDeferral:
       | { entry: SshTunnelEntry; intent: NonNullable<ReturnType<typeof pendingReplacements.get>> }
       | undefined;
@@ -5900,6 +5912,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       observed = statuses.get(key);
       const entry = tunnels.get(key);
       const intent = pendingReplacements.get(key);
+      if (entry !== undefined && intent?.pending?.detail === "drain-unavailable")
+        drainAttachment = { entry, intent };
       yield* validateManagedPin(resolvedTarget);
       if (observed?.status?.state === "preparing" || observed?.status?.state === "update_waiting")
         return observed;
@@ -6040,11 +6054,16 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           refreshDeferred,
           detail: refreshDeferred.detail,
         };
-      } else if (
-        compatibleLive &&
-        snapshot.runtimeVersion === requestedVersion &&
-        pending?.detail !== "drain-unavailable"
-      ) {
+      } else if (pending?.detail === "drain-unavailable") {
+        snapshot = {
+          ...base,
+          runtimeVersion: snapshot.runtimeVersion,
+          state: "update_blocked",
+          detail:
+            snapshot.detail ??
+            `${host}: The deferred runtime attachment could not be verified. Try reconnecting.`,
+        };
+      } else if (compatibleLive && snapshot.runtimeVersion === requestedVersion) {
         clearArchiveDeferral = { failure: previousFailure, intent: pendingReplacements.get(key) };
       } else if (
         compatibleLive &&
@@ -6127,6 +6146,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       )
         pendingReplacements.delete(key);
     }
+    if (
+      drainAttachment !== undefined &&
+      tunnels.get(key) === drainAttachment.entry &&
+      pendingReplacements.get(key) === drainAttachment.intent
+    ) {
+      // Historical launch proof cannot readmit an attachment rejected by a fresh probe.
+      drainAttachment.entry.attachmentInvalidated = verifiedDrainDeferral === undefined;
+    }
     statuses.set(key, enriched);
     return enriched;
   });
@@ -6140,6 +6167,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     if (
       closed ||
       entry === undefined ||
+      entry.attachmentInvalidated === true ||
       (snapshot?.state !== "ready" && snapshot?.state !== "providers_not_ready") ||
       !(yield* entry.process.isRunning.pipe(Effect.orElseSucceed(() => false)))
     )
