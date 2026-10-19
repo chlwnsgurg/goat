@@ -95,6 +95,9 @@ export const make = Effect.gen(function* () {
   const http = yield* HttpClient.HttpClient;
   const signals = yield* PubSub.sliding<void>(1);
   const lock = yield* Semaphore.make(1);
+  // Orders cloud alias invalidation against check results, so a check that finishes after a
+  // machine was forgotten cannot write its route state back.
+  const routeStateLock = yield* Semaphore.make(1);
   const publish = PubSub.publish(signals, undefined).pipe(Effect.asVoid);
   const now = Clock.currentTimeMillis.pipe(
     Effect.map((at) => DateTime.formatIso(DateTime.makeUnsafe(at))),
@@ -209,7 +212,7 @@ export const make = Effect.gen(function* () {
               yield* repository.deleteRouteState(routeId);
             }
             yield* publish;
-          }).pipe(Effect.ignore)
+          }).pipe(routeStateLock.withPermits(1), Effect.ignore)
         : Effect.void,
     ),
   );
@@ -434,21 +437,33 @@ export const make = Effect.gen(function* () {
               }).pipe(Effect.timeout("15 seconds"), Effect.result);
               const at = yield* now;
               const previous = states.get(route.routeId);
-              yield* repository.upsertRouteState({
-                routeId: route.routeId,
-                environmentId:
-                  result._tag === "Success"
-                    ? (result.success ??
-                      previous?.environmentId ??
-                      identities.get(route.routeId) ??
-                      null)
-                    : (previous?.environmentId ?? identities.get(route.routeId) ?? null),
-                status: result._tag === "Success" ? "online" : "offline",
-                checkedAt: at,
-                lastSeenAt: result._tag === "Success" ? at : (previous?.lastSeenAt ?? null),
-                lastError:
-                  result._tag === "Success" ? null : "The route did not answer a read-only check.",
-              });
+              const target = route.target;
+              yield* Effect.gen(function* () {
+                if (
+                  target.kind === "cloud" &&
+                  !(yield* cloud.catalog.pipe(
+                    Effect.orElseSucceed((): ReadonlyArray<{ readonly alias: string }> => []),
+                  )).some((entry) => entry.alias === target.alias)
+                )
+                  return;
+                yield* repository.upsertRouteState({
+                  routeId: route.routeId,
+                  environmentId:
+                    result._tag === "Success"
+                      ? (result.success ??
+                        previous?.environmentId ??
+                        identities.get(route.routeId) ??
+                        null)
+                      : (previous?.environmentId ?? identities.get(route.routeId) ?? null),
+                  status: result._tag === "Success" ? "online" : "offline",
+                  checkedAt: at,
+                  lastSeenAt: result._tag === "Success" ? at : (previous?.lastSeenAt ?? null),
+                  lastError:
+                    result._tag === "Success"
+                      ? null
+                      : "The route did not answer a read-only check.",
+                });
+              }).pipe(routeStateLock.withPermits(1));
             }),
           { concurrency: 4, discard: true },
         );

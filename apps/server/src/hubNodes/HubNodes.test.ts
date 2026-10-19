@@ -362,6 +362,29 @@ describe("HubNodes", () => {
         }),
       ),
   );
+  it.effect(
+    "does not let a check that outlives a forgotten cloud machine write its state back",
+    () =>
+      run(({ service, state, repository, listeners }) =>
+        Effect.gen(function* () {
+          const alias = machine().alias;
+          state.machines = [machine("running")];
+          const identifying = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          state.identifyEffect = Deferred.succeed(identifying, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.as(remote),
+          );
+          const checking = yield* service.check({}).pipe(Effect.forkScoped);
+          yield* Deferred.await(identifying);
+          state.machines = [];
+          yield* listeners[0]!(alias);
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(checking);
+          expect(yield* repository.listRouteState).toEqual([]);
+        }),
+      ),
+  );
   it.effect("reads a headless local snapshot without desktop broker, HTTP, SSH, or Boat", () =>
     run(({ service, state }) =>
       Effect.gen(function* () {
