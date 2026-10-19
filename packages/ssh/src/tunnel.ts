@@ -914,7 +914,13 @@ if ! goat_runtime_ready; then
     GOAT_EXECUTABLE_SHA256="$(sha256sum "$GOAT_STAGING/goat" | cut -d' ' -f1)"
   fi
   # Publish provenance with the verified executable, never backfill legacy directories.
-  printf '%s %s %s %s\\n' "$GOAT_ARCHIVE_VERSION" "$GOAT_EXPECTED" "$GOAT_EXECUTABLE_SHA256" @@GOAT_ARCHIVE_SOURCE@@ > "$GOAT_STAGING/.install-record"
+  # The uploader names its source in the environment so run-t3.sh bytes stay source-free:
+  # retained-runner identity compares those bytes across launches.
+  case "\${GOAT_SSH_ARCHIVE_SOURCE:-}" in
+    bundle|cache|gh) GOAT_RECORD_SOURCE="$GOAT_SSH_ARCHIVE_SOURCE" ;;
+    *) GOAT_RECORD_SOURCE=@@GOAT_DOWNLOAD_SOURCE@@ ;;
+  esac
+  printf '%s %s %s %s\\n' "$GOAT_ARCHIVE_VERSION" "$GOAT_EXPECTED" "$GOAT_EXECUTABLE_SHA256" "$GOAT_RECORD_SOURCE" > "$GOAT_STAGING/.install-record"
   printf '%s\\n' "$GOAT_ARCHIVE_VERSION" > "$GOAT_STAGING/.install-complete"
   rm -rf "$GOAT_RUNTIME_DIR"
   mv "$GOAT_STAGING" "$GOAT_RUNTIME_DIR"
@@ -2000,9 +2006,7 @@ export function buildRemoteGoatRunnerScript(input?: RemoteGoatRunnerOptions): st
       GOAT_NODE_SCRIPT_PATH: shellSingleQuote(nodeScriptPath),
       GOAT_ARCHIVE_VERSION: shellSingleQuote(archiveVersion),
       GOAT_RELEASE_BASE_URL: shellSingleQuote(releaseBaseUrl),
-      GOAT_ARCHIVE_SOURCE: shellSingleQuote(
-        input?.archiveSource ?? (input?.releaseBaseUrl?.trim() ? "mirror" : "https"),
-      ),
+      GOAT_DOWNLOAD_SOURCE: input?.releaseBaseUrl?.trim() ? "mirror" : "https",
       GOAT_ARCHIVE_LOCK_WAIT_SECONDS: String(REMOTE_ARCHIVE_LOCK_WAIT_SECONDS),
       GOAT_ARCHIVE_DOWNLOAD_SECONDS: String(REMOTE_ARCHIVE_DOWNLOAD_SECONDS),
       GOAT_ARCHIVE_CHECKSUMS_SECONDS: String(REMOTE_ARCHIVE_CHECKSUMS_SECONDS),
@@ -2206,7 +2210,8 @@ export function buildRemoteGoatUploadInstallerScript(
 }
 
 export function buildRemoteUploadScript(input: RemoteGoatRunnerOptions, sha256: string): string {
-  const installer = buildRemoteGoatUploadInstallerScript(input, sha256);
+  const { archiveSource, ...runner } = input;
+  const installer = buildRemoteGoatUploadInstallerScript(runner, sha256);
   return `set -eu
 umask 077
 mkdir -p "$HOME/.goat/runtime/goat/versions"
@@ -2215,6 +2220,7 @@ trap 'rm -rf "$upload_dir"' EXIT
 trap 'exit 1' HUP INT TERM
 cat > "$upload_dir/archive.tar.gz"
 export GOAT_SSH_UPLOADED_ARCHIVE="$upload_dir/archive.tar.gz"
+export GOAT_SSH_ARCHIVE_SOURCE=${shellSingleQuote(archiveSource ?? "cache")}
 sh -c ${shellSingleQuote(installer)} -- --version
 `;
 }
