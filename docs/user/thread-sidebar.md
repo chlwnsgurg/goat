@@ -167,6 +167,13 @@ from the sidebar. Only top-level threads count: subagents are part of their pare
 archived threads do not count. Work an environment started on an SSH host you are not connected
 to appears as last reported by that environment.
 
+At the top, **Fleet telemetry** shows CPU, memory, and load for each machine over the last ten
+minutes, provider quota, runs started and finished in the last hour, and alerts for machines that
+are reconnecting, unreachable, or on a different GOAT version. It reads the same host status as
+**Settings → Hosts**, every 15 seconds while the page is open. A machine shows "No metrics" when
+no connected machine reports on it. Collapse the panel to stop reading host status; it stays
+collapsed until you open it again.
+
 Below the list, **Connections** shows your saved machines with the same controls as
 **Settings → Connections**: switch one off, check its routes and permissions, remove it, or pair
 another with **Add device**.
