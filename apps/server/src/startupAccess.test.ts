@@ -1,4 +1,5 @@
 import { assert, expect, it } from "@effect/vitest";
+import { buildMobilePairingLink } from "@goat/shared/mobilePairingLink";
 
 import {
   buildPairingUrl,
@@ -75,5 +76,8 @@ it("formats headless serve output with the connection string, token, pairing url
   expect(output).toContain("Connection string: http://192.168.1.42:3773");
   expect(output).toContain("Token: PAIRCODE");
   expect(output).toContain("Pairing URL: http://192.168.1.42:3773/pair#token=PAIRCODE");
-  assert.isTrue(output.includes("█") || output.includes("▀") || output.includes("▄"));
+  // The QR opens the phone app; the printed URL stays the browser link.
+  expect(output).toContain(
+    renderTerminalQrCode(buildMobilePairingLink("http://192.168.1.42:3773/pair#token=PAIRCODE")),
+  );
 });

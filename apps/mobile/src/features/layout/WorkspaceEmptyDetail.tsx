@@ -21,13 +21,13 @@ export function WorkspaceEmptyDetail(props: {
       {props.onAddConnection ? (
         <View className="w-full max-w-[430px]">
           <EmptyState
-            title="No environments connected"
-            detail="Add an environment to load projects and start coding sessions."
+            title="Connect your hub"
+            detail="Scan the QR code your hub shows to see its sessions here."
             variant="plain"
             action={
               <FloatingActionButton
-                label="Add environment"
-                icon="plus"
+                label="Scan QR code"
+                icon="qrcode.viewfinder"
                 variant="extended"
                 tone="primary"
                 onPress={props.onAddConnection}

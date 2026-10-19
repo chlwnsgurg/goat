@@ -164,7 +164,6 @@ export function FleetPage() {
             ) : null}
 
             <ConnectionCatalogUnreadableAlert />
-            {/* The same rows and Add environment flow as Settings > Connections. */}
             <ConnectionEnvironmentsSection
               title="Connections"
               searchable={false}

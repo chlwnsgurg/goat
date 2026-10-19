@@ -1,3 +1,7 @@
+import { buildMobilePairingLink } from "@goat/shared/mobilePairingLink";
+import { readHostedPairingRequest } from "@goat/shared/remote";
+import { isLoopbackHostname } from "../../environments/primary/target";
+import { resolveDesktopPairingUrl } from "./pairingUrls";
 import {
   type AdvertisedEndpoint,
   type AuthGrantScope,
@@ -112,4 +116,60 @@ export async function applyWslEnableSelection(input: {
     await bridge.setWslDistro(nextDistro);
   }
   return await bridge.setWslBackendEnabled(true);
+}
+
+export type HubPhoneQrTarget = {
+  readonly endpoint: AdvertisedEndpoint;
+  readonly endpointOrigin: string;
+  readonly kind: "tailscale-https" | "tailnet" | "lan";
+};
+
+export function selectHubPhoneQrTarget(
+  endpoints: ReadonlyArray<AdvertisedEndpoint>,
+): HubPhoneQrTarget | null {
+  const candidates = endpoints.flatMap((endpoint): HubPhoneQrTarget[] => {
+    if (endpoint.status !== "available" || endpoint.reachability === "loopback") return [];
+    let url: URL;
+    try {
+      url = new URL(endpoint.httpBaseUrl);
+    } catch {
+      return [];
+    }
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      isLoopbackHostname(url.hostname) ||
+      url.username !== "" ||
+      url.password !== ""
+    )
+      return [];
+    const base = { endpoint, endpointOrigin: url.origin };
+    if (
+      endpoint.provider.id === "tailscale" &&
+      endpoint.reachability === "private-network" &&
+      endpoint.id.startsWith("tailscale-magicdns:") &&
+      url.protocol === "https:"
+    )
+      return [{ ...base, kind: "tailscale-https" }];
+    if (endpoint.provider.id === "tailscale" && endpoint.reachability === "private-network")
+      return [{ ...base, kind: "tailnet" }];
+    return endpoint.reachability === "lan" ? [{ ...base, kind: "lan" }] : [];
+  });
+  return (
+    candidates.find((candidate) => candidate.kind === "tailscale-https") ??
+    candidates.find((candidate) => candidate.kind === "tailnet") ??
+    candidates.find((candidate) => candidate.kind === "lan") ??
+    null
+  );
+}
+
+export function buildHubPhoneQrPayload(target: HubPhoneQrTarget, credential: string): string {
+  return buildMobilePairingLink(resolveDesktopPairingUrl(target.endpointOrigin, credential));
+}
+
+export function buildClientPairingQrPayload(pairingUrl: string): string {
+  const hosted = readHostedPairingRequest(new URL(pairingUrl));
+  const directUrl = hosted
+    ? resolveDesktopPairingUrl(new URL(hosted.host).origin, hosted.token)
+    : pairingUrl;
+  return buildMobilePairingLink(directUrl);
 }

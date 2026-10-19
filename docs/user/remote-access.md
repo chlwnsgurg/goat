@@ -17,6 +17,45 @@ Previously linked servers start normally and keep their stored link dormant.
 Saved environments with only a T3 Connect route show as unavailable; add a
 direct or Tailscale route, or forget the environment in connection settings.
 
+## Connect your phone to a hub
+
+A hub is the one GOAT server your phone pairs with, ideally a machine that stays
+on. The phone and the hub must be on the same tailnet, so install Tailscale on
+both and sign in to the same account.
+
+On the hub's desktop app, open **Settings → Connections**. The **Use this device
+as a hub** card at the top has the **Tailscale HTTPS** switch and **Show phone
+QR**. Turn on Tailscale HTTPS first: without it, the QR dialog explains how to
+turn it on, and only offers a tailnet or local network address after you choose
+one. On a hub without the desktop app, run `goat serve --tailscale-serve`, then
+`goat pair --tailscale` to print a QR code.
+
+On the phone, open GOAT and tap **Scan QR code**, allow camera access the first
+time, and point the camera at the hub's QR code. The app connects as soon as it
+reads the code and opens the hub's sessions. To type an address and pairing code
+instead, open **Advanced → Enter address manually**.
+
+These QR codes are GOAT app links. Scan them from inside GOAT; scanning one with
+the phone's camera app opens GOAT's scanner, and you scan once more there. QR
+codes printed by older T3 Code versions still scan. Browsers use the
+`Pairing URL` printed next to the QR code.
+
+If pairing fails, the app shows three checks and stops at the first one that
+failed:
+
+1. **Tailscale** (or **Network** for a non-tailnet address): the phone could not
+   reach the hub. Turn on Tailscale on the phone and sign in to the hub's
+   tailnet, or check that the hub is awake.
+2. **Hub responds**: something answered, but not as a GOAT hub this app can use.
+   Check the address and update GOAT on the hub.
+3. **Pairing code**: the hub rejected the code. Codes work once and expire; show
+   a new QR code on the hub.
+
+To switch to another hub, open **Settings → Environments → Change hub** on the
+phone and scan the new hub's QR code. The old hub is removed from the phone
+after the new one connects. To keep several servers on the phone, use
+**Settings → Environments → Advanced → Add another server**.
+
 ## Pair over a LAN or private network
 
 Use direct pairing when the other device can reach the host's network address.
@@ -38,8 +77,8 @@ If a server is already running, generate a fresh link without restarting it:
 goat pair
 ```
 
-Scan the QR code on your phone or paste the pairing URL into **Add environment**
-in the receiving app. Connection settings are under **Settings → Connections**
+Scan the QR code from the GOAT app on your phone, or paste the pairing URL into
+**Add device → Tailscale (GOAT server)** on web and desktop. Connection settings are under **Settings → Connections**
 on web and desktop and **Settings → Environments** on mobile. A loopback address
 such as `127.0.0.1` reaches only the device opening the link.
 
@@ -140,7 +179,7 @@ On mobile, an IP address entered without a scheme uses HTTP, so include
 
 ## Desktop-managed SSH
 
-In the desktop app, open **Settings → Connections → Add environment**, choose
+In the desktop app, open **Settings → Connections → Add device**, choose
 **SSH**, and enter a host or SSH alias such as `user@example.com`. GOAT starts
 or reuses a server there and opens the port forward for you. Projects, provider
 credentials, and agent work stay on the remote machine.
@@ -215,7 +254,7 @@ For Antigravity's Google callback on a remote host, see
 
 ### A fresh VPS
 
-Open **Settings → Connections → Add environment → SSH**, or tell an agent to
+Open **Settings → Connections → Add device → SSH**, or tell an agent to
 “connect a new SSH host” and give it the address and SSH user. Check the displayed
 host-key fingerprint against your server provider's record before approving.
 The first approval also lets GOAT add its Include line to your SSH config.

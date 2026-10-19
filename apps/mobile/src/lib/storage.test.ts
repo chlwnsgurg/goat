@@ -147,6 +147,13 @@ describe("mobile connection storage", () => {
     vi.clearAllMocks();
   });
 
+  it("ignores the unshipped preference hub id without migrating it", async () => {
+    mocks.setPreferencesJson(JSON.stringify({ hubEnvironmentId: "hub-c", themeMode: "dark" }), 1);
+    await expect(loadPreferences()).resolves.toEqual({ themeMode: "dark" });
+    await savePreferencesPatch({ codeWordBreak: true });
+    await expect(loadPreferences()).resolves.toEqual({ themeMode: "dark", codeWordBreak: true });
+  });
+
   it("persists relay-managed connections without their ephemeral access token", async () => {
     await saveConnection(managedConnection);
 

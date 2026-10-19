@@ -19,6 +19,7 @@ export type StoredConnectionCredential = typeof StoredConnectionCredential.Type;
 
 export const ConnectionCatalogDocument = Schema.Struct({
   schemaVersion: Schema.Literal(1),
+  hub: Schema.optionalKey(Schema.Struct({ environmentId: EnvironmentId })),
   targets: Schema.Array(PersistedConnectionTarget),
   profiles: Schema.Array(ConnectionProfile),
   credentials: Schema.Array(StoredConnectionCredential),
@@ -38,6 +39,21 @@ export const EMPTY_CONNECTION_CATALOG_DOCUMENT: ConnectionCatalogDocument = Obje
   remoteDpopTokens: [],
   disabledEnvironmentIds: [],
 });
+
+export function readCatalogHub(document: ConnectionCatalogDocument): EnvironmentId | null {
+  return document.hub?.environmentId ?? null;
+}
+
+export function setCatalogHub(
+  document: ConnectionCatalogDocument,
+  environmentId: EnvironmentId | null,
+): ConnectionCatalogDocument {
+  if (environmentId === null) {
+    const { hub: _hub, ...rest } = document;
+    return rest;
+  }
+  return { ...document, hub: { environmentId } };
+}
 
 export function replaceCatalogValue<A>(
   values: ReadonlyArray<A>,
@@ -179,7 +195,9 @@ export function removeConnectionFromCatalog(
   document: ConnectionCatalogDocument,
   environmentId: EnvironmentId,
 ): ConnectionCatalogDocument {
-  const next = setRoutesInCatalog(document, environmentId, []);
+  const withoutHub =
+    readCatalogHub(document) === environmentId ? setCatalogHub(document, null) : document;
+  const next = setRoutesInCatalog(withoutHub, environmentId, []);
   return {
     ...next,
     remoteDpopTokens: removeCatalogValue(
