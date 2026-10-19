@@ -150,15 +150,15 @@ it("requires an explicit hub choice when several Settings targets apply", async 
   await render();
   expect(state.query).not.toHaveBeenCalled();
   expect(container.textContent).toContain("Choose a hub to see its devices.");
-  await act(async () => button("Use hub Office hub").click());
-  expect(button("Use hub Office hub").getAttribute("aria-checked")).toBe("true");
+  await act(async () => button("Use hub Office hub, connected").click());
+  expect(button("Use hub Office hub, connected").getAttribute("aria-checked")).toBe("true");
   expect(state.query).toHaveBeenCalledWith({ environmentId: second.environmentId, input: {} });
   expect(container.textContent).toContain("Hub: Office hub");
 });
 
 it("keeps the chosen hub disconnected instead of switching, and resumes it on reconnect", async () => {
   await render();
-  await act(async () => button("Use hub Office hub").click());
+  await act(async () => button("Use hub Office hub, connected").click());
   state.query.mockClear();
   state.selectedTargets = [first];
   state.environments = [first];
@@ -201,6 +201,19 @@ it("offers an explicit choice when a hub appears after opening with none", async
   state.environments = [first];
   state.selectedTargets = [first];
   await render();
-  await act(async () => button("Use hub Home hub").click());
+  await act(async () => button("Use hub Home hub, connected").click());
   expect(state.query).toHaveBeenCalledWith({ environmentId: first.environmentId, input: {} });
+});
+
+it("tells the user when the chosen hub is too old to keep a device list", async () => {
+  state.environments = [first];
+  state.selectedTargets = [first];
+  state.query.mockReturnValue({
+    data: null,
+    error: null,
+    cause: new Error("Unknown request tag: hub.nodes.subscribe"),
+  });
+  await render();
+  expect(container.textContent).toContain("This hub runs an older GOAT without a device list.");
+  expect(container.querySelector('button[aria-label="Check Lab server"]')).toBeNull();
 });

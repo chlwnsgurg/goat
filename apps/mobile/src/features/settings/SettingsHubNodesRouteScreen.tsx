@@ -135,7 +135,13 @@ function HubNodesList({ environmentId }: { readonly environmentId: EnvironmentId
       setError(failure instanceof Error ? failure.message : "The hub request failed.");
     }
   };
-  if (isHubNodesUnsupportedError(listed.cause)) return null;
+  if (isHubNodesUnsupportedError(listed.cause))
+    return (
+      <Text className="text-foreground-muted">
+        This hub runs an older GOAT without a device list. Update GOAT on the hub to manage its
+        devices here.
+      </Text>
+    );
   return (
     <View className="gap-4">
       <Text className="text-sm text-foreground-muted">
