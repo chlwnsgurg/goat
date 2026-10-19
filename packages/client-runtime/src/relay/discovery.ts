@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import type {
   RelayClientEnvironmentRecord,
   RelayEnvironmentStatusResponse,
@@ -101,11 +102,14 @@ function relayAccountId(clerkToken: string): Option.Option<string> {
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.fn("RelayEnvironmentDiscovery.make")(function* () {
+  const state = yield* SubscriptionRef.make(EMPTY_RELAY_ENVIRONMENT_DISCOVERY_STATE);
+  if (!isGoatConnectEnabled()) {
+    return RelayEnvironmentDiscovery.of({ state, refresh: Effect.void });
+  }
   const relay = yield* ManagedRelay.ManagedRelayClient;
   const session = yield* ClientCapabilities.CloudSession;
   const connectivity = yield* Connectivity.Connectivity;
   const wakeups = yield* ConnectionWakeups.ConnectionWakeups;
-  const state = yield* SubscriptionRef.make(EMPTY_RELAY_ENVIRONMENT_DISCOVERY_STATE);
   const refreshLock = yield* Semaphore.make(1);
   const hasRefreshed = yield* Ref.make(false);
   const accountGeneration = yield* Ref.make(0);

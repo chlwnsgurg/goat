@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import Constants from "expo-constants";
 import { relayClerkTokenOptions } from "@goat/shared/relayAuth";
 import { normalizeSecureRelayUrl } from "@goat/shared/relayUrl";
@@ -57,6 +58,13 @@ function normalizeSecureUrl(value: unknown): string | null {
 }
 
 export function resolveCloudPublicConfig(extra: ExpoExtra = Constants.expoConfig?.extra) {
+  if (!isGoatConnectEnabled()) {
+    return {
+      clerk: { publishableKey: null, jwtTemplate: null },
+      relay: { url: null },
+      observability: { tracesUrl: null, tracesDataset: null, tracesToken: null },
+    } satisfies CloudPublicConfig;
+  }
   return {
     clerk: {
       publishableKey: trimNonEmpty(extra?.clerk?.publishableKey),

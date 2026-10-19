@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { ConnectionTraceId } from "./ConnectionTraceId";
 import { useAuth } from "@clerk/expo";
@@ -37,6 +38,7 @@ interface CloudEnvironmentRowsProps {
 }
 
 export function CloudEnvironmentRows(props: CloudEnvironmentRowsProps) {
+  if (!isGoatConnectEnabled()) return null;
   // Showcase captures run without a Clerk publishable key, so `ClerkProvider`
   // is never mounted and any `useAuth` call throws — the fixture states whether
   // the rows are signed in instead of asking Clerk.

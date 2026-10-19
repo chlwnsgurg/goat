@@ -26,6 +26,7 @@ import {
 } from "~/components/solar";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 
+import { hasCloudPublicConfig } from "../../cloud/publicConfig";
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
 import {
@@ -347,16 +348,20 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
         </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
-        <Suspense fallback={null}>
-          <T3ConnectSidebarSignIn />
-        </Suspense>
+        {hasCloudPublicConfig() ? (
+          <Suspense fallback={null}>
+            <T3ConnectSidebarSignIn />
+          </Suspense>
+        ) : null}
         <div className="flex items-center gap-1">
           <div className="min-w-0 flex-1">
             <SidebarUtilityMenu />
           </div>
-          <Suspense fallback={null}>
-            <T3ConnectSidebarAvatar />
-          </Suspense>
+          {hasCloudPublicConfig() ? (
+            <Suspense fallback={null}>
+              <T3ConnectSidebarAvatar />
+            </Suspense>
+          ) : null}
         </div>
       </SidebarFooter>
     </>

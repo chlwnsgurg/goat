@@ -1,3 +1,4 @@
+import { installRelayClient } from "./cloud/installRelayClient.ts";
 import * as CodexRoutes from "./provider/CodexRouteService.ts";
 import * as SshHostSetup from "./sshRemote/SshHostSetup.ts";
 import * as Handoffs from "./handoffs/Handoffs.ts";
@@ -92,8 +93,6 @@ import {
   ProjectMutationError,
   ProviderUploadFeedbackError,
   ProviderSetupError,
-  RelayClientInstallFailedError,
-  type RelayClientInstallProgressEvent,
   type ServerConfig as ClientServerConfig,
   type ServerConfigStreamEvent,
   type ServerLifecycleStreamEvent,
@@ -2727,31 +2726,7 @@ const layerWsRpc = (
           backgroundPolicy.reportHostPowerState(input),
         [WS_METHODS.serverGetBackgroundPolicy]: (_input) => backgroundPolicy.snapshot,
         [WS_METHODS.cloudGetRelayClientStatus]: (_input) => relayClient.resolve,
-        [WS_METHODS.cloudInstallRelayClient]: (_input) =>
-          Stream.callback<RelayClientInstallProgressEvent, RelayClientInstallFailedError>((queue) =>
-            relayClient
-              .installWithProgress((event) => Queue.offer(queue, event).pipe(Effect.asVoid))
-              .pipe(
-                Effect.flatMap((status) =>
-                  Queue.offer(queue, {
-                    type: "complete",
-                    status,
-                  }),
-                ),
-                Effect.catchTags({
-                  RelayClientInstallError: (error) =>
-                    Queue.fail(
-                      queue,
-                      new RelayClientInstallFailedError({
-                        reason: error.reason,
-                        message: error.message,
-                      }),
-                    ),
-                }),
-                Effect.andThen(Queue.end(queue)),
-                Effect.forkScoped,
-              ),
-          ),
+        [WS_METHODS.cloudInstallRelayClient]: (_input) => installRelayClient(relayClient),
         [WS_METHODS.pullRequestsList]: (input) => pullRequests.list(input),
         [WS_METHODS.pullRequestsListStats]: (input) => pullRequests.listStats(input),
         [WS_METHODS.pullRequestsRoutingIdentity]: (input) => pullRequests.routingIdentity(input),

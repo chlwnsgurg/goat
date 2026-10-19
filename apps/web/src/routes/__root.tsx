@@ -1,3 +1,4 @@
+import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { PermissionUpdateNotice } from "../components/PermissionUpdateNotice";
 import { type ServerLifecycleWelcomePayload } from "@goat/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@goat/client-runtime/environment";
@@ -234,7 +235,7 @@ function RootRouteView() {
           {primaryEnvironmentAuthenticated ? <DesktopAppActivationCoordinator /> : null}
           {primaryEnvironmentAuthenticated ? <DesktopWebLinkCoordinator /> : null}
           {isElectron ? <RunningThreadKeepAlive /> : null}
-          <RelayClientInstallDialog />
+          {hasCloudPublicConfig() ? <RelayClientInstallDialog /> : null}
           <ConnectOnboardingDialog />
           <SshPasswordPromptDialog />
           <SnapShotCoordinator />

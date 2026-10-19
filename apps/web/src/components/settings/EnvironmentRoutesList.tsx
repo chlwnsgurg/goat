@@ -20,13 +20,13 @@ import {
   type ConnectionRoute,
   connectionRouteAddress,
   connectionRouteId,
-  connectionRouteLabel,
   connectionRoutes,
   isLearned,
 } from "@goat/client-runtime/connection";
 import { GripVerticalIcon, PlusIcon, XIcon } from "~/components/solar";
 import { useState } from "react";
 
+import { savedConnectionRouteLabel } from "./EnvironmentRow.logic";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { environmentCatalog } from "~/connection/catalog";
 import { cn } from "~/lib/utils";
@@ -70,7 +70,7 @@ export function EnvironmentRoutesList({
   const confirmRemove = async (route: ConnectionRoute) => {
     const address = connectionRouteAddress(route);
     const confirmed = await requestConfirmDialog(
-      `Remove ${connectionRouteLabel(route)} route?${address === null ? "" : `\n${address}`}`,
+      `Remove ${savedConnectionRouteLabel(route)} route?${address === null ? "" : `\n${address}`}`,
       { variant: "destructive" },
     );
     if (confirmed !== true) return;
@@ -140,7 +140,7 @@ function SortableRouteRow({
   readonly onRemove: () => void;
 }) {
   const id = connectionRouteId(route.target);
-  const label = connectionRouteLabel(route);
+  const label = savedConnectionRouteLabel(route);
   const address = connectionRouteAddress(route);
   const {
     attributes,

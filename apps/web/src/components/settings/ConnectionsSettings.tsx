@@ -1,3 +1,5 @@
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import { ensureLocalApi } from "../../localApi";
 import { settlePromise } from "@goat/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 import { SessionPermissions } from "./SessionPermissions";
@@ -2397,7 +2399,9 @@ export function ConnectionsSettings() {
                 <AlertDialogDescription>
                   {pendingDesktopServerExposureMode === "network-accessible"
                     ? "Let your other devices connect to GOAT over the network. Pair devices to give them access. GOAT will restart."
-                    : "Devices connected over your local network will disconnect. Existing tunnels, such as T3 Connect or Tailscale HTTPS, keep working. GOAT will restart."}
+                    : isGoatConnectEnabled()
+                      ? "Devices connected over your local network will disconnect. Existing tunnels, such as T3 Connect or Tailscale HTTPS, keep working. GOAT will restart."
+                      : "Devices connected over your local network will disconnect. Tailscale HTTPS keeps working. GOAT will restart."}
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -2665,6 +2669,25 @@ export function ConnectionsSettings() {
   return (
     <SettingsPageContainer>
       <ConnectionCatalogUnreadableAlert />
+      {!isGoatConnectEnabled() ? (
+        <SettingsSection {...searchableSetting("goat-connect-coming-soon")} hideTitle>
+          <SettingsRow
+            title={`${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}`}
+            description={GOAT_CONNECT_COMING_SOON.description}
+            control={
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  void ensureLocalApi().shell.openExternal(GOAT_CONNECT_COMING_SOON.guideUrl)
+                }
+              >
+                Tailscale guide
+              </Button>
+            }
+          />
+        </SettingsSection>
+      ) : null}
       {primarySettings}
       <ConnectionEnvironmentsSection />
       <AdvancedSettingsDisclosure targetIds={ADVANCED_CONNECTION_SETTING_IDS}>

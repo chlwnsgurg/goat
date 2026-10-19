@@ -1,3 +1,4 @@
+import { vi } from "vite-plus/test";
 import { ProviderMemoryImportRuntime } from "../memory/imports/MemoryImportTypes.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -574,3 +575,8 @@ it.effect("hub advertisement follows registered routes and live disable/re-enabl
     }).pipe(Effect.provide(ServerEnvironment.layer.pipe(Layer.provideMerge(routes))));
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));

@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import {
   RelayManagedEndpointOrigin,
   RelayManagedEndpointRuntimeConfig,
@@ -52,6 +53,7 @@ export const readAgentActivityPublishingActive = (
   secrets: ServerSecretStore.ServerSecretStore["Service"],
 ): Effect.Effect<boolean> =>
   Effect.gen(function* () {
+    if (!isGoatConnectEnabled()) return false;
     const readSecretString = (name: string) =>
       secrets
         .get(name)
@@ -85,15 +87,23 @@ const readSecretString = (name: string) =>
     Effect.orElseSucceed(() => null),
   );
 
-export const readRelayConnection = Effect.all([
-  readSecretString(RELAY_URL_SECRET),
-  readSecretString(RELAY_ENVIRONMENT_CREDENTIAL_SECRET),
-]).pipe(
-  Effect.map(([url, environmentCredential]) =>
-    url && environmentCredential ? { url, environmentCredential } : null,
-  ),
+export const readRelayConnection = Effect.suspend(() =>
+  !isGoatConnectEnabled()
+    ? Effect.succeed(null)
+    : Effect.all([
+        readSecretString(RELAY_URL_SECRET),
+        readSecretString(RELAY_ENVIRONMENT_CREDENTIAL_SECRET),
+      ]).pipe(
+        Effect.map(([url, environmentCredential]) =>
+          url && environmentCredential ? { url, environmentCredential } : null,
+        ),
+      ),
 );
 
-export const readHoldWebhooksWhileOffline = readSecretString(
-  HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET,
-).pipe(Effect.map((value) => value === "true"));
+export const readHoldWebhooksWhileOffline = Effect.suspend(() =>
+  !isGoatConnectEnabled()
+    ? Effect.succeed(false)
+    : readSecretString(HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET).pipe(
+        Effect.map((value) => value === "true"),
+      ),
+);

@@ -23,7 +23,11 @@ import {
   unregisterAgentAwarenessDeviceForCurrentUser,
 } from "../agent-awareness/remoteRegistration";
 import { clearConnectOnboardingRequest, requestConnectOnboarding } from "./connectOnboarding";
-import { resolveCloudPublicConfig, resolveRelayClerkTokenOptions } from "./publicConfig";
+import {
+  hasCloudPublicConfig,
+  resolveCloudPublicConfig,
+  resolveRelayClerkTokenOptions,
+} from "./publicConfig";
 import { removeCloudEnvironments } from "./cloud-drafts";
 
 function resetManagedRelayTokenCache() {
@@ -192,15 +196,17 @@ function CloudAuthBridge(props: { readonly children: ReactNode }) {
 export function CloudAuthProvider(props: { readonly children: ReactNode }) {
   const config = resolveCloudPublicConfig();
   const publishableKey = config.clerk.publishableKey;
-  const relayUrl = config.relay.url;
+  const enabled = hasCloudPublicConfig();
 
   useEffect(() => {
-    if (!publishableKey || !relayUrl) {
-      deactivateCloudRelayAccount();
+    if (!enabled) {
+      // Disabling Connect is not a sign-out; retain the saved registration.
+      releaseAgentAwarenessRelayTokenProvider();
+      setManagedRelaySession(appAtomRegistry, null);
     }
-  }, [publishableKey, relayUrl]);
+  }, [enabled]);
 
-  if (!publishableKey || !relayUrl) {
+  if (!enabled || !publishableKey) {
     return props.children;
   }
 

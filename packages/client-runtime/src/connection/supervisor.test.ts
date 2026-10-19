@@ -1,3 +1,10 @@
+import { vi } from "vite-plus/test";
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));
+
 import { AuthStandardClientScopes, EnvironmentId, type ServerConfig } from "@goat/contracts";
 import { RelayClientTracer } from "@goat/shared/relayTracing";
 import { describe, expect, it } from "@effect/vitest";

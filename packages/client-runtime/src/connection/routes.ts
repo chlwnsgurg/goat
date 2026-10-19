@@ -1,3 +1,4 @@
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import {
   isLocalLoopbackHost,
   isPrivateNetworkHost,
@@ -158,7 +159,9 @@ function routeAddressKey(route: ConnectionRoute): string | null {
 export function connectionRouteLabel(route: ConnectionRoute): string {
   switch (connectionRouteKind(route)) {
     case "relay":
-      return "T3 Connect";
+      return isGoatConnectEnabled()
+        ? "T3 Connect"
+        : `${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}`;
     case "loopback":
       return "This device";
     case "lan":
@@ -341,10 +344,21 @@ export function sendsTokenInClear(
   );
 }
 
-/** Routes a connect may use: none sends a paired token over plain HTTP it wasn't paired over. */
+export function isConnectionRouteEnabled(route: ConnectionRoute): boolean {
+  const profile = Option.getOrNull(route.profile);
+  return (
+    isGoatConnectEnabled() ||
+    (route.target._tag !== "RelayConnectionTarget" &&
+      !(profile?._tag === "BearerConnectionProfile" && profile.authorization === "t3-connect"))
+  );
+}
+
+/** Routes a connect may use without sending a paired token over unintended plain HTTP. */
 export function usableRoutes(entry: ConnectionCatalogEntry): ReadonlyArray<ConnectionRoute> {
   const routes = connectionRoutes(entry);
-  return routes.filter((route) => !sendsTokenInClear(routes, route));
+  return routes.filter(
+    (route) => isConnectionRouteEnabled(route) && !sendsTokenInClear(routes, route),
+  );
 }
 
 export interface ReportedEndpoint {

@@ -1,3 +1,5 @@
+import { GOAT_CONNECT_COMING_SOON } from "@goat/shared/goatConnect";
+import { isGoatConnectUnavailable } from "./EnvironmentRow.logic";
 import { sshHostProbeErrorText } from "@goat/client-runtime/state/sshHost";
 import * as Schema from "effect/Schema";
 import { HandoffReview } from "../chat/HandoffReview";
@@ -323,6 +325,7 @@ function savedBackendStatus(environment: EnvironmentPresentation): {
   readonly text: string;
   readonly tone: "muted" | "error";
 } {
+  if (isGoatConnectUnavailable(environment.entry)) return { text: "Unavailable", tone: "muted" };
   if (!environment.entry.enabled && environment.connection.phase !== "unsupported")
     return { text: "Off", tone: "muted" };
   const { connection } = environment;
@@ -486,21 +489,23 @@ function SavedBackendListRow({
     versionMismatch !== null &&
     (serverUpdateState.status === "idle" || serverUpdateState.status === "failed");
 
-  const statusTooltip = `${
-    unsupported
-      ? (environment.connection.error ?? connectionStatusText(environment.connection))
-      : enabled
-        ? connectionStatusText(environment.connection)
-        : "Switched off"
-  }${
-    versionMismatch
-      ? `\nUpdate available: ${versionMismatch.serverVersion} → ${versionMismatch.clientVersion}`
-      : ""
-  }${
-    savedSshTarget && runtimeStatus
-      ? `\nRuntime ${runtimeStatus.runtimeVersion ?? "unknown"} · This app ${runtimeStatus.requestedVersion}`
-      : ""
-  }`;
+  const statusTooltip = isGoatConnectUnavailable(environment.entry)
+    ? `${GOAT_CONNECT_COMING_SOON.status}. ${GOAT_CONNECT_COMING_SOON.description}`
+    : `${
+        unsupported
+          ? (environment.connection.error ?? connectionStatusText(environment.connection))
+          : enabled
+            ? connectionStatusText(environment.connection)
+            : "Switched off"
+      }${
+        versionMismatch
+          ? `\nUpdate available: ${versionMismatch.serverVersion} → ${versionMismatch.clientVersion}`
+          : ""
+      }${
+        savedSshTarget && runtimeStatus
+          ? `\nRuntime ${runtimeStatus.runtimeVersion ?? "unknown"} · This app ${runtimeStatus.requestedVersion}`
+          : ""
+      }`;
 
   return (
     <EnvironmentRow
@@ -1402,6 +1407,7 @@ export function ConnectionEnvironmentsSection({
   // T3 Connect is offered as a route when this account can reach the machine
   // through it and it is not one of the machine's routes yet.
   const relayRouteOffer =
+    hasCloudPublicConfig() &&
     routeTarget !== null &&
     !routeTarget.relayManaged &&
     relayDiscoveryState.environments.has(routeTarget.environmentId)

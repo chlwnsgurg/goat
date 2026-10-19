@@ -1,5 +1,16 @@
-import { type ConnectionCatalogEntry, hasRelayRoute } from "@goat/client-runtime/connection";
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import {
+  type ConnectionCatalogEntry,
+  hasRelayRoute,
+  usableRoutes,
+} from "@goat/client-runtime/connection";
 import type { EnvironmentId } from "@goat/contracts";
+
+export function isOnboardingEnvironmentAvailable(environment: {
+  readonly entry: ConnectionCatalogEntry;
+}): boolean {
+  return isGoatConnectEnabled() || usableRoutes(environment.entry).length > 0;
+}
 
 interface OnboardingEnvironment {
   readonly environmentId: EnvironmentId;

@@ -60,8 +60,8 @@ service is still installed and will start at the next login.
 
 Windows background services are not supported.
 
-T3 Connect can offer service installation during setup, but the two are managed
-separately. Signing out of T3 Connect does not stop or uninstall the service.
+The background service runs independently of GOAT Connect. Previously linked
+servers keep starting normally; connect with [direct pairing or Tailscale](./remote-access.md#tailscale-https).
 
 ## Troubleshooting
 
@@ -83,9 +83,8 @@ ssh -t your-server 'sudo loginctl enable-linger "$(id -un)"'
 ```
 
 Then retry service setup as your normal user. Run only the `loginctl` command
-with sudo; running GOAT as root creates a separate installation and Connect
-identity. Without administrator access, run `goat serve` in a terminal and keep
-that session open.
+with sudo; running GOAT as root creates a separate installation. Without
+administrator access, run `goat serve` in a terminal and keep that session open.
 
 | Status problem                          | Next step                                                                                                                      |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
@@ -100,8 +99,8 @@ Downloads, it may need Full Disk Access for the `goat` executable listed in
 `ProgramArguments` in
 `~/Library/LaunchAgents/si.goat.service.plist`.
 
-For failures after signing in to T3 Connect, see
-[connection troubleshooting](./remote-access.md#t3-connect-troubleshooting).
+For connecting another device to a running server, see
+[remote access](./remote-access.md).
 
 ## Reclaim database space
 

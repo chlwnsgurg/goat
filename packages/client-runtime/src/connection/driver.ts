@@ -1,3 +1,4 @@
+import { GOAT_CONNECT_COMING_SOON } from "@goat/shared/goatConnect";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -12,11 +13,12 @@ import type {
   ConnectionAttemptStage,
   PreparedConnection,
 } from "./model.ts";
-import { ConnectionTransientError } from "./model.ts";
+import { ConnectionBlockedError, ConnectionTransientError } from "./model.ts";
 import * as ConnectionResolver from "./resolver.ts";
 import {
   connectionRouteId,
   connectionRoutes,
+  isConnectionRouteEnabled,
   routeEntry,
   routeHttpBaseUrl,
   sendsTokenInClear,
@@ -71,6 +73,15 @@ export const connectOverRoutes = Effect.fn("ConnectionDriver.connectOverRoutes")
   ) => Effect.Effect<EnvironmentConnectionLease, ConnectionAttemptError, R | Scope.Scope>,
 ) {
   const routes = usableRoutes(entry);
+  if (
+    routes.length === 0 &&
+    connectionRoutes(entry).some((route) => !isConnectionRouteEnabled(route))
+  ) {
+    return yield* new ConnectionBlockedError({
+      reason: "configuration",
+      detail: `${GOAT_CONNECT_COMING_SOON.title} is coming soon. ${GOAT_CONNECT_COMING_SOON.description}`,
+    });
+  }
   const checks =
     routes.length === 1
       ? []
@@ -126,6 +137,7 @@ export const make = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
 
   const checkRoute = (entry: ConnectionCatalogEntry, route: ConnectionRoute) => {
+    if (!isConnectionRouteEnabled(route)) return Effect.succeed<RouteCheck>("silent");
     const httpBaseUrl = routeHttpBaseUrl(route);
     if (httpBaseUrl === null) return Effect.succeed<RouteCheck>("unchecked");
     // The descriptor is public, so this sends no credential to whatever

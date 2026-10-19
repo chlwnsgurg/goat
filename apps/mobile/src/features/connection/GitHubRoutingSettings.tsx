@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import * as Dialog from "../../components/ui/Dialog";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -62,7 +63,8 @@ export function GitHubRoutingSettings() {
                     {entry.target.label}
                   </Text>
                   <Text className="text-xs text-foreground-muted" numberOfLines={1}>
-                    {connectionCatalogDisplayUrl(entry) ?? "T3 Connect"}
+                    {connectionCatalogDisplayUrl(entry) ??
+                      (isGoatConnectEnabled() ? "T3 Connect" : "Saved environment")}
                   </Text>
                 </View>
                 <Text className="text-sm text-foreground-muted">

@@ -21,7 +21,8 @@ in `apps/server/src/orchestration-v2/ThreadMessageIntake.ts`, which calls
 `ThreadManagementService.dispatch` unless the thread is a bot thread.
 
 Subcommands on the same binary include `serve`, `pair`, `service`, and `update`. `connect` is
-registered when the build has T3 Connect public configuration. Remote launch scripts call
+always registered; while `GOAT_CONNECT_ENABLED` is false in `@goat/shared/goatConnect`,
+it prints the GOAT Connect coming-soon message and exits 0 without running Connect setup. Remote launch scripts call
 `__ssh-helper` (`apps/server/src/cli/sshHelper.ts`). The list is `apps/server/src/binCli.ts`.
 
 `goat service` installs the server as the systemd user unit `goat.service` or the launch agent

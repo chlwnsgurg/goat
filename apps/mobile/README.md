@@ -20,9 +20,11 @@ Names, URL schemes (`goat`, `goat-preview`, `goat-dev`) and bundle ids live in
 
 Run commands from `apps/mobile`.
 
-T3 Connect is optional and disabled in a fresh clone. Public configuration belongs in the
-repository-root `.env` or `.env.local`, not an `apps/mobile/.env` file. See
-[`../../.env.example`](../../.env.example).
+GOAT Connect is coming soon. T3 Connect is disabled in every build by
+`GOAT_CONNECT_ENABLED=false` in `@goat/shared/goatConnect`, even with public configuration.
+Use [direct pairing or Tailscale](../../docs/user/remote-access.md#tailscale-https).
+Dormant Connect configuration belongs in the repository-root `.env` or `.env.local`,
+not an `apps/mobile/.env` file; see the [setup runbook](../../docs/operations/connect-setup.md).
 
 ## Development
 
@@ -129,9 +131,9 @@ Preview and production variants use Expo fingerprinting so OTA updates only reac
 
 The development variant uses `appVersion` to avoid recalculating the native fingerprint for each Metro launch manifest. `MOBILE_VERSION_POLICY` can override either default. If you distribute a custom Release build with the development identity and publish OTA updates to it, set `MOBILE_VERSION_POLICY=fingerprint` for both its build and updates. Changing the runtime policy requires a native rebuild for OTA matching; an existing dev client can still load local Metro bundles.
 
-For preview or production EAS environments, set `T3CODE_CLERK_PUBLISHABLE_KEY`,
-`T3CODE_CLERK_JWT_TEMPLATE`, and `T3CODE_RELAY_URL`
-as EAS environment variables. Expo config maps the canonical values into the mobile build.
+Clerk and relay EAS variables do not enable Connect while the shared gate is off.
+The [setup runbook](../../docs/operations/connect-setup.md) retains those settings for
+the dormant implementation.
 EAS builds and OTA updates also need an EAS project the GOAT account owns:
 set `GOAT_MOBILE_EAS_PROJECT_ID` and `GOAT_MOBILE_EAS_OWNER`. Without them the binary ships with
 updates off.

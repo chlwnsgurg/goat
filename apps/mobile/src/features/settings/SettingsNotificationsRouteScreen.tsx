@@ -1,3 +1,4 @@
+import { GOAT_CONNECT_COMING_SOON } from "@goat/shared/goatConnect";
 import * as Dialog from "../../components/ui/Dialog";
 import { AuthRelayWriteScope } from "@goat/contracts";
 import { readEnvironmentScope } from "../../state/session";
@@ -64,7 +65,8 @@ export function SettingsNotificationsRouteScreen() {
           contentContainerClassName="px-5 pt-4"
         >
           <Text className="text-base text-foreground-muted">
-            Notifications require T3 Connect in this app build.
+            {GOAT_CONNECT_COMING_SOON.title} · {GOAT_CONNECT_COMING_SOON.status}.{" "}
+            {GOAT_CONNECT_COMING_SOON.description}
           </Text>
         </ScrollView>
       </SettingsScreen>

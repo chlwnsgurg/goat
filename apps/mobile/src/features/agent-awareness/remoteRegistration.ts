@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { type LiveActivity } from "expo-widgets";
 import {
   configureAndroidAgentNotifications,
@@ -174,6 +175,10 @@ export function setAgentAwarenessRelayTokenProvider(
   provider: (() => Promise<string | null>) | null,
   identity?: string,
 ): void {
+  if (!isGoatConnectEnabled()) {
+    releaseAgentAwarenessRelayTokenProvider();
+    return;
+  }
   const isExistingIdentity =
     provider !== null &&
     !shouldRegisterAgentAwarenessDeviceForProvider(relayTokenProviderIdentity, identity);
@@ -698,7 +703,7 @@ function registerDevice(
   expectedGeneration = deviceRegistrationGeneration,
 ): Effect.Effect<void, unknown, ManagedRelay.ManagedRelayClient> {
   return Effect.gen(function* () {
-    if (!canRegisterPushNotifications()) {
+    if (!isGoatConnectEnabled() || !canRegisterPushNotifications()) {
       logRegistrationDebug("device registration skipped; platform does not support it");
       return;
     }
@@ -826,7 +831,7 @@ function endLocalLiveActivities(context: string): void {
 }
 
 export function registerAgentAwarenessConnection(connection: SavedRemoteConnection): void {
-  if (!canRegisterPushNotifications()) {
+  if (!isGoatConnectEnabled() || !canRegisterPushNotifications()) {
     return;
   }
 
@@ -931,7 +936,7 @@ export function registerLiveActivityPushToken(input: {
   readonly activity: LiveActivity<AgentActivityProps>;
 }): Effect.Effect<boolean, unknown, ManagedRelay.ManagedRelayClient> {
   return Effect.gen(function* () {
-    if (!canRegisterRemoteLiveActivities()) {
+    if (!isGoatConnectEnabled() || !canRegisterRemoteLiveActivities()) {
       return false;
     }
 
@@ -1037,7 +1042,7 @@ export function refreshActiveLiveActivityRemoteRegistration(): Effect.Effect<
   ManagedRelay.ManagedRelayClient
 > {
   return Effect.gen(function* () {
-    if (!canRegisterRemoteLiveActivities() || !relayTokenProvider) {
+    if (!isGoatConnectEnabled() || !canRegisterRemoteLiveActivities() || !relayTokenProvider) {
       return;
     }
 

@@ -11,7 +11,7 @@ development) by `apps/desktop/src/electron/ElectronProtocol.ts`.
 
 The Electron runtime name is `GOAT <stage>` (`DESKTOP_RUNTIME_APP_BASE_NAME` in
 `apps/desktop/src/app/DesktopEnvironment.ts`). Electron reads it once, before the event loop
-starts, to name the safeStorage key that encrypts saved connections and Clerk tokens, so
+starts, to name the safeStorage key that encrypts saved connections and stored Clerk tokens, so
 `apps/desktop/src/main.ts` sets it synchronously at load. The renderer origin keys localStorage and
 IndexedDB. Builds before #110 set the name too late, so their key sits under the initial package
 name, and they served `t3code://app`. Both migrate forward once per profile and leave the originals
@@ -29,6 +29,8 @@ The OS hands both `goat` and `t3code` links to the app (`getDesktopLinkSchemes`)
 accepts both renderer origins (`DESKTOP_RENDERER_ORIGINS` in `apps/server/src/httpCors.ts`).
 
 > Decision record: [ADR-0014](decisions/ADR-0014-desktop-runtime-identity.md)
+
+`apps/desktop/src/app/DesktopClerk.ts` keeps Clerk inactive through `@goat/shared/goatConnect`; GOAT Connect is coming soon.
 
 ## Shared connection catalog
 

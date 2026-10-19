@@ -65,8 +65,16 @@ const connectErrorCases = {
   CloudLinkProofRejectedError: unauthorized,
   CloudLinkProofReplayedError: conflict,
   CloudLinkTunnelSupersededError: conflict,
+  // While GOAT Connect is off, callers holding an old relay grant get a typed
+  // refusal instead of a server error; nothing reaches the relay or cloudflared.
   CloudLinkInternalError: (error: CloudLink.CloudLinkInternalError) =>
-    internalServerError(error, error.cause),
+    error.operation === "connect-disabled"
+      ? Effect.logInfo(error.message).pipe(
+          Effect.andThen(
+            Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+          ),
+        )
+      : internalServerError(error, error.cause),
   RelayRequestError: relayFailure,
 } as const;
 

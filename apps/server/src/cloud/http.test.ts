@@ -88,6 +88,14 @@ describe("connect routes", () => {
         message: "Cloud mint public key is not installed for this environment.",
       },
     },
+    {
+      failure: new CloudLink.CloudLinkInternalError({ operation: "connect-disabled" }),
+      status: 403,
+      body: {
+        _tag: "EnvironmentHttpForbiddenError",
+        message: "GOAT Connect is coming soon. Connect with Tailscale for now.",
+      },
+    },
   ])("answers $failure._tag with HTTP $status", async ({ failure, status, body }) => {
     const response = await answerHealthWith(failure);
     expect(response).toEqual({ status, body });

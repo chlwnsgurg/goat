@@ -1,3 +1,4 @@
+import { vi } from "vite-plus/test";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
@@ -997,3 +998,8 @@ describe("startup catch-up", { concurrent: false }, () => {
     }).pipe(Effect.scoped),
   );
 });
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));

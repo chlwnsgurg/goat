@@ -2758,9 +2758,16 @@ describe("OrchestratorMcpService provider resolution", () => {
         );
         const [noTunnel, unknown] = listed.tasks;
         assert.equal(noTunnel?.webhookUrl, undefined);
-        assert.include(noTunnel?.webhookUrlUnavailableReason ?? "", "has no managed tunnel");
+        // GOAT Connect is off, so every missing public URL has the same cause.
+        assert.include(
+          noTunnel?.webhookUrlUnavailableReason ?? "",
+          "GOAT Connect, which is coming soon",
+        );
         assert.include(noTunnel?.webhookUrlUnavailableReason ?? "", "Settings → Scheduled Tasks");
-        assert.include(unknown?.webhookUrlUnavailableReason ?? "", "could not read");
+        assert.include(
+          unknown?.webhookUrlUnavailableReason ?? "",
+          "GOAT Connect, which is coming soon",
+        );
       }),
     );
 

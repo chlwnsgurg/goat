@@ -95,3 +95,8 @@ it.effect("does not let OTLP serialization failures alter application effects", 
     ),
   );
 });
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));

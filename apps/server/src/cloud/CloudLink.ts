@@ -1,3 +1,4 @@
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createPublicKey.
 import * as NodeCrypto from "node:crypto";
 import {
@@ -233,6 +234,7 @@ export class CloudLinkEndpointUnavailableError extends Schema.TaggedError<CloudL
 }
 
 const INTERNAL_OPERATION_MESSAGES = {
+  "connect-disabled": `${GOAT_CONNECT_COMING_SOON.title} is ${GOAT_CONNECT_COMING_SOON.status.toLowerCase()}. ${GOAT_CONNECT_COMING_SOON.description}`,
   "relay-url-unconfigured":
     "T3CODE_RELAY_URL must be configured as a secure absolute HTTPS origin.",
   "generate-link-proof": "Could not generate environment link proof.",
@@ -505,6 +507,7 @@ export class CloudLink extends Context.Service<
     ) => Effect.Effect<
       boolean,
       | CloudLinkEndpointUnavailableError
+      | CloudLinkInternalError
       | CloudLinkOriginInvalidError
       | ServerSecretStore.SecretStoreError
     >;
@@ -518,6 +521,35 @@ export class CloudLink extends Context.Service<
 >()("goat/cloud/CloudLink") {}
 
 const make = Effect.gen(function* () {
+  if (!isGoatConnectEnabled()) {
+    const unavailable = () =>
+      Effect.fail(new CloudLinkInternalError({ operation: "connect-disabled" }));
+    return CloudLink.of({
+      linkProof: unavailable,
+      applyRelayConfig: unavailable,
+      linkState: () =>
+        Effect.succeed({
+          linked: false,
+          linkRevoked: false,
+          cloudUserId: null,
+          relayUrl: null,
+          relayIssuer: null,
+          managedTunnelActive: false,
+          publishAgentActivity: false,
+          holdWebhooksWhileOffline: false,
+        }),
+      unlink: () => Effect.succeed({ ok: true, endpointRuntimeStatus: { status: "disabled" } }),
+      updatePreferences: unavailable,
+      answerHealthRequest: unavailable,
+      mintCredential: unavailable,
+      reconcileDesiredLink: unavailable,
+      reconcileDesiredLinkIfStillDesired: unavailable,
+      registerManagedTunnelRecovery: unavailable,
+      recoverManagedTunnel: unavailable,
+      startManagedTunnelIfOriginConfirmed: unavailable,
+      releaseManagedTunnelOnShutdown: unavailable,
+    });
+  }
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const endpointRuntime = yield* ManagedEndpointRuntime.CloudManagedEndpointRuntime;
