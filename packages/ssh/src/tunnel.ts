@@ -2596,7 +2596,11 @@ const REMOTE_HOST_FETCH_FUNCTION = `  goat_host_fetch() {
     if command -v curl >/dev/null 2>&1; then
       curl -fsSL --connect-timeout 10 --retry 2 --max-time "$3" "$1" -o "$2" && return 0
     elif command -v wget >/dev/null 2>&1; then
-      wget -q --timeout=30 --tries=3 --waitretry=2 "$1" -O "$2" && return 0
+      if wget --help 2>&1 | grep -q -- --retry-on-http-error; then
+        wget -q --timeout=30 --tries=3 --waitretry=2 --retry-on-http-error=408,429,500,502,503,504 "$1" -O "$2" && return 0
+      else
+        wget -q --timeout=30 --tries=3 --waitretry=2 "$1" -O "$2" && return 0
+      fi
     else
       printf 'Remote host needs curl or wget to download %s.\\n' "$GOAT_ARCHIVE" >&2
       return 1
@@ -2875,9 +2879,13 @@ if [ "$live_answered" = 0 ]; then
 fi
 [ "$live_status" != none ] || collect_installed_candidates
 case "$(uname -s)" in
-  Darwin) platform=darwin ;; Linux) platform=linux ;; MINGW*|MSYS*|CYGWIN*) platform=win32 ;; *) exit 1 ;;
+  Darwin) platform=darwin ;; Linux) platform=linux ;; MINGW*|MSYS*|CYGWIN*) platform=win32 ;;
+  *) printf 'Remote host %s has no GOAT release archive.\\n' "$(uname -s)" >&2; exit 1 ;;
 esac
-case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x64 ;; *) exit 1 ;; esac
+case "$(uname -m)" in
+  arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x64 ;;
+  *) printf 'Remote host %s has no GOAT release archive.\\n' "$(uname -m)" >&2; exit 1 ;;
+esac
 ready=false
 if ready_version "$V"; then ready=true; fi
 ${
@@ -4595,18 +4603,26 @@ function runtimeFailureResult(
   ) {
     return failed({ reason: "start_timeout", fix: { actor: "agent", instruction: "Try again" } });
   }
+  if (/Remote host .+ has no GOAT release archive\./iu.test(diagnostic)) {
+    return failed({
+      reason: "unsupported_platform",
+      fix: { actor: "human", instruction: "Use Linux, an Apple Silicon Mac, or Windows." },
+    });
+  }
   if (
-    /Remote host is missing node on PATH|Install shasum or sha256sum|Remote host needs curl or wget|tar:.*(?:not found|not recognized)/iu.test(
-      diagnostic,
+    /Remote host is missing node on PATH|Install shasum or sha256sum|Remote host needs curl or wget|tar(?:\.exe)?:.*(?:not found|not recognized)|[/\\]tar\.exe:\s*No such file or directory|'sh' is not recognized as an internal or external command|\bsh\s*:\s*The term 'sh' is not recognized/iu.test(
+      source,
     )
   ) {
-    const instruction = /missing node/iu.test(diagnostic)
+    const instruction = /missing node/iu.test(source)
       ? `Install Node on ${host} for the source runtime, then try again.`
-      : /curl or wget/iu.test(diagnostic)
+      : /curl or wget/iu.test(source)
         ? `Install curl or wget on ${host}, then try again.`
-        : /tar:/iu.test(diagnostic)
-          ? `Install tar on ${host}, then try again.`
-          : `Install sha256sum (coreutils) on ${host}, then try again.`;
+        : /'sh' is not recognized|\bsh\s*:\s*The term 'sh' is not recognized/iu.test(source)
+          ? `Install Git for Windows on ${host} and set Git Bash as the OpenSSH DefaultShell, then try again.`
+          : /tar(?:\.exe)?:/iu.test(source)
+            ? `Install tar on ${host}, then try again.`
+            : `Install sha256sum (coreutils) on ${host}, then try again.`;
     return failed({ reason: "missing_tools", fix: { actor: "human", instruction } });
   }
   return {
