@@ -23,6 +23,7 @@ import * as Client from "./MemoryHubClient.ts";
 import * as Hub from "./MemoryHubService.ts";
 import * as Service from "./MemoryService.ts";
 import * as Store from "./MemoryStore.ts";
+import * as Hold from "./MemoryGenerationHold.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import { memoryOperationDigest } from "./MemoryDecider.ts";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
@@ -142,6 +143,7 @@ const selectionKey = Schema.encodeSync(Schema.fromJsonString(M.MemoryModelSelect
 // New conflict claims freeze the memory model; frozen tickets keep theirs across devices.
 const memorySelection = (s: M.ServerSettings) =>
   s.memoryEnabled ? resolveMemoryModelSelection(s, undefined) : null;
+const decodeMemorySelection = Schema.decodeUnknownEffect(M.MemoryModelSelection);
 const decodePull = Schema.decodeUnknownEffect(M.MemoryHubPullResult);
 const decodeSource = Schema.decodeUnknownEffect(M.MemorySourceReadOutcome);
 const decodeGenerated = Schema.decodeUnknownEffect(M.ResolveMemoryConflictExecutionResult);
@@ -188,6 +190,7 @@ const make = Effect.gen(function* () {
   const runtime = yield* MemorySyncRuntime;
   const quota = yield* Quota.MemoryQuotaService;
   const generation = yield* Generation.TextGeneration;
+  const hold = yield* Hold.shared;
   const identity = yield* Environment.ServerEnvironmentIdentity;
   const local = yield* identity.getEnvironmentId;
   const scope = yield* Scope.Scope;
@@ -701,12 +704,24 @@ const make = Effect.gen(function* () {
         yield* ensureEpoch(r.settings.memoryHubVersion);
         yield* eligibility(row.ticket);
         generationAttempted = true;
+        const holdKey = yield* hold.keyFor(input.modelSelection);
         const generated = yield* Effect.scoped(
           Effect.gen(function* () {
             // Renewal failure interrupts the provider, including a hung one-shot execution.
             return yield* Effect.raceFirst(
-              model(input).pipe(
-                Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
+              hold.guard(holdKey, model(input)).pipe(
+                // A held model or a rejection that repeats for every request stays resumable:
+                // "unavailable" is transient, so the ticket is retried instead of retired.
+                Effect.mapError(
+                  (error) =>
+                    new M.MemoryHubError({
+                      code:
+                        error._tag === "MemoryGenerationHeld" ||
+                        Hold.deterministicFailure(error) !== undefined
+                          ? "unavailable"
+                          : "invalid_output",
+                    }),
+                ),
               ),
               renew.pipe(Effect.flatMap(() => Effect.never)),
             );
@@ -2273,6 +2288,14 @@ const make = Effect.gen(function* () {
           return yield* new M.MemoryHubError({ code: "fenced" });
         const failure = lastFailure?.epoch === epoch ? lastFailure.code : undefined;
         const success = lastSuccess?.epoch === epoch ? lastSuccess.at : null;
+        const selected = memorySelection(current);
+        const memoryModel =
+          selected === null
+            ? Option.none<M.MemoryModelSelection>()
+            : yield* decodeMemorySelection(selected).pipe(Effect.option);
+        const generationHold = Option.isSome(memoryModel)
+          ? yield* hold.status(yield* hold.keyFor(memoryModel.value))
+          : undefined;
         return {
           memorySpaceId: space,
           ...(includeRetained
@@ -2294,6 +2317,7 @@ const make = Effect.gen(function* () {
           storage,
           processing: persisted.processing,
           ...(failure ? { failureCode: failure } : {}),
+          ...(generationHold ? { generationHold } : {}),
         };
       }),
     readSource: (validated, permit) =>

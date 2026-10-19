@@ -1497,6 +1497,8 @@ export class MemoryStore extends Context.Service<
       limit: number,
     ) => Effect.Effect<ReadonlyArray<M.MemoryOperation>, MemoryStorageError>;
     readonly enqueueWork: (work: MemoryWork) => Effect.Effect<void, MemoryStorageError>;
+    /** Makes summary and consolidation retries due now, after the model they waited on changed. */
+    readonly rearmGenerationWork: (now: number) => Effect.Effect<number, MemoryStorageError>;
     readonly claimWork: (
       id: string,
       owner: string,
@@ -4353,6 +4355,13 @@ const make = Effect.gen(function* () {
       sql`UPDATE memory_outbox SET status='retry',next_attempt_at=${nextAttemptAt},claimed_by=NULL,claimed_until=NULL WHERE id=${work.id} AND kind NOT IN ('claim','resolve','revert_intent') AND status='running' AND claimed_by=${work.claimedBy} AND claimed_until=${work.claimedUntil} AND attempt=${work.attempt} RETURNING id`,
     );
     return rows.length === 1;
+  });
+  const rearmGenerationWork = Effect.fn("MemoryStore.rearmGenerationWork")(function* (now: number) {
+    const rows = yield* stored(
+      "rearm-generation-work",
+      sql`UPDATE memory_outbox SET next_attempt_at=${now} WHERE kind IN ('summary','consolidate') AND status='retry' AND next_attempt_at>${now} RETURNING id`,
+    );
+    return rows.length;
   });
   const renewWork = Effect.fn("MemoryStore.renewWork")(function* (
     work: MemoryWork,
@@ -12029,6 +12038,7 @@ const make = Effect.gen(function* () {
     dueWork,
     readWork,
     retryWork,
+    rearmGenerationWork,
     renewWork,
     rebindWorkModel,
     readThreadHookWatermark,

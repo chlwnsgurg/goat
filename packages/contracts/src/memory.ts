@@ -1140,6 +1140,14 @@ export const MemoryHubReconcileResult = struct({
 });
 export type MemoryHubReconcileResult = typeof MemoryHubReconcileResult.Type;
 
+/** Memory generation paused for the current model after the provider refused it the same way. */
+export const MemoryGenerationHold = struct({
+  reason: Schema.Literals(["schema_rejected", "auth", "unavailable", "rate_limited"]),
+  since: MemoryUtcTimestamp,
+  nextAttemptAt: MemoryUtcTimestamp,
+});
+export type MemoryGenerationHold = typeof MemoryGenerationHold.Type;
+
 export const MemorySyncStatus = struct({
   memorySpaceId: Schema.NullOr(MemorySpaceId),
   /** Last locally ready space remains readable while sharing is disabled. */
@@ -1153,6 +1161,7 @@ export const MemorySyncStatus = struct({
   failureCode: Schema.optionalKey(MemoryFailureCode),
   storage: MemoryStorageStatus,
   processing: MemoryProcessingStatus,
+  generationHold: Schema.optionalKey(MemoryGenerationHold),
 }).check(Schema.makeFilter((v) => v.lastHubSequence === v.processing.lastReceivedHubSequence));
 export type MemorySyncStatus = typeof MemorySyncStatus.Type;
 
