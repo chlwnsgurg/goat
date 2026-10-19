@@ -14,6 +14,19 @@ import {
  * GOAT 1001 <-> upstream 2. GOAT protocol numbers only increase. */
 export const ORCHESTRATION_PROTOCOL_VERSION = 1001;
 export const ORCHESTRATION_PROTOCOL_VERSION_TEXT = `${ORCHESTRATION_PROTOCOL_VERSION}` as const;
+/**
+ * Oldest orchestration protocol this server still serves. Clients always speak
+ * ORCHESTRATION_PROTOCOL_VERSION; lower this only together with the decoders and behavior that
+ * keep the older protocol working, so a newer server keeps older clients connected.
+ */
+export const ORCHESTRATION_PROTOCOL_MIN_SERVED: number = ORCHESTRATION_PROTOCOL_VERSION;
+
+/** Whether this server accepts a client announcing `announced` as its orchestration protocol. */
+export function servesOrchestrationProtocol(announced: string | null | undefined): boolean {
+  if (announced == null || !/^[1-9][0-9]{0,15}$/u.test(announced)) return false;
+  const version = Number(announced);
+  return ORCHESTRATION_PROTOCOL_MIN_SERVED <= version && version <= ORCHESTRATION_PROTOCOL_VERSION;
+}
 export const ORCHESTRATION_PROTOCOL_QUERY_PARAM = "orchestrationProtocol";
 export const ORCHESTRATION_PROTOCOL_HEADER = GOAT_ORCHESTRATION_PROTOCOL_HEADER;
 

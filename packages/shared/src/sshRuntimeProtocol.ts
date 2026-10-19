@@ -1,3 +1,5 @@
+import { ORCHESTRATION_PROTOCOL_MIN_SERVED, ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
+
 /** Bump when helper grammar, runner lifecycle, or auth-state semantics cease to interoperate.
  * GOAT 1001 <-> upstream 1. GOAT protocol numbers only increase. */
 export const SSH_RUNTIME_PROTOCOL_VERSION = 1001;
@@ -14,11 +16,18 @@ export interface RuntimeProtocolRanges {
   readonly orchestration: ProtocolRange;
 }
 
-/** Wire ranges this build speaks. Widen `min` only when this build still serves the older peer. */
+/** The single protocols this build speaks as a client. */
 export const ownRuntimeProtocolRanges = (orchestrationProtocolVersion: number) =>
   ({
     ssh: { min: SSH_RUNTIME_PROTOCOL_VERSION, max: SSH_RUNTIME_PROTOCOL_VERSION },
     orchestration: { min: orchestrationProtocolVersion, max: orchestrationProtocolVersion },
+  }) satisfies RuntimeProtocolRanges;
+
+/** The ranges this build serves as a server, down to the oldest client protocol it still keeps. */
+export const servedRuntimeProtocolRanges = () =>
+  ({
+    ssh: { min: SSH_RUNTIME_PROTOCOL_VERSION, max: SSH_RUNTIME_PROTOCOL_VERSION },
+    orchestration: { min: ORCHESTRATION_PROTOCOL_MIN_SERVED, max: ORCHESTRATION_PROTOCOL_VERSION },
   }) satisfies RuntimeProtocolRanges;
 
 export type RuntimeProtocolVerdict =
@@ -33,6 +42,20 @@ const validRange = (range: ProtocolRange | undefined): range is ProtocolRange =>
   Number.isSafeInteger(range.max) &&
   range.min > 0 &&
   range.min <= range.max;
+
+/**
+ * The orchestration protocols a server serves. Servers that advertise only the integer serve
+ * exactly that one, and servers shipped before negotiation speak the original protocol 1.
+ */
+export const orchestrationProtocolRangeOf = (server: {
+  readonly protocol?: Partial<RuntimeProtocolRanges> | undefined;
+  readonly orchestrationProtocolVersion?: number | undefined;
+}): ProtocolRange => {
+  const advertised = server.protocol?.orchestration;
+  if (validRange(advertised)) return advertised;
+  const version = server.orchestrationProtocolVersion ?? 1;
+  return { min: version, max: version };
+};
 
 /**
  * The one SSH runtime compatibility comparator. A server compatible with the client on both the SSH

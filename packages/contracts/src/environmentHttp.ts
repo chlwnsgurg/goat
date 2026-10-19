@@ -49,7 +49,7 @@ import {
 import {
   ExecutionEnvironmentDescriptor,
   ORCHESTRATION_PROTOCOL_HEADER,
-  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  servesOrchestrationProtocol,
 } from "./environment.ts";
 import {
   DpopFailureReason,
@@ -89,7 +89,9 @@ const OptionalBearerHeaders = Schema.Struct({
 const GoatOrchestrationProtocolHeaders = Schema.Struct({
   authorization: Schema.optionalKey(Schema.String),
   dpop: Schema.optionalKey(Schema.String),
-  [ORCHESTRATION_PROTOCOL_HEADER]: Schema.Literal(ORCHESTRATION_PROTOCOL_VERSION_TEXT),
+  [ORCHESTRATION_PROTOCOL_HEADER]: Schema.String.check(
+    Schema.makeFilter((announced) => servesOrchestrationProtocol(announced)),
+  ),
 });
 
 const OrchestrationProtocolHeaders = Schema.Struct({
@@ -98,10 +100,10 @@ const OrchestrationProtocolHeaders = Schema.Struct({
   [LEGACY_ORCHESTRATION_PROTOCOL_HEADER]: Schema.optionalKey(Schema.String),
 })
   .check(
-    Schema.makeFilter(
-      (headers) =>
-        (headers[ORCHESTRATION_PROTOCOL_HEADER] ??
-          headers[LEGACY_ORCHESTRATION_PROTOCOL_HEADER]) === ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+    Schema.makeFilter((headers) =>
+      servesOrchestrationProtocol(
+        headers[ORCHESTRATION_PROTOCOL_HEADER] ?? headers[LEGACY_ORCHESTRATION_PROTOCOL_HEADER],
+      ),
     ),
   )
   .pipe(
@@ -109,8 +111,8 @@ const OrchestrationProtocolHeaders = Schema.Struct({
       decode: SchemaGetter.transform(
         ({ [LEGACY_ORCHESTRATION_PROTOCOL_HEADER]: legacyProtocol, ...headers }) => ({
           ...headers,
-          [ORCHESTRATION_PROTOCOL_HEADER]: (headers[ORCHESTRATION_PROTOCOL_HEADER] ??
-            legacyProtocol) as typeof ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+          [ORCHESTRATION_PROTOCOL_HEADER]:
+            headers[ORCHESTRATION_PROTOCOL_HEADER] ?? legacyProtocol ?? "",
         }),
       ),
       encode: SchemaGetter.transform((headers) => headers),
