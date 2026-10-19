@@ -15,7 +15,11 @@ replies happen after that return. Adapters do not send replies themselves.
 
 `ChannelBotHome.requireHome` in `apps/server/src/channels/ChannelBotHome.ts` rejects ingest when
 `settings.goatBotHome` says another environment is the cluster home. The claim schema is
-`GoatBotHomeClaim` in `packages/contracts/src/settings.ts`.
+`GoatBotHomeClaim` in `packages/contracts/src/settings.ts`. Servers do not sync the claim with
+each other: clients copy the newest claim to every server they reach. So a claim naming a
+vanished environment blocks the bot everywhere until someone moves it, either from a client or
+through `ChannelBotHome.claimHere` (the `channel_bot_home_claim` MCP tool), which writes a newer
+claim for its own server and reconfirms the caller's settings grant inside the settings write lock.
 
 Slack is one adapter. `apps/server/src/channels/slack/SlackChannelAdapter.ts` maps Socket Mode
 envelopes into `ChannelGateway.ingest` and posts outbound through the Slack API.

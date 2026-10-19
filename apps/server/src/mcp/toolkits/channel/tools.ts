@@ -104,7 +104,7 @@ const ChannelBotHomeTool = Tool.make(agentSurfaceRegistry["channel.bot_home_read
   ...shared,
   dependencies: [...shared.dependencies, ChannelBotHome.ChannelBotHome],
   description: agentSurfaceRegistry["channel.bot_home_read"].description,
-  parameters: Schema.Struct({}),
+  parameters: Tool.EmptyParams,
   success: ChannelBotHomeStatus,
 }).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.bot_home_read"]));
 
@@ -112,7 +112,7 @@ const ChannelBotHomeClaimTool = Tool.make(agentSurfaceRegistry["channel.bot_home
   ...shared,
   dependencies: [...shared.dependencies, ChannelBotHome.ChannelBotHome],
   description: agentSurfaceRegistry["channel.bot_home_claim"].description,
-  parameters: Schema.Struct({}),
+  parameters: Tool.EmptyParams,
   success: ChannelBotHomeClaimResult,
 }).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.bot_home_claim"]));
 

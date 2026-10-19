@@ -361,4 +361,6 @@ export const CHANNEL_MCP_TOOL_NAMES = {
   taskList: "channel_task_list",
   taskReport: "channel_task_report",
   taskMove: "channel_task_move",
+  botHome: "channel_bot_home",
+  botHomeClaim: "channel_bot_home_claim",
 } as const;

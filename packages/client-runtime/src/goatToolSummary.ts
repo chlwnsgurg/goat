@@ -514,6 +514,12 @@ export function summarizeGoatToolCalls(
     case "channel-task-report":
       label = phrase("Reported", "report", `on GOAT ledger tasks ${times}`);
       break;
+    case "channel-bot-home-read":
+      label = phrase("Checked", "check", `where GOAT Bot lives ${times}`);
+      break;
+    case "channel-bot-home-claim":
+      label = phrase("Moved", "move", "GOAT Bot to this machine");
+      break;
   }
   return { label, failedCount };
 }

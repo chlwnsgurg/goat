@@ -189,7 +189,7 @@ const client = McpSchema.McpServerClient.of({
 });
 
 it("gives every entry a unique path, legacy name and resolvable schema reference", () => {
-  expect(entries).toHaveLength(141); // Includes current memory, browser, provider and SSH runtime tools.
+  expect(entries).toHaveLength(143); // Includes current memory, browser, provider, SSH runtime and GOAT Bot home tools.
   expect(new Set(entries.map((entry) => entry.name)).size).toBe(entries.length);
   for (const [path, entry] of Object.entries(agentSurfaceRegistry)) {
     expect(path).toBe(entry.path);
