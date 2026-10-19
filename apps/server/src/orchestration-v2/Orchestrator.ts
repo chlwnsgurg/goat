@@ -2555,6 +2555,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         rootThreadId: command.threadId,
       },
       ...(command.launchedBy === undefined ? {} : { launchedBy: command.launchedBy }),
+      ...(command.externalLauncher === undefined
+        ? {}
+        : { externalLauncher: command.externalLauncher }),
       ...(command.sideChatOf === undefined ? {} : { sideChatOf: command.sideChatOf }),
       forkedFrom: null,
       createdAt: now,
@@ -2602,6 +2605,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           forkedFrom: null,
           contextUsage: null,
           nativeMetadata: command.importedNativeThread.metadata ?? null,
+          ...(command.importedNativeThread.cloudTask === undefined
+            ? {}
+            : { cloudTask: command.importedNativeThread.cloudTask }),
           createdAt: now,
           updatedAt: now,
         },

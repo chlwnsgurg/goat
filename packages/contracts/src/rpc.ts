@@ -464,6 +464,7 @@ import {
   CloudMachinesListInput,
   CloudMachinesListResult,
 } from "./cloudMachines.ts";
+import { CloudRunListInput, CloudRunListResult } from "./cloudAgents.ts";
 
 export const WS_METHODS = {
   memoryProjectBindingGet: "memory.projectBinding.get",
@@ -649,6 +650,7 @@ export const WS_METHODS = {
 
   // Boat cloud machines this environment manages as SSH hosts
   cloudMachinesList: "cloudMachines.list",
+  cloudAgentsListRuns: "cloudAgents.listRuns",
   cloudMachinesConfigure: "cloudMachines.configure",
   cloudMachinesDisconnect: "cloudMachines.disconnect",
   cloudMachinesCreate: "cloudMachines.create",
@@ -2073,6 +2075,13 @@ const WsRemoteLaunchesListRpc = Rpc.make(WS_METHODS.remoteLaunchesList, {
   error: Schema.Union([RemoteLaunchesError, EnvironmentAuthorizationError]),
 });
 
+/** Cloud agent runs this environment follows or links, for Fleet. */
+const WsCloudAgentsListRunsRpc = Rpc.make(WS_METHODS.cloudAgentsListRuns, {
+  payload: CloudRunListInput,
+  success: CloudRunListResult,
+  error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
+});
+
 const CloudMachineRpcError = Schema.Union([CloudMachineError, EnvironmentAuthorizationError]);
 const WsCloudMachinesListRpc = Rpc.make(WS_METHODS.cloudMachinesList, {
   payload: CloudMachinesListInput,
@@ -2326,6 +2335,7 @@ export const WsCoreServerRpcGroup = RpcGroup.make(
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsRemoteLaunchesListRpc,
   WsCloudMachinesListRpc,
+  WsCloudAgentsListRunsRpc,
   WsCloudMachinesConfigureRpc,
   WsCloudMachinesDisconnectRpc,
   WsCloudMachinesCreateRpc,

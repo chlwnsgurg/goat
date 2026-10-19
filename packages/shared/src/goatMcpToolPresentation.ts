@@ -500,6 +500,17 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     ["Resume", "Resuming", "Resumed", "a cloud machine"],
     "cloud-machine-change",
   ),
+  goat_cloud_holders: tool(
+    ["List", "Listing", "Listed", "cloud credential holders"],
+    "provider-diagnose",
+  ),
+  goat_cloud_launch: tool(["Launch", "Launching", "Launched", "a cloud agent"], "thread-create"),
+  goat_cloud_run_register: tool(
+    ["Register", "Registering", "Registered", "a cloud run"],
+    "thread-create",
+  ),
+  goat_cloud_run_list: tool(["List", "Listing", "Listed", "cloud runs"], "thread-list"),
+  goat_cloud_run_forget: tool(["Forget", "Forgetting", "Forgot", "a cloud run"], "thread-update"),
   goat_connection_list: tool(["List", "Listing", "Listed", "saved connections"], "connection-list"),
   goat_connection_add_ssh: tool(["Save", "Saving", "Saved", "an SSH connection"], "connection-add"),
   goat_connection_remove: tool(

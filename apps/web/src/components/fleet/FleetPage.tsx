@@ -4,7 +4,7 @@ import { useState } from "react";
 
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
-import { useFleetSnapshot } from "../../state/fleet";
+import { useFleetCloudAgents, useFleetSnapshot } from "../../state/fleet";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { Button } from "../ui/button";
@@ -13,6 +13,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsIcon } from "~/components/solar";
 import { ConnectionCatalogUnreadableAlert } from "../desktop/ConnectionCatalogUnreadableNotice";
 import { ConnectionEnvironmentsSection } from "../settings/ConnectionEnvironmentsSection";
+import { FleetCloudAgents } from "./FleetCloudAgents";
 import { FleetGraph } from "./FleetGraph";
 import { describeMachine } from "./describeMachine";
 import { fleetConnectionLegend, UNKNOWN_FLEET_CONNECTION } from "./fleetConnection";
@@ -52,6 +53,7 @@ function groupThreadsByMachine(threads: ReadonlyArray<FleetThread>) {
 /** Everything running across connected machines, as a graph and a list grouped by machine. */
 export function FleetPage() {
   const { snapshot, connections, currentMachineId, loading } = useFleetSnapshot();
+  const cloudAgents = useFleetCloudAgents();
   const [selected, setSelected] = useState<string | null>(null);
   const selectedMachine = snapshot.machines.find((machine) => machine.id === selected) ?? null;
   const toggleMachine = (machineId: string) =>
@@ -162,6 +164,8 @@ export function FleetPage() {
             {selectedMachine && listed.length === 0 ? (
               <p className="text-sm text-muted-foreground">Nothing running on this machine.</p>
             ) : null}
+
+            {selectedMachine ? null : <FleetCloudAgents groups={cloudAgents} />}
 
             <ConnectionCatalogUnreadableAlert />
             <ConnectionEnvironmentsSection

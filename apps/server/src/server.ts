@@ -56,6 +56,9 @@ import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as ThreadResultService from "./threadResults/ThreadResultService.ts";
 import * as ProviderDiagnosisRouting from "./provider/ProviderDiagnosisRouting.ts";
 import * as ProviderHostSync from "./provider/ProviderHostSync.ts";
+import * as CloudAgentService from "./cloudAgents/CloudAgentService.ts";
+import * as ThreadLaunchMcpService from "./mcp/ThreadLaunchMcpService.ts";
+import * as RemoteReportService from "./remoteReports/RemoteReportService.ts";
 import * as SshHostSetup from "./sshRemote/SshHostSetup.ts";
 import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
 import * as BoatClient from "./cloudMachines/BoatClient.ts";
@@ -1281,7 +1284,19 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
   ),
   Layer.provide(
-    ProviderDiagnosisRouting.layer.pipe(
+    Layer.mergeAll(
+      ProviderDiagnosisRouting.layer,
+      // Cloud launches route to a credential holder with the same diagnosis and host reads.
+      CloudAgentService.layer.pipe(
+        Layer.provide(
+          ThreadLaunchMcpService.layer.pipe(
+            Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+            Layer.provide(CloudTaskSource.layer.pipe(Layer.provide(GitVcsDriver.layer))),
+            Layer.provide(RemoteReportService.layer),
+          ),
+        ),
+      ),
+    ).pipe(
       Layer.provide(ProviderDiagnosisService.layer.pipe(Layer.provide(ProviderHostLive.layer))),
       Layer.provide(
         HostThreadsMcpService.layer.pipe(

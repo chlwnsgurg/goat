@@ -1,6 +1,12 @@
 import * as Schema from "effect/Schema";
 
-import { IsoDateTime, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  PositiveInt,
+  RuntimeRequestId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { PullRequestState } from "./pullRequest.ts";
 
 /**
@@ -35,9 +41,20 @@ export const ChannelTaskNeedsYouKind = Schema.Literals([
 ]);
 export type ChannelTaskNeedsYouKind = typeof ChannelTaskNeedsYouKind.Type;
 
+/**
+ * The exact approval a person can answer from GOAT Bot: the request and the thread that holds it
+ * (the worker or one of its subagents). Reports from other machines leave it out.
+ */
+export const ChannelTaskApprovalRef = Schema.Struct({
+  requestId: RuntimeRequestId,
+  threadId: ThreadId,
+});
+export type ChannelTaskApprovalRef = typeof ChannelTaskApprovalRef.Type;
+
 export const ChannelTaskNeedsYou = Schema.Struct({
   kind: ChannelTaskNeedsYouKind,
   since: IsoDateTime,
+  approval: Schema.optional(ChannelTaskApprovalRef),
 });
 export type ChannelTaskNeedsYou = typeof ChannelTaskNeedsYou.Type;
 
@@ -66,7 +83,9 @@ export const channelWorkerObservationEquals = (
     a.needsYou.length === b.needsYou.length &&
     a.needsYou.every(
       (item, index) =>
-        item.kind === b.needsYou[index]?.kind && item.since === b.needsYou[index]?.since,
+        item.kind === b.needsYou[index]?.kind &&
+        item.since === b.needsYou[index]?.since &&
+        item.approval?.requestId === b.needsYou[index]?.approval?.requestId,
     ) &&
     a.pullRequests.length === b.pullRequests.length &&
     a.pullRequests.every((item, index) => {
