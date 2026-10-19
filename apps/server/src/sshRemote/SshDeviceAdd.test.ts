@@ -368,3 +368,19 @@ it.effect("headless preparation returns preflight when environment:maintain is m
     expect(f.calls).toEqual(["preflight", "broker"]);
   }),
 );
+it.effect("a denied fallback still says why the connection was not saved", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture({ configured: true, catalog: "absent" });
+    const result = yield* f.call({
+      ...scope,
+      thread: undefined,
+      grantedScopes: ["orchestration:read", "orchestration:operate"],
+      client: { sessionId: "client", label: "Client", access: "full-access" },
+    });
+    expect(result).toMatchObject({ outcome: "capability_denied", saved: false });
+    expect(isAddResult(result) && "reason" in result ? result.reason : "").toMatch(
+      /^No desktop connection catalog is attached.*settings:write/su,
+    );
+    expect(f.calls).toEqual(["preflight", "broker"]);
+  }),
+);

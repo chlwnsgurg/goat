@@ -119,6 +119,10 @@ const make = Effect.gen(function* () {
       );
       if (preflight.steps.some((step) => step.state === "failed"))
         return { outcome: "failed", preflight };
+      // Why the connection could not be saved, kept so a later denied step still explains it.
+      let saveBlocked: string | undefined;
+      const deniedReason = (message: string) =>
+        saveBlocked === undefined ? message : `${saveBlocked} ${message}`;
       return yield* Effect.gen(function* () {
         const requestTrust = (): ReturnType<SshDeviceAdd["Service"]["addDevice"]> =>
           Effect.gen(function* () {
@@ -225,6 +229,7 @@ const make = Effect.gen(function* () {
           reason =
             "No desktop connection catalog is attached; this environment cannot save a desktop connection.";
         }
+        saveBlocked = reason;
         if (!resolved.managed) return yield* requestTrust();
         yield* authorizeSshHost(sessions, caller, "environment:maintain");
         const result = yield* setup.prepare({ host: resolved.host }, caller);
@@ -236,7 +241,7 @@ const make = Effect.gen(function* () {
               outcome: "capability_denied" as const,
               preflight,
               saved: false as const,
-              reason: error.message,
+              reason: deniedReason(error.message),
             }),
           OrchestratorMcpFailure: (error) =>
             error.code === "capability_denied"
@@ -244,7 +249,7 @@ const make = Effect.gen(function* () {
                   outcome: "capability_denied" as const,
                   preflight,
                   saved: false as const,
-                  reason: error.message,
+                  reason: deniedReason(error.message),
                 })
               : Effect.fail(error),
         }),
