@@ -7,6 +7,11 @@ import {
 import * as Schema from "effect/Schema";
 
 import { requiredScopesForRpcCall, rpcAuthorizationError } from "../auth/RpcAuthorization.ts";
+import {
+  PENDING_ATTACHMENT_THREAD_SEGMENT,
+  parseThreadSegmentFromAttachmentId,
+  toSafeThreadAttachmentSegment,
+} from "../attachmentStore.ts";
 
 /**
  * Client frames on a proxied socket are Effect RPC JSON: one envelope or an array of them per
@@ -24,6 +29,23 @@ type Envelope = {
 export const hubProxyRefusal = (message: string) =>
   new EnvironmentAuthorizationError({ message, requiredScope: AuthHubProxyScope });
 
+/**
+ * A node hands any stored attachment it is given to the provider, whichever thread stored it. A
+ * proxied follow-up may therefore carry only fresh uploads or the destination thread's own files.
+ */
+const followUpAttachmentsBelongToThread = (payload: unknown): boolean => {
+  const message = payload as { readonly threadId?: unknown; readonly attachments?: unknown };
+  if (!Array.isArray(message.attachments)) return false;
+  const own =
+    typeof message.threadId === "string" ? toSafeThreadAttachmentSegment(message.threadId) : null;
+  return message.attachments.every((attachment: unknown) => {
+    const id = (attachment as { readonly id?: unknown } | null)?.id;
+    if (typeof id !== "string") return false;
+    const segment = parseThreadSegmentFromAttachmentId(id);
+    return segment === PENDING_ATTACHMENT_THREAD_SEGMENT || (own !== null && segment === own);
+  });
+};
+
 /** Why the hub will not forward this call, or undefined when it will. */
 export const refuseProxiedCall = (
   effective: ReadonlyArray<AuthEnvironmentScope>,
@@ -39,9 +61,15 @@ export const refuseProxiedCall = (
   }
   const missing = required.find((scope) => !effective.includes(scope));
   if (missing !== undefined) return rpcAuthorizationError(missing);
-  return hubProxyAdmitsMethod(method, payload, required)
-    ? undefined
-    : hubProxyRefusal(`${method} is not available through the hub.`);
+  if (!hubProxyAdmitsMethod(method, payload, required))
+    return hubProxyRefusal(`${method} is not available through the hub.`);
+  if (
+    method === "orchestration.dispatchCommand" &&
+    (payload as { readonly type?: unknown }).type === "message.dispatch" &&
+    !followUpAttachmentsBelongToThread(payload)
+  )
+    return hubProxyRefusal("Attachments from another thread cannot be sent through the hub.");
+  return undefined;
 };
 
 const encodeAuthorizationError = Schema.encodeSync(EnvironmentAuthorizationError);

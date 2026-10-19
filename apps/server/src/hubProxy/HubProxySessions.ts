@@ -162,6 +162,14 @@ export class HubProxySessions extends Context.Service<
       token: string,
       unauthorized?: boolean,
     ) => Effect.Effect<void>;
+    /**
+     * What a client holding `scopes` may do on the node without issuing anything: for a linked node
+     * also within the enrollment's grant, so session state never advertises what the node refuses.
+     */
+    readonly limit: (
+      nodeId: string,
+      scopes: ReadonlyArray<AuthEnvironmentScope>,
+    ) => Effect.Effect<ReadonlyArray<AuthEnvironmentScope>>;
     /** Reads current in-memory authority only; never issues or loads a credential. */
     readonly peek: (
       nodeId: string,
@@ -393,6 +401,20 @@ export const make = Effect.gen(function* () {
     };
     return upstream;
   });
+
+  const limit: HubProxySessions["Service"]["limit"] = (nodeId, scopes) =>
+    Effect.gen(function* () {
+      const node = yield* nodes.get(nodeId);
+      const route = Option.isSome(node) ? preferredRoute(node.value) : undefined;
+      if (route === undefined) return [];
+      if (route.kind === "ssh") return scopes;
+      if (states.get(nodeId)?.enrollmentRejected === true) return [];
+      const enrollment = yield* readEnrollment(nodeId).pipe(
+        Effect.orElseSucceed(() => Option.none<Enrollment>()),
+      );
+      if (Option.isNone(enrollment) || enrollment.value.baseUrl !== route.baseUrl) return [];
+      return scopes.filter((scope) => enrollment.value.scopes.includes(scope));
+    });
 
   const open: HubProxySessions["Service"]["open"] = (nodeId, scopes) =>
     Effect.gen(function* () {
@@ -710,6 +732,7 @@ export const make = Effect.gen(function* () {
     open,
     invalidate,
     peek,
+    limit,
     revoked,
     isCurrent,
     prepare,

@@ -1,6 +1,7 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- scoped ephemeral HTTP test servers.
 import * as NodeHttp from "node:http";
 
+import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
@@ -9,6 +10,7 @@ import {
   EnvironmentId,
   type AuthEnvironmentScope,
 } from "@goat/contracts";
+import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -193,13 +195,22 @@ export const makeSessions = Effect.fnUntraced(function* (
   );
 });
 
-export const startNode = Effect.fnUntraced(function* (shellBody?: Stream.Stream<Uint8Array>) {
+export const startNode = Effect.fnUntraced(function* (
+  shellBody?: Stream.Stream<Uint8Array>,
+  holdUploads = false,
+) {
   const requests: Array<{ url: string; authorization: string | undefined }> = [];
   const tags: Array<string> = [];
   const handshakes: Array<{ url: string; authorization: string | undefined }> = [];
   const sockets: Array<Socket.Socket> = [];
   const shellRequests = yield* Queue.unbounded<number>();
   const streamEnded = yield* Queue.unbounded<void>();
+  const uploadStarted = yield* Queue.unbounded<void>();
+  const uploadReceived = yield* Queue.unbounded<number>();
+  const uploadAborted = yield* Queue.unbounded<number>();
+  const uploadProgress = yield* Queue.unbounded<number>();
+  const releaseUploads = yield* Deferred.make<void>();
+  const uploadLengths: Array<string | undefined> = [];
   let rejectUpgrade = 0;
   let rejectReads = false;
   let shellCount = 0;
@@ -260,6 +271,26 @@ export const startNode = Effect.fnUntraced(function* (shellBody?: Stream.Stream<
               Effect.provideService(HttpServerRequest.HttpServerRequest, wrapped),
             );
           }
+          if (holdUploads && path?.startsWith("/api/attachments/upload/")) {
+            let bytes = 0;
+            const response = NodeHttpServerRequest.toServerResponse(request);
+            response.once("close", () => {
+              if (!response.writableFinished) Queue.offerUnsafe(uploadAborted, bytes);
+            });
+            uploadLengths.push(request.headers["content-length"]);
+            yield* Queue.offer(uploadStarted, undefined);
+            yield* request.stream.pipe(
+              Stream.runForEach((chunk) =>
+                Effect.sync(() => {
+                  bytes += chunk.byteLength;
+                  Queue.offerUnsafe(uploadProgress, bytes);
+                }),
+              ),
+            );
+            yield* Queue.offer(uploadReceived, bytes);
+            yield* Deferred.await(releaseUploads);
+            return HttpServerResponse.empty({ status: 200 });
+          }
           if (rejectReads) return HttpServerResponse.empty({ status: 401 });
           if (path === "/api/orchestration/shell") {
             shellCount += 1;
@@ -302,6 +333,12 @@ export const startNode = Effect.fnUntraced(function* (shellBody?: Stream.Stream<
     handshakes,
     shellRequests,
     streamEnded,
+    uploadStarted,
+    uploadReceived,
+    uploadAborted,
+    uploadProgress,
+    uploadLengths,
+    releaseUploads: Deferred.succeed(releaseUploads, undefined).pipe(Effect.asVoid),
     rejectUpgrade: (status = 503) => {
       rejectUpgrade = status;
     },
@@ -327,9 +364,10 @@ export const authLayer = EnvironmentAuth.layer.pipe(
 
 export const startHub = Effect.fnUntraced(function* (options?: {
   readonly linked?: boolean;
+  readonly holdUploads?: boolean;
   readonly shellBody?: Stream.Stream<Uint8Array>;
 }) {
-  const node = yield* startNode(options?.shellBody);
+  const node = yield* startNode(options?.shellBody, options?.holdUploads);
   const nodes = yield* makeNodes(
     options?.linked
       ? { ...sshNode, routes: [{ kind: "linked", baseUrl: node.baseUrl.replace(/\/$/u, "") }] }

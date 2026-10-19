@@ -1,6 +1,13 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- sends an oversized declared body without allocating it.
+import * as NodeHttp from "node:http";
+
 import { expect, it } from "@effect/vitest";
 import { NodeWS } from "@effect/platform-node/NodeSocket";
-import { AuthStandardClientScopes, EnvironmentAuthorizationError } from "@goat/contracts";
+import {
+  AuthStandardClientScopes,
+  EnvironmentAuthorizationError,
+  PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -528,5 +535,190 @@ it.effect("4b: signed uploads need a cached operate session and never dial for s
     expect(hub.node.requests).toEqual([
       { url: "/api/attachments/upload/signed-upload", authorization: `Bearer ${NODE_TOKEN}` },
     ]);
+  }).pipe(Effect.scoped, Effect.provide(authLayer)),
+);
+
+it.effect(
+  "S2: a read-only linked enrollment narrows session state and refuses operate WS calls locally",
+  () =>
+    Effect.gen(function* () {
+      const hub = yield* startHub({ linked: true });
+      const phone = yield* hub.auth.issueSession({
+        scopes: ["hub:proxy", "orchestration:read", "orchestration:operate"],
+      });
+      const state = yield* fetchResponse(
+        `${hub.baseUrl}hub/nodes/node-1/api/auth/session`,
+        phone.token,
+      );
+      expect(state.status).toBe(200);
+      expect(JSON.parse(state.text)).toMatchObject({
+        authenticated: true,
+        scopes: ["orchestration:read"],
+        permissions: ["orchestration:read"],
+        proxiedByHub: true,
+      });
+      expect(hub.node.requests).toEqual([]);
+      expect(hub.ssh.issues).toEqual([]);
+      const client = yield* rawSocket(yield* ticketUrl(hub, phone));
+      yield* client.opened;
+      client.socket.send(
+        JSON.stringify({
+          _tag: "Request",
+          id: "operate",
+          tag: "orchestration.dispatchCommand",
+          headers: [],
+          payload: {
+            type: "message.dispatch",
+            commandId: "c1",
+            threadId: "t1",
+            messageId: "m1",
+            createdBy: "user",
+            creationSource: "mobile",
+            text: "Continue",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+          },
+        }),
+      );
+      const reply = JSON.parse(yield* Queue.take(client.frames));
+      expect(Array.isArray(reply) ? reply : [reply]).toMatchObject([
+        {
+          _tag: "Exit",
+          requestId: "operate",
+          exit: {
+            _tag: "Failure",
+            cause: [{ _tag: "Fail", error: { requiredScope: "orchestration:operate" } }],
+          },
+        },
+      ]);
+      expect(hub.node.tags).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(authLayer)),
+);
+
+const uploadUrl = (hub: Effect.Success<ReturnType<typeof startHub>>) =>
+  `${hub.baseUrl}hub/nodes/node-1/api/attachments/upload/signed-upload`;
+const postUpload = (
+  hub: Effect.Success<ReturnType<typeof startHub>>,
+  body = Stream.make(new TextEncoder().encode("bytes")),
+) =>
+  Effect.gen(function* () {
+    const http = yield* HttpClient.HttpClient;
+    const response = yield* http.execute(
+      HttpClientRequest.post(uploadUrl(hub)).pipe(
+        HttpClientRequest.bodyStream(body, { contentType: "application/octet-stream" }),
+      ),
+    );
+    return { status: response.status, text: yield* response.text };
+  }).pipe(Effect.provide(FetchHttpClient.layer));
+
+const uploadHub = Effect.fnUntraced(function* () {
+  const hub = yield* startHub({ holdUploads: true });
+  yield* hub.sessions.open("node-1", ["orchestration:read", "orchestration:operate"]);
+  return hub;
+});
+
+it.effect("S4: declared upload length above the cap returns 403 without contacting the node", () =>
+  Effect.gen(function* () {
+    const hub = yield* uploadHub();
+    const status = yield* Effect.callback<number, Error>((resume) => {
+      const request = NodeHttp.request(
+        uploadUrl(hub),
+        {
+          method: "POST",
+          headers: { "content-length": PROVIDER_SEND_TURN_MAX_FILE_BYTES + 1 },
+        },
+        (response) => {
+          response.resume();
+          response.on("end", () => resume(Effect.succeed(response.statusCode ?? 0)));
+        },
+      );
+      request.on("error", (error) => resume(Effect.fail(error)));
+      request.end();
+      return Effect.sync(() => request.destroy());
+    });
+    expect(status).toBe(403);
+    expect(hub.node.requests).toEqual([]);
+  }).pipe(Effect.scoped, Effect.provide(authLayer)),
+);
+
+it.effect("S4: a chunked upload crossing the byte cap is refused and aborts the node request", () =>
+  Effect.gen(function* () {
+    const hub = yield* uploadHub();
+    const chunk = new Uint8Array(1024 * 1024);
+    const overflow = Effect.gen(function* () {
+      let received = 0;
+      while (received < PROVIDER_SEND_TURN_MAX_FILE_BYTES) {
+        received = yield* Queue.take(hub.node.uploadProgress);
+      }
+      return new Uint8Array([1]);
+    });
+    const body = Stream.range(1, 50).pipe(
+      Stream.map(() => chunk),
+      Stream.concat(Stream.fromEffect(overflow)),
+    );
+    const result = yield* Effect.result(postUpload(hub, body));
+    if (result._tag === "Success") {
+      expect(result.success.status).toBe(403);
+      expect(JSON.parse(result.success.text)).toMatchObject({ code: "hub_node_refused" });
+    } else {
+      // Cancelling the inbound stream can close its socket before the refusal response is written.
+      expect(result.failure.reason._tag).toBe("TransportError");
+      expect(result.failure.reason.cause).toBeInstanceOf(TypeError);
+      expect((result.failure.reason.cause as Error).cause).toMatchObject({
+        code: expect.stringMatching(/^(?:ECONNRESET|UND_ERR_SOCKET)$/),
+      });
+    }
+    expect(yield* Queue.take(hub.node.uploadAborted)).toBe(PROVIDER_SEND_TURN_MAX_FILE_BYTES);
+    expect(hub.node.uploadLengths).toEqual([undefined]);
+    expect(yield* Queue.size(hub.node.uploadReceived)).toBe(0);
+  }).pipe(Effect.scoped, Effect.provide(authLayer)),
+);
+
+it.effect(
+  "S4: a stalled upload times out after ten minutes, aborts upstream and releases its slot",
+  () =>
+    Effect.gen(function* () {
+      const hub = yield* uploadHub();
+      const stalled = yield* postUpload(hub).pipe(Effect.forkScoped);
+      expect(yield* Queue.take(hub.node.uploadReceived)).toBe(5);
+      yield* TestClock.adjust("10 minutes");
+      expect((yield* Fiber.join(stalled)).status).toBe(503);
+      yield* Queue.take(hub.node.uploadAborted);
+      const next = yield* Effect.forEach([1, 2, 3, 4], () =>
+        postUpload(hub).pipe(Effect.forkScoped),
+      );
+      for (const _ of next) expect(yield* Queue.take(hub.node.uploadReceived)).toBe(5);
+      yield* hub.node.releaseUploads;
+      expect((yield* Effect.forEach(next, Fiber.join)).map((response) => response.status)).toEqual([
+        200, 200, 200, 200,
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(authLayer)),
+);
+
+it.effect("S4: removing a node ends its held upload and aborts the upstream request", () =>
+  Effect.gen(function* () {
+    const hub = yield* uploadHub();
+    const upload = yield* postUpload(hub).pipe(Effect.forkScoped);
+    expect(yield* Queue.take(hub.node.uploadReceived)).toBe(5);
+    yield* hub.nodes.replace(undefined);
+    expect((yield* Fiber.join(upload)).status).toBe(503);
+    yield* Queue.take(hub.node.uploadAborted);
+  }).pipe(Effect.scoped, Effect.provide(authLayer)),
+);
+
+it.effect("S4: four Deferred-held uploads fill one node's slots and the fifth returns 429", () =>
+  Effect.gen(function* () {
+    const hub = yield* uploadHub();
+    const held = yield* Effect.forEach([1, 2, 3, 4], () => postUpload(hub).pipe(Effect.forkScoped));
+    for (const _ of held) expect(yield* Queue.take(hub.node.uploadReceived)).toBe(5);
+    expect((yield* postUpload(hub)).status).toBe(429);
+    expect(
+      hub.node.requests.filter((request) => request.url.startsWith("/api/attachments/upload/")),
+    ).toHaveLength(4);
+    yield* hub.node.releaseUploads;
+    expect((yield* Effect.forEach(held, Fiber.join)).map((response) => response.status)).toEqual([
+      200, 200, 200, 200,
+    ]);
+    expect((yield* postUpload(hub)).status).toBe(200);
   }).pipe(Effect.scoped, Effect.provide(authLayer)),
 );

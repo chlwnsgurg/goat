@@ -67,11 +67,20 @@ The policy lets a client send a follow-up (`message.dispatch`), stop a run (`run
 and upload the attachments a follow-up references. Every other orchestration command, such as
 archiving, deleting or renaming a thread, stays with the node's own clients.
 
+A forwarded follow-up carries only what a person's composer sends: text, context, attachments
+that are pending uploads or already belong to that thread, the model picked in the composer, and
+the plan it implements. The model and plan stay because ordinary follow-ups send them, and an
+`orchestration:operate` session on the node itself allows the same. Fields only automation sets
+(scheduled tasks, notifications, delegated completion, usage-limit recovery), a sender other than
+the user, a deferred start that prepares a workspace, and memory grants are refused.
+
 The proxied `/api/auth/session` reports the intersection and `proxiedByHub: true`. Client
 command permissions mirror the method policy for such sessions
-([commandPermissions.ts](../../packages/client-runtime/src/state/commandPermissions.ts)), so every
-surface hides a node action the hub would refuse instead of offering it. The mirror only knows
-the client-guarded scopes, so it hides less than the hub refuses; the hub stays authoritative.
+([commandPermissions.ts](../../packages/client-runtime/src/state/commandPermissions.ts)), and the
+RPC transport refuses such a call on a hub-proxy route before sending it
+([client.ts](../../packages/client-runtime/src/rpc/client.ts)). Not every action reads a
+permission atom, and the mirror only knows the client-guarded scopes, so some refused actions
+stay visible and fail with the hub's refusal; the hub stays authoritative.
 
 ## Node credentials never leave the hub
 
@@ -140,21 +149,21 @@ The hub host is fully trusted: it holds SSH keys and node sessions for every nod
 must be encrypted and its screen locked. Clients are trusted within their scopes. Other tailnet
 peers and nodes are not trusted with anything the hub holds.
 
-| Threat                                                                 | Mitigation                                                                                                                    |
-| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| A stranger makes the hub dial nodes                                    | Authentication and `hub:proxy` precede session acquisition; capability assets use cached sessions only                        |
-| Capability asset URLs are loaded without hub headers                   | The node validates its signed URL; only current, unexpired cached read sessions are forwarded, with no SSH or enrollment read |
-| Capability upload URLs are posted without hub headers                  | The node validates its signed URL; only cached sessions with `orchestration:operate` forward, and nothing dials or buffers    |
-| An old or narrowed pairing proxies                                     | `hub:proxy` is required; it is not implied by any other scope                                                                 |
-| A client exceeds its rights on a node                                  | Per-envelope `authorizeRpcCall` against the intersection, then the method policy, before forwarding                           |
-| A full-scope client reaches settings, terminals or providers on a node | The ceiling excludes them; the node session never holds them                                                                  |
-| A batch smuggles a forbidden call                                      | Every envelope is judged; only refused ids are answered locally                                                               |
-| Node credentials reach the client                                      | Hub-answered auth endpoints, header and query allowlists, no node tickets                                                     |
-| Hub tickets reach a node                                               | Credential query parameters are stripped before dialing                                                                       |
-| Path tricks pick another destination                                   | The node id only selects an entry in the hub's node list; upstream URLs come from that entry                                  |
-| Access survives revocation, unenrollment or node removal               | Relays race session invalidation and the node generation                                                                      |
-| A stale session is reused at a broader scope set                       | The session cache key is the exact scope set                                                                                  |
-| Proxied requests are forged cross-site                                 | Cookie authentication keeps the hub's origin checks                                                                           |
-| Loopback-only node endpoints become reachable                          | They are not on the allowlist                                                                                                 |
-| Browsing a cloud node wakes or bills it                                | Proxying uses the never-wake readiness path                                                                                   |
-| A large node shell exhausts hub memory                                 | Byte-counted copies are capped per node; refresh reads stop at the cap and have a whole-response deadline                     |
+| Threat                                                                 | Mitigation                                                                                                                                                                                                                            |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A stranger makes the hub dial nodes                                    | Authentication and `hub:proxy` precede session acquisition; capability assets use cached sessions only                                                                                                                                |
+| Capability asset URLs are loaded without hub headers                   | The node validates its signed URL; only current, unexpired cached read sessions are forwarded, with no SSH or enrollment read                                                                                                         |
+| Capability upload URLs are posted without hub headers                  | The node validates its signed URL; only cached sessions with `orchestration:operate` forward, with no SSH or session acquisition, as a streamed request to the cached node endpoint bounded by size, deadline and four slots per node |
+| An old or narrowed pairing proxies                                     | `hub:proxy` is required; it is not implied by any other scope                                                                                                                                                                         |
+| A client exceeds its rights on a node                                  | Per-envelope `authorizeRpcCall` against the intersection, then the method policy, before forwarding                                                                                                                                   |
+| A full-scope client reaches settings, terminals or providers on a node | The ceiling excludes them; the node session never holds them                                                                                                                                                                          |
+| A batch smuggles a forbidden call                                      | Every envelope is judged; only refused ids are answered locally                                                                                                                                                                       |
+| Node credentials reach the client                                      | Hub-answered auth endpoints, header and query allowlists, no node tickets                                                                                                                                                             |
+| Hub tickets reach a node                                               | Credential query parameters are stripped before dialing                                                                                                                                                                               |
+| Path tricks pick another destination                                   | The node id only selects an entry in the hub's node list; upstream URLs come from that entry                                                                                                                                          |
+| Access survives revocation, unenrollment or node removal               | Relays race session invalidation and the node generation                                                                                                                                                                              |
+| A stale session is reused at a broader scope set                       | The session cache key is the exact scope set                                                                                                                                                                                          |
+| Proxied requests are forged cross-site                                 | Cookie authentication keeps the hub's origin checks                                                                                                                                                                                   |
+| Loopback-only node endpoints become reachable                          | They are not on the allowlist                                                                                                                                                                                                         |
+| Browsing a cloud node wakes or bills it                                | Proxying uses the never-wake readiness path                                                                                                                                                                                           |
+| A large node shell exhausts hub memory                                 | Byte-counted copies are capped per node; refresh reads stop at the cap and have a whole-response deadline                                                                                                                             |

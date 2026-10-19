@@ -10,6 +10,10 @@ import {
   type ServerConfigStreamEvent,
   type ServerLifecycleStreamEvent,
   WS_METHODS,
+  ORCHESTRATION_V2_WS_METHODS,
+  CommandId,
+  ThreadId,
+  MessageId,
 } from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
@@ -35,6 +39,8 @@ import { RpcClientError } from "effect/rpc";
 import {
   AVAILABLE_CONNECTION_STATE,
   PrimaryConnectionTarget,
+  HubProxyConnectionTarget,
+  BearerConnectionTarget,
   type PreparedConnection,
   type SupervisorConnectionState,
 } from "../connection/model.ts";
@@ -111,7 +117,9 @@ function session(client: WsRpcProtocolClient): RpcSession.RpcSession {
   };
 }
 
-const makeHarness = Effect.fn("TestEnvironmentRpc.makeHarness")(function* () {
+const makeHarness = Effect.fn("TestEnvironmentRpc.makeHarness")(function* (
+  target: EnvironmentSupervisor.EnvironmentSupervisor["Service"]["target"] = TARGET,
+) {
   const state = yield* SubscriptionRef.make<SupervisorConnectionState>(AVAILABLE_CONNECTION_STATE);
   const activeSession = yield* SubscriptionRef.make<Option.Option<RpcSession.RpcSession>>(
     Option.none(),
@@ -119,7 +127,7 @@ const makeHarness = Effect.fn("TestEnvironmentRpc.makeHarness")(function* () {
   const prepared = yield* SubscriptionRef.make<Option.Option<PreparedConnection>>(Option.none());
   const retryCount = yield* Ref.make(0);
   const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
-    target: TARGET,
+    target,
     state,
     session: activeSession,
     prepared,
@@ -1146,3 +1154,69 @@ describe("staged memory RPC", () => {
     }),
   );
 });
+
+it.effect(
+  "hub guard: a hub route blocks thread.delete and permits message.dispatch; a direct route sends both",
+  () =>
+    Effect.gen(function* () {
+      const sent: Array<unknown> = [];
+      const client = {
+        [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (input: unknown) =>
+          Effect.sync(() => {
+            sent.push(input);
+            return { sequence: 1 };
+          }),
+      } as unknown as WsRpcProtocolClient;
+      const hub = yield* makeHarness(
+        new HubProxyConnectionTarget({
+          environmentId: TARGET.environmentId,
+          label: TARGET.label,
+          connectionId: "hub:primary:node-1",
+        }),
+      );
+      const direct = yield* makeHarness(
+        new BearerConnectionTarget({
+          environmentId: TARGET.environmentId,
+          label: TARGET.label,
+          connectionId: "direct-node",
+        }),
+      );
+      yield* SubscriptionRef.set(hub.activeSession, Option.some(session(client)));
+      yield* SubscriptionRef.set(direct.activeSession, Option.some(session(client)));
+      const remove = {
+        type: "thread.delete" as const,
+        commandId: CommandId.make("c-delete"),
+        threadId: ThreadId.make("thread-1"),
+      };
+      const followUp = {
+        type: "message.dispatch" as const,
+        commandId: CommandId.make("c-send"),
+        threadId: ThreadId.make("thread-1"),
+        messageId: MessageId.make("m1"),
+        createdBy: "user" as const,
+        creationSource: "mobile" as const,
+        text: "Continue",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" as const },
+      };
+      const viaHub = Effect.provideService(
+        EnvironmentSupervisor.EnvironmentSupervisor,
+        hub.supervisor,
+      );
+      const viaDirect = Effect.provideService(
+        EnvironmentSupervisor.EnvironmentSupervisor,
+        direct.supervisor,
+      );
+      const refused = yield* Effect.flip(
+        requestGuarded(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, remove).pipe(viaHub),
+      );
+      expect(refused).toBeInstanceOf(EnvironmentAuthorizationError);
+      expect(refused).toMatchObject({ requiredScope: "hub:proxy" });
+      expect(sent).toEqual([]);
+      yield* requestGuarded(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, followUp).pipe(viaHub);
+      expect(sent).toEqual([followUp]);
+      yield* requestGuarded(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, remove).pipe(viaDirect);
+      yield* requestGuarded(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, followUp).pipe(viaDirect);
+      expect(sent).toEqual([followUp, remove, followUp]);
+    }),
+);

@@ -2,6 +2,7 @@ import { expect, it } from "@effect/vitest";
 import {
   AuthStandardClientScopes,
   EnvironmentAuthorizationError,
+  OrchestrationV2Command,
   WS_METHODS,
 } from "@goat/contracts";
 import * as Effect from "effect/Effect";
@@ -10,6 +11,7 @@ import * as Schema from "effect/Schema";
 import * as Socket from "effect/socket/Socket";
 import { Rpc, RpcClient, RpcGroup, RpcMessage, RpcSerialization } from "effect/rpc";
 
+import { createAttachmentId, createPendingAttachmentId } from "../attachmentStore.ts";
 import { gateClientFrame, hubProxyRefusal, refuseProxiedCall } from "./frames.ts";
 
 const read = "orchestration.subscribeThread";
@@ -197,4 +199,110 @@ it("4b: an operate client may upload follow-up attachments through the hub", () 
       sizeBytes: 10,
     }),
   ).toMatchObject({ requiredScope: "orchestration:operate" });
+});
+
+const isCommand = Schema.is(OrchestrationV2Command);
+
+const assertFollowUpFrame = (payload: unknown, admitted: boolean) => {
+  const frame = JSON.stringify({ ...request("follow-up", write), payload });
+  const gated = gateClientFrame(frame, (_method, input) => operate(input));
+  if (admitted) expect(gated).toEqual({ forward: frame, replies: [] });
+  else {
+    expect(gated.forward).toBeUndefined();
+    expect(gated.replies.map((reply) => JSON.parse(reply))).toMatchObject([
+      {
+        requestId: "follow-up",
+        exit: {
+          _tag: "Failure",
+          cause: [
+            {
+              _tag: "Fail",
+              error: { _tag: "EnvironmentAuthorizationError", requiredScope: "hub:proxy" },
+            },
+          ],
+        },
+      },
+    ]);
+  }
+};
+
+it("4b: composer model selection and a same-project source plan remain permitted follow-ups", () => {
+  const payload = {
+    ...followUp,
+    modelSelection: { instanceId: "claude", model: "different-model" },
+    sourcePlanRef: { threadId: "another-thread-in-the-project", planId: "plan-1" },
+    memoryGrantCeiling: "none",
+  };
+  expect(isCommand(payload)).toBe(true);
+  assertFollowUpFrame(payload, true);
+});
+
+it.each([
+  [
+    "notification",
+    { notification: { source: { kind: "system" }, outcome: "updated", summary: "Update" } },
+  ],
+  ["scheduledTaskId", { scheduledTaskId: "task-1" }],
+  ["senderThreadId", { senderThreadId: "sender-thread" }],
+  [
+    "delegatedCompletion",
+    { delegatedCompletion: { parentRunId: "run-1", generation: 1, taskIds: ["task-1"] } },
+  ],
+  ["usageLimitRecoveryRequestId", { usageLimitRecoveryRequestId: "recovery-1" }],
+  ["createdBy agent", { createdBy: "agent" }],
+  ["dispatchMode defer_start", { dispatchMode: { type: "defer_start" } }],
+  ["memoryGrantCeiling read", { memoryGrantCeiling: "read" }],
+])("4b: refuses follow-up metadata %s before forwarding", (_name, extra) => {
+  const payload = { ...followUp, ...extra };
+  expect(isCommand(payload)).toBe(true);
+  assertFollowUpFrame(payload, false);
+});
+
+const imageAttachment = (id: string | null) => ({
+  type: "image",
+  id,
+  name: "screen.png",
+  mimeType: "image/png",
+  sizeBytes: 10,
+});
+
+it("4b: pending uploads and destination-thread stored attachments pass the frame gate", () => {
+  const payload = {
+    ...followUp,
+    threadId: "Thread / Destination",
+    attachments: [
+      imageAttachment(createPendingAttachmentId("png")),
+      imageAttachment(createAttachmentId("Thread / Destination", "png")),
+    ],
+  };
+  expect(isCommand(payload)).toBe(true);
+  assertFollowUpFrame(payload, true);
+});
+
+it.each(["alone", "mixed"])(
+  "4b: refuses foreign-thread attachments %s before forwarding",
+  (mode) => {
+    const foreign = imageAttachment(createAttachmentId("other-thread", "png"));
+    const attachments =
+      mode === "alone"
+        ? [foreign]
+        : [
+            imageAttachment(createPendingAttachmentId("png")),
+            imageAttachment(createAttachmentId(followUp.threadId, "png")),
+            foreign,
+          ];
+    const payload = { ...followUp, attachments };
+    expect(isCommand(payload)).toBe(true);
+    assertFollowUpFrame(payload, false);
+  },
+);
+
+it("4b: refuses an attachment without a stored id before forwarding", () => {
+  assertFollowUpFrame(
+    {
+      ...followUp,
+      attachments: [{ type: "image", name: "screen.png", mimeType: "image/png", sizeBytes: 10 }],
+    },
+    false,
+  );
 });

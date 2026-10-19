@@ -591,7 +591,12 @@ describe("command permissions through a hub", () => {
           ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
         );
         const remove = { type: "thread.delete", commandId: "c1", threadId: "t1" };
-        const followUp = { type: "message.dispatch", commandId: "c2", threadId: "t1" };
+        const followUp = {
+          type: "message.dispatch",
+          commandId: "c2",
+          threadId: "t1",
+          createdBy: "user",
+        };
         const stop = { type: "run.interrupt", commandId: "c3", threadId: "t1", runId: "r1" };
         registry.set(sessions(env), AsyncResult.success(grant(true)));
         // A direct connection is unaffected.

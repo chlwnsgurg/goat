@@ -63,7 +63,47 @@ export const HUB_PROXY_COMMAND_TYPES: ReadonlySet<string> = new Set([
 const hubProxyAdmitsCommand = (payload: unknown): boolean => {
   if (typeof payload !== "object" || payload === null) return false;
   const command = payload as { readonly type?: unknown };
-  return typeof command.type === "string" && HUB_PROXY_COMMAND_TYPES.has(command.type);
+  if (typeof command.type !== "string" || !HUB_PROXY_COMMAND_TYPES.has(command.type)) return false;
+  return command.type !== "message.dispatch" || hubProxyAdmitsFollowUp(payload);
+};
+
+/**
+ * What an interactive client puts in a follow-up: its text, context and attachments, the model it
+ * chose in the composer, the plan it implements, and how to deliver it. Fields only automation
+ * sends (scheduled tasks, notifications, delegated completion, usage-limit recovery) are refused,
+ * as is a deferred start that prepares a workspace.
+ */
+const HUB_PROXY_FOLLOW_UP_FIELDS: ReadonlySet<string> = new Set([
+  "type",
+  "commandId",
+  "threadId",
+  "messageId",
+  "text",
+  "context",
+  "attachments",
+  "titleSeed",
+  "modelSelection",
+  "sourcePlanRef",
+  "manualContinuationOfRunId",
+  "deliveryIntent",
+  "dispatchMode",
+  "createdBy",
+  "creationSource",
+  "memoryGrantCeiling",
+]);
+
+const hubProxyAdmitsFollowUp = (payload: object): boolean => {
+  const message = payload as {
+    readonly createdBy?: unknown;
+    readonly dispatchMode?: { readonly type?: unknown };
+    readonly memoryGrantCeiling?: unknown;
+  };
+  return (
+    Object.keys(payload).every((key) => HUB_PROXY_FOLLOW_UP_FIELDS.has(key)) &&
+    message.createdBy === "user" &&
+    message.dispatchMode?.type !== "defer_start" &&
+    (message.memoryGrantCeiling === undefined || message.memoryGrantCeiling === "none")
+  );
 };
 
 /** Whether the hub forwards a call that already passed the scope check for these required scopes. */

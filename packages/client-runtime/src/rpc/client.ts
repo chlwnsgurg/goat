@@ -1,6 +1,8 @@
 import {
   EnvironmentAuthorizationError,
   clientRpcRequiredScopes,
+  hubProxyHidesClientCall,
+  AuthHubProxyScope,
   authScopeRequiredResponse,
   type EnvironmentId,
   type MemoryHistoryInput,
@@ -198,8 +200,20 @@ const authorizeRequest = Effect.fn("EnvironmentRpc.authorize")(function* (
   method: string,
   input: unknown,
 ) {
-  if (clientRpcRequiredScopes(method, input).length === 0) return;
   const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+  const required = clientRpcRequiredScopes(method, input);
+  // On a node reached through a hub, fail at once with the reason instead of after the hub refuses.
+  // The route decides, not cached session state, so a stale answer cannot mislead; a node whose
+  // preferred route is direct still meets the hub's own refusal if it falls back to the hub.
+  if (
+    supervisor.target._tag === "HubProxyConnectionTarget" &&
+    hubProxyHidesClientCall(method, input, required)
+  )
+    return yield* new EnvironmentAuthorizationError({
+      ...authScopeRequiredResponse(AuthHubProxyScope),
+      message: "This action is not available through the hub.",
+    });
+  if (required.length === 0) return;
   const guard = yield* RpcPermissionGuard;
   yield* guard.authorize(supervisor.target.environmentId, method, input);
 });

@@ -11,13 +11,16 @@ import {
   AuthSessionState,
   AuthWebSocketTicketResult,
   HUB_PROXY_ROUTE_PREFIX,
+  PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   authScopeResponse,
   hubProxyEffectiveScopes,
   type AuthEnvironmentScope,
 } from "@goat/contracts";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
@@ -217,16 +220,42 @@ const upstreamRequest = (
  * body is never buffered here; the node checks the token, size and type as it does for its own
  * clients.
  */
+const UPLOAD_DEADLINE = Duration.minutes(10);
+/** Uploads at once per node: anyone holding the URL can post, and the hub cannot check the token. */
+const UPLOADS_PER_NODE = 4;
+const uploadSlots = new Map<string, Semaphore.Semaphore>();
+
+const uploadTooLarge = () =>
+  new HubProxyError({
+    reason: "refused",
+    message: "That file is larger than an attachment may be.",
+  });
+
 const proxyUpload = Effect.fn("HubProxyHttp.proxyUpload")(function* (
   request: HttpServerRequest.HttpServerRequest,
   upstream: HubProxyUpstream,
   path: string,
 ) {
+  const sessions = yield* HubProxySessions;
   const contentLength = Number(request.headers["content-length"]);
-  const response = yield* send(
+  if (Number.isSafeInteger(contentLength) && contentLength > PROVIDER_SEND_TURN_MAX_FILE_BYTES)
+    return yield* uploadTooLarge();
+  let bytes = 0;
+  // Counted as it streams, whatever the header claimed; nothing is buffered here.
+  const body = request.stream.pipe(
+    Stream.mapEffect((chunk) => {
+      bytes += chunk.byteLength;
+      return bytes > PROVIDER_SEND_TURN_MAX_FILE_BYTES
+        ? Effect.fail(uploadTooLarge())
+        : Effect.succeed(chunk);
+    }),
+  );
+  const slots = uploadSlots.get(upstream.nodeId) ?? Semaphore.makeUnsafe(UPLOADS_PER_NODE);
+  uploadSlots.set(upstream.nodeId, slots);
+  const transfer = send(
     HttpClientRequest.post(new URL(path, upstream.httpBaseUrl).toString()).pipe(
       HttpClientRequest.setHeaders({ authorization: `Bearer ${upstream.token}` }),
-      HttpClientRequest.bodyStream(request.stream, {
+      HttpClientRequest.bodyStream(body, {
         ...(request.headers["content-type"]
           ? { contentType: request.headers["content-type"] }
           : {}),
@@ -234,10 +263,29 @@ const proxyUpload = Effect.fn("HubProxyHttp.proxyUpload")(function* (
       }),
     ),
   ).pipe(
-    Effect.mapError(
-      () => new HubProxyError({ reason: "unavailable", message: "The node did not answer." }),
+    Effect.timeoutOption(UPLOAD_DEADLINE),
+    // Removing the node or its enrollment ends an upload in flight too.
+    (effect) =>
+      Effect.raceFirst(
+        effect,
+        sessions.revoked(upstream.nodeId, upstream.generation).pipe(Effect.as(Option.none())),
+      ),
+    Effect.mapError(() =>
+      bytes > PROVIDER_SEND_TURN_MAX_FILE_BYTES
+        ? uploadTooLarge()
+        : new HubProxyError({ reason: "unavailable", message: "The node did not answer." }),
     ),
+    Effect.scoped,
   );
+  const outcome = yield* slots.withPermitsIfAvailable(1)(transfer);
+  if (Option.isNone(outcome))
+    return HttpServerResponse.text("Too many uploads to this machine at once.", { status: 429 });
+  if (Option.isNone(outcome.value))
+    return yield* new HubProxyError({
+      reason: "unavailable",
+      message: "The upload took too long.",
+    });
+  const response = outcome.value.value;
   return HttpServerResponse.empty({
     status: response.status,
     headers: proxiedDocumentPolicy(undefined),
@@ -407,7 +455,8 @@ const proxySocket = Effect.fn("HubProxyHttp.proxySocket")(function* (
   const clientWriter = yield* client.writer;
   yield* Effect.raceAllFirst([
     pumpFrames(socket.reader, clientWriter),
-    pumpGated(clientReader, socket.writer, clientWriter, scopes),
+    // The node session's own scopes: for a linked node that is also within its enrollment.
+    pumpGated(clientReader, socket.writer, clientWriter, upstream.scopes),
     sessionStore.awaitInvalidation(session.sessionId),
     sessions.revoked(nodeId, upstream.generation),
   ]).pipe(Effect.ignoreCause);
@@ -469,9 +518,10 @@ const handler = Effect.gen(function* () {
   if (path === "api/auth/session" && request.method === "GET") {
     const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const state = yield* serverAuth.getSessionState(request);
-    // What this client may do on the node, never the node session's own grant.
+    // What this client may do on the node: its own rights, within what the node granted the hub.
+    const allowed = yield* sessions.limit(target.nodeId, scopes);
     const narrowed = state.authenticated
-      ? { ...state, ...authScopeResponse(scopes), proxiedByHub: true }
+      ? { ...state, ...authScopeResponse(allowed), proxiedByHub: true }
       : state;
     return HttpServerResponse.jsonUnsafe(yield* encodeSessionState(narrowed).pipe(Effect.orDie));
   }

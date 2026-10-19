@@ -231,3 +231,56 @@ it.effect(
       });
     }).pipe(Effect.scoped),
 );
+
+it.effect("S2: limit reports SSH rights without acquiring an endpoint or issuing a session", () =>
+  Effect.gen(function* () {
+    const { sessions, ssh } = yield* fixture();
+    const scopes = ["orchestration:read", "orchestration:operate"] as const;
+    expect(yield* sessions.limit("node-1", scopes)).toEqual(scopes);
+    expect(yield* sessions.limit("missing", scopes)).toEqual([]);
+    expect(ssh.endpoints).toEqual([]);
+    expect(ssh.issues).toEqual([]);
+  }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "S2: limit follows linked enrollment scopes, replacement and rejection without dialing",
+  () =>
+    Effect.gen(function* () {
+      const baseUrl = "https://node.invalid";
+      const nodes = yield* makeNodes({ ...sshNode, routes: [{ kind: "linked", baseUrl }] });
+      const secrets = makeSecrets();
+      const ssh = makeSsh(baseUrl);
+      const sessions = yield* makeSessions(nodes.service, ssh.service, secrets.service);
+      yield* nodes.subscribed;
+      const scopes = ["orchestration:read", "orchestration:operate"] as const;
+      const save = (granted: ReadonlyArray<AuthEnvironmentScope>) =>
+        secrets.service.set(
+          enrollmentSecretName("node-1"),
+          new TextEncoder().encode(
+            JSON.stringify({
+              version: 1,
+              nodeId: "node-1",
+              baseUrl,
+              token: "linked-token",
+              scopes: granted,
+              expiresAt: null,
+            }),
+          ),
+        );
+      expect(yield* sessions.limit("node-1", scopes)).toEqual([]);
+      yield* save(readScopes);
+      expect(yield* sessions.limit("node-1", scopes)).toEqual(["orchestration:read"]);
+      yield* save(scopes);
+      expect(yield* sessions.limit("node-1", scopes)).toEqual([
+        "orchestration:read",
+        "orchestration:operate",
+      ]);
+      const opened = yield* sessions.open("node-1", scopes);
+      expect(opened.scopes).toEqual(["orchestration:read", "orchestration:operate"]);
+      yield* sessions.invalidate("node-1", opened.token);
+      expect(yield* sessions.limit("node-1", scopes)).toEqual([]);
+      expect(ssh.endpoints).toEqual([]);
+      expect(ssh.issues).toEqual([]);
+    }).pipe(Effect.scoped),
+);
