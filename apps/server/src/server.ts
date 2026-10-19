@@ -1305,7 +1305,30 @@ const layerMakeServer = Layer.unwrap(
     const tailscaleParked = yield* Deferred.make<void>();
     const cloudLinkParked = yield* Deferred.make<void>();
     const routesReady = yield* Deferred.make<void>();
-    const layerLauncher = ServiceLauncherClient.layer;
+    const layerLauncher = ServiceLauncherClient.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.effect(
+            ServiceLauncherClient.ServiceLauncherPort,
+            Effect.map(HttpServer.HttpServer, (server) =>
+              typeof server.address === "string" || !("port" in server.address)
+                ? undefined
+                : server.address.port,
+            ),
+          ),
+          Layer.effect(
+            ServiceLauncherClient.ServiceLauncherHost,
+            Effect.map(HttpServer.HttpServer, (server) =>
+              typeof server.address !== "string" &&
+              "hostname" in server.address &&
+              typeof server.address.hostname === "string"
+                ? server.address.hostname
+                : undefined,
+            ),
+          ),
+        ),
+      ),
+    );
 
     yield* fixPath({ shellEnvironmentPrepared: config.shellEnvironmentPrepared });
 

@@ -34,6 +34,11 @@ describe("server owner lock", () => {
       update: { ...pendingUpdate, status: "committed" as const },
     };
     assert.equal(serverOwnerTag({ launcherContext: active, mode: "web" }), "service:1.1.0");
+    // A committed target the launcher restarts during probation is still that update.
+    assert.equal(
+      serverOwnerTag({ launcherContext: { ...active, probation: true }, mode: "web" }),
+      "service-probation:update-1",
+    );
     assert.equal(serverOwnerTag({ launcherContext: undefined, mode: "desktop" }), "server:desktop");
   });
 

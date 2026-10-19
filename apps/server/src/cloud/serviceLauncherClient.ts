@@ -41,7 +41,7 @@ export class ServiceLauncherClientError extends Schema.TaggedError<ServiceLaunch
       case "disconnect":
         return "The service launcher disconnected before acknowledging the request.";
       case "timeout":
-        return "The service launcher did not respond within 30 seconds.";
+        return "The service launcher did not respond within the acknowledgement deadline.";
     }
   }
 }
@@ -91,6 +91,17 @@ export const ServiceLauncherHostProcess = Context.Reference<ServiceLauncherProce
       },
     }),
   },
+);
+
+export const ServiceLauncherPort = Context.Reference<number | undefined>(
+  "goat/cloud/serviceLauncherPort",
+  { defaultValue: () => undefined },
+);
+
+/** The hostname the HTTP server bound, reported with the port for the launcher's smoke probe. */
+export const ServiceLauncherHost = Context.Reference<string | undefined>(
+  "goat/cloud/serviceLauncherHost",
+  { defaultValue: () => undefined },
 );
 
 export class ServiceLauncherClient extends Context.Service<
@@ -143,10 +154,13 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
   readonly currentVersion?: string;
 }) {
   const { host, context, managed } = yield* resolveStartup(options);
+  const port = yield* ServiceLauncherPort;
+  const boundHost = yield* ServiceLauncherHost;
 
   const exchange = (
     message: ServiceLauncherChildMessage,
     accept: (reply: ServiceLauncherParentMessage) => boolean,
+    timeoutMs = 30_000,
   ) =>
     Effect.callback<ServiceLauncherParentMessage, ServiceLauncherClientError>((resume) => {
       if (!managed) {
@@ -191,7 +205,7 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
       return Effect.sync(cleanup);
     }).pipe(
       Effect.timeoutOrElse({
-        duration: "30 seconds",
+        duration: timeoutMs,
         orElse: () => Effect.fail(new ServiceLauncherClientError({ operation: "timeout" })),
       }),
     );
@@ -223,8 +237,15 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
   const prepareTrial =
     pending !== undefined
       ? exchange(
-          { type: "prepared", updateId: pending.id },
+          {
+            type: "prepared",
+            updateId: pending.id,
+            ...(port === undefined ? {} : { port }),
+            ...(port === undefined || boundHost === undefined ? {} : { host: boundHost }),
+          },
           (reply) => reply.type === "committed" && reply.updateId === pending.id,
+          // The launcher may spend 30 seconds probing HTTP before its durable commit.
+          60_000,
         ).pipe(
           Effect.flatMap((reply) => {
             if (reply.type !== "committed") {
