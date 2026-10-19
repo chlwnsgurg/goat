@@ -282,6 +282,9 @@ export class SshRemoteDispatch extends Context.Service<
       { readonly stdout: string; readonly stderr: string },
       SshRemoteDispatchError
     >;
+    readonly identifyTarget: (
+      target: DesktopSshEnvironmentTarget,
+    ) => Effect.Effect<EnvironmentId | null, SshRemoteDispatchError>;
     readonly preflightTarget: (input: {
       readonly target: DesktopSshEnvironmentTarget;
       readonly runtimeMode: RuntimeMode;
@@ -323,6 +326,8 @@ export class SshRemoteDispatch extends Context.Service<
     readonly connectedHosts: Effect.Effect<ReadonlyArray<string>>;
   }
 >()("goat/sshRemote/SshRemoteDispatch") {}
+
+const decodeIdentityFile = Schema.decodeEffect(EnvironmentId);
 
 const decodeRemoteIdentity = Schema.decodeUnknownEffect(
   Schema.Struct({ environmentId: EnvironmentId }),
@@ -1338,6 +1343,29 @@ const make = Effect.gen(function* () {
     const target = yield* resolveHost(input.host);
     return yield* runRemoteScript({ target, script: input.script, timeoutMs: input.timeoutMs });
   });
+  const identifyTarget = Effect.fn("SshRemoteDispatch.identifyTarget")(function* (
+    target: DesktopSshEnvironmentTarget,
+  ) {
+    yield* readyCloudTarget(target, false);
+    const result = yield* withRuntime(
+      manager.runRemoteScript(target, {
+        script:
+          'if [ -f "$HOME/.goat/userdata/environment-id" ]; then cat "$HOME/.goat/userdata/environment-id"; fi',
+        timeoutMs: 15_000,
+      }),
+    ).pipe(
+      Effect.mapError(() =>
+        failure("host_unavailable", `Could not read GOAT identity on ${target.alias}.`),
+      ),
+    );
+    const value = result.stdout.trim();
+    if (value === "") return null;
+    return yield* decodeIdentityFile(value).pipe(
+      Effect.mapError(() =>
+        failure("host_unavailable", `GOAT identity on ${target.alias} is invalid.`),
+      ),
+    );
+  });
   const preflightTarget = Effect.fn("SshRemoteDispatch.preflightTarget")(function* (input: {
     readonly target: DesktopSshEnvironmentTarget;
     readonly runtimeMode: RuntimeMode;
@@ -1967,6 +1995,7 @@ const make = Effect.gen(function* () {
     runRemoteScript,
     runHostScript,
     preflightTarget,
+    identifyTarget,
   });
 });
 

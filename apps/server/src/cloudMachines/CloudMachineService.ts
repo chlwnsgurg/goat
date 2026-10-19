@@ -23,6 +23,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as PubSub from "effect/PubSub";
+import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 import * as Crypto from "effect/Crypto";
 
@@ -87,6 +89,11 @@ export interface EnsureReadyOptions {
 export class CloudMachineService extends Context.Service<
   CloudMachineService,
   {
+    readonly changes: Stream.Stream<void>;
+    readonly catalog: Effect.Effect<
+      ReadonlyArray<{ readonly alias: CloudMachineAlias; readonly label: string }>,
+      CloudMachineError
+    >;
     readonly list: () => Effect.Effect<CloudMachinesListResult, CloudMachineError>;
     readonly configure: (
       input: CloudMachinesConfigureInput,
@@ -139,6 +146,7 @@ export const make = Effect.gen(function* () {
 
   const catalogPath = path.join(config.stateDir, CATALOG_FILE);
   const catalogLock = yield* Semaphore.make(1);
+  const signals = yield* PubSub.unbounded<void>();
   const aliasLocks = yield* KeyedLock.make<string>();
   const readyAt = new Map<string, number>();
   // Counts completed waking ensures, so a caller that queued behind one reuses its result.
@@ -166,7 +174,10 @@ export const make = Effect.gen(function* () {
         Effect.andThen(fs.rename(temp, catalogPath)),
         Effect.onError(() => fs.remove(temp, { force: true }).pipe(Effect.ignore)),
       );
-    }).pipe(Effect.mapError(() => fail("storage_failed")));
+    }).pipe(
+      Effect.mapError(() => fail("storage_failed")),
+      Effect.tap(() => PubSub.publish(signals, undefined)),
+    );
 
   /** Serializes read-modify-write of the catalog. */
   const updateCatalog = <A>(f: (catalog: Catalog) => readonly [Catalog, A]) =>
@@ -523,6 +534,15 @@ export const make = Effect.gen(function* () {
     });
 
   return CloudMachineService.of({
+    changes: Stream.fromPubSub(signals),
+    catalog: readCatalog.pipe(
+      Effect.map((catalog) =>
+        catalog.machines.map(({ alias, label, sandboxId }) => ({
+          alias,
+          label: label || sandboxId,
+        })),
+      ),
+    ),
     list,
     configure,
     disconnect,

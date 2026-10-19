@@ -16,6 +16,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as PubSub from "effect/PubSub";
+import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpClient from "effect/http/HttpClient";
@@ -144,6 +146,7 @@ export function parseLinkTarget(url: string, code: string | undefined): LinkTarg
 export class LinkedHosts extends Context.Service<
   LinkedHosts,
   {
+    readonly changes: Stream.Stream<void>;
     readonly list: Effect.Effect<ReadonlyArray<LinkedHost>, LinkedHostError>;
     /** The link and its token, or none when the name is not linked. */
     readonly find: (
@@ -176,6 +179,7 @@ export const make = Effect.gen(function* () {
   const http = yield* HttpClient.HttpClient;
   const crypto = yield* Crypto.Crypto;
   const lock = yield* Semaphore.make(1);
+  const signals = yield* PubSub.unbounded<void>();
 
   const read = secrets.get(LINKED_HOSTS_SECRET).pipe(
     Effect.flatMap(
@@ -384,6 +388,7 @@ export const make = Effect.gen(function* () {
             version: 1,
             links: [...catalog.links.filter((existing) => existing.name !== name), stored],
           });
+          yield* PubSub.publish(signals, undefined);
           return { host: view(stored), replaced };
         }),
       );
@@ -399,11 +404,12 @@ export const make = Effect.gen(function* () {
           version: 1,
           links: catalog.links.filter((existing) => existing !== found),
         });
+        yield* PubSub.publish(signals, undefined);
         return Option.some(view(found));
       }),
     );
 
-  return LinkedHosts.of({ list, find, names, link, unlink });
+  return LinkedHosts.of({ changes: Stream.fromPubSub(signals), list, find, names, link, unlink });
 });
 
 export const layer = Layer.effect(LinkedHosts, make);

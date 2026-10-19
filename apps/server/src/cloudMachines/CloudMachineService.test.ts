@@ -8,10 +8,12 @@ import {
   type CloudMachineErrorReason,
   type CloudMachineState,
 } from "@goat/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -28,6 +30,7 @@ const HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOv8eZbJtFiAHk3Fp2Kq";
 /** A scripted Boat and SSH writer that record every call. */
 const makeWorld = () => {
   const states = new Map<string, CloudMachineState>();
+  const milestones = { onGet: Effect.void as Effect.Effect<void> };
   const calls: Array<string> = [];
   const createKeys: Array<string> = [];
   const failures = new Map<string, CloudMachineErrorReason>();
@@ -59,6 +62,7 @@ const makeWorld = () => {
     checkKey: () => call("checkKey"),
     get: (_key, id) =>
       call("get").pipe(
+        Effect.tap(() => milestones.onGet),
         Effect.flatMap(() =>
           missing.has(id)
             ? Effect.fail(new CloudMachineError({ reason: "not_found" }))
@@ -110,6 +114,7 @@ const makeWorld = () => {
 
   return {
     states,
+    milestones,
     calls,
     createKeys,
     failures,
@@ -244,10 +249,13 @@ describe("CloudMachineService.ensureReady", () => {
           expect((yield* service.list()).machines[0]?.lastError).toBe(expired.message);
 
           world.states.set(ID, "provisioning");
+          const reading = yield* Deferred.make<void>();
+          world.milestones.onGet = Deferred.succeed(reading, undefined).pipe(Effect.asVoid);
           const waiting = yield* service
             .ensureReady(ALIAS, { wake: true })
             .pipe(Effect.flip, Effect.forkChild);
-          for (let second = 0; second < 200; second += 2) yield* TestClock.adjust("2 seconds");
+          yield* Deferred.await(reading);
+          yield* TestClock.adjust("180 seconds");
           expect((yield* Fiber.join(waiting)).reason).toBe("readiness_timeout");
         }),
       );
@@ -430,3 +438,25 @@ describe("CloudMachineService lifecycle", () => {
     }),
   );
 });
+
+it.effect("reads a local catalog without Boat and signals catalog writes", () =>
+  Effect.gen(function* () {
+    const world = makeWorld();
+    yield* withService(world, {}, (service) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const changed = yield* service.changes.pipe(
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped({ startImmediately: true }),
+          );
+          yield* service.create({ label: "Build box", type: "small", ttlSeconds: 3600 });
+          yield* Fiber.join(changed);
+          world.calls.length = 0;
+          expect(yield* service.catalog).toEqual([{ alias: ALIAS, label: "Build box" }]);
+          expect(world.calls).toEqual([]);
+        }),
+      ),
+    );
+  }),
+);
