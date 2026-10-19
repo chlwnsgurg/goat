@@ -379,7 +379,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             const ordinary = contended ? yield* launch(f) : undefined;
             if (ordinary !== undefined) {
               assert.equal(ordinary.status, "ready");
-              assert.equal(ordinary.pending?.reason, "contended");
+              assert.isUndefined(ordinary.pending);
             }
             const snapshot = yield* f.snapshot;
             const commands = f.remoteCommands.length;

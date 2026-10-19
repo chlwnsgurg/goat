@@ -1577,7 +1577,13 @@ emit_pending() {
       check_retained_runner
       check_live_protocol
       if [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_PID" = "$pending_pid" ] && [ "$LIVE_PORT" = "$pending_port" ] && [ "$LIVE_VERSION" = "$pending_version" ]; then
-        printf '{"status":"ready","remotePort":%s,"serverKind":"managed","selectedVersion":"%s","pending":{%s}}\n' "$LIVE_PORT" "$LIVE_VERSION" "$pending_fields"
+        pending_kind=external; [ "$LIVE_OWNED" != 1 ] || pending_kind=managed
+        # Lock contention does not imply a replacement; compatible attach-only servers stay ready.
+        pending_suffix=
+        if [ "$reason" != contended ] || [ "$NEEDS_OWNED_UPGRADE" != 0 ]; then
+          pending_suffix="$(printf ',"pending":{%s}' "$pending_fields")"
+        fi
+        printf '{"status":"ready","remotePort":%s,"serverKind":"%s","selectedVersion":"%s"%s}\n' "$LIVE_PORT" "$pending_kind" "$LIVE_VERSION" "$pending_suffix"
         exit 0
       fi
     fi
