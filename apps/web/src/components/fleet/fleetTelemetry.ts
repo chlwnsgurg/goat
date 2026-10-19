@@ -349,7 +349,24 @@ export function fleetAlerts(
         detail: "Update GOAT to report status",
       });
     }
-    if (entry.versionMismatch === true) {
+    // As in Settings > Hosts, only the protocol verdict warns; builds of different versions
+    // work together. versionMismatch decides only when the fan-out machine predates verdicts.
+    const version = entry.serverVersion === undefined ? "" : ", runs GOAT " + entry.serverVersion;
+    if (row.tone === "ok" && entry.compatibility === "incompatible") {
+      alerts.push({
+        key: row.key + ":version",
+        tone: "destructive",
+        label: row.label,
+        detail: "Incompatible" + version,
+      });
+    } else if (row.tone === "ok" && entry.compatibility === "degraded") {
+      alerts.push({
+        key: row.key + ":version",
+        tone: "muted",
+        label: row.label,
+        detail: "Compatibility unknown" + version,
+      });
+    } else if (entry.compatibility === undefined && entry.versionMismatch === true) {
       alerts.push({
         key: row.key + ":version",
         tone: "warning",

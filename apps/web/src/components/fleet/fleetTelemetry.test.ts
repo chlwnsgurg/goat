@@ -42,6 +42,7 @@ function entry(
     readonly reachability?: HostStatusEntry["reachability"];
     readonly lastKnown?: true;
     readonly versionMismatch?: true;
+    readonly compatibility?: HostStatusEntry["compatibility"];
     readonly quotas?: NonNullable<HostStatusEntry["metrics"]>["quotas"];
     readonly noMetrics?: boolean;
   } = {},
@@ -51,6 +52,7 @@ function entry(
     reachability: options.reachability ?? "ok",
     ...(options.lastKnown ? { lastKnown: true as const } : {}),
     ...(options.versionMismatch ? { versionMismatch: true as const, serverVersion: "0.1.0" } : {}),
+    ...(options.compatibility ? { compatibility: options.compatibility } : {}),
     ...(options.noMetrics
       ? {}
       : {
@@ -296,6 +298,9 @@ describe("fleetAlerts", () => {
           }),
           entry("box", { reachability: "unreachable", lastKnown: true, at: NOW - 4 * 60_000 }),
           entry("old", { versionMismatch: true }),
+          entry("newer", { versionMismatch: true, compatibility: "compatible" }),
+          entry("broken", { versionMismatch: true, compatibility: "incompatible" }),
+          entry("legacy", { versionMismatch: true, compatibility: "degraded" }),
           entry("ancient", { reachability: "unsupported", noMetrics: true }),
         ],
       }),
@@ -311,9 +316,11 @@ describe("fleetAlerts", () => {
       ),
     ).toEqual([
       ["mini", "destructive", "Tailscale is off"],
+      ["broken", "destructive", "Incompatible, runs GOAT 0.1.0"],
       ["remote", "warning", "Could not read host status"],
       ["box", "warning", "Unreachable, last known 4m ago"],
       ["old", "warning", "Runs GOAT 0.1.0"],
+      ["legacy", "muted", "Compatibility unknown, runs GOAT 0.1.0"],
       ["ancient", "muted", "Update GOAT to report status"],
     ]);
   });
