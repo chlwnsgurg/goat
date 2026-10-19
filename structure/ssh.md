@@ -41,17 +41,21 @@ manager. Commands reuse its control socket; forwards are added with `-O forward`
 and removed with `-O cancel` using the identical `-L` spec before the master is
 killed through its captured process handle. `ControlPersist=no` and the same
 owner-pipe fence as standalone forwards prevent a master surviving an owner crash.
-The 0700 GOAT runtime temp directory contains both askpass and the socket; a
-16-hex SHA-256 prefix covers the resolved target and effective `ssh -G` config,
-including proxy and identity settings. Paths of 104 bytes or more disable sharing
-rather than exceed macOS's socket limit. A separate directory per lifetime keeps
-teardown from reaching a successor's socket.
+The fresh, owner-checked 0700 runtime directory under `/tmp` contains both
+askpass and the socket; a 12-hex SHA-256 prefix covers the resolved target and
+effective `ssh -G` config, including proxy and identity settings. The path budget
+reserves 17 bytes for OpenSSH's temporary suffix plus a terminating NUL within
+macOS's 104-byte socket limit. A separate directory per lifetime keeps teardown
+from reaching a successor's socket.
 
 A failed or exited master falls back to standalone SSH. Windows stays standalone.
-An effective user ControlPath or enabled ControlMaster leaves sharing to OpenSSH's
-user configuration; GOAT adds no socket override. Keepalive runs on the owned master,
-or on each standalone session. Git workspace transfers carry the same 15 s / three
-missed probes budget through `GIT_SSH_COMMAND`. The RPC ping still owns detection
+An effective user ControlPath or enabled ControlMaster leaves command sharing to
+OpenSSH's user configuration. The forward stays standalone and owner-fenced with
+`ControlMaster=no`, `ControlPath=none`, and `ControlPersist=no`; GOAT never creates
+a master in that case. Keepalive runs on the owned master and on commands,
+including commands using `-S` in case OpenSSH falls back to a direct connection.
+Git workspace transfers carry the same 15 s / three missed probes budget through
+`GIT_SSH_COMMAND`. The RPC ping still owns detection
 of a forward that remains alive but stops carrying bytes. `ssh.reconnect.cost`
 counts all SSH spawns and reports `mastersStarted` and `controlCommands` separately
 from authentication milestones, so local mux requests do not imply new handshakes.

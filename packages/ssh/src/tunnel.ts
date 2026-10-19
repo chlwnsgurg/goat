@@ -87,7 +87,6 @@ import {
   SshReconnectCost,
   SshConnectionSharing,
   healthySshMaster,
-  hasUserSshSharing,
   type SshMasterConnection,
   measureSshReconnectStep,
   SSH_KEEPALIVE_ARGS,
@@ -3648,10 +3647,6 @@ const startSshTunnelAttempt = Effect.fn("ssh/tunnel.startSshTunnel")(function* (
   );
   let master = yield* healthySshMaster(input.resolvedTarget);
   const platform = yield* HostProcess.Platform;
-  const sharing = yield* SshConnectionSharing;
-  const userSharing =
-    platform !== "win32" &&
-    hasUserSshSharing(sharing?.configurations.get(input.resolvedTarget.alias) ?? "");
   const args = [
     ...SSH_DIAGNOSTIC_ARGS,
     ...baseSshArgs(input.resolvedTarget, {
@@ -3659,9 +3654,12 @@ const startSshTunnelAttempt = Effect.fn("ssh/tunnel.startSshTunnel")(function* (
     }),
     "-o",
     "ExitOnForwardFailure=yes",
-    ...(userSharing
-      ? []
-      : ["-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no"]),
+    "-o",
+    "ControlMaster=no",
+    "-o",
+    "ControlPath=none",
+    "-o",
+    "ControlPersist=no",
     ...SSH_KEEPALIVE_ARGS,
     "-n",
     "-N",

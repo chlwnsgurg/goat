@@ -1,9 +1,12 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Bind the actual OpenSSH temporary socket path on the host OS.
+import * as NodeNet from "node:net";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@goat/shared/HostProcess";
 import * as NetService from "@goat/shared/Net";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -11,6 +14,7 @@ import { HttpClient } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as SshAuth from "./auth.ts";
 import { SshReconnectCost, hasUserSshSharing } from "./command.ts";
+import { SshCommandError } from "./errors.ts";
 import { SshEnvironmentManager } from "./tunnel.ts";
 import {
   commandArgs,
@@ -41,12 +45,19 @@ const fixture = (
     let prompts = 0;
     let currentDie = Effect.void;
     const die = Effect.suspend(() => currentDie);
+    const commandStarted = Deferred.makeUnsafe<void>();
+    let holdCommand = false;
+    let masterExit = Effect.never as Effect.Effect<ChildProcessSpawner.ExitCode>;
+    const holdNextCommand = Effect.sync(() => {
+      holdCommand = true;
+    });
     let identity = "/fixture/id";
     const changeIdentity = Effect.sync(() => {
       identity = "/fixture/other-id";
     });
     const newMasterProcess = () => {
       const exit = Deferred.makeUnsafe<ChildProcessSpawner.ExitCode>();
+      masterExit = Deferred.await(exit);
       let running = true;
       const stop = Effect.sync(() => {
         running = false;
@@ -108,6 +119,16 @@ const fixture = (
           events.push("standalone-forward");
           return makeRunningProcess(() => events.push("kill-forward"));
         }
+        if (holdCommand && args.includes("sh")) {
+          holdCommand = false;
+          return {
+            ...makeSuccessfulProcess(""),
+            stderr: Stream.make(
+              new TextEncoder().encode("mux_client_read_packet: read header failed: Broken pipe\n"),
+            ),
+            exitCode: Deferred.succeed(commandStarted, undefined).pipe(Effect.andThen(masterExit)),
+          };
+        }
         if (mode === "password" && prompts === 0) return failedAuth();
         if (isRemoteLaunch(args))
           return makeSuccessfulProcess(
@@ -136,7 +157,17 @@ const fixture = (
         leaveRemoteServerRunning: mode !== "stop-runtime",
       }),
     );
-    return { commands, events, die, changeIdentity, layer, platform, prompts: () => prompts };
+    return {
+      commands,
+      events,
+      die,
+      changeIdentity,
+      layer,
+      platform,
+      holdNextCommand,
+      commandStarted,
+      prompts: () => prompts,
+    };
   });
 
 const run = <A, E>(
@@ -149,6 +180,7 @@ const run = <A, E>(
     E,
     Effect.Services<ReturnType<SshEnvironmentManager["Service"]["ensureEnvironment"]>>
   >,
+  tempDirectory?: string,
 ) =>
   Effect.gen(function* () {
     const f = yield* fixture(mode);
@@ -156,6 +188,18 @@ const run = <A, E>(
       const manager = yield* SshEnvironmentManager;
       return yield* body(f, manager);
     }).pipe(
+      Effect.updateService(FileSystem.FileSystem, (fs) =>
+        tempDirectory === undefined
+          ? fs
+          : {
+              ...fs,
+              makeTempDirectoryScoped: (options) =>
+                fs.makeTempDirectoryScoped({
+                  ...options,
+                  directory: options?.directory ?? tempDirectory,
+                }),
+            },
+      ),
       Effect.scoped,
       Effect.provide(f.layer),
       Effect.provideService(HostProcess.Platform, f.platform),
@@ -163,6 +207,72 @@ const run = <A, E>(
   });
 
 describe("scoped SSH master", () => {
+  it.effect("binds the OpenSSH temporary control socket within the macOS sun_path limit", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const longTemp = yield* fs.makeTempDirectoryScoped({
+        directory: "/tmp",
+        prefix: `goat-macos-tmp-${"x".repeat(25)}`,
+      });
+      return yield* run(
+        "healthy",
+        (f, manager) =>
+          Effect.gen(function* () {
+            yield* manager.ensureEnvironment(uploadTarget);
+            const args = commandArgs(f.commands.find((c) => commandArgs(c).includes("-M"))!);
+            const socket = args[args.indexOf("-S") + 1]!;
+            const temporary = `${socket}.${"a".repeat(16)}`;
+            yield* Effect.tryPromise(
+              () =>
+                new Promise<void>((resolve, reject) => {
+                  const server = NodeNet.createServer();
+                  server.once("error", reject);
+                  server.listen(temporary, () =>
+                    server.close((error) => (error ? reject(error) : resolve())),
+                  );
+                }),
+            );
+            assert.isBelow(Buffer.byteLength(temporary), 104);
+            assert.equal(Buffer.byteLength(temporary) - Buffer.byteLength(socket), 17);
+            yield* manager.disconnectEnvironment(uploadTarget);
+          }),
+        longTemp,
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "returns a typed error for an in-flight command when its master dies, then falls back",
+    () =>
+      run("healthy", (f, manager) =>
+        Effect.gen(function* () {
+          yield* manager.ensureEnvironment(uploadTarget);
+          yield* f.holdNextCommand;
+          const pending = yield* manager
+            .runRemoteScript(uploadTarget, { script: "echo interrupted" })
+            .pipe(Effect.result, Effect.forkChild);
+          yield* Deferred.await(f.commandStarted);
+          assert.include(commandArgs(f.commands.at(-1)!), "-S");
+          yield* f.die;
+          const result = yield* Fiber.join(pending);
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.instanceOf(result.failure, SshCommandError);
+            if (result.failure instanceof SshCommandError) {
+              assert.equal(result.failure.exitCode, 255);
+              assert.include(result.failure.stderr, "Broken pipe");
+            }
+          }
+          yield* manager.runRemoteScript(uploadTarget, { script: "echo fallback" });
+          assert.notInclude(commandArgs(f.commands.at(-1)!), "-S");
+          yield* manager.revalidateTunnels();
+          yield* manager.ensureEnvironment(uploadTarget);
+          assert.equal(f.events.filter((event) => event === "master").length, 2);
+          yield* manager.disconnectEnvironment(uploadTarget);
+        }),
+      ),
+  );
+
   it.effect(
     "shares preparation and commands, cancels the forward before killing its master, and passes askpass to the master",
     () =>
@@ -185,7 +295,7 @@ describe("scoped SSH master", () => {
           const args = commandArgs(master);
           const socket = args[args.indexOf("-S") + 1]!;
           assert.isBelow(new TextEncoder().encode(socket).length, 104);
-          assert.match(socket, /\/goat-ssh-runtime-[^/]+\/[a-f0-9]{16}$/u);
+          assert.match(socket, /\/goat-ssh-runtime-[^/]+\/[a-f0-9]{12}$/u);
           assert.include(args, "ControlPersist=no");
           assert.include(args, "ServerAliveInterval=15");
           assert.include(args, "ServerAliveCountMax=3");
@@ -204,7 +314,10 @@ describe("scoped SSH master", () => {
           assert.isAtLeast(remote.length, 1);
           for (const command of remote) {
             assert.includeMembers([...commandArgs(command)], ["-S", socket, "ControlMaster=no"]);
-            assert.notInclude(commandArgs(command), "ServerAliveInterval=15");
+            assert.includeMembers(
+              [...commandArgs(command)],
+              ["ServerAliveInterval=15", "ServerAliveCountMax=3"],
+            );
           }
           assert.equal(cost.mastersStarted, 1);
           assert.equal(cost.controlCommands, 2);
@@ -325,13 +438,20 @@ describe("scoped SSH master", () => {
           const forward = f.commands.find(
             (c) => commandArgs(c).includes("-N") && !commandArgs(c).includes("-M"),
           )!;
-          if (mode === "windows")
-            assert.includeMembers(
-              [...commandArgs(forward)],
-              ["ControlPath=none", "ControlMaster=no"],
-            );
-          if (mode === "user-path" || mode === "user-master")
-            assert.notInclude(commandArgs(forward), "ControlPath=none");
+          assert.includeMembers(
+            [...commandArgs(forward)],
+            ["ControlPath=none", "ControlMaster=no", "ControlPersist=no"],
+          );
+          assert.notInclude(commandArgs(forward), "-S");
+          if (mode === "user-path" || mode === "user-master") {
+            const remote = f.commands.find((c) => commandArgs(c).includes("sh"))!;
+            assert.notInclude(commandArgs(remote), "ControlPath=none");
+            assert.equal(forward._tag, "StandardCommand");
+            if (forward._tag === "StandardCommand") {
+              assert.equal(forward.command, "/bin/sh");
+              assert.isTrue(forward.options.detached);
+            }
+          }
           yield* manager.disconnectEnvironment(uploadTarget);
           assert.include(f.events, "kill-forward");
         }),

@@ -405,11 +405,8 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
     ...baseSshArgs(target, {
       batchMode: input.batchMode ?? (input.interactiveAuth ? "no" : "yes"),
     }),
-    ...(master === undefined
-      ? input.preHostArgs?.includes("-O")
-        ? []
-        : SSH_KEEPALIVE_ARGS
-      : ["-S", master.socket, "-o", "ControlMaster=no"]),
+    ...(input.preHostArgs?.includes("-O") ? [] : SSH_KEEPALIVE_ARGS),
+    ...(master === undefined ? [] : ["-S", master.socket, "-o", "ControlMaster=no"]),
     ...(input.preHostArgs ?? []),
     "--",
     hostSpec,

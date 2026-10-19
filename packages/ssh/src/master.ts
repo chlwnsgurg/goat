@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Hex from "effect/encoding/Hex";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -55,14 +56,25 @@ export const ensureSshMaster = Effect.fn("ssh/master.ensure")(function* (
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const crypto = yield* Crypto.Crypto;
-    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-ssh-runtime-" });
+    // macOS TMPDIR can leave no room for OpenSSH's temporary socket name.
+    // mkdtemp creates a fresh private directory rather than trusting a shared fixed path.
+    const directory = yield* fs.makeTempDirectoryScoped({
+      directory: "/tmp",
+      prefix: "goat-ssh-runtime-",
+    });
     yield* fs.chmod(directory, 0o700);
+    const uid = yield* HostProcess.UserId;
+    const info = yield* fs.stat(directory);
+    if (uid === undefined || Option.getOrUndefined(info.uid) !== uid)
+      return yield* Effect.fail("control-directory-owner-mismatch");
     // The effective config includes ProxyJump/ProxyCommand and every selected identity.
     const hash = Hex.encode(
       yield* crypto.digest("SHA-256", new TextEncoder().encode(`${key}\u0000${configuration}`)),
-    ).slice(0, 16);
+    ).slice(0, 12);
     const socket = path.join(directory, hash);
-    if (new TextEncoder().encode(socket).length >= 104)
+    // OpenSSH binds <ControlPath>.<16 random chars> before rename; reserve its suffix
+    // and the terminating NUL within macOS's 104-byte sun_path (Linux allows 108).
+    if (new TextEncoder().encode(socket).length + 17 >= 104)
       return yield* Effect.fail("control-path-too-long");
     const environment = yield* buildSshChildEnvironment({
       ...auth,
