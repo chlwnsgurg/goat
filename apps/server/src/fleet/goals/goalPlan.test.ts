@@ -22,6 +22,7 @@ const observe = (overrides: Partial<GoalObservation> = {}): GoalObservation => (
   pullRequests: new Map(),
   issues: new Map(),
   turns: 0,
+  firstClaimAt: null,
   ...overrides,
 });
 
@@ -253,7 +254,8 @@ describe("planGoal", () => {
     expect(shrink.actions).toEqual([
       { type: "interrupt", slot: 1, attempt: 1, actionId: "goal:goal_h:s1:a1:interrupt" },
     ]);
-    expect(shrink.workers[1]!.state).toBe("superseded");
+    // It stays live until the interrupt is confirmed.
+    expect(shrink.workers[1]!.state).toBe("running");
     const deleting = testGoal("goal_h", { deletionRequestedAt: "2026-10-20T00:30:00.000Z" });
     expect(
       planGoal(deleting, [running(deleting, 0)], observe({ workers: new Map([[0, live]]) }))
@@ -265,5 +267,80 @@ describe("planGoal", () => {
       planGoal(deleting, [running(deleting, 0)], observe({ workers: new Map([[0, seen()]]) }))
         .actions,
     ).toEqual([{ type: "delete_row" }]);
+  });
+  it("keeps dropped slots until their interrupts land, even past one pass's limit", () => {
+    const goal = testGoal("goal_i", {
+      spec: testSpec({ workers: { ...testSpec().workers, count: 0 } }),
+    });
+    const live = seen({ terminal: false, runStatus: "running" });
+    const previous = [0, 1, 2, 3, 4].map((slot) => running(goal, slot));
+    const plan = planGoal(
+      goal,
+      previous,
+      observe({ workers: new Map(previous.map((w) => [w.slot, live])) }),
+    );
+    expect(plan.actions).toHaveLength(MAX_ACTIONS_PER_GOAL);
+    expect(plan.truncated).toBe(true);
+    expect(plan.workers.map((worker) => worker.state)).toEqual([
+      "running",
+      "running",
+      "running",
+      "running",
+      "running",
+    ]);
+    const stopped = planGoal(
+      goal,
+      previous,
+      observe({ workers: new Map(previous.map((w) => [w.slot, seen()])) }),
+    );
+    expect(stopped.workers.every((worker) => worker.state === "superseded")).toBe(true);
+    const paused = testGoal("goal_i", {
+      spec: testSpec({ paused: true, workers: { ...testSpec().workers, count: 0 } }),
+    });
+    expect(
+      planGoal(paused, previous, observe({ workers: new Map(previous.map((w) => [w.slot, live])) }))
+        .actions,
+    ).toEqual([]);
+  });
+
+  it("keeps a deleting goal while any attempt cannot be confirmed stopped", () => {
+    const deleting = testGoal("goal_j", { deletionRequestedAt: "2026-10-20T00:30:00.000Z" });
+    const unreadable = planGoal(
+      deleting,
+      [running(deleting, 0)],
+      observe({ workers: new Map([[0, { kind: "unknown", message: "host down" }]]) }),
+    );
+    expect(unreadable.actions).toEqual([]);
+    expect(unreadable.status.phase).toBe("deleting");
+    const unclear = newWorker(deleting, 0, null);
+    const claimed = planGoal(
+      deleting,
+      [unclear],
+      observe({
+        launchClaims: new Map([
+          [unclear.launchClientRequestId, { claimedAt: NOW - 1000, settled: false }],
+        ]),
+      }),
+    );
+    expect(claimed.actions).toEqual([
+      {
+        type: "resolve_launch",
+        slot: 0,
+        attempt: 1,
+        actionId: "goal:goal_j:s0:a1:launch",
+        expired: false,
+      },
+    ]);
+  });
+
+  it("runs the wall-clock budget from the first claim even if status never recorded it", () => {
+    const goal = testGoal("goal_k", {
+      spec: testSpec({ limits: { ...testSpec().limits, maxWallClockMs: 60_000 } }),
+    });
+    const plan = planGoal(goal, [], observe({ firstClaimAt: NOW - 120_000 }));
+    expect(plan.actions).toEqual([]);
+    expect(
+      plan.status.conditions.find((condition) => condition.type === "BudgetExhausted"),
+    ).toMatchObject({ status: "True" });
   });
 });

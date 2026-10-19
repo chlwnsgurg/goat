@@ -179,6 +179,9 @@ export const make = Effect.gen(function* () {
         pullRequests,
         issues,
         turns: yield* store.turns(goal.id),
+        firstClaimAt: yield* store
+          .firstClaimAt(goal.id)
+          .pipe(Effect.map((started) => (started === null ? null : Date.parse(started)))),
       };
       return observation;
     });
@@ -197,7 +200,7 @@ export const make = Effect.gen(function* () {
         plan.status.conditions.some(
           (c) => c.type === "Degraded" && c.reason === "ObservationFailed",
         );
-      let startedAt = goal.status.usage.startedAt;
+      let startedAt = plan.status.usage.startedAt;
       let used = 0;
       const owner = FleetOwnerKey.make("goal:" + goal.id);
       const note = (
@@ -233,6 +236,15 @@ export const make = Effect.gen(function* () {
             nowIso,
           })
           .pipe(
+            // An interrupt or a reschedule may be sent again: its receiver dedupes it by the
+            // command id or the next attempt's launch id, so a crash after the claim cannot leave
+            // it undone for good.
+            Effect.map((refusal) =>
+              refusal === "already_claimed" &&
+              (kind === "interrupt" || actionId.endsWith(":reschedule"))
+                ? null
+                : refusal,
+            ),
             Effect.tap((refusal) =>
               refusal === null
                 ? Effect.logInfo("fleet.goal.action", { goalId: goal.id, actionId, kind })
@@ -592,6 +604,8 @@ export const make = Effect.gen(function* () {
                 nowIso,
               );
               if (stopped._tag === "Failure") failed = true;
+              else if (worker.slot >= desiredSlots(goal).length)
+                workers.set(worker.slot, { ...worker, state: "superseded" });
               note(
                 stopped._tag === "Success" ? "Normal" : "Warning",
                 stopped._tag === "Success" ? "WorkerInterrupted" : "InterruptFailed",

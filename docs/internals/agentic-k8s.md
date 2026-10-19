@@ -336,6 +336,14 @@ differences a maintainer would otherwise trip on:
   whose turn has ended. Remote follow-ups still go through `goat_thread_send` and need a live
   owner (#494).
 - PR state comes from `PullRequestService.checks` for the goal's repo, not thread PR links.
+- Goal-owned threads are not yet excluded from `UsageLimitRecoveryWorker` auto-resume; that filter
+  is the resources work's 3b slice. Until then, with `autoResumeLimitedThreads` on, a limited goal
+  worker resumes after its reset even if the goal is paused or out of budget.
+- An attempt replaced after `LAUNCH_GRACE_MS` is not kept as its own record, so a late thread from
+  it is not found or interrupted by the goal. Fencing of stale attempts arrives with self-healing.
+- Owner authority is re-read right before each action, but not inside the claim transaction, so a
+  mode change in that short window is honoured from the next action on.
+- `limits.maxTokens` is refused unless null; nothing counts tokens yet.
 - Only thread owners are accepted; `owner.kind: "mcp_client"` is in the contract but refused
   (#493). Owners in plan mode are refused because the remote and dispatch paths carry no plan
   ceiling.

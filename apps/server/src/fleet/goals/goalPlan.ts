@@ -116,6 +116,8 @@ export interface GoalObservation {
   readonly pullRequests: ReadonlyMap<number, PullRequestObservation>;
   readonly issues: ReadonlyMap<number, "open" | "closed" | "unknown">;
   readonly turns: number;
+  /** When the goal's first action was claimed; the wall-clock budget runs from here. */
+  readonly firstClaimAt: number | null;
 }
 
 export type GoalAction =
@@ -408,7 +410,15 @@ export function planGoal(
   const workers: Array<WorkerRecord> = [];
   for (const { slot, target } of desired) {
     const known = bySlot.get(slot) ?? newWorker(goal, slot, target);
-    workers.push(deleting || spec.paused || !owner.available ? observeOnly(known) : judge(known));
+    const unclear =
+      known.threadId === null && observation.launchClaims.get(known.launchClientRequestId) != null;
+    workers.push(
+      deleting && unclear
+        ? judge(known)
+        : deleting || spec.paused || !owner.available
+          ? observeOnly(known)
+          : judge(known),
+    );
   }
   function observeOnly(worker: WorkerRecord): WorkerRecord {
     const seen = observation.workers.get(worker.slot);
@@ -423,20 +433,32 @@ export function planGoal(
     const seen = observation.workers.get(worker.slot);
     return worker.threadId !== null && seen?.kind === "seen" && !seen.terminal;
   };
+  /** Known to have stopped: no thread was ever started, the run ended, or the thread is gone. */
+  const confirmedDone = (worker: WorkerRecord) => {
+    if (worker.state === "launch_unknown") return false;
+    if (worker.threadId === null) return true;
+    const seen = observation.workers.get(worker.slot);
+    return seen?.kind === "missing" || (seen?.kind === "seen" && seen.terminal);
+  };
   // Slots the spec no longer asks for, and every live slot of a goal being deleted.
   const shrunk = previous.filter((worker) => worker.slot >= desired.length);
+  // A dropped slot stays as it is until its run is confirmed stopped, so an interrupt that did
+  // not fit in this pass, or failed, is planned again next pass.
   for (const worker of shrunk) {
-    if (isLive(worker) && worker.state !== "superseded")
+    if (isLive(worker))
       actions.push({
         type: "interrupt",
         slot: worker.slot,
         attempt: worker.attempt,
         actionId: interruptActionId(goal, worker.slot, worker.attempt),
       });
-    workers.push(worker.state === "superseded" ? worker : { ...worker, state: "superseded" });
+    workers.push(confirmedDone(worker) ? { ...worker, state: "superseded" } : worker);
   }
   if (deleting) {
+    // Unclear launches are still looked up, since one may have started a thread to stop.
+    const resolving = actions.filter((action) => action.type === "resolve_launch");
     actions.length = 0;
+    actions.push(...resolving);
     const live = workers.filter(isLive);
     for (const worker of live)
       actions.push({
@@ -445,7 +467,9 @@ export function planGoal(
         attempt: worker.attempt,
         actionId: interruptActionId(goal, worker.slot, worker.attempt),
       });
-    if (live.length === 0) actions.push({ type: "delete_row" });
+    // Like a finalizer: the row goes only once every attempt is known to have stopped. A worker
+    // that cannot be read keeps the goal as a tombstone; goat_goal_delete with force drops it.
+    if (workers.every(confirmedDone)) actions.push({ type: "delete_row" });
   }
 
   for (const worker of workers) {
@@ -501,7 +525,10 @@ export function planGoal(
       issueTargets.every((number) => observation.issues.get(number) === "closed"),
   };
   const done = spec.doneWhen.every((entry) => holds[entry.type]);
-  const startedAt = goal.status.usage.startedAt;
+  const startedAt =
+    observation.firstClaimAt === null
+      ? goal.status.usage.startedAt
+      : DateTime.formatIso(DateTime.makeUnsafe(observation.firstClaimAt));
   const budgetSpent =
     (spec.limits.maxTurns !== null && observation.turns >= spec.limits.maxTurns) ||
     (spec.limits.maxWallClockMs !== null &&
@@ -563,13 +590,15 @@ export function planGoal(
   // Only deletion interrupts and the row removal survive a stop on acting.
   const allowed = deleting
     ? actions
-    : spec.paused || !owner.available || done
-      ? actions.filter((action) => action.type === "interrupt")
-      : budgetSpent
-        ? actions.filter(
-            (action) => action.type === "interrupt" || action.type === "resolve_launch",
-          )
-        : actions;
+    : spec.paused || !owner.available
+      ? []
+      : done
+        ? actions.filter((action) => action.type === "interrupt")
+        : budgetSpent
+          ? actions.filter(
+              (action) => action.type === "interrupt" || action.type === "resolve_launch",
+            )
+          : actions;
   const bounded = allowed.slice(0, MAX_ACTIONS_PER_GOAL);
 
   if (phase !== goal.status.phase)
@@ -593,7 +622,7 @@ export function planGoal(
       degraded: troubled || unobserved,
     }),
     workers: workers.map(publicWorker),
-    usage: { ...goal.status.usage, turns: observation.turns },
+    usage: { ...goal.status.usage, turns: observation.turns, startedAt },
     lastReconcileAt: nowIso,
   };
   return { status, workers, actions: bounded, events, truncated: allowed.length > bounded.length };

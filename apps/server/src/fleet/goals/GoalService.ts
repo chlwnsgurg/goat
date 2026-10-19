@@ -145,6 +145,11 @@ export const make = Effect.gen(function* () {
           code: "invalid_request",
           message: "Set spec.project.projectId for workers on this machine.",
         });
+      if (spec.limits.maxTokens !== null)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "limits.maxTokens is not enforced yet; leave it null.",
+        });
       if (spec.workers.perTarget && spec.targets.length === 0)
         return yield* new OrchestratorMcpFailure({
           code: "invalid_request",

@@ -171,6 +171,8 @@ export class GoalStore extends Context.Service<
       } | null,
       GoalStoreError
     >;
+    /** When the goal's first action was claimed, or null before any. */
+    readonly firstClaimAt: (id: FleetGoalId) => Effect.Effect<string | null, GoalStoreError>;
     /** Turns the goal has spent: claimed launches, follow-ups and model switches. */
     readonly turns: (id: FleetGoalId) => Effect.Effect<number, GoalStoreError>;
   }
@@ -215,7 +217,6 @@ const decodeWorkerRow = Schema.decodeUnknownEffect(WorkerRow);
 const decodeEventRow = Schema.decodeUnknownEffect(EventRow);
 const decodeWorkerState = Schema.decodeUnknownEffect(GoalWorkerState);
 const decodeSpecJson = Schema.decodeUnknownEffect(Schema.fromJsonString(FleetGoalSpec));
-const decodeStatusJson = Schema.decodeUnknownEffect(Schema.fromJsonString(FleetGoalStatus));
 const decodeEvent = Schema.decodeUnknownEffect(FleetGoalEvent);
 const encodeGoal = Schema.encodeEffect(FleetGoal);
 const encodeOwnerJson = Schema.encodeEffect(Schema.fromJsonString(FleetGoalOwner));
@@ -511,7 +512,10 @@ export const make = Effect.gen(function* () {
         "GoalStore.due",
         sql`
           SELECT ${sql.literal(GOAL_COLUMNS)} FROM fleet_goals
-          WHERE deletion_requested_at IS NOT NULL
+          WHERE (
+              deletion_requested_at IS NOT NULL
+              AND (next_reconcile_at IS NULL OR next_reconcile_at <= ${nowIso})
+            )
             OR observed_generation < generation
             OR (
               paused = 0
@@ -574,7 +578,6 @@ export const make = Effect.gen(function* () {
               if (row.deletion_requested_at !== null) return "deleting" as const;
               if (row.paused === 1) return "paused" as const;
               const spec = yield* decodeSpecJson(row.spec_json);
-              const status = yield* decodeStatusJson(row.status_json);
               const [spent] = yield* sql<{ readonly turns: number }>`
                 SELECT COUNT(*) AS turns FROM fleet_goal_actions
                 WHERE goal_id = ${request.goalId}
@@ -582,7 +585,11 @@ export const make = Effect.gen(function* () {
               `;
               if (spec.limits.maxTurns !== null && (spent?.turns ?? 0) >= spec.limits.maxTurns)
                 return "budget" as const;
-              const started = status.usage.startedAt;
+              const [first] = yield* sql<{ readonly started: string | null }>`
+                SELECT MIN(claimed_at) AS started FROM fleet_goal_actions
+                WHERE goal_id = ${request.goalId}
+              `;
+              const started = first?.started ?? null;
               if (
                 spec.limits.maxWallClockMs !== null &&
                 started !== null &&
@@ -635,6 +642,13 @@ export const make = Effect.gen(function* () {
             : { claimedAt: row.claimed_at, settledAt: row.settled_at, outcome: row.outcome },
         ),
       ),
+    firstClaimAt: (id) =>
+      run(
+        "GoalStore.firstClaimAt",
+        sql<{ readonly started: string | null }>`
+          SELECT MIN(claimed_at) AS started FROM fleet_goal_actions WHERE goal_id = ${id}
+        `,
+      ).pipe(Effect.map(([row]) => row?.started ?? null)),
     turns: (id) =>
       run(
         "GoalStore.turns",
