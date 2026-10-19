@@ -32,10 +32,14 @@ watcher=$!
 ssh_pid=$!
 exec 3<&-
 trap 'interrupted=1; kill -TERM "$ssh_pid" 2>/dev/null' TERM INT HUP
+status=
 while :; do
   interrupted=0
-  wait "$ssh_pid"
-  status=$?
+  wait "$ssh_pid" 2>/dev/null
+  waited=$?
+  # A signal right after wait returned makes the next wait find no child: macOS sh then
+  # answers 127, and the status already collected stands.
+  if [ "$waited" -ne 127 ] || [ -z "$status" ]; then status=$waited; fi
   [ "$interrupted" -eq 0 ] && break
 done
 kill -KILL "$watcher" 2>/dev/null

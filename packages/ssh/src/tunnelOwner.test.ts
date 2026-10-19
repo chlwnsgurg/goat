@@ -239,30 +239,69 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       },
     );
 
-    // ssh exits as the trap forwards SIGTERM; the interrupted wait must not decide the status.
-    it.each(SHELLS)(
-      "reports ssh's own exit status after a forwarded SIGTERM; %s",
-      async (shell) => {
+    // ssh's exit status must survive a SIGTERM whether it lands while the supervisor waits
+    // (forwarded) or races ssh's own exit (before or after the supervisor's wait returns).
+    it.each(
+      SHELLS.flatMap((shell) => [
+        {
+          shell,
+          signalFromTest: true,
+          ssh: 'process.on("SIGTERM", () => process.exit(23)); console.log("up"); setInterval(() => {}, 1e9);',
+        },
+        {
+          shell,
+          signalFromTest: false,
+          ssh: 'process.on("SIGTERM", () => {}); process.kill(process.ppid, "SIGTERM"); process.exit(23);',
+        },
+      ]),
+    )(
+      "reports ssh's own exit status around a SIGTERM; $shell signalFromTest=$signalFromTest",
+      async ({ shell, ssh, signalFromTest }) => {
         const child = NodeChildProcess.spawn(
           shell,
-          [
-            "-c",
-            OWNER_PIPE_SUPERVISOR,
-            "goat-ssh-forward",
-            "",
-            process.execPath,
-            "-e",
-            'process.on("SIGTERM", () => process.exit(23)); console.log("up"); setInterval(() => {}, 1e9);',
-          ],
+          ["-c", OWNER_PIPE_SUPERVISOR, "goat-ssh-forward", "", process.execPath, "-e", ssh],
           { detached: true, stdio: ["pipe", "pipe", "inherit"] },
         );
         try {
           const signal = AbortSignal.timeout(5_000);
-          const lines = NodeReadline.createInterface({ input: child.stdout! });
-          await NodeEvents.EventEmitter.once(lines, "line", { signal });
           const closed = NodeEvents.EventEmitter.once(child, "close", { signal });
-          process.kill(child.pid!, "SIGTERM");
+          if (signalFromTest) {
+            const lines = NodeReadline.createInterface({ input: child.stdout! });
+            await NodeEvents.EventEmitter.once(lines, "line", { signal });
+            process.kill(child.pid!, "SIGTERM");
+          }
           const [code] = await closed;
+          assert.equal(code, 23);
+        } finally {
+          try {
+            process.kill(-child.pid!, "SIGKILL");
+          } catch (error) {
+            assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+          }
+        }
+      },
+    );
+
+    // Nothing outside the supervisor can land a signal between wait returning and the
+    // interrupted check, so this one inserts it there.
+    it.each(SHELLS)(
+      "keeps ssh's status when SIGTERM lands just after wait returns; %s",
+      async (shell) => {
+        const marker = "  waited=$?\n";
+        assert.include(OWNER_PIPE_SUPERVISOR, marker);
+        const script = OWNER_PIPE_SUPERVISOR.replace(
+          marker,
+          () => marker + '  [ -n "$sent" ] || { sent=1; kill -TERM "$$"; }\n',
+        );
+        const child = NodeChildProcess.spawn(
+          shell,
+          ["-c", script, "goat-ssh-forward", "", process.execPath, "-e", "process.exit(23)"],
+          { detached: true, stdio: ["pipe", "ignore", "inherit"] },
+        );
+        try {
+          const [code] = await NodeEvents.EventEmitter.once(child, "close", {
+            signal: AbortSignal.timeout(5_000),
+          });
           assert.equal(code, 23);
         } finally {
           try {
