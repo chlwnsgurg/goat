@@ -395,7 +395,7 @@ export PATH
             yield* f.fs.makeDirectory(unsuitableBin);
             yield* f.fs.writeFileString(`${unsuitableBin}/node`, "#!/bin/sh\nexit 1\n");
             yield* f.fs.chmod(`${unsuitableBin}/node`, 0o700);
-            f.setRemotePath(`${unsuitableBin}:/usr/bin:/bin`);
+            f.setRemotePath(`${unsuitableBin}:/usr/bin:/bin:/usr/sbin:/sbin`);
           }
           const layer = (nodeScriptPath: string, leaveRemoteServerRunning: boolean) =>
             Layer.mergeAll(
