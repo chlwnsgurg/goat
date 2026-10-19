@@ -30,6 +30,7 @@ import {
   secondaryBearerExpiresAtEpochMs,
   secondaryBearerRefreshAtEpochMs,
   secondsUntil,
+  type SshPairingGrants,
 } from "./platform.ts";
 
 const TARGET: DesktopSshEnvironmentTarget = {
@@ -45,6 +46,8 @@ function makeBridge(
     readonly failDescriptor?: boolean;
     readonly savedTokenRejected?: boolean;
     readonly savedTokenPermissions?: ReadonlyArray<string>;
+    readonly remoteServerVersion?: string;
+    readonly pairedScopes?: ReadonlyArray<string>;
   },
 ): DesktopBridge {
   return {
@@ -58,6 +61,9 @@ function makeBridge(
         httpBaseUrl: "http://127.0.0.1:3201/",
         wsBaseUrl: "ws://127.0.0.1:3201/",
         pairingToken: ensureOptions?.issuePairingToken === true ? "pairing-token" : null,
+        ...(options?.remoteServerVersion === undefined
+          ? {}
+          : { remoteServerVersion: options.remoteServerVersion }),
       };
     },
     fetchSshSessionState: async () => {
@@ -92,11 +98,16 @@ function makeBridge(
         issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
         token_type: "Bearer",
         expires_in: 3_600,
-        scope: AuthStandardClientScopes.join(" "),
+        scope: (options?.pairedScopes ?? AuthStandardClientScopes).join(" "),
       };
     },
   } as unknown as DesktopBridge;
 }
+
+// What a runtime from before access and relay management joined the standard scopes grants.
+const OLDER_RUNTIME_SCOPES = AuthStandardClientScopes.filter(
+  (scope) => !["access:read", "access:write", "relay:write"].includes(scope),
+);
 
 describe("desktop SSH pairing", () => {
   it.effect("forwards key-only authentication to the desktop bridge", () =>
@@ -281,6 +292,101 @@ describe("desktop SSH pairing", () => {
       expect(calls).toEqual(["ensure", "descriptor"]);
     }),
   );
+
+  describe("on a runtime older than this app's standard scopes", () => {
+    const reconnect = (
+      grants: SshPairingGrants,
+      bridge: Parameters<typeof makeBridge>[1],
+      bearerToken: string,
+      calls: string[] = [],
+    ) =>
+      prepareDesktopSshEnvironment(
+        makeBridge(calls, bridge),
+        {
+          target: TARGET,
+          expectedEnvironmentId: EnvironmentId.make("environment-ssh"),
+          bearerToken,
+        },
+        undefined,
+        grants,
+      ).pipe(Effect.map((prepared) => ({ ...prepared, calls })));
+    const older = {
+      remoteServerVersion: "0.1.0-older",
+      pairedScopes: OLDER_RUNTIME_SCOPES,
+      savedTokenPermissions: OLDER_RUNTIME_SCOPES,
+    };
+
+    it.effect("pairs once, then reuses the token that pairing issued", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+
+        const first = yield* reconnect(grants, older, "token-from-an-earlier-launch");
+        expect(first.bearerToken).toBe("bearer-token");
+        expect(first.calls).toContain("token");
+
+        const second = yield* reconnect(grants, older, first.bearerToken);
+        expect(second.bearerToken).toBe("bearer-token");
+        expect(second.calls).toEqual(["ensure", "descriptor", "session"]);
+      }),
+    );
+
+    it.effect("pairs again once the host runs another runtime version", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        yield* reconnect(grants, older, "token-from-an-earlier-launch");
+
+        const upgraded = yield* reconnect(
+          grants,
+          { ...older, remoteServerVersion: "0.1.0-newer" },
+          "bearer-token",
+        );
+        expect(upgraded.calls).toContain("token");
+      }),
+    );
+
+    it.effect("pairs again when the host revoked or expired the token", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        yield* reconnect(grants, older, "token-from-an-earlier-launch");
+
+        const rejected = yield* reconnect(
+          grants,
+          { ...older, savedTokenRejected: true },
+          "bearer-token",
+        );
+        expect(rejected.calls).toContain("token");
+      }),
+    );
+
+    it.effect("pairs again when the token lacks a scope this runtime's pairing granted", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        yield* reconnect(grants, older, "token-from-an-earlier-launch");
+
+        const narrower = yield* reconnect(
+          grants,
+          { ...older, savedTokenPermissions: ["orchestration:read"] },
+          "bearer-token",
+        );
+        expect(narrower.calls).toContain("token");
+      }),
+    );
+
+    it.effect("requires every standard scope when the runtime reports no version", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        const unversioned = {
+          pairedScopes: OLDER_RUNTIME_SCOPES,
+          savedTokenPermissions: OLDER_RUNTIME_SCOPES,
+        };
+        yield* reconnect(grants, unversioned, "token-from-an-earlier-launch");
+
+        const again = yield* reconnect(grants, unversioned, "bearer-token");
+        expect(again.calls).toContain("token");
+        expect(grants.size).toBe(0);
+      }),
+    );
+  });
 });
 
 describe("desktop-local bearer cache", () => {

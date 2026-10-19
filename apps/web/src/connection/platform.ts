@@ -51,6 +51,7 @@ import * as Schema from "effect/Schema";
 import { FetchHttpClient } from "effect/http";
 
 import { APP_VERSION } from "../branding";
+import { parseOAuthScope } from "@goat/shared/oauthScope";
 import { readDesktopPrimaryBearerToken } from "../environments/primary/desktopAuth";
 import * as PrimaryEnvironmentHttpLayer from "../environments/primary/httpLayer";
 import {
@@ -272,6 +273,34 @@ export const readyCloudMachineThroughPrimary: CloudMachinePreflight = Effect.fn(
 const preflightCloudMachine = (alias: string, ready: CloudMachinePreflight) =>
   isCloudMachineAlias(alias) ? ready(alias) : Effect.void;
 
+/**
+ * Scopes a fresh pairing was granted, per environment and remote runtime version. A runtime
+ * older than this app's standard scopes grants the same narrower set to every pairing, so
+ * requiring the full standard set there would mint a token, and add a session on the host, on
+ * every reconnect without ever gaining a scope. A different runtime version may grant more,
+ * so it misses and the full set is required again.
+ */
+export type SshPairingGrants = Map<string, ReadonlyArray<string>>;
+const sshPairingGrants: SshPairingGrants = new Map();
+
+const pairingGrantKey = (environmentId: EnvironmentId, serverVersion: string | undefined) =>
+  serverVersion === undefined || serverVersion.length === 0
+    ? undefined
+    : `${environmentId}\n${serverVersion}`;
+
+/** The standard scopes a saved SSH token must still hold to be reused instead of re-paired. */
+export function requiredSshTokenScopes(
+  grants: SshPairingGrants,
+  environmentId: EnvironmentId,
+  serverVersion: string | undefined,
+) {
+  const key = pairingGrantKey(environmentId, serverVersion);
+  const granted = key === undefined ? undefined : grants.get(key);
+  return granted === undefined
+    ? AuthStandardClientScopes
+    : AuthStandardClientScopes.filter((scope) => granted.includes(scope));
+}
+
 export const provisionDesktopSshEnvironment = Effect.fn(
   "web.connectionPlatform.ssh.provisionDesktop",
 )(function* (
@@ -280,6 +309,7 @@ export const provisionDesktopSshEnvironment = Effect.fn(
   expectedEnvironmentId?: EnvironmentId,
   options?: { readonly keyOnly?: boolean; readonly onHostAnswered?: () => void },
   readyCloudMachine: CloudMachinePreflight = readyCloudMachineThroughPrimary,
+  grants: SshPairingGrants = sshPairingGrants,
 ) {
   yield* preflightCloudMachine(target.alias, readyCloudMachine);
   const bootstrap = yield* Effect.tryPromise({
@@ -313,6 +343,9 @@ export const provisionDesktopSshEnvironment = Effect.fn(
     try: () => bridge.bootstrapSshBearerSession(bootstrap.httpBaseUrl, pairingToken),
     catch: sshPreparationFailure,
   });
+  const grantKey = pairingGrantKey(descriptor.environmentId, bootstrap.remoteServerVersion);
+  const granted = parseOAuthScope(access.scope);
+  if (grantKey !== undefined && granted !== null) grants.set(grantKey, granted);
   return {
     environmentId: descriptor.environmentId,
     label: descriptor.label,
@@ -336,6 +369,7 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       readonly onHostAnswered?: Effect.Effect<void>;
     },
     readyCloudMachine: CloudMachinePreflight = readyCloudMachineThroughPrimary,
+    grants: SshPairingGrants = sshPairingGrants,
   ) {
     yield* preflightCloudMachine(input.target.alias, readyCloudMachine);
     const answered = yield* Deferred.make<void>();
@@ -377,11 +411,15 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
         catch: sshPreparationFailure,
       });
       // Servers never widen a stored grant, so a token from before the standard
-      // scopes grew is replaced by pairing again.
+      // scopes grew is replaced by pairing again, unless this runtime grants no more.
       const granted = session.permissions ?? session.scopes ?? [];
       if (
         session.authenticated &&
-        AuthStandardClientScopes.every((scope) => granted.includes(scope))
+        requiredSshTokenScopes(
+          grants,
+          input.expectedEnvironmentId,
+          bootstrap.remoteServerVersion,
+        ).every((scope) => granted.includes(scope))
       ) {
         return { bootstrap, bearerToken };
       }
@@ -393,6 +431,7 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       input.expectedEnvironmentId,
       progressOptions,
       () => Effect.void,
+      grants,
     );
     return { bootstrap: provisioned.bootstrap, bearerToken: provisioned.bearerToken };
   },
