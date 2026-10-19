@@ -635,7 +635,8 @@ const make = Effect.gen(function* () {
           manager.disconnectEnvironment({ alias, hostname: alias, username: null, port: null }),
         ).pipe(Effect.ignore({ log: true }));
     });
-  if (Option.isSome(cloudMachines)) yield* cloudMachines.value.onAliasInvalidated(invalidateAlias);
+  if (Option.isSome(cloudMachines))
+    yield* cloudMachines.value.onAliasInvalidated((alias) => invalidateAlias(alias));
 
   // Hosts linked over HTTPS. Optional so test layers without it dial every alias as plain SSH.
   const linkedHosts = yield* Effect.serviceOption(LinkedHosts.LinkedHosts);

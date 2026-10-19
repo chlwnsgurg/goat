@@ -98,8 +98,8 @@ export const make = Effect.gen(function* () {
   // Orders cloud alias invalidation against check results, so a check that finishes after a
   // machine was forgotten cannot write its route state back.
   const routeStateLock = yield* Semaphore.make(1);
-  // Bumped on every cloud alias invalidation, so a check that read Boat before a stop or address
-  // change cannot report the machine as it was.
+  // Bumped when a cloud machine is stopped, deleted, forgotten or disconnected, so a check that
+  // read Boat before that cannot report the machine as it was.
   const cloudGenerations = new Map<string, number>();
   const publish = PubSub.publish(signals, undefined).pipe(Effect.asVoid);
   const now = Clock.currentTimeMillis.pipe(
@@ -193,9 +193,11 @@ export const make = Effect.gen(function* () {
       active = false;
     }),
   );
-  yield* cloud.onAliasInvalidated((alias) =>
+  // A new address or host key belongs to the same running machine, often refreshed by this
+  // hub's own check, so only lifecycle changes reset the route and void checks in flight.
+  yield* cloud.onAliasInvalidated((alias, cause) =>
     Effect.suspend(() =>
-      active
+      active && cause === "lifecycle"
         ? Effect.sync(() =>
             cloudGenerations.set(alias, (cloudGenerations.get(alias) ?? 0) + 1),
           ).pipe(

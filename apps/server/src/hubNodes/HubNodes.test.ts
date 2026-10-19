@@ -81,7 +81,9 @@ const fixture = Effect.gen(function* () {
   );
   const linkSignals = yield* PubSub.unbounded<void>();
   const cloudSignals = yield* PubSub.unbounded<void>();
-  const listeners: Array<(alias: string) => Effect.Effect<void>> = [];
+  const listeners: Array<
+    (alias: string, cause: CloudMachineService.CloudAliasInvalidation) => Effect.Effect<void>
+  > = [];
   const state = {
     links: [] as LinkedHosts.LinkedHost[],
     machines: [] as CloudMachine[],
@@ -354,10 +356,10 @@ describe("HubNodes", () => {
           );
           yield* Deferred.await(initial);
           state.machines = [];
-          yield* listeners[0]!(alias);
+          yield* listeners[0]!(alias, "lifecycle");
           expect((yield* Fiber.join(observing))[1]!.nodes).toEqual([]);
           expect(yield* repository.listRouteState).toEqual([]);
-          yield* listeners[0]!(alias);
+          yield* listeners[0]!(alias, "lifecycle");
           expect(yield* repository.listRouteState).toEqual([]);
         }),
       ),
@@ -378,7 +380,7 @@ describe("HubNodes", () => {
           const checking = yield* service.check({}).pipe(Effect.forkScoped);
           yield* Deferred.await(identifying);
           state.machines = [];
-          yield* listeners[0]!(alias);
+          yield* listeners[0]!(alias, "lifecycle");
           yield* Deferred.succeed(release, undefined);
           yield* Fiber.join(checking);
           expect(yield* repository.listRouteState).toEqual([]);
@@ -399,10 +401,23 @@ describe("HubNodes", () => {
         const checking = yield* service.check({}).pipe(Effect.forkScoped);
         yield* Deferred.await(identifying);
         state.machines = [machine("archived")];
-        yield* listeners[0]!(alias);
+        yield* listeners[0]!(alias, "lifecycle");
         yield* Deferred.succeed(release, undefined);
         yield* Fiber.join(checking);
         expect((yield* repository.listRouteState).map((row) => row.status)).toEqual(["unknown"]);
+      }),
+    ),
+  );
+  it.effect("keeps a cloud route's check result when only its SSH endpoint was refreshed", () =>
+    run(({ service, state, repository, listeners }) =>
+      Effect.gen(function* () {
+        const alias = machine().alias;
+        state.machines = [machine("running")];
+        state.identifyEffect = listeners[0]!(alias, "endpoint").pipe(Effect.as(remote));
+        const checked = yield* service.check({});
+        expect(checked.nodes[0]).toMatchObject({ environmentId: remote, status: "online" });
+        yield* listeners[0]!(alias, "endpoint");
+        expect((yield* repository.listRouteState).map((row) => row.status)).toEqual(["online"]);
       }),
     ),
   );
@@ -683,7 +698,7 @@ describe("HubNodes", () => {
           Effect.forkScoped,
         );
         yield* Deferred.await(initial);
-        yield* listeners[0]!(state.machines[0]!.alias);
+        yield* listeners[0]!(state.machines[0]!.alias, "lifecycle");
         const observed = yield* Fiber.join(changed);
         expect(observed[1]!.nodes[0]!.status).toBe("unknown");
         const read = yield* Deferred.make<void>();
