@@ -70,24 +70,39 @@ function ProviderHostMatrixPanel({ environmentId }: { readonly environmentId: En
                     key={row.host ?? "local"}
                     className="min-w-36 px-3 py-2.5 font-medium"
                   >
-                    {row.host ?? "This machine"}
                     {row.message ? (
-                      <p className="mt-1 max-w-56 font-normal text-muted-foreground">
-                        {row.message}
-                      </p>
-                    ) : null}
+                      <Tooltip>
+                        <TooltipTrigger render={<span tabIndex={0} />}>
+                          {row.host ?? "This machine"}
+                        </TooltipTrigger>
+                        <TooltipPopup>{row.message}</TooltipPopup>
+                      </Tooltip>
+                    ) : (
+                      (row.host ?? "This machine")
+                    )}
                   </th>
                 ))}
-                <th scope="col" className="px-3 py-2.5">
-                  <span className="sr-only">Actions</span>
-                </th>
               </tr>
             </thead>
             <tbody>
               {SYNC_PROVIDERS.map((provider) => (
                 <tr key={provider.driver} className="border-b border-border/50 last:border-0">
                   <th scope="row" className="px-3 py-3 font-medium sm:px-4">
-                    {provider.displayName}
+                    <div className="flex flex-col items-start gap-1.5">
+                      {provider.displayName}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={!canSync}
+                        aria-label={`Sync ${provider.displayName} to other hosts`}
+                        onClick={() => {
+                          setSelection(provider);
+                          setOpen(true);
+                        }}
+                      >
+                        Sync…
+                      </Button>
+                    </div>
                   </th>
                   {columns.map((row) => {
                     const cell = providerCell(row, provider.driver);
@@ -116,20 +131,6 @@ function ProviderHostMatrixPanel({ environmentId }: { readonly environmentId: En
                       </td>
                     );
                   })}
-                  <td className="px-3 py-3">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={!canSync}
-                      aria-label={`Sync ${provider.displayName} to other hosts`}
-                      onClick={() => {
-                        setSelection(provider);
-                        setOpen(true);
-                      }}
-                    >
-                      Sync to other hosts…
-                    </Button>
-                  </td>
                 </tr>
               ))}
             </tbody>

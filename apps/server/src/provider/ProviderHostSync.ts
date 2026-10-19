@@ -87,8 +87,6 @@ const MAX_CONCURRENT_INSTALLERS = 2;
 const decodeMatrix = Schema.decodeUnknownEffect(ProviderHostMatrixResult);
 const decodeSyncResult = Schema.decodeUnknownEffect(ProviderSyncResultJson);
 const decodeSyncState = Schema.decodeUnknownEffect(ProviderSyncState);
-const isSyncDriver = (driver: string): driver is ProviderHostSyncDriver =>
-  (PROVIDER_HOST_SYNC_DRIVERS as ReadonlyArray<string>).includes(driver);
 
 type Failure = ProviderHostSyncError | EnvironmentAuthorizationError;
 const fail = (code: ProviderHostSyncError["code"], detail: string) =>
@@ -194,13 +192,13 @@ export const make = Effect.gen(function* () {
   const context = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
   const crypto = yield* Crypto.Crypto;
   const hostname = yield* HostProcess.Hostname;
-  const platform = hostPlatform(process.platform);
+  const runtimePlatform = yield* HostProcess.Platform;
+  const runtimeArch = yield* HostProcess.Architecture;
+  const platform = hostPlatform(runtimePlatform);
   const operations = new Map<string, SyncOperation>();
   const approvals = new Map<string, PendingApproval>();
   const approvedSyncs = new Map<string, string>();
   const installers = yield* Semaphore.make(MAX_CONCURRENT_INSTALLERS);
-
-  // ---- authority -------------------------------------------------------
 
   const readCeiling = (caller: SshHostCaller) =>
     authorizeSshHost(sessions, caller, "orchestration:read").pipe(
@@ -256,8 +254,6 @@ export const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => false),
     );
 
-  // ---- this machine ----------------------------------------------------
-
   const snapshotFor = (all: ReadonlyArray<ServerProvider>, driver: ProviderHostSyncDriver) => {
     const own = all.filter(
       (provider) => provider.driver === driver && provider.executionLocation !== "cloud",
@@ -305,14 +301,12 @@ export const make = Effect.gen(function* () {
     return {
       host: null,
       status: "ok",
-      platform: process.platform,
-      arch: process.arch,
+      platform: runtimePlatform,
+      arch: runtimeArch,
       goatVersion: packageJson.version,
       providers: yield* localProviders,
     } satisfies ProviderHostRow;
   });
-
-  // ---- remote calls ----------------------------------------------------
 
   const callRemote = (
     caller: SshHostCaller,
@@ -376,7 +370,11 @@ export const make = Effect.gen(function* () {
         Effect.succeed<ProviderHostRow>({
           host,
           status: failure.status === "refused" ? "unreachable" : failure.status,
-          message: failure.message,
+          // People read this in Settings; the status tells agents which tool to call.
+          message:
+            failure.status === "not_ready"
+              ? `GOAT is not running on ${host}. Prepare the host in Hosts, then refresh.`
+              : failure.message,
           providers: [],
         }),
       ),
@@ -389,14 +387,22 @@ export const make = Effect.gen(function* () {
     yield* readCeiling(caller);
     const local = yield* localRow;
     if (input.localOnly === true) return { rows: [local] };
-    const hosts = input.hosts ?? (yield* dispatch.connectedHosts);
+    // Connected hosts plus aliases the user wrote in ssh config; known_hosts
+    // entries are left out because they include every server ever reached.
+    const hosts = input.hosts ?? [
+      ...(yield* dispatch.connectedHosts),
+      ...(yield* dispatch.listHosts({ probe: false }).pipe(
+        Effect.map((all) =>
+          all.filter((host) => host.source === "ssh-config").map((host) => host.alias),
+        ),
+        Effect.orElseSucceed(() => []),
+      )),
+    ];
     const rows = yield* Effect.forEach([...new Set(hosts)], (host) => remoteRow(caller, host), {
       concurrency: 6,
     });
     return { rows: [local, ...rows] };
   });
-
-  // ---- operations ------------------------------------------------------
 
   const view = (operation: SyncOperation): ProviderSyncState => ({
     syncId: operation.syncId,
@@ -663,7 +669,7 @@ export const make = Effect.gen(function* () {
             task,
             {
               phase: "failed",
-              message: `GOAT cannot install ${recipe.displayName} on ${process.platform}. Install it with the vendor's instructions.`,
+              message: `GOAT cannot install ${recipe.displayName} on ${runtimePlatform}. Install it with the vendor's instructions.`,
             },
             true,
           );
@@ -851,8 +857,6 @@ export const make = Effect.gen(function* () {
       );
       return { kind: "started" as const, sync: view(operation) };
     });
-
-  // ---- approvals -------------------------------------------------------
 
   const requestApproval = (
     input: ProviderSyncInput,

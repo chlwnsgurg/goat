@@ -2662,7 +2662,7 @@ export const agentSurfaceRegistry = {
     toolkit: "provider",
     summary: "Read which machines have each provider CLI",
     description:
-      "Read the provider × host matrix: for this machine and each connected SSH host, which coding-agent CLIs (Codex, Claude, Cursor, Grok, OpenCode, Pi) are installed, their versions, whether they are signed in, and how GOAT would install and sign in to each there. Pass hosts to choose machines; omit it for every connected host. A host row with status update_runtime runs a GOAT too old to answer; tell the user to update GOAT there (goat_ssh_runtime_update). not_ready means its runtime is stopped; call goat_ssh_host_prepare first. versionMismatch means the host runs another GOAT build. Reading never installs, signs in, or starts a runtime, and never returns credentials.",
+      "Read the provider × host matrix: for this machine and each connected SSH host, which coding-agent CLIs (Codex, Claude, Cursor, Grok, OpenCode, Pi) are installed, their versions, whether they are signed in, and how GOAT would install and sign in to each there. Pass hosts to choose machines; omit it for connected hosts and the aliases in ssh config. A host row with status update_runtime runs a GOAT too old to answer; tell the user to update GOAT there (goat_ssh_runtime_update). not_ready means its runtime is stopped; call goat_ssh_host_prepare first. versionMismatch means the host runs another GOAT build. Reading never installs, signs in, or starts a runtime, and never returns credentials.",
     effect: "read",
     hostRoutable: false,
     requires: "either",

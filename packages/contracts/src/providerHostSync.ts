@@ -79,7 +79,8 @@ export type ProviderHostRow = typeof ProviderHostRow.Type;
 
 export const ProviderHostMatrixInput = Schema.Struct({
   hosts: Schema.optional(Schema.Array(SshHostAlias).check(Schema.isMaxLength(32))).annotate({
-    description: "SSH hosts to include. Omit for every SSH host this machine knows.",
+    description:
+      "SSH hosts to include. Omit for connected hosts and the aliases in your ssh config.",
   }),
   localOnly: Schema.optional(Schema.Boolean).annotate({
     description: "Report only this machine. Another machine asking a host sets this.",

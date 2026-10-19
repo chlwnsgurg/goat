@@ -107,6 +107,11 @@ const harness = (options: {
         }),
         Layer.mock(Dispatch.SshRemoteDispatch)({
           connectedHosts: Effect.succeed(["old", "stopped", "box"]),
+          listHosts: () =>
+            Effect.succeed([
+              { alias: "box", source: "ssh-config" as const },
+              { alias: "github.com", source: "known-hosts" as const },
+            ]),
           callHostTool: <E, R>(call: Call, authorize: Effect.Effect<string, E, R>) =>
             authorize.pipe(
               Effect.flatMap((ceiling) => {
@@ -202,6 +207,7 @@ it.effect("reports old, stopped, and mismatched hosts instead of failing the mat
     expect(byHost.old?.status).toBe("update_runtime");
     expect(byHost.stopped?.status).toBe("not_ready");
     expect(byHost.box).toMatchObject({ status: "ok", versionMismatch: true });
+    expect(result.rows.map((row) => row.host)).toEqual([null, "old", "stopped", "box"]);
   }).pipe(Effect.provide(layer));
 });
 
