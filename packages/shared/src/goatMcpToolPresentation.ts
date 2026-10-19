@@ -85,7 +85,9 @@ export type GoatMcpToolSummaryAction =
   | "channel-reply"
   | "channel-task-read"
   | "channel-task-report"
-  | "channel-task-move";
+  | "channel-task-move"
+  | "channel-bot-home-read"
+  | "channel-bot-home-claim";
 
 export interface GoatMcpToolDefinition {
   readonly displayName: string;
@@ -404,6 +406,42 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     ["Diagnose", "Diagnosing", "Diagnosed", "a provider"],
     "provider-diagnose",
   ),
+  goat_provider_host_matrix: tool(
+    ["Read", "Reading", "Read", "providers on each machine"],
+    "provider-diagnose",
+  ),
+  goat_provider_sync: tool(
+    ["Sync", "Syncing", "Synced", "a provider to other machines"],
+    "provider-diagnose",
+  ),
+  goat_provider_sync_status: tool(
+    ["Check", "Checking", "Checked", "provider sync progress"],
+    "provider-diagnose",
+  ),
+  goat_provider_sync_cancel: tool(
+    ["Stop", "Stopping", "Stopped", "a provider sync"],
+    "provider-diagnose",
+  ),
+  goat_provider_addable_list: tool(
+    ["List", "Listing", "Listed", "addable providers"],
+    "provider-diagnose",
+  ),
+  goat_provider_setup_open: tool(
+    ["Request", "Requesting", "Requested", "provider setup"],
+    "provider-diagnose",
+  ),
+  goat_provider_login_start: tool(
+    ["Start", "Starting", "Started", "a provider sign-in"],
+    "provider-diagnose",
+  ),
+  goat_provider_login_status: tool(
+    ["Check", "Checking", "Checked", "a provider sign-in"],
+    "provider-diagnose",
+  ),
+  goat_provider_login_cancel: tool(
+    ["Cancel", "Cancelling", "Cancelled", "a provider sign-in"],
+    "provider-diagnose",
+  ),
   goat_thread_launch: tool(
     ["Launch", "Launching", "Launched", "a project thread"],
     "thread-create",
@@ -456,6 +494,17 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     ["Resume", "Resuming", "Resumed", "a cloud machine"],
     "cloud-machine-change",
   ),
+  goat_cloud_holders: tool(
+    ["List", "Listing", "Listed", "cloud credential holders"],
+    "provider-diagnose",
+  ),
+  goat_cloud_launch: tool(["Launch", "Launching", "Launched", "a cloud agent"], "thread-create"),
+  goat_cloud_run_register: tool(
+    ["Register", "Registering", "Registered", "a cloud run"],
+    "thread-create",
+  ),
+  goat_cloud_run_list: tool(["List", "Listing", "Listed", "cloud runs"], "thread-list"),
+  goat_cloud_run_forget: tool(["Forget", "Forgetting", "Forgot", "a cloud run"], "thread-update"),
   goat_connection_list: tool(["List", "Listing", "Listed", "saved connections"], "connection-list"),
   goat_connection_add_ssh: tool(["Save", "Saving", "Saved", "an SSH connection"], "connection-add"),
   goat_connection_remove: tool(
@@ -500,6 +549,14 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
   channel_task_report: tool(
     ["Report on", "Reporting on", "Reported on", "a GOAT ledger task"],
     "channel-task-report",
+  ),
+  channel_bot_home: tool(
+    ["Check", "Checking", "Checked", "where GOAT Bot lives"],
+    "channel-bot-home-read",
+  ),
+  channel_bot_home_claim: tool(
+    ["Move", "Moving", "Moved", "GOAT Bot to this machine"],
+    "channel-bot-home-claim",
   ),
 };
 

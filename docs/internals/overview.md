@@ -145,5 +145,8 @@ lazily inside `WindowsForeground.ts` for a handful of Win32 calls. macOS window 
 to `osascript` instead of a native addon. A crash or stall in any of these must not take the app
 down, so new native capability goes in a child with a deadline, not an `import` in main.
 
+Goals, self-healing across hosts, placement limits and model fallback chains are proposed in
+[agentic Kubernetes](./agentic-k8s.md).
+
 See the [glossary](./glossary.md) for shared terms and the
 [development runbook](../operations/development.md) for setup and checks.

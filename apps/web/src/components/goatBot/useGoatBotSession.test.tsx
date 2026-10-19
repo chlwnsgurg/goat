@@ -71,7 +71,10 @@ function bumpTick() {
   tickVersion += 1;
   for (const listener of tickListeners) listener();
 }
-vi.mock("./useGoatBotHome", () => ({ useGoatBotHome: () => undefined }));
+vi.mock("./useGoatBotHome", () => ({
+  useGoatBotHome: () => undefined,
+  useGoatBotHomeSettings: () => ({ moveTarget: null, busy: false, error: null }),
+}));
 vi.mock("./goatBotHooks", () => ({
   useGoatBotEnvironments: () => {
     useTick();

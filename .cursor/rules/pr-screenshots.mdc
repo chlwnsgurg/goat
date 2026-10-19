@@ -11,11 +11,11 @@ line:
 - A PR that changes `apps/web`, `apps/desktop`, `apps/mobile`, or `apps/marketing` embeds before/after
   screenshots in its description. The `goat-screenshot-gate` job in goat-ci checks for an embedded
   image.
-- Upload with the GitHub contents API to the orphan `pr-assets` branch, one folder per PR:
-  `gh api -X PUT repos/goat-si/goat/contents/<pr>/<name>.png -f branch=pr-assets -f message="<pr>: <name>" -f content="$(base64 < shot.png | tr -d '\n')"`.
-  Read `.commit.sha` from the response and embed
-  `![<name>](https://raw.githubusercontent.com/goat-si/goat/<commit-sha>/<pr>/<name>.png)` in the
-  PR body with `gh pr edit <pr> --body-file`. Link by commit SHA, never by branch name.
+- Upload with `node scripts/pr-assets.ts upload <pr> <files...>`. It commits to the orphan
+  `pr-assets` branch as `<pr>/<name>`, checks each URL loads, and prints
+  `![<name>](https://raw.githubusercontent.com/goat-si/goat/<commit-sha>/<pr>/<name>.png)` lines to
+  paste. `--patch-body` repoints embeds already in the PR body. Relative paths like
+  `pr-assets/x.png` and branch-name links never render, and the gate rejects them.
 - Never commit screenshots to the PR branch. Do not add the `gui-screenshot-waived` label yourself;
   only a maintainer's waiver counts.
 - After adding the screenshot, re-run only the `goat-screenshot-gate` job:

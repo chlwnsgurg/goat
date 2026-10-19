@@ -1,14 +1,23 @@
 # CI
 
-goat-si/goat runs one active workflow, `.github/workflows/goat-ci.yml`, on GitHub-hosted
-`ubuntu-24.04` runners, which are free for a public repository. Every upstream workflow is disabled
-on GitHub. The pre-push hook
+goat-si/goat keeps three workflows active: `.github/workflows/goat-ci.yml` runs CI on GitHub-hosted
+`ubuntu-24.04` runners, which are free for a public repository, `goat-nightly.yml` publishes
+nightlies after a manual goat-ci run on `dev`, and `close-outside-prs.yml` closes pull requests from
+forks whose authors lack write access. Every upstream workflow is disabled on GitHub. The pre-push hook
 `.vite-hooks/goat-workflow-guard.mjs` refuses a push that carries any other enabled workflow, and
 holds `goat-ci.yml` to the jobs `scope`, `ci`, `screenshot-gate` and `result`, the pinned
 `ubuntu-24.04` image or the EPYC self-hosted labels, the `push`, `pull_request`, and
 `workflow_dispatch` triggers, and an allowlist of actions.
-A new check is therefore a matrix task of `ci`. A separate workflow, `pull_request_target`, or
+A new check is therefore a matrix task of `ci`. Any other new workflow, a
+`pull_request_target` trigger outside `close-outside-prs.yml`, or
 `actions/github-script` does not pass the guard.
+
+`close-outside-prs.yml` is the one `pull_request_target` workflow. It runs from the repository's default branch (`main`)
+with a write token, so the guard pins it to the `opened` and `reopened` events and to
+`pull-requests: write`, and pins its single `close` job by a hash of the reviewed job. A
+command blocklist cannot prove that a script never fetches or runs pull request code, so any edit
+to that job, including its step names, scripts and env, fails until someone reviews it and
+updates the hash in the guard.
 
 ## When goat-ci runs
 
@@ -64,5 +73,12 @@ than `ci:*` (the waiver included) starts no job, so the script reads the live PR
 that one job re-evaluates it. Switching modes is in
 [the operations guide](../docs/operations/pr-screenshot-gate.md).
 
+An embed counts only if it loads for a reader. A relative path resolves against the PR page, and a
+branch name moves, so both fail along with a `/blob/` viewer page. Any other URL must answer an
+anonymous request with HTTP 200 and an image content type. One broken embed fails the gate. When an
+image cannot be fetched because of a network error, timeout, or 5xx, the result is inconclusive
+instead.
+
 Screenshot evidence never lands on `dev`. Authors drag images into the description editor or
-commit them to the orphan `pr-assets` branch and link them by commit SHA.
+upload them with `scripts/pr-assets.ts`, which commits to the orphan `pr-assets` branch and links
+them by commit SHA.

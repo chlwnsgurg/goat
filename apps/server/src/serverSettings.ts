@@ -800,6 +800,8 @@ export class ServerSettingsService extends Context.Service<
 
     readonly updateSettings: (
       patch: ServerSettingsPatch,
+      /** Runs inside the write lock before the patch applies, so a revoked grant cannot commit. */
+      authorizeAtCommit?: Effect.Effect<void, ServerSettingsError>,
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
     readonly updateProviderInstance: (
@@ -929,9 +931,10 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
       start: Effect.void,
       ready: Effect.void,
       getSettings,
-      updateSettings: (patch) =>
+      updateSettings: (patch, authorizeAtCommit) =>
         updateTestSettings((currentSettings) =>
-          rejectMemoryHubSettingsPatch(patch, "test settings").pipe(
+          (authorizeAtCommit ?? Effect.void).pipe(
+            Effect.andThen(rejectMemoryHubSettingsPatch(patch, "test settings")),
             Effect.map(() => applyServerSettingsPatch(currentSettings, patch)),
           ),
         ),
@@ -1195,6 +1198,7 @@ const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set([
   "sourceControlWriterModelSelection",
   "reviewGuideModelSelection",
   "memoryModelSelection",
+  "goatBotModelSelection",
   "textGenerationModelSelection",
   "pullRequestMergeMethod",
 ]);
@@ -2151,10 +2155,11 @@ const make = Effect.gen(function* () {
       Effect.flatMap(materializeSettingsSecrets),
       Effect.map(resolveTextGenerationProvider),
     ),
-    updateSettings: (patch) =>
+    updateSettings: (patch, authorizeAtCommit) =>
       updateAndPersistSettings(
         (current) =>
-          rejectMemoryHubSettingsPatch(patch, settingsPath).pipe(
+          (authorizeAtCommit ?? Effect.void).pipe(
+            Effect.andThen(rejectMemoryHubSettingsPatch(patch, settingsPath)),
             Effect.map(() => applyServerSettingsPatch(current, patch)),
           ),
         Object.keys(patch.providerInstances ?? {}).map((id) => id as ProviderInstanceId),

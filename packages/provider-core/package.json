@@ -115,6 +115,10 @@
       "types": "./src/server/ProviderAdapter.ts",
       "import": "./src/server/ProviderAdapter.ts"
     },
+    "./server/providerLoginTerminal": {
+      "types": "./src/server/providerLoginTerminal.ts",
+      "import": "./src/server/providerLoginTerminal.ts"
+    },
     "./server/providerAuthFlow": {
       "types": "./src/server/providerAuthFlow.ts",
       "import": "./src/server/providerAuthFlow.ts"

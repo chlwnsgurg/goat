@@ -60,6 +60,52 @@ const extractingRunner = (fs: FileSystem.FileSystem, path: Path.Path, commands: 
   });
 
 it.layer(NodeServices.layer)("ensurePinnedRuntimeInstalled", (it) => {
+  it.effect("reuses a verified cache only while its executable matches the install record", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-pinned-verified-" });
+      const requests: string[] = [];
+      const checksums = yield* validChecksums;
+      const install = (verifyCachedInstall: boolean) =>
+        ensurePinnedRuntimeInstalled({
+          baseDir,
+          version,
+          fs,
+          path,
+          platform: "linux",
+          arch: "x64",
+          httpClient: releaseHttpClient(checksums, requests),
+          runner: extractingRunner(fs, path),
+          validate: () => Effect.void,
+          verifyCachedInstall,
+        });
+      const paths = yield* install(true);
+      assert.lengthOf(requests, 2);
+
+      // Unchanged bytes: no download, no checksum fetch.
+      yield* install(true);
+      assert.lengthOf(requests, 2);
+
+      // Replaced bytes behind an intact sentinel are reinstalled from the verified release.
+      yield* fs.writeFileString(paths.entryPath, "#!/bin/sh\necho tampered\n");
+      yield* install(true);
+      assert.lengthOf(requests, 4);
+      assert.isTrue(requests[2]!.endsWith("/SHA256SUMS"));
+      assert.equal(yield* fs.readFileString(paths.entryPath), "#!/bin/sh\n");
+
+      // An install from before records counts as unverified.
+      yield* fs.remove(path.join(paths.versionDir, ".install-record"));
+      yield* install(true);
+      assert.lengthOf(requests, 6);
+
+      // Callers that do not ask keep the plain sentinel check.
+      yield* fs.writeFileString(paths.entryPath, "#!/bin/sh\necho tampered\n");
+      yield* install(false);
+      assert.lengthOf(requests, 6);
+    }),
+  );
+
   it.effect("installs the verified release archive as the runtime executable", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

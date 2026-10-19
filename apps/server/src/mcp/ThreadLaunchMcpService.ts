@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as HostProcess from "@goat/shared/HostProcess";
 import type { ThreadLaunchParameters, ThreadLaunchSuccess } from "./toolkits/project/tools.ts";
 import { resolveProjectSettings } from "@goat/shared/projectSettings";
 import { prependStandingInstructions } from "@goat/shared/standingInstructions";
@@ -29,6 +30,7 @@ import * as RemoteReportService from "../remoteReports/RemoteReportService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { nativeWorkspacePath } from "../workspace/WorkspacePaths.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import {
@@ -44,6 +46,13 @@ type Modes = {
   readonly interactionMode: ProviderInteractionMode;
 };
 
+/** Server-set only: a registered cloud run's stable thread, imported task and launcher name. */
+export interface CloudRunLaunch {
+  readonly threadId: ThreadId;
+  readonly importedNativeThread?: ThreadLaunch.ThreadLaunchInput["importedNativeThread"];
+  readonly externalLauncher?: string;
+}
+
 export class ThreadLaunchMcpService extends Context.Service<
   ThreadLaunchMcpService,
   {
@@ -51,6 +60,7 @@ export class ThreadLaunchMcpService extends Context.Service<
       scope: McpInvocationContext.McpInvocationScope,
       input: typeof ThreadLaunchParameters.Type,
       modes: Modes,
+      cloudRun?: CloudRunLaunch,
     ) => Effect.Effect<typeof ThreadLaunchSuccess.Type, OrchestratorMcpFailure>;
   }
 >()("goat/mcp/ThreadLaunchMcpService") {}
@@ -164,8 +174,23 @@ const make = Effect.gen(function* () {
       });
   });
   return ThreadLaunchMcpService.of({
-    launch: (scope, input, { runtimeMode, interactionMode }) =>
+    launch: (scope, rawInput, { runtimeMode, interactionMode }, cloudRun) =>
       Effect.gen(function* () {
+        // The checkout is checked and recorded as given, so it must already be native here.
+        const platform = yield* HostProcess.Platform;
+        const input =
+          rawInput.workspaceStrategy?.type === "existing_worktree"
+            ? {
+                ...rawInput,
+                workspaceStrategy: {
+                  ...rawInput.workspaceStrategy,
+                  worktreePath: nativeWorkspacePath(
+                    platform,
+                    rawInput.workspaceStrategy.worktreePath,
+                  ),
+                },
+              }
+            : rawInput;
         const context = yield* readCaller();
         const { caller } = context;
         const forwarded = input.memoryGrantCeiling;
@@ -201,7 +226,7 @@ const make = Effect.gen(function* () {
               "launchedBy is accepted only from an outside caller naming a foreign environment.",
           });
         const commandId = yield* newCommandId();
-        const threadId = ThreadId.make(commandId);
+        const threadId = cloudRun?.threadId ?? ThreadId.make(commandId);
         const messageId = MessageId.make(commandId);
         const attachments = input.attachments ?? [];
         if (attachments.some((attachment) => !Claims.attachmentIsPendingUpload(attachment)))
@@ -295,7 +320,8 @@ const make = Effect.gen(function* () {
         // ref that cannot resolve, or a branch Git will not create, is refused
         // while the agent can still act on it.
         const strategy = input.workspaceStrategy;
-        if (cloud && startsRun) {
+        // A registered run carries its own source; nothing is submitted from this checkout.
+        if (cloud && startsRun && cloudRun?.importedNativeThread?.cloudTask === undefined) {
           const project = yield* readProject;
           if (project === undefined)
             return yield* new OrchestratorMcpFailure({
@@ -411,6 +437,12 @@ const make = Effect.gen(function* () {
                     }),
                 createdBy: "agent",
                 creationSource: "mcp",
+                ...(cloudRun?.importedNativeThread === undefined
+                  ? {}
+                  : { importedNativeThread: cloudRun.importedNativeThread }),
+                ...(cloudRun?.externalLauncher === undefined
+                  ? {}
+                  : { externalLauncher: cloudRun.externalLauncher }),
                 // The calling thread is the launcher. A launch forwarded over SSH has no
                 // calling thread here and names its launcher on the other machine instead.
                 ...(caller !== undefined

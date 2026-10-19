@@ -5,7 +5,7 @@ import { useState } from "react";
 
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
-import { useFleetSnapshot } from "../../state/fleet";
+import { useFleetCloudAgents, useFleetSnapshot } from "../../state/fleet";
 import { useFleetHostMetrics } from "../../state/fleetHostMetrics";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
@@ -15,6 +15,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsIcon } from "~/components/solar";
 import { ConnectionCatalogUnreadableAlert } from "../desktop/ConnectionCatalogUnreadableNotice";
 import { ConnectionEnvironmentsSection } from "../settings/ConnectionEnvironmentsSection";
+import { FleetCloudAgents } from "./FleetCloudAgents";
 import { FleetGraph } from "./FleetGraph";
 import { describeMachine } from "./describeMachine";
 import { fleetConnectionLegend, UNKNOWN_FLEET_CONNECTION } from "./fleetConnection";
@@ -68,6 +69,7 @@ function groupThreadsByMachine(threads: ReadonlyArray<FleetThread>) {
 export function FleetPage() {
   const live = useFleetSnapshot();
   const liveHeat = useFleetHostMetrics();
+  const cloudAgents = useFleetCloudAgents();
   const [demo] = useState(readHeatDemo);
   const { snapshot, connections, currentMachineId, loading } =
     demo === null ? live : { ...demo, loading: false };
@@ -195,6 +197,8 @@ export function FleetPage() {
             {selectedMachine && listed.length === 0 ? (
               <p className="text-sm text-muted-foreground">Nothing running on this machine.</p>
             ) : null}
+
+            {selectedMachine ? null : <FleetCloudAgents groups={cloudAgents} />}
 
             <ConnectionCatalogUnreadableAlert />
             <ConnectionEnvironmentsSection

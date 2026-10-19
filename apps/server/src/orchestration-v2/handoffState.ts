@@ -1,6 +1,7 @@
 import {
   HandoffError,
   isHandoffPending,
+  isProviderHandoffPath,
   type Handoff,
   type HandoffActor,
   type HandoffState,
@@ -32,7 +33,7 @@ export function transitionHandoff(
       DateTime.toEpochMillis(record.expiresAt) <= DateTime.toEpochMillis(now)) ||
     (record.kind === "approval" &&
       !record.target.path.startsWith("ssh.") &&
-      record.target.path !== "provider.home_request" &&
+      !isProviderHandoffPath(record.target.path) &&
       runEnded);
   const next = expired ? "expired" : state;
   if (next === "pending" || (next === "expired" && !expired))

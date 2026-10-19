@@ -2,7 +2,9 @@ import {
   DEFAULT_OPENCODEX_BASE_URL,
   EnvironmentId,
   ProviderDriverKind,
+  ProviderInstanceId,
   type AcpRegistrySearchAgent,
+  type ServerProvider,
 } from "@goat/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -12,7 +14,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 const actions = vi.hoisted(() => ({
   toast: vi.fn(),
   onOpenChange: vi.fn(),
+  onFinished: vi.fn(),
   canManageProviders: true,
+  providers: [] as ServerProvider[],
 }));
 const settingsHooks = vi.hoisted(() => ({
   read: vi.fn(() => ({ providerInstances: {} })),
@@ -55,6 +59,22 @@ vi.mock(import("../ui/toast"), async (original) => {
   const actual = await original();
   return { ...actual, toastManager: { ...actual.toastManager, add: actions.toast } };
 });
+vi.mock(import("../../state/server"), async (original) => {
+  const actual = await original();
+  const { Atom } = await import("effect/reactivity");
+  // One atom per fixture list, so a test's snapshots are what the dialog reads.
+  let cached: { readonly value: ServerProvider[]; readonly atom: unknown } | undefined;
+  const providers = () => {
+    if (cached?.value !== actions.providers) {
+      cached = { value: actions.providers, atom: Atom.make(actions.providers) };
+    }
+    return cached.atom;
+  };
+  return {
+    ...actual,
+    serverEnvironment: { ...actual.serverEnvironment, providersValueAtom: providers as never },
+  };
+});
 // The registry search and the sign-in step talk to the environment over RPC; these
 // stand-ins expose the choices a user makes there.
 vi.mock(import("./AcpRegistrySearchStep"), async (original) => ({
@@ -82,11 +102,11 @@ vi.mock(import("./ProviderWizardAuthenticationStep"), async (original) => ({
   ProviderWizardAuthenticationStep: (props: {
     environmentId: string;
     instanceId: string;
-    onFinish: () => void;
+    onFinish: (result: { readonly signedIn: boolean }) => void;
   }) => (
-    <section aria-label="Sign-in step">
+    <section aria-label="Setup step">
       {props.environmentId}/{props.instanceId}
-      <button type="button" onClick={props.onFinish}>
+      <button type="button" onClick={() => props.onFinish({ signedIn: true })}>
         Finish sign-in
       </button>
     </section>
@@ -107,7 +127,11 @@ function deferred<T>() {
 
 let root: Root;
 
-function render(onOpenChange = actions.onOpenChange, initialCodexRoute?: "opencodex") {
+function render(
+  onOpenChange = actions.onOpenChange,
+  initialCodexRoute?: "opencodex",
+  extra: { initialInstanceId?: ProviderInstanceId; initialDriver?: ProviderDriverKind } = {},
+) {
   return act(async () =>
     root.render(
       <AddProviderInstanceDialog
@@ -115,7 +139,9 @@ function render(onOpenChange = actions.onOpenChange, initialCodexRoute?: "openco
         environmentId={remoteEnvironmentId}
         environmentLabel="Remote device"
         onOpenChange={onOpenChange}
+        onFinished={actions.onFinished}
         initialCodexRoute={initialCodexRoute}
+        {...extra}
       />,
     ),
   );
@@ -137,7 +163,32 @@ async function type(selector: string, value: string) {
   await act(async () => userEvent.fill(input(selector), value));
   await act(async () => input(selector).blur());
 }
-const signInStep = () => document.querySelector('[aria-label="Sign-in step"]');
+const signInStep = () => document.querySelector('[aria-label="Setup step"]');
+const radio = (label: string) =>
+  [...document.querySelectorAll('[role="radio"]')].find((element) =>
+    element.textContent?.includes(label),
+  ) as HTMLElement;
+
+function snapshot(
+  instanceId: string,
+  driver: string,
+  patch: Partial<ServerProvider> = {},
+): ServerProvider {
+  return {
+    instanceId: ProviderInstanceId.make(instanceId),
+    driver: ProviderDriverKind.make(driver),
+    enabled: true,
+    installed: true,
+    version: null,
+    status: "ready",
+    auth: { status: "unauthenticated" },
+    checkedAt: "2026-10-20T00:00:00.000Z",
+    models: [],
+    slashCommands: [],
+    skills: [],
+    ...patch,
+  };
+}
 
 async function prepareCodexInstance() {
   await render();
@@ -150,8 +201,10 @@ describe("AddProviderInstanceDialog environment routing", () => {
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     actions.canManageProviders = true;
+    actions.providers = [];
     actions.toast.mockReset();
     actions.onOpenChange.mockReset();
+    actions.onFinished.mockReset();
     settingsHooks.read.mockReset().mockReturnValue({ providerInstances: {} });
     settingsHooks.mutate.mockReset().mockResolvedValue({ _tag: "Success", value: {} });
     settingsHooks.useMutation.mockReset().mockReturnValue(settingsHooks.mutate);
@@ -164,18 +217,62 @@ describe("AddProviderInstanceDialog environment routing", () => {
 
   it("creates a provider with its default identity without typing", async () => {
     await render();
-    const grok = [...document.querySelectorAll('[role="radio"]')].find((radio) =>
-      radio.textContent?.includes("Grok"),
-    ) as HTMLElement;
-    await act(async () => grok.click());
+    await act(async () => radio("Grok").click());
     await click("Next");
     await click("Next");
-    await click("Add instance");
+    await click("Add and set up");
     expect(settingsHooks.mutate).toHaveBeenCalledWith({
       operation: "create",
       instanceId: "grok",
       instance: { driver: "grok", enabled: true, displayName: "Grok" },
     });
+  });
+
+  it("shows each provider's install and sign-in state on the provider list", async () => {
+    actions.providers = [
+      snapshot("codex", "codex", { auth: { status: "authenticated" } }),
+      snapshot("claudeAgent", "claudeAgent"),
+      snapshot("cursor", "cursor", { installed: false, status: "error" }),
+    ];
+    await render();
+
+    expect(radio("Codex").textContent).toContain("Signed in");
+    expect(radio("Claude").textContent).toContain("Installed");
+    expect(radio("Cursor").textContent).toContain("Not installed");
+    expect(radio("Grok").textContent).not.toMatch(/Installed|Signed in/);
+  });
+
+  it("finishes in the setup step for every driver and reports the new instance", async () => {
+    await render();
+    await act(async () => radio("Grok").click());
+    await click("Next");
+    await click("Next");
+    await click("Add and set up");
+
+    expect(signInStep()?.textContent).toContain("remote-device/grok");
+    expect(actions.onOpenChange).not.toHaveBeenCalled();
+    await click("Finish sign-in");
+    expect(actions.onFinished).toHaveBeenCalledWith({ instanceId: "grok", signedIn: true });
+    expect(actions.onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("opens an existing instance straight to its setup step", async () => {
+    actions.providers = [snapshot("claudeAgent", "claudeAgent")];
+    await render(actions.onOpenChange, undefined, {
+      initialInstanceId: ProviderInstanceId.make("claudeAgent"),
+    });
+
+    expect(signInStep()?.textContent).toContain("remote-device/claudeAgent");
+    expect(document.querySelector('[aria-current="step"]')?.textContent).toContain("Set up");
+    expect(settingsHooks.mutate).not.toHaveBeenCalled();
+  });
+
+  it("preselects the requested driver", async () => {
+    await render(actions.onOpenChange, undefined, {
+      initialDriver: ProviderDriverKind.make("opencode"),
+    });
+
+    expect(radio("OpenCode").getAttribute("aria-checked")).toBe("true");
   });
 
   it("chooses an unused identity for another account without replacing configured instances", async () => {
@@ -185,7 +282,7 @@ describe("AddProviderInstanceDialog environment routing", () => {
     await render();
     await click("Configure manually");
     await click("Next");
-    await click("Add instance");
+    await click("Add and set up");
     expect(settingsHooks.mutate).toHaveBeenCalledWith({
       operation: "create",
       instanceId: "codex_3",
@@ -212,7 +309,7 @@ describe("AddProviderInstanceDialog environment routing", () => {
     await click("Use Kilo Code");
 
     expect(document.body.textContent).toContain("v4.2.0 · binary");
-    await click("Continue to sign-in");
+    await click("Add and set up");
     expect(settingsHooks.mutate).toHaveBeenCalledWith({
       operation: "create",
       instanceId: "acpRegistry_kilo_code",
@@ -242,7 +339,7 @@ describe("AddProviderInstanceDialog environment routing", () => {
     await click("Enter registry agent");
     await type("#add-provider-acpRegistry-manual-agentId", "devin");
     await click("Next");
-    await click("Continue to sign-in");
+    await click("Add and set up");
     expect(settingsHooks.mutate).toHaveBeenCalledWith({
       operation: "create",
       instanceId: "acpRegistry_custom",
@@ -255,7 +352,7 @@ describe("AddProviderInstanceDialog environment routing", () => {
     expect(signInStep()).not.toBeNull();
   });
 
-  it("creates a local command in the selected environment without a sign-in step", async () => {
+  it("creates a local command in the selected environment, then sets it up", async () => {
     await render();
     await click("Use local command");
     await click("Next");
@@ -280,7 +377,7 @@ describe("AddProviderInstanceDialog environment routing", () => {
     await type('input[aria-label="Environment variable value 1"]', "work");
     await click("Next");
     await type("#add-provider-label", "Deepseek Harness");
-    await click("Add instance");
+    await click("Add and set up");
 
     expect(settingsHooks.useMutation).toHaveBeenCalledWith(remoteEnvironmentId);
     expect(settingsHooks.mutate).toHaveBeenCalledWith({
@@ -296,26 +393,26 @@ describe("AddProviderInstanceDialog environment routing", () => {
         ],
       },
     });
-    expect(actions.onOpenChange).toHaveBeenCalledWith(false);
-    expect(signInStep()).toBeNull();
+    expect(actions.onOpenChange).not.toHaveBeenCalled();
+    expect(signInStep()?.textContent).toContain("acpRegistry_deepseek_harness");
   });
 
   it("keeps the dialog open when the atomic upsert fails", async () => {
     settingsHooks.mutate.mockResolvedValueOnce({ _tag: "Failure", cause: new Error("Conflict") });
     await render();
     await click("Use Kilo Code");
-    await click("Continue to sign-in");
+    await click("Add and set up");
 
     expect(actions.onOpenChange).not.toHaveBeenCalled();
     expect(actions.toast).toHaveBeenCalledWith(
       expect.objectContaining({ type: "error", title: "Could not add provider instance" }),
     );
-    expect(button("Continue to sign-in").disabled).toBe(false);
+    expect(button("Add and set up").disabled).toBe(false);
   });
 
   it("adds an instance with the selected environment's provider grant alone", async () => {
     await prepareCodexInstance();
-    await click("Add instance");
+    await click("Add and set up");
 
     expect(settingsHooks.mutate).toHaveBeenCalledWith({
       operation: "create",
@@ -327,15 +424,12 @@ describe("AddProviderInstanceDialog environment routing", () => {
         config: { setupMode: "existing" },
       },
     });
-    expect(actions.toast).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "success", title: "Provider instance added" }),
-    );
-    expect(actions.onOpenChange).toHaveBeenCalledWith(false);
+    expect(signInStep()?.textContent).toContain("remote-device/codex_work");
   });
 
   it("rejects a queued save after the provider grant is revoked", async () => {
     await prepareCodexInstance();
-    const save = button("Add instance");
+    const save = button("Add and set up");
     actions.canManageProviders = false;
     // The rendered button is still enabled; the click must recheck the live grant.
     await act(async () => save.click());
@@ -344,21 +438,21 @@ describe("AddProviderInstanceDialog environment routing", () => {
     expect(actions.toast).not.toHaveBeenCalled();
     expect(actions.onOpenChange).not.toHaveBeenCalled();
     await render();
-    expect(button("Add instance").disabled).toBe(true);
+    expect(button("Add and set up").disabled).toBe(true);
   });
 
   it("keeps a denied draft available when the provider grant arrives", async () => {
     actions.canManageProviders = false;
     await prepareCodexInstance();
-    expect(button("Add instance").disabled).toBe(true);
+    expect(button("Add and set up").disabled).toBe(true);
     expect(settingsHooks.mutate).not.toHaveBeenCalled();
 
     actions.canManageProviders = true;
     await render();
-    expect(button("Add instance").disabled).toBe(false);
-    await click("Add instance");
+    expect(button("Add and set up").disabled).toBe(false);
+    await click("Add and set up");
     expect(settingsHooks.mutate).toHaveBeenCalledOnce();
-    expect(actions.onOpenChange).toHaveBeenCalledWith(false);
+    expect(signInStep()).not.toBeNull();
   });
 });
 
@@ -381,7 +475,7 @@ describe("OpenCodex Home routing", () => {
   it("creates the Home preset in the selected environment", async () => {
     await render(actions.onOpenChange, "opencodex");
     await click("Next");
-    await click("Add instance");
+    await click("Add and set up");
 
     expect(settingsHooks.useMutation).toHaveBeenCalledWith(remoteEnvironmentId);
     expect(settingsHooks.mutate).toHaveBeenCalledExactlyOnceWith({
@@ -411,7 +505,7 @@ describe("OpenCodex Home routing", () => {
     await type("#add-provider-instance-id", "codex_home_2");
     await click("Next");
     await type("#add-provider-codex-homePath", "/home/person/.codex");
-    await click("Add instance");
+    await click("Add and set up");
 
     expect(settingsHooks.mutate).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({

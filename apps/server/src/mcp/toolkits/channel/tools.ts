@@ -1,6 +1,8 @@
 import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
 import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import {
+  ChannelBotHomeClaimResult,
+  ChannelBotHomeStatus,
   ChannelIngestResult,
   ChannelInputId,
   ChannelInputSnapshot,
@@ -19,6 +21,7 @@ import {
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 
+import * as ChannelBotHome from "../../../channels/ChannelBotHome.ts";
 import * as ChannelGateway from "../../../channels/ChannelGateway.ts";
 import * as ChannelLedger from "../../../channels/ChannelLedger.ts";
 import * as ChannelRemoteWorkers from "../../../channels/ChannelRemoteWorkers.ts";
@@ -97,6 +100,22 @@ const ChannelTaskMoveTool = Tool.make(agentSurfaceRegistry["channel.task_move"].
   success: ChannelTaskMoveResult,
 }).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.task_move"]));
 
+const ChannelBotHomeTool = Tool.make(agentSurfaceRegistry["channel.bot_home_read"].name, {
+  ...shared,
+  dependencies: [...shared.dependencies, ChannelBotHome.ChannelBotHome],
+  description: agentSurfaceRegistry["channel.bot_home_read"].description,
+  parameters: Tool.EmptyParams,
+  success: ChannelBotHomeStatus,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.bot_home_read"]));
+
+const ChannelBotHomeClaimTool = Tool.make(agentSurfaceRegistry["channel.bot_home_claim"].name, {
+  ...shared,
+  dependencies: [...shared.dependencies, ChannelBotHome.ChannelBotHome],
+  description: agentSurfaceRegistry["channel.bot_home_claim"].description,
+  parameters: Tool.EmptyParams,
+  success: ChannelBotHomeClaimResult,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["channel.bot_home_claim"]));
+
 export const ChannelToolkit = Toolkit.make(
   ChannelIngestTool,
   ChannelInputGetTool,
@@ -105,4 +124,6 @@ export const ChannelToolkit = Toolkit.make(
   ChannelTaskExportTool,
   ChannelTaskReportTool,
   ChannelTaskMoveTool,
+  ChannelBotHomeTool,
+  ChannelBotHomeClaimTool,
 );

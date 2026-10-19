@@ -656,7 +656,9 @@ describe("SSH pending replacement reconciliation", () => {
           assert.isTrue(
             Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
           );
-          assert.equal((yield* manager.status(uploadTarget)).status?.state, "ready");
+          const uncertain = yield* manager.status(uploadTarget);
+          assert.equal(uncertain.status?.state, "update_blocked");
+          assert.isUndefined(uncertain.status?.refreshDeferred);
           assert.isTrue(
             Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
           );

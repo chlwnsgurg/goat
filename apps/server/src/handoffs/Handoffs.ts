@@ -13,6 +13,7 @@ import {
   HandoffHuman,
   handoffSummary,
   isHandoffPending,
+  isProviderHandoffPath,
   TurnItemId,
   type HandoffReadInput,
   type HandoffRespondInput,
@@ -256,7 +257,7 @@ const make = Effect.gen(function* () {
     sessionId: AuthSessionId,
   ) {
     const record = yield* read(input);
-    if (record.target.path.startsWith("ssh.") || record.target.path === "provider.home_request") {
+    if (record.target.path.startsWith("ssh.") || isProviderHandoffPath(record.target.path)) {
       if (Option.isNone(environment)) return yield* new HandoffError({ reason: "unavailable" });
       const origin = yield* environment.value.getEnvironmentId;
       if (record.target.environmentId !== origin)
@@ -368,7 +369,7 @@ const make = Effect.gen(function* () {
         expiresAt:
           input.kind === "approval" &&
           !input.target.path.startsWith("ssh.") &&
-          input.target.path !== "provider.home_request"
+          !isProviderHandoffPath(input.target.path)
             ? null
             : (input.expiresAt ?? DateTime.add(now, { minutes: 15 })),
         createdAt: now,
@@ -422,7 +423,7 @@ const make = Effect.gen(function* () {
           DateTime.toEpochMillis(handoff.expiresAt) <= DateTime.toEpochMillis(now)) ||
         (handoff.kind === "approval" &&
           !handoff.target.path.startsWith("ssh.") &&
-          handoff.target.path !== "provider.home_request" &&
+          !isProviderHandoffPath(handoff.target.path) &&
           (runStatus === null || ThreadManagement.isTerminalRunStatus(runStatus)))
       ) {
         const input = yield* decodeAddress({

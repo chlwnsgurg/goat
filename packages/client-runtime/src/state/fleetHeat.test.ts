@@ -194,6 +194,20 @@ describe("fleetMachineHeat", () => {
     });
   });
 
+  it("judges heat by load alone, whatever the host's version or protocol verdict", () => {
+    const busy = metrics({ cpuUtilization: 0.95 });
+    for (const extra of [
+      { versionMismatch: true as const },
+      { compatibility: "degraded" as const },
+      { compatibility: "incompatible" as const },
+    ]) {
+      expect(fleetMachineHeat(entry({ metrics: busy, ...extra }))).toMatchObject({
+        tier: "burning",
+        status: "live",
+      });
+    }
+  });
+
   it("shows no heat for stale, unreachable, unsupported, or unmatched machines", () => {
     const hot = metrics({ cpuUtilization: 0.99 });
     expect(
