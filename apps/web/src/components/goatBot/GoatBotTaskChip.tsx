@@ -91,7 +91,7 @@ export function GoatBotTaskChip({
             </div>
           ) : null}
         </div>
-        <div className="flex min-h-9 flex-wrap items-center justify-between gap-1 bg-black/5 px-3 py-1 text-xs text-muted-foreground dark:bg-white/5">
+        <div className="flex min-h-9 flex-wrap items-center justify-between gap-1 border-t border-black/10 px-3 py-1 text-xs text-muted-foreground dark:border-white/10">
           <time dateTime={card.updatedAt} className="shrink-0">
             Updated {formatShortTimestamp(card.updatedAt, timestampFormat)}
           </time>
