@@ -22,6 +22,7 @@ export * from "./providerDiagnosis.ts";
 export * from "./codexRoute.ts";
 export * from "./providerHomeRequest.ts";
 export * from "./providerHostSync.ts";
+export * from "./providerOnboarding.ts";
 export * from "./providerRuntime.ts";
 export * from "./providerUsageLimits.ts";
 export * from "./usageLimitSourceId.ts";

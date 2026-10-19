@@ -1,4 +1,4 @@
-# ADR-0016 — decision recorded under "Updates"
+# ADR-0019 — decision recorded under "Updates"
 
 - Contract owner: [server.md](../server.md#updates)
 - Related: [ADR-0012](ADR-0012-shared-ssh-runtime.md), [ADR-0013](ADR-0013-drain-replacement.md),

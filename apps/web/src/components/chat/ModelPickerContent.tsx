@@ -355,6 +355,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   terminalOpen: boolean;
   onRequestClose?: () => void;
   onOpenProviderSetup?: (instanceId: ProviderInstanceId) => void;
+  onAddProvider?: () => void;
+  addProviderDisabledReason?: string | null;
+  /** Rail selection to open with, such as a provider that was just added. */
+  initialSelectedInstanceId?: ProviderInstanceId | null;
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
@@ -419,6 +423,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     );
   const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | "favorites">(
     () => {
+      if (props.initialSelectedInstanceId) {
+        return props.initialSelectedInstanceId;
+      }
       if (
         props.lockedProvider !== null ||
         activeInstanceHasSelectableUnavailableModel ||
@@ -617,7 +624,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     }
     return [...available, ...disabled];
   })();
-  const showSidebar = !isSearching && sidebarInstanceEntries.length > 0;
+  const showSidebar =
+    !isSearching && (sidebarInstanceEntries.length > 0 || props.onAddProvider !== undefined);
   const instanceOrder = instanceEntries.map((entry) => entry.instanceId);
 
   const filteredModels = (() => {
@@ -807,6 +815,12 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             onFocusSearch={focusSearchInput}
             instanceEntries={sidebarInstanceEntries}
             showFavorites
+            {...(props.onAddProvider
+              ? {
+                  onAddProvider: props.onAddProvider,
+                  addProviderDisabledReason: props.addProviderDisabledReason ?? null,
+                }
+              : {})}
             {...(selectableUnavailableInstanceIds ? { selectableUnavailableInstanceIds } : {})}
             {...(lockedDisabledInstanceIds
               ? {
