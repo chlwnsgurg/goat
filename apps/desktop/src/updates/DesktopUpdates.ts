@@ -362,19 +362,28 @@ export const make = Effect.gen(function* () {
     // Electron's app path points inside the bundle (usually app.asar), not at the bundle.
     const bundlePath = environment.appPath.match(/^(.*?\.app)(?:\/|$)/)?.[1];
     if (!bundlePath) return null;
-    const [bundleWritable, parentWritable] = yield* Effect.all([
-      fileSystem.access(bundlePath, { writable: true }).pipe(Effect.isSuccess),
-      fileSystem
-        .access(environment.path.dirname(bundlePath), { writable: true })
-        .pipe(Effect.isSuccess),
+    const writability = (path: string) =>
+      fileSystem.access(path, { writable: true }).pipe(
+        Effect.match({
+          onSuccess: () => "writable" as const,
+          // access(2) reports EROFS only for a read-only filesystem, such as a mounted disk
+          // image; a plain permission failure on a writable disk still allows an admin install.
+          onFailure: (error) =>
+            (error.reason as { cause?: { code?: unknown } }).cause?.code === "EROFS"
+              ? ("read-only" as const)
+              : ("denied" as const),
+        }),
+      );
+    const [bundle, parent] = yield* Effect.all([
+      writability(bundlePath),
+      writability(environment.path.dirname(bundlePath)),
     ]);
     return classifyDesktopUpdateInstallation({
       platform: environment.platform,
       appBundlePath: bundlePath,
-      bundleWritable,
-      parentWritable,
-      // DMGs mount under /Volumes; a writable external installation remains updateable.
-      readOnlyVolume: bundlePath.startsWith("/Volumes/") && (!bundleWritable || !parentWritable),
+      bundleWritable: bundle === "writable",
+      parentWritable: parent === "writable",
+      readOnlyVolume: bundle === "read-only" || parent === "read-only",
     });
   });
   const installationMessage = installationReason

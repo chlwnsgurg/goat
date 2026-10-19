@@ -31,8 +31,15 @@ describe("DesktopUpdates", () => {
     },
     {
       bundle: "/Volumes/GOAT/GOAT.app",
-      unwritablePaths: ["/Volumes/GOAT/GOAT.app", "/Volumes/GOAT"],
+      unwritablePaths: [],
+      readOnlyPaths: ["/Volumes/GOAT/GOAT.app", "/Volumes/GOAT"],
       reason: "read-only-volume",
+    },
+    // An administrator's install on a writable external disk needs an admin, not a move.
+    {
+      bundle: "/Volumes/External/GOAT.app",
+      unwritablePaths: ["/Volumes/External/GOAT.app", "/Volumes/External"],
+      reason: "needs-admin",
     },
     {
       bundle: "/Applications/GOAT.app",
@@ -49,6 +56,7 @@ describe("DesktopUpdates", () => {
         const harness = makeHarness({
           appPath: `${scenario.bundle}/Contents/Resources/app.asar`,
           unwritablePaths: scenario.unwritablePaths,
+          ...("readOnlyPaths" in scenario ? { readOnlyPaths: scenario.readOnlyPaths } : {}),
         });
         return Effect.gen(function* () {
           const updates = yield* DesktopUpdates.DesktopUpdates;
