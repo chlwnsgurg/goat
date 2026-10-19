@@ -144,6 +144,29 @@ jobs:
         if: matrix.task == 'typecheck'
         run: vpr typecheck
 
+      # Web browser tests and the server's browser integration tests run in Playwright's headless
+      # Chromium. HOME is persistent per runner, so the install downloads only when this
+      # Playwright version's shell is missing. There is no sudo here: a missing system library
+      # fails the step with the list instead of running install-deps.
+      - name: Install Chromium headless shell
+        if: matrix.task == 'test' || matrix.task == 'test-server'
+        env:
+          TASK: ${{ matrix.task }}
+        run: |
+          if [ "$TASK" = test ]; then
+            cli=apps/web/node_modules/playwright/cli.js
+          else
+            cli=apps/server/node_modules/playwright-core/cli.js
+          fi
+          node "$cli" install --only-shell chromium
+          # Older revisions stay in the persistent HOME after an upgrade; check the newest.
+          browser=$(find "$HOME/.cache/ms-playwright" -path '*chromium_headless_shell-*' -name chrome-headless-shell -type f | sort -V | tail -1)
+          test -n "$browser"
+          if ldd "$browser" | grep '=> not found'; then
+            echo "::error::Chromium headless shell is missing system libraries on $RUNNER_NAME"
+            exit 1
+          fi
+
       # ssh and web stay here. The other suites are their own matrix tasks so a
       # slow server shard does not block them. `check` above is still the aggregate.
       - name: Test
