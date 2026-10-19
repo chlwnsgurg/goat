@@ -63,12 +63,14 @@ export function GoatBotChatView({
   const canSend = !removed && canSendToGoatBot(availability, canOperate);
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
-      <WorkspacePageHeader electron={isElectron} className="border-b border-border">
-        <div className="flex min-w-0 items-center gap-2.5">
+      <WorkspacePageHeader electron={isElectron} className="surface-glass relative">
+        <div className="absolute left-1/2 flex max-w-[60%] min-w-0 -translate-x-1/2 items-center gap-2">
           <GoatBotAvatar size="md" />
           <div className="flex min-w-0 flex-col">
-            <h1 className="truncate text-sm font-medium text-foreground">{GOAT_BOT_TITLE}</h1>
-            <p className="truncate text-xs text-muted-foreground">
+            <h1 className="truncate font-semibold text-foreground" style={{ fontSize: 13 }}>
+              {GOAT_BOT_TITLE} ›
+            </h1>
+            <p className="truncate text-2xs text-muted-foreground">
               {removal === "archived"
                 ? "Archived"
                 : removal === "deleted"

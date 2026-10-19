@@ -1,7 +1,11 @@
 import { MemoryReportLink } from "../settings/SettingsMemoryRouteScreen";
 import { LegendList } from "@legendapp/list/react-native";
 import type { EnvironmentThreadShell } from "@goat/client-runtime/state/shell";
-import type { GoatBotRow } from "@goat/client-runtime/goatBot";
+import {
+  formatGoatBotStamp,
+  goatBotReceiptLabel,
+  type GoatBotRow,
+} from "@goat/client-runtime/goatBot";
 import { memo, useCallback, useState } from "react";
 import { Platform, Pressable, Text, TextInput, View } from "react-native";
 import { KeyboardAvoidingView, useKeyboardState } from "react-native-keyboard-controller";
@@ -16,11 +20,8 @@ import { GoatBotAvatar } from "./GoatBotAvatar";
 
 type ThreadSelection = Pick<EnvironmentThreadShell, "environmentId" | "id">;
 const rowKey = (row: GoatBotRow) => row.id;
-const dayFormatter = new Intl.DateTimeFormat(undefined, {
-  weekday: "long",
-  month: "long",
-  day: "numeric",
-});
+const receiptTime = (iso: string) =>
+  new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(iso));
 const availabilityCopy = {
   ready: "Answers here, works in its own threads",
   connecting: "Connecting to GOAT Bot…",
@@ -111,11 +112,11 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
   readonly onSelectThread: (thread: ThreadSelection) => void;
 }) {
   const { row } = props;
+  const [nowMs] = useState(() => Date.now());
   if (row.kind === "day") {
-    const date = new Date(row.at);
     return (
       <Text className="py-4 text-center text-xs text-foreground-muted">
-        {Number.isNaN(date.getTime()) ? "" : dayFormatter.format(date)}
+        {formatGoatBotStamp(row.at, nowMs, receiptTime)}
       </Text>
     );
   }
@@ -124,14 +125,7 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
   }
   if (row.kind === "user") {
     const delivery = row.delivery;
-    const label =
-      delivery.state === "sending"
-        ? "Sending…"
-        : delivery.state === "failed"
-          ? (delivery.rejectionReason ?? "Not sent")
-          : delivery.state === "read"
-            ? "Read"
-            : "Sent";
+    const receipt = goatBotReceiptLabel(delivery, receiptTime);
     return (
       <View className="my-1 items-end gap-1">
         <View className="max-w-[85%] rounded-2xl bg-user-bubble px-3 py-2">
@@ -139,19 +133,28 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
             {row.text}
           </Text>
         </View>
-        <View className="flex-row items-center gap-2">
-          <Text className="text-xs text-foreground-muted">{label}</Text>
-          {delivery.state === "failed" && delivery.rejectionReason === undefined ? (
-            <Pressable
-              accessibilityRole="button"
-              disabled={!props.canSend}
-              onPress={() => props.onRetry(delivery.clientKey)}
-              className="p-2"
+        {row.showReceipt || delivery.state === "failed" ? (
+          <View className="flex-row items-center gap-2">
+            <Text
+              className="text-xs text-foreground-muted"
+              accessibilityLabel={receipt?.accessibleText}
             >
-              <Text className="text-sm text-foreground">Retry</Text>
-            </Pressable>
-          ) : null}
-        </View>
+              {delivery.state === "failed"
+                ? (delivery.rejectionReason ?? "Not Delivered")
+                : receipt?.text}
+            </Text>
+            {delivery.state === "failed" && delivery.rejectionReason === undefined ? (
+              <Pressable
+                accessibilityRole="button"
+                disabled={!props.canSend}
+                onPress={() => props.onRetry(delivery.clientKey)}
+                className="p-2"
+              >
+                <Text className="text-sm text-foreground">Retry</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
       </View>
     );
   }

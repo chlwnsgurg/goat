@@ -166,7 +166,7 @@ describe("buildGoatBotTimeline", () => {
     });
     expect(content(rows).map((row) => (row.kind === "user" ? row.delivery : null))).toEqual([
       { state: "read", readAt: "2026-10-12T12:00:01Z" },
-      { state: "sent" },
+      { state: "delivered" },
     ]);
   });
 
@@ -221,7 +221,7 @@ describe("buildGoatBotTimeline", () => {
     expect(
       content(rows).map((row) => [row.id, row.kind === "user" ? row.delivery.state : null]),
     ).toEqual([
-      ["u1", "sent"],
+      ["u1", "delivered"],
       ["pending:k2", "sending"],
       ["pending:k3", "failed"],
     ]);
@@ -279,6 +279,77 @@ describe("buildGoatBotTimeline", () => {
       ["u3", true],
       ["u4", true],
     ]);
+  });
+
+  it("marks first, middle, last and single bubbles and groups task cards with bot replies", () => {
+    const rows = buildGoatBotTimeline({
+      visibleTurnItems: rowsOf([
+        user("u1", "2026-10-12T12:00:00Z", "a"),
+        user("u2", "2026-10-12T12:01:00Z", "b"),
+        user("u3", "2026-10-12T12:02:00Z", "c"),
+        bot("b1", "2026-10-12T12:03:00Z", "Working"),
+        notice("n1", "2026-10-12T12:04:00Z"),
+        user("u4", "2026-10-12T12:10:00Z", "later"),
+      ]),
+      pendingInputs: [],
+      readers: readers({}, { n1: card("task", 1) }),
+    });
+    expect(content(rows).map((row) => [row.id, row.groupPosition])).toEqual([
+      ["u1", "first"],
+      ["u2", "middle"],
+      ["u3", "last"],
+      ["b1", "first"],
+      ["n1", "last"],
+      ["u4", "single"],
+    ]);
+    expect(
+      content(rows).flatMap((row) => (row.kind === "user" && row.showReceipt ? [row.id] : [])),
+    ).toEqual(["u4"]);
+  });
+
+  it("adds a time stamp at one hour while five-minute pauses only split bubbles", () => {
+    const rows = buildGoatBotTimeline({
+      visibleTurnItems: rowsOf([
+        user("u1", "2026-10-12T12:00:00Z", "a"),
+        user("u2", "2026-10-12T12:06:00Z", "b"),
+        user("u3", "2026-10-12T13:06:00Z", "c"),
+      ]),
+      pendingInputs: [],
+      readers: readers(),
+    });
+    expect(rows.map((row) => row.kind)).toEqual(["day", "user", "user", "day", "user"]);
+    expect(content(rows).map((row) => row.groupPosition)).toEqual(["single", "single", "single"]);
+  });
+
+  it("distinguishes queued and accepted pending sends from committed delivery", () => {
+    const rows = buildGoatBotTimeline({
+      visibleTurnItems: rowsOf([user("u1", "2026-10-12T12:00:00Z", "committed")]),
+      pendingInputs: [
+        {
+          clientKey: "q",
+          text: "wait",
+          createdAt: "2026-10-12T12:00:01Z",
+          state: "queued",
+          requestKey: null,
+        },
+        {
+          clientKey: "a",
+          text: "accepted",
+          createdAt: "2026-10-12T12:00:02Z",
+          state: "accepted",
+          requestKey: "accepted",
+        },
+      ],
+      readers: readers(),
+    });
+    expect(content(rows).map((row) => (row.kind === "user" ? row.delivery.state : null))).toEqual([
+      "delivered",
+      "queued",
+      "sent",
+    ]);
+    expect(
+      content(rows).flatMap((row) => (row.kind === "user" && row.showReceipt ? [row.id] : [])),
+    ).toEqual(["pending:a"]);
   });
 
   it("takes the bot's tone from its message and skips a reply that has not started", () => {

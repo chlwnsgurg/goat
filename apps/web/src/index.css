@@ -256,6 +256,11 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --color-goat-avatar: color-mix(in oklab, var(--foreground) 6%, var(--background));
   --color-goat-avatar-border: color-mix(in oklab, var(--foreground) 12%, var(--background));
   --color-goat-avatar-foreground: color-mix(in oklab, var(--foreground) 82%, var(--background));
+  /* GOAT Bot's Messages colors stay local to its conversation. */
+  --color-goat-bubble-out: var(--goat-bubble-out);
+  --color-goat-bubble-out-foreground: #fff;
+  --color-goat-bubble-in: var(--goat-bubble-in);
+  --color-goat-bubble-in-foreground: var(--goat-bubble-in-foreground);
   --color-channel-dev: var(--channel-dev);
   --color-channel-nightly: var(--channel-nightly);
   --color-error-foreground: var(--error-foreground);
@@ -593,6 +598,64 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
     background-clip: text;
     animation: live-tool-shine 2.2s steps(30) infinite;
     animation-play-state: var(--visible-animation-state, paused);
+  }
+}
+
+@utility goat-bubble {
+  position: relative;
+  max-width: min(75%, 34rem);
+  padding: 7px 12px 8px;
+  border-radius: 18px;
+  font-size: 15px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* The canvas-colored mask cuts a curved Messages tail from the last bubble in a group. */
+@utility goat-bubble-tail-out {
+  &::before {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    right: -7px;
+    height: 20px;
+    width: 20px;
+    background: var(--color-goat-bubble-out);
+    border-bottom-left-radius: 16px 14px;
+  }
+  &::after {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    right: -26px;
+    height: 20px;
+    width: 26px;
+    background: var(--background);
+    border-bottom-left-radius: 10px;
+  }
+}
+
+@utility goat-bubble-tail-in {
+  &::before {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    left: -7px;
+    height: 20px;
+    width: 20px;
+    background: var(--color-goat-bubble-in);
+    border-bottom-right-radius: 16px 14px;
+  }
+  &::after {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    left: -26px;
+    height: 20px;
+    width: 26px;
+    background: var(--background);
+    border-bottom-right-radius: 10px;
   }
 }
 
@@ -956,6 +1019,9 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
 
 :root {
   color-scheme: light;
+  --goat-bubble-out: #1b86f9;
+  --goat-bubble-in: #e9e9eb;
+  --goat-bubble-in-foreground: #000;
   --radius: 0.625rem;
   --background: var(--color-white);
   --app-chrome-background: var(--background);
@@ -1029,6 +1095,9 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
 
   @variant dark {
     color-scheme: dark;
+    --goat-bubble-out: #2c66ca;
+    --goat-bubble-in: #3a3a3c;
+    --goat-bubble-in-foreground: #fff;
     /* Keep controls and floating surfaces close to the neutral-black canvas.
        Borders and hover states provide separation without milky gray fills. */
     --background: var(--color-neutral-950);

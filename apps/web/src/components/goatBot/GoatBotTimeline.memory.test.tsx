@@ -35,6 +35,7 @@ const row = {
   id: "synthetic-report",
   createdAt: "2026-10-01T00:00:00Z",
   firstInGroup: true,
+  groupPosition: "single",
   text: "A memory conflict was resolved.",
   tone: "result",
   replyTo: null,

@@ -3,8 +3,6 @@ import { type FormEvent, type KeyboardEvent, useState } from "react";
 
 import { cn } from "~/lib/utils";
 
-import { Button } from "../ui/button";
-
 /**
  * GOAT Bot's message box. It clears as soon as a message is handed off, so a
  * double Enter cannot send the same message twice. Work in progress never
@@ -43,9 +41,10 @@ export function GoatBotComposer({
     <form onSubmit={handleSubmit} className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-4">
       <div
         className={cn(
-          "flex items-end gap-2 rounded-2xl border border-input bg-background py-1.5 pr-1.5 pl-3.5 shadow-xs/5 transition-shadow focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/24 focus-within:ring-inset dark:bg-input/32",
+          "flex items-end gap-2 border border-input bg-background py-1 pr-1 pl-3.5 shadow-xs/5 transition-shadow focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/24 focus-within:ring-inset",
           disabled && "opacity-64",
         )}
+        style={{ borderRadius: 20 }}
       >
         <textarea
           rows={1}
@@ -55,17 +54,20 @@ export function GoatBotComposer({
           disabled={disabled}
           onChange={(event) => setText(event.currentTarget.value)}
           onKeyDown={handleKeyDown}
-          className="field-sizing-content max-h-48 min-h-7 flex-1 resize-none self-center bg-transparent py-1 text-sm text-foreground outline-none placeholder:text-muted-foreground"
+          className="field-sizing-content max-h-48 min-h-7 flex-1 resize-none self-center bg-transparent py-1 text-foreground outline-none placeholder:text-muted-foreground"
+          style={{ fontSize: 15 }}
         />
-        <Button
+        <button
           type="submit"
-          size="icon-sm"
           aria-label="Send"
           disabled={disabled || trimmed.length === 0}
-          className="shrink-0"
+          className={cn(
+            "flex size-7 shrink-0 items-center justify-center rounded-full bg-goat-bubble-out text-white",
+            trimmed.length === 0 && "invisible",
+          )}
         >
-          <ArrowUpIcon />
-        </Button>
+          <ArrowUpIcon className="size-4" />
+        </button>
       </div>
     </form>
   );

@@ -57,8 +57,7 @@ export function createGoatBotSendQueue(options: GoatBotSendQueueOptions): GoatBo
       clientKey: entry.clientKey,
       text: entry.text,
       createdAt: entry.createdAt,
-      state:
-        entry.state === "accepted" ? "accepted" : entry.state === "failed" ? "failed" : "sending",
+      state: entry.state,
       requestKey: entry.requestKey,
       ...(entry.rejectionReason === null ? {} : { rejectionReason: entry.rejectionReason }),
     }));
