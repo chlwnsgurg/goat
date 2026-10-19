@@ -48,7 +48,8 @@ concurrency:
 jobs:
   scope:
     name: ${{ (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')) && 'goat-scope' || 'goat-ci (label ignored)' }}
-    if: (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:'))
+    # EPYC is a self-hosted runner: a pull request from a fork never runs on it.
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:'))
     runs-on: [self-hosted, linux, x64, goat, epyc]
     timeout-minutes: 10
     outputs:
@@ -291,7 +292,7 @@ jobs:
   screenshot-gate:
     name: ${{ (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')) && 'goat-screenshot-gate' || 'goat-ci (label ignored)' }}
     # It reads the pull request, so a manual run has nothing to inspect.
-    if: github.event_name == 'pull_request' && (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:'))
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:'))
     runs-on: [self-hosted, linux, x64, goat, epyc]
     timeout-minutes: 40
     permissions:
@@ -338,7 +339,7 @@ jobs:
     name: ${{ (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')) && 'goat-ci-result' || 'goat-ci (label ignored)' }}
     needs: [scope, ci, screenshot-gate]
     # Runs when a task failed too, so the failure lands on this check; a superseded run stays cancelled.
-    if: ${{ !cancelled() && (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')) }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')) }}
     runs-on: [self-hosted, linux, x64, goat, epyc]
     timeout-minutes: 5
     steps:
