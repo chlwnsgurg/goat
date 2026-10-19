@@ -31,6 +31,10 @@ import {
 } from "./catalog.ts";
 import * as ConnectionCredentialStore from "./credentialStore.ts";
 import {
+  EMPTY_CONNECTION_CATALOG_DOCUMENT,
+  putConnectionCredentialInCatalog,
+} from "../platform/storageDocument.ts";
+import {
   BearerConnectionTarget,
   ConnectionTransientError,
   PrimaryConnectionTarget,
@@ -83,6 +87,7 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
   readonly profiles?: ReadonlyArray<ConnectionProfile>;
   readonly profileStore?: ConnectionProfileStore.ConnectionProfileStore["Service"];
   readonly credentials?: ReadonlyArray<readonly [string, ConnectionCredential]>;
+  readonly credentialStore?: ConnectionCredentialStore.ConnectionCredentialStore["Service"];
   readonly authorizeBearer?: RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]["authorizeBearer"];
   readonly authorizeDpop?: RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]["authorizeDpop"];
   readonly primaryBearerToken?: string;
@@ -176,7 +181,10 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
       ConnectionProfileStore.ConnectionProfileStore,
       options?.profileStore ?? profileStore,
     ),
-    Layer.succeed(ConnectionCredentialStore.ConnectionCredentialStore, credentialStore),
+    Layer.succeed(
+      ConnectionCredentialStore.ConnectionCredentialStore,
+      options?.credentialStore ?? credentialStore,
+    ),
     Layer.succeed(
       ClientCapabilities.PrimaryEnvironmentAuth,
       ClientCapabilities.PrimaryEnvironmentAuth.of({
@@ -193,7 +201,7 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
     Layer.succeed(ClientCapabilities.SshEnvironmentGateway, ssh),
   );
 
-  return Effect.succeed(ConnectionResolver.layer.pipe(Layer.provide(layerDependencies)));
+  return Effect.succeed(ConnectionResolver.layer.pipe(Layer.provideMerge(layerDependencies)));
 });
 
 describe("ConnectionResolver", () => {
@@ -574,6 +582,122 @@ describe("ConnectionResolver", () => {
       expect(yield* Ref.get(offeredTokens)).toEqual(["revoked-token", "paired-token"]);
       expect(first.httpAuthorization).toMatchObject({ token: "paired-token" });
       expect(second.httpAuthorization).toMatchObject({ token: "paired-token" });
+    }),
+  );
+
+  it.effect.each(["add", "remove"] as const)(
+    "saves a grant %s even if the SSH token stays the same",
+    (change) =>
+      Effect.gen(function* () {
+        const grant = { key: "fixture-host-runtime", scopes: ["orchestration:read"] };
+        const target = new SshConnectionTarget({
+          environmentId: ENVIRONMENT_ID,
+          label: "SSH",
+          connectionId: "ssh-1",
+        });
+        const profile = new SshConnectionProfile({
+          connectionId: target.connectionId,
+          environmentId: ENVIRONMENT_ID,
+          label: "SSH",
+          target: SSH_TARGET,
+        });
+        const layerBroker = yield* makeDependencies({
+          credentials: [
+            [
+              target.connectionId,
+              new BearerConnectionCredential({
+                token: "paired-token",
+                ...(change === "remove" ? { sshPairingGrant: grant } : {}),
+              }),
+            ],
+          ],
+          prepareSsh: () =>
+            Effect.succeed({
+              bootstrap: {
+                target: SSH_TARGET,
+                httpBaseUrl: ENDPOINT.httpBaseUrl,
+                wsBaseUrl: ENDPOINT.wsBaseUrl,
+                pairingToken: null,
+              },
+              bearerToken: "paired-token",
+              ...(change === "add" ? { sshPairingGrant: grant } : {}),
+            }),
+        });
+        const broker = yield* ConnectionResolver.ConnectionResolver.pipe(
+          Effect.provide(layerBroker),
+        );
+        yield* broker.prepare(catalogEntry(target, Option.some(profile)));
+        const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore.pipe(
+          Effect.provide(layerBroker),
+        );
+        const saved = Option.getOrThrow(yield* credentials.get(target.connectionId));
+        expect(saved.sshPairingGrant).toEqual(change === "add" ? grant : undefined);
+      }),
+  );
+
+  it.effect("does not overwrite a newer pairing when an older reconnect removes metadata", () =>
+    Effect.gen(function* () {
+      const target = new SshConnectionTarget({
+        environmentId: ENVIRONMENT_ID,
+        label: "SSH",
+        connectionId: "ssh:fixture",
+      });
+      const profile = new SshConnectionProfile({
+        connectionId: target.connectionId,
+        environmentId: ENVIRONMENT_ID,
+        label: "SSH",
+        target: SSH_TARGET,
+      });
+      const grant = { key: "fixture-host-runtime", scopes: ["orchestration:read"] };
+      const newer = new BearerConnectionCredential({
+        token: "new-fixture-token",
+        sshPairingGrant: grant,
+      });
+      let document = {
+        ...EMPTY_CONNECTION_CATALOG_DOCUMENT,
+        targets: [target],
+        credentials: [
+          {
+            connectionId: target.connectionId,
+            credential: new BearerConnectionCredential({
+              token: "old-fixture-token",
+              sshPairingGrant: grant,
+            }),
+          },
+        ],
+      };
+      const layerBroker = yield* makeDependencies({
+        credentialStore: {
+          get: () => Effect.sync(() => Option.some(document.credentials[0]!.credential)),
+          put: (connectionId, credential, expectedToken) =>
+            Effect.sync(() => {
+              const next = putConnectionCredentialInCatalog(
+                document,
+                connectionId,
+                credential,
+                expectedToken,
+              );
+              document = { ...next, targets: [target], credentials: [...next.credentials] };
+            }),
+          remove: () => Effect.die("unused"),
+        },
+        prepareSsh: () =>
+          Effect.sync(() => {
+            document.credentials = [{ connectionId: target.connectionId, credential: newer }];
+            return {
+              bootstrap: {
+                target: SSH_TARGET,
+                httpBaseUrl: ENDPOINT.httpBaseUrl,
+                wsBaseUrl: ENDPOINT.wsBaseUrl,
+                pairingToken: null,
+              },
+              bearerToken: "old-fixture-token",
+            };
+          }),
+      });
+      const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
+      yield* broker.prepare(catalogEntry(target, Option.some(profile)));
+      expect(document.credentials[0]!.credential).toEqual(newer);
     }),
   );
 

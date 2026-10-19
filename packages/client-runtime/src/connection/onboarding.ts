@@ -278,7 +278,12 @@ export const prepareSshRegistration = Effect.fn(
       target: provisioned.bootstrap.target,
       ...(input.addedBy === undefined ? {} : { addedBy: input.addedBy }),
     }),
-    credential: new BearerConnectionCredential({ token: provisioned.bearerToken }),
+    credential: new BearerConnectionCredential({
+      token: provisioned.bearerToken,
+      ...(provisioned.sshPairingGrant === undefined
+        ? {}
+        : { sshPairingGrant: provisioned.sshPairingGrant }),
+    }),
   });
 });
 

@@ -183,6 +183,44 @@ const withSiblingStore = <A, E, R>(
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
 
 describe("DesktopConnectionCatalogStore", () => {
+  it.effect("encrypts SSH grant metadata with its bearer and reads it in a fresh store", () =>
+    withStore(
+      Effect.gen(function* () {
+        const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fs = yield* FileSystem.FileSystem;
+        const catalog = JSON.stringify({
+          ...JSON.parse(VALID_CATALOG),
+          credentials: [
+            {
+              connectionId: "ssh:fixture",
+              credential: {
+                _tag: "BearerConnectionCredential",
+                token: "fixture-bearer",
+                sshPairingGrant: {
+                  key: "fixture-host-runtime-identity",
+                  scopes: ["orchestration:read"],
+                },
+              },
+            },
+          ],
+        });
+        assert.isTrue(yield* store.set(catalog, null));
+        const disk = yield* fs.readFileString(`${environment.stateDir}/connection-catalog.json`);
+        assert.notInclude(disk, "fixture-host-runtime-identity");
+        assert.notInclude(disk, "fixture-bearer");
+        assert.notInclude(disk, "sshPairingGrant");
+        const restarted = yield* DesktopConnectionCatalogStore.make;
+        const loaded = Option.getOrThrow(yield* restarted.get);
+        const decoded = yield* decodeConnectionCatalog(loaded);
+        assert.deepStrictEqual(decoded.credentials[0]?.credential.sshPairingGrant, {
+          key: "fixture-host-runtime-identity",
+          scopes: ["orchestration:read"],
+        });
+      }),
+    ),
+  );
+
   it.effect("persists, reads, and clears an encrypted connection catalog", () =>
     withStore(
       Effect.gen(function* () {

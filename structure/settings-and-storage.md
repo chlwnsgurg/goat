@@ -70,3 +70,14 @@ and remote dispatch (`apps/server/src/persistence/Migrations/066_RemoteDispatche
 `apps/server/src/persistence/Migrations/070_RemoteReportRelay.ts`) are migrations on this database.
 Launch watches are the exception that is not a table: they are JSON at
 `<stateDir>/thread-launch-watches.json`. See [`launch-and-remote-dispatch.md`](launch-and-remote-dispatch.md).
+
+## Desktop SSH pairing grants
+
+The desktop [connection catalog](../apps/desktop/src/app/DesktopConnectionCatalogStore.ts) encrypts
+SSH scope-ceiling metadata alongside its bearer credential using Electron safeStorage. The
+[renderer adapter](../apps/web/src/connection/sshPairingGrantStore.ts) reads it fresh through IPC;
+it has no browser-storage fallback. This metadata only avoids futile re-pairing with an older
+runtime: the host still authenticates the saved token and enforces its scopes. The exact host,
+environment, runtime instance and version must match, and invalidation compares the observed
+credential before clearing metadata so a late rejection cannot erase a newer pairing. Forgetting
+the SSH route removes the credential and its metadata together.

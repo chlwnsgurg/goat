@@ -18,6 +18,7 @@ import {
   PrimaryConnectionTarget,
   sshPreparationFailure,
   withSshConnectionTiming,
+  sshTargetKey,
   Wakeups,
 } from "@goat/client-runtime/connection";
 import { bootstrapRemoteBearerSession } from "@goat/client-runtime/authorization";
@@ -74,6 +75,7 @@ import {
 } from "./desktopLocal";
 import * as ConnectionStorage from "./storage";
 import { clientPresentationMetadata } from "./clientMetadata";
+import { desktopSshPairingGrantStore } from "./sshPairingGrantStore";
 
 let nextObservedRpcRequestId = 0;
 
@@ -303,6 +305,8 @@ const pairingGrantKey = (server: PairingGrantServer, target: DesktopSshEnvironme
         target.hostname,
         target.username,
         target.port,
+        // A newer client must probe again if its standard scope requirements grew.
+        AuthStandardClientScopes,
       ]);
 
 /** The standard scopes a saved SSH token must still hold to be reused instead of re-paired. */
@@ -368,12 +372,20 @@ export const provisionDesktopSshEnvironment = Effect.fn(
   const grantKey = pairingGrantKey(descriptor, bootstrap.target);
   const granted = grantKey === undefined ? null : parseOAuthScope(access.scope);
   if (grantKey !== undefined && granted !== null) grants.set(grantKey, granted);
+  const sshPairingGrant =
+    grantKey !== undefined && granted !== null && desktopSshPairingGrantStore(bridge) !== undefined
+      ? {
+          key: grantKey,
+          scopes: AuthStandardClientScopes.filter((scope) => granted.includes(scope)),
+        }
+      : undefined;
   return {
     environmentId: descriptor.environmentId,
     label: descriptor.label,
     bootstrap,
     bearerToken: access.access_token,
     verifiedEndpoint: { httpBaseUrl: bootstrap.httpBaseUrl, descriptor },
+    ...(sshPairingGrant === undefined ? {} : { sshPairingGrant }),
   };
 });
 
@@ -388,7 +400,7 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
     input: Omit<
       Parameters<ClientCapabilities.SshEnvironmentGateway["Service"]["prepare"]>[0],
       "connectionId"
-    >,
+    > & { readonly connectionId?: string },
     readyCloudMachine: CloudMachinePreflight = readyCloudMachineThroughPrimary,
     grants: SshPairingGrants = sshPairingGrants,
   ) {
@@ -450,21 +462,62 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
               );
       const verifiedDescriptor =
         authorization === undefined ? descriptor : yield* Deferred.await(endpointVerified);
+      const grantKey = pairingGrantKey(verifiedDescriptor, bootstrap.target);
+      const secureStore = desktopSshPairingGrantStore(bridge);
+      const persisted =
+        secureStore === undefined
+          ? undefined
+          : yield* secureStore
+              .load(
+                input.connectionId ??
+                  `ssh:${descriptor.environmentId}:${sshTargetKey(bootstrap.target)}`,
+                bearerToken,
+                grantKey,
+              )
+              .pipe(
+                Effect.catch(() =>
+                  Effect.logWarning(
+                    "Could not load the secure SSH pairing grant; requiring all standard scopes.",
+                  ).pipe(Effect.as(undefined)),
+                ),
+              );
+      // Secure storage is authoritative across windows and launches, including deletions.
+      const effectiveGrants =
+        secureStore === undefined
+          ? grants
+          : new Map(
+              persisted?.grant === undefined ? [] : [[persisted.grant.key, persisted.grant.scopes]],
+            );
+      const invalidate = Effect.gen(function* () {
+        if (grantKey !== undefined) grants.delete(grantKey);
+        if (persisted !== undefined) yield* persisted.invalidate;
+      });
       const session = yield* Effect.tryPromise({
         try: () => bridge.fetchSshSessionState(bootstrap.httpBaseUrl, bearerToken),
-        catch: sshPreparationFailure,
-      }).pipe(withSshConnectionTiming("session"));
+        catch: (cause) => ({
+          cause,
+          revoked: /\[ssh_http:(?:401|403)\]/u.test(
+            cause instanceof Error ? cause.message : String(cause),
+          ),
+        }),
+      }).pipe(
+        Effect.tapError((error) => (error.revoked ? invalidate : Effect.void)),
+        Effect.mapError((error) => ("cause" in error ? sshPreparationFailure(error.cause) : error)),
+        withSshConnectionTiming("session"),
+      );
+      if (!session.authenticated) yield* invalidate;
       // Servers never widen a stored grant, so a token from before the standard
       // scopes grew is replaced by pairing again, unless this runtime grants no more.
       const granted = session.permissions ?? session.scopes ?? [];
       if (
         session.authenticated &&
-        requiredSshTokenScopes(grants, verifiedDescriptor, bootstrap.target).every((scope) =>
-          granted.includes(scope),
+        requiredSshTokenScopes(effectiveGrants, verifiedDescriptor, bootstrap.target).every(
+          (scope) => granted.includes(scope),
         )
       ) {
         const authorized: ClientCapabilities.PreparedSshEnvironment = {
           ...prepared,
+          ...(persisted?.grant === undefined ? {} : { sshPairingGrant: persisted.grant }),
           verifiedEndpoint: { httpBaseUrl: bootstrap.httpBaseUrl, descriptor: verifiedDescriptor },
           ...(authorization === undefined
             ? {}
@@ -491,6 +544,9 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       bootstrap: provisioned.bootstrap,
       bearerToken: provisioned.bearerToken,
       verifiedEndpoint: provisioned.verifiedEndpoint,
+      ...(provisioned.sshPairingGrant === undefined
+        ? {}
+        : { sshPairingGrant: provisioned.sshPairingGrant }),
     };
     return prepared;
   },
