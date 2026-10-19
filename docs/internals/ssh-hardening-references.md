@@ -161,23 +161,23 @@ are relative to the bundle's `snapshots/vite-build-beautified/`.
 
 ## Gap table
 
-| Concern                      | GOAT today                                                                                                                                                                    | Best reference practice                                         | Gap           |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------- |
-| Backoff and jitter           | 1 s→5 min, upper-half jitter, 30 s stable reset                                                                                                                               | cmux full jitter; herdr resets on 60 s _ready_                  | none          |
-| Post-wake retries            | flat 2 s for 30 s after long resume, failure count held at zero                                                                                                               | herdr caps at 2 s for 30 s after wake                           | none          |
-| Suspend                      | cancels establishment and retry timers until wake                                                                                                                             | herdr cancels in-flight attempts; cmux cancels timers           | none          |
-| Blocked recovery             | local proxy re-checks every 60 s while staying blocked; other blocks wait for a signal                                                                                        | herdr re-checks every 30 s                                      | none          |
-| SSH handshakes per reconnect | one owned POSIX master per target; commands and the forward reuse it; the user's own sharing is left alone; the cost log separates masters and control commands               | one scoped master per host in cmux, herdr, herdr-web-ui (POSIX) | none          |
-| Setup deadline               | a reconnect starts `goat` on the host 2–3 times (recorded host facts); the setup budget learns each host (15–45 s) once it answers, and a first slow attempt is not a failure | none of the references probe a runtime on each reconnect        | none          |
-| Stalled link                 | ServerAlive + RPC silence budget; real loopback stall tests cover RPC timeout and forward revalidation                                                                        | cmux blocked-write and carrier-cut fixtures                     | none          |
-| Abandoned server sockets     | 120 s inbound idle timeout tolerates throttled hidden tabs; clients ping every 5 s (`apps/server/src/wsIdleTimeout.ts`)                                                       | herdr bridge idles out at 60 s; cmux lease evicts older bridges | none          |
-| Git over SSH                 | `GIT_SSH_COMMAND` carries ServerAliveInterval=15 / ServerAliveCountMax=3; a real-socket test stalls a fetch and sees keepalive end it (#408)                                  | every other SSH path carries ServerAlive                        | none          |
-| Error detail                 | tooltip; connection menu and thread banner copy a sanitized public diagnostic                                                                                                 | cmux Copy SSH Error; herdr-web-ui last 8 lines                  | none          |
-| Frozen timers (web, mobile)  | long resume replaces the session; timers over 2 s late restart the RPC silence budget                                                                                         | herdr-web-ui treats a late deadline as a freeze                 | none          |
-| Archive pinning              | SHA-256 locally and on the host                                                                                                                                               | same                                                            | none          |
-| Session resume               | server owns turns and state; subscriptions replay from cursor; mutations never replayed                                                                                       | cmux keeps replay state 120 s; herdr keeps panes running        | none          |
-| Forward lifetime             | owner-death fence on POSIX, 2 s bounded teardown (#378); Windows unfenced                                                                                                     | herdr-web-ui and Codex kill by captured PID                     | none on POSIX |
-| Roaming transport (Mosh)     | none                                                                                                                                                                          | cmux uses it for the terminal only                              | non-goal      |
+| Concern                      | GOAT today                                                                                                                                                                                                           | Best reference practice                                         | Gap           |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------- |
+| Backoff and jitter           | 1 s→5 min, upper-half jitter, 30 s stable reset                                                                                                                                                                      | cmux full jitter; herdr resets on 60 s _ready_                  | none          |
+| Post-wake retries            | flat 2 s for 30 s after long resume, failure count held at zero                                                                                                                                                      | herdr caps at 2 s for 30 s after wake                           | none          |
+| Suspend                      | cancels establishment and retry timers until wake                                                                                                                                                                    | herdr cancels in-flight attempts; cmux cancels timers           | none          |
+| Blocked recovery             | local proxy re-checks every 60 s while staying blocked; other blocks wait for a signal                                                                                                                               | herdr re-checks every 30 s                                      | none          |
+| SSH handshakes per reconnect | one owned POSIX master per target; commands and the forward reuse it; the user's own sharing is left alone; the cost log separates masters and control commands                                                      | one scoped master per host in cmux, herdr, herdr-web-ui (POSIX) | none          |
+| Setup deadline               | an unchanged reconnect runs one remote command and starts `goat` once (readiness); the saved token is reused; the setup budget learns each host (15–45 s) once it answers, and a first slow attempt is not a failure | none of the references probe a runtime on each reconnect        | none          |
+| Stalled link                 | ServerAlive + RPC silence budget; real loopback stall tests cover RPC timeout and forward revalidation                                                                                                               | cmux blocked-write and carrier-cut fixtures                     | none          |
+| Abandoned server sockets     | 120 s inbound idle timeout tolerates throttled hidden tabs; clients ping every 5 s (`apps/server/src/wsIdleTimeout.ts`)                                                                                              | herdr bridge idles out at 60 s; cmux lease evicts older bridges | none          |
+| Git over SSH                 | `GIT_SSH_COMMAND` carries ServerAliveInterval=15 / ServerAliveCountMax=3; a real-socket test stalls a fetch and sees keepalive end it (#408)                                                                         | every other SSH path carries ServerAlive                        | none          |
+| Error detail                 | tooltip; connection menu and thread banner copy a sanitized public diagnostic                                                                                                                                        | cmux Copy SSH Error; herdr-web-ui last 8 lines                  | none          |
+| Frozen timers (web, mobile)  | long resume replaces the session; timers over 2 s late restart the RPC silence budget                                                                                                                                | herdr-web-ui treats a late deadline as a freeze                 | none          |
+| Archive pinning              | SHA-256 locally and on the host                                                                                                                                                                                      | same                                                            | none          |
+| Session resume               | server owns turns and state; subscriptions replay from cursor; mutations never replayed                                                                                                                              | cmux keeps replay state 120 s; herdr keeps panes running        | none          |
+| Forward lifetime             | owner-death fence on POSIX, 2 s bounded teardown (#378); Windows unfenced                                                                                                                                            | herdr-web-ui and Codex kill by captured PID                     | none on POSIX |
+| Roaming transport (Mosh)     | none                                                                                                                                                                                                                 | cmux uses it for the terminal only                              | non-goal      |
 
 Two reference behaviors are deliberately not adopted. cmux's older coordinator
 parks a session after a bounded number of failures; GOAT never gives up on a
@@ -201,38 +201,50 @@ clients'. A stalled link is simulated with a loopback relay in the path (for
 example a `ProxyCommand` through a relay that can stop forwarding), never by
 stopping ssh itself: a stopped ssh also stops its keepalive.
 
-Reconnects measured on 2026-10-19 with a development desktop attached to each
-host's existing runtime, 5 per host, each triggered by killing the app's SSH
-master. `goat` starts are this client's on the host; every row authenticates
-once.
+Reconnects measured with a development desktop attached to each host's
+existing runtime, 5 per host, each triggered by killing the app's SSH master.
+"SSH" is the `ssh.reconnect.cost` wall time; "Total" runs from the kill until
+the Connections row reads Connected and also covers the client's work after
+SSH. Commands exclude the master. `goat` starts are this client's on the host.
+Round 3 published 6.8 s and 19.3 s; its rows here were re-measured with
+round 4 on 2026-10-19 and 2026-10-20 against the same runtimes
+(`mac-studio` 0.1.0-dev.…g52be2c095, `macmini-cf` 0.1.0-dev.b1dc5be3d).
 
-| Host         | Build                | Reconnect (median) | Probe | `goat` starts | First attempt |
-| ------------ | -------------------- | ------------------ | ----- | ------------- | ------------- |
-| `mac-studio` | before (`6be4bffc8`) | 25.3 s             | 5.6 s | 47            | 5/5           |
-| `mac-studio` | host facts and #409  | 6.8 s              | 0.1 s | 2             | 5/5           |
-| `macmini-cf` | before (`6be4bffc8`) | 36.8 s             | 6.5 s | 47            | 0/5           |
-| `macmini-cf` | host facts only      | 32.3 s             | 2.0 s | 3             | 0/5           |
-| `macmini-cf` | host facts and #409  | 19.3 s             | 1.5 s | 2             | 5/5           |
+| Host         | Build                 | Total  | SSH    | Commands | `goat` starts | Pairings | First attempt |
+| ------------ | --------------------- | ------ | ------ | -------- | ------------- | -------- | ------------- |
+| `mac-studio` | round 2 (`6be4bffc8`) | 25.3 s |        |          | 47            | 1        | 5/5           |
+| `mac-studio` | round 3 (`ac40fe793`) | 7.3 s  | 3.9 s  | 3        | 2–9           | 1        | 5/5           |
+| `mac-studio` | token reuse (#413)    | 6.0 s  | 2.9 s  | 2        | 1–28          | 0        | 6/6           |
+| `mac-studio` | round 4 (#428)        | 5.8 s  | 3.0 s  | 1        | 1             | 0        | 5/5           |
+| `macmini-cf` | round 2 (`6be4bffc8`) | 36.8 s |        |          | 47            | 1        | 0/5           |
+| `macmini-cf` | round 3 (`ac40fe793`) | 22.6 s | 14.8 s | 3        | 2             | 1        | 5/5           |
+| `macmini-cf` | token reuse (#413)    | 20.5 s | 12.1 s | 2        | 1             | 0        | 5/5           |
+| `macmini-cf` | round 4 (#428)        | 14.0 s | 7.2 s  | 1        | 1             | 0        | 5/5           |
 
-`mac-studio` has two routes, so its first attempt already had 30 s. The
-remaining `goat` starts are the readiness check and the pairing token. A Git
-clone from `mac-studio` stalled mid-transfer through the relay failed on
+`mac-studio` runs other clients' agents, so its `goat` counts are noisy. When
+another client holds the replacement lock, this app's refresh of an older
+runtime is deferred and that reconnect probes separately, as before folding.
+Behind `cloudflared` every removed
+command saves about 2 s. The first reconnect after an install starts `goat`
+once instead of about 10 times (#415, #419), counted in the real-shell
+fixture; no host was upgraded to measure it, because both run threads.
+
+A Git clone from `mac-studio` stalled mid-transfer through the relay failed on
 keepalive 56.5 s after the stall; without the keepalive arguments it was still
 waiting at 197 s.
 
 ### Remaining
 
-- **Pairing on every reconnect.** The client asks for a fresh pairing token
-  after each reconnect, one more SSH command and `goat` start (0.8 s on
-  `mac-studio`, 2–3 s behind `cloudflared`). Skipping it while the stored
-  session is valid needs a client-side check, not a `packages/ssh` change.
-- **Round trips behind a proxy.** Behind `cloudflared` each remote command
-  costs 1.5–2 s of latency even with no `goat` start, and a reconnect runs
-  three (probe, launch, pairing) plus the forward. Folding the probe into the
-  launch round trip would save one.
-- **First probe after an install.** Recorded answers start once an executable
-  is 2 s old, so the first reconnect after installing a runtime pays the old
-  cost once. Facts of removed versions stay behind; they are a few hundred
-  bytes each.
+- **Client work after SSH.** On `macmini-cf` about 7 s pass between the end of
+  SSH preparation and Connected: descriptor, session check, authorization,
+  socket, and snapshot all cross the `cloudflared` forward one after another.
+  Overlapping them, or carrying the descriptor in the launch answer, is the
+  next saving there.
+- **Pairing grants are kept in memory.** A runtime older than the app's
+  standard scopes is paired once per app launch, because the record of what
+  it grants is not persisted.
+- **Competing refreshes.** Two clients that both want to replace an older
+  runtime take turns on the replacement lock; while a refresh is deferred, the
+  reconnect does not fold its probe.
 - **Sleep and wake.** Not measured on a real sleep: the measuring Mac has
   `SleepDisabled` set and no non-interactive `sudo` to schedule a wake.
