@@ -1,6 +1,6 @@
 # Channels and the GOAT bot
 
-Input from the GOAT bot, Slack, and agents over MCP goes through one gateway into a ledger in
+Input from the GOAT bot, Slack, local Mac iMessage, and agents over MCP goes through one gateway into a ledger in
 `statev2.sqlite`, separate from orchestration events. The ledger owns tasks, where their results go,
 and who asked; coding threads own the work and its history. Code lives in
 [`apps/server/src/channels/`](../../apps/server/src/channels/); the wire types are in
@@ -81,6 +81,24 @@ the one process holding the worker row in `channel_runtime_state`. Ownership cha
 compare-and-set on a stale heartbeat, and every worker write re-checks the token inside its
 transaction, so a process that paused past the heartbeat cannot commit a claim. Any process can
 accept input; the owner picks it up on its next pass.
+
+## iMessage on a local Mac
+
+The opt-in `imessage-channel-settings.json` in the server state directory holds a stable connection
+ID, normalized allowed handles, and a scoped owner. The worker owner polls the current user's
+Messages `chat.db` with a separate read-only SQLite connection, ordered by message ROWID. The
+first poll begins at the current maximum; later passes checkpoint only after each input's durable
+gateway receipt. A bounded pending set retries rows seen before their chat join is committed.
+Both cursor and pending IDs share one fenced ledger record. A database reset requires an operator
+decision rather than silently replaying history.
+
+Only allowlisted direct iMessage text is admitted, and a link code establishes the sender's
+identity before work can be requested. Reception and dispatch consult the current link again.
+The home claim and owner token guard polling; outbound transport checks the home again. Replies
+use the existing chat GUID through a fixed AppleScript with data passed as arguments. A successful
+osascript call means Messages accepted the request, not that a person received it; uncertain
+outcomes remain ambiguous in the outbox. The app launching the server needs Full Disk Access to
+read Messages, and sending requires separate Automation permission for Messages.
 
 ## Restarts
 

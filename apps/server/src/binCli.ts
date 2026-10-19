@@ -14,6 +14,7 @@ import { appCommand } from "./cli/app.ts";
 import { browserCommand } from "./cli/browser.ts";
 import { connectCommand } from "./cli/connect.ts";
 import { pairCommand } from "./cli/pair.ts";
+import { imessageCommand } from "./cli/imessage.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { keepOutboundFetchOnHttp1 } from "./outboundHttp.ts";
 import { sharedServerCommandFlags } from "./cli/config.ts";
@@ -74,6 +75,7 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
       serveCommand,
       appCommand,
       pairCommand,
+      imessageCommand,
       authCommand,
       browserCommand,
       projectCommand,
