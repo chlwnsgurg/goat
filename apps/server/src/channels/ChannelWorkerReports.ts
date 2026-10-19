@@ -46,6 +46,7 @@ import {
   completionHoldCount,
   isThreadMissing,
   needsYouFromRuntimeRequests,
+  subagentRequests,
   observeWorker,
   pullRequestsFromLinks,
   usageLimitWait,
@@ -211,7 +212,12 @@ const make = Effect.gen(function* () {
       // Workers on another machine report through ChannelRemoteWorkers.
       if (worker === undefined || worker.host !== undefined) return false;
       const records = yield* threads
-        .getThreadRecords(worker.threadId, ["runs", "providerThreads", "runtimeRequests"])
+        .getThreadRecords(worker.threadId, [
+          "runs",
+          "providerThreads",
+          "runtimeRequests",
+          "subagents",
+        ])
         .pipe(Effect.option);
       if (records._tag === "None") return false;
       const runs = records.value.runs.toSorted((left, right) => left.ordinal - right.ordinal);
@@ -264,6 +270,12 @@ const make = Effect.gen(function* () {
         pullRequests: pullRequestsFromLinks(pullRequestLinks),
         needsYou: [
           ...needsYouFromRuntimeRequests(records.value.runtimeRequests),
+          // A subagent waiting on an approval or answer blocks the work as much as the worker.
+          ...needsYouFromRuntimeRequests(
+            yield* subagentRequests(records.value.subagents, (threadId) =>
+              threads.getThreadRecords(threadId, ["runtimeRequests", "subagents"]),
+            ),
+          ),
           ...(limit?.needsYou === undefined ? [] : [limit.needsYou]),
         ],
         usageLimitResetAt: limit?.resetAt,
