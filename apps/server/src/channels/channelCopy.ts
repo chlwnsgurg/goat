@@ -5,11 +5,11 @@
  */
 export const CHANNEL_COPY = {
   linkHelp:
-    'I don\'t know who you are yet. Open GOAT, go to Settings → Integrations → Slack, create a link code, and send it to me as "link <code>".',
+    'I don\'t know who you are yet. Open GOAT, go to Settings → GOAT Bot → Slack, create a link code, and send it to me as "link <code>".',
   linkInvalid: "That link code is wrong or expired. Create a new one in GOAT and try again.",
   linked: "You're linked. Send me what you need.",
   unlinkedInput:
-    'I can\'t take work from this account yet. Open GOAT, create a link code under Settings → Integrations → Slack, and send me "link <code>".',
+    'I can\'t take work from this account yet. Open GOAT, create a link code under Settings → GOAT Bot → Slack, and send me "link <code>".',
   botMoved: "GOAT Bot moved to another machine. Please resend your message there.",
   receptionFailed: "I couldn't read that just now. Please send it again.",
   agentCannotCreateWork:

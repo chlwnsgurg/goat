@@ -13,7 +13,7 @@ GOAT Bot screen shows only a chip for the work and its final report.
    `chat:write`, `app_mentions:read`, and `im:history`. Subscribe the bot to
    the `app_mention` and `message.im` events, then install the app to your
    workspace.
-3. In GOAT, open **Settings → Integrations → Slack** for the machine that
+3. In GOAT, open **Settings → GOAT Bot → Slack** for the machine that
    should do the work. Paste both tokens, list the channel IDs where mentions
    may start work, and turn on **Use Slack**. Tokens stay on that machine and
    are never shown again.
