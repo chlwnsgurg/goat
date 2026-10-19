@@ -16,10 +16,12 @@ const SentEdit = Schema.Struct({
 
 export const NoteOutboxRow = Schema.Struct({
   environmentId: Schema.String,
-  path: NotePath,
+  // Rows outlive app versions. Enqueueing validates the path and the hub refuses an invalid one on
+  // send, so a draft saved under an older, looser NotePath stays visible without blocking the rest.
+  path: Schema.String,
   ...SentEdit.fields,
   state: Schema.Literals(["pending", "conflict"]),
-  // Rows outlive app versions; a title saved before the wire cap must not block the outbox.
+  // Likewise, a title saved before the wire cap must not block the outbox.
   current: Schema.NullOr(Schema.Struct({ ...NoteDocumentSchema.fields, title: Schema.String })),
   inFlight: Schema.NullOr(SentEdit),
 });

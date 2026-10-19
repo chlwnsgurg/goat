@@ -146,3 +146,17 @@ it("loads a stored conflict whose title predates the wire title cap", () => {
   };
   expect(decodeRow(stored).current?.title).toHaveLength(300);
 });
+
+it("loads drafts saved under paths that predate the folder length limit", () => {
+  const legacy = {
+    environmentId: "hub",
+    path: `${"f".repeat(121)}/a.md`,
+    body: "mine",
+    baseRevision: null,
+    localUpdatedAt: 1,
+    state: "pending",
+    current: null,
+    inFlight: null,
+  };
+  expect(decodeRow(legacy).path).toBe(legacy.path);
+});
