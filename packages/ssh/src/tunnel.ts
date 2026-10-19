@@ -190,6 +190,8 @@ export interface PreparedRemoteRuntime {
   readonly upgradeFailure?: SshHostFailure;
   /** Why a compatible live selection can be attached to, but cannot be updated. */
   readonly updateBlocked?: string;
+  readonly reconnectProbe?: string;
+  readonly hostPlatform?: "darwin" | "linux" | "win32";
 }
 const requestedRuntime = (runner: RemoteGoatRunnerOptions | undefined): PreparedRemoteRuntime => ({
   runner: { ...runner },
@@ -1300,7 +1302,7 @@ check_live_protocol() {
   else
     if [ -e "$DEFAULT_RUNTIME_FILE" ] || [ -e "$PORT_FILE" ] || [ -e "$PID_FILE" ]; then LIVE_STATUS=unknown; fi
   fi
-  if [ "$ALLOW_LEGACY_ADOPTION" = 1 ] &&
+@@GOAT_RECONNECT_LIVE_GUARD@@  if [ "$ALLOW_LEGACY_ADOPTION" = 1 ] &&
      { [ "$LIVE_STATUS" = unknown ] || { [ "$LIVE_STATUS" = live ] && [ "$LIVE_OWNED" = 1 ] && [ ! -e "$STATE_DIR/identity" ] && [ ! -L "$STATE_DIR/identity" ]; }; }; then
     legacy_verified=1
     if [ "$LEGACY_COMMITTED" = 1 ]; then
@@ -2371,6 +2373,7 @@ function buildRemoteRunnerSetupScript(
   input: RemoteGoatRunnerOptions | undefined,
   selection: PreparedRemoteRuntime,
   verifyOwnedBeforePublication = false,
+  reconnect = false,
 ): string {
   const preserve = selection.source === "retained";
   return applyScriptPlaceholders(REMOTE_RUNNER_SETUP_SCRIPT, {
@@ -2420,6 +2423,14 @@ function buildRemoteRunnerSetupScript(
     GOAT_PROTOCOL_GUARD: applyScriptPlaceholders(REMOTE_PROTOCOL_GUARD_SCRIPT, {
       GOAT_SSH_PROTOCOL: String(SSH_RUNTIME_PROTOCOL_VERSION),
       GOAT_ORCHESTRATION_PROTOCOL: String(ORCHESTRATION_PROTOCOL_VERSION),
+      GOAT_RECONNECT_LIVE_GUARD: reconnect
+        ? `  # A folded reconnect may only attach to the owned selection; a race must re-enter preparation.
+  if [ "$LIVE_STATUS" != live ] || [ "$LIVE_VERSION" != "$SELECTED_VERSION" ] ||
+     [ "$LIVE_OWNED" != 1 ] || ! verify_owned_identity "$LIVE_PID" "$LIVE_PORT"; then
+    printf 'Cached GOAT selection changed; reconnect.\\n' >&2; exit 1
+  fi
+`
+        : "",
     }),
     GOAT_VERIFY_OWNED_BEFORE_PUBLICATION: verifyOwnedBeforePublication
       ? VERIFY_OWNED_BEFORE_PUBLICATION + "\n"
@@ -2431,6 +2442,7 @@ function buildRemoteRunnerSetupScript(
 export function buildRemoteLaunchScript(
   input?: RemoteGoatRunnerOptions,
   selection = requestedRuntime(input),
+  reconnect = false,
 ): string {
   return applyScriptPlaceholders(REMOTE_LAUNCH_SCRIPT, {
     GOAT_ARCHIVE_MODE: isNodeScriptRunner(input) ? "0" : "1",
@@ -2438,7 +2450,7 @@ export function buildRemoteLaunchScript(
     GOAT_OWNED_IDENTITY: REMOTE_OWNED_IDENTITY_SCRIPT,
     GOAT_LEGACY_IDENTITY: REMOTE_LEGACY_IDENTITY_SCRIPT,
     GOAT_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
-    GOAT_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, selection, true),
+    GOAT_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, selection, true, reconnect),
     GOAT_PICK_PORT_SCRIPT: stripTrailingNewlines(REMOTE_PICK_PORT_SCRIPT),
     GOAT_WAIT_READY_SCRIPT: stripTrailingNewlines(REMOTE_WAIT_READY_SCRIPT),
     GOAT_DEFAULT_REMOTE_PORT: String(DEFAULT_REMOTE_PORT),
@@ -2594,6 +2606,7 @@ export function buildRemoteRuntimeProbeScript(
   version: string,
   stateKey?: string,
   _keepExistingRunner = false,
+  recordReconnect = false,
 ): string {
   return `set -eu
 V=${shellSingleQuote(version)}
@@ -2634,6 +2647,16 @@ binary_json() {
   fi
 }
 ${REMOTE_RUNNER_HINT_SCRIPT}
+${
+  recordReconnect
+    ? `# Capturing a baseline cannot help until the executable and live process can be keyed.
+if [ "\${1:-}" = capture ] &&
+   { [ ! -f "$state/identity" ] || ! live_fact_key "$state/run-t3.sh" "$runtime_file" "$state/port" "$state/pid"; }; then
+  exit 1
+fi
+`
+    : ""
+}
 retained_version=
 retained_sha256=
 if [ -n "$state_key" ] && [ -f "$state/run-t3.sh" ]; then
@@ -2793,6 +2816,22 @@ esac
 case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x64 ;; *) exit 1 ;; esac
 ready=false
 if ready_version "$V"; then ready=true; fi
+${
+  recordReconnect
+    ? `# A byte-identical answer alone would miss a rebuilt binary or a changed ownership record.
+reconnect_key=
+if [ "$platform" != win32 ] && live_fact_key "$HOME/.goat/runtime/goat/versions/\${live_version:-}/goat" "$runtime_file" "$state/port" "$state/pid"; then
+  reconnect_live_key="$FACT_KEY"
+  if reconnect_runner="$(runner_sha256 "$state/run-t3.sh")" &&
+     reconnect_identity="$(runner_sha256 "$state/identity")" &&
+     reconnect_managed="$(runner_sha256 "$state/managed")"; then
+    reconnect_key="$(printf '%s' "$reconnect_live_key|$reconnect_runner|$reconnect_identity|$reconnect_managed" | runner_sha256 /dev/stdin)" || reconnect_key=
+  fi
+fi
+[ -z "$reconnect_key" ] || live_fields="$live_fields,\\"reconnectKey\\":\\"$reconnect_key\\""
+`
+    : ""
+}
 printf '{"platform":"%s","arch":"%s","ready":%s,"liveOwned":%s,"identityAbsent":%s,"installedCandidates":[%s]%s%s}\\n' "$platform" "$arch" "$ready" "$live_owned" "$identity_absent" "$installed_candidates" "$retained_fields" "$live_fields"
 `;
 }
@@ -2803,6 +2842,7 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
       platform: Schema.Literals(["darwin", "linux", "win32"]),
       arch: Schema.Literals(["arm64", "x64"]),
       ready: Schema.Boolean,
+      reconnectKey: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/))),
       installedCandidates: Schema.optionalKey(
         Schema.Array(
           Schema.Struct({
@@ -2877,6 +2917,7 @@ export const prepareRemoteRuntime = (
   stateKey?: string,
   owningLaunch = false,
   onPhase?: SshRuntimeProgressCallback,
+  observedProbe?: string,
 ) =>
   Effect.gen(function* () {
     let exact = requestedRuntime(runner);
@@ -2895,14 +2936,22 @@ export const prepareRemoteRuntime = (
       catch: runtimePreparationError,
     });
     notifyRuntimePhase(target, "checking", onPhase);
-    const result = yield* runSshCommand(target, {
-      ...authOptions,
-      remoteCommandArgs: ["sh", "-l", "-s"],
-      stdin: buildRemoteRuntimeProbeScript(version, stateKey, runner?.keepExistingRunner ?? false),
-    }).pipe(Effect.mapError(runtimePreparationError));
+    const result =
+      observedProbe === undefined
+        ? yield* runSshCommand(target, {
+            ...authOptions,
+            remoteCommandArgs: ["sh", "-l", "-s"],
+            stdin: buildRemoteRuntimeProbeScript(
+              version,
+              stateKey,
+              runner?.keepExistingRunner ?? false,
+            ),
+          }).pipe(Effect.mapError(runtimePreparationError))
+        : { stdout: observedProbe };
     const probe = yield* decodeRemoteJsonOutput(result.stdout, decodeRemoteRuntimeProbe).pipe(
       Effect.mapError(runtimePreparationError),
     );
+    exact = { ...exact, hostPlatform: probe.platform };
     // Every replace, refresh, and upgrade below needs a proven order; `undefined` means none,
     // and then the host keeps what it runs or has installed (see `compareRuntimeBuilds`).
     const requestedBuild = { version, commitTime: runner?.archiveCommitTime };
@@ -3381,12 +3430,53 @@ function buildRemoteLogTailScript(stateKey: string): string {
   });
 }
 
+// Keep the probe in its own shell: its exit paths and shell options must not affect launch.
+function buildReconnectLaunchScript(selected: PreparedRemoteRuntime, expectedProbe?: string) {
+  const probe = `reconnect_probe() {
+sh -s -- "\${1:-}" <<'GOAT_RECONNECT_PROBE_SCRIPT'
+${buildRemoteRuntimeProbeScript(selected.requestedVersion ?? "", REMOTE_RUNTIME_STATE_KEY, false, true)}
+GOAT_RECONNECT_PROBE_SCRIPT
+}`;
+  return `set -eu
+${probe}
+${
+  expectedProbe === undefined
+    ? ""
+    : `if ! probe_output="$(reconnect_probe)"; then
+  printf '{"status":"reprobe"}\\n'
+  exit 0
+fi
+if [ "$probe_output" != ${shellSingleQuote(expectedProbe)} ]; then
+  printf 'GOAT_RECONNECT_PROBE=%s\\n' "$probe_output"
+  printf '{"status":"reprobe"}\\n'
+  exit 0
+fi`
+}
+reconnect_launch() {
+sh -s -- "$1" <<'GOAT_RECONNECT_LAUNCH_SCRIPT'
+${buildRemoteLaunchScript(selected.runner, expectedProbe === undefined ? selected : { ...selected, mayUpgradeOwnedServer: false }, expectedProbe !== undefined)}
+GOAT_RECONNECT_LAUNCH_SCRIPT
+}
+${
+  expectedProbe === undefined
+    ? 'launch_output="$(reconnect_launch "$1")"'
+    : `if ! launch_output="$(reconnect_launch "$1")"; then
+  printf '{"status":"reprobe"}\\n'
+  exit 0
+fi`
+}
+if probe_output="$(reconnect_probe capture)"; then printf 'GOAT_RECONNECT_PROBE=%s\\n' "$probe_output"; fi
+printf '%s\\n' "$launch_output"
+`;
+}
+
 export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemoteServer")(
   function* (
     target: DesktopSshEnvironmentTarget,
     input?: SshAuth.SshAuthOptions,
     runner?: RemoteGoatRunnerOptions,
     onPhase?: SshRuntimeProgressCallback,
+    previousSelection?: PreparedRemoteRuntime,
   ): Effect.fn.Return<
     | {
         readonly status: "ready";
@@ -3406,34 +3496,77 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       ...sshRunnerLogFields(runner),
       stateKey,
     });
-    const selected = yield* prepareRemoteRuntime(
-      target,
-      input ?? {},
-      runner,
-      stateKey,
-      true,
-      onPhase,
-    );
+    const canFoldProbe =
+      previousSelection?.reconnectProbe !== undefined &&
+      previousSelection.requestedVersion === runner?.archiveVersion?.trim() &&
+      previousSelection.runner.archiveCommitTime === runner?.archiveCommitTime &&
+      (previousSelection.runner.keepExistingRunner === true) ===
+        (runner?.keepExistingRunner === true) &&
+      previousSelection.upgradeFailure === undefined &&
+      previousSelection.updateBlocked === undefined &&
+      !isNodeScriptRunner(runner) &&
+      runner?.refreshOwnedRuntimeOnFirstConnection !== true &&
+      runner?.confirmReplacement !== true;
+    const launch = (selected: PreparedRemoteRuntime, expectedProbe?: string) =>
+      runSshCommand(target, {
+        remoteCommandArgs: ["sh", "-l", "-s", "--", stateKey],
+        stdin:
+          isNodeScriptRunner(selected.runner) || selected.hostPlatform === "win32"
+            ? buildRemoteLaunchScript(selected.runner, selected)
+            : buildReconnectLaunchScript(selected, expectedProbe),
+        timeoutStage: "runtime-launch",
+        timeoutMs: isNodeScriptRunner(selected.runner)
+          ? REMOTE_LAUNCH_TIMEOUT_MS
+          : REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
+        ...input,
+      });
+    let folded = canFoldProbe
+      ? yield* measureSshReconnectStep(
+          "runtime-probe-folded",
+          launch(
+            { ...previousSelection, uploaded: false, requireInstalled: true },
+            previousSelection.reconnectProbe,
+          ),
+        )
+      : undefined;
+    const observedProbe = folded?.stdout
+      .split(/\r?\n/u)
+      .find((line) => line.startsWith("GOAT_RECONNECT_PROBE="))
+      ?.slice("GOAT_RECONNECT_PROBE=".length);
+    if (
+      folded !== undefined &&
+      getLastNonEmptyOutputLine(folded.stdout) === '{"status":"reprobe"}'
+    ) {
+      yield* Effect.logDebug("ssh.runtime.reconnect.reprobe", sshTargetLogFields(target));
+      folded = undefined;
+    }
+    const selected =
+      folded !== undefined && previousSelection !== undefined
+        ? { ...previousSelection, uploaded: false, requireInstalled: true }
+        : yield* prepareRemoteRuntime(
+            target,
+            input ?? {},
+            runner,
+            stateKey,
+            true,
+            onPhase,
+            observedProbe,
+          );
     yield* Effect.annotateCurrentSpan("goat.runtime.selectedVersion", selected.version);
     yield* Effect.annotateCurrentSpan("goat.runtime.requestedVersion", selected.requestedVersion);
-    const result = yield* runSshCommand(target, {
-      remoteCommandArgs: ["sh", "-l", "-s", "--", stateKey],
-      stdin: buildRemoteLaunchScript(selected.runner, selected),
-      timeoutStage: "runtime-launch",
-      timeoutMs: isNodeScriptRunner(selected.runner)
-        ? REMOTE_LAUNCH_TIMEOUT_MS
-        : REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
-      ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
-      ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
-      ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
-    });
+    const result = folded ?? (yield* launch(selected));
     if (!getLastNonEmptyOutputLine(result.stdout)) {
       return yield* new SshLaunchError({
         message: "SSH launch did not return a remote port.",
         stdout: result.stdout,
       });
     }
-    const parsed = yield* decodeRemoteLaunchOutput(result.stdout).pipe(
+    const parsed = yield* decodeRemoteLaunchOutput(
+      result.stdout
+        .split(/\r?\n/u)
+        .filter((line) => !line.startsWith("GOAT_RECONNECT_PROBE="))
+        .join("\n"),
+    ).pipe(
       Effect.mapError(
         (cause) =>
           new SshLaunchError({
@@ -3538,6 +3671,40 @@ ${REMOTE_RUNTIME_FACT_WARMUP_SCRIPT}`,
     delete durableSelection.refreshIfIdle;
     delete durableSelection.expectedLiveVersion;
     delete durableSelection.expectedLiveRunnerSha256;
+    delete durableSelection.reconnectProbe;
+    const probeOutput = result.stdout
+      .split(/\r?\n/u)
+      .find((line) => line.startsWith("GOAT_RECONNECT_PROBE="))
+      ?.slice("GOAT_RECONNECT_PROBE=".length);
+    if (
+      probeOutput !== undefined &&
+      parsed.pending === undefined &&
+      selected.upgradeFailure === undefined &&
+      selected.updateBlocked === undefined &&
+      parsed.selectedVersion === selected.version
+    ) {
+      const probe = yield* decodeRemoteRuntimeProbe(probeOutput).pipe(Effect.option);
+      if (
+        Option.isSome(probe) &&
+        probe.value.reconnectKey !== undefined &&
+        probe.value.platform !== "win32" &&
+        probe.value.liveStatus === "live" &&
+        probe.value.liveOwned === true &&
+        probe.value.identityAbsent === false &&
+        probe.value.liveVersion === selected.version &&
+        probe.value.retainedVersion === selected.version &&
+        (selected.source !== "retained" ||
+          probe.value.retainedRunnerSha256 === selected.retainedRunnerSha256) &&
+        probe.value.liveSignals !== undefined &&
+        probe.value.liveBinarySignals !== undefined &&
+        matchesSignals(probe.value.liveSignals, selected.requestedVersion ?? "") &&
+        matchesSignals(probe.value.liveBinarySignals, selected.requestedVersion ?? "")
+      ) {
+        durableSelection.reconnectProbe = probeOutput;
+        durableSelection.source = "retained";
+        durableSelection.retainedRunnerSha256 = probe.value.retainedRunnerSha256 ?? null;
+      }
+    }
     notifyRuntimePhase(target, "starting", onPhase);
     return {
       status: "ready",
@@ -5010,6 +5177,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     readonly runner?: RemoteGoatRunnerOptions;
     readonly previous?: SshTunnelEntry;
     readonly previousLocalPort?: number;
+    readonly previousSelection?: PreparedRemoteRuntime;
     readonly background?: boolean;
     readonly onPhase?: SshRuntimeProgressCallback;
   }): Effect.fn.Return<
@@ -5048,6 +5216,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           authOptions,
           input.runner,
           phase,
+          input.previousSelection,
         );
       });
     const launchStartedAt = yield* Clock.currentTimeMillis;
@@ -5362,6 +5531,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     keyOnly: boolean = false,
     reuseWhileRefreshPending: boolean = false,
     onPhase?: SshRuntimeProgressCallback,
+    allowFoldedProbe = true,
   ): Effect.fn.Return<
     SshTunnelEntry | DesktopSshRuntimePendingResult,
     SshEnvironmentEffectError,
@@ -5413,6 +5583,12 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       keyOnly: keyOnly === true,
       ...(runner === undefined ? {} : { runner }),
       ...(entry === undefined ? {} : { previousLocalPort: entry.localPort }),
+      ...(allowFoldedProbe &&
+      entry !== undefined &&
+      !pendingReplacements.has(key) &&
+      runner?.refreshOwnedRuntimeOnFirstConnection !== true
+        ? { previousSelection: entry.selectedRuntime }
+        : {}),
       background,
       ...(onPhase === undefined ? {} : { onPhase }),
     });
@@ -5616,6 +5792,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           requestOptions?.reuseWhileRefreshPending === true &&
             requestOptions.refreshRuntime !== true,
           requestOptions?.onPhase,
+          requestOptions?.refreshRuntime !== true && requestOptions?.confirmReplacement !== true,
         );
         if (ensureSuperseded(ticket) || (generations.get(key) ?? 0) !== ensureGeneration)
           return yield* new SshLaunchError({

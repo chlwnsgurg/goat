@@ -1,0 +1,328 @@
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { assert, describe, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as NetService from "@goat/shared/Net";
+import * as Stream from "effect/Stream";
+import { HttpClient } from "effect/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import {
+  ARCHIVE,
+  uploadTarget,
+  testHttpClient,
+  testNetService,
+  makeRunningProcess,
+  installArchivePsDouble,
+} from "./tunnel.fixture.ts";
+import { makeProtocolFixture, protocolExecutable } from "./tunnel.protocol.fixture.ts";
+import { SshReconnectCost } from "./command.ts";
+import * as SshAuth from "./auth.ts";
+import {
+  launchOrReuseRemoteServer,
+  SshEnvironmentManager,
+  type PreparedRemoteRuntime,
+} from "./tunnel.ts";
+
+const fixture = makeProtocolFixture({
+  live: true,
+  kind: "managed",
+  oldVersion: ARCHIVE.archiveVersion,
+  ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+  orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+});
+type Fixture = Effect.Success<typeof fixture>;
+const launch = (f: Fixture, previous?: PreparedRemoteRuntime) =>
+  launchOrReuseRemoteServer(uploadTarget, {}, f.runner, undefined, previous).pipe(
+    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+    Effect.provideService(FileSystem.FileSystem, f.observedFs),
+  );
+
+const replaceLive = (f: Fixture, compatible: boolean) =>
+  Effect.gen(function* () {
+    const version = "9.0.0";
+    const directory = `${f.home}/.goat/runtime/goat/versions/${version}`;
+    yield* f.fs.makeDirectory(directory);
+    yield* f.fs.writeFileString(
+      `${directory}/goat`,
+      protocolExecutable(
+        version,
+        {
+          ssh: compatible ? SSH_RUNTIME_PROTOCOL_VERSION : SSH_RUNTIME_PROTOCOL_VERSION + 1,
+          orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+        },
+        f.state,
+      ),
+    );
+    yield* f.fs.chmod(`${directory}/goat`, 0o700);
+    yield* f.fs.writeFileString(`${directory}/.install-complete`, version + "\n");
+    const child = yield* f.realSpawner.spawn(
+      ChildProcess.make(`${directory}/goat`, ["serve", "--test-seed"], {
+        env: { HOME: f.home },
+        extendEnv: true,
+      }),
+    );
+    const record = JSON.parse(
+      yield* child.stdout.pipe(
+        Stream.decodeText(),
+        Stream.splitLines,
+        Stream.take(1),
+        Stream.mkString,
+      ),
+    ) as { pid: number; port: number };
+    assert.equal(record.pid, Number(child.pid));
+    yield* installArchivePsDouble(f.home, record.pid, record.port, version);
+    yield* f.fs.writeFileString(`${f.state}/pid`, `${record.pid}\n`);
+    yield* f.fs.writeFileString(`${f.state}/port`, `${record.port}\n`);
+    yield* f.fs.writeFileString(
+      `${f.state}/identity`,
+      `${directory}/goat serve --host 127.0.0.1 --port ${record.port} --base-dir ${f.home}/.goat\n`,
+    );
+  });
+
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "SSH folded reconnect probe",
+  () => {
+    it.live.each([ARCHIVE.archiveVersion, "1.2.2"])(
+      "folds probe and launch into one command and reuses host facts for %s",
+      (version) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: version,
+            drain: true,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+          });
+          yield* f.shiftHostClock(60);
+          const first = yield* launch(f);
+          assert.equal(first.status, "ready");
+          if (first.status !== "ready") return;
+          assert.isString(first.selectedRuntime.reconnectProbe);
+          const commands = f.remoteCommands.length;
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          const cost = {
+            active: true,
+            spawns: 0,
+            authentications: 0,
+            steps: {} as Record<string, number>,
+          };
+          const second = yield* launch(f, first.selectedRuntime).pipe(
+            Effect.provideService(SshReconnectCost, cost),
+          );
+          assert.equal(second.status, "ready");
+          assert.equal(f.remoteCommands.length - commands, 1);
+          assert.equal(yield* f.fs.readFileString(`${f.test}/events`), events);
+          assert.property(cost.steps, "runtime-probe-folded");
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+
+    it.live.each(["executable", "runner", "runtime record", "identity"] as const)(
+      "reprobes a changed %s and preserves ordinary launch behavior",
+      (changed) =>
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          yield* f.shiftHostClock(60);
+          const first = yield* launch(f);
+          assert.equal(first.status, "ready");
+          if (first.status !== "ready") return;
+          assert.isString(first.selectedRuntime.reconnectProbe);
+          if (changed === "executable") {
+            yield* f.fs.writeFileString(
+              `${f.old}/goat`,
+              (yield* f.fs.readFileString(`${f.old}/goat`)) + "\n// rebuilt\n",
+            );
+          } else if (changed === "runner") {
+            yield* f.fs.writeFileString(
+              `${f.state}/run-t3.sh`,
+              (yield* f.fs.readFileString(`${f.state}/run-t3.sh`)) + "\n# changed\n",
+            );
+          } else if (changed === "runtime record") {
+            const file = `${f.home}/.goat/userdata/server-runtime.json`;
+            yield* f.fs.writeFileString(
+              file,
+              (yield* f.fs.readFileString(file)).replace(
+                '"startedAt":',
+                '"observed":true,"startedAt":',
+              ),
+            );
+          } else {
+            yield* f.fs.remove(`${f.state}/identity`);
+          }
+          const commands = f.remoteCommands.length;
+          const result = yield* Effect.result(launch(f, first.selectedRuntime));
+          const count = f.remoteCommands.length - commands;
+          const ordinary = yield* Effect.result(launch(f));
+          assert.equal(count, 2);
+          assert.equal(result._tag, ordinary._tag);
+          if (result._tag === "Failure" && ordinary._tag === "Failure") {
+            assert.equal(result.failure.message, ordinary.failure.message);
+          } else if (result._tag === "Success" && ordinary._tag === "Success") {
+            assert.equal(result.success.status, ordinary.success.status);
+            if (result.success.status === "ready" && ordinary.success.status === "ready") {
+              assert.equal(result.success.remotePort, ordinary.success.remotePort);
+              assert.equal(
+                result.success.selectedRuntime.version,
+                ordinary.success.selectedRuntime.version,
+              );
+            }
+          }
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+
+    it.live(
+      "a stale manager entry reconnects with one command and records its folded step",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          yield* f.shiftHostClock(60);
+          let forwardAlive = true;
+          const transport = ChildProcessSpawner.make((command) => {
+            if (command._tag === "StandardCommand" && command.args.includes("-N")) {
+              forwardAlive = true;
+              return Effect.succeed({
+                ...makeRunningProcess(() => undefined),
+                isRunning: Effect.sync(() => forwardAlive),
+              });
+            }
+            return f.transport.spawn(command);
+          });
+          const layer = Layer.mergeAll(
+            NodeServices.layer,
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, transport),
+            Layer.succeed(FileSystem.FileSystem, f.observedFs),
+            Layer.succeed(HttpClient.HttpClient, testHttpClient),
+            Layer.succeed(NetService.NetService, testNetService),
+            SshAuth.SshPasswordPrompt.disabledLayer,
+            SshEnvironmentManager.layer({
+              resolveCliRunner: Effect.succeed(f.runner),
+              leaveRemoteServerRunning: true,
+            }),
+          );
+          yield* Effect.gen(function* () {
+            const manager = yield* SshEnvironmentManager;
+            yield* manager.ensureEnvironment(uploadTarget);
+            const commands = f.remoteCommands.length;
+            forwardAlive = false;
+            yield* manager.ensureEnvironment(uploadTarget);
+            assert.equal(f.remoteCommands.length - commands, 1);
+            for (const options of [{ refreshRuntime: true }, { confirmReplacement: true }]) {
+              forwardAlive = false;
+              const before = f.remoteCommands.length;
+              yield* manager.ensureEnvironment(uploadTarget, options);
+              assert.equal(f.remoteCommands.length - before, 2);
+            }
+          }).pipe(Effect.provide(layer), Effect.scoped);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+
+    it.live.each([true, false])(
+      "reprobes a newer live runtime (compatible=%s)",
+      (compatible) =>
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          yield* f.shiftHostClock(60);
+          const first = yield* launch(f);
+          assert.equal(first.status, "ready");
+          if (first.status !== "ready") return;
+          yield* replaceLive(f, compatible);
+          const before = f.remoteCommands.length;
+          const result = yield* Effect.result(launch(f, first.selectedRuntime));
+          assert.equal(f.remoteCommands.length - before, compatible ? 2 : 1);
+          const ordinary = yield* Effect.result(launch(f));
+          assert.equal(result._tag, ordinary._tag);
+          if (result._tag === "Failure" && ordinary._tag === "Failure") {
+            assert.equal(result.failure._tag, "SshLaunchError");
+            assert.equal("reason" in result.failure && result.failure.reason, "runtime-newer");
+            assert.equal(result.failure.message, ordinary.failure.message);
+          } else if (result._tag === "Success" && ordinary._tag === "Success") {
+            assert.equal(result.success.status, "ready");
+            if (result.success.status !== "ready" || ordinary.success.status !== "ready") return;
+            assert.equal(result.success.selectedRuntime.version, "9.0.0");
+            assert.equal(
+              result.success.selectedRuntime.updateBlocked,
+              ordinary.success.selectedRuntime.updateBlocked,
+            );
+
+            assert.isString(result.success.selectedRuntime.updateBlocked);
+            assert.isUndefined(result.success.selectedRuntime.reconnectProbe);
+          }
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+
+    it.live(
+      "a host change between folded probe and launch falls back without replacing anything",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          yield* f.shiftHostClock(60);
+          const first = yield* launch(f);
+          assert.equal(first.status, "ready");
+          if (first.status !== "ready") return;
+          f.setScriptPrefix(`sh() {
+      if [ -f "$HOME/.test/probed" ] && [ ! -f "$HOME/.test/raced" ]; then
+        printf 'changed identity\\n' > "$HOME/.goat/ssh-launch/runtime/identity"
+        touch "$HOME/.test/raced"
+      fi
+      touch "$HOME/.test/probed"
+      command sh "$@"
+    }
+    `);
+          const before = f.remoteCommands.length;
+          const result = yield* Effect.result(launch(f, first.selectedRuntime));
+          assert.equal(result._tag, "Failure");
+          assert.equal(f.remoteCommands.length - before, 3);
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          assert.notInclude(events, '"type":"drain"');
+          assert.notInclude(events, '"type":"stop"');
+          assert.equal(events.split('"type":"start"').length - 1, 1);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+
+    it.live(
+      "a vanished selection reinstalls only the requested runtime, then cleans up separately",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          yield* f.shiftHostClock(60);
+          const first = yield* launch(f);
+          assert.equal(first.status, "ready");
+          if (first.status !== "ready") return;
+          yield* f.fs.remove(`${f.old}/.install-complete`);
+          const unverified = `${f.home}/.goat/runtime/goat/versions/8.0.0`;
+          yield* f.fs.makeDirectory(unverified);
+          yield* f.fs.writeFileString(`${unverified}/.install-complete`, "8.0.0\n");
+          yield* f.fs.writeFileString(
+            `${unverified}/goat`,
+            '#!/bin/sh\ntouch "$HOME/.test/unverified-executed"\nexit 1\n',
+          );
+          yield* f.fs.chmod(`${unverified}/goat`, 0o700);
+          const before = f.remoteCommands.length;
+          const result = yield* launch(f, first.selectedRuntime);
+          assert.equal(result.status, "ready");
+          if (result.status !== "ready") return;
+          assert.equal(result.selectedRuntime.version, ARCHIVE.archiveVersion);
+          assert.isFalse(yield* f.fs.exists(`${f.test}/unverified-executed`));
+          assert.equal(f.counters().uploads, 1);
+          assert.equal(f.remoteCommands.length - before, 4);
+          const cleanup = f.remoteCommands.at(-1)!;
+          assert.equal(cleanup._tag, "StandardCommand");
+          if (cleanup._tag === "StandardCommand")
+            assert.include(cleanup.args, "goat-runtime-cleanup");
+          const reconnected = f.remoteCommands.length;
+          yield* launch(f, result.selectedRuntime);
+          assert.equal(f.remoteCommands.length - reconnected, 1);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+  },
+);
