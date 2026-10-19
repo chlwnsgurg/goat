@@ -27,6 +27,10 @@
       "types": "./src/tunnel.ts",
       "import": "./src/tunnel.ts"
     },
+    "./probeOptions": {
+      "types": "./src/probeOptions.ts",
+      "import": "./src/probeOptions.ts"
+    },
     "./preflight": {
       "types": "./src/preflight.ts",
       "import": "./src/preflight.ts"

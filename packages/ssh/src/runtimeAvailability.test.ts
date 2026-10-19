@@ -188,3 +188,22 @@ it.effect.each(["directory", "oversized"] as const)(
       expect(result.needsTransfer).toBe(false);
     }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+it.effect.each(["bundle", "cache", "release", "authenticated"] as const)(
+  "an available %s does not require transferring over a retained newer runtime",
+  (source) =>
+    Effect.gen(function* () {
+      const result = yield* fixture({
+        installed: ["0.2.0"],
+        ...(source === "bundle"
+          ? { local: "both" as const }
+          : source === "cache"
+            ? { local: "archive" as const, cache: true }
+            : source === "release"
+              ? { head: "present" as const }
+              : { gh: "both" as const }),
+      });
+      expect(result.step.state).toBe("passed");
+      expect(result.needsTransfer).toBe(false);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);

@@ -195,10 +195,15 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
     reachabilityFailure(resolved.stderr);
     return finish();
   }
+  const proxyArgs = yield* readOnlyProxyJumpArgs(ssh, settings).pipe(Effect.result);
+  if (proxyArgs._tag === "Failure") {
+    reachabilityFailure(proxyArgs.failure.message);
+    return finish();
+  }
   const run = (authentication: string, command: ReadonlyArray<string> = ["exit", "0"]) =>
     runPreflightProcess(ssh, [
       ...commonArgs,
-      ...readOnlyProxyJumpArgs(ssh, settings),
+      ...proxyArgs.success,
       ...overrides,
       "-o",
       `PreferredAuthentications=${authentication}`,
@@ -308,7 +313,7 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
       host: destination.hostname,
       user: destination.user,
       port: destination.port,
-      ...(publicKeyPath ? { publicKeyPath } : {}),
+      publicKeyPath: publicKeyPath ?? `${home}/.ssh/id_ed25519.pub`,
     });
     steps.push({
       id: "key_auth",
@@ -336,8 +341,12 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
         ...(partial
           ? {}
           : guidance.command
-            ? { command: guidance.command }
-            : { command: "ssh-keygen -t ed25519" }),
+            ? {
+                command: publicKeyPath
+                  ? guidance.command
+                  : `ssh-keygen -t ed25519 && ${guidance.command}`,
+              }
+            : {}),
       },
     });
     return finish();
@@ -402,29 +411,39 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
   }
   platformKey = key;
   steps.push({ id: "platform", state: "passed", summary: `Supports ${key}.` });
+  const installedVersions = facts.stdout
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith("GOAT_INSTALLED="))
+    .map((line) => line.slice(15));
   const runtime = yield* checkRuntimeAvailability({
     runner: options.runner,
     ownerLabel: options.ownerLabel,
     platformKey: key,
-    installedVersions: facts.stdout
-      .split(/\r?\n/u)
-      .filter((line) => line.startsWith("GOAT_INSTALLED="))
-      .map((line) => line.slice(15)),
+    installedVersions,
   });
   steps.push(runtime.step);
+  const mayNeedInstallation =
+    !options.runner.nodeScriptPath?.trim() &&
+    !installedVersions.includes(options.runner.archiveVersion?.trim() ?? "");
   const freeKiB = Number(values.get("GOAT_FREE_KIB"));
   steps.push({
     id: "disk",
     state: !Number.isFinite(freeKiB)
       ? "warning"
-      : freeKiB < 512 * 1024 && runtime.needsTransfer
-        ? "failed"
+      : freeKiB < 512 * 1024
+        ? runtime.needsTransfer
+          ? "failed"
+          : mayNeedInstallation
+            ? "warning"
+            : "passed"
         : "passed",
     summary: !Number.isFinite(freeKiB)
       ? "Could not check free space in the home folder."
       : freeKiB < 512 * 1024 && runtime.needsTransfer
         ? `Only ${formatDiskSpace(freeKiB)} free; installing GOAT needs ${formatDiskSpace(512 * 1024)} for the archive and extracted runtime.`
-        : `${formatDiskSpace(freeKiB)} free in the home folder.`,
+        : freeKiB < 512 * 1024 && mayNeedInstallation
+          ? `Only ${formatDiskSpace(freeKiB)} free; a new GOAT installation needs 512 MB${installedVersions.length ? " if the installed runtime cannot be reused" : ""}.`
+          : `${formatDiskSpace(freeKiB)} free in the home folder.`,
     ...(freeKiB < 512 * 1024 && runtime.needsTransfer
       ? {
           fix: {

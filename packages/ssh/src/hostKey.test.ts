@@ -28,10 +28,13 @@ const fixture = Effect.gen(function* () {
       if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected command");
       calls.push({ command: command.command, args: command.args });
       assert.equal(command.options.forceKillAfter, 2_000);
-      if (command.args.includes("-G"))
+      if (command.args.includes("-G")) {
+        if (command.args.at(-1) === "trusted-jump")
+          return makeSuccessfulProcess("proxyjump none\n");
         return makeSuccessfulProcess(
           "hostname endpoint.example\nport 2200\nuser deploy\nproxyjump trusted-jump\nproxycommand none\n",
         );
+      }
       if (command.args.includes("-lf")) {
         assert.equal(command.args[command.args.indexOf("-lf") + 1], temporaryFile);
         assert.equal(yield* fs.readFileString(temporaryFile), contents);
@@ -96,10 +99,10 @@ describe("negotiated SSH host keys", () => {
       const f = yield* fixture;
       yield* f.probe.pipe(Effect.provideService(HostProcess.Platform, "win32"));
       assert.equal(f.calls[0]!.command, "ssh.exe");
-      assert.equal(f.calls[1]!.command, "ssh.exe");
-      assert.equal(f.calls[2]!.command, "ssh-keygen.exe");
-      assert.include(f.calls[1]!.args, "GlobalKnownHostsFile=/dev/null");
-      const proxy = f.calls[1]!.args.find((arg) => arg.startsWith("ProxyCommand="));
+      assert.equal(f.calls[2]!.command, "ssh.exe");
+      assert.equal(f.calls[3]!.command, "ssh-keygen.exe");
+      assert.include(f.calls[2]!.args, "GlobalKnownHostsFile=/dev/null");
+      const proxy = f.calls[2]!.args.find((arg) => arg.startsWith("ProxyCommand="));
       assert.include(proxy, 'ProxyCommand="ssh.exe"');
       assert.include(proxy, '"UpdateHostKeys=no"');
       assert.include(proxy, '-W "[%h]:%p" -- "trusted-jump"');
@@ -112,9 +115,9 @@ describe("negotiated SSH host keys", () => {
       Effect.gen(function* () {
         const f = yield* fixture;
         assert.deepEqual(yield* f.probe, { algorithm: "ssh-ed25519", key, fingerprint });
-        assert.equal(f.calls.length, 3);
+        assert.equal(f.calls.length, 4);
         assert.deepEqual(f.calls[0]!.args, ["-G", "-l", "deploy", "-p", "2200", "private-alias"]);
-        const args = f.calls[1]!.args;
+        const args = f.calls[2]!.args;
         for (const option of [
           "BatchMode=yes",
           "PreferredAuthentications=none",
@@ -130,7 +133,7 @@ describe("negotiated SSH host keys", () => {
         assert.include(proxy, "trusted-jump");
         assert.include(proxy, "UpdateHostKeys=no");
         assert.include(proxy, "PermitLocalCommand=no");
-        assert.deepEqual(f.calls[2]!.args.slice(0, 3), ["-E", "sha256", "-lf"]);
+        assert.deepEqual(f.calls[3]!.args.slice(0, 3), ["-E", "sha256", "-lf"]);
         const fs = yield* FileSystem.FileSystem;
         assert.isFalse(yield* fs.exists(f.temporaryFile()));
       }).pipe(Effect.provide(NodeServices.layer)),
@@ -153,7 +156,7 @@ describe("negotiated SSH host keys", () => {
         assert.equal(error._tag, "SshHostKeyProbeError");
         const fs = yield* FileSystem.FileSystem;
         assert.isFalse(yield* fs.exists(f.temporaryFile()));
-        assert.equal(f.calls.length, 2);
+        assert.equal(f.calls.length, 3);
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 

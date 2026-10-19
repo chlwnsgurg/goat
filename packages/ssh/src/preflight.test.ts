@@ -1,3 +1,4 @@
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { SshPreflightReport, SSH_PREFLIGHT_STEP_ORDER } from "@goat/contracts";
@@ -34,6 +35,7 @@ const fixture = (
     runner?: RemoteGoatRunnerOptions;
     settings?: string;
     missingFingerprint?: boolean;
+    port?: number;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -43,10 +45,12 @@ const fixture = (
       Effect.gen(function* () {
         if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected pipeline");
         calls.push(command.args);
-        if (command.args.includes("-G"))
+        if (command.args.includes("-G")) {
+          if (command.args.at(-1) === "bastion") return makeSuccessfulProcess("proxyjump none\n");
           return makeSuccessfulProcess(
-            `hostname ${input.resolvedHost ?? input.host ?? "build.example"}\nuser ${input.user ?? "deploy"}\nport 22\nidentityfile /keys/id_ed25519\nproxyjump bastion\n${input.settings ?? ""}`,
+            `hostname ${input.resolvedHost ?? input.host ?? "build.example"}\nuser ${input.user ?? "deploy"}\nport ${input.port ?? 22}\nidentityfile /keys/id_ed25519\nproxyjump bastion\n${input.settings ?? ""}`,
           );
+        }
         if (command.args.includes("-lf"))
           return makeSuccessfulProcess(`256 SHA256:${"a".repeat(43)} build.example (ED25519)\n`);
         const knownHosts = command.args.find((arg) => arg.startsWith("UserKnownHostsFile="));
@@ -96,13 +100,13 @@ const fixture = (
     return { report, calls };
   });
 it.effect(
-  "resolves once, disables sharing, uses key-only authentication and reads installed facts",
+  "resolves destination and jump once, disables sharing, uses key-only authentication and reads installed facts",
   () =>
     Effect.gen(function* () {
       const { report, calls } = yield* fixture();
       expect(report.ready).toBe(true);
       expect(report.platformKey).toBe("linux-arm64");
-      expect(calls.filter((args) => args.includes("-G"))).toHaveLength(1);
+      expect(calls.filter((args) => args.includes("-G"))).toHaveLength(2);
       for (const args of calls) {
         expect(args).toContain("ControlMaster=no");
         expect(args).toContain("ControlPath=none");
@@ -111,9 +115,9 @@ it.effect(
         expect(args).toContain("PermitLocalCommand=no");
         expect(args.filter((arg) => arg.startsWith("LogLevel="))).toEqual(["LogLevel=VERBOSE"]);
       }
-      expect(calls[2]).toContain("PreferredAuthentications=publickey");
+      expect(calls[3]).toContain("PreferredAuthentications=publickey");
       const proxies = calls
-        .slice(1)
+        .filter((args) => !args.includes("-G"))
         .map((args) => args.find((arg) => arg.startsWith("ProxyCommand=")));
       expect(proxies[0]).toContain("bastion");
       expect(proxies[1]).toBe(proxies[0]);
@@ -128,7 +132,7 @@ it.effect.each(["refused", "dns", "proxy", "jumpDenied"] as const)(
       const { report, calls } = yield* fixture({ handshake: stderr[kind] });
       expect(report.ready).toBe(false);
       expect(report.steps[0]?.state).toBe("failed");
-      expect(calls).toHaveLength(2);
+      expect(calls).toHaveLength(3);
       expect(
         report.steps
           .slice(1)
@@ -169,7 +173,7 @@ it.effect("requires a managed pin even when known_hosts already matches", () =>
     );
     expect(report.steps[1]?.fingerprint).toContain("SHA256:");
     expect(report.steps[2]?.summary).toBe("Waits for the host key check.");
-    expect(calls.filter((args) => args.includes("-G"))).toHaveLength(1);
+    expect(calls.filter((args) => args.includes("-G"))).toHaveLength(3);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 it.effect.each(["keyAndPassword", "passwordOnly", "partial"] as const)(
@@ -239,7 +243,7 @@ it.effect.each(["handshake", "auth"] as const)(
         },
       });
       expect(report.steps.slice(3).every((step) => step.state === "skipped")).toBe(true);
-      expect(calls).toHaveLength(stage === "handshake" ? 2 : 3);
+      expect(calls).toHaveLength(stage === "handshake" ? 3 : 4);
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 it.effect("accepts none authentication", () =>
@@ -332,7 +336,7 @@ it.effect.each([
     expect(report.ready).toBe(true);
     expect(report.steps[0]?.state).toBe("passed");
     expect(report.steps[2]?.state).toBe("passed");
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(4);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 it.effect.each(["2001:db8::2", "[2001:db8::2]"])("attributes IPv6 jump-hop %s", (hop) =>
@@ -344,7 +348,7 @@ it.effect.each(["2001:db8::2", "[2001:db8::2]"])("attributes IPv6 jump-hop %s", 
     expect(report.steps[0]?.state).toBe("failed");
     expect(report.steps[0]?.summary).toContain(`jump hop ${hop} failed`);
     expect(report.steps[2]?.state).toBe("skipped");
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 it.effect.each(["oracle.tail.ts.net", "100.64.0.1", "100.127.255.254"])(
@@ -409,8 +413,8 @@ it.effect(
         settings: "remotecommand touch /mutated\nrequesttty force\nlocalforward 8080 target:80\n",
       });
       expect(report.ready).toBe(true);
-      expect(calls[1]?.slice(-3)).toEqual(["build", "exit", "0"]);
-      for (const args of calls.slice(1)) {
+      expect(calls[2]?.slice(-3)).toEqual(["build", "exit", "0"]);
+      for (const args of calls.filter((args) => !args.includes("-G"))) {
         for (const option of [
           "-T",
           "RemoteCommand=none",
@@ -421,7 +425,7 @@ it.effect(
         ])
           expect(args).toContain(option);
       }
-      expect(calls[2]).toContain("sh");
+      expect(calls[3]).toContain("sh");
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 it.effect("fingerprint collection failure gives actionable guidance instead of review", () =>
@@ -452,4 +456,37 @@ it.effect("fingerprint probes also terminate none-auth sessions and override rem
     ])
       expect(probe).toContain(option);
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "keeps low disk as a warning when a different runtime may be reused despite an available release",
+  () =>
+    Effect.gen(function* () {
+      const { report } = yield* fixture({
+        facts:
+          "GOAT_OS=Linux\nGOAT_ARCH=aarch64\nGOAT_FREE_KIB=1024\nGOAT_FACTS_DONE=yes\nGOAT_INSTALLED=0.2.0\n",
+      });
+      expect(report.steps[5]?.state).toBe("passed");
+      expect(report.steps[5]?.summary).toContain("Downloads the published GOAT 0.1.0");
+      expect(report.steps[4]?.state).toBe("warning");
+      expect(report.steps[4]?.summary).toContain("1 MB free");
+      expect(report.steps[4]?.summary).toContain("installed runtime cannot be reused");
+      expect(report.ready).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "provides both key creation and safely quoted installation when no local key exists",
+  () =>
+    Effect.gen(function* () {
+      const { report } = yield* fixture({
+        auth: stderr.keyAndPassword,
+        host: "build'$(false)",
+        user: "deploy'account",
+        port: 2222,
+      }).pipe(Effect.provideService(HostProcess.HomeDirectory, "/isolated owner"));
+      expect(report.steps[2]?.fix?.command).toBe(
+        "ssh-keygen -t ed25519 && ssh-copy-id -i '/isolated owner/.ssh/id_ed25519.pub' -p '2222' 'deploy'\\''account@build'\\''$(false)'",
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
 );

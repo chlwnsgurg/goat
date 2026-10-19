@@ -20,6 +20,9 @@ import {
 } from "@goat/contracts";
 import * as HostKey from "@goat/ssh/hostKey";
 import * as FileSystem from "effect/FileSystem";
+import { ChildProcessSpawner } from "effect/process";
+import * as Stream from "effect/Stream";
+import { makeSuccessfulProcess } from "../../../../packages/ssh/src/tunnel.fixture.ts";
 import { ExitCode } from "effect/process/ChildProcessSpawner";
 import * as ProcessRunner from "../processRunner.ts";
 import * as Diagnosis from "../provider/ProviderDiagnosisRouting.ts";
@@ -872,83 +875,131 @@ const processOutput = (stdout: string, stderr = "", code = 0) => ({
 });
 it.effect.each([
   {
+    jump: false,
     stderr: "connect to host box port 22: Connection refused",
     reason: "connection_refused",
     message: "box refused the connection.",
   },
   {
+    jump: false,
     stderr: "connect to host box port 22: No route to host",
     reason: "unreachable",
     message: "Can't reach box.",
   },
   {
+    jump: false,
     stderr: "Could not resolve hostname box: nodename nor servname provided",
     reason: "unreachable",
     message: "Can't reach box.",
   },
   {
+    jump: false,
     stderr: "Key exchange did not return a destination key",
     reason: "operation_failed",
     message: "Could not check this SSH host. Try again.",
   },
-] as const)("typed probe failure: $reason", ({ stderr, reason, message }) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-probe-test-" });
-    const paths: string[] = [];
-    const key = vi
-      .spyOn(HostKey, "probeHostKey")
-      .mockReturnValue(
-        Effect.fail(
-          new SshHostKeyProbeError({ message: "Expected one negotiated destination host key." }),
-        ),
-      );
-    const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(Effect.succeed([]));
-    yield* Effect.gen(function* () {
-      const setup = Context.get(
-        yield* Layer.build(
-          Layer.effect(SshHostSetup.SshHostSetup, SshHostSetup.make({ home })).pipe(
-            Layer.provide(probeClient),
-            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
-            Layer.provide(
-              Layer.mock(ProcessRunner.ProcessRunner)({
-                run: (input) =>
-                  Effect.sync(() => {
-                    if (input.args.includes("-G"))
-                      return processOutput("hostname box\nuser root\nport 22\n");
-                    expect(input.args).toContain("PreferredAuthentications=none");
-                    expect(input.args).toContain("UpdateHostKeys=no");
-                    const destination = input.args.find((arg) =>
-                      arg.startsWith("UserKnownHostsFile="),
-                    )!;
-                    const file = destination.slice('UserKnownHostsFile="'.length, -1);
-                    paths.push(file);
-                    expect(file).not.toBe(`${home}/.ssh/known_hosts`);
-                    return processOutput("", stderr, 255);
-                  }),
-              }),
-            ),
-            Layer.provide(dependencies),
+  {
+    jump: true,
+    stderr: "connect to host box port 22: Connection refused",
+    reason: "connection_refused",
+    message: "box refused the connection.",
+  },
+] as const)(
+  "typed probe failure: $reason (nested jump: $jump)",
+  ({ stderr, reason, message, jump }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-probe-test-" });
+      const paths: string[] = [];
+      const key = vi
+        .spyOn(HostKey, "probeHostKey")
+        .mockReturnValue(
+          Effect.fail(
+            new SshHostKeyProbeError({ message: "Expected one negotiated destination host key." }),
           ),
+        );
+      const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(Effect.succeed([]));
+      yield* Effect.gen(function* () {
+        const setup = Context.get(
+          yield* Layer.build(
+            Layer.effect(SshHostSetup.SshHostSetup, SshHostSetup.make({ home })).pipe(
+              Layer.provide(probeClient),
+              Layer.provide(
+                Layer.succeed(
+                  ChildProcessSpawner.ChildProcessSpawner,
+                  ChildProcessSpawner.make((command) => {
+                    if (command._tag !== "StandardCommand")
+                      return Effect.die("Unexpected pipeline");
+                    expect(command.args).toContain("-G");
+                    return Effect.succeed(
+                      makeSuccessfulProcess(
+                        command.args.at(-1) === "bastion"
+                          ? "proxyjump outer\n"
+                          : "proxyjump none\n",
+                      ),
+                    );
+                  }),
+                ),
+              ),
+              Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+              Layer.provide(
+                Layer.mock(ProcessRunner.ProcessRunner)({
+                  run: (input) =>
+                    Effect.sync(() => {
+                      if (input.args.includes("-G"))
+                        return processOutput(
+                          `hostname box\nuser root\nport 22\n${jump ? "proxyjump bastion\n" : ""}`,
+                        );
+                      expect(input.args).toContain("PreferredAuthentications=none");
+                      for (const option of [
+                        "UpdateHostKeys=no",
+                        "PermitLocalCommand=no",
+                        "ControlMaster=no",
+                        "ControlPath=none",
+                        "RemoteCommand=none",
+                        "ClearAllForwardings=yes",
+                      ])
+                        expect(input.args).toContain(option);
+                      expect(input.args.slice(-3)).toEqual(["box", "exit", "0"]);
+                      if (jump) {
+                        expect(input.args).toContain("ProxyJump=none");
+                        const proxy = input.args.find((arg) => arg.startsWith("ProxyCommand="));
+                        expect(proxy).toContain("bastion");
+                        expect(proxy).toContain("outer");
+                        expect(proxy).toContain("PermitLocalCommand=no");
+                        expect(proxy).toContain("ProxyJump=none");
+                      }
+                      const destination = input.args.find((arg) =>
+                        arg.startsWith("UserKnownHostsFile="),
+                      )!;
+                      const file = destination.slice('UserKnownHostsFile="'.length, -1);
+                      paths.push(file);
+                      expect(file).not.toBe(`${home}/.ssh/known_hosts`);
+                      return processOutput("", stderr, 255);
+                    }),
+                }),
+              ),
+              Layer.provide(dependencies),
+            ),
+          ),
+          SshHostSetup.SshHostSetup,
+        );
+        const error = yield* setup.probe({ address: "box" }, probeSessionId).pipe(Effect.flip);
+        expect(error._tag).toBe("SshHostProbeError");
+        if (error._tag === "SshHostProbeError")
+          expect({ reason: error.reason, message: error.message }).toEqual({ reason, message });
+        expect(paths).toHaveLength(1);
+        for (const path of paths) expect(yield* fs.exists(path)).toBe(false);
+        expect(yield* fs.exists(`${home}/.ssh/config`)).toBe(false);
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            key.mockRestore();
+            discover.mockRestore();
+          }),
         ),
-        SshHostSetup.SshHostSetup,
       );
-      const error = yield* setup.probe({ address: "box" }, probeSessionId).pipe(Effect.flip);
-      expect(error._tag).toBe("SshHostProbeError");
-      if (error._tag === "SshHostProbeError")
-        expect({ reason: error.reason, message: error.message }).toEqual({ reason, message });
-      expect(paths).toHaveLength(1);
-      for (const path of paths) expect(yield* fs.exists(path)).toBe(false);
-      expect(yield* fs.exists(`${home}/.ssh/config`)).toBe(false);
-    }).pipe(
-      Effect.ensuring(
-        Effect.sync(() => {
-          key.mockRestore();
-          discover.mockRestore();
-        }),
-      ),
-    );
-  }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.effect(
@@ -1197,8 +1248,7 @@ it.effect.each(["pinned", "key_changed", "expired", "authorization_revoked"] as 
           Layer.provide(
             Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
               publishSetupOutcome: () => Effect.succeed(false),
-              runtimeStatus: () =>
-                Effect.succeed({ kind: "ok", status: { ...stopped, host: "build" } }),
+              runtimeStatus: () => Effect.die("Pin approval attempted SSH authentication"),
               beginSetupOperation: () => Effect.die("Approval started a setup operation"),
               prepareRuntime: () => Effect.die("Approval installed a runtime"),
             }),
@@ -1483,4 +1533,100 @@ it.effect("preparation rejects a configured alias without managed files before d
     expect(yield* fs.exists(`${home}/.ssh/goat-hosts`)).toBe(false);
     expect(yield* fs.readFileString(`${home}/.ssh/config`)).toBe(sshConfig);
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([true, false])(
+  "pin-only trust handles a policy-refused user (key confirmation succeeds: %s)",
+  (confirmKey) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-policy-pin-" });
+      const stderr = "goat-cursor-2-e25449c9: Connection closed by 100.84.150.71 port 22";
+      let approving = false;
+      const calls: ReadonlyArray<string>[] = [];
+      const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(Effect.succeed([]));
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected pipeline");
+          calls.push(command.args);
+          if (command.args.includes("-G"))
+            return makeSuccessfulProcess("hostname cursor-2\nuser ubuntu\nport 22\n");
+          if (command.args.includes("-lf"))
+            return makeSuccessfulProcess(`256 SHA256:${"a".repeat(43)} cursor-2 (ED25519)\n`);
+          expect(command.args).toContain("PreferredAuthentications=none");
+          const knownHosts = command.args
+            .find((arg) => arg.startsWith("UserKnownHostsFile="))!
+            .slice("UserKnownHostsFile=".length)
+            .replace(/^"|"$/gu, "");
+          if (!approving || confirmKey)
+            yield* fs.writeFileString(knownHosts, "cursor-2 ssh-ed25519 AAAA\n");
+          return {
+            ...makeSuccessfulProcess(""),
+            exitCode: Effect.succeed(ExitCode(255)),
+            stderr: Stream.make(new TextEncoder().encode(stderr)),
+          };
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const layer = Layer.effect(SshHostSetup.SshHostSetup, SshHostSetup.make({ home })).pipe(
+          Layer.provide(probeClient),
+          Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+          Layer.provide(
+            Layer.mock(ProcessRunner.ProcessRunner)({
+              run: ({ args }) =>
+                Effect.succeed(
+                  args?.includes("-G")
+                    ? processOutput(
+                        `hostname cursor-2\nuser ubuntu\nport 22\nhostkeyalias goat-cursor-2-e25449c9\nuserknownhostsfile ${home}/.ssh/goat-hosts/goat-cursor-2-e25449c9.known_hosts\nglobalknownhostsfile /dev/null\nstricthostkeychecking yes\nupdatehostkeys no\nhostkeyalgorithms ssh-ed25519\nidentityfile /fixture/key\nidentitiesonly yes\n`,
+                      )
+                    : processOutput("", stderr, 255),
+                ),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+              runtimeStatus: () => Effect.die("Pin approval attempted SSH authentication"),
+              beginSetupOperation: () => Effect.die("Pin approval started setup"),
+            }),
+          ),
+          Layer.provide(dependencies),
+        );
+        const setup = Context.get(yield* Layer.build(layer), SshHostSetup.SshHostSetup);
+        const probe = yield* setup.probe(
+          {
+            address: "cursor-2",
+            user: "ubuntu",
+            alias: "goat-cursor-2-e25449c9",
+            identityFile: "/fixture/key",
+          },
+          probeSessionId,
+        );
+        approving = true;
+        const result = yield* setup.trust(
+          { probeId: probe.probeId, accepted: true },
+          probeSessionId,
+        );
+        expect(calls.filter((args) => args.includes("PreferredAuthentications=none"))).toHaveLength(
+          2,
+        );
+        if (confirmKey) {
+          expect(result).toMatchObject({
+            kind: "ok",
+            status: { state: "stopped", runtimeVersion: null },
+          });
+          expect(
+            yield* fs.readFileString(`${home}/.ssh/goat-hosts/goat-cursor-2-e25449c9.known_hosts`),
+          ).toBe("goat-cursor-2-e25449c9 ssh-ed25519 AAAA\n");
+        } else {
+          expect(result).toMatchObject({
+            kind: "error",
+            message: "Could not reach cursor-2 to confirm its key; Check again.",
+          });
+          expect(JSON.stringify(result)).not.toContain(stderr);
+          expect(
+            yield* fs.exists(`${home}/.ssh/goat-hosts/goat-cursor-2-e25449c9.known_hosts`),
+          ).toBe(false);
+        }
+      }).pipe(Effect.ensuring(Effect.sync(() => discover.mockRestore())));
+    }).pipe(Effect.provide(NodeServices.layer)),
 );

@@ -77,7 +77,7 @@ export const probeHostKey = Effect.fn("ssh/hostKey.probeHostKey")(function* (inp
       const probe = yield* run(ssh, [
         ...args,
         ...readOnlySshArgs,
-        ...readOnlyProxyJumpArgs(ssh, settings),
+        ...(yield* readOnlyProxyJumpArgs(ssh, settings)),
         "-o",
         "PreferredAuthentications=none",
         "-o",

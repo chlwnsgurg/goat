@@ -25,6 +25,7 @@ import {
   type SshHostSetupProgress,
 } from "@goat/contracts";
 import { discoverSshHosts } from "@goat/ssh/config";
+import { resolveSshCommand } from "@goat/ssh/command";
 import { parseSshDestination } from "@goat/shared/sshDestination";
 import { runSshPreflight } from "@goat/ssh/preflight";
 import { FetchHttpClient } from "effect/http";
@@ -51,6 +52,7 @@ import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Diagnosis from "../provider/ProviderDiagnosisRouting.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { readOnlySshArgs, readOnlyProxyJumpArgs } from "@goat/ssh/probeOptions";
 import {
   makeManagedSshWriter,
   definesHostAlias,
@@ -294,33 +296,35 @@ export const make = (
       });
     // hostKey intentionally returns no raw SSH stderr. On failure only, collect a bounded,
     // authentication-free diagnostic using disposable known_hosts, preserving jump routing.
-    const classifyProbeFailure = (input: SshHostAddInput) =>
+    const classifyProbeFailure = (input: SshHostAddInput, settings: ReadonlyMap<string, string>) =>
       Effect.scoped(
         Effect.gen(function* () {
           const temporary = yield* fs.makeTempDirectoryScoped({ prefix: "goat-probe-error-" });
           yield* fs.chmod(temporary, 0o700);
           const knownHosts = path.join(temporary, "known_hosts");
           yield* fs.writeFileString(knownHosts, "", { mode: 0o600, flag: "wx" });
+          const ssh = yield* resolveSshCommand;
+          const proxyArgs = yield* readOnlyProxyJumpArgs(ssh, settings).pipe(
+            Effect.provide(runtime),
+          );
           const output = yield* runner.run({
-            command: "ssh",
+            command: ssh,
             args: [
+              ...readOnlySshArgs,
+              ...proxyArgs,
               ...(input.user ? ["-l", input.user] : []),
               ...(input.port ? ["-p", String(input.port)] : []),
-              "-o",
-              "BatchMode=yes",
               "-o",
               "PreferredAuthentications=none",
               "-o",
               "StrictHostKeyChecking=accept-new",
               "-o",
-              "UpdateHostKeys=no",
-              "-o",
               `UserKnownHostsFile="${knownHosts.replaceAll("\\", "/").replaceAll('"', '\\"')}"`,
               "-o",
               "GlobalKnownHostsFile=/dev/null",
-              "-o",
-              "ConnectTimeout=10",
               input.address,
+              "exit",
+              "0",
             ],
             timeout: "20 seconds",
             timeoutBehavior: "timedOutResult",
@@ -391,7 +395,9 @@ export const make = (
           ...(input.port ? { port: input.port } : {}),
         }).pipe(
           Effect.provide(runtime),
-          Effect.catch(() => classifyProbeFailure(input).pipe(Effect.flatMap(Effect.fail))),
+          Effect.catch(() =>
+            classifyProbeFailure(input, settings).pipe(Effect.flatMap(Effect.fail)),
+          ),
         );
         const endpoint: ManagedSshEndpoint = {
           host: settings.get("hostname") ?? input.address,
@@ -605,7 +611,12 @@ export const make = (
           (aliasGenerations.get(challenge.host) ?? 0) !== challenge.aliasGeneration
         )
           return errorResult("This SSH trust request expired. Ask again.", "cancelled");
-        const current = yield* collect(challenge.input);
+        const confirmation = yield* collect(challenge.input).pipe(Effect.result);
+        if (confirmation._tag === "Failure")
+          return errorResult(
+            `Could not reach ${challenge.input.address} to confirm its key; Check again.`,
+          );
+        const current = confirmation.success;
         if (
           current.endpoint.hostKey !== challenge.endpoint.hostKey ||
           Object.entries(challenge.endpoint).some(
@@ -645,7 +656,16 @@ export const make = (
         if ((aliasGenerations.get(challenge.host) ?? 0) !== challenge.aliasGeneration)
           return errorResult("This SSH trust request was cancelled by Forget.", "cancelled");
         yield* writer.writeHost(challenge.host, challenge.endpoint, identityFile);
-        return yield* status({ host: challenge.host });
+        // Pinning confirms host identity only. Authentication belongs to the next preflight.
+        return {
+          kind: "ok",
+          status: {
+            host: challenge.host,
+            state: "stopped",
+            runtimeVersion: null,
+            requestedVersion: "",
+          },
+        } satisfies SshHostResult;
       }).pipe(
         Effect.catch((error) =>
           isAuthorizationError(error)

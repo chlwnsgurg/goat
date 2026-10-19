@@ -44,9 +44,10 @@ export const checkRuntimeAvailability = Effect.fn("ssh/preflight.runtime")(funct
   readonly ownerLabel: string;
 }) {
   const { runner, ownerLabel, platformKey, installedVersions } = input;
+  // Installed candidates may be reused by provisioning, even when the requested archive exists.
   const result = (step: Omit<SshPreflightStep, "id">, needsTransfer = false) => ({
     step: { id: "runtime" as const, ...step },
-    needsTransfer,
+    needsTransfer: needsTransfer && installedVersions.length === 0,
   });
   if (runner.nodeScriptPath?.trim())
     return result({
