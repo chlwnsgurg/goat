@@ -1,11 +1,7 @@
 import { MemoryReportLink } from "../settings/SettingsMemoryRouteScreen";
 import { LegendList } from "@legendapp/list/react-native";
 import type { EnvironmentThreadShell } from "@goat/client-runtime/state/shell";
-import {
-  formatGoatBotStamp,
-  goatBotReceiptLabel,
-  type GoatBotRow,
-} from "@goat/client-runtime/goatBot";
+import { goatBotReceiptLabel, type GoatBotRow } from "@goat/client-runtime/goatBot";
 import { memo, useCallback, useState } from "react";
 import { Platform, Pressable, Text, TextInput, View } from "react-native";
 import { KeyboardAvoidingView, useKeyboardState } from "react-native-keyboard-controller";
@@ -16,7 +12,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useHomeThreadSelection } from "../home/home-thread-navigation";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
 import { useMobileGoatBotSession } from "./useMobileGoatBotSession";
-import { GoatBotBubble } from "./GoatBotBubble";
+import { GoatBotBubble, GoatBotTypingIndicator } from "./GoatBotBubble";
+import { GoatBotDayStamp } from "./GoatBotDayStamp";
 import { GOAT_BOT_BUBBLE_COLORS, goatBotBubbleLayout } from "./goatBotBubbleStyle";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
@@ -128,11 +125,7 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
   const receiptText = useScaledTextRole("caption");
   const [nowMs] = useState(() => Date.now());
   if (row.kind === "day") {
-    return (
-      <Text className="py-4 text-center text-xs font-semibold text-foreground-muted">
-        {formatGoatBotStamp(row.at, nowMs, receiptTime)}
-      </Text>
-    );
+    return <GoatBotDayStamp at={row.at} nowMs={nowMs} formatTime={receiptTime} />;
   }
   const layout = goatBotBubbleLayout(row.groupPosition);
   if (row.kind === "task") {
@@ -313,38 +306,7 @@ export function GoatBotScreen(props: {
               Ask GOAT Bot for anything. It answers here and starts work in its own threads.
             </Text>
           }
-          ListFooterComponent={
-            replying ? (
-              <View
-                accessibilityRole="text"
-                accessibilityLabel="GOAT Bot is replying"
-                className="self-start"
-              >
-                <View
-                  className="flex-row items-center justify-center"
-                  style={{
-                    width: 40,
-                    height: 40,
-                    gap: 2,
-                    borderRadius: 20,
-                    backgroundColor: GOAT_BOT_BUBBLE_COLORS[themeAppearance].in,
-                  }}
-                >
-                  {[0, 1, 2].map((dot) => (
-                    <View
-                      key={dot}
-                      style={{
-                        width: 7,
-                        height: 7,
-                        borderRadius: 3.5,
-                        backgroundColor: GOAT_BOT_BUBBLE_COLORS[themeAppearance].inText,
-                      }}
-                    />
-                  ))}
-                </View>
-              </View>
-            ) : null
-          }
+          ListFooterComponent={replying ? <GoatBotTypingIndicator /> : null}
         />
       </NativeScrollViewMarker>
       <View

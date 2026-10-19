@@ -47,3 +47,22 @@ export function GoatBotBubble(props: {
     </View>
   );
 }
+
+export function GoatBotTypingIndicator() {
+  return (
+    <View accessibilityRole="text" accessibilityLabel="GOAT Bot is replying" className="self-start">
+      <GoatBotBubble side="in" tail>
+        {(textColor) => (
+          <View className="flex-row items-center justify-center" style={{ minHeight: 40, gap: 2 }}>
+            {[0, 1, 2].map((dot) => (
+              <View
+                key={dot}
+                style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: textColor }}
+              />
+            ))}
+          </View>
+        )}
+      </GoatBotBubble>
+    </View>
+  );
+}

@@ -29,7 +29,7 @@ vi.mock("react-native-svg", () => ({
   ),
 }));
 
-import { GoatBotBubble } from "./GoatBotBubble";
+import { GoatBotBubble, GoatBotTypingIndicator } from "./GoatBotBubble";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -96,4 +96,23 @@ it("shows a tail only when requested, on the side of its bubble", async () => {
   expect(incomingTail).not.toBeNull();
   expect(styleOf(incomingTail!).left).toBe(-8);
   expect(styleOf(incomingTail!).right).toBeUndefined();
+});
+
+it("renders the typing dots inside an incoming bubble with its tail", async () => {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await act(async () => root.render(<GoatBotTypingIndicator />));
+
+  const bubble = container.firstElementChild?.firstElementChild;
+  const dots = bubble?.firstElementChild;
+  expect(bubble).not.toBeNull();
+  expect(styleOf(bubble!).backgroundColor).toBe("#E9E9EB");
+  expect(styleOf(dots!).minHeight).toBe(40);
+  expect(dots?.children).toHaveLength(3);
+  for (const dot of Array.from(dots?.children ?? [])) {
+    expect(styleOf(dot)).toMatchObject({ width: 7, height: 7, backgroundColor: "#000000" });
+  }
+  const tail = bubble?.querySelector('[data-testid="goat-bubble-tail"]');
+  expect(styleOf(tail!).left).toBe(-8);
 });
