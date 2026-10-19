@@ -12,13 +12,16 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2StoredEvent,
+  type OrchestrationV2Subagent,
   type ThreadResultReport,
 } from "@goat/contracts";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -102,7 +105,7 @@ const setup = Effect.gen(function* () {
       : Queue.offer(queue, event);
   };
   const creations = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
-  const subscribed = yield* Deferred.make<void>();
+  const subscribed = yield* Deferred.make<void, RemoteReportService.RemoteReportError>();
   const state: {
     runs: OrchestrationV2Run[];
     messages: OrchestrationV2ConversationMessage[];
@@ -115,6 +118,7 @@ const setup = Effect.gen(function* () {
     questions: string[];
     backgroundTasks: number;
     continuationPending: boolean;
+    subagents: ReadonlyArray<OrchestrationV2Subagent> | undefined;
     shell: Partial<OrchestrationV2ThreadShell>;
     subscriptions: Array<
       Parameters<Orchestrator.OrchestratorV2["Service"]["streamStoredEventsFrom"]>[0]
@@ -130,6 +134,7 @@ const setup = Effect.gen(function* () {
     questions: [],
     backgroundTasks: 0,
     continuationPending: false,
+    subagents: [],
     shell: { pullRequests: [] },
     subscriptions: [],
   };
@@ -172,7 +177,7 @@ const setup = Effect.gen(function* () {
               })),
             },
           ],
-          subagents: [],
+          subagents: state.subagents,
         };
         const after = state.afterRead;
         state.afterRead = undefined;
@@ -193,7 +198,13 @@ const setup = Effect.gen(function* () {
     },
   });
   const context = yield* Layer.build(RemoteReportService.layer.pipe(Layer.provide(fake)));
-  const service = Context.get(context, RemoteReportService.RemoteReportService);
+  const rawService = Context.get(context, RemoteReportService.RemoteReportService);
+  // wait reads once before opening event streams, so a failure there must fail subscribed too.
+  const service: RemoteReportService.RemoteReportService["Service"] = {
+    ...rawService,
+    wait: (input) =>
+      rawService.wait(input).pipe(Effect.onError((cause) => Deferred.failCause(subscribed, cause))),
+  };
   yield* service.bind(threadId, binding);
   const lifetime = yield* Effect.scope;
   const recreate = Layer.buildWithScope(
@@ -904,3 +915,27 @@ test("relay receipts survive collection and service recreation and remain scoped
     yield* restarted.unbind(relaying);
     expect(yield* restarted.relayReceipt(relaying, input.clientRequestId)).toBeNull();
   }));
+
+it.effect.each(["initial", "wakeup"] as const)(
+  "a projection defect when subagents is missing on %s read fails the wait promptly instead of hanging",
+  (phase) =>
+    withFixture(({ service, state, events, subscribed }) =>
+      Effect.gen(function* () {
+        if (phase === "initial") state.subagents = undefined;
+        const fiber = yield* service.wait(waitInput).pipe(Effect.forkChild);
+        const subscribedExit = yield* Effect.exit(Deferred.await(subscribed));
+        if (phase === "wakeup") {
+          expect(Exit.isSuccess(subscribedExit)).toBe(true);
+          state.subagents = undefined;
+          yield* Queue.offer(
+            events,
+            stored(18, { type: "run.updated", payload: run(runA, "running") }),
+          );
+        } else {
+          expect(Exit.isFailure(subscribedExit) && Cause.hasDies(subscribedExit.cause)).toBe(true);
+        }
+        const exit = yield* Fiber.await(fiber);
+        expect(Exit.isFailure(exit) && Cause.hasDies(exit.cause)).toBe(true);
+      }),
+    ),
+);
