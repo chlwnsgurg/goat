@@ -80,6 +80,11 @@ export interface FleetEnvironment {
   /** What the server reports about its host; absent until its config loads. */
   readonly os?: ExecutionEnvironmentPlatformOs | null;
   readonly machineKind?: EnvironmentMachineKind | null;
+  /**
+   * False draws the machine without counting its threads: a disconnected
+   * environment's shells are stale. Absent means connected.
+   */
+  readonly connected?: boolean;
 }
 
 export interface FleetMachineSummary {
@@ -260,7 +265,12 @@ export function buildFleet(input: {
     for (const alias of environment.sshAliases)
       environmentBySshAlias.set(alias, environment.environmentId);
   }
-  const connectedShells = input.shells.filter((shell) => labelOf.has(shell.environmentId));
+  const connectedIds = new Set(
+    input.environments
+      .filter((environment) => environment.connected !== false)
+      .map((environment) => environment.environmentId),
+  );
+  const connectedShells = input.shells.filter((shell) => connectedIds.has(shell.environmentId));
 
   const count = (
     machine: MutableMachine,

@@ -8,6 +8,12 @@ import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { GoatWordmark } from "../GoatWordmark";
 import { renderProviderGlyph } from "../chat/ProviderInstanceIcon";
 import { describeMachine } from "./describeMachine";
+import {
+  fleetConnectionVisual,
+  UNKNOWN_FLEET_CONNECTION,
+  type FleetConnection,
+} from "./fleetConnection";
+import { FleetConnectionGlyph } from "./FleetConnectionGlyph";
 import { providerInstanceInitials } from "@goat/client-runtime/state/provider-instance-display";
 import {
   rubberBand,
@@ -35,6 +41,9 @@ const AGENT_FOLLOW = 0.7;
 const CLICK_SLOP = 4;
 const MACHINE_RADIUS = 18;
 const AGENT_RADIUS = 11;
+/** The status mark sits on the machine's ring, lower right, like an avatar's presence dot. */
+const STATUS_OFFSET = Math.round(MACHINE_RADIUS * Math.SQRT1_2);
+const THIS_MACHINE = "This machine";
 
 function useElementWidth() {
   const ref = useRef<HTMLDivElement>(null);
@@ -204,10 +213,12 @@ interface PlacedMachine {
 
 export const FleetGraph = memo(function FleetGraph(props: {
   readonly snapshot: FleetSnapshot;
+  readonly connections: ReadonlyMap<string, FleetConnection>;
+  readonly currentMachineId: string | null;
   readonly selectedMachineId: string | null;
   readonly onSelectMachine: (machineId: string) => void;
 }) {
-  const { snapshot, selectedMachineId, onSelectMachine } = props;
+  const { snapshot, connections, currentMachineId, selectedMachineId, onSelectMachine } = props;
   const [wrapperRef, width] = useElementWidth();
   const svgRef = useRef<SVGSVGElement>(null);
   const reduced = useMediaQuery("(prefers-reduced-motion: reduce)");
@@ -299,15 +310,31 @@ export const FleetGraph = memo(function FleetGraph(props: {
             const machine = entry.layout.id === null ? null : machinesById.get(entry.layout.id)!;
             const work = machine ?? entry.layout.aggregate!;
             const busy = work.running + work.attention > 0;
+            const link =
+              machine === null
+                ? null
+                : fleetConnectionVisual(
+                    (connections.get(machine.id) ?? UNKNOWN_FLEET_CONNECTION).state,
+                  ).edge;
             return (
               <g key={"edge:" + (entry.layout.id ?? "more")}>
-                <path
-                  d={entry.edge}
-                  fill="none"
-                  className={busy ? "stroke-info/40" : "stroke-border"}
-                  strokeWidth={busy ? 1.6 : 1.2}
-                  strokeDasharray={machine?.kind === "environment" || busy ? undefined : "3 5"}
-                />
+                {link === null ? (
+                  <path
+                    d={entry.edge}
+                    fill="none"
+                    className={busy ? "stroke-info/40" : "stroke-border"}
+                    strokeWidth={busy ? 1.6 : 1.2}
+                    strokeDasharray={machine?.kind === "environment" || busy ? undefined : "3 5"}
+                  />
+                ) : (
+                  <path
+                    d={entry.edge}
+                    fill="none"
+                    className={cn(link.className, link.animated && !reduced && "fleet-flow")}
+                    strokeWidth={1.4}
+                    strokeDasharray={link.dash}
+                  />
+                )}
                 {busy && !reduced ? (
                   <path
                     d={entry.edge}
@@ -426,6 +453,8 @@ export const FleetGraph = memo(function FleetGraph(props: {
                 key={"machine:" + entry.layout.id}
                 at={entry.at}
                 machine={machinesById.get(entry.layout.id)!}
+                connection={connections.get(entry.layout.id) ?? UNKNOWN_FLEET_CONNECTION}
+                current={currentMachineId === entry.layout.id}
                 selected={selectedMachineId === entry.layout.id}
                 reduced={reduced}
                 onSelect={onSelectMachine}
@@ -507,36 +536,56 @@ type NodeHandlers = {
 function MachineNode(props: {
   readonly at: FleetPoint;
   readonly machine: FleetMachine;
+  readonly connection: FleetConnection;
+  /** The machine this app runs on. */
+  readonly current: boolean;
   readonly selected: boolean;
   readonly reduced: boolean;
   readonly onSelect: (machineId: string) => void;
   readonly handlers: NodeHandlers;
 }) {
-  const { at, machine, selected, reduced, onSelect, handlers } = props;
+  const { at, machine, connection, current, selected, reduced, onSelect, handlers } = props;
   const busy = machine.running + machine.attention;
+  const { quiet } = fleetConnectionVisual(connection.state);
   const onKeyDown = (event: KeyboardEvent<SVGGElement>) => {
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
     onSelect(machine.id);
   };
   const device = describeMachine(machine.os, machine.machineKind);
-  const sub =
-    [device, machine.subtitle].filter((part) => part !== null).join(" · ") ||
-    (machine.kind === "environment" ? null : machine.kind === "cloud" ? "cloud" : "ssh");
+  // The user knows their own hardware; naming the machine is what matters here.
+  const sub = current
+    ? THIS_MACHINE
+    : [device, machine.subtitle].filter((part) => part !== null).join(" · ") ||
+      (machine.kind === "environment" ? null : machine.kind === "cloud" ? "cloud" : "ssh");
+  const status =
+    connection.state === "unknown"
+      ? []
+      : [
+          connection.reason === null
+            ? connection.label
+            : connection.label + ": " + connection.reason,
+        ];
+  const description = [current ? THIS_MACHINE : null, ...status, workSummary(machine)].filter(
+    (part) => part !== null,
+  );
   return (
     <g
       role="button"
       tabIndex={0}
       aria-pressed={selected}
-      aria-label={machine.label + ", " + workSummary(machine)}
+      aria-label={[machine.label, ...description].join(", ")}
       className="fleet-node cursor-grab touch-none outline-none active:cursor-grabbing"
       onKeyDown={onKeyDown}
       transform={"translate(" + at.x + " " + at.y + ")"}
       {...handlers}
     >
-      <title>{machine.label + " · " + workSummary(machine)}</title>
+      <title>{machine.label + "\n" + description.join("\n")}</title>
       {busy > 0 && !reduced ? (
         <circle r={MACHINE_RADIUS + 8} className="fleet-breathe fill-info/10" />
+      ) : null}
+      {current ? (
+        <circle r={MACHINE_RADIUS + 4} fill="none" className="stroke-foreground/25" />
       ) : null}
       <circle
         r={MACHINE_RADIUS}
@@ -548,7 +597,9 @@ function MachineNode(props: {
               ? "stroke-warning"
               : busy > 0
                 ? "stroke-info"
-                : "stroke-muted-foreground/60",
+                : quiet
+                  ? "stroke-muted-foreground/30"
+                  : "stroke-muted-foreground/60",
         )}
         strokeWidth={selected ? 2.4 : 1.6}
       />
@@ -561,8 +612,11 @@ function MachineNode(props: {
         y={-8}
         width={16}
         height={16}
-        className="text-foreground"
+        className={quiet ? "text-muted-foreground/70" : "text-foreground"}
       />
+      <g transform={"translate(" + STATUS_OFFSET + " " + STATUS_OFFSET + ")"}>
+        <FleetConnectionGlyph state={connection.state} halo />
+      </g>
       {busy > 0 ? (
         <g transform="translate(13 -13)">
           <circle r={7} className={machine.attention > 0 ? "fill-warning" : "fill-info"} />
@@ -581,7 +635,7 @@ function MachineNode(props: {
       <text
         y={MACHINE_RADIUS + 13}
         textAnchor="middle"
-        className="fill-foreground text-3xs font-medium"
+        className={cn("text-3xs font-medium", quiet ? "fill-muted-foreground" : "fill-foreground")}
       >
         {truncate(machine.label, 18)}
       </text>
