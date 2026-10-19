@@ -37,7 +37,7 @@ import * as Generation from "../textGeneration/TextGeneration.ts";
 import * as Secrets from "../auth/ServerSecretStore.ts";
 import * as Events from "../orchestration-v2/EventSink.ts";
 import * as RuntimeIdentity from "../runtimeIdentity.ts";
-import { runMigrations } from "../persistence/Migrations.ts";
+import { migrationManifest, runMigrations } from "../persistence/Migrations.ts";
 import migration from "../persistence/Migrations/072_Memory.ts";
 import lastReadyMigration from "../persistence/Migrations/082_MemoryLastReadySpace.ts";
 import hubMigration from "../persistence/Migrations/073_MemoryHubSync.ts";
@@ -2146,11 +2146,10 @@ it.effect.each([
             assert.isEmpty(
               yield* sql`SELECT name FROM sqlite_master WHERE name='memory_last_ready_space'`,
             );
-            assert.deepStrictEqual(yield* runMigrations(), [
-              [82, "MemoryLastReadySpace"],
-              [83, "MemoryHubAdministered"],
-              [84, "MemoryCheckpointLifecycle"],
-            ]);
+            // The upgrade runs everything after 081, starting with MemoryLastReadySpace.
+            const upgraded = migrationManifest.filter(([id]) => id > 81);
+            assert.deepStrictEqual(upgraded[0], [82, "MemoryLastReadySpace"]);
+            assert.deepStrictEqual(yield* runMigrations(), upgraded);
             const adapter = yield* statusRuntime;
             const result = yield* Effect.scoped(
               Effect.gen(function* () {
