@@ -83,15 +83,22 @@ export const readLocalReleaseAssets = Effect.fn("readLocalReleaseAssets")(functi
     });
   }
   const runtimeName = runtimeManifestAssetName(version);
-  if (!checksums.has(runtimeName))
-    return yield* new NightlyPublishError({ message: `Missing runtime manifest: ${runtimeName}.` });
-  const runtimeProblems = checkReleaseRuntimeManifest(
-    yield* fs.readFileString(path.join(dir, runtimeName)),
-    version,
-    checksums,
-  );
-  if (runtimeProblems.length)
-    return yield* new NightlyPublishError({ message: runtimeProblems.join("; ") });
+  // A runtime-only backfill of a release from before manifests has none; clients treat such a
+  // release by the pre-manifest rule. A full release always needs one, and any one is checked.
+  if (!checksums.has(runtimeName)) {
+    if (requireRepositoryFiles)
+      return yield* new NightlyPublishError({
+        message: `Missing runtime manifest: ${runtimeName}.`,
+      });
+  } else {
+    const runtimeProblems = checkReleaseRuntimeManifest(
+      yield* fs.readFileString(path.join(dir, runtimeName)),
+      version,
+      checksums,
+    );
+    if (runtimeProblems.length)
+      return yield* new NightlyPublishError({ message: runtimeProblems.join("; ") });
+  }
   const entries = yield* fs.readDirectory(dir);
   if (entries.some((name) => name !== "SHA256SUMS" && !checksums.has(name))) {
     return yield* new NightlyPublishError({

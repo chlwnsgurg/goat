@@ -436,8 +436,16 @@ describe("publish nightly release", () => {
     "requires a checksummed runtime manifest matching every published archive before API reads",
     () =>
       Effect.gen(function* () {
-        for (const mode of ["missing", "invalid", "omitted-platform", "digest-mismatch"]) {
-          const state = yield* fixture();
+        for (const [mode, assetsOnly] of [
+          ["missing", false],
+          ["invalid", false],
+          ["omitted-platform", false],
+          ["digest-mismatch", false],
+          ["invalid", true],
+          ["omitted-platform", true],
+          ["digest-mismatch", true],
+        ] as const) {
+          const state = yield* fixture({ assetsOnly });
           const name = runtimeManifestAssetName(version);
           if (mode === "missing") state.files.delete(name);
           else if (mode === "invalid") state.files.set(name, new TextEncoder().encode("invalid"));
@@ -456,6 +464,19 @@ describe("publish nightly release", () => {
           expect(state.calls).toEqual([]);
         }
       }),
+  );
+
+  it.effect("backfills a runtime-only release published before manifests", () =>
+    Effect.gen(function* () {
+      const state = yield* fixture({ assetsOnly: true });
+      state.files.delete(runtimeManifestAssetName(version));
+      const lines: string[] = [];
+      for (const [asset, bytes] of state.files) {
+        if (asset !== "SHA256SUMS") lines.push(`${yield* hashBytes(bytes)}  ${asset}\n`);
+      }
+      state.files.set("SHA256SUMS", new TextEncoder().encode(lines.join("")));
+      expect((yield* Effect.result(state.run()))._tag).toBe("Success");
+    }),
   );
 
   it.effect("rejects malformed, duplicate, and escaping checksum entries before API reads", () =>
