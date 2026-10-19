@@ -2358,11 +2358,7 @@ describe("structural supervisor ownership", () => {
           { concurrency: "unbounded" },
         );
         yield* Deferred.await(started);
-        // Separate scheduler turns and real elapsed test time: no equal-clock assumption.
-        yield* TestClock.adjust(100);
-        yield* supervisor.retryNow;
-        yield* harness.wake(reason);
-        yield* TestClock.adjust(100);
+        yield* TestClock.adjust(0);
         expect(connectCalls).toBe(2);
         yield* Deferred.succeed(gate, undefined);
         yield* awaitState(supervisor.state, (state) => state.phase === "connected");
@@ -2459,3 +2455,129 @@ describe("structural supervisor ownership", () => {
     }),
   );
 });
+
+describe("targeted establishment replacement", () => {
+  it.effect.each(["preparing", "synchronizing"] as const)(
+    "replaces a pre-resume attempt stalled at %s",
+    (stage) =>
+      Effect.gen(function* () {
+        const stalled = yield* Deferred.make<void>();
+        const stall = Deferred.succeed(stalled, undefined).pipe(Effect.andThen(Effect.never));
+        const harness = yield* makeHarness({
+          prepare: (attempt) =>
+            stage === "preparing" && attempt === 2 ? stall : Effect.succeed(PREPARED_CONNECTION),
+          ready: (attempt) => (stage === "synchronizing" && attempt === 2 ? stall : Effect.void),
+        });
+        const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+          initiallyDesired: true,
+        }).pipe(Effect.provide(harness.dependencies));
+        yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+        yield* harness.closeLatestSession();
+        yield* awaitState(supervisor.state, (state) => state.phase === "backoff");
+        yield* TestClock.adjust(2_000);
+        yield* Deferred.await(stalled);
+        yield* harness.wake("application-active-reconnect");
+        yield* TestClock.adjust(0);
+        expect(yield* Ref.get(harness.prepareCount)).toBe(3);
+        expect(yield* SubscriptionRef.get(supervisor.state)).toMatchObject({
+          phase: "connected",
+          generation: 2,
+          attempt: 1,
+        });
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("an explicit retry restarts a stalled attempt without waiting for its timeout", () =>
+    Effect.gen(function* () {
+      const stalled = yield* Deferred.make<void>();
+      const harness = yield* makeHarness({
+        prepare: (attempt) =>
+          attempt === 2
+            ? Deferred.succeed(stalled, undefined).pipe(Effect.andThen(Effect.never))
+            : Effect.succeed(PREPARED_CONNECTION),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      yield* harness.closeLatestSession();
+      yield* awaitState(supervisor.state, (state) => state.phase === "backoff");
+      yield* TestClock.adjust(2_000);
+      yield* Deferred.await(stalled);
+      yield* supervisor.retryNow;
+      yield* TestClock.adjust(0);
+      expect(yield* Ref.get(harness.prepareCount)).toBe(3);
+      expect(yield* SubscriptionRef.get(supervisor.state)).toMatchObject({
+        phase: "connected",
+        generation: 2,
+        attempt: 1,
+      });
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(["retry", "application-active-probe", "application-active-reconnect"] as const)(
+    "a later Retry replaces a stalled attempt started by %s",
+    (source) =>
+      Effect.gen(function* () {
+        const stalled = yield* Deferred.make<void>();
+        const harness = yield* makeHarness({
+          prepare: (attempt) =>
+            attempt === 1
+              ? Effect.fail(transient())
+              : attempt === 2
+                ? Deferred.succeed(stalled, undefined).pipe(Effect.andThen(Effect.never))
+                : Effect.succeed(PREPARED_CONNECTION),
+        });
+        const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+          initiallyDesired: true,
+        }).pipe(Effect.provide(harness.dependencies));
+        yield* awaitState(supervisor.state, (state) => state.phase === "backoff");
+        yield* source === "retry" ? supervisor.retryNow : harness.wake(source);
+        yield* Deferred.await(stalled);
+        // Ordering comes from the driver's milestone, even when the clock has not moved.
+        yield* supervisor.retryNow;
+        yield* TestClock.adjust(0);
+        expect(yield* Ref.get(harness.prepareCount)).toBe(3);
+        expect(yield* SubscriptionRef.get(supervisor.state)).toMatchObject({
+          phase: "connected",
+          attempt: 1,
+        });
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+});
+
+it.effect("coalesces concurrent replacement requests targeting a stalled attempt", () =>
+  Effect.gen(function* () {
+    const originalStarted = yield* Deferred.make<void>();
+    const replacementStarted = yield* Deferred.make<void>();
+    const allowReplacement = yield* Deferred.make<void>();
+    const harness = yield* makeHarness({
+      prepare: (attempt) =>
+        attempt === 1
+          ? Deferred.succeed(originalStarted, undefined).pipe(Effect.andThen(Effect.never))
+          : Deferred.succeed(replacementStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(allowReplacement)),
+              Effect.as(PREPARED_CONNECTION),
+            ),
+    });
+    const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+      initiallyDesired: true,
+    }).pipe(Effect.provide(harness.dependencies));
+    yield* Deferred.await(originalStarted);
+    yield* Effect.all(
+      [
+        harness.wake("application-active-reconnect"),
+        harness.wake("network-changed"),
+        supervisor.retryNow,
+      ],
+      { concurrency: "unbounded" },
+    );
+    yield* TestClock.adjust(0);
+    expect(yield* Ref.get(harness.prepareCount)).toBe(2);
+    expect(yield* Deferred.isDone(replacementStarted)).toBe(true);
+    yield* Deferred.succeed(allowReplacement, undefined);
+    yield* TestClock.adjust(0);
+    expect((yield* SubscriptionRef.get(supervisor.state)).phase).toBe("connected");
+    expect(yield* Ref.get(harness.prepareCount)).toBe(2);
+  }).pipe(Effect.provide(TestClock.layer())),
+);

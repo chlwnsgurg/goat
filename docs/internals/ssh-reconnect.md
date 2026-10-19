@@ -96,10 +96,13 @@ cap never delays a return: every signal that conditions changed skips the wait.
 
 ## Resuming
 
-These signals skip a pending retry delay. If an attempt is already establishing,
-it satisfies the request and keeps running; resetting signals reset the ladder
-for its next failure. Queued signals are coalesced when an attempt starts.
-All but the return to online reset the ladder to its first rung:
+These signals skip a pending retry delay. Retry now cancels an establishing
+attempt, and a long resume replaces an attempt that began before the resume:
+its socket may have died during suspension even before readiness. Each signal
+targets the attempt present when it is queued, so a replacement absorbs queued
+duplicates targeting its predecessor. A later Retry can still replace that
+attempt if it stalls. Ordinary foreground and network-change signals leave
+establishment running. All but the return to online reset the retry ladder:
 
 - The app returns to the foreground (`application-active`).
 - The device moves to another network (`network-changed`), the likely moment a

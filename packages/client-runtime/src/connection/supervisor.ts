@@ -65,6 +65,8 @@ type SupervisorSignal =
   | { readonly _tag: "Wakeup"; readonly reason: ConnectionWakeups.ConnectionWakeup }
   | { readonly _tag: "BetterRouteAvailable"; readonly routeId: string };
 
+type QueuedSupervisorSignal = SupervisorSignal & { readonly attemptSequence: number };
+
 interface PendingRetryTrace {
   readonly previousAttempt: Tracer.Span;
   readonly failureCount: number;
@@ -266,7 +268,8 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     network: yield* connectivity.status,
   };
   const intent = yield* Ref.make(initialIntent);
-  const signals = yield* Queue.unbounded<SupervisorSignal>();
+  const attemptSequence = yield* Ref.make(0);
+  const signals = yield* Queue.unbounded<QueuedSupervisorSignal>();
   const resetRetryState = yield* Ref.make(false);
   const probeUnanswered = yield* Ref.make(false);
   const state = yield* SubscriptionRef.make<SupervisorConnectionState>(
@@ -372,7 +375,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   });
 
   const signal = Effect.fn("EnvironmentSupervisor.signal")(function* (next: SupervisorSignal) {
-    yield* Queue.offer(signals, next);
+    // Delayed signals may target an attempt that their replacement already superseded.
+    const targetedAttempt = yield* Ref.get(attemptSequence);
+    yield* Queue.offer(signals, { ...next, attemptSequence: targetedAttempt });
   });
 
   const logManagedRelayAccountChange = Effect.logInfo(
@@ -495,6 +500,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
 
   const waitForEstablishmentInterrupt = Effect.fnUntraced(function* (
     ignoreOffline: Ref.Ref<boolean>,
+    sequence: number,
   ) {
     for (;;) {
       const next = yield* Queue.take(signals);
@@ -502,8 +508,8 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         case "DisconnectRequested":
           return false;
         case "RetryRequested":
-          // The attempt in flight already satisfies Retry now.
           yield* Ref.set(resetRetryState, true);
+          if (next.attemptSequence === sequence) return false;
           break;
         case "NetworkChanged":
           if (next.network === "offline" && !(yield* Ref.get(ignoreOffline))) {
@@ -518,6 +524,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
             yield* Ref.set(resetRetryState, true);
           }
           if (next.reason === "application-active-reconnect") {
+            if (next.attemptSequence === sequence) return true;
             yield* Ref.set(ignoreOffline, true);
           }
           if (next.reason === "credentials-changed" && usesRelay) {
@@ -667,6 +674,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     pendingRetry: Option.Option<PendingRetryTrace>,
     ignoreOffline: boolean,
   ) {
+    const sequence = yield* Ref.updateAndGet(attemptSequence, (current) => current + 1);
     const ignoreOfflineState = yield* Ref.make(ignoreOffline);
     const attemptActive = yield* Ref.make(true);
     const switchingTo = yield* Ref.get(preferredRouteId);
@@ -688,7 +696,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           exit,
         })),
       ),
-      waitForEstablishmentInterrupt(ignoreOfflineState).pipe(
+      waitForEstablishmentInterrupt(ignoreOfflineState, sequence).pipe(
         Effect.map((resetRetry): EstablishmentEvent => ({
           _tag: "Interrupted",
           resetRetry,
