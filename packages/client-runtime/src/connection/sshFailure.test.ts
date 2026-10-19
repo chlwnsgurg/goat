@@ -48,7 +48,6 @@ describe("sshPreparationFailure", () => {
     "Live GOAT PID=812 port=3773 is incompatible; it was left running. Upgrade with the owning client or reconnect.",
     "Remote runtime GOAT 0.1.0-dev.abc cannot be ordered against this app (GOAT 0.1.0-dev.def); it was left running. Stop it on the remote host when its work is done, then reconnect.",
     "Cannot verify remote version ordering; process was preserved.",
-    "Cannot verify live GOAT PID=812 port=3773: descriptor unavailable or persisted identity disagrees; it may predate GOAT SSH runtime protocol metadata. It was left running, and the runner and ownership files were preserved. If this is your earlier GOAT server, stop it on the remote host (kill 812) and reconnect.",
   ])("blocks a runtime that refuses this client without disabling it: %s", (message) => {
     // "unsupported" would switch the environment off; this needs a person instead.
     expect(sshPreparationFailure(new Error(message))).toMatchObject({
@@ -82,6 +81,17 @@ describe("sshPreparationFailure", () => {
   });
 
   it("retries other failures as a remote problem, without the IPC prefix", () => {
+    // The launch script prints these both for a real identity disagreement and
+    // for a live server whose descriptor answered too slowly, so they retry.
+    for (const message of [
+      "Cannot verify live GOAT PID=812 port=3773: descriptor unavailable or persisted identity disagrees; it may predate GOAT SSH runtime protocol metadata. It was left running, and the runner and ownership files were preserved. If this is your earlier GOAT server, stop it on the remote host (kill 812) and reconnect.",
+      "GOAT ownership could not be verified; process and ownership files were preserved.",
+    ]) {
+      expect(sshPreparationFailure(new Error(message))).toMatchObject({
+        _tag: "ConnectionTransientError",
+        reason: "remote-unavailable",
+      });
+    }
     const gh =
       "Local gh release download failed (exit 1; goat 0.3.0 darwin-arm64). Check gh auth status and that the release contains both assets. stderr (last 400 sanitized characters): authentication failed";
     // gh's login, after the SSH login succeeded: not an SSH key problem, bare
