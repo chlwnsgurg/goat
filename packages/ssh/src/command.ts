@@ -42,6 +42,12 @@ export const SshReconnectCost = Context.Reference<{
   defaultValue: () => null,
 });
 
+// Request-local observation; SSH diagnostics retain authority over the final target's login.
+export const SshHostAnswered = Context.Reference<(() => void) | null>(
+  "@goat/ssh/command/SshHostAnswered",
+  { defaultValue: () => null },
+);
+
 export interface SshMasterConnection {
   readonly configuration: string;
   readonly socket: string;
@@ -450,6 +456,8 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
       ),
     );
 
+  const onHostAnswered = yield* SshHostAnswered;
+  let reportedAnswer = false;
   const cost = yield* SshReconnectCost;
   if (cost?.active) {
     cost.spawns++;
@@ -484,6 +492,18 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
             /^(?:Authenticated to |debug1: Authentication succeeded|debug1: mux_client_request_session: master session id:)/u.test(
               line,
             );
+        }
+        const finalHostAnswered =
+          line.startsWith(`Authenticated to ${target.hostname} `) ||
+          line.startsWith(`Authenticated to ${target.alias} `) ||
+          line.startsWith("debug1: mux_client_request_session: master session id:");
+        if (progress.authenticated && finalHostAnswered && !reportedAnswer) {
+          reportedAnswer = true;
+          try {
+            onHostAnswered?.();
+          } catch {
+            // A renderer that went away must not cancel the shared preparation.
+          }
         }
       }).pipe(
         Stream.runForEach((line) =>

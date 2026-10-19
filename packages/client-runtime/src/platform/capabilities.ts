@@ -77,6 +77,7 @@ export class SshEnvironmentGateway extends Context.Service<
       readonly expectedEnvironmentId: EnvironmentId;
       readonly target: DesktopSshEnvironmentTarget;
       readonly bearerToken?: string;
+      readonly onHostAnswered?: Effect.Effect<void>;
     }) => Effect.Effect<PreparedSshEnvironment, ConnectionAttemptError>;
     readonly disconnect: (
       target: DesktopSshEnvironmentTarget,

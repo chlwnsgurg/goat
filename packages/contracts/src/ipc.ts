@@ -537,6 +537,7 @@ export const DesktopSshEnvironmentEnsureOptionsSchema = Schema.Struct({
 });
 
 export const DesktopSshEnvironmentEnsureInputSchema = Schema.Struct({
+  requestId: Schema.optionalKey(Schema.String),
   target: DesktopSshEnvironmentTargetSchema,
   options: Schema.optionalKey(DesktopSshEnvironmentEnsureOptionsSchema),
 });
@@ -1192,9 +1193,10 @@ export interface DesktopBridge {
   ) => Promise<void>;
   dismissSnapShotAnimation?: (id: DesktopSnapShotId) => Promise<void>;
   acknowledgeSnapShot?: (id: string) => Promise<void>;
+  supportsSshEnvironmentProgress?: true;
   ensureSshEnvironment: (
     target: DesktopSshEnvironmentTarget,
-    options?: { issuePairingToken?: boolean; keyOnly?: boolean },
+    options?: { issuePairingToken?: boolean; keyOnly?: boolean; onHostAnswered?: () => void },
   ) => Promise<DesktopSshEnvironmentReadyOrPending>;
   getSshHostStatus: (target: DesktopSshEnvironmentTarget) => Promise<SshHostResult>;
   updateSshRuntime: (

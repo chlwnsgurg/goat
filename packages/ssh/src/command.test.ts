@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { sshPreparationFailure } from "../../client-runtime/src/connection/sshFailure.ts";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -16,6 +17,7 @@ import {
   getLastNonEmptyOutputLine,
   parseSshResolveOutput,
   runSshCommand,
+  SshHostAnswered,
 } from "./command.ts";
 import { SshCommandError } from "./errors.ts";
 
@@ -69,6 +71,55 @@ const makeNeverFinishingProcess = () => {
 };
 
 describe("ssh command", () => {
+  it.effect.each([
+    ['Authenticated to fixture using "publickey".\n', 1],
+    ["debug1: mux_client_request_session: master session id: 2\n", 1],
+    ["debug1: Connection established.\n", 0],
+    ['Authenticated to jump using "publickey".\n', 0],
+    [
+      'debug1: Executing proxy command: exec ssh -W fixture:22 jump\nAuthenticated to jump using "publickey".\n',
+      0,
+    ],
+    [
+      'debug1: Executing proxy command: exec ssh -W fixture:22 jump\nAuthenticated to jump using "publickey".\ndebug1: Authenticating to fixture:22 as "owner"\nAuthenticated to fixture using "publickey".\n',
+      1,
+    ],
+  ] as const)("reports only the final host's authenticated answer: %s", (diagnostic) =>
+    Effect.gen(function* () {
+      const [stderr, expected] = diagnostic;
+      const drained = yield* Deferred.make<void>();
+      let answered = 0;
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.succeed({
+          ...makeNeverFinishingProcess(),
+          stderr: Stream.make(encoder.encode(stderr)).pipe(
+            Stream.ensuring(Deferred.succeed(drained, undefined)),
+          ),
+        }),
+      );
+      const fiber = yield* runSshCommand({
+        alias: "fixture",
+        hostname: "fixture",
+        username: null,
+        port: null,
+      }).pipe(
+        Effect.provideService(SshHostAnswered, () => {
+          answered += 1;
+        }),
+        Effect.provide(
+          Layer.merge(
+            NodeServices.layer,
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          ),
+        ),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(drained);
+      assert.equal(answered, expected);
+      yield* Fiber.interrupt(fiber);
+    }),
+  );
+
   it.effect("preserves binary stdin bytes", () => {
     const bytes = new Uint8Array([0, 128, 255]);
     const captured: number[] = [];

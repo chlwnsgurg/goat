@@ -52,6 +52,7 @@ export class ConnectionResolver extends Context.Service<
   {
     readonly prepare: (
       entry: ConnectionCatalogEntry,
+      onHostAnswered?: Effect.Effect<void>,
     ) => Effect.Effect<PreparedConnection, ConnectionAttemptError>;
     /**
      * Authorizes a socket without the orchestration protocol gate, for hosts
@@ -206,6 +207,7 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
 
   return Effect.fn("clientRuntime.connection.broker.ssh")(function* (
     entry: ConnectionCatalogEntry & { readonly target: SshConnectionTarget },
+    onHostAnswered?: Effect.Effect<void>,
   ) {
     const target = entry.target;
     const profile = yield* Effect.fromOption(entry.profile, () =>
@@ -231,6 +233,7 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
       expectedEnvironmentId: target.environmentId,
       target: profile.target,
       ...(savedToken === undefined ? {} : { bearerToken: savedToken }),
+      ...(onHostAnswered === undefined ? {} : { onHostAnswered }),
     });
     if (prepared.bearerToken !== savedToken) {
       yield* credentials.put(
@@ -280,6 +283,7 @@ export const make = Effect.gen(function* () {
 
   const authorize = Effect.fn("clientRuntime.connection.broker.authorize")(function* (
     entry: ConnectionCatalogEntry,
+    onHostAnswered?: Effect.Effect<void>,
   ) {
     const target: ConnectionTarget = entry.target;
     yield* Effect.annotateCurrentSpan({
@@ -295,7 +299,7 @@ export const make = Effect.gen(function* () {
         case "RelayConnectionTarget":
           return relay(target);
         case "SshConnectionTarget":
-          return ssh({ ...entry, target });
+          return ssh({ ...entry, target }, onHostAnswered);
       }
     })();
     const descriptor = yield* fetchRemoteEnvironmentDescriptor({
@@ -315,8 +319,9 @@ export const make = Effect.gen(function* () {
 
   const prepare = Effect.fn("clientRuntime.connection.broker.prepare")(function* (
     entry: ConnectionCatalogEntry,
+    onHostAnswered?: Effect.Effect<void>,
   ) {
-    const { prepared, descriptor } = yield* authorize(entry);
+    const { prepared, descriptor } = yield* authorize(entry, onHostAnswered);
     const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
     if (compatibilityError !== null) {
       return yield* compatibilityError;

@@ -15,6 +15,7 @@ import type {
 import { ConnectionTransientError } from "./model.ts";
 import * as ConnectionResolver from "./resolver.ts";
 import {
+  connectionRouteId,
   connectionRoutes,
   routeEntry,
   routeHttpBaseUrl,
@@ -27,6 +28,8 @@ import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
 export type ConnectionDriverProgress =
   | {
       readonly stage: "preparing";
+      readonly hostAnswered?: true;
+      readonly routeId?: string;
     }
   | {
       readonly stage: Exclude<ConnectionAttemptStage, "preparing">;
@@ -157,7 +160,14 @@ export const make = Effect.gen(function* () {
       entry,
       (route) => checkRoute(entry, route),
       Effect.fnUntraced(function* (route) {
-        const prepared = yield* resolver.prepare(routeEntry(entry, route));
+        yield* reportProgress({
+          stage: "preparing",
+          routeId: connectionRouteId(route.target),
+        });
+        const prepared = yield* resolver.prepare(
+          routeEntry(entry, route),
+          reportProgress({ stage: "preparing", hostAnswered: true }),
+        );
         yield* reportProgress({ stage: "opening", prepared });
         const session = yield* sessions.connect(prepared);
         yield* reportProgress({ stage: "synchronizing", prepared });

@@ -155,6 +155,24 @@ GOAT's cap is longer because an SSH attempt spawns a process and can wait 10 s
 for `ConnectTimeout`, and a sleeping laptop can stay away for hours. The long
 cap never delays a return: every signal that conditions changed skips the wait.
 
+Setup starts with a 15 s per-route budget. Each environment's supervisor keeps
+its last five successful setup durations in memory, measured with the Effect
+Clock's monotonic time from that route's preparation start to its entering
+`synchronizing` (or completion when that stage is absent). The per-route budget
+is 1.5 times the largest sample, bounded to 15–45 s. It is multiplied by the
+route count; each route reaching `synchronizing` still adds 75 s for its snapshot.
+Until the host answers in the current attempt, the per-route budget stays 15 s.
+Failed routes' preparation and synchronization waits do not enter the sample.
+A first consecutive setup timeout after the host answers retries immediately
+without counting a failure. SSH reports the final host's authenticated answer
+through the desktop bridge while preparation is still running; a jump host's
+login and plain `preparing` do not qualify. `opening` also proves an answer.
+Retries of the same route retain the original preparation start, including
+counted retries, so joining in-flight preparation does not understate its cost.
+A second consecutive slow timeout, a silent host, and a stalled snapshot keep
+normal failure counting. Successful establishment
+ends the slow-timeout streak.
+
 A long resume (`application-active-reconnect`) resets the ladder and opens a
 30 s window measured with the Effect Clock's monotonic time. Failed attempts
 in that window retry after a flat 2 s, including the published `retryAt`, and do not advance

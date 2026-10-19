@@ -6,6 +6,7 @@ import {
   type DesktopSshEnvironmentTarget,
 } from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
@@ -150,6 +151,67 @@ describe("desktop SSH pairing", () => {
 
       expect(calls).toEqual(["ensure", "descriptor"]);
     }),
+  );
+
+  it.effect.each([undefined, "saved-token"])(
+    "reports SSH answering before preparation completes (%s)",
+    (bearerToken) =>
+      Effect.gen(function* () {
+        const answered = yield* Deferred.make<void>();
+        let reply: (() => void) | undefined;
+        let finish: (() => void) | undefined;
+        const ensureStarted = yield* Deferred.make<void>();
+        const calls: string[] = [];
+        const base = makeBridge(calls);
+        const bridge: DesktopBridge = {
+          ...base,
+          supportsSshEnvironmentProgress: true,
+          ensureSshEnvironment: (target, options) =>
+            new Promise((resolve) => {
+              reply = options?.onHostAnswered;
+              finish = () => {
+                void base.ensureSshEnvironment(target, options).then(resolve);
+              };
+              Deferred.doneUnsafe(ensureStarted, Effect.void);
+            }),
+        };
+        const fiber = yield* prepareDesktopSshEnvironment(bridge, {
+          target: TARGET,
+          expectedEnvironmentId: EnvironmentId.make("environment-ssh"),
+          ...(bearerToken === undefined ? {} : { bearerToken }),
+          onHostAnswered: Deferred.succeed(answered, undefined),
+        }).pipe(Effect.forkChild);
+        yield* Deferred.await(ensureStarted);
+        expect(reply).toBeDefined();
+        reply!();
+        yield* Deferred.await(answered);
+        expect(calls).toEqual([]);
+        finish!();
+        yield* Fiber.join(fiber);
+        expect(calls[0]).toBe("ensure");
+      }),
+  );
+
+  it.effect.each([undefined, "saved-token"])(
+    "keeps options serializable for an older preload (%s)",
+    (bearerToken) =>
+      Effect.gen(function* () {
+        const base = makeBridge([]);
+        const bridge: DesktopBridge = {
+          ...base,
+          ensureSshEnvironment: (target, options) => {
+            structuredClone(options);
+            return base.ensureSshEnvironment(target, options);
+          },
+        };
+        const prepared = yield* prepareDesktopSshEnvironment(bridge, {
+          target: TARGET,
+          expectedEnvironmentId: EnvironmentId.make("environment-ssh"),
+          ...(bearerToken === undefined ? {} : { bearerToken }),
+          onHostAnswered: Effect.die("An older preload must not receive a callback."),
+        });
+        expect(prepared.bootstrap.target).toEqual(TARGET);
+      }),
   );
 
   it.effect("reconnects with the saved token while it holds every standard scope", () =>
