@@ -341,6 +341,9 @@ The [SSH toolkit](../apps/server/src/mcp/toolkits/ssh/tools.ts) exposes host set
 status, updates, forget, browsing, and thread dispatch; callable capabilities and
 human steps are defined in the [registry](../packages/contracts/src/agentSurface/registry.ts).
 Browse uses `apps/server/src/sshRemote/remoteBrowse.ts`.
+On a Git Bash, MSYS2, or Cygwin host the shell reports `/c/…` paths but GOAT there is native, so
+browse returns `C:\…` paths (`cygpath -w` when present) and launch compares projects case- and
+slash-insensitively; a Windows server also maps a received `/c/…` or `/cygdrive/c/…` root itself.
 Launch goes through `SshRemoteDispatch.launchThread`. When the MCP caller is itself a thread, the
 SSH toolkit asks `RemoteDispatchCoordinator` to persist the dispatch first. That coordinator is
 [`launch-and-remote-dispatch.md`](launch-and-remote-dispatch.md).
