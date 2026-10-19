@@ -18,10 +18,14 @@ import * as NodeOS from "node:os";
 import {
   CHANNEL_HOST_WORKSPACE_LABEL,
   type ChannelInputId,
+  type ChannelConversationId,
   type ChannelReceptionHostFact,
   type ChannelReceptionInput,
+  type ChannelReceptionRead,
+  type ChannelReceptionReadResult,
   type ChannelReceptionResult,
   type ChannelReplyAddress,
+  type ChannelRequester,
   type ChannelTask,
   ChannelReceptionId,
   CHANNEL_RECEPTION_TAIL_LIMITS,
@@ -41,6 +45,9 @@ import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { countHostThreads } from "../mcp/hostStatusModel.ts";
+import * as MemoryAccess from "../memory/MemoryAccess.ts";
+import * as MemoryService from "../memory/MemoryService.ts";
+import * as MemorySyncService from "../memory/MemorySyncService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -52,12 +59,25 @@ import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRemoteWorkers from "./ChannelRemoteWorkers.ts";
 import * as ChannelWake from "./ChannelWake.ts";
 import {
+  appendChannelBotJournal,
   appendChannelBotNote,
   channelBotFilesFor,
   listChannelBotSkills,
   quotedFromInput,
+  readChannelBotJournal,
   readChannelBotNotes,
 } from "./channelBotNotes.ts";
+import {
+  boundRecall,
+  canSeeTask,
+  matchMemoryLines,
+  matchTasks,
+  pullRequestLabel,
+  RECALL_MEMORY_LINES,
+  RECALL_TASK_SCAN,
+  taskDigest,
+  threadDigest,
+} from "./channelBotRecall.ts";
 import { CHANNEL_COPY } from "./channelCopy.ts";
 import { answerForwardIdsFor, deliveryIdFor, taskEventIdFor, taskIdFor } from "./channelIds.ts";
 import { botAddress, chipDelivery, makeTaskEvent, prepareTransition } from "./channelTaskWrites.ts";
@@ -174,6 +194,9 @@ const make = Effect.gen(function* () {
   const botFiles = channelBotFilesFor(path, serverConfig.stateDir);
   const platform = yield* HostProcess.Platform;
   const architecture = yield* HostProcess.Architecture;
+  // Absent in embeddings without memory; the bot then reads only its own notes and journal.
+  const memoryService = yield* Effect.serviceOption(MemoryService.MemoryService);
+  const memorySync = yield* Effect.serviceOption(MemorySyncService.MemorySyncService);
 
   // Facts that do not change while the server runs.
   const linuxName =
@@ -296,6 +319,137 @@ const make = Effect.gen(function* () {
       );
     });
 
+  /** The owner's newest tasks this requester may see. */
+  const visibleTasks = (viewer: ChannelRequester, conversationId: ChannelConversationId) =>
+    ledger
+      .listTasks({ ownerId: viewer.ownerId, limit: RECALL_TASK_SCAN })
+      .pipe(
+        Effect.map((page) => page.tasks.filter((task) => canSeeTask(viewer, task, conversationId))),
+      );
+
+  /**
+   * GOAT memory items for a query, under the requester's own memory access. Empty when memory is
+   * off, not set up, or the requester may not read it.
+   */
+  const searchGoatMemory = (viewer: ChannelRequester, query: string) =>
+    Effect.gen(function* () {
+      if (Option.isNone(memoryService) || Option.isNone(memorySync)) return [];
+      if (!viewer.grantedScopes.includes("memory:read")) return [];
+      const settings = yield* serverSettings.getSettings;
+      if (!settings.memoryEnabled) return [];
+      const readiness = yield* memorySync.value.readLocalReadiness();
+      if (readiness.bootstrap !== "ready" || readiness.memorySpaceId === null) return [];
+      const page = yield* memoryService.value.search(
+        {
+          memorySpaceId: readiness.memorySpaceId,
+          query: query.trim().normalize("NFC"),
+          limit: RECALL_MEMORY_LINES,
+          mode: "fts",
+        },
+        // The requester's scopes were judged for this input; reception holds no other authority.
+        MemoryAccess.memoryAccessPermit(
+          { grantedScopes: viewer.grantedScopes, reauthorize: () => Effect.void, readOnly: true },
+          "read",
+        ),
+      );
+      return page.items.flatMap((item) =>
+        item.status === "active" ? ["- " + item.payload.text.replace(/\s+/gu, " ").trim()] : [],
+      );
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.logInfo("GOAT Bot memory search skipped", { cause }).pipe(Effect.as([])),
+      ),
+    );
+
+  const runRead = (
+    read: ChannelReceptionRead,
+    viewer: ChannelRequester,
+    conversationId: ChannelConversationId,
+  ) =>
+    Effect.gen(function* () {
+      switch (read.kind) {
+        case "memory": {
+          const notes = yield* readChannelBotNotes(fileSystem, botFiles);
+          const journal = yield* readChannelBotJournal(fileSystem, botFiles, { whole: true });
+          const local = matchMemoryLines(notes + "\n" + journal, read.query);
+          const goat = yield* searchGoatMemory(viewer, read.query);
+          if (local.length === 0 && goat.length === 0) return "Nothing in memory matches.";
+          return [
+            ...(local.length === 0 ? [] : ["GOAT Bot notes and journal:", ...local]),
+            ...(goat.length === 0 ? [] : ["GOAT memory:", ...goat]),
+          ].join("\n");
+        }
+        case "work": {
+          const matched = matchTasks(yield* visibleTasks(viewer, conversationId), read.query);
+          return matched.length === 0
+            ? "No work this person may see matches."
+            : matched.map(taskDigest).join("\n\n");
+        }
+        case "thread": {
+          const task = matchTasks(yield* visibleTasks(viewer, conversationId), read.query, 1)[0];
+          if (task === undefined) return "No work this person may see matches.";
+          const worker = task.worker;
+          if (worker === undefined) {
+            return taskDigest(task) + "\nIts coding thread has not started.";
+          }
+          if (worker.host !== undefined) {
+            // Remote threads are read through their reports, which the ledger already holds.
+            return (
+              taskDigest(task) +
+              "\nIts thread runs on " +
+              worker.host +
+              "; only its reports reach this machine."
+            );
+          }
+          const records = yield* threads.getThreadRecords(worker.threadId, ["messages"]);
+          return (
+            taskDigest(task) +
+            "\n" +
+            threadDigest(
+              records.thread.title || task.title,
+              records.messages.map((message) => ({
+                role: message.role,
+                text: message.text,
+                createdAt: DateTime.formatIso(message.createdAt),
+              })),
+            )
+          );
+        }
+        case "conversation": {
+          const found = yield* ledger.searchConversation(conversationId, read.query, 5);
+          return found.length === 0
+            ? "No earlier message in this conversation matches."
+            : found
+                .map(
+                  (entry) =>
+                    "- " +
+                    entry.receivedAt.slice(0, 16) +
+                    " Person: " +
+                    entry.text +
+                    (entry.replyText === undefined ? "" : "\n  GOAT: " + entry.replyText),
+                )
+                .join("\n");
+        }
+      }
+    });
+
+  /** Runs one pass's reads. A read that fails says so instead of failing the reply. */
+  const runReads = (
+    reads: ReadonlyArray<ChannelReceptionRead>,
+    viewer: ChannelRequester,
+    conversationId: ChannelConversationId,
+  ): Effect.Effect<ReadonlyArray<ChannelReceptionReadResult>> =>
+    Effect.forEach(reads, (read) =>
+      runRead(read, viewer, conversationId).pipe(
+        Effect.map((text) => ({ kind: read.kind, query: read.query, text: boundRecall(text) })),
+        Effect.catch((cause) =>
+          Effect.logWarning("GOAT Bot read failed", { kind: read.kind, cause }).pipe(
+            Effect.as({ kind: read.kind, query: read.query, text: "(could not be read)" }),
+          ),
+        ),
+      ),
+    );
+
   const receive: ChannelReceptionService["Service"]["receive"] = (inputId, owner) =>
     Effect.gen(function* () {
       const isHome = yield* home.requireHome.pipe(
@@ -396,8 +550,9 @@ const make = Effect.gen(function* () {
                 const recent = recentThreads(shells, targets, bot?.threadId);
                 const facts = yield* hostFacts(shells);
                 const notes = yield* readChannelBotNotes(fileSystem, botFiles);
+                const journal = yield* readChannelBotJournal(fileSystem, botFiles);
                 const skills = yield* listChannelBotSkills(fileSystem, path, botFiles);
-                return yield* generate({
+                const base: ChannelReceptionInput = {
                   mode: "input",
                   conversationId,
                   originKind: message.kind,
@@ -427,6 +582,12 @@ const make = Effect.gen(function* () {
                     ...(task.resultSummary === undefined
                       ? {}
                       : { resultSummary: task.resultSummary }),
+                    ...((task.worker?.host ?? task.host) === undefined
+                      ? {}
+                      : { host: task.worker?.host ?? task.host }),
+                    ...((task.observed?.pullRequests ?? []).length === 0
+                      ? {}
+                      : { pullRequests: task.observed!.pullRequests.map(pullRequestLabel) }),
                     openQuestions: task.openQuestions.map((question) => ({
                       questionId: question.questionId,
                       text: question.text,
@@ -437,9 +598,25 @@ const make = Effect.gen(function* () {
                   ...(recent.length === 0 ? {} : { recentThreads: recent }),
                   ...(facts.length === 0 ? {} : { hostFacts: facts }),
                   ...(notes === "" ? {} : { notes }),
+                  ...(journal === "" ? {} : { journal }),
                   ...(skills.length === 0 ? {} : { skills }),
                   requester,
-                });
+                };
+                const first = yield* generate({ ...base, readsAllowed: true });
+                if (Option.isNone(first) || first.value.action.type !== "read") return first;
+                // One round of reads, then the answer. Reads run within what this requester
+                // may see; a second request to read is answered with what the pass wrote.
+                const readResults = yield* runReads(
+                  first.value.action.reads,
+                  requester,
+                  conversationId,
+                );
+                const second = yield* generate({ ...base, readsAllowed: false, readResults });
+                return Option.map(second, (result): ChannelReceptionResult =>
+                  result.action.type === "read"
+                    ? { replyText: result.replyText, action: { type: "report_only" } }
+                    : result,
+                );
               }),
             );
 
@@ -724,8 +901,21 @@ const make = Effect.gen(function* () {
           receptionId,
         });
       }
+      if (committed && createdTask !== undefined) {
+        yield* journalEntry(
+          "Started for " + requester.displayName + ": " + createdTask.task.title,
+          now,
+          "start:" + createdTask.task.taskId,
+        );
+      }
       yield* wake.wake;
     });
+
+  /** The journal is a convenience copy of the ledger; failing to write it never fails a reply. */
+  const journalEntry = (entry: string, at: string, key: string) =>
+    appendChannelBotJournal(fileSystem, botFiles, entry, at, key).pipe(
+      Effect.catch((cause) => Effect.logWarning("GOAT Bot journal was not written", { cause })),
+    );
 
   const narrationFor = (task: ChannelTask, event: ChannelLedger.ChannelPendingEvent["event"]) => {
     switch (event.type) {
@@ -831,6 +1021,13 @@ const make = Effect.gen(function* () {
         );
       }
       yield* ledger.completeNarration({ owner, sequence: pending.sequence, deliveries, now });
+      if (
+        pending.event.type === "task.completed" ||
+        pending.event.type === "task.failed" ||
+        pending.event.type === "task.cancelled"
+      ) {
+        yield* journalEntry(base.text + " (" + task.taskId + ")", now, pending.event.eventId);
+      }
       yield* wake.wake;
     });
 

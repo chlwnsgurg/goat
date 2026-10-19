@@ -16,6 +16,36 @@ starts a provider turn there. Replies come from a one-shot, tool-free text gener
 (`generateChannelReception`; Codex and Claude only), not from a session that could queue behind
 work. Chip notifications carry `ledgerTask`; only the ledger writes them.
 
+## What the bot remembers and reads
+
+Questions about past work and memory are answered in reception, without starting a worker,
+because a coding thread costs a minute and a provider session for something the ledger already
+knows. The model still runs no tools: a pass may answer with a `read` action naming up to three
+lookups, the server runs them, and one more pass answers with the results. A second request to
+read is answered with what that pass wrote, so an input costs at most two generations. Reads
+change nothing, so a reception retried after a crash simply reads again.
+
+- **Memory.** Every pass gets the newest 6,000 characters of `goat-bot/memory.md` (standing
+  notes, written only when the person's own message asks, as before) and the newest 3,000 of
+  `goat-bot/journal.md`. The journal is a one-line copy of each task the bot started and how it
+  ended, written by the server when the ledger commits the start or the narration, keyed by that
+  event so a replay writes it once, and trimmed to 64,000 characters. Only the server writes it,
+  so no message can plant text that later passes read as the bot's own record. A `memory` read
+  searches both files and, when memory is on and the requester holds `memory:read`, GOAT memory
+  (`MemoryService.search`, the store agents use). Reception writes GOAT memory only through the
+  coding threads it starts, which get the requester's memory ceiling; summaries of those threads
+  reach memory the usual way.
+- **Work.** A `work` read matches the owner's 200 most recently updated tasks by task id, a
+  linked pull request number or URL, or shared words, and returns each task's request, result,
+  machine, open questions and pull requests with their last known state. A `thread` read adds
+  the last six messages of the task's coding thread on this machine; a thread on another machine
+  is read through the reports already copied into the ledger, never over SSH during reception. A
+  `conversation` read searches older inputs and replies of the same conversation.
+- **Who sees what.** Everyone sees the work of the conversation they write in. A person also sees
+  work they asked for elsewhere, and all of the owner's work when they hold `orchestration:read`.
+  Agents over MCP see only their own conversation. A Slack or iMessage link acts as the GOAT
+  principal who made the link code, so it sees what that principal sees.
+
 An owner has one bot, in the Scratch project, and one bot conversation keyed by the owner rather
 than the thread. Where Scratch is off because the data directory is inside a Git work tree, the bot
 gets a project of its own under the data directory instead: the bot never runs a provider or

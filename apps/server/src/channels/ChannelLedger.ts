@@ -193,6 +193,12 @@ export class ChannelLedger extends Context.Service<
       conversationId: ChannelConversationId,
       limit: number,
     ) => Effect.Effect<ReadonlyArray<ChannelTailEntry>, ChannelLedgerError>;
+    /** Inputs in one conversation whose text or reply contains `query`, newest first. */
+    readonly searchConversation: (
+      conversationId: ChannelConversationId,
+      query: string,
+      limit: number,
+    ) => Effect.Effect<ReadonlyArray<ChannelTailEntry>, ChannelLedgerError>;
     readonly listConversationTasks: (
       conversationId: ChannelConversationId,
     ) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
@@ -909,6 +915,31 @@ const make = Effect.gen(function* () {
         ),
         Effect.mapError(toLedgerError("readConversationTail")),
       ),
+
+    searchConversation: (conversationId, query, limit) => {
+      const pattern = "%" + query.replace(/[\\%_]/gu, (char) => "\\" + char) + "%";
+      return sql<{
+        readonly input_id: ChannelInputId;
+        readonly message_json: string;
+        readonly accepted_at: string;
+        readonly reply_json: string | null;
+      }>`
+        SELECT input_id, message_json, accepted_at, reply_json FROM channel_inbox
+        WHERE conversation_id = ${conversationId} AND state != 'rejected'
+          AND (message_json LIKE ${pattern} ESCAPE '\\' OR reply_json LIKE ${pattern} ESCAPE '\\')
+        ORDER BY accepted_at DESC, input_id DESC LIMIT ${limit}
+      `.pipe(
+        Effect.map((rows) =>
+          rows.map((row) => ({
+            inputId: row.input_id,
+            text: decodeInbound(row.message_json).text,
+            receivedAt: row.accepted_at,
+            replyText: row.reply_json === null ? undefined : decodeReply(row.reply_json).text,
+          })),
+        ),
+        Effect.mapError(toLedgerError("searchConversation")),
+      );
+    },
 
     listConversationTasks: (conversationId) =>
       sql<TaskRow>`

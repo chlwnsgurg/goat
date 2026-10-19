@@ -1050,6 +1050,7 @@ it.layer(layerCodexTextGenerationTest)("channel reception", (it) => {
     answer: "",
     question: "",
     options: [],
+    reads: [],
     remember: "",
     rememberQuote: "",
     notesChangeRequested: "",

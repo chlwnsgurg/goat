@@ -340,7 +340,15 @@ export function makeHarness(
                 const text = world.finalText.get(run.id);
                 return text === undefined
                   ? []
-                  : [{ role: "assistant", text, streaming: false, runId: run.id }];
+                  : [
+                      {
+                        role: "assistant",
+                        text,
+                        streaming: false,
+                        runId: run.id,
+                        createdAt: DateTime.makeUnsafe("2026-10-12T00:05:00.000Z"),
+                      },
+                    ];
               }),
           } as never);
         }) as typeof real.getThreadRecords,
