@@ -14,16 +14,13 @@ const disabled = new Set((NodeProcess.env.GOAT_DISABLED_WORKFLOWS ?? "").split("
 const labels = new Set(["self-hosted", "linux", "x64", "goat", "epyc"]);
 // goat-scope picks the matrix, ci runs it, goat-ci-result aggregates; every job runs on EPYC.
 const goatCiJobs = new Set(["scope", "ci", "screenshot-gate", "result"]);
-const actions = new Set([
-  "actions/checkout@v6",
-  "voidzero-dev/setup-vp@v1",
-  "actions/upload-artifact@v4",
-]);
+// No Actions artifacts anywhere: goat-si is on the free plan and a full artifact
+// quota fails every upload. goat-nightly hands off through a staging draft release.
+const actions = new Set(["actions/checkout@v6", "voidzero-dev/setup-vp@v1"]);
 // goat-nightly.yml signs on the Mac Studio and publishes with the goat-releases App,
 // so it may only run after a successful manual goat-ci run on dev, never from a pull request.
 const nightlyActions = new Set([
   ...actions,
-  "actions/download-artifact@v4",
   "actions/create-github-app-token@v2",
   "dtolnay/rust-toolchain@stable",
 ]);
@@ -302,8 +299,23 @@ function validateNightlyWorkflow(source, yaml) {
     ) {
       fail(`jobs.${name} must not use uses, container or services`);
     }
-    if (JSON.stringify(job.permissions ?? {}).includes("write")) {
-      fail(`jobs.${name} must not request write permissions`);
+    // The staging hand-off (scripts/nightly-staging.ts) reads and writes a draft
+    // release in goat-si/goat, which needs contents: write and nothing else.
+    // prepare verifies the commit and never needs it.
+    if (Object.hasOwn(job, "permissions")) {
+      const permissions = job.permissions;
+      const contentsWrite =
+        isMapping(permissions) &&
+        Object.keys(permissions).length === 1 &&
+        permissions.contents === "write";
+      const readOnly = !JSON.stringify(permissions ?? {}).includes("write");
+      if (name === "prepare" ? !readOnly : !(contentsWrite || readOnly)) {
+        fail(
+          name === "prepare"
+            ? "jobs.prepare must not request write permissions"
+            : `jobs.${name} may only request contents: write`,
+        );
+      }
     }
     if (name === "prepare") {
       if (normalizeExpression(job.if) !== prepareGate)

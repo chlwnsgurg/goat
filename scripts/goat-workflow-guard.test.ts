@@ -334,11 +334,7 @@ describe("goat pre-push workflow guard", () => {
       "all allowed actions",
       workflow({
         ...baseJob,
-        steps: [
-          { uses: "actions/checkout@v6" },
-          { uses: "voidzero-dev/setup-vp@v1" },
-          { uses: "actions/upload-artifact@v4" },
-        ],
+        steps: [{ uses: "actions/checkout@v6" }, { uses: "voidzero-dev/setup-vp@v1" }],
       }),
     ],
     [
@@ -859,6 +855,22 @@ describe("goat pre-push nightly workflow guard", () => {
     expect(result.status).toBe(0);
   });
 
+  it("allows contents: write on jobs that use the staging hand-off", () => {
+    const jobs = nightlyJobs();
+    jobs.build_mac = { ...jobs.build_mac, permissions: { contents: "write" } };
+    jobs.publish = { ...jobs.publish, permissions: { contents: "write" } };
+    jobs.cleanup = {
+      needs: ["prepare", "publish"],
+      if: `${downstreamGateText} && (always())`,
+      "runs-on": "ubuntu-24.04",
+      permissions: { contents: "write" },
+      steps: [checkout(), { run: "node scripts/nightly-staging.ts cleanup" }],
+    };
+    const result = push(nightly(jobs));
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+  });
+
   it("allows the shipped nightly workflow", () => {
     const shipped = NodePath.join(sourceRoot, nightlyPath);
     if (!NodeFS.existsSync(shipped)) return;
@@ -1114,9 +1126,34 @@ describe("goat pre-push nightly workflow guard", () => {
       "must check out ${{ needs.prepare.outputs.sha }} with persist-credentials: false",
     ],
     [
-      "write permissions",
-      withJob("publish", { permissions: { contents: "write" } }),
-      "jobs.publish must not request write permissions",
+      "write permissions beyond contents",
+      withJob("publish", { permissions: { contents: "write", actions: "write" } }),
+      "jobs.publish may only request contents: write",
+    ],
+    [
+      "write-all permissions",
+      withJob("build_mac", { permissions: "write-all" }),
+      "jobs.build_mac may only request contents: write",
+    ],
+    [
+      "a non-contents write permission",
+      withJob("build_other", { permissions: { packages: "write" } }),
+      "jobs.build_other may only request contents: write",
+    ],
+    [
+      "write permissions on prepare",
+      withJob("prepare", { permissions: { contents: "write" } }),
+      "jobs.prepare must not request write permissions",
+    ],
+    [
+      "an Actions artifact upload",
+      withJob("build_mac", { steps: [checkout(), { uses: "actions/upload-artifact@v4" }] }),
+      "jobs.build_mac step 1.uses is not an allowed action",
+    ],
+    [
+      "an Actions artifact download",
+      withJob("build_other", { steps: [{ uses: "actions/download-artifact@v4" }] }),
+      "jobs.build_other step 0.uses is not an allowed action",
     ],
   ])("refuses %s", (_name, content, reason) => {
     const result = push(content);
