@@ -75,6 +75,9 @@ vi.mock("../../state/use-remote-environment-registry", () => ({
   useRemoteConnectionStatus: () => ({ connectedEnvironments: [] }),
 }));
 vi.mock("./useReplying", () => ({ useReplying: () => false }));
+vi.mock("./useMobileGoatBotHomeSettings", () => ({
+  useMobileGoatBotHomeSettings: () => ({ moveTarget: null, error: null }),
+}));
 vi.mock("./useMobileGoatBotSession", () => ({
   useMobileGoatBotSession: () => ({
     availability: "ready",

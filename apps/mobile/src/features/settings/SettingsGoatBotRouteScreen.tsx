@@ -1,25 +1,15 @@
-import type { EnvironmentId, GoatBotHomeClaim } from "@goat/contracts";
-import { useRef, useState } from "react";
+import type { EnvironmentId } from "@goat/contracts";
 import { Text } from "react-native";
 
 import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
-import { uuidv4 } from "../../lib/uuid";
 import { useMobileGoatBotHomeSettings } from "../goat-bot/useMobileGoatBotHomeSettings";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
-import {
-  planMobileGoatBotHomeChange,
-  writeMobileGoatBotHomeChange,
-} from "./mobileGoatBotHomeChange";
-
 /** The home belongs to the cluster, independent of the Settings environment filter. */
 export function SettingsGoatBotRouteScreen() {
-  const { supported, resolution, targets, environments, writableIds, write } =
+  const { supported, resolution, targets, environments, writableIds, busy, error, changeHome } =
     useMobileGoatBotHomeSettings();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const observedMax = useRef<GoatBotHomeClaim | null>(null);
   const claim = resolution.state === "claimed" ? resolution.claim : null;
   const label = (environmentId: EnvironmentId) =>
     environments.find((entry) => entry.environmentId === environmentId)?.label ?? environmentId;
@@ -28,31 +18,11 @@ export function SettingsGoatBotRouteScreen() {
       ? "Loading…"
       : claim === null
         ? "Not chosen yet"
-        : resolution.state === "claimed" && !resolution.homeConnected
-          ? `Waiting for ${label(claim.environmentId)}`
-          : label(claim.environmentId);
-  function changeHome(environmentId: EnvironmentId) {
-    if (busy || resolution.state === "unknown") return;
-    const change = planMobileGoatBotHomeChange({
-      environmentId,
-      targets,
-      writableIds,
-      currentClaim: claim,
-      observedMax: observedMax.current,
-      // oxlint-disable-next-line react/purity -- The row invokes this callback on user selection.
-      now: Date.now(),
-      randomId: uuidv4,
-    });
-    if (change === null) return;
-    observedMax.current = change.claim;
-    setBusy(true);
-    setError(null);
-    void writeMobileGoatBotHomeChange(change, write)
-      .then((success) => {
-        if (!success) setError("Could not save on every computer. Reconnect to sync the choice.");
-      })
-      .finally(() => setBusy(false));
-  }
+        : resolution.state === "claimed" && !resolution.homeKnown
+          ? `Not connected (${claim.environmentId.slice(0, 8)})`
+          : resolution.state === "claimed" && !resolution.homeConnected
+            ? `Waiting for ${label(claim.environmentId)}`
+            : label(claim.environmentId);
   return (
     <SettingsScreen title="GOAT Bot">
       <ScreenScrollView

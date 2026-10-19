@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import type * as SchemaAST from "effect/SchemaAST";
 
 import {
   validateMemoryGenerationResult,
@@ -14,7 +15,11 @@ import { formatGeneratedBranchName, sanitizeFeatureBranchName } from "@goat/shar
 import { extractJsonObject } from "@goat/shared/schemaJson";
 
 import { buildChannelReceptionPrompt, toChannelReceptionResult } from "./channelReceptionPrompt.ts";
-import { buildMemoryConflictPrompt, buildMemorySummaryPrompt } from "./memoryGenerationPrompts.ts";
+import {
+  buildMemoryConflictPrompt,
+  buildMemorySummaryPrompt,
+  memoryResultFromModelOutput,
+} from "./memoryGenerationPrompts.ts";
 import { unsupportedMemoryRunner, type MemoryRunner } from "./memoryGenerationRunner.ts";
 export type { MemoryRunner } from "./memoryGenerationRunner.ts";
 import type { ProviderTextGeneration } from "./textGeneration.ts";
@@ -36,6 +41,13 @@ export const isMemoryOperation = (
   operation: Operation,
 ): operation is "resolveMemoryConflict" | "generateMemorySummary" =>
   operation === "resolveMemoryConflict" || operation === "generateMemorySummary";
+
+/**
+ * Parse options for a provider's raw structured output. Memory output is authority-bearing, so a
+ * key outside its schema fails the decode instead of being silently dropped.
+ */
+export const outputDecodeOptions = (operation: Operation): SchemaAST.ParseOptions | undefined =>
+  isMemoryOperation(operation) ? { onExcessProperty: "error" } : undefined;
 const sameMemorySelection = (
   a: import("@goat/contracts").MemoryModelSelection,
   b: import("@goat/contracts").MemoryModelSelection,
@@ -93,7 +105,7 @@ export const decodeJsonReply = <S extends Schema.Top>(
   text: string,
 ) => {
   const decodeOutput = Schema.decodeEffect(Schema.fromJsonString(request.outputSchema));
-  return decodeOutput(extractJsonObject(text)).pipe(
+  return decodeOutput(extractJsonObject(text), outputDecodeOptions(request.operation)).pipe(
     Effect.mapError(
       (cause) =>
         new TextGenerationError({
@@ -129,9 +141,10 @@ export function fromRunner(
         modelSelection: input.modelSelection,
         ...request,
       });
-      const result = yield* decodeMemoryConflictExecution(generated, {
-        onExcessProperty: "error",
-      }).pipe(
+      const result = yield* decodeMemoryConflictExecution(
+        { ...generated, result: memoryResultFromModelOutput(generated.result) },
+        { onExcessProperty: "error" },
+      ).pipe(
         Effect.mapError(
           (cause) =>
             new TextGenerationError({
@@ -161,9 +174,10 @@ export function fromRunner(
         modelSelection: input.modelSelection,
         ...request,
       });
-      const result = yield* decodeMemorySummaryExecution(generated, {
-        onExcessProperty: "error",
-      }).pipe(
+      const result = yield* decodeMemorySummaryExecution(
+        { ...generated, result: memoryResultFromModelOutput(generated.result) },
+        { onExcessProperty: "error" },
+      ).pipe(
         Effect.mapError(
           (cause) =>
             new TextGenerationError({

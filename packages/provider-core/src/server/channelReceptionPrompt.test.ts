@@ -21,6 +21,7 @@ const emptyOutput = {
   answer: "",
   question: "",
   options: [],
+  clarifyAbout: "other",
   reads: [],
   remember: "",
   rememberQuote: "",
@@ -119,6 +120,26 @@ describe("channel reception note request conversion", () => {
       expect(result).not.toHaveProperty("rememberQuote");
       expect(result).not.toHaveProperty("remember");
     }
+  });
+});
+
+describe("channel reception project questions and other machines", () => {
+  it("marks a clarify about a project so the server can word it", () => {
+    expect(
+      convert({
+        action: "clarify",
+        question: "Which project?",
+        options: [],
+        clarifyAbout: "project",
+      }),
+    ).toEqual({
+      replyText: "Okay.",
+      action: { type: "clarify", question: "Which project?", about: "project" },
+    });
+    expect(
+      convert({ action: "clarify", question: "Which task?", options: [], clarifyAbout: "other" })
+        .action,
+    ).toEqual({ type: "clarify", question: "Which task?" });
   });
 });
 

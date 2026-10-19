@@ -1245,6 +1245,31 @@ export function goatBotHomeClaimSupersedes(
   return current === null || compareGoatBotHomeClaims(next, current) > 0;
 }
 
+/**
+ * A claim that supersedes `observedMax`. Advancing the observed logical clock keeps moving home
+ * working after clock rollback. Clients and the server's own claim share it.
+ */
+export function newGoatBotHomeClaim({
+  environmentId,
+  now,
+  observedMax,
+  randomId,
+}: {
+  environmentId: EnvironmentId;
+  now: number;
+  observedMax: GoatBotHomeClaim | null;
+  randomId: () => string;
+}): GoatBotHomeClaim {
+  return {
+    environmentId,
+    claimedAt: Math.min(
+      Number.MAX_SAFE_INTEGER,
+      Math.max(0, Math.trunc(now), (observedMax?.claimedAt ?? -1) + 1),
+    ),
+    claimId: randomId(),
+  };
+}
+
 export const ServerSettings = Schema.Struct({
   memoryOwnerSourceReadPolicyVersion: NonNegativeInt.pipe(
     Schema.withDecodingDefault(Effect.succeed(0)),

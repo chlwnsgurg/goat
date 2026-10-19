@@ -1,7 +1,12 @@
 // @effect-diagnostics cryptoRandomUUID:off - browser home claims use the platform UUID source.
+import {
+  planGoatBotHomeChange,
+  writeGoatBotHomeChange,
+  pickGoatBotHomeMoveTarget,
+} from "@goat/client-runtime/goatBot/home";
 import { createGoatBotHomeSync, resolveGoatBotHomeSelection } from "@goat/client-runtime/goatBot";
 import { AuthSettingsWriteScope, type EnvironmentId, type GoatBotHomeClaim } from "@goat/contracts";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useGlobalAgentStore } from "~/globalAgentStore";
 import { serverEnvironment } from "~/state/server";
@@ -32,7 +37,45 @@ export function useGoatBotHomeSettings() {
       return false;
     }
   };
-  return { ...home, environments, writableIds, write };
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const observedMax = useRef<GoatBotHomeClaim | null>(null);
+  const moveTargetId = pickGoatBotHomeMoveTarget({
+    targets: home.targets,
+    writableIds,
+    primaryEnvironmentId: environments.find((entry) => entry.primary)?.environmentId ?? null,
+  });
+  const moveTarget =
+    moveTargetId === null
+      ? null
+      : {
+          environmentId: moveTargetId,
+          label:
+            environments.find((entry) => entry.environmentId === moveTargetId)?.label ??
+            moveTargetId.slice(0, 8),
+        };
+  function changeHome(environmentId: EnvironmentId) {
+    if (busy || home.resolution.state === "unknown") return;
+    const change = planGoatBotHomeChange({
+      environmentId,
+      targets: home.targets,
+      writableIds,
+      currentClaim: home.resolution.state === "claimed" ? home.resolution.claim : null,
+      observedMax: observedMax.current,
+      now: Date.now(),
+      randomId: () => crypto.randomUUID(),
+    });
+    if (change === null) return;
+    observedMax.current = change.claim;
+    setBusy(true);
+    setError(null);
+    void writeGoatBotHomeChange(change, write)
+      .then((success) => {
+        if (!success) setError("Could not save on every computer. Reconnect to sync the choice.");
+      })
+      .finally(() => setBusy(false));
+  }
+  return { busy, error, changeHome, moveTarget, ...home, environments, writableIds, write };
 }
 
 /** Mounted once by the sidebar; readers elsewhere never create or replicate a claim. */

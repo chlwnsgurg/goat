@@ -45,6 +45,10 @@ vi.mock("~/lib/archivedThreadsState", () => ({
   useArchivedThreadSnapshots: () => ({ snapshots: [], isLoading: false, error: null }),
 }));
 
+vi.mock("./useGoatBotHome", () => ({
+  useGoatBotHomeSettings: () => ({ moveTarget: null, busy: false, error: null }),
+}));
+
 import { GoatBotThreadView } from "./GoatBotThreadView";
 
 let root: Root;

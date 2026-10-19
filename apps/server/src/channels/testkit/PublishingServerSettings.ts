@@ -17,7 +17,8 @@ export const layer = (overrides: DeepPartial<Settings> = {}) =>
       const publish = (next: Settings) => PubSub.publish(changes, next);
       return ServerSettings.ServerSettingsService.of({
         ...settings,
-        updateSettings: (patch) => settings.updateSettings(patch).pipe(Effect.tap(publish)),
+        updateSettings: (patch, authorizeAtCommit) =>
+          settings.updateSettings(patch, authorizeAtCommit).pipe(Effect.tap(publish)),
         updateProviderInstance: (mutation, patch) =>
           settings.updateProviderInstance(mutation, patch).pipe(Effect.tap(publish)),
         streamChanges: Stream.fromPubSub(changes),

@@ -1,10 +1,7 @@
 import { resolveGoatBotHome, type GoatBotHomeTarget } from "@goat/client-runtime/goatBot/home";
 import { EnvironmentId, compareGoatBotHomeClaims } from "@goat/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
-import {
-  planMobileGoatBotHomeChange,
-  writeMobileGoatBotHomeChange,
-} from "./mobileGoatBotHomeChange";
+import { planGoatBotHomeChange, writeGoatBotHomeChange } from "./home.ts";
 
 const a = EnvironmentId.make("A"),
   b = EnvironmentId.make("B");
@@ -27,15 +24,15 @@ const input = () => ({
   randomId: () => "next",
 });
 
-describe("mobile GOAT Bot settings home changes", () => {
+describe("GOAT Bot home changes", () => {
   it("moves A to B to A after a partial failure and clock rollback", async () => {
-    const toB = planMobileGoatBotHomeChange(input())!;
+    const toB = planGoatBotHomeChange(input())!;
     const writeB = vi.fn(async (environmentId: EnvironmentId) => environmentId === b);
-    expect(await writeMobileGoatBotHomeChange(toB, writeB)).toBe(false);
+    expect(await writeGoatBotHomeChange(toB, writeB)).toBe(false);
     expect(writeB.mock.calls.map(([id]) => id)).toEqual([a, b]);
     expect(toB.claim.claimedAt).toBe(101);
     // The settings snapshot may still show A while B's accepted write is in flight.
-    const toA = planMobileGoatBotHomeChange({
+    const toA = planGoatBotHomeChange({
       ...input(),
       environmentId: a,
       observedMax: toB.claim,
@@ -45,7 +42,7 @@ describe("mobile GOAT Bot settings home changes", () => {
     expect(compareGoatBotHomeClaims(toA.claim, toB.claim)).toBeGreaterThan(0);
     let snapshots = [target(a), { ...target(b), home: toB.claim }];
     expect(
-      await writeMobileGoatBotHomeChange(toA, async (id, claim) => {
+      await writeGoatBotHomeChange(toA, async (id, claim) => {
         snapshots = snapshots.map((entry) =>
           entry.environmentId === id ? { ...entry, home: claim } : entry,
         );
@@ -59,9 +56,9 @@ describe("mobile GOAT Bot settings home changes", () => {
     });
   });
   it("can retry the same selection when no server read back the previous write", async () => {
-    const failed = planMobileGoatBotHomeChange(input())!;
-    expect(await writeMobileGoatBotHomeChange(failed, async () => false)).toBe(false);
-    const retry = planMobileGoatBotHomeChange({
+    const failed = planGoatBotHomeChange(input())!;
+    expect(await writeGoatBotHomeChange(failed, async () => false)).toBe(false);
+    const retry = planGoatBotHomeChange({
       ...input(),
       observedMax: failed.claim,
       randomId: () => "retry",
@@ -70,17 +67,17 @@ describe("mobile GOAT Bot settings home changes", () => {
     expect(retry.claim.claimedAt).toBe(102);
   });
   it("does not issue a claim to an offline or unauthorized selected computer", () => {
-    expect(planMobileGoatBotHomeChange({ ...input(), writableIds: new Set([a]) })).toBeNull();
+    expect(planGoatBotHomeChange({ ...input(), writableIds: new Set([a]) })).toBeNull();
     expect(
-      planMobileGoatBotHomeChange({
+      planGoatBotHomeChange({
         ...input(),
         targets: [target(a), { ...target(b), connected: false }],
       }),
     ).toBeNull();
-    expect(planMobileGoatBotHomeChange({ ...input(), environmentId: a })).toBeNull();
+    expect(planGoatBotHomeChange({ ...input(), environmentId: a })).toBeNull();
   });
   it("writes only to connected supporting writable servers and reports a rejected write", async () => {
-    const change = planMobileGoatBotHomeChange({
+    const change = planGoatBotHomeChange({
       ...input(),
       targets: [
         target(a),
@@ -95,7 +92,7 @@ describe("mobile GOAT Bot settings home changes", () => {
       if (id === a) throw new Error("disconnected");
       return true;
     });
-    expect(await writeMobileGoatBotHomeChange(change, write)).toBe(false);
+    expect(await writeGoatBotHomeChange(change, write)).toBe(false);
     expect(write).toHaveBeenCalledTimes(2);
   });
 });
