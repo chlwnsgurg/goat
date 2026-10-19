@@ -18,6 +18,7 @@ import {
   RuntimeRequestId,
   ScheduledTaskId,
   ThreadId,
+  TextGenerationError,
   type ThreadPullRequestLink,
 } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
@@ -1723,6 +1724,37 @@ describe("who may do what (scenario 4)", () => {
     },
   );
 
+  it.effect("words a project question from real projects, not the model's options", () => {
+    const harness = makeHarness({ projects: 2 });
+    harness.script.current = (input) =>
+      input.mode === "input"
+        ? Effect.succeed({
+            replyText: "Which project? goat-si, jun, or developer?",
+            action: {
+              type: "clarify" as const,
+              question: "Which project? goat-si, jun, or developer?",
+              options: ["goat-si", "jun", "developer"],
+              about: "project" as const,
+            },
+          })
+        : defaultScript(input);
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const receipt = yield* gateway.ingest(
+        goatInput("fix the flaky test", "project-q"),
+        rpcContext,
+      );
+      yield* runtime.drain;
+      const reply = (yield* ledger.getInput(receipt.inputId))?.snapshot.reply?.text ?? "";
+      assert.include(reply, "Which project should I use?");
+      assert.notInclude(reply, "goat-si");
+      assert.strictEqual(harness.world.launches.length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("asks instead of guessing when the project is not clear", () => {
     const harness = makeHarness({ projects: 2 });
     return Effect.gen(function* () {
@@ -1822,6 +1854,79 @@ describe("who may do what (scenario 4)", () => {
       const later = seen.find((input) => input.inputText === "what machine is this?");
       assert.include(later?.notes ?? "", "Reply in Korean. (asked in " + receipt.inputId + ")");
       assert.include((later?.hostFacts ?? []).map((fact) => fact.value).join("\n"), "test-machine");
+      assert.strictEqual(harness.world.launches.length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+  it.effect("keeps the failure reason when the answer after a read fails", () => {
+    const harness = makeHarness();
+    const passes: Array<boolean | undefined> = [];
+    harness.script.current = (input) => {
+      if (input.mode !== "input") return defaultScript(input);
+      passes.push(input.readsAllowed);
+      return input.readsAllowed === true
+        ? Effect.succeed({
+            replyText: "",
+            action: {
+              type: "read" as const,
+              reads: [{ kind: "memory" as const, query: "deploy" }],
+            },
+          })
+        : Effect.fail(
+            new TextGenerationError({
+              operation: "generateChannelReception",
+              detail: "Codex CLI request timed out.",
+            }),
+          );
+    };
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const receipt = yield* gateway.ingest(
+        goatInput("what did I deploy?", "read-fail"),
+        rpcContext,
+      );
+      yield* runtime.drain;
+      assert.deepStrictEqual(passes, [true, false]);
+      assert.deepStrictEqual((yield* ledger.getInput(receipt.inputId))?.snapshot.failure, {
+        reason: "reception_failed",
+        message: CHANNEL_COPY.receptionFailedBecause.timeout,
+      });
+      assert.strictEqual(harness.world.launches.length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect.each([
+    {
+      kind: "schema_rejected",
+      detail:
+        'Codex CLI command failed: {"error":{"message":"Invalid schema for response_format \'codex_output_schema\'","code":"invalid_json_schema"},"status":400}',
+    },
+    { kind: "unavailable", detail: "This provider does not support channel reception." },
+  ] as const)("tells the person reception failed because of $kind", ({ kind, detail }) => {
+    const harness = makeHarness();
+    harness.script.current = (input) =>
+      input.mode === "input"
+        ? Effect.fail(new TextGenerationError({ operation: "generateChannelReception", detail }))
+        : defaultScript(input);
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const receipt = yield* gateway.ingest(
+        goatInput("what machine is this?", "fail-1"),
+        rpcContext,
+      );
+      yield* runtime.drain;
+      const failure = (yield* ledger.getInput(receipt.inputId))?.snapshot.failure;
+      assert.deepStrictEqual(failure, {
+        reason: "reception_failed",
+        message: CHANNEL_COPY.receptionFailedBecause[kind],
+      });
+      // Provider output stays in the server log.
+      assert.notInclude(failure?.message ?? "", detail);
       assert.strictEqual(harness.world.launches.length, 0);
     }).pipe(Effect.provide(harness.layer));
   });

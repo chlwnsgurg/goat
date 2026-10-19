@@ -13,7 +13,7 @@ import {
 } from "./availability.ts";
 
 const primary = EnvironmentId.make("primary");
-const remote = EnvironmentId.make("remote");
+const remote = EnvironmentId.make("remote-computer-id");
 const botThread = ThreadId.make("bot");
 
 const env = (
@@ -242,7 +242,12 @@ describe("cluster home availability", () => {
         botRef: remembered,
         ensure: { state: "confirmed", bot: remembered },
       }),
-    ).toEqual({ kind: "home_offline", environmentId: remote, label: remote });
+    ).toEqual({
+      kind: "home_offline",
+      known: false,
+      environmentId: remote,
+      label: remote.slice(0, 8),
+    });
   });
   it("names a disconnected home and blocks sending", () => {
     const offline = homeEnv(remote, claim, {
@@ -263,6 +268,7 @@ describe("cluster home availability", () => {
     });
     expect(availability).toEqual({
       kind: "home_offline",
+      known: true,
       environmentId: remote,
       label: "Remote Mac",
     });

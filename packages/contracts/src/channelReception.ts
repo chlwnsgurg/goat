@@ -228,6 +228,8 @@ export const ChannelReceptionAction = Schema.Union([
     question: TrimmedNonEmptyString,
     /** Short answers the person can pick instead of typing one. */
     options: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+    /** The question picks a project; the server words it from the projects it would offer. */
+    about: Schema.optional(Schema.Literal("project")),
   }),
   Schema.Struct({ type: Schema.Literal("report_only") }),
 ]);

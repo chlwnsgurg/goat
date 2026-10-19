@@ -85,7 +85,9 @@ export type GoatMcpToolSummaryAction =
   | "channel-reply"
   | "channel-task-read"
   | "channel-task-report"
-  | "channel-task-move";
+  | "channel-task-move"
+  | "channel-bot-home-read"
+  | "channel-bot-home-claim";
 
 export interface GoatMcpToolDefinition {
   readonly displayName: string;
@@ -500,6 +502,14 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
   channel_task_report: tool(
     ["Report on", "Reporting on", "Reported on", "a GOAT ledger task"],
     "channel-task-report",
+  ),
+  channel_bot_home: tool(
+    ["Check", "Checking", "Checked", "where GOAT Bot lives"],
+    "channel-bot-home-read",
+  ),
+  channel_bot_home_claim: tool(
+    ["Move", "Moving", "Moved", "GOAT Bot to this machine"],
+    "channel-bot-home-claim",
   ),
 };
 

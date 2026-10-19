@@ -25,6 +25,7 @@ const result = { text: "Synthetic result", assertionKind: "inference" as const, 
 
 import { withMemoryExecution, type MemorySelectedRunner } from "./memoryGenerationRunner.ts";
 import { buildMemorySummaryPrompt } from "./memoryGenerationPrompts.ts";
+import { outputDecodeOptions } from "./textGenerationOperations.ts";
 describe("memory generation runner", () => {
   it.effect("binds requested instance environment and effective selection before returning", () =>
     Effect.gen(function* () {
@@ -98,10 +99,11 @@ describe("memory generation runner", () => {
   it.effect("rejects forged execution fields inside model JSON", () =>
     Effect.gen(function* () {
       const selected: MemorySelectedRunner = (request) =>
-        Schema.decodeUnknownEffect(request.outputSchema)({
-          ...result,
-          execution: { environmentId: "forged" },
-        }).pipe(
+        // Providers decode raw memory output with outputDecodeOptions; this fixture does the same.
+        Schema.decodeUnknownEffect(request.outputSchema)(
+          { ...result, execution: { environmentId: "forged" } },
+          outputDecodeOptions(request.operation),
+        ).pipe(
           Effect.map((result) => ({ result, effectiveModel: "effective" })),
           Effect.mapError(
             (cause) =>

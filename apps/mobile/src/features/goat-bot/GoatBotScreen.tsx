@@ -11,6 +11,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useHomeThreadSelection } from "../home/home-thread-navigation";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
+import { useMobileGoatBotHomeSettings } from "./useMobileGoatBotHomeSettings";
 import { useMobileGoatBotSession } from "./useMobileGoatBotSession";
 import { GoatBotBubble, GoatBotTypingIndicator } from "./GoatBotBubble";
 import { GoatBotDayStamp } from "./GoatBotDayStamp";
@@ -232,6 +233,8 @@ export function GoatBotScreen(props: {
   readonly onSelectThread?: (thread: ThreadSelection) => void;
 }) {
   const session = useMobileGoatBotSession(props.visible);
+  const homeSettings = useMobileGoatBotHomeSettings();
+  const moveTarget = homeSettings.moveTarget;
   const { themeAppearance } = useAppearancePreferences();
   const bodyText = useScaledTextRole("body");
   const outgoingColor = GOAT_BOT_BUBBLE_COLORS[themeAppearance].out;
@@ -273,11 +276,25 @@ export function GoatBotScreen(props: {
         >
           <Text className="text-sm text-foreground-muted">
             {session.availability === "home_offline"
-              ? `GOAT Bot runs on ${session.homeLabel}. It will continue when that computer connects.`
+              ? session.homeKnown
+                ? `GOAT Bot runs on ${session.homeLabel}, which isn't connected.`
+                : `GOAT Bot's home (${session.homeLabel}) isn't a computer this app knows.`
               : session.availability === "error"
                 ? (session.error ?? availabilityCopy.error)
                 : availabilityCopy[session.availability]}
           </Text>
+          {session.availability === "home_offline" && moveTarget ? (
+            <Pressable
+              accessibilityRole="button"
+              disabled={homeSettings.busy}
+              onPress={() => {
+                if (moveTarget) homeSettings.changeHome(moveTarget.environmentId);
+              }}
+              className="self-start rounded-lg border border-border px-3 py-2"
+            >
+              <Text className="text-sm text-foreground">Move GOAT Bot to {moveTarget.label}</Text>
+            </Pressable>
+          ) : null}
           {session.availability === "error" || session.availability === "legacy_active" ? (
             <Pressable
               accessibilityRole="button"
@@ -288,6 +305,11 @@ export function GoatBotScreen(props: {
             </Pressable>
           ) : null}
         </View>
+      ) : null}
+      {homeSettings.error ? (
+        <Text accessibilityRole="alert" className="px-4 py-2 text-sm text-danger-foreground">
+          {homeSettings.error}
+        </Text>
       ) : null}
       <NativeScrollViewMarker style={{ flex: 1 }}>
         <LegendList

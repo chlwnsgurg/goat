@@ -44,6 +44,7 @@ export const ChannelReceptionModelOutput = Schema.Struct({
   question: Schema.String,
   options: Schema.Array(Schema.String),
   reads: Schema.Array(Schema.Struct({ kind: ChannelReceptionReadKind, query: Schema.String })),
+  clarifyAbout: Schema.Literals(["project", "other"]),
   remember: Schema.String,
   rememberQuote: Schema.String,
   notesChangeRequested: Schema.String,
@@ -158,6 +159,7 @@ function toActionResult(
           type: "clarify",
           question: output.question,
           ...(options.length < 2 ? {} : { options }),
+          ...(output.clarifyAbout === "project" ? { about: "project" } : {}),
         },
       });
     }
@@ -195,7 +197,9 @@ export function buildChannelReceptionPrompt(input: ChannelReceptionInput) {
   const projects = input.allowedTargets
     .map((target) => "- project " + target.projectId + ": " + target.label)
     .join("\n");
-  const hosts = (input.allowedHosts ?? []).map((host) => "- " + host).join("\n");
+  const hosts = (input.allowedHosts ?? [])
+    .map((host) => "- " + host + " (configured; reachability not checked)")
+    .join("\n");
   const threads = (input.recentThreads ?? [])
     .map(
       (thread) =>
@@ -260,6 +264,7 @@ export function buildChannelReceptionPrompt(input: ChannelReceptionInput) {
     "- Never invent facts or results. If something is not below and you did not start work to find out, say you have not checked it.",
     "- Never say work is finished unless the update says it is.",
     "- When the person asks to continue a task on another machine because its remote machine stopped answering, choose move_task and pick host from allowedHosts (the other machines listed below).",
+    "- Questions about which other machines you can see or reach are answered with report_only from the list of other machines below; say their reachability was not checked. Asking to connect to one, test it, or run work there starts a coding agent with host set.",
     "",
     "Style: one to three short sentences, warm and plain, outcome first. No internal ids unless the person needs them.",
     "",
@@ -276,10 +281,10 @@ export function buildChannelReceptionPrompt(input: ChannelReceptionInput) {
     "- move_task: continue a listed task whose remote machine stopped answering on another machine at the person’s request. Fill taskId and host; host must be one of allowedHosts listed below.",
     "- status: the person asks about work listed below in this conversation. Set taskId when one task is meant.",
     "- answer_question: the message answers one listed open question. Fill taskId, questionId, answer.",
-    "- clarify: only when the message is too unclear to start any work, or it could mean several listed tasks or recent threads equally well. Fill question and put the same question in replyText. When the answer is one of a few concrete choices, such as a task, a recent thread, or a project listed below, put two to four of them in options, recommended first, each worded as the person's short reply. Otherwise leave options empty.",
+    "- clarify: only when the message is too unclear to start any work, or it could mean several listed tasks or recent threads equally well. Fill question and put the same question in replyText. When the answer is one of a few concrete choices, such as a task, a recent thread, or a project listed below, put two to four of them in options, recommended first, each worded as the person's short reply. Otherwise leave options empty. Set clarifyAbout to project when the question asks which project to use, else other.",
     "- report_only: direct answers, remembering a note, small talk, and always for task updates.",
     "",
-    "Return a JSON object with every key: replyText, action, title, instruction, projectId, host, taskId, questionId, answer, question, options, reads, remember, rememberQuote, notesChangeRequested. Use an empty string for text keys the action does not use, an empty list for options unless the action is clarify, an empty list for reads unless the action is read, empty remember and rememberQuote unless the new message asks to keep something, and an empty notesChangeRequested unless a create_task changes or forgets a note at the person's request.",
+    "Return a JSON object with every key: replyText, action, title, instruction, projectId, host, taskId, questionId, answer, question, options, clarifyAbout, reads, remember, rememberQuote, notesChangeRequested. Use other for clarifyAbout unless the action is clarify about a project, an empty string for text keys the action does not use, an empty list for options unless the action is clarify, an empty list for reads unless the action is read, empty remember and rememberQuote unless the new message asks to keep something, and an empty notesChangeRequested unless a create_task changes or forgets a note at the person's request.",
     "",
     "This machine (where you and new work run unless a host is set):",
     hostFacts === "" ? "(not available)" : hostFacts,

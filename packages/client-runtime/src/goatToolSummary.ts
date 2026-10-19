@@ -514,6 +514,15 @@ export function summarizeGoatToolCalls(
     case "channel-task-report":
       label = phrase("Reported", "report", `on GOAT ledger tasks ${times}`);
       break;
+    case "channel-bot-home-read":
+      label = phrase("Checked", "check", `where GOAT Bot lives ${times}`);
+      break;
+    case "channel-bot-home-claim":
+      // claimed:false means a newer claim for another machine won; nothing moved.
+      label = completed.some((call) => call.output?.claimed === true)
+        ? "Moved GOAT Bot to this machine"
+        : "Tried to move GOAT Bot to this machine";
+      break;
   }
   return { label, failedCount };
 }
