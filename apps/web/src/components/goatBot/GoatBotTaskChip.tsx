@@ -57,23 +57,29 @@ export function GoatBotTaskChip({
       )}
     >
       <div className="overflow-hidden rounded-2xl">
-        <div className="flex items-center gap-1.5 bg-black/5 px-3 py-2 text-xs font-medium dark:bg-white/5">
+        <div className="flex items-center gap-1.5 px-3 pt-2.5 text-2xs leading-4 font-medium">
           <Icon className={cn("size-3.5 shrink-0", TONE_TEXT[card.tone])} />
           <span className="truncate">{card.statusLabel}</span>
           {card.attentionLabel ? (
             <span className="ml-auto shrink-0 text-warning-foreground">{card.attentionLabel}</span>
           ) : null}
         </div>
-        <div className="space-y-1.5 px-3 py-2.5">
-          <div className="text-base font-semibold break-words">{card.title}</div>
+        <div className="space-y-1.5 px-3 pt-1.5 pb-2">
+          <div className="goat-task-title font-semibold break-words">{card.title}</div>
           {card.summary ? (
-            <p className="line-clamp-2 text-xs text-muted-foreground">{card.summary}</p>
+            <p className="goat-task-summary line-clamp-3 text-goat-bubble-in-foreground/80">
+              {card.summary}
+            </p>
           ) : null}
           {card.sourceLabel ? (
-            <div className="truncate text-xs text-muted-foreground">{card.sourceLabel}</div>
+            <div className="truncate text-xs text-goat-bubble-in-foreground/65">
+              {card.sourceLabel}
+            </div>
           ) : null}
           {card.continuationLabel ? (
-            <div className="truncate text-xs text-muted-foreground">{card.continuationLabel}</div>
+            <div className="truncate text-xs text-goat-bubble-in-foreground/65">
+              {card.continuationLabel}
+            </div>
           ) : null}
           {card.pullRequests.length > 0 ? (
             <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-xs">

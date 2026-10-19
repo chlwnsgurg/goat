@@ -43,10 +43,9 @@ export function GoatBotComposer({
     <form onSubmit={handleSubmit} className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-4">
       <div
         className={cn(
-          "flex items-end gap-2 border border-input bg-background py-1 pr-1 pl-3.5 shadow-xs/5 transition-shadow focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/24 focus-within:ring-inset",
+          "goat-composer-field flex items-end gap-2 py-1 pr-1 pl-3.5",
           disabled && "opacity-64",
         )}
-        style={{ borderRadius: 20 }}
       >
         <textarea
           rows={1}
@@ -56,15 +55,14 @@ export function GoatBotComposer({
           disabled={disabled}
           onChange={(event) => setText(event.currentTarget.value)}
           onKeyDown={handleKeyDown}
-          className="field-sizing-content max-h-48 min-h-7 flex-1 resize-none self-center bg-transparent py-1 text-foreground outline-none placeholder:text-muted-foreground"
-          style={{ fontSize: 15 }}
+          className="field-sizing-content max-h-48 min-h-7 flex-1 resize-none self-center bg-transparent py-1 font-(family-name:--font-composer,var(--font-sans)) text-(length:--font-size-prompt,var(--text-sm)) text-foreground outline-none placeholder:text-muted-foreground max-sm:pointer-coarse:text-(length:--font-size-prompt-touch)"
         />
         <button
           type="submit"
           aria-label="Send"
           disabled={disabled || trimmed.length === 0}
           className={cn(
-            "flex size-7 shrink-0 items-center justify-center rounded-full bg-goat-bubble-out text-white",
+            "goat-bubble-out-fill flex size-7 shrink-0 items-center justify-center rounded-full text-white",
             trimmed.length === 0 && "invisible",
           )}
         >

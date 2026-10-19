@@ -145,12 +145,12 @@ function GoatBotConversationRow({
       render={<Link to={GOAT_BOT_PATH} />}
     >
       <span
-        className="flex size-2 shrink-0 items-center justify-center group-data-[collapsible=icon]:absolute group-data-[collapsible=icon]:right-0 group-data-[collapsible=icon]:top-0"
+        className="flex size-2.5 shrink-0 items-center justify-center group-data-[collapsible=icon]:absolute group-data-[collapsible=icon]:right-0 group-data-[collapsible=icon]:top-0"
         aria-hidden={!preview?.unread}
       >
         {preview?.unread ? (
           <span
-            className="size-2 rounded-full bg-info"
+            className="size-2.5 rounded-full bg-info"
             role="img"
             aria-label="Unread GOAT Bot messages"
           />
@@ -159,7 +159,15 @@ function GoatBotConversationRow({
       <GoatBotAvatar size="sm" />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5 group-data-[collapsible=icon]:hidden">
         <span className="flex min-w-0 items-center gap-2">
-          <span className="min-w-0 flex-1 truncate">GOAT Bot</span>
+          <span
+            className={
+              preview?.unread
+                ? "min-w-0 flex-1 truncate font-semibold text-sidebar-foreground"
+                : "min-w-0 flex-1 truncate"
+            }
+          >
+            GOAT Bot
+          </span>
           {at ? (
             <span
               data-slot="goat-bot-relative-time"
@@ -175,7 +183,13 @@ function GoatBotConversationRow({
           ) : null}
         </span>
         {preview ? (
-          <span className="truncate text-xs font-normal text-sidebar-muted-foreground">
+          <span
+            className={
+              preview.unread
+                ? "truncate text-xs font-normal text-sidebar-foreground/75"
+                : "truncate text-xs font-normal text-sidebar-muted-foreground"
+            }
+          >
             {preview.text}
           </span>
         ) : null}

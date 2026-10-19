@@ -4,6 +4,7 @@ import { useState, type ReactNode } from "react";
 
 import { APP_DISPLAY_NAME } from "~/branding";
 import { isElectron } from "~/env";
+import { ChevronRightIcon } from "~/components/solar";
 import { GOAT_BOT_PATH, type GlobalAgentLegacyRoute } from "~/globalAgentRoute";
 
 import { Button } from "../ui/button";
@@ -67,24 +68,28 @@ export function GoatBotChatView({
   const ready = availability.kind === "ready" && !removed;
   const canSend = !removed && canSendToGoatBot(availability, canOperate);
   const [seed, setSeed] = useState<{ text: string; nonce: number } | null>(null);
+  const headerStatus =
+    removal === "archived"
+      ? "Archived"
+      : removal === "deleted"
+        ? "Deleted"
+        : removal === "unchecked"
+          ? "Couldn't check this chat"
+          : availability.kind === "ready"
+            ? null
+            : statusLine(availability);
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
       <WorkspacePageHeader electron={isElectron} className="surface-glass relative">
         <div className="absolute left-1/2 flex max-w-[60%] min-w-0 -translate-x-1/2 items-center gap-2">
           <GoatBotAvatar size="md" />
-          <div className="flex min-w-0 flex-col">
-            <h1 className="truncate font-semibold text-foreground" style={{ fontSize: 13 }}>
-              {GOAT_BOT_TITLE} ›
+          <div className="flex min-w-0 items-center gap-2">
+            <h1 className="goat-name-capsule truncate text-foreground">
+              {GOAT_BOT_TITLE} <ChevronRightIcon aria-hidden className="size-3" />
             </h1>
-            <p className="truncate text-2xs text-muted-foreground">
-              {removal === "archived"
-                ? "Archived"
-                : removal === "deleted"
-                  ? "Deleted"
-                  : removal === "unchecked"
-                    ? "Couldn't check this chat"
-                    : statusLine(availability)}
-            </p>
+            {headerStatus ? (
+              <p className="truncate text-2xs text-muted-foreground">{headerStatus}</p>
+            ) : null}
           </div>
         </div>
         <div className="ml-auto flex shrink-0 items-center">
@@ -312,7 +317,7 @@ function GoatBotNotice({
     );
   }
   return (
-    <Empty className="min-h-0 flex-1">
+    <Empty size="compact" className="min-h-0 flex-1">
       <EmptyHeader className="max-w-md">
         <GoatBotAvatar size="lg" className="mx-auto mb-4" />
         <EmptyTitle>{title}</EmptyTitle>
@@ -325,7 +330,7 @@ function GoatBotNotice({
               <button
                 key={example}
                 type="button"
-                className="rounded-2xl bg-goat-bubble-in px-3 py-2 text-base text-goat-bubble-in-foreground hover:brightness-95"
+                className="rounded-full border border-border bg-transparent px-3 py-1.5 text-sm hover:bg-goat-bubble-in"
                 onClick={() => onSelectExample(example)}
               >
                 {example}

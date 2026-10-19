@@ -51,6 +51,8 @@ async function render(canOperate: boolean) {
 
 it("seeds the composer without sending and refills it when the same example is picked again", async () => {
   await render(true);
+  expect(container.querySelector("h1")?.textContent).toContain("GOAT Bot");
+  expect(container.querySelector("header p")).toBeNull();
   const exampleButton = [...container.querySelectorAll("button")].find(
     (button) => button.textContent === example,
   );

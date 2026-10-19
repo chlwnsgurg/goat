@@ -619,6 +619,68 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   }
 }
 
+@utility goat-name-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 600;
+  background: color-mix(in oklab, var(--background) 72%, transparent);
+  box-shadow: inset 0 0 0 0.5px color-mix(in oklab, var(--foreground) 14%, transparent);
+}
+
+@utility goat-message-row {
+  border-radius: 20px;
+}
+
+@utility goat-task-title {
+  font-size: 15px;
+  line-height: 20px;
+}
+
+@utility goat-task-summary {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+@utility goat-composer-field {
+  min-height: 44px;
+  border-radius: 22px;
+  background: var(--goat-composer-fill);
+  box-shadow: inset 0 0 0 0.5px var(--goat-hairline);
+
+  &:focus-within {
+    box-shadow: inset 0 0 0 0.5px color-mix(in oklab, var(--color-goat-bubble-out) 40%, transparent);
+  }
+}
+
+.goat-timeline[data-at-top="true"] > .goat-top-fade,
+.goat-timeline[data-at-bottom="true"] > .goat-bottom-fade {
+  opacity: 0;
+}
+
+@keyframes goat-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@utility goat-arrive {
+  animation: goat-arrive 180ms cubic-bezier(0.2, 0.8, 0.2, 1) 1 both;
+
+  @media (prefers-reduced-motion: reduce), (forced-colors: active) {
+    animation: none;
+  }
+}
+
 @utility goat-bubble-out-fill {
   background-color: var(--color-goat-bubble-out);
   background-image: linear-gradient(
@@ -1073,6 +1135,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --goat-bubble-out: #1466d0;
   --goat-bubble-in: #e9e9eb;
   --goat-bubble-in-foreground: #000;
+  --goat-composer-fill: #f2f2f7;
+  --goat-hairline: rgb(0 0 0 / 8%);
   --radius: 0.625rem;
   --background: var(--color-white);
   --app-chrome-background: var(--background);
@@ -1150,6 +1214,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
     --goat-bubble-out: #2b66c6;
     --goat-bubble-in: #3a3a3c;
     --goat-bubble-in-foreground: #fff;
+    --goat-composer-fill: #1c1c1e;
+    --goat-hairline: rgb(255 255 255 / 10%);
     /* Keep controls and floating surfaces close to the neutral-black canvas.
        Borders and hover states provide separation without milky gray fills. */
     --background: var(--color-neutral-950);
