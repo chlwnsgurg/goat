@@ -11,6 +11,7 @@
 import {
   AuthProvidersManageScope,
   PROVIDER_SETUP_HANDOFF_PATH,
+  PROVIDER_SIGN_IN_COMMANDS,
   ProviderDriverKind,
   ProviderInstanceId,
   redactProviderAuthState,
@@ -45,19 +46,17 @@ import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
  * provider's own terminal command for drivers whose sign-in cannot run in the
  * app on this server; cloud drivers follow their local sibling.
  */
-const SIGN_IN: Readonly<
-  Record<string, { readonly kind: ProviderSignInKind; readonly command?: string }>
-> = {
+const SIGN_IN: Readonly<Record<string, { readonly kind: ProviderSignInKind }>> = {
   codex: { kind: "browser" },
-  claudeAgent: { kind: "terminal", command: "claude auth login" },
-  claudeCloud: { kind: "linked", command: "claude auth login --claudeai" },
+  claudeAgent: { kind: "terminal" },
+  claudeCloud: { kind: "linked" },
   cursor: { kind: "browser" },
   cursorCloud: { kind: "linked" },
   devinCloud: { kind: "linked" },
   antigravity: { kind: "browser" },
   acpRegistry: { kind: "agent" },
   grok: { kind: "environment" },
-  opencode: { kind: "command", command: "opencode auth login" },
+  opencode: { kind: "command" },
 };
 
 const error = (code: string, message: string, fix?: { instruction: string; path?: string }) => ({
@@ -91,7 +90,7 @@ export const buildAddableDrivers = (
       signIn: {
         kind,
         inApp: signInInApp,
-        command: signInInApp ? null : (known?.command ?? null),
+        command: signInInApp ? null : (PROVIDER_SIGN_IN_COMMANDS[driverKind] ?? null),
       },
       instances: own.map((snapshot) => ({
         instanceId: snapshot.instanceId,
@@ -234,7 +233,7 @@ const make = Effect.gen(function* () {
           });
         const name = instance.displayName ?? driverName(instance.driverKind);
         if (!instance.auth) {
-          const command = SIGN_IN[instance.driverKind]?.command;
+          const command = PROVIDER_SIGN_IN_COMMANDS[instance.driverKind];
           return error(
             "unsupported",
             `${name} does not sign in through GOAT.`,

@@ -17,6 +17,13 @@ import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import type { ProviderAuthState } from "./providerSetup.ts";
 import { ServerProviderAuthStatus, ServerProviderState } from "./server.ts";
 
+/** The provider's own sign-in command, for drivers whose sign-in may need its terminal. */
+export const PROVIDER_SIGN_IN_COMMANDS: Readonly<Record<string, string>> = {
+  claudeAgent: "claude auth login",
+  claudeCloud: "claude auth login --claudeai",
+  opencode: "opencode auth login",
+};
+
 /** The handoff target path that asks a person to finish provider setup in the app. */
 export const PROVIDER_SETUP_HANDOFF_PATH = "provider.setup";
 
