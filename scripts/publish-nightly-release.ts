@@ -123,7 +123,7 @@ export const publishNightlyRelease = Effect.fn("publishNightlyRelease")(function
    */
   readonly assetsOnly?: boolean;
   /** Commit the release tag points at; goat-releases tags its own main. */
-  readonly target?: string;
+  readonly target?: string | undefined;
 }) {
   const { client, dir, version, name, dryRun = false, assetsOnly = false } = input;
   const repositoryFiles = assetsOnly ? [] : REPOSITORY_RELEASE_FILES;
