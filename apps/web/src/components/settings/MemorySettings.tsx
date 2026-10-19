@@ -51,7 +51,8 @@ import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
-import { useEnvironment, useEnvironments } from "../../state/environments";
+import { useEnvironment, useEnvironmentProviders, useEnvironments } from "../../state/environments";
+import { resolveMemoryModelSelection } from "@goat/shared/serverSettings";
 import { useProjects } from "../../state/entities";
 import {
   readEnvironmentScope,
@@ -229,10 +230,13 @@ function MemoryDestinationContent({
     setSyncReload((value) => value + 1);
   };
 
-  // A new memory model clears a pause, so its status is read again.
-  const memoryModel = JSON.stringify(
-    useEnvironmentSettings(environmentId).memoryModelSelection ?? null,
-  );
+  // Turning memory off or a new effective memory model clears a pause, so status is read again.
+  const settings = useEnvironmentSettings(environmentId);
+  const providers = useEnvironmentProviders().get(environmentId) ?? [];
+  const memoryModel = JSON.stringify([
+    settings.memoryEnabled,
+    resolveMemoryModelSelection(settings, providers),
+  ]);
   const [syncRequest, setSyncRequest] = useState({
     canSync,
     environmentId,
