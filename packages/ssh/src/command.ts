@@ -1,5 +1,7 @@
 import type { DesktopSshEnvironmentTarget } from "@goat/contracts";
 import * as HostProcess from "@goat/shared/HostProcess";
+import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -28,6 +30,34 @@ const sshCommandForPlatform = (platform: NodeJS.Platform): string =>
 export const resolveSshCommand = Effect.map(HostProcess.Platform, sshCommandForPlatform);
 
 const encoder = new TextEncoder();
+
+export const SshReconnectCost = Context.Reference<{
+  active: boolean;
+  spawns: number;
+  authentications: number;
+  steps: Record<string, number>;
+} | null>("@goat/ssh/command/SshReconnectCost", {
+  defaultValue: () => null,
+});
+
+export const measureSshReconnectStep = <A, E, R>(
+  step: string,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+  Effect.gen(function* () {
+    const cost = yield* SshReconnectCost;
+    if (cost === null || !cost.active) return yield* effect;
+    const startedAt = yield* Clock.currentTimeMillis;
+    return yield* effect.pipe(
+      Effect.ensuring(
+        Clock.currentTimeMillis.pipe(
+          Effect.map((now) => {
+            if (cost.active) cost.steps[step] = (cost.steps[step] ?? 0) + now - startedAt;
+          }),
+        ),
+      ),
+    );
+  });
 
 export interface SshCommandResult {
   readonly stdout: string;
@@ -162,10 +192,12 @@ export const sshDiagnosticChunks = <E>(
   observeLine?: (line: string) => void,
 ): Stream.Stream<string, E> =>
   Stream.unwrap(
-    Effect.sync(() => {
+    Effect.gen(function* () {
+      const cost = yield* SshReconnectCost;
       let pending = "";
       let mode: "buffer" | "keep" | "drop" = "buffer";
       const diagnostic = (line: string) => {
+        if (cost?.active && /^(?:debug1: )?Authenticated to /u.test(line)) cost.authentications++;
         observeLine?.(line.replace(/\r?\n$/u, ""));
         const text = line.replace(
           /^debug1: (?:kex_exchange_identification|ssh_exchange_identification): banner line \d+: (Tailscale is stopped\.|Logged out\.|Machine is not yet approved by tailnet admin\.)(\r?\n)?$/u,
@@ -378,6 +410,8 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
       ),
     );
 
+  const cost = yield* SshReconnectCost;
+  if (cost?.active) cost.spawns++;
   const [stdout, stderr, exitCode] = yield* Effect.all(
     [
       collectProcessOutput(child.stdout),
@@ -513,6 +547,14 @@ export const runSshCommand = Effect.fn("ssh/command.runSshCommand")(function* (
           }),
       }),
     ),
+    (effect) =>
+      measureSshReconnectStep(
+        input.timeoutStage ??
+          (input.preHostArgs?.includes("-G") === true
+            ? "ssh/command.resolveSshTarget"
+            : "ssh/command.runSshCommand"),
+        effect,
+      ),
   );
 });
 

@@ -48,6 +48,15 @@ function archivePlatform(key: string | null | undefined) {
   return `${os} (${match[2]})`;
 }
 
+export function sshRuntimeBuildOrder(status: SshHostStatus) {
+  return status.runtimeVersion === null
+    ? undefined
+    : compareRuntimeBuilds(
+        { version: status.runtimeVersion },
+        { version: status.requestedVersion },
+      );
+}
+
 /** Copy shared by the saved connection subtitle and its runtime details. */
 export function sshRuntimeStatusText(status: SshHostStatus): string {
   const version = status.runtimeVersion ?? "unknown";
@@ -76,8 +85,18 @@ export function sshRuntimeStatusText(status: SshHostStatus): string {
     }
     case "stopped":
       return `Not running · Runtime ${version}`;
-    case "ready":
-      return `${status.runtimeVersion === status.requestedVersion ? "Up to date" : "Update available"} · Runtime ${version}`;
+    case "ready": {
+      if (status.runtimeVersion === status.requestedVersion)
+        return `Up to date · Runtime ${version}`;
+      const order = sshRuntimeBuildOrder(status);
+      const label =
+        order !== undefined && order < 0
+          ? "Update available"
+          : order !== undefined && order > 0
+            ? "Newer than this app"
+            : "Kept";
+      return `${label} · Runtime ${version}`;
+    }
     case "update_waiting":
       return `Update waits for running work · Runtime ${version}`;
     case "update_blocked": {
@@ -155,7 +174,13 @@ export function sshRuntimeRecoveryText(status: SshHostStatus) {
         : "Register your public SSH key on the host, then try again.";
     case "providers_not_ready":
       return status.providers?.fixes[0]?.instruction ?? null;
-    case "ready":
+    case "ready": {
+      if (status.runtimeVersion === status.requestedVersion) return null;
+      const order = sshRuntimeBuildOrder(status);
+      if (order !== undefined && order > 0) return "Update this app to manage it.";
+      if (order !== undefined && order < 0) return null;
+      return `GOAT can't tell whether ${status.runtimeVersion ?? "the running runtime"} is older than this app's build, so it leaves it running. Stop it on ${status.host} when its work is done, then reconnect to move it to ${status.requestedVersion}.`;
+    }
     case "update_blocked":
       return null;
   }

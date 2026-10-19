@@ -7,7 +7,7 @@ import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
 
-import { runSshCommand } from "./command.ts";
+import { runSshCommand, SshReconnectCost } from "./command.ts";
 import { SshCommandError } from "./errors.ts";
 import { makeSuccessfulProcess, uploadTarget } from "./tunnel.fixture.ts";
 
@@ -105,3 +105,37 @@ it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       }
     }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+it.effect("counts DEBUG1 authentication lines across chunks without exposing them", () => {
+  const cost = { active: true, spawns: 0, authentications: 0, steps: {} };
+  const diagnostic = [
+    "debug1: Executing proxy command: exec ssh -W target:22 jump\r\n",
+    'Authenticated to jump ([127.0.0.1]:22) using "publickey".\r\n',
+    "debug1: Authenticating to target:22 as 'user'\n",
+    'Authenticated to target ([127.0.0.2]:22) using "publickey".\n',
+    "debug1: mux_client_request_session: master session id: 2\n",
+    chatter,
+  ].join("");
+  const bytes = new TextEncoder().encode(diagnostic);
+  const spawner = ChildProcessSpawner.make(() =>
+    Effect.succeed({
+      ...makeSuccessfulProcess("ok"),
+      stderr: Stream.fromIterable(Array.from(bytes, (byte) => Uint8Array.of(byte))),
+    }),
+  );
+  return Effect.gen(function* () {
+    const result = yield* runSshCommand(uploadTarget);
+    assert.equal(result.stdout, "ok");
+    assert.equal(result.stderr, "");
+    assert.equal(cost.spawns, 1);
+    assert.equal(cost.authentications, 2);
+  }).pipe(
+    Effect.provideService(SshReconnectCost, cost),
+    Effect.provide(
+      Layer.merge(
+        NodeServices.layer,
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      ),
+    ),
+  );
+});

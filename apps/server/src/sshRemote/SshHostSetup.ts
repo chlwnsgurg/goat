@@ -726,12 +726,10 @@ export const make = (options: { readonly home?: string } = {}) =>
           if ((aliasGenerations.get(host) ?? 0) !== requestGeneration)
             return yield* new HandoffError({ reason: "expired" });
           if (beforeRun) yield* beforeRun;
-          if (update) {
-            const current = yield* status({ host });
-            yield* audit
-              .append({
+          const auditEntry = update
+            ? {
                 operationId: operation.operationId,
-                operation: "ssh-runtime-update",
+                operation: "ssh-runtime-update" as const,
                 destination: host,
                 actor:
                   caller.kind === "client"
@@ -742,15 +740,35 @@ export const make = (options: { readonly home?: string } = {}) =>
                           caller.scope.client?.sessionId ?? caller.scope.thread?.providerSessionId,
                         threadId: caller.scope.thread?.threadId,
                       },
-                fromVersion: current.status?.runtimeVersion ?? null,
+                fromVersion: (yield* status({ host })).status?.runtimeVersion ?? null,
                 targetVersion: packageJson.version,
-                mode: confirmReplacement ? "confirmed" : "idle",
-                outcome: "requested",
-              })
+                mode: confirmReplacement ? ("confirmed" as const) : ("idle" as const),
+              }
+            : undefined;
+          if (auditEntry !== undefined)
+            yield* audit
+              .append({ ...auditEntry, outcome: "requested" })
               .pipe(Effect.mapError((cause) => new HandoffError({ reason: "unavailable", cause })));
-          }
-          let result = yield* update
-            ? dispatch.runtimeUpdate(host, { confirmReplacement, onPhase, ...operation })
+          let result = yield* auditEntry !== undefined
+            ? dispatch.runtimeUpdate(host, { confirmReplacement, onPhase, ...operation }).pipe(
+                // An idle update can return while it still waits; only the target version is done.
+                Effect.tap((updated) =>
+                  audit
+                    .append({
+                      ...auditEntry,
+                      outcome:
+                        updated.status?.runtimeVersion === auditEntry.targetVersion
+                          ? "completed"
+                          : "accepted",
+                    })
+                    .pipe(Effect.ignore({ log: true })),
+                ),
+                Effect.tapError(() =>
+                  audit
+                    .append({ ...auditEntry, outcome: "failed" })
+                    .pipe(Effect.ignore({ log: true })),
+                ),
+              )
             : dispatch.prepareRuntime(host, { ...operation, onPhase });
           if (
             update ||

@@ -1100,6 +1100,10 @@ else exit 2; fi
               ? yield* input.stream.pipe(Stream.runCollect)
               : [];
           const data = new Uint8Array(chunks.flatMap((chunk) => Array.from(chunk)));
+          if (command.args.includes("goat-runtime-cleanup")) {
+            calls.push("cleanup");
+            return makeSuccessfulProcess("");
+          }
           if (command.args.includes("-c")) {
             calls.push("upload");
             assert.include(command.args.join(" "), ARCHIVE.archiveVersion);
@@ -1154,7 +1158,12 @@ else exit 2; fi
         ),
       );
       assert.isTrue(Result.isSuccess(result));
-      assert.deepEqual(calls, ["probe", entry]);
+      // Cleanup is a best-effort trailing call after a launch that installed a runtime.
+      assert.deepEqual(
+        calls.filter((call) => call !== "cleanup"),
+        ["probe", entry],
+      );
+      assert.isTrue(calls.indexOf("cleanup") === -1 || calls.at(-1) === "cleanup");
       assert.equal(
         spans
           .find((span) => span.name === "ssh.prepareRemoteRuntime")
@@ -1320,8 +1329,15 @@ else {
           assert.equal(command._tag, "StandardCommand");
           if (command._tag !== "StandardCommand") return makeSuccessfulProcess("");
           const args = command.args;
-          const kind = args.includes("-c") ? "upload" : isRemoteLaunch(args) ? "launch" : "probe";
+          const kind = args.includes("goat-runtime-cleanup")
+            ? "cleanup"
+            : args.includes("-c")
+              ? "upload"
+              : isRemoteLaunch(args)
+                ? "launch"
+                : "probe";
           calls.push(kind);
+          if (kind === "cleanup") return makeSuccessfulProcess("");
           auth.push({
             secret: command.options.env?.T3_SSH_AUTH_SECRET,
             batch: args.find((arg) => arg.startsWith("BatchMode=")),
@@ -1386,7 +1402,11 @@ else {
       );
       assert.deepEqual(
         calls,
-        ready || missing ? ["probe", "launch"] : ["probe", "upload", "launch"],
+        ready
+          ? ["probe", "launch"]
+          : missing
+            ? ["probe", "launch", "cleanup"]
+            : ["probe", "upload", "launch", "cleanup"],
       );
       assert.equal(reads, ready || missing ? 0 : 1);
       for (const options of auth)
@@ -1470,13 +1490,15 @@ else {
             calls.some((call) => call.kind === "pairing")
           )
             return makeSuccessfulProcess('{"stopped":true}');
-          const kind = args.includes("-c")
-            ? "upload"
-            : isRemoteLaunch(args)
-              ? "launch"
-              : args.includes("-l")
-                ? "probe"
-                : "pairing";
+          const kind = args.includes("goat-runtime-cleanup")
+            ? "cleanup"
+            : args.includes("-c")
+              ? "upload"
+              : isRemoteLaunch(args)
+                ? "launch"
+                : args.includes("-l")
+                  ? "probe"
+                  : "pairing";
           if (command._tag === "StandardCommand")
             calls.push({
               kind,
@@ -1529,7 +1551,7 @@ else {
       assert.equal(uploads, 2);
       assert.deepEqual(
         calls.map((call) => call.kind),
-        ["probe", "upload", "probe", "upload", "launch", "pairing"],
+        ["probe", "upload", "probe", "upload", "launch", "cleanup", "pairing"],
       );
       for (const call of calls.slice(0, 2))
         assert.deepEqual(

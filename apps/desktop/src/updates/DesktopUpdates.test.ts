@@ -20,10 +20,18 @@ import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
-import { getDesktopUpdateInstallationMessage } from "./updateInstallation.ts";
+import {
+  getDesktopUpdateInstallationMessage,
+  type DesktopUpdateInstallationReason,
+} from "./updateInstallation.ts";
 
 describe("DesktopUpdates", () => {
-  for (const scenario of [
+  const installationScenarios: ReadonlyArray<{
+    readonly bundle: string;
+    readonly unwritablePaths: ReadonlyArray<string>;
+    readonly readOnlyPaths?: ReadonlyArray<string>;
+    readonly reason: DesktopUpdateInstallationReason | null;
+  }> = [
     {
       bundle: "/private/var/AppTranslocation/id/d/GOAT.app",
       unwritablePaths: [],
@@ -31,8 +39,15 @@ describe("DesktopUpdates", () => {
     },
     {
       bundle: "/Volumes/GOAT/GOAT.app",
-      unwritablePaths: ["/Volumes/GOAT/GOAT.app", "/Volumes/GOAT"],
+      unwritablePaths: [],
+      readOnlyPaths: ["/Volumes/GOAT/GOAT.app", "/Volumes/GOAT"],
       reason: "read-only-volume",
+    },
+    // An administrator's install on a writable external disk needs an admin, not a move.
+    {
+      bundle: "/Volumes/External/GOAT.app",
+      unwritablePaths: ["/Volumes/External/GOAT.app", "/Volumes/External"],
+      reason: "needs-admin",
     },
     {
       bundle: "/Applications/GOAT.app",
@@ -42,39 +57,39 @@ describe("DesktopUpdates", () => {
     { bundle: "/Applications/GOAT.app", unwritablePaths: ["/Applications"], reason: "needs-admin" },
     { bundle: "/Applications/GOAT.app", unwritablePaths: [], reason: null },
     { bundle: "/Volumes/External/GOAT.app", unwritablePaths: [], reason: null },
-  ] as const) {
-    it.effect(
-      `reports ${scenario.reason ?? "writable installation"} for ${scenario.bundle} (${scenario.unwritablePaths.join(",")})`,
-      () => {
-        const harness = makeHarness({
-          appPath: `${scenario.bundle}/Contents/Resources/app.asar`,
-          unwritablePaths: scenario.unwritablePaths,
-        });
-        return Effect.gen(function* () {
-          const updates = yield* DesktopUpdates.DesktopUpdates;
-          yield* updates.configure;
-          const state = yield* updates.getState;
-          const disabled =
-            scenario.reason === "translocated" || scenario.reason === "read-only-volume";
-          const message = scenario.reason
-            ? getDesktopUpdateInstallationMessage(scenario.reason)
-            : null;
-          assert.equal(state.enabled, !disabled);
-          assert.equal(state.status, disabled ? "disabled" : "idle");
-          assert.equal(Option.getOrNull(yield* updates.disabledReason), disabled ? message : null);
-          assert.equal(state.message, disabled ? message : null);
-          assert.equal(
-            state.installationNotice,
-            scenario.reason === "needs-admin" ? message : undefined,
-          );
-          const check = yield* updates.check("manual");
-          assert.equal(check.checked, !disabled);
-          assert.equal(harness.checkCount(), disabled ? 0 : 1);
-          assert.equal((yield* updates.getState).installationNotice, state.installationNotice);
-        }).pipe(Effect.scoped, Effect.provide(harness.layer));
-      },
-    );
-  }
+  ];
+  it.effect.each(installationScenarios)(
+    "reports $reason for $bundle (unwritable $unwritablePaths, read-only $readOnlyPaths)",
+    (scenario) => {
+      const harness = makeHarness({
+        appPath: `${scenario.bundle}/Contents/Resources/app.asar`,
+        unwritablePaths: scenario.unwritablePaths,
+        ...(scenario.readOnlyPaths ? { readOnlyPaths: scenario.readOnlyPaths } : {}),
+      });
+      return Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        const state = yield* updates.getState;
+        const disabled =
+          scenario.reason === "translocated" || scenario.reason === "read-only-volume";
+        const message = scenario.reason
+          ? getDesktopUpdateInstallationMessage(scenario.reason)
+          : null;
+        assert.equal(state.enabled, !disabled);
+        assert.equal(state.status, disabled ? "disabled" : "idle");
+        assert.equal(Option.getOrNull(yield* updates.disabledReason), disabled ? message : null);
+        assert.equal(state.message, disabled ? message : null);
+        assert.equal(
+          state.installationNotice,
+          scenario.reason === "needs-admin" ? message : undefined,
+        );
+        const check = yield* updates.check("manual");
+        assert.equal(check.checked, !disabled);
+        assert.equal(harness.checkCount(), disabled ? 0 : 1);
+        assert.equal((yield* updates.getState).installationNotice, state.installationNotice);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    },
+  );
 
   it("preserves complete causes for update poller and event failures", () => {
     const cause = Cause.combine(

@@ -83,6 +83,8 @@ import {
   resolveSshCommand,
   resolveSshTarget,
   runSshCommand,
+  SshReconnectCost,
+  measureSshReconnectStep,
   SSH_KEEPALIVE_ARGS,
   sshDiagnosticChunks,
   SSH_DIAGNOSTIC_ARGS,
@@ -171,6 +173,8 @@ export interface PreparedRemoteRuntime {
   readonly source: "requested" | "retained" | "live" | "installed";
   readonly installedExecutableSha256?: string;
   readonly requireInstalled: boolean;
+  /** This preparation uploaded the archive, so an older runtime may have just become garbage. */
+  readonly uploaded?: boolean;
   readonly mayUpgradeOwnedServer: boolean;
   /** SHA-256 of the retained run-t3.sh observed by preparation; null for other sources. */
   readonly retainedRunnerSha256: string | null;
@@ -784,6 +788,13 @@ goat_runtime_ready() {
 }
 if ! goat_runtime_ready; then
   mkdir -p "$HOME/.goat/runtime/goat/versions"
+  # Cleanup takes this mutex exclusively; installs may still run concurrently.
+  if [ "$(uname -s)" = Linux ] && command -v flock >/dev/null 2>&1; then
+    GOAT_MAINTENANCE="$HOME/.goat/runtime/goat/versions/.maintenance.lock"
+    [ ! -L "$GOAT_MAINTENANCE" ] || exit 1
+    exec 9>"$GOAT_MAINTENANCE"
+    flock -w @@GOAT_ARCHIVE_LOCK_WAIT_SECONDS@@ -s 9
+  fi
   GOAT_LOCK="$HOME/.goat/runtime/goat/versions/.$GOAT_ARCHIVE_VERSION.install.lock"
   # Publish a nonempty directory with an immutable pid and unique token by
   # same-filesystem rename. mv can nest it in an existing lock: only a token
@@ -914,7 +925,13 @@ if ! goat_runtime_ready; then
     GOAT_EXECUTABLE_SHA256="$(sha256sum "$GOAT_STAGING/goat" | cut -d' ' -f1)"
   fi
   # Publish provenance with the verified executable, never backfill legacy directories.
-  printf '%s %s %s %s\\n' "$GOAT_ARCHIVE_VERSION" "$GOAT_EXPECTED" "$GOAT_EXECUTABLE_SHA256" @@GOAT_ARCHIVE_SOURCE@@ > "$GOAT_STAGING/.install-record"
+  # The uploader names its source in the environment so run-t3.sh bytes stay source-free:
+  # retained-runner identity compares those bytes across launches.
+  case "\${GOAT_SSH_ARCHIVE_SOURCE:-}" in
+    bundle|cache|gh) GOAT_RECORD_SOURCE="$GOAT_SSH_ARCHIVE_SOURCE" ;;
+    *) GOAT_RECORD_SOURCE=@@GOAT_DOWNLOAD_SOURCE@@ ;;
+  esac
+  printf '%s %s %s %s\\n' "$GOAT_ARCHIVE_VERSION" "$GOAT_EXPECTED" "$GOAT_EXECUTABLE_SHA256" "$GOAT_RECORD_SOURCE" > "$GOAT_STAGING/.install-record"
   printf '%s\\n' "$GOAT_ARCHIVE_VERSION" > "$GOAT_STAGING/.install-complete"
   rm -rf "$GOAT_RUNTIME_DIR"
   mv "$GOAT_STAGING" "$GOAT_RUNTIME_DIR"
@@ -923,6 +940,7 @@ if [ -n "\${GOAT_LOCK:-}" ]; then
   goat_lock_cleanup
   trap - 0 1 2 3 15
 fi
+exec 9>&-
 exec "$GOAT_RUNTIME_DIR/goat" "$@"
 `;
 
@@ -1599,6 +1617,108 @@ elif [ "$LIVE_OWNED" = 1 ] && ! verify_owned_identity "$LIVE_PID" "$LIVE_PORT"; 
   exit 1
 fi`;
 
+// The caller holds the replacement mutex after readiness, outside any supervisor trial.
+export const REMOTE_RUNTIME_CLEANUP_SCRIPT = String.raw`cleanup_runtime_versions() {
+  [ "$GOAT_HOST_WINDOWS" = 0 ] && [ "$GOAT_ARCHIVE_MODE" = 1 ] || return 0
+  [ "$LOCK_HELD" = 1 ] && [ -z "${"${UPGRADE_VERSION:-}"}" ] || return 0
+  [ "$(readlink "$LOCK" 2>/dev/null)" = "$OWNER" ] || return 1
+  # A detached supervisor can outlive the SSH shell that owned the replacement lock.
+  [ ! -e "$STATE_DIR/run-t3.previous" ] && [ ! -L "$STATE_DIR/run-t3.previous" ] || return 1
+  for parent in "$HOME" "$HOME/.goat" "$HOME/.goat/runtime" "$HOME/.goat/runtime/goat" "$HOME/.goat/runtime/goat/versions"; do
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  done
+  versions="$HOME/.goat/runtime/goat/versions"
+  [ -d /proc/self ] && command -v flock >/dev/null 2>&1 || return 1
+  [ ! -L "$versions/.maintenance.lock" ] || return 1
+  exec 9>"$versions/.maintenance.lock" || return 1
+  flock -n -x 9 || return 1
+  set +f
+  # Older clients do not take the maintenance mutex; their install locks still veto cleanup.
+  for install in "$versions"/.*.install.lock*; do
+    [ ! -e "$install" ] && [ ! -L "$install" ] || return 1
+  done
+  retained="$(read_runner_hint "$RUNNER_FILE" GOAT_ARCHIVE_VERSION T3_ARCHIVE_VERSION)" || return 1
+  valid_version "$retained" && valid_version "$SELECTED_VERSION" || return 1
+  live_binary="$versions/$SELECTED_VERSION/goat"
+  [ ! -L "$versions/$SELECTED_VERSION" ] && [ ! -L "$live_binary" ] || return 1
+  # Revalidate the descriptor under both mutexes, after the readiness handshake.
+  live="$("$live_binary" __ssh-helper protocol --runtime-file "$DEFAULT_RUNTIME_FILE" --port-file "$PORT_FILE" --pid-file "$PID_FILE" --shell)" || return 1
+  set -f; set -- $live; set +f
+  valid_live_tokens "$@" && [ "$1" = live ] && [ "$2" = "$SELECTED_VERSION" ] &&
+    [ "$6" = "$REMOTE_PORT" ] || return 1
+  cleanup_process_paths() {
+    # Only this user's processes can run from this user's runtime directory, and /proc
+    # hides other users' executable and cwd links from an unprivileged reader.
+    uid="$(id -u)" || return 1
+    commands="$(ps -o command= -U "$uid")" && pids="$(ps -o pid= -U "$uid")" || return 1
+    [ -n "$commands" ] && [ -n "$pids" ] || return 1
+    paths="$commands"
+    # ps alone misses chdir and exec with a custom argv[0]. An unreadable live process vetoes
+    # deletion; one that exited since ps listed it has nothing left to protect.
+    for pid in $pids; do
+      case "$pid" in *[!0-9]*|'') return 1 ;; esac
+      if executable="$(readlink "/proc/$pid/exe")" && cwd="$(readlink "/proc/$pid/cwd")"; then
+        paths="$paths
+$executable
+$cwd"
+      elif [ -e "/proc/$pid" ]; then
+        return 1
+      fi
+    done
+  }
+  cleanup_process_paths || return 1
+  cleanup_commit() {
+    binary="$versions/$1/goat"
+    [ ! -L "$binary" ] && [ ! -L "$versions/$1/.install-record" ] || return 1
+    record="$(cat "$versions/$1/.install-record" 2>/dev/null)" || return 1
+    set -f; set -- $record; set +f
+    [ "$#" = 4 ] && [ "$versions/$1/goat" = "$binary" ] || return 1
+    [ "$(runner_sha256 "$binary")" = "$3" ] || return 1
+    build_commit_time "$binary"
+  }
+  cleanup_order() {
+    first="$1"; second="$2"; set --
+    if first_time="$(cleanup_commit "$first")" && second_time="$(cleanup_commit "$second")"; then
+      set -- --live-commit-time "$first_time" --requested-commit-time "$second_time"
+    fi
+    "$live_binary" __ssh-helper compare-version "$@" "$first" "$second" 2>/dev/null
+  }
+  older=
+  for dir in "$versions"/*; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    [ -x "$dir/goat" ] && [ ! -L "$dir/goat" ] || continue
+    version="${"${dir##*/}"}"
+    valid_version "$version" || continue
+    [ ! -L "$dir/.install-complete" ] &&
+      [ "$(cat "$dir/.install-complete" 2>/dev/null)" = "$version" ] || continue
+    [ "$version" != "$SELECTED_VERSION" ] || continue
+    [ "$(cleanup_order "$SELECTED_VERSION" "$version")" = newer ] || continue
+    older="$older $version"
+  done
+  for version in $older; do
+    [ "$version" != "$retained" ] && [ "$version" != "$REQUESTED_VERSION" ] || continue
+    # Preserve every maximal older build when the rollback candidates cannot be totally ordered.
+    removable=0
+    for other in $older; do
+      if [ "$(cleanup_order "$other" "$version")" = newer ]; then removable=1; break; fi
+    done
+    [ "$removable" = 1 ] || continue
+    dir="$versions/$version"
+    cleanup_process_paths || return 1
+    case "$paths" in *"$dir/"*|*"$dir
+"*|*"$dir") continue ;; esac
+    [ ! -L "$dir" ] || return 1
+    [ ! -e "$versions/.$version.install.lock" ] && [ ! -L "$versions/.$version.install.lock" ] || return 1
+    trash="$(mktemp -d "$versions/.trash-XXXXXXXX")" || return 1
+    # Moving into an owned empty sibling keeps a failed recursive delete out of runtime discovery.
+    mv "$dir" "$trash/runtime" || return 1
+    rm -rf "$trash" || return 1
+    printf 'ssh.runtime.cleanup.removed version=%s\n' "$version" >&2
+  done
+}
+(cleanup_runtime_versions) || { printf 'ssh.runtime.cleanup.skipped inspection, lock, or cleanup failed\n' >&2 || true; }
+`;
+
 const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@GOAT_NODE_ENV_SCRIPT@@
 STATE_KEY="$1"
@@ -2000,9 +2120,7 @@ export function buildRemoteGoatRunnerScript(input?: RemoteGoatRunnerOptions): st
       GOAT_NODE_SCRIPT_PATH: shellSingleQuote(nodeScriptPath),
       GOAT_ARCHIVE_VERSION: shellSingleQuote(archiveVersion),
       GOAT_RELEASE_BASE_URL: shellSingleQuote(releaseBaseUrl),
-      GOAT_ARCHIVE_SOURCE: shellSingleQuote(
-        input?.archiveSource ?? (input?.releaseBaseUrl?.trim() ? "mirror" : "https"),
-      ),
+      GOAT_DOWNLOAD_SOURCE: input?.releaseBaseUrl?.trim() ? "mirror" : "https",
       GOAT_ARCHIVE_LOCK_WAIT_SECONDS: String(REMOTE_ARCHIVE_LOCK_WAIT_SECONDS),
       GOAT_ARCHIVE_DOWNLOAD_SECONDS: String(REMOTE_ARCHIVE_DOWNLOAD_SECONDS),
       GOAT_ARCHIVE_CHECKSUMS_SECONDS: String(REMOTE_ARCHIVE_CHECKSUMS_SECONDS),
@@ -2206,7 +2324,8 @@ export function buildRemoteGoatUploadInstallerScript(
 }
 
 export function buildRemoteUploadScript(input: RemoteGoatRunnerOptions, sha256: string): string {
-  const installer = buildRemoteGoatUploadInstallerScript(input, sha256);
+  const { archiveSource, ...runner } = input;
+  const installer = buildRemoteGoatUploadInstallerScript(runner, sha256);
   return `set -eu
 umask 077
 mkdir -p "$HOME/.goat/runtime/goat/versions"
@@ -2215,6 +2334,7 @@ trap 'rm -rf "$upload_dir"' EXIT
 trap 'exit 1' HUP INT TERM
 cat > "$upload_dir/archive.tar.gz"
 export GOAT_SSH_UPLOADED_ARCHIVE="$upload_dir/archive.tar.gz"
+export GOAT_SSH_ARCHIVE_SOURCE=${shellSingleQuote(archiveSource ?? "cache")}
 sh -c ${shellSingleQuote(installer)} -- --version
 `;
 }
@@ -2836,7 +2956,7 @@ export const prepareRemoteRuntime = (
         }),
       );
       yield* Effect.annotateCurrentSpan("goat.runtime.upload.installComplete", true);
-      return { ...exact, requireInstalled: true };
+      return { ...exact, requireInstalled: true, uploaded: true };
     }).pipe(
       // Error.message is non-enumerable; adding acquisition context must preserve it explicitly.
       Effect.mapError((error) =>
@@ -3054,6 +3174,58 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       refresh: parsed.refresh ?? null,
       stateKey,
     });
+    if (
+      !isNodeScriptRunner(selected.runner) &&
+      // Garbage appears only when this launch installed a runtime; skip the round trip otherwise.
+      (selected.uploaded === true || !selected.requireInstalled) &&
+      parsed.pending === undefined &&
+      parsed.refresh === undefined &&
+      parsed.selectedVersion === selected.version
+    ) {
+      // A separate round trip makes even a hung cleanup or a dropped SSH connection best-effort.
+      yield* Effect.gen(function* () {
+        const cleanup = yield* runSshCommand(target, {
+          ...input,
+          // The trailing word is only $1 to the script; it names this call in traces and tests.
+          remoteCommandArgs: ["sh", "-l", "-s", "goat-runtime-cleanup"],
+          timeoutMs: 10_000,
+          stdin: `set -eu
+DEFAULT_SERVER_HOME="$HOME/.goat"
+STATE_DIR="$DEFAULT_SERVER_HOME/ssh-launch/${stateKey}"
+DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"
+PID_FILE="$STATE_DIR/pid"; PORT_FILE="$STATE_DIR/port"; RUNNER_FILE="$STATE_DIR/run-t3.sh"
+SELECTED_VERSION=${shellSingleQuote(selected.version ?? "")}
+REQUESTED_VERSION=${shellSingleQuote(selected.requestedVersion ?? "")}
+REMOTE_PORT=${parsed.remotePort}; GOAT_ARCHIVE_MODE=1
+${REMOTE_PROTOCOL_TOKEN_SCRIPT}
+${REMOTE_RUNNER_HINT_SCRIPT}
+${REMOTE_REPLACEMENT_LOCK_SCRIPT}
+trap 'release_recovery_lock; release_replacement_lock' EXIT
+trap 'exit 1' HUP INT TERM
+if [ "$GOAT_HOST_WINDOWS" = 1 ]; then exit 0; fi
+if [ -e "$LOCK" ] || [ -L "$LOCK" ] || ! acquire_replacement_lock; then
+  printf 'ssh.runtime.cleanup.skipped replacement lock held\\n' >&2
+  exit 0
+fi
+${REMOTE_RUNTIME_CLEANUP_SCRIPT}`,
+        });
+        for (const line of cleanup.stderr.split(/\r?\n/u)) {
+          if (line.startsWith("ssh.runtime.cleanup.")) {
+            yield* Effect.logInfo("ssh.runtime.cleanup.result", {
+              ...sshTargetLogFields(target),
+              detail: line,
+            });
+          }
+        }
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("ssh.runtime.cleanup.failed", {
+            ...sshTargetLogFields(target),
+            cause,
+          }),
+        ),
+      );
+    }
     const reusedVersion = parsed.selectedVersion;
     const cachedSelection: PreparedRemoteRuntime =
       reusedVersion === selected.version || isNodeScriptRunner(selected.runner)
@@ -3425,7 +3597,7 @@ const existingTunnelCheck = (entry: SshTunnelEntry, minimumMs: number) => ({
   probeTimeoutMs: entry.readiness.probeTimeoutMs,
 });
 
-const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: {
+const startSshTunnelAttempt = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: {
   readonly selectedRuntime: PreparedRemoteRuntime;
   readonly key: string;
   readonly resolvedTarget: DesktopSshEnvironmentTarget;
@@ -3538,6 +3710,8 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
           }),
       ),
     );
+  const cost = yield* SshReconnectCost;
+  if (cost?.active) cost.spawns++;
   yield* Effect.logDebug("ssh.tunnel.spawn.succeeded", {
     ...sshTargetLogFields(input.resolvedTarget),
     command: tunnelCommand,
@@ -3684,6 +3858,9 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
   return tunnelEntry;
 });
 
+const startSshTunnel = (input: Parameters<typeof startSshTunnelAttempt>[0]) =>
+  measureSshReconnectStep("ssh/tunnel.startSshTunnel", startSshTunnelAttempt(input));
+
 function archiveFailure(error: SshLaunchError): SshHostFailure | undefined {
   if (error.reason !== "archive-unavailable" || error.acquisition === undefined) return undefined;
   if (error.acquisition.platformKey === "darwin-x64") {
@@ -3811,6 +3988,32 @@ function runtimeFailureResult(
     fix: { actor: "agent", instruction: "Try again" },
   };
 }
+
+const withReconnectCost = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+  Effect.gen(function* () {
+    const current = yield* SshReconnectCost;
+    if (current?.active) return yield* effect;
+    const cost = { active: true, spawns: 0, authentications: 0, steps: {} };
+    const startedAt = yield* Clock.currentTimeMillis;
+    return yield* effect.pipe(
+      Effect.provideService(SshReconnectCost, cost),
+      Effect.ensuring(
+        Effect.gen(function* () {
+          const wallMs = (yield* Clock.currentTimeMillis) - startedAt;
+          // A retained tunnel's diagnostic drain must not mutate an already emitted summary.
+          cost.active = false;
+          yield* Effect.logInfo("ssh.reconnect.cost").pipe(
+            Effect.annotateLogs({
+              spawns: cost.spawns,
+              authentications: cost.authentications,
+              wallMs,
+              steps: cost.steps,
+            }),
+          );
+        }),
+      ),
+    );
+  });
 
 const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.make")(function* (
   options: SshEnvironmentManagerOptions = {},
@@ -4706,7 +4909,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       remotePort,
     });
     return tunnelEntry;
-  });
+  }, withReconnectCost);
 
   /**
    * Whether an open local forward still reaches its remote server. One that
@@ -4897,10 +5100,15 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           );
         }
       }
-    }).pipe(Effect.provide(context), Effect.forkIn(managerScope));
+    }).pipe(
+      Effect.provide(context),
+      // Deferred preparations own their cost even when the initiating ensure is still running.
+      Effect.provideService(SshReconnectCost, null),
+      Effect.forkIn(managerScope),
+    );
   });
 
-  const ensureEnvironment = Effect.fn("ssh/tunnel.ensureEnvironment")(function* (
+  const ensureEnvironmentAttempt = Effect.fn("ssh/tunnel.ensureEnvironment")(function* (
     target: DesktopSshEnvironmentTarget,
     requestOptions?: Parameters<SshEnvironmentManagerShape["ensureEnvironment"]>[1],
   ): Effect.fn.Return<
@@ -5080,6 +5288,9 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       ),
     );
   });
+
+  const ensureEnvironment: SshEnvironmentManagerShape["ensureEnvironment"] = (...args) =>
+    withReconnectCost(ensureEnvironmentAttempt(...args));
 
   const revalidateTunnels = Effect.fn("ssh/tunnel.revalidateTunnels")(function* () {
     yield* Effect.forEach(
