@@ -38,15 +38,15 @@ import * as Secrets from "../auth/ServerSecretStore.ts";
 import * as Events from "../orchestration-v2/EventSink.ts";
 import * as RuntimeIdentity from "../runtimeIdentity.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
-import migration from "../persistence/Migrations/072_Memory.ts";
-import lastReadyMigration from "../persistence/Migrations/082_MemoryLastReadySpace.ts";
-import hubMigration from "../persistence/Migrations/073_MemoryHubSync.ts";
-import searchMigration from "../persistence/Migrations/074_MemorySearchCounters.ts";
-import lineageMigration from "../persistence/Migrations/076_MemoryImportLineage.ts";
-import checkpointMigration from "../persistence/Migrations/077_MemoryCheckpointAccounting.ts";
-import reportMigration from "../persistence/Migrations/078_MemoryReportLifecycle.ts";
-import usageMigration from "../persistence/Migrations/079_MemoryUsageCounters.ts";
-import revertMigration from "../persistence/Migrations/080_MemoryRevertResults.ts";
+import migration from "../persistence/Migrations/073_Memory.ts";
+import lastReadyMigration from "../persistence/Migrations/083_MemoryLastReadySpace.ts";
+import hubMigration from "../persistence/Migrations/074_MemoryHubSync.ts";
+import searchMigration from "../persistence/Migrations/075_MemorySearchCounters.ts";
+import lineageMigration from "../persistence/Migrations/077_MemoryImportLineage.ts";
+import checkpointMigration from "../persistence/Migrations/078_MemoryCheckpointAccounting.ts";
+import reportMigration from "../persistence/Migrations/079_MemoryReportLifecycle.ts";
+import usageMigration from "../persistence/Migrations/080_MemoryUsageCounters.ts";
+import revertMigration from "../persistence/Migrations/081_MemoryRevertResults.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Service from "./MemoryService.ts";
 import * as Quota from "./MemoryQuotaService.ts";
@@ -2147,9 +2147,9 @@ it.effect.each([
               yield* sql`SELECT name FROM sqlite_master WHERE name='memory_last_ready_space'`,
             );
             assert.deepStrictEqual(yield* runMigrations(), [
-              [82, "MemoryLastReadySpace"],
-              [83, "MemoryHubAdministered"],
-              [84, "MemoryCheckpointLifecycle"],
+              [83, "MemoryLastReadySpace"],
+              [84, "MemoryHubAdministered"],
+              [85, "MemoryCheckpointLifecycle"],
             ]);
             const adapter = yield* statusRuntime;
             const result = yield* Effect.scoped(
@@ -2166,7 +2166,7 @@ it.effect.each([
             );
             assert.strictEqual(result.state, "disabled");
             assert.strictEqual(result.retainedLocalSpaceId, space);
-          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(81)))),
+          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(82)))),
         );
         // Close the SQLite connection and rebuild the service, preserving only the upgraded file.
         yield* Effect.scoped(
@@ -2207,7 +2207,7 @@ it.effect.each([
             const item = listed.items[0];
             if (item?.status !== "active") throw new Error("retained memory missing");
             assert.strictEqual(item.payload.text, "synthetic fact 98010");
-          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(82)))),
+          }).pipe(Effect.provide(fixture(peer(), undefined, true, false, local, database(83)))),
         );
       }).pipe(Effect.provide(NodeServices.layer)),
     ),

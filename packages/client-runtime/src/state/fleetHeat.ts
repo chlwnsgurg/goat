@@ -152,7 +152,11 @@ export const NO_FLEET_HEAT: FleetMachineHeat = {
   summary: "No metrics",
 };
 
-/** A machine's heat from its host-status entry and the tier it showed last. */
+/**
+ * A machine's heat from its host-status entry and the tier it showed last. Heat is
+ * load only: a reachable host's sample is live whatever its version or protocol
+ * verdict, which Settings' Hosts section reports.
+ */
 export function fleetMachineHeat(
   entry: HostStatusEntry | undefined,
   previous: FleetHeatTier = "normal",

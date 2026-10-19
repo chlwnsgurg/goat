@@ -387,7 +387,27 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
                 ...promptContext,
                 cause,
               }),
-          }).pipe(Effect.raceFirst(Deferred.await(rejected)));
+          }).pipe(
+            // Cancelling an HTTP request does not stop generation on a shared server.
+            Effect.onInterrupt(() => {
+              // The isolated helper's scope already aborts and deletes its session.
+              if (memory) return Effect.void;
+              return OpenCodeRuntime.runOpenCodeSdk("session.abort", (signal) =>
+                client.session.abort({ sessionID: session.data.id }, { signal }),
+              ).pipe(
+                Effect.interruptible,
+                Effect.timeout("10 seconds"),
+                Effect.catch(() =>
+                  Effect.logWarning(
+                    "Failed to stop cancelled OpenCode text generation.",
+                    promptContext,
+                  ),
+                ),
+                Effect.asVoid,
+              );
+            }),
+            Effect.raceFirst(Deferred.await(rejected)),
+          );
           if (memory && attemptedTool)
             return yield* reject().pipe(Effect.andThen(Deferred.await(rejected)));
           if (memory && (yield* Deferred.isDone(rejected))) return yield* Deferred.await(rejected);

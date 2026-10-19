@@ -81,8 +81,8 @@ vi.mock("../../components/ui/AppText", () => ({
     accessibilityRole?: "alert";
   }) => <span role={accessibilityRole}>{children}</span>,
 }));
-vi.mock("./RequestActionButton", () => ({
-  RequestActionButton: ({
+vi.mock("../../components/ui/Button", () => ({
+  Button: ({
     label,
     disabled,
     onPress,

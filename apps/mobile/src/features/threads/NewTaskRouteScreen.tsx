@@ -71,11 +71,15 @@ function deriveProjectEmptyState(catalogState: WorkspaceState): {
   if (
     (catalogState.connectionState === "available" ||
       catalogState.connectionState === "offline" ||
-      catalogState.connectionState === "error") &&
+      catalogState.connectionState === "error" ||
+      catalogState.connectionState === "unsupported") &&
     !catalogState.hasLoadedShellSnapshot
   ) {
     return {
-      title: "Environment unavailable",
+      title:
+        catalogState.connectionState === "unsupported"
+          ? "Client not supported"
+          : "Environment unavailable",
       detail:
         catalogState.connectionError ??
         "The saved environment is offline. Check the URL or start the environment, then retry.",
@@ -402,33 +406,28 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                   ) : null}
                 </>
               ) : !catalogState.hasReadyEnvironment ? (
-                <Pressable
-                  className="mt-1 rounded-full bg-primary px-4 py-2.5 active:opacity-70"
-                  onPress={() => navigation.navigate("ConnectionsNew")}
-                >
-                  <Text className="text-sm font-goat-bold text-primary-foreground">
-                    {connectHubLabel}
-                  </Text>
-                </Pressable>
+                <View className="mt-1">
+                  <Button
+                    label={connectHubLabel}
+                    tone="primary"
+                    onPress={() => navigation.navigate("ConnectionsNew")}
+                  />
+                </View>
               ) : (
                 <>
-                  <Pressable
-                    className="mt-1 rounded-full bg-primary px-4 py-2.5 active:opacity-70"
-                    onPress={() => navigation.dispatch(StackActions.push("AddProject"))}
-                  >
-                    <Text className="text-sm font-goat-bold text-primary-foreground">
-                      Add new project
-                    </Text>
-                  </Pressable>
+                  <View className="mt-1">
+                    <Button
+                      label="Add new project"
+                      tone="primary"
+                      onPress={() => navigation.dispatch(StackActions.push("AddProject"))}
+                    />
+                  </View>
                   {canStartScratch ? (
-                    <Pressable
-                      className="rounded-full bg-subtle px-4 py-2.5 active:opacity-70"
+                    <Button
+                      label="Start without a project"
+                      tone="secondary"
                       onPress={() => void startScratch()}
-                    >
-                      <Text className="text-sm font-goat-bold text-foreground">
-                        Start without a project
-                      </Text>
-                    </Pressable>
+                    />
                   ) : null}
                 </>
               )}

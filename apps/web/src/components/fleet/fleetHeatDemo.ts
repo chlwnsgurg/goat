@@ -63,46 +63,49 @@ function sample(input: {
   };
 }
 
-/** One machine per tier and state, with numbers like a real afternoon on this fleet. */
-const MACHINES: ReadonlyArray<{
-  readonly id: string;
-  readonly running: number;
-  readonly entry: HostStatusEntry | undefined;
-}> = [
-  {
-    id: "macmini",
-    running: 2,
-    entry: sample({ cpu: 0.91, cores: 10, load: 17, memoryUsed: 0.72 }),
-  },
-  {
-    id: "macbookpro-2",
-    running: 1,
-    entry: sample({ cpu: 0.78, cores: 18, load: 21, memoryUsed: 0.66 }),
-  },
-  {
-    id: "lidge-ai",
-    running: 0,
-    entry: sample({ cpu: 0.35, cores: 16, load: 4, memoryUsed: 0.4, quota: 82 }),
-  },
-  {
-    id: "mac-studio",
-    running: 1,
-    entry: sample({ cpu: 0.3, cores: 16, load: 6, memoryUsed: 0.5 }),
-  },
-  { id: "box", running: 0, entry: sample({ cpu: 0.12, cores: 8, load: 0.4, memoryUsed: 0.3 }) },
-  {
-    id: "clisu-oracle",
-    running: 0,
-    entry: sample({ cpu: 0.95, cores: 4, load: 6, memoryUsed: 0.5, reachable: false }),
-  },
-];
-
 const MACHINE_KINDS: Readonly<Record<string, EnvironmentMachineKind>> = {
   macmini: "mac-mini",
   "macbookpro-2": "laptop",
   "mac-studio": "mac-studio",
   "lidge-ai": "linux",
 };
+
+/** One machine per tier and state, with numbers like a real afternoon on this fleet. */
+function demoMachines(): ReadonlyArray<{
+  readonly id: string;
+  readonly running: number;
+  readonly entry: HostStatusEntry | undefined;
+}> {
+  // Built on call, so production bundles shake the whole fixture away.
+  return [
+    {
+      id: "macmini",
+      running: 2,
+      entry: sample({ cpu: 0.91, cores: 10, load: 17, memoryUsed: 0.72 }),
+    },
+    {
+      id: "macbookpro-2",
+      running: 1,
+      entry: sample({ cpu: 0.78, cores: 18, load: 21, memoryUsed: 0.66 }),
+    },
+    {
+      id: "lidge-ai",
+      running: 0,
+      entry: sample({ cpu: 0.35, cores: 16, load: 4, memoryUsed: 0.4, quota: 82 }),
+    },
+    {
+      id: "mac-studio",
+      running: 1,
+      entry: sample({ cpu: 0.3, cores: 16, load: 6, memoryUsed: 0.5 }),
+    },
+    { id: "box", running: 0, entry: sample({ cpu: 0.12, cores: 8, load: 0.4, memoryUsed: 0.3 }) },
+    {
+      id: "clisu-oracle",
+      running: 0,
+      entry: sample({ cpu: 0.95, cores: 4, load: 6, memoryUsed: 0.5, reachable: false }),
+    },
+  ];
+}
 
 function runningShell(environmentId: EnvironmentId, id: string): FleetShell {
   const at = "2026-10-20T00:00:00.000Z";
@@ -144,6 +147,7 @@ export function fleetHeatDemo(): {
   readonly currentMachineId: string;
   readonly connections: ReadonlyMap<string, FleetConnection>;
 } {
+  const MACHINES = demoMachines();
   const environments: FleetEnvironment[] = MACHINES.map(({ id }) => ({
     environmentId: EnvironmentId.make(id),
     label: id,

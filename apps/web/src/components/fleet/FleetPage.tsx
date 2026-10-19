@@ -70,11 +70,11 @@ function groupThreadsByMachine(threads: ReadonlyArray<FleetThread>) {
 export function FleetPage() {
   const live = useFleetSnapshot();
   const liveHeat = useFleetHostMetrics();
+  const cloudAgents = useFleetCloudAgents();
   const [demo] = useState(readHeatDemo);
   const { snapshot, connections, currentMachineId, loading } =
     demo === null ? live : { ...demo, loading: false };
   const heat = demo?.heat ?? liveHeat;
-  const cloudAgents = useFleetCloudAgents();
   const [selected, setSelected] = useState<string | null>(null);
   const selectedMachine = snapshot.machines.find((machine) => machine.id === selected) ?? null;
   const toggleMachine = (machineId: string) =>

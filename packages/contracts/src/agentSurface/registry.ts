@@ -458,6 +458,61 @@ export const agentSurfaceRegistry = {
       openWorldHint: true,
     },
   }),
+  "scheduler.status": entry({
+    resource: "scheduler",
+    verb: "status",
+    name: "goat_scheduler_status",
+    toolkit: "fleetResources",
+    summary:
+      "Read fleet placement status: per host counts, limits, quota windows and why goal work would be refused, plus fallback cooldowns and recent placement decisions.",
+    description:
+      "Read fleet placement status from settings fleet.*: per host running and queued threads, maxThreads and allowGoals, quota per provider instance with exhausted windows and reset times, and the reason goal work would be refused there now (caps bind goal work only, never a person's own launch). Also lists fallback steps cooling down after a failure and the last placement decisions with reasons. Pass local:true for this machine only; reading other machines needs a caller allowed to use this machine's SSH keys.",
+    effect: "read",
+    hostRoutable: false,
+    requires: "either",
+    dryRun: "unsupported",
+    humanSteps: [],
+    annotations: {
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  }),
+  "fallback_chain.get": entry({
+    resource: "fallback_chain",
+    verb: "get",
+    name: "goat_fallback_chain_get",
+    toolkit: "fleetResources",
+    summary: "Read the configured model fallback chains and the default chain for goals.",
+    description:
+      "Read the model fallback chains in settings fleet.fallbackChains (ordered {instanceId, model} steps, on, maxHops, cooldownMs, scope) and fleet.defaultFallbackChain, the chain goals use when they name none. Pass id for one chain.",
+    effect: "read",
+    hostRoutable: false,
+    requires: "either",
+    dryRun: "unsupported",
+    humanSteps: [],
+    annotations: {
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  "fallback_chain.set": entry({
+    resource: "fallback_chain",
+    verb: "set",
+    name: "goat_fallback_chain_set",
+    toolkit: "fleetResources",
+    summary: "Create, replace, or delete one model fallback chain.",
+    description:
+      "Create, replace, or delete one model fallback chain. When work fails with one of the chain's triggers (default usage_limit), it moves to the next step that is not cooling down or out of quota, with a notice on the thread, instead of waiting for the reset; with no step left it waits as before. scope 'goals' (default) applies the chain to goals only; 'goals_and_threads' also moves ordinary threads whose model is a step. Each instanceId must be configured here; a model the instance does not list is saved with a warning. Chains only choose a model selection and never change provider sign-ins or Codex configuration. Needs a full-access caller.",
+    effect: "destructive",
+    hostRoutable: false,
+    requires: "either",
+    dryRun: "unsupported",
+    humanSteps: [],
+    annotations: {
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
   "html.preview": entry({
     resource: "html",
     verb: "preview",
@@ -791,7 +846,7 @@ export const agentSurfaceRegistry = {
     toolkit: "orchestrator",
     summary: "Cancel delegated task",
     description:
-      "Needs an agent running inside a GOAT thread. Stop a GOAT-owned delegated task. Cancelling a local task disposes its automatic parent delivery. Its child thread stops like a user Stop: the running turn is interrupted, queued turns are held, pull request watches end, and the tasks it delegated stop too. This includes later child-thread runs, even after the task is terminal. A terminal task returns its existing status, and published task results remain available. Remote tasks request interrupt of their launched run and return cancel_requested until that run stops; refused/unreachable cancellation preserves its intent and mailbox. A cancelled remote task's result still reaches the parent like any terminal result. Parent Stop does not cancel remote tasks.",
+      "Needs an agent running inside a GOAT thread. Stop a GOAT-owned delegated task. Cancelling a local task disposes its automatic parent delivery. Its child thread stops like a user Stop: the running turn is interrupted, other queued turns are held, pull request watches end, and the tasks it delegated stop too. The task's own queued turn is cancelled, including when held in a stopped queue. This includes later child-thread runs, even after the task is terminal. A terminal task returns its existing status, and published task results remain available. Remote tasks request interrupt of their launched run and return cancel_requested until that run stops; refused/unreachable cancellation preserves its intent and mailbox. A cancelled remote task's result still reaches the parent like any terminal result. Parent Stop does not cancel remote tasks.",
     effect: "destructive",
     hostRoutable: false,
     requires: "thread",
