@@ -277,9 +277,9 @@ branch. SSH-only operations (browse, setup, runtime updates) refuse a linked nam
 
 The trade against SSH is authority. An SSH session is issued per call at the caller's ceiling;
 a link's session is fixed. `linkWriteRefusal` therefore refuses a write from a caller whose ceiling
-is below the link's access, a link never answers approvals, and only a full-access link registers a
-new project during launch. Launch cannot browse a linked host, so its folder is checked by the
-host when the project is created or found.
+is below the link's access, a link never answers approvals, and launch only uses a folder that is
+already a project there: it cannot browse the host to apply the broad-folder guard, so a person on
+that host chooses the workspace.
 
 ## Cloud machines
 

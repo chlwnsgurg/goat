@@ -252,24 +252,49 @@ describe("SshRemoteDispatch with a linked host", () => {
     }),
   );
 
-  it("checks a linked host's folder without browsing it", () => {
+  it("reads a linked host's folder as an absolute local path", () => {
     expect(SshRemoteDispatch.linkedHostFolder("box", "~/app")).toContain("absolute path");
-    for (const [cwd, broad] of [
-      ["/srv/app/../..", "the filesystem root"],
-      ["/home/alice", "the home directory"],
-      ["/Users/alice/../alice/", "the home directory"],
-      ["/srv", "a top-level folder"],
-    ] as const) {
-      const folder = SshRemoteDispatch.linkedHostFolder("box", cwd);
-      if (typeof folder === "string") throw new Error(folder);
-      expect(SshRemoteDispatch.broadWorkspaceRoot(folder), cwd).toBe(broad);
-    }
-    const project = SshRemoteDispatch.linkedHostFolder("box", "/home/alice/./work/app/");
-    expect(project).toMatchObject({ path: "/home/alice/work/app", home: "/home/alice" });
-    expect(SshRemoteDispatch.broadWorkspaceRoot(project as SshRemoteDispatch.SshBrowseResult)).toBe(
-      null,
-    );
+    expect(SshRemoteDispatch.linkedHostFolder("box", "//share/repo")).toContain("network share");
+    expect(SshRemoteDispatch.linkedHostFolder("box", "\\\\share\\repo")).toContain("network share");
+    expect(SshRemoteDispatch.linkedHostFolder("box", "/srv/./app/../app/")).toMatchObject({
+      path: "/srv/app",
+    });
+    expect(SshRemoteDispatch.linkedHostFolder("box", "C:\\work\\app\\")).toMatchObject({
+      path: "C:\\work\\app",
+    });
   });
+
+  it.effect("starts nothing in a folder that is not a project there", () =>
+    Effect.gen(function* () {
+      const { result, record } = yield* withLinkedHost(
+        (request) =>
+          request.tool === "goat_project_list"
+            ? { result: { structuredContent: { projects: [], nextCursor: null } } }
+            : { result: {} },
+        Effect.gen(function* () {
+          const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+          return yield* dispatch.launchThread(
+            {
+              host: "box",
+              cwd: "/home/alice",
+              workspace: { type: "cwd" },
+              title: "Fix it",
+              runtimeMode: "approval-required",
+              callerRuntimeMode: "full-access",
+            },
+            Effect.void,
+          );
+        }),
+      );
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: { reason: "remote_refused", message: expect.stringContaining("not a project") },
+      });
+      expect(
+        record.filter((entry) => entry.method === "tools/call").map((entry) => entry.tool),
+      ).toEqual(["goat_project_list"]);
+    }),
+  );
 
   it.effect("keeps SSH tools off a linked name", () =>
     Effect.gen(function* () {

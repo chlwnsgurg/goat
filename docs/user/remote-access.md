@@ -354,9 +354,9 @@ projects, threads, worktrees and host status, start threads there, and include
 it when they list threads across machines.
 
 A link can do at most what you allow when linking. It is Supervised by default;
-read-only links cannot start or change threads, and only a full-access link lets
-an agent register a new folder as a project there. Otherwise add the project on
-that machine first, and give the agent its folder. An agent whose own permission
+read-only links cannot start or change threads. Agents start threads only in
+folders that are already projects on that machine, so add the project there
+first, for example from the GOAT app connected to it. An agent whose own permission
 mode is lower than the link's cannot change anything through it. A link cannot
 answer approval requests, and folder browsing and runtime updates still need SSH.
 

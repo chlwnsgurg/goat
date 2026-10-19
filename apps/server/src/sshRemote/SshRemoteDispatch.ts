@@ -449,16 +449,17 @@ export function broadWorkspaceRoot(
 
 /**
  * What launch knows about a folder on a linked host, which it cannot browse, or why the
- * folder is unusable. The path must be absolute so it matches the host's project roots, and
- * a home under /home or /Users stands in for the home the host would report, so
- * broadWorkspaceRoot still refuses it.
+ * folder is unusable. Launch then requires an existing project there, so a person on that
+ * host chose the workspace; the path only needs to match project roots exactly.
  */
 export function linkedHostFolder(alias: string, cwd: string): SshBrowseResult | string {
   const trimmed = cwd.trim();
   const windows = /^[A-Za-z]:[\\/]/u.test(trimmed);
+  if (/^(?:\/\/|\\\\)/u.test(trimmed))
+    return `${alias} is a linked host; network share paths are not supported there. Pass the local absolute path of one of its projects.`;
   if (!windows && !trimmed.startsWith("/"))
     return `${alias} is a linked host, so cwd must be an absolute path there, not ${trimmed}. goat_project_list with host "${alias}" shows its project folders.`;
-  // Resolve . and .. so a path cannot climb past what the checks below see.
+  // Resolve . and .. so the path compares with the host's stored project roots.
   const [root, ...rest] = trimmed.split(/[\\/]+/u);
   const parts: Array<string> = [];
   for (const part of rest) {
@@ -467,13 +468,10 @@ export function linkedHostFolder(alias: string, cwd: string): SshBrowseResult | 
   }
   const separator = windows ? "\\" : "/";
   const path = `${root}${separator}${parts.join(separator)}`;
-  const home = windows
-    ? (/^[A-Za-z]:\\Users\\[^\\]+/iu.exec(path)?.[0] ?? null)
-    : (/^\/(?:home|Users)\/[^/]+/u.exec(path)?.[0] ?? null);
   return {
     host: alias,
     os: null,
-    home,
+    home: null,
     path,
     realPath: path,
     gitRoot: null,
@@ -644,6 +642,7 @@ const make = Effect.gen(function* () {
           Effect.tap((found) =>
             Effect.sync(() => {
               if (Option.isSome(found)) linkedAliases.add(found.value.host.name);
+              else linkedAliases.delete(host.trim());
             }),
           ),
           Effect.mapError((error) => failure("host_unavailable", error.message)),
@@ -1045,7 +1044,11 @@ const make = Effect.gen(function* () {
           );
         }
         return new SshRemoteDispatchError({
-          reason: "ssh_failed",
+          // No SSH reaches a linked host: a transport failure there means it is unreachable.
+          reason:
+            linkedAliases.has(input.target.alias) && error.kind !== "rpc"
+              ? "host_unavailable"
+              : "ssh_failed",
           message: `Calling ${input.tool} on ${input.target.alias} failed: ${describe(error)}`,
           ...(input.tool === "goat_thread_launch" ? { launchMayHaveStarted: true } : {}),
         });
@@ -1540,10 +1543,10 @@ const make = Effect.gen(function* () {
     let project = yield* findProject(remote, folder);
     let projectCreated = false;
     if (project === undefined) {
-      if (Option.isSome(linked) && linked.value.host.access !== "full-access") {
+      if (Option.isSome(linked)) {
         return yield* failure(
           "remote_refused",
-          `${folder.path} is not a project on ${target.alias}, and its link allows ${linked.value.host.access}; only a full-access link may register a project. Add the folder as a project on ${target.alias}, or link it again with access full-access.`,
+          `${folder.path} is not a project on ${target.alias}. A linked host cannot be browsed, so it only runs threads in its existing projects: add the folder as a project on ${target.alias}, or pick one from goat_project_list with host "${target.alias}".`,
         );
       }
       if (!session.ceilingApplied) {
