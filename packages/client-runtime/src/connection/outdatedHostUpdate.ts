@@ -6,6 +6,7 @@ import {
   type ServerSelfUpdateResult,
   WS_METHODS,
 } from "@goat/contracts";
+import { orchestrationProtocolRangeOf } from "@goat/shared/sshRuntimeProtocol";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -216,5 +217,10 @@ export const updateOutdatedHost = Effect.fn("clientRuntime.connection.updateOutd
 );
 
 function isCompatibleDescriptor(descriptor: ExecutionEnvironmentDescriptor): boolean {
-  return (descriptor.orchestrationProtocolVersion ?? 1) === ORCHESTRATION_PROTOCOL_VERSION;
+  const served = orchestrationProtocolRangeOf(descriptor);
+  return (
+    served !== null &&
+    served.min <= ORCHESTRATION_PROTOCOL_VERSION &&
+    ORCHESTRATION_PROTOCOL_VERSION <= served.max
+  );
 }

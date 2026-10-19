@@ -8,7 +8,7 @@ import {
 import * as HostProcess from "@goat/shared/HostProcess";
 import {
   SSH_RUNTIME_PROTOCOL_VERSION,
-  ownRuntimeProtocolRanges,
+  servedRuntimeProtocolRanges,
 } from "@goat/shared/sshRuntimeProtocol";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -229,7 +229,7 @@ export const make = Effect.gen(function* () {
     },
     serverVersion: packageJson.version,
     instanceId,
-    protocol: ownRuntimeProtocolRanges(ORCHESTRATION_PROTOCOL_VERSION),
+    protocol: servedRuntimeProtocolRanges(),
     sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
     orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
     capabilities: {

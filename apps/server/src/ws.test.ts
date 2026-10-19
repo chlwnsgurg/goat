@@ -71,6 +71,12 @@ it("accepts only the current orchestration protocol before websocket RPC setup",
       new URL(`https://host.test/ws?orchestrationProtocol=${ORCHESTRATION_PROTOCOL_VERSION - 1}`),
     ),
   );
+  for (const malformed of ["", "1001.0", "+1001", "01001", "1e3"])
+    assert.isFalse(
+      hasCompatibleOrchestrationProtocol(
+        new URL(`https://host.test/ws?orchestrationProtocol=${encodeURIComponent(malformed)}`),
+      ),
+    );
 });
 
 it("keeps full thread snapshot fallback unless the client opts into bounded history", () => {

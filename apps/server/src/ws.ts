@@ -72,6 +72,7 @@ import {
   ORCHESTRATION_V2_WS_METHODS,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION,
+  servesOrchestrationProtocol,
   OrchestrationV2DispatchCommandError,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2GetThreadProjectionError,
@@ -699,10 +700,7 @@ export const enqueuePublicOrchestrationCommand = <A, E>(
   );
 
 export function hasCompatibleOrchestrationProtocol(url: URL): boolean {
-  return (
-    url.searchParams.get(ORCHESTRATION_PROTOCOL_QUERY_PARAM) ===
-    String(ORCHESTRATION_PROTOCOL_VERSION)
-  );
+  return servesOrchestrationProtocol(url.searchParams.get(ORCHESTRATION_PROTOCOL_QUERY_PARAM));
 }
 
 export function shouldUseBoundedThreadSnapshot(input: {
