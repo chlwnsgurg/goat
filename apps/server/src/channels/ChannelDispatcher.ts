@@ -63,6 +63,8 @@ import { choosePlacement, type PlacementCandidate } from "./channelPlacement.ts"
 import { channelNotesRevision, freezeChannelBrief } from "./channelBriefs.ts";
 import { commitTransition } from "./channelTaskWrites.ts";
 import { channelWorkerRules, workerHeader } from "./channelWorkerBrief.ts";
+import { isThreadMissing } from "./channelWorkerObservation.ts";
+import { derivePendingBackgroundWork } from "@goat/shared/orchestrationV2PendingBackgroundWork";
 import * as SlackChannelSettings from "./SlackChannelSettings.ts";
 
 export class ChannelDispatcher extends Context.Service<
@@ -900,16 +902,37 @@ const make = Effect.gen(function* () {
       const threadId =
         task.worker?.threadId ?? workerLaunchIdsFor(task.taskId, task.generation).threadId;
       const ids = stopIdsFor(pending.event.eventId);
-      const records = yield* threads.getThreadRecords(threadId, ["runs"]).pipe(Effect.option);
-      if (Option.isNone(records)) {
+      const read = yield* threads
+        .getThreadRecords(threadId, ["runs", "providerThreads", "turnItems"], {
+          turnItemStatuses: ["pending", "running", "waiting"],
+        })
+        .pipe(Effect.result);
+      if (read._tag === "Failure") {
+        // A read that failed says nothing; only a thread that does not exist may be a launch
+        // that never landed, and only once the grace for one in flight has passed.
+        if (!isThreadMissing(read.failure)) return;
         const age =
           DateTime.toEpochMillis(yield* DateTime.now) - Date.parse(pending.event.occurredAt);
-        // No thread yet: a launch may still land, so look again until the grace runs out.
         if (age > STOP_LAUNCH_GRACE_MS) yield* done;
         return;
       }
-      // Anything not yet ended is alive: queued, preparing, starting, running, waiting.
-      const live = records.value.runs.findLast((run) => !ENDED_RUN_STATUSES.has(run.status));
+      const records = { value: read.success };
+      // Anything not yet ended is alive: queued, preparing, starting, running, waiting, or a
+      // finished run whose provider still works in the background.
+      const runs = records.value.runs;
+      const latestRun = runs.findLast((run) => run.status !== "queued");
+      const background =
+        latestRun !== undefined &&
+        derivePendingBackgroundWork({
+          latestRun,
+          providerThreads: records.value.providerThreads,
+          turnItems: records.value.turnItems,
+          activeProviderThreadId: records.value.thread.activeProviderThreadId,
+          runs,
+        }).length > 0;
+      const live =
+        runs.findLast((run) => !ENDED_RUN_STATUSES.has(run.status)) ??
+        (background ? latestRun : undefined);
       const stopThread = (commandId: CommandId) =>
         threads
           .dispatch({ type: "thread.stop", commandId, threadId, reason: "Stopped from GOAT Bot." })

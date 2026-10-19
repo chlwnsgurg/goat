@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import type { ChannelReceptionInput, ChannelReceptionReadResult } from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ChannelDispatcher from "./ChannelDispatcher.ts";
 import * as ChannelGateway from "./ChannelGateway.ts";
@@ -250,6 +251,58 @@ describe("GOAT Bot work items and worker runs", () => {
       yield* dispatcher.forward(stop!, runtime.ownerToken);
       assert.deepStrictEqual(harness.world.interrupts, [threadId]);
       assert.lengthOf(yield* ledger.listPendingForwards(10), 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("lets a stop go once a launch it waited for never landed", () => {
+    const { harness } = queueHarness();
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const reception = yield* ChannelReceptionService.ChannelReceptionService;
+      const dispatcher = yield* ChannelDispatcher.ChannelDispatcher;
+      // Claims the worker ownership the direct calls below write under.
+      yield* runtime.drain;
+      yield* gateway.ingest(goatInput("do: long job", "l1"), rpcContext);
+      const [input] = yield* ledger.listPendingInputs(10);
+      yield* reception.receive(input!, runtime.ownerToken);
+      // The dispatcher claimed it for a launch that has not landed yet.
+      const [task] = (yield* ledger.listTasks({ ownerId, limit: 10 })).tasks;
+      const stored = (yield* ledger.getTask(task!.taskId))!;
+      yield* commitTransition(
+        ledger,
+        stored,
+        {
+          type: "task.dispatch.claimed",
+          payload: {
+            generation: 1,
+            target: {
+              environmentId,
+              projectId,
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              workspaceStrategy: { type: "root" },
+            },
+            leaseExpiresAt: "2026-10-12T00:00:00.000Z",
+          },
+        },
+        { owner: runtime.ownerToken },
+      );
+      yield* gateway.ingest(goatInput("stop", "l2"), rpcContext);
+      const [stopInput] = yield* ledger.listPendingInputs(10);
+      yield* reception.receive(stopInput!, runtime.ownerToken);
+      const [stop] = yield* ledger.listPendingForwards(10);
+      yield* dispatcher.forward(stop!, runtime.ownerToken);
+      // No thread yet: the stop waits for it.
+      assert.lengthOf(yield* ledger.listPendingForwards(10), 1);
+      // The thread is confirmed missing and the grace for a launch in flight has passed.
+      yield* TestClock.adjust("3 minutes");
+      yield* dispatcher.forward(stop!, runtime.ownerToken);
+      assert.lengthOf(yield* ledger.listPendingForwards(10), 0);
+      assert.lengthOf(harness.world.interrupts, 0);
     }).pipe(Effect.provide(harness.layer));
   });
 

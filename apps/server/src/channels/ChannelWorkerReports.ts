@@ -44,6 +44,7 @@ import { settleCompletedRun } from "./channelRunOutcome.ts";
 import { commitTransition } from "./channelTaskWrites.ts";
 import {
   completionHoldCount,
+  isThreadMissing,
   needsYouFromRuntimeRequests,
   observeWorker,
   pullRequestsFromLinks,
@@ -172,7 +173,7 @@ const make = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const worker = task.worker;
-      if (worker === undefined) return;
+      if (worker === undefined) return true;
       const known = new Map(
         (yield* ledger.listWorkerRuns([task.taskId])).map((run) => [run.runId, run]),
       );
@@ -196,8 +197,11 @@ const make = Effect.gen(function* () {
           ...(ended === undefined ? {} : { endedAt: before?.endedAt ?? ended }),
         });
       }
+      return true;
     }).pipe(
-      Effect.catch((cause) => Effect.logWarning("channel worker run not recorded", { cause })),
+      Effect.catch((cause) =>
+        Effect.logWarning("channel worker run not recorded", { cause }).pipe(Effect.as(false)),
+      ),
     );
 
   const reconcileTask = (stored: ChannelLedger.ChannelStoredTask, owner: string) =>
@@ -412,18 +416,29 @@ const make = Effect.gen(function* () {
         });
         const records = yield* threads
           .getThreadRecords(worker.threadId, ["runs"])
-          .pipe(Effect.option);
-        if (records._tag === "None") {
-          // No thread: the launch never landed, so there is no run to record.
-          if (DateTime.toEpochMillis(now) - Date.parse(finished.updatedAt) > NO_THREAD_GRACE_MS) {
+          .pipe(Effect.result);
+        if (records._tag === "Failure") {
+          // Only a thread that does not exist means the launch never landed; any other failed
+          // read is tried again next pass.
+          if (
+            isThreadMissing(records.failure) &&
+            DateTime.toEpochMillis(now) - Date.parse(finished.updatedAt) > NO_THREAD_GRACE_MS
+          ) {
             yield* settle;
           }
           continue;
         }
-        const runs = records.value.runs.toSorted((left, right) => left.ordinal - right.ordinal);
+        const runs = records.success.runs.toSorted((left, right) => left.ordinal - right.ordinal);
         const launched = runs.find((run) => run.userMessageId === ids.messageId);
-        yield* recordRuns({ ...finished, worker }, runs, launched?.ordinal ?? 0, false);
-        if (runs.every((run) => TERMINAL_RUN_STATUSES.has(run.status))) yield* settle;
+        const recorded = yield* recordRuns(
+          { ...finished, worker },
+          runs,
+          launched?.ordinal ?? 0,
+          false,
+        );
+        if (recorded && runs.every((run) => TERMINAL_RUN_STATUSES.has(run.status))) {
+          yield* settle;
+        }
       }
       // Runs recorded as running or waiting whose task has ended (stopped, or settled by the
       // worker's own report) still end on their own; record how.
