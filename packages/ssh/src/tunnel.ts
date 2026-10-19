@@ -83,6 +83,8 @@ import {
   resolveSshCommand,
   resolveSshTarget,
   runSshCommand,
+  SshReconnectCost,
+  measureSshReconnectStep,
   SSH_KEEPALIVE_ARGS,
   sshDiagnosticChunks,
   SSH_DIAGNOSTIC_ARGS,
@@ -3425,7 +3427,7 @@ const existingTunnelCheck = (entry: SshTunnelEntry, minimumMs: number) => ({
   probeTimeoutMs: entry.readiness.probeTimeoutMs,
 });
 
-const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: {
+const startSshTunnelAttempt = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: {
   readonly selectedRuntime: PreparedRemoteRuntime;
   readonly key: string;
   readonly resolvedTarget: DesktopSshEnvironmentTarget;
@@ -3538,6 +3540,8 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
           }),
       ),
     );
+  const cost = yield* SshReconnectCost;
+  if (cost?.active) cost.spawns++;
   yield* Effect.logDebug("ssh.tunnel.spawn.succeeded", {
     ...sshTargetLogFields(input.resolvedTarget),
     command: tunnelCommand,
@@ -3684,6 +3688,9 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
   return tunnelEntry;
 });
 
+const startSshTunnel = (input: Parameters<typeof startSshTunnelAttempt>[0]) =>
+  measureSshReconnectStep("ssh/tunnel.startSshTunnel", startSshTunnelAttempt(input));
+
 function archiveFailure(error: SshLaunchError): SshHostFailure | undefined {
   if (error.reason !== "archive-unavailable" || error.acquisition === undefined) return undefined;
   if (error.acquisition.platformKey === "darwin-x64") {
@@ -3811,6 +3818,32 @@ function runtimeFailureResult(
     fix: { actor: "agent", instruction: "Try again" },
   };
 }
+
+const withReconnectCost = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+  Effect.gen(function* () {
+    const current = yield* SshReconnectCost;
+    if (current?.active) return yield* effect;
+    const cost = { active: true, spawns: 0, authentications: 0, steps: {} };
+    const startedAt = yield* Clock.currentTimeMillis;
+    return yield* effect.pipe(
+      Effect.provideService(SshReconnectCost, cost),
+      Effect.ensuring(
+        Effect.gen(function* () {
+          const wallMs = (yield* Clock.currentTimeMillis) - startedAt;
+          // A retained tunnel's diagnostic drain must not mutate an already emitted summary.
+          cost.active = false;
+          yield* Effect.logInfo("ssh.reconnect.cost").pipe(
+            Effect.annotateLogs({
+              spawns: cost.spawns,
+              authentications: cost.authentications,
+              wallMs,
+              steps: cost.steps,
+            }),
+          );
+        }),
+      ),
+    );
+  });
 
 const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.make")(function* (
   options: SshEnvironmentManagerOptions = {},
@@ -4706,7 +4739,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       remotePort,
     });
     return tunnelEntry;
-  });
+  }, withReconnectCost);
 
   /**
    * Whether an open local forward still reaches its remote server. One that
@@ -4897,10 +4930,15 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           );
         }
       }
-    }).pipe(Effect.provide(context), Effect.forkIn(managerScope));
+    }).pipe(
+      Effect.provide(context),
+      // Deferred preparations own their cost even when the initiating ensure is still running.
+      Effect.provideService(SshReconnectCost, null),
+      Effect.forkIn(managerScope),
+    );
   });
 
-  const ensureEnvironment = Effect.fn("ssh/tunnel.ensureEnvironment")(function* (
+  const ensureEnvironmentAttempt = Effect.fn("ssh/tunnel.ensureEnvironment")(function* (
     target: DesktopSshEnvironmentTarget,
     requestOptions?: Parameters<SshEnvironmentManagerShape["ensureEnvironment"]>[1],
   ): Effect.fn.Return<
@@ -5080,6 +5118,9 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       ),
     );
   });
+
+  const ensureEnvironment: SshEnvironmentManagerShape["ensureEnvironment"] = (...args) =>
+    withReconnectCost(ensureEnvironmentAttempt(...args));
 
   const revalidateTunnels = Effect.fn("ssh/tunnel.revalidateTunnels")(function* () {
     yield* Effect.forEach(
