@@ -18,9 +18,9 @@ export function GoatBotBubble(props: {
     <View
       style={{
         backgroundColor,
-        borderRadius: 18,
-        paddingHorizontal: 12,
-        paddingVertical: 7,
+        borderRadius: 20,
+        paddingHorizontal: 13,
+        paddingVertical: 8,
         maxWidth: props.maxWidth ?? "78%",
       }}
     >

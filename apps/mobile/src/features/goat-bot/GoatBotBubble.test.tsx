@@ -59,14 +59,19 @@ async function renderBubble(side: "in" | "out", tail: boolean) {
 const styleOf = (element: Element) => JSON.parse(element.getAttribute("data-style") ?? "null");
 
 it.each([
-  ["light", "out", "#1B86F9"],
-  ["dark", "out", "#2C66CA"],
+  ["light", "out", "#1466D0"],
+  ["dark", "out", "#2B66C6"],
   ["light", "in", "#E9E9EB"],
   ["dark", "in", "#3A3A3C"],
 ] as const)("uses %s appearance for the %s bubble", async (mode, side, color) => {
   appearance.mode = mode;
   const bubble = await renderBubble(side, true);
   expect(styleOf(bubble).backgroundColor).toBe(color);
+  expect(styleOf(bubble)).toMatchObject({
+    borderRadius: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 13,
+  });
   expect(
     bubble.querySelector('[data-testid="goat-bubble-tail-path"]')?.getAttribute("data-fill"),
   ).toBe(color);

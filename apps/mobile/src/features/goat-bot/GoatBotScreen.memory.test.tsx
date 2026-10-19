@@ -22,7 +22,10 @@ vi.mock("./useMobileGoatBotSession", () => ({ useMobileGoatBotSession: () => ({}
 vi.mock("./GoatBotAvatar", () => ({ GoatBotAvatar: () => null }));
 vi.mock("react-native-svg", () => ({ default: () => null, Path: () => null }));
 vi.mock("../settings/appearance/AppearancePreferencesProvider", () => ({
-  useAppearancePreferences: () => ({ themeAppearance: appearance.mode }),
+  useAppearancePreferences: () => ({
+    themeAppearance: appearance.mode,
+    appearance: { baseFontSize: 16 },
+  }),
 }));
 import { GoatBotTimelineRow } from "./GoatBotScreen";
 let h: NativeMemoryHarness;

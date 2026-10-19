@@ -7,7 +7,7 @@ import {
   type NativeMemoryHarness,
 } from "../../testing/memoryNativeHarness";
 
-const appearance = vi.hoisted(() => ({ mode: "light" as "light" | "dark" }));
+const appearance = vi.hoisted(() => ({ mode: "light" as "light" | "dark", baseFontSize: 16 }));
 
 vi.mock("@legendapp/list/react-native", () => ({ LegendList: () => null }));
 vi.mock("react-native-keyboard-controller", () => ({
@@ -20,7 +20,10 @@ vi.mock("./useMobileGoatBotSession", () => ({ useMobileGoatBotSession: () => ({}
 vi.mock("./GoatBotAvatar", () => ({ GoatBotAvatar: () => null }));
 vi.mock("react-native-svg", () => ({ default: () => null, Path: () => null }));
 vi.mock("../settings/appearance/AppearancePreferencesProvider", () => ({
-  useAppearancePreferences: () => ({ themeAppearance: appearance.mode }),
+  useAppearancePreferences: () => ({
+    themeAppearance: appearance.mode,
+    appearance: { baseFontSize: appearance.baseFontSize },
+  }),
 }));
 import { GoatBotTimelineRow } from "./GoatBotScreen";
 
@@ -30,6 +33,7 @@ afterEach(async () => {
   await view?.unmount();
   h?.dispose();
   appearance.mode = "light";
+  appearance.baseFontSize = 16;
 });
 
 const props = { canSend: true, onSend: () => true, onRetry: vi.fn(), onSelectThread: () => {} };
