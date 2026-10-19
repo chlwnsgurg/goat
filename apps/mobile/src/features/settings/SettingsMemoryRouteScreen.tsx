@@ -37,6 +37,7 @@ import {
   MEMORY_FORGET_NOTICE,
 } from "@goat/client-runtime/memory-presentation";
 import { squashAtomCommandFailure } from "@goat/client-runtime/state/runtime";
+import { resolveMemoryModelSelection } from "@goat/shared/serverSettings";
 import {
   memoryBrowseInput,
   memorySearchInput,
@@ -396,6 +397,25 @@ function MemoryConnected({
       };
     }, [load, readAllowed]),
   );
+  // Turning memory off or a new effective memory model clears a pause, so status is read again.
+  const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
+  const memoryModel = config
+    ? JSON.stringify([
+        config.settings.memoryEnabled,
+        resolveMemoryModelSelection(config.settings, undefined),
+      ])
+    : null;
+  const seenModel = useRef(memoryModel);
+  useEffect(() => {
+    // The first value was already loaded on focus; only a change needs another read.
+    // Without read access the focus effect loads once access arrives.
+    if (seenModel.current === memoryModel || !readAllowed) return;
+    const timer = setTimeout(() => {
+      seenModel.current = memoryModel;
+      void load();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [memoryModel, load, readAllowed]);
   const generationHold = status?.generationHold;
   useEffect(() => {
     const delay = memoryHoldRefreshDelayMs(generationHold, Date.now());
