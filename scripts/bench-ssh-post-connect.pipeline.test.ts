@@ -313,6 +313,7 @@ describe("SSH session and ticket pipeline", () => {
         const h = yield* makeHarness({ session: Deferred.await(session) });
         const fiber = yield* h.driver.connect(h.entry, () => Effect.void).pipe(Effect.forkChild);
         yield* Deferred.await(h.ticketStarted);
+        yield* Deferred.await(h.authorizationFinished);
         expect(h.state.sockets).toEqual([]);
         yield* Deferred.succeed(session, {
           authenticated: scenario !== "revoked",
