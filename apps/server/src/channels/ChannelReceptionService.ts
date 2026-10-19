@@ -29,6 +29,10 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@goat/contracts";
 import * as HostProcess from "@goat/shared/HostProcess";
+import {
+  classifyTextGenerationFailure,
+  type TextGenerationFailureKind,
+} from "@goat/provider-core/server/textGenerationUtils";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -64,6 +68,14 @@ import { botAddress, chipDelivery, makeTaskEvent, prepareTransition } from "./ch
 
 /** How long a reception pass may take before the sender gets a failure note instead. */
 const CHANNEL_RECEPTION_TIMEOUT_MS = 45_000;
+
+type ReceptionOutcome =
+  | { readonly ok: true; readonly result: ChannelReceptionResult }
+  | { readonly ok: false; readonly failure: TextGenerationFailureKind };
+const receptionFailure = (failure: TextGenerationFailureKind): ReceptionOutcome => ({
+  ok: false,
+  failure,
+});
 /** How many recently active threads a reception pass sees by title. */
 const CHANNEL_RECEPTION_RECENT_THREADS = 20;
 
@@ -278,12 +290,13 @@ const make = Effect.gen(function* () {
       });
   };
 
-  const generate = (input: ChannelReceptionInput) =>
+  const generateOutcome = (input: ChannelReceptionInput) =>
     Effect.gen(function* () {
       const settings = yield* serverSettings.getSettings.pipe(Effect.option);
       const generateReception = textGeneration.generateChannelReception;
       if (Option.isNone(settings) || generateReception === undefined) {
-        return Option.none<ChannelReceptionResult>();
+        yield* Effect.logWarning("channel reception failed", { kind: "unavailable" });
+        return receptionFailure("unavailable");
       }
       return yield* generateReception({
         cwd: serverConfig.stateDir,
@@ -291,10 +304,29 @@ const make = Effect.gen(function* () {
         modelSelection: settings.value.textGenerationModelSelection,
       }).pipe(
         Effect.timeoutOption(CHANNEL_RECEPTION_TIMEOUT_MS),
-        Effect.tapError((cause) => Effect.logWarning("channel reception failed", { cause })),
-        Effect.orElseSucceed(() => Option.none<ChannelReceptionResult>()),
+        Effect.flatMap(
+          Option.match({
+            onNone: () =>
+              Effect.logWarning("channel reception failed", { kind: "timeout" }).pipe(
+                Effect.as(receptionFailure("timeout")),
+              ),
+            onSome: (result): Effect.Effect<ReceptionOutcome> =>
+              Effect.succeed({ ok: true, result }),
+          }),
+        ),
+        Effect.catch((cause) => {
+          const kind = classifyTextGenerationFailure(cause);
+          return Effect.logWarning("channel reception failed", { kind, cause }).pipe(
+            Effect.as(receptionFailure(kind)),
+          );
+        }),
       );
     });
+  // Narration falls back to the worker's own words when the model cannot phrase them.
+  const generate = (input: ChannelReceptionInput) =>
+    generateOutcome(input).pipe(
+      Effect.map((outcome) => (outcome.ok ? Option.some(outcome.result) : Option.none())),
+    );
 
   const receive: ChannelReceptionService["Service"]["receive"] = (inputId, owner) =>
     Effect.gen(function* () {
@@ -373,89 +405,91 @@ const make = Effect.gen(function* () {
       const hosts = yield* remoteWorkers.knownHosts;
       const bot = (yield* ledger.getBot(stored.ownerId))?.bot;
       const targets = yield* allowedTargets(bot?.projectId);
-      const decision: ChannelReceptionResult | undefined =
+      const outcome: ReceptionOutcome =
         message.intent === "answer" &&
         message.taskId !== undefined &&
         message.questionId !== undefined
           ? {
-              replyText: CHANNEL_COPY.answerForwarded,
-              action: {
-                type: "answer_question",
-                taskId: message.taskId,
-                questionId: message.questionId,
-                answer: message.text.trim() === "" ? "(no answer)" : message.text,
+              ok: true,
+              result: {
+                replyText: CHANNEL_COPY.answerForwarded,
+                action: {
+                  type: "answer_question",
+                  taskId: message.taskId,
+                  questionId: message.questionId,
+                  answer: message.text.trim() === "" ? "(no answer)" : message.text,
+                },
               },
             }
-          : Option.getOrUndefined(
-              yield* Effect.gen(function* () {
-                const tail = yield* ledger.readConversationTail(
-                  conversationId,
-                  CHANNEL_RECEPTION_TAIL_LIMITS.messages,
-                );
-                const shells = yield* listThreads;
-                const recent = recentThreads(shells, targets, bot?.threadId);
-                const facts = yield* hostFacts(shells);
-                const notes = yield* readChannelBotNotes(fileSystem, botFiles);
-                const skills = yield* listChannelBotSkills(fileSystem, path, botFiles);
-                return yield* generate({
-                  mode: "input",
-                  conversationId,
-                  originKind: message.kind,
-                  inputText: message.text,
-                  tail: boundTail(
-                    tail.flatMap((entry) =>
-                      entry.inputId === inputId
-                        ? []
-                        : [
-                            { role: "user" as const, text: entry.text, at: entry.receivedAt },
-                            ...(entry.replyText === undefined
-                              ? []
-                              : [
-                                  {
-                                    role: "assistant" as const,
-                                    text: entry.replyText,
-                                    at: entry.receivedAt,
-                                  },
-                                ]),
-                          ],
-                    ),
+          : yield* Effect.gen(function* () {
+              const tail = yield* ledger.readConversationTail(
+                conversationId,
+                CHANNEL_RECEPTION_TAIL_LIMITS.messages,
+              );
+              const shells = yield* listThreads;
+              const recent = recentThreads(shells, targets, bot?.threadId);
+              const facts = yield* hostFacts(shells);
+              const notes = yield* readChannelBotNotes(fileSystem, botFiles);
+              const skills = yield* listChannelBotSkills(fileSystem, path, botFiles);
+              return yield* generateOutcome({
+                mode: "input",
+                conversationId,
+                originKind: message.kind,
+                inputText: message.text,
+                tail: boundTail(
+                  tail.flatMap((entry) =>
+                    entry.inputId === inputId
+                      ? []
+                      : [
+                          { role: "user" as const, text: entry.text, at: entry.receivedAt },
+                          ...(entry.replyText === undefined
+                            ? []
+                            : [
+                                {
+                                  role: "assistant" as const,
+                                  text: entry.replyText,
+                                  at: entry.receivedAt,
+                                },
+                              ]),
+                        ],
                   ),
-                  tasks: tasks.map((task) => ({
-                    taskId: task.taskId,
-                    title: task.title,
-                    status: task.status,
-                    ...(task.resultSummary === undefined
-                      ? {}
-                      : { resultSummary: task.resultSummary }),
-                    openQuestions: task.openQuestions.map((question) => ({
-                      questionId: question.questionId,
-                      text: question.text,
-                    })),
+                ),
+                tasks: tasks.map((task) => ({
+                  taskId: task.taskId,
+                  title: task.title,
+                  status: task.status,
+                  ...(task.resultSummary === undefined
+                    ? {}
+                    : { resultSummary: task.resultSummary }),
+                  openQuestions: task.openQuestions.map((question) => ({
+                    questionId: question.questionId,
+                    text: question.text,
                   })),
-                  allowedTargets: targets,
-                  ...(hosts.length === 0 ? {} : { allowedHosts: hosts }),
-                  ...(recent.length === 0 ? {} : { recentThreads: recent }),
-                  ...(facts.length === 0 ? {} : { hostFacts: facts }),
-                  ...(notes === "" ? {} : { notes }),
-                  ...(skills.length === 0 ? {} : { skills }),
-                  requester,
-                });
-              }),
-            );
+                })),
+                allowedTargets: targets,
+                ...(hosts.length === 0 ? {} : { allowedHosts: hosts }),
+                ...(recent.length === 0 ? {} : { recentThreads: recent }),
+                ...(facts.length === 0 ? {} : { hostFacts: facts }),
+                ...(notes === "" ? {} : { notes }),
+                ...(skills.length === 0 ? {} : { skills }),
+                requester,
+              });
+            });
 
       const now = DateTime.formatIso(yield* DateTime.now);
-      if (decision === undefined) {
+      if (!outcome.ok) {
+        const reply = CHANNEL_COPY.receptionFailedBecause[outcome.failure];
         yield* ledger.failReception({
           owner,
           inputId,
           receptionId,
-          failure: { reason: "reception_failed", message: CHANNEL_COPY.receptionFailed },
+          failure: { reason: "reception_failed", message: reply },
           deliveries: [
             replyDelivery({
               causeKey: "reply:" + inputId,
               destination: origin,
               kind: "failure",
-              text: CHANNEL_COPY.receptionFailed,
+              text: reply,
               inputId,
               mentionActorId: mention,
             }),
@@ -465,6 +499,7 @@ const make = Effect.gen(function* () {
         yield* wake.wake;
         return;
       }
+      const decision = outcome.result;
 
       // Notes shape every later reply, so a note is kept only when a person asked for it in this
       // input: the quote the model returns must occur in the message itself, never in the tail.

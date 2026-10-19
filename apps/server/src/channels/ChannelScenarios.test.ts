@@ -18,6 +18,7 @@ import {
   RuntimeRequestId,
   ScheduledTaskId,
   ThreadId,
+  TextGenerationError,
   type ThreadPullRequestLink,
 } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
@@ -1822,6 +1823,39 @@ describe("who may do what (scenario 4)", () => {
       const later = seen.find((input) => input.inputText === "what machine is this?");
       assert.include(later?.notes ?? "", "Reply in Korean. (asked in " + receipt.inputId + ")");
       assert.include((later?.hostFacts ?? []).map((fact) => fact.value).join("\n"), "test-machine");
+      assert.strictEqual(harness.world.launches.length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+  it.effect.each([
+    {
+      kind: "schema_rejected",
+      detail:
+        'Codex CLI command failed: {"error":{"message":"Invalid schema for response_format \'codex_output_schema\'","code":"invalid_json_schema"},"status":400}',
+    },
+    { kind: "unavailable", detail: "This provider does not support channel reception." },
+  ] as const)("tells the person reception failed because of $kind", ({ kind, detail }) => {
+    const harness = makeHarness();
+    harness.script.current = (input) =>
+      input.mode === "input"
+        ? Effect.fail(new TextGenerationError({ operation: "generateChannelReception", detail }))
+        : defaultScript(input);
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const receipt = yield* gateway.ingest(
+        goatInput("what machine is this?", "fail-1"),
+        rpcContext,
+      );
+      yield* runtime.drain;
+      const failure = (yield* ledger.getInput(receipt.inputId))?.snapshot.failure;
+      assert.deepStrictEqual(failure, {
+        reason: "reception_failed",
+        message: CHANNEL_COPY.receptionFailedBecause[kind],
+      });
+      // Provider output stays in the server log.
+      assert.notInclude(failure?.message ?? "", detail);
       assert.strictEqual(harness.world.launches.length, 0);
     }).pipe(Effect.provide(harness.layer));
   });
