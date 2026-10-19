@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as HostProcess from "@goat/shared/HostProcess";
 import type { ThreadLaunchParameters, ThreadLaunchSuccess } from "./toolkits/project/tools.ts";
 import { resolveProjectSettings } from "@goat/shared/projectSettings";
 import { prependStandingInstructions } from "@goat/shared/standingInstructions";
@@ -29,6 +30,7 @@ import * as RemoteReportService from "../remoteReports/RemoteReportService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { nativeWorkspacePath } from "../workspace/WorkspacePaths.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import {
@@ -164,8 +166,23 @@ const make = Effect.gen(function* () {
       });
   });
   return ThreadLaunchMcpService.of({
-    launch: (scope, input, { runtimeMode, interactionMode }) =>
+    launch: (scope, rawInput, { runtimeMode, interactionMode }) =>
       Effect.gen(function* () {
+        // The checkout is checked and recorded as given, so it must already be native here.
+        const platform = yield* HostProcess.Platform;
+        const input =
+          rawInput.workspaceStrategy?.type === "existing_worktree"
+            ? {
+                ...rawInput,
+                workspaceStrategy: {
+                  ...rawInput.workspaceStrategy,
+                  worktreePath: nativeWorkspacePath(
+                    platform,
+                    rawInput.workspaceStrategy.worktreePath,
+                  ),
+                },
+              }
+            : rawInput;
         const context = yield* readCaller();
         const { caller } = context;
         const forwarded = input.memoryGrantCeiling;
