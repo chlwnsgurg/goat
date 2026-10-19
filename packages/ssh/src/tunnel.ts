@@ -2640,7 +2640,8 @@ if ready_version "$retained_version"; then
     fi
   fi
 fi
-# Records are data, never shell code. A completion marker alone authorizes no discovery.
+# Records pin executable identity. Unrecorded installs must prove their exact version and both
+# protocols themselves; launch re-verifies the executable SHA captured by this probe.
 installed_candidates=
 installed_versions=
 installed_collected=0
@@ -2674,6 +2675,34 @@ collect_installed_candidates() {
       candidate_fields="$candidate_fields,\\"commitTime\\":$candidate_commit"
     fi
     installed_versions="$installed_versions $recorded_version"
+    installed_candidates="$installed_candidates\${installed_candidates:+,}$candidate_fields}"
+  done
+  if [ "$installed_noglob" = 1 ]; then set -f; else set +f; fi
+  marker_list="$(ls -t "$HOME/.goat/runtime/goat/versions/"*/.install-complete 2>/dev/null || true)"
+  IFS='
+'
+  eligible=0
+  for marker in $marker_list; do
+    IFS="$old_ifs"
+    dir="\${marker%/.install-complete}"; candidate_version="\${dir##*/}"
+    [ ! -e "$dir/.install-record" ] && [ ! -L "$dir/.install-record" ] || continue
+    [ ! -L "$dir" ] && [ ! -L "$marker" ] && [ ! -L "$dir/goat" ] || continue
+    [ "$candidate_version" != "$retained_version" ] || continue
+    # Builtin exclusions first: valid_version spawns grep, and recorded installs can be numerous.
+    valid_version "$candidate_version" || continue
+    ready_version "$candidate_version" || continue
+    case " $installed_versions " in *" $candidate_version "*) continue ;; esac
+    [ "$eligible" -lt 8 ] || break
+    eligible=$((eligible + 1))
+    candidate_signals="$(binary_json "$candidate_version" || true)"
+    case "$candidate_signals" in *'"sshRuntimeProtocolVersion"'*'"orchestrationProtocolVersion"'*) ;; *) continue ;; esac
+    case "$candidate_signals" in *'"invalid"'*) continue ;; esac
+    executable_sha="$(runner_sha256 "$dir/goat")" || continue
+    candidate_fields="$(printf '{"version":"%s","signals":%s,"executableSha256":"%s","unrecorded":true' "$candidate_version" "$candidate_signals" "$executable_sha")"
+    if candidate_commit="$(build_commit_time "$dir/goat")"; then
+      candidate_fields="$candidate_fields,\\"commitTime\\":$candidate_commit"
+    fi
+    installed_versions="$installed_versions $candidate_version"
     installed_candidates="$installed_candidates\${installed_candidates:+,}$candidate_fields}"
   done
   IFS="$old_ifs"
@@ -2758,6 +2787,7 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
             version: Schema.String,
             signals: RuntimeSignals,
             commitTime: Schema.optionalKey(Schema.Int),
+            unrecorded: Schema.optionalKey(Schema.Boolean),
             executableSha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
           }),
         ),
@@ -3258,7 +3288,7 @@ export const prepareRemoteRuntime = (
               ...sshTargetLogFields(target),
               installedVersion: fallbackVersion,
               requestedVersion: version,
-              reason: `GOAT ${version} could not be installed; using compatible GOAT ${fallbackVersion} (${fallbackToLive ? "live server" : fallbackVersion === probe.retainedVersion ? "retained runtime; no verified newer ordered candidate" : "newest verified installed runtime with proven build order"}): ${error.message}`,
+              reason: `GOAT ${version} could not be installed; using compatible GOAT ${fallbackVersion} (${fallbackToLive ? "live server" : fallbackVersion === probe.retainedVersion ? "retained runtime; no verified newer ordered candidate" : `newest verified installed runtime with proven build order${probe.installedCandidates?.find((candidate) => candidate.version === fallbackVersion)?.unrecorded ? " (unrecorded install)" : ""}`}): ${error.message}`,
             }).pipe(
               Effect.andThen(selectInstalled(fallbackVersion)),
               Effect.map((selected): PreparedRemoteRuntime => {
@@ -4606,6 +4636,11 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     });
     notifyRuntimePhase(target, phase, onPhase);
   };
+  const deferredArchiveRefresh = (requestedVersion: string) => ({
+    reason: "archive_unavailable" as const,
+    requestedVersion,
+    detail: `Refresh deferred: archive for ${requestedVersion} unavailable`,
+  });
   const publishResult = (
     key: string,
     target: DesktopSshEnvironmentTarget,
@@ -4631,7 +4666,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
               : `Update to ${requestedVersion} waits for running work`;
       snapshot = { ...base, state: "update_waiting", waitingReason: pending.reason, detail };
     } else if (!("type" in result) && result.selectedRuntime.upgradeFailure !== undefined) {
-      snapshot = { ...base, state: "failed", failure: result.selectedRuntime.upgradeFailure };
+      const refreshDeferred = deferredArchiveRefresh(requestedVersion);
+      snapshot = { ...base, state: "ready", refreshDeferred, detail: refreshDeferred.detail };
       acquisitionFailures.set(key, result.selectedRuntime.upgradeFailure);
     } else if (!("type" in result) && result.selectedRuntime.updateBlocked !== undefined) {
       snapshot = { ...base, state: "update_blocked", detail: result.selectedRuntime.updateBlocked };
@@ -4691,11 +4727,13 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     {
       target: DesktopSshEnvironmentTarget;
       requestedRunner: RemoteGoatRunnerOptions;
-      pending: SshRuntimePendingReplacement;
       generation: number;
       managedPin?: ManagedPin;
       nextAttemptAt: number;
-    }
+    } & (
+      | { pending: SshRuntimePendingReplacement; archiveFailure?: never }
+      | { pending?: never; archiveFailure: SshHostFailure }
+    )
   >();
   let retryStarted = false;
   let closed = false;
@@ -4966,8 +5004,10 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     const managedPin = yield* validateManagedPin(input.resolvedTarget);
     if (closed || (generations.get(input.key) ?? 0) !== generation)
       return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
-    // Only an observed remote pending result grants background replacement intent.
     const phase: SshRuntimeProgressCallback = ({ phase }) => {
+      // A background refresh of a host whose forward still works keeps its published status;
+      // "preparing" would drop provider diagnosis and flap a healthy host every ten minutes.
+      if (input.background === true && tunnels.has(input.key)) return;
       if (!closed && (generations.get(input.key) ?? 0) === generation) {
         publishPhase(
           input.key,
@@ -5044,25 +5084,41 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       } else cancelledLaunches.set(input.key, stop);
       return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
     }
-    if (remoteLaunch.pending !== undefined && input.runner !== undefined) {
-      // The host keeps its current runtime for now; say why instead of pinning it silently.
-      yield* Effect.logWarning("ssh.runtime.refresh.deferred", {
-        ...sshTargetLogFields(input.resolvedTarget),
-        liveVersion: remoteLaunch.pending.liveVersion,
-        requestedVersion: remoteLaunch.pending.requestedVersion,
-        reason: remoteLaunch.pending.reason,
-        replacement: remoteLaunch.pending.replacement,
-        retryInMinutes: 10,
-      });
-      pendingReplacements.set(input.key, {
+    const archiveFailure =
+      remoteLaunch.status === "ready" ? remoteLaunch.selectedRuntime.upgradeFailure : undefined;
+    const needsArchiveRetry = archiveFailure?.reason === "archive_unavailable";
+    if ((remoteLaunch.pending !== undefined || needsArchiveRetry) && input.runner !== undefined) {
+      const intent = {
         target: input.resolvedTarget,
         requestedRunner: { ...input.runner, confirmReplacement: false },
-        pending: remoteLaunch.pending,
         generation,
         ...(managedPin === undefined ? {} : { managedPin }),
         nextAttemptAt: (yield* Clock.currentTimeMillis) + 600_000,
-      });
+      };
+      if (remoteLaunch.pending !== undefined) {
+        yield* Effect.logWarning("ssh.runtime.refresh.deferred", {
+          ...sshTargetLogFields(input.resolvedTarget),
+          liveVersion: remoteLaunch.pending.liveVersion,
+          requestedVersion: remoteLaunch.pending.requestedVersion,
+          reason: remoteLaunch.pending.reason,
+          replacement: remoteLaunch.pending.replacement,
+          retryInMinutes: 10,
+        });
+        pendingReplacements.set(input.key, { ...intent, pending: remoteLaunch.pending });
+      } else if (needsArchiveRetry) {
+        yield* Effect.logWarning("ssh.runtime.refresh.deferred", {
+          ...sshTargetLogFields(input.resolvedTarget),
+          actualVersion:
+            remoteLaunch.status === "ready" ? remoteLaunch.selectedRuntime.version : null,
+          requestedVersion: archiveFailure.archive?.requestedVersion,
+          reason: archiveFailure.reason,
+          sourcesTried: archiveFailure.archive?.sourcesTried,
+          retryInMinutes: 10,
+        });
+        pendingReplacements.set(input.key, { ...intent, archiveFailure });
+      }
     }
+    if (setupTerminalFailure(input.key)) pendingReplacements.delete(input.key);
     if (remoteLaunch.status === "pending")
       return pendingResult(input.resolvedTarget, remoteLaunch.pending);
     if (
@@ -5071,7 +5127,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       input.previous.remotePort === remoteLaunch.remotePort &&
       input.previous.selectedRuntime.version === remoteLaunch.selectedRuntime.version
     ) {
-      if (remoteLaunch.pending === undefined) pendingReplacements.delete(input.key);
+      if (remoteLaunch.pending === undefined && !needsArchiveRetry)
+        pendingReplacements.delete(input.key);
       // Keep the forward's identity for its finalizer while updating the latest selection.
       input.previous.selectedRuntime = remoteLaunch.selectedRuntime;
       return input.previous;
@@ -5146,7 +5203,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
     }
     tunnels.set(input.key, tunnelEntry);
-    if (remoteLaunch.pending === undefined) pendingReplacements.delete(input.key);
+    if (remoteLaunch.pending === undefined && !needsArchiveRetry)
+      pendingReplacements.delete(input.key);
     const spawnerService = yield* ChildProcessSpawner.ChildProcessSpawner;
     const cryptoService = yield* Crypto.Crypto;
     const fileSystemService = yield* FileSystem.FileSystem;
@@ -5738,6 +5796,10 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     let observed = active;
     let generation = generations.get(key) ?? 0;
     const initialGeneration = generation;
+    // Applied only after the generation/snapshot checks below, so a stale probe cannot clear newer state.
+    let clearArchiveDeferral:
+      | { readonly failure: SshHostFailure | undefined; readonly intent: unknown }
+      | undefined;
     const result = yield* Effect.gen(function* () {
       const { resolvedTarget } = yield* resolveManagedTarget(target);
       key = targetConnectionKey(resolvedTarget);
@@ -5777,6 +5839,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       const host = target.alias || target.hostname;
       const base = { host, requestedVersion };
       let snapshot: SshHostStatus;
+      let compatibleLive = false;
       if (probe.liveStatus === "live") {
         if (
           probe.liveVersion === undefined ||
@@ -5800,6 +5863,12 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           order > 0 ||
           (probe.liveVersion !== requestedVersion && probe.liveDrain !== true);
         const compatible = matchesSignals(probe.liveSignals, requestedVersion);
+        compatibleLive =
+          compatible &&
+          probe.identityAbsent !== true &&
+          probe.liveBinarySignals !== undefined &&
+          probe.liveBinarySignals.serverVersion === probe.liveVersion &&
+          matchesSignals(probe.liveBinarySignals, requestedVersion);
         if (!compatible && !blocked) {
           return {
             kind: "error",
@@ -5848,7 +5917,23 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       }
       // A successful probe observes liveness; it does not retry a failed acquisition.
       const previousFailure = acquisitionFailures.get(key);
-      if (
+      if (compatibleLive && snapshot.runtimeVersion === requestedVersion) {
+        clearArchiveDeferral = { failure: previousFailure, intent: pendingReplacements.get(key) };
+      } else if (
+        compatibleLive &&
+        previousFailure?.reason === "archive_unavailable" &&
+        previousFailure.archive?.requestedVersion === requestedVersion
+      ) {
+        const refreshDeferred = deferredArchiveRefresh(requestedVersion);
+        snapshot = {
+          ...base,
+          runtimeVersion: snapshot.runtimeVersion,
+          detail: refreshDeferred.detail,
+          state: snapshot.providers?.ready === false ? "providers_not_ready" : "ready",
+          ...(snapshot.providers === undefined ? {} : { providers: snapshot.providers }),
+          refreshDeferred,
+        };
+      } else if (
         previousFailure?.reason === "archive_unavailable" ||
         previousFailure?.reason === "unsupported_platform"
       ) {
@@ -5894,6 +5979,17 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     if (latest !== observed && latest !== undefined) return latest;
     const enriched = yield* enrichFailure(target, result);
     if (closed || (generations.get(key) ?? 0) !== generation) return statuses.get(key) ?? enriched;
+    if (clearArchiveDeferral !== undefined) {
+      if (acquisitionFailures.get(key) === clearArchiveDeferral.failure)
+        acquisitionFailures.delete(key);
+      const intent = pendingReplacements.get(key);
+      if (
+        intent !== undefined &&
+        intent === clearArchiveDeferral.intent &&
+        intent.archiveFailure !== undefined
+      )
+        pendingReplacements.delete(key);
+    }
     statuses.set(key, enriched);
     return enriched;
   });
@@ -6099,17 +6195,20 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         "update_blocked",
         "providers_not_ready",
       ].includes(snapshot.state);
-      if (outcome.kind === "complete" || keepRecovery) {
+      if (outcome.kind === "complete" || (keepRecovery && snapshot.refreshDeferred === undefined)) {
         if (outcome.kind === "complete" && snapshot.state === "preparing") return false;
         setupOperations.set(key, { ...setup, diagnosisRequired: false });
         statuses.set(key, { kind: "ok", status: { ...snapshot, ...setupFields(key, "complete") } });
       } else {
+        pendingReplacements.delete(key);
+        generations.set(key, operation.generation + 1);
         const {
           phase: _phase,
           waitingReason: _waiting,
           publicKey: _publicKey,
           keyAuth: _keyAuth,
           failure: _failure,
+          refreshDeferred: _refreshDeferred,
           ...base
         } = snapshot;
         statuses.set(key, {

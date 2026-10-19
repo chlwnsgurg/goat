@@ -86,6 +86,7 @@ export function sshRuntimeStatusText(status: SshHostStatus): string {
     case "stopped":
       return `Not running · Runtime ${version}`;
     case "ready": {
+      if (status.refreshDeferred) return `Runtime ${version} · ${status.refreshDeferred.detail}`;
       if (status.runtimeVersion === status.requestedVersion)
         return `Up to date · Runtime ${version}`;
       const order = sshRuntimeBuildOrder(status);
@@ -112,7 +113,7 @@ export function sshRuntimeStatusText(status: SshHostStatus): string {
         : `A GOAT server that this app didn't start is running on ${status.host}. Stop it on the host, then reconnect.`;
     }
     case "providers_not_ready":
-      return `Providers need attention · Runtime ${version}`;
+      return `Providers need attention · Runtime ${version}${status.refreshDeferred ? ` · ${status.refreshDeferred.detail}` : ""}`;
     case "failed": {
       const failure = status.failure;
       if (!failure) return status.detail ?? `GOAT setup failed on ${status.host}.`;
@@ -149,6 +150,9 @@ export function sshRuntimeStatusText(status: SshHostStatus): string {
 
 /** The single next step for the current runtime condition. */
 export function sshRuntimeRecoveryText(status: SshHostStatus) {
+  const deferredRecovery = status.refreshDeferred
+    ? "GOAT is connected. It will retry the refresh every 10 minutes."
+    : null;
   switch (status.state) {
     case "failed":
       return status.failure?.reason === "archive_unavailable"
@@ -173,8 +177,12 @@ export function sshRuntimeRecoveryText(status: SshHostStatus) {
         ? `GOAT created a key for ${status.host}. Add this public key to the server. Most providers ask for it when you create a server.`
         : "Register your public SSH key on the host, then try again.";
     case "providers_not_ready":
-      return status.providers?.fixes[0]?.instruction ?? null;
+      return (
+        [status.providers?.fixes[0]?.instruction, deferredRecovery].filter(Boolean).join(" ") ||
+        null
+      );
     case "ready": {
+      if (deferredRecovery) return deferredRecovery;
       if (status.runtimeVersion === status.requestedVersion) return null;
       const order = sshRuntimeBuildOrder(status);
       if (order !== undefined && order > 0) return "Update this app to manage it.";

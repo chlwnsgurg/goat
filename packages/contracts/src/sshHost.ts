@@ -59,6 +59,13 @@ export const SshHostFailure = Schema.Struct({
 );
 export type SshHostFailure = typeof SshHostFailure.Type;
 
+export const SshRefreshDeferred = Schema.Struct({
+  reason: Schema.Literals(["archive_unavailable"]),
+  requestedVersion: Schema.String,
+  detail: Schema.String,
+});
+export type SshRefreshDeferred = typeof SshRefreshDeferred.Type;
+
 export const SshHostProviders = Schema.Struct({
   checkedAt: IsoDateTime,
   ready: Schema.Boolean,
@@ -104,6 +111,7 @@ const SshHostStatusShape = Schema.Struct({
   waitingReason: Schema.optionalKey(Schema.Literals(["busy", "unknown", "contended"])),
   detail: Schema.optionalKey(Schema.String),
   failure: Schema.optionalKey(SshHostFailure),
+  refreshDeferred: Schema.optionalKey(SshRefreshDeferred),
   providers: Schema.optionalKey(SshHostProviders),
   publicKey: Schema.optionalKey(Schema.String),
   keyAuth: Schema.optionalKey(SshKeyAuthInstructions),
@@ -114,6 +122,14 @@ const SshHostStatusShape = Schema.Struct({
 export function validateSshHostStatus(status: typeof SshHostStatusShape.Type) {
   if ((status.state === "preparing") !== (status.phase !== undefined)) return false;
   if (status.state === "failed" && status.failure === undefined) return false;
+  if (
+    status.refreshDeferred !== undefined &&
+    ((status.state !== "ready" && status.state !== "providers_not_ready") ||
+      status.runtimeVersion === null ||
+      status.failure !== undefined ||
+      status.refreshDeferred.requestedVersion !== status.requestedVersion)
+  )
+    return false;
   if (status.waitingReason !== undefined && status.state !== "update_waiting") return false;
   if (
     (status.publicKey !== undefined || status.keyAuth !== undefined) &&

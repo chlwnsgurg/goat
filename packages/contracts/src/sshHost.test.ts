@@ -569,3 +569,34 @@ it("key-auth commands are restricted to auth_failed and match any exposed genera
   expect(() => decodeStatus({ ...status, state: "ready" })).toThrow();
   expect(() => decodeStatus({ ...status, publicKey: "another key" })).toThrow();
 });
+
+const refreshDeferred = {
+  reason: "archive_unavailable",
+  requestedVersion: stopped.requestedVersion,
+  detail: "Refresh deferred: archive for 0.4.3 unavailable",
+} as const;
+it.each(["ready", "providers_not_ready"] as const)(
+  "round-trips a usable %s deferred refresh",
+  (state) => {
+    const status = {
+      ...stopped,
+      state,
+      refreshDeferred,
+      ...(state === "providers_not_ready" ? { providers } : {}),
+    };
+    const decoded = decodeStatus(status);
+    const result = { kind: "ok", status: decoded } as const;
+    expect(decodeResultWire(encodeResultWire(result))).toEqual(result);
+    expect(decodeStatus({ ...stopped, state: "ready" }).refreshDeferred).toBeUndefined();
+  },
+);
+it.each([
+  { state: "stopped" },
+  { state: "failed", failure: { reason: "archive_unavailable", archive, fix } },
+  { runtimeVersion: null },
+  { failure: { reason: "archive_unavailable", archive, fix } },
+  { refreshDeferred: { ...refreshDeferred, reason: "operation_failed" } },
+  { refreshDeferred: { ...refreshDeferred, requestedVersion: "other" } },
+])("rejects an unusable or inconsistent deferred snapshot %j", (invalid) => {
+  expect(() => decodeStatus({ ...stopped, state: "ready", refreshDeferred, ...invalid })).toThrow();
+});

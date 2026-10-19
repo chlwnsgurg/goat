@@ -367,3 +367,40 @@ it.each([
   );
   expect(sshRuntimeRecoveryText(status)).toBeNull();
 });
+
+it.each(["ready", "providers_not_ready"] as const)(
+  "explains deferred refresh on %s without hiding provider recovery",
+  (state) => {
+    const detail = "Refresh deferred: archive for 0.4.3 unavailable";
+    const status: SshHostStatus = {
+      host: "box",
+      state,
+      runtimeVersion: "0.4.2",
+      requestedVersion: "0.4.3",
+      refreshDeferred: { reason: "archive_unavailable", requestedVersion: "0.4.3", detail },
+      ...(state === "providers_not_ready"
+        ? {
+            providers: {
+              checkedAt: "2026-10-18T00:00:00.000Z",
+              ready: false,
+              fixes: [{ actor: "human", instruction: "Sign in" }],
+            },
+          }
+        : {}),
+    };
+    expect(sshRuntimeStatusText(status)).toBe(
+      `${state === "providers_not_ready" ? "Providers need attention · " : ""}Runtime 0.4.2 · ${detail}`,
+    );
+    expect(sshRuntimeRecoveryText(status)).toBe(
+      `${state === "providers_not_ready" ? "Sign in " : ""}GOAT is connected. It will retry the refresh every 10 minutes.`,
+    );
+    const exact = {
+      host: status.host,
+      requestedVersion: status.requestedVersion,
+      state: "ready",
+      runtimeVersion: "0.4.3",
+    } as const;
+    expect(sshRuntimeStatusText(exact)).toBe("Up to date · Runtime 0.4.3");
+    expect(sshRuntimeRecoveryText(exact)).toBeNull();
+  },
+);

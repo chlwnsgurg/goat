@@ -505,9 +505,9 @@ describe("SSH runtime status", () => {
     },
   );
 
-  it.effect(
-    "retains an acquisition failure while the fallback runtime connects and probes successfully",
-    () => {
+  it.effect.each([true, false])(
+    "reconciles fallback and exact success even when drain=%s",
+    (drain) => {
       const f = fixture(retained);
       f.setLaunchVersion("1.2.2");
       return Effect.gen(function* () {
@@ -520,19 +520,31 @@ describe("SSH runtime status", () => {
           liveStatus: "live",
           liveVersion: "1.2.2",
           liveOwned: true,
-          liveDrain: true,
+          liveDrain: drain,
           liveSignals: signals("1.2.2"),
+          liveBinarySignals: signals("1.2.2"),
         });
         const result = yield* manager.status(uploadTarget);
         yield* decodeSshHostResult(result);
         const status = successfulStatus(result);
-        assert.equal(status.state, "failed");
+        assert.equal(status.state, "ready");
         assert.equal(status.runtimeVersion, "1.2.2");
-        assert.deepEqual(status.failure?.archive, {
-          requestedVersion: ARCHIVE.archiveVersion,
-          platformKey: "linux-x64",
-          sourcesTried: [],
+        assert.equal(status.refreshDeferred?.requestedVersion, ARCHIVE.archiveVersion);
+        assert.isUndefined(status.failure);
+        f.setProbe({
+          ...stopped,
+          ready: true,
+          liveStatus: "live",
+          liveOwned: true,
+          liveVersion: ARCHIVE.archiveVersion,
+          liveSignals: signals(ARCHIVE.archiveVersion),
+          liveBinarySignals: signals(ARCHIVE.archiveVersion),
         });
+        const exact = yield* manager.status(uploadTarget);
+        yield* decodeSshHostResult(exact);
+        assert.equal(exact.status?.state, "ready");
+        assert.isUndefined(exact.status?.refreshDeferred);
+        assert.isUndefined(exact.status?.failure);
       }).pipe(Effect.provide(f.layer), Effect.scoped);
     },
   );
@@ -748,6 +760,40 @@ it.effect.each(["Tailscale is stopped.", "Logged out."])(
         assert.equal(result.code, "operation_failed");
         assert.include(result.message, `Tailscale proxy status: ${status}`);
       }
+    }).pipe(Effect.provide(f.layer), Effect.scoped);
+  },
+);
+
+it.effect.each(["stopped", "incompatible", "unverified-binary", "probe-failed"] as const)(
+  "does not turn %s evidence into a ready archive deferral",
+  (kind) => {
+    const f = fixture(retained);
+    f.setLaunchVersion("1.2.2");
+    return Effect.gen(function* () {
+      const manager = yield* SshTunnel.SshEnvironmentManager;
+      yield* manager.ensureEnvironment(uploadTarget, { keyOnly: true });
+      if (kind === "probe-failed") f.failProbe("Connection refused");
+      f.setProbe(
+        kind === "stopped"
+          ? stopped
+          : {
+              ...stopped,
+              liveStatus: "live",
+              liveOwned: true,
+              liveDrain: true,
+              liveVersion: "1.2.2",
+              liveSignals: {
+                ...signals("1.2.2"),
+                sshRuntimeProtocolVersion:
+                  kind === "incompatible" ? 99 : SSH_RUNTIME_PROTOCOL_VERSION,
+              },
+              ...(kind === "unverified-binary" ? {} : { liveBinarySignals: signals("1.2.2") }),
+            },
+      );
+      const result = yield* manager.status(uploadTarget);
+      yield* decodeSshHostResult(result);
+      assert.notEqual(result.status?.state, "ready");
+      assert.isUndefined(result.status?.refreshDeferred);
     }).pipe(Effect.provide(f.layer), Effect.scoped);
   },
 );
