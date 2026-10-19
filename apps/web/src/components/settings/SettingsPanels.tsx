@@ -2891,7 +2891,7 @@ export function GeneralSettingsPanel() {
           {...searchableSetting("automatic-server-updates")}
           serverScoped
           settingKeys={["automaticServerUpdates"]}
-          description="Automatically update background servers on their current release channel when idle. Enabled by default."
+          description="When this server runs as a background service, install new releases from its channel while no threads are running. A failed update rolls back."
           resetAction={
             settings.automaticServerUpdates !== DEFAULT_UNIFIED_SETTINGS.automaticServerUpdates ? (
               <SettingResetButton

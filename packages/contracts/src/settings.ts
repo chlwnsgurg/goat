@@ -1024,7 +1024,6 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "sidebarAutoSettleAfterDays",
   "sidebarAutoSettleKeepPullRequests",
   "continueThreadsAfterServerUpdate",
-  "automaticServerUpdates",
   "responseStreamingMode",
   "standingInstructions",
 ] as const;
@@ -1080,7 +1079,6 @@ export const ProjectSettingsOverrides = Schema.Struct({
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
-  automaticServerUpdates: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   standingInstructions: Schema.optionalKey(StandingInstructions),
   providerInstances: Schema.optionalKey(
