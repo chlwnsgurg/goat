@@ -14,6 +14,7 @@ import {
   classifyTextGenerationFailure,
   type TextGenerationFailureKind,
 } from "@goat/provider-core/server/textGenerationUtils";
+import { MemoryGenerationRunnerError } from "@goat/provider-core/server/memoryGenerationRunner";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -77,6 +78,7 @@ export class MemoryGenerationHeld extends Schema.TaggedError<MemoryGenerationHel
 }
 
 const isTextGenerationError = Schema.is(M.TextGenerationError);
+const isRunnerError = Schema.is(MemoryGenerationRunnerError);
 const encodeKey = Schema.encodeSync(
   Schema.fromJsonString(
     Schema.Tuple([
@@ -88,13 +90,20 @@ const encodeKey = Schema.encodeSync(
   ),
 );
 
-/** The deterministic failure kind behind an error, looking through wrappers' `cause`. */
+/**
+ * The deterministic failure kind behind an error, looking through the cause chain. Memory
+ * runners (Claude isolation, Grok, OpenCode) report a missing model or runtime as a typed
+ * runner error under a free-text detail, so an unrecognized detail keeps looking.
+ */
 export function deterministicFailure(error: unknown): MemoryGenerationHoldReason | undefined {
   for (let current = error, depth = 0; current !== undefined && depth < 4; depth += 1) {
     if (isTextGenerationError(current)) {
       const kind = classifyTextGenerationFailure(current);
-      return DETERMINISTIC_FAILURES.has(kind) ? (kind as MemoryGenerationHoldReason) : undefined;
+      if (DETERMINISTIC_FAILURES.has(kind)) return kind as MemoryGenerationHoldReason;
     }
+    if (isRunnerError(current))
+      // Every code but invalid_output repeats until the provider or its models change.
+      return current.code === "invalid_output" ? undefined : "unavailable";
     current =
       typeof current === "object" && current !== null && "cause" in current
         ? current.cause

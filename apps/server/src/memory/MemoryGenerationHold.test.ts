@@ -5,6 +5,8 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
 
+import { MemoryGenerationRunnerError } from "@goat/provider-core/server/memoryGenerationRunner";
+
 import * as Hold from "./MemoryGenerationHold.ts";
 
 const rejected = new M.TextGenerationError({
@@ -139,6 +141,20 @@ describe("MemoryGenerationHold", () => {
       "schema_rejected",
     );
     assert.isUndefined(Hold.deterministicFailure(flaky));
+    // Grok, OpenCode and Claude isolation report a missing model under a free-text detail.
+    const runner = (code: MemoryGenerationRunnerError["code"]) =>
+      new M.TextGenerationError({
+        operation: "generateMemorySummary",
+        detail: "Grok did not disclose or support the selected memory model.",
+        cause: new MemoryGenerationRunnerError({ code }),
+      });
+    assert.strictEqual(Hold.deterministicFailure(runner("unavailable")), "unavailable");
+    assert.strictEqual(Hold.deterministicFailure(runner("identity_mismatch")), "unavailable");
+    assert.strictEqual(
+      Hold.deterministicFailure({ cause: runner("unsupported_operation") }),
+      "unavailable",
+    );
+    assert.isUndefined(Hold.deterministicFailure(runner("invalid_output")));
     assert.strictEqual(
       Hold.deterministicFailure(
         new M.TextGenerationError({ operation: "x", detail: "Codex CLI request timed out." }),

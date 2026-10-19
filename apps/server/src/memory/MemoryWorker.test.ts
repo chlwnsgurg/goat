@@ -28,6 +28,7 @@ import { decideMemoryOperation } from "./MemoryDecider.ts";
 import * as Service from "./MemoryService.ts";
 import * as Maintenance from "./MemoryFtsMaintenance.ts";
 import * as Worker from "./MemoryWorker.ts";
+import { MemoryGenerationRunnerError } from "@goat/provider-core/server/memoryGenerationRunner";
 import * as Hold from "./MemoryGenerationHold.ts";
 import * as Snapshot from "./MemorySnapshot.ts";
 import { threadProvenanceCases } from "./threadProvenance.testkit.ts";
@@ -73,7 +74,7 @@ const service = Service.layer.pipe(
 const maintenance = Maintenance.layer.pipe(Layer.provideMerge(quota));
 const live = (
   // A function decides per call: a detail string fails with it, undefined succeeds.
-  failure: boolean | (() => string | undefined) = false,
+  failure: boolean | (() => string | M.TextGenerationError | undefined) = false,
   onInput?: (input: M.GenerateMemorySummaryInput) => void,
   local = false,
   elapsedPerCallMs = 0,
@@ -109,7 +110,9 @@ const live = (
           const result =
             detail !== undefined
               ? Effect.fail(
-                  new M.TextGenerationError({ operation: "generateMemorySummary", detail }),
+                  typeof detail === "string"
+                    ? new M.TextGenerationError({ operation: "generateMemorySummary", detail })
+                    : detail,
                 )
               : Effect.succeed({
                   result: {
@@ -1024,79 +1027,96 @@ describe("MemoryWorker", () => {
       assert.deepStrictEqual(rows, [{ kind: "consolidate", status: "completed" }]);
     }).pipe(Effect.provide(live())),
   );
-  it.effect("pauses a model the provider keeps rejecting instead of failing every summary", () => {
-    let reject = true;
-    let calls = 0;
-    const schemaRejection =
-      'Codex CLI command failed: {"error":{"message":"Invalid schema for response_format","code":"invalid_json_schema"},"status":400}';
-    return Effect.gen(function* () {
-      yield* TestClock.setTime(Date.parse(now));
-      yield* seed;
-      const sql = yield* SqlClient.SqlClient;
-      const store = yield* Store.MemoryStore;
-      const worker = yield* Worker.MemoryWorker;
-      const template = work();
-      for (let index = 0; index < 19; index++)
-        yield* store.enqueueWork({
-          ...template,
-          id: "queued-" + index,
-          memoryId: M.MemoryId.make(id(9000 + index)),
-          status: "pending",
-          claimedBy: null,
-          claimedUntil: null,
-          metadata: {
-            ...(template.metadata as Extract<Store.MemoryWork["metadata"], { kind: "summary" }>),
+  it.effect.each([
+    [
+      "schema_rejected",
+      'Codex CLI command failed: {"error":{"message":"Invalid schema for response_format","code":"invalid_json_schema"},"status":400}',
+      5,
+    ],
+    [
+      "unavailable",
+      // Grok's shape: free-text detail, typed runner cause.
+      new M.TextGenerationError({
+        operation: "generateMemorySummary",
+        detail: "Grok did not disclose or support the selected memory model.",
+        cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
+      }),
+      6,
+    ],
+  ] as const)(
+    "pauses a model the provider keeps refusing (%s) instead of failing every summary",
+    ([reason, schemaRejection, probes]) => {
+      let reject = true;
+      let calls = 0;
+      return Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(now));
+        yield* seed;
+        const sql = yield* SqlClient.SqlClient;
+        const store = yield* Store.MemoryStore;
+        const worker = yield* Worker.MemoryWorker;
+        const template = work();
+        for (let index = 0; index < 19; index++)
+          yield* store.enqueueWork({
+            ...template,
+            id: "queued-" + index,
             memoryId: M.MemoryId.make(id(9000 + index)),
-            operationId: M.MemoryOperationId.make(id(9100 + index)),
-            revisionId: M.MemoryRevisionId.make(id(9200 + index)),
-          },
-        });
-      const summaries = sql<{
-        status: string;
-        attempt: number;
-      }>`SELECT status,attempt FROM memory_outbox WHERE kind='summary'`;
-      yield* worker.sweepDue();
-      yield* worker.sweepDue();
-      // The first rejection holds the model: no other summary was claimed or reported.
-      assert.strictEqual(calls, 1);
-      assert.strictEqual((yield* store.pendingReports(100)).length, 1);
-      const statuses = (yield* summaries).map((row) => row.status);
-      assert.deepStrictEqual(
-        [
-          statuses.filter((status) => status === "retry").length,
-          statuses.filter((status) => status === "pending").length,
-        ],
-        [1, 19],
+            status: "pending",
+            claimedBy: null,
+            claimedUntil: null,
+            metadata: {
+              ...(template.metadata as Extract<Store.MemoryWork["metadata"], { kind: "summary" }>),
+              memoryId: M.MemoryId.make(id(9000 + index)),
+              operationId: M.MemoryOperationId.make(id(9100 + index)),
+              revisionId: M.MemoryRevisionId.make(id(9200 + index)),
+            },
+          });
+        const summaries = sql<{
+          status: string;
+          attempt: number;
+        }>`SELECT status,attempt FROM memory_outbox WHERE kind='summary'`;
+        yield* worker.sweepDue();
+        yield* worker.sweepDue();
+        // The first rejection holds the model: no other summary was claimed or reported.
+        assert.strictEqual(calls, 1);
+        assert.strictEqual((yield* store.pendingReports(100)).length, 1);
+        const statuses = (yield* summaries).map((row) => row.status);
+        assert.deepStrictEqual(
+          [
+            statuses.filter((status) => status === "retry").length,
+            statuses.filter((status) => status === "pending").length,
+          ],
+          [1, 19],
+        );
+        const hold = yield* Hold.MemoryGenerationHold;
+        const key = yield* hold.keyFor(selection);
+        assert.strictEqual((yield* hold.status(key))?.reason, reason);
+        // Probes at 1 minute, 10 minutes and 1 hour, then once a day (hourly for an outage).
+        for (const step of [60_000, 600_000, 3_600_000, 82_800_000, 3_600_000]) {
+          yield* TestClock.adjust(step);
+          yield* worker.sweepDue();
+          yield* worker.sweepDue();
+        }
+        assert.strictEqual(calls, probes);
+        assert.isAtMost((yield* store.pendingReports(100)).length, probes);
+        // The provider is fixed: the next daily probe succeeds and the queue drains.
+        reject = false;
+        yield* TestClock.adjust(24 * 3_600_000);
+        yield* worker.sweepDue();
+        // The success lifts the hold and rearms rows that failed earlier probes, so every row is
+        // generated again at once. The clones share one source chunk, so only one of them commits.
+        assert.strictEqual(calls, probes + 20);
+        assert.isTrue((yield* summaries).some((row) => row.status === "completed"));
+        assert.isUndefined(yield* hold.status(key));
+      }).pipe(
+        Effect.provide(
+          live(
+            () => (reject ? schemaRejection : undefined),
+            () => void (calls += 1),
+          ).pipe(Layer.provideMerge(Hold.layer)),
+        ),
       );
-      const hold = yield* Hold.MemoryGenerationHold;
-      const key = yield* hold.keyFor(selection);
-      assert.strictEqual((yield* hold.status(key))?.reason, "schema_rejected");
-      // Probes at 1 minute, 10 minutes and 1 hour, then once a day: 25 hours cost 5 calls.
-      for (const step of [60_000, 600_000, 3_600_000, 82_800_000, 3_600_000]) {
-        yield* TestClock.adjust(step);
-        yield* worker.sweepDue();
-        yield* worker.sweepDue();
-      }
-      assert.strictEqual(calls, 5);
-      assert.isAtMost((yield* store.pendingReports(100)).length, 5);
-      // The provider is fixed: the next daily probe succeeds and the queue drains.
-      reject = false;
-      yield* TestClock.adjust(24 * 3_600_000);
-      yield* worker.sweepDue();
-      // The success lifts the hold and rearms rows that failed earlier probes, so every row is
-      // generated again at once. The clones share one source chunk, so only one of them commits.
-      assert.strictEqual(calls, 25);
-      assert.isTrue((yield* summaries).some((row) => row.status === "completed"));
-      assert.isUndefined(yield* hold.status(key));
-    }).pipe(
-      Effect.provide(
-        live(
-          () => (reject ? schemaRejection : undefined),
-          () => void (calls += 1),
-        ).pipe(Layer.provideMerge(Hold.layer)),
-      ),
-    );
-  });
+    },
+  );
   it.effect("resumes held summaries right away when the memory model changes", () => {
     let calls = 0;
     const models: Array<string> = [];

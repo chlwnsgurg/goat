@@ -1,5 +1,6 @@
 import { legacySyncStatusRpc } from "./MemorySyncStatusLegacy.testkit.ts";
 import * as Hold from "./MemoryGenerationHold.ts";
+import { MemoryGenerationRunnerError } from "@goat/provider-core/server/memoryGenerationRunner";
 import * as Rpc from "effect/rpc/Rpc";
 import * as Exit from "effect/Exit";
 import { McpServer } from "effect/ai";
@@ -3873,6 +3874,58 @@ it.effect(
             ),
           );
         }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);
+
+it.effect(
+  "a model the runner cannot provide keeps the conflict resumable and probes on the hold schedule",
+  () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const model = realGeneration({
+        resolveMemoryConflict: () =>
+          Effect.suspend(() => {
+            calls++;
+            // Grok's shape: free-text detail, typed runner cause.
+            return Effect.fail(
+              new M.TextGenerationError({
+                operation: "resolveMemoryConflict",
+                detail: "Grok did not disclose or support the selected memory model.",
+                cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
+              }),
+            );
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* conflict();
+          const sync = yield* Sync.MemorySyncService;
+          const store = yield* Store.MemoryStore;
+          const attempt = Effect.gen(function* () {
+            yield* sync.syncOnce;
+            yield* sync.scheduleConflictResolution;
+          });
+          yield* attempt;
+          assert.strictEqual(calls, 1);
+          // Held: further sweeps before the probe make no provider call.
+          for (let n = 0; n < 5; n++) {
+            yield* TestClock.adjust("5 seconds");
+            yield* attempt;
+          }
+          assert.strictEqual(calls, 1);
+          // Not retired as invalid output: the ticket is still there for the probe.
+          assert.isFalse(
+            (yield* store.pendingReports(100)).some(
+              (report) => report.outcome === "failed" && report.failureCode === "invalid_output",
+            ),
+          );
+          yield* TestClock.adjust("1 minute");
+          yield* attempt;
+          assert.strictEqual(calls, 2);
+          yield* sync.shutdown;
+        }).pipe(Effect.provide(fixture(peer(), model).pipe(Layer.provideMerge(Hold.layer)))),
       );
     }),
 );
