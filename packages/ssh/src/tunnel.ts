@@ -1,5 +1,6 @@
 import {
   isSshHostUnreachable,
+  sshAuthenticationFailure,
   sshFailureDiagnostic,
   sshLocalProxyFailure,
 } from "@goat/shared/sshFailure";
@@ -3676,6 +3677,7 @@ function runtimeFailureResult(
   }
   if (
     error instanceof SshPasswordPromptError ||
+    sshAuthenticationFailure(source) !== undefined ||
     /permission denied|authentication failed|SSH authentication timed out for /iu.test(diagnostic)
   ) {
     return { kind: "ok", status: { ...base, state: "auth_failed", detail: diagnostic } };

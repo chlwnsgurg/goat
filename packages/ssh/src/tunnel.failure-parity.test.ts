@@ -21,6 +21,10 @@ import { SshEnvironmentManager } from "./tunnel.ts";
 
 const closure = "\nConnection closed by UNKNOWN port 65535";
 const cases = [
+  [
+    "fixture@jump: Permission denied (publickey).\nkex_exchange_identification: Connection closed by remote host\nConnection closed by UNKNOWN port 65535",
+    "authentication",
+  ],
   ["Connection to 192.0.2.1 port 22 timed out", "host-unreachable"],
   ["Connection timed out during banner exchange", "host-unreachable"],
   ["ssh: connect to host 192.0.2.1 port 22: Host is down", "host-unreachable"],
@@ -72,6 +76,10 @@ describe("SSH preparation/runtime status parity", () => {
       if (expected === "host-unreachable") {
         assert.equal(result.kind, "error");
         if (result.kind === "error") assert.equal(result.code, "host_unreachable");
+      } else if (expected === "authentication") {
+        assert.equal(client._tag, "ConnectionBlockedError");
+        assert.equal(result.status?.state, "auth_failed");
+        assert.include(result.status?.detail ?? "", "fixture@jump: Permission denied (publickey).");
       } else if (expected === "configuration") {
         assert.equal(result.kind, "error");
         if (result.kind === "error") {

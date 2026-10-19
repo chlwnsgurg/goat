@@ -1,5 +1,6 @@
 import {
   isSshHostUnreachable,
+  sshAuthenticationFailure,
   isSshRuntimeAcquisitionFailure,
   sshLocalProxyFailure,
 } from "@goat/shared/sshFailure";
@@ -9,10 +10,6 @@ import {
   ConnectionTransientError,
 } from "./model.ts";
 
-// Mirrors isSshAuthFailure in @goat/ssh/auth, which is Node-only, plus the
-// sentence @goat/ssh/tunnel writes when a key-only (agent) login is rejected.
-const AUTH_FAILURE_RE =
-  /permission denied \((?:publickey|password|keyboard-interactive|hostbased|gssapi-with-mic)[^)]*\)|authentication failed|too many authentication failures|Key-based login failed for /iu;
 const HOST_KEY_FAILURE_RE =
   /REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|host key for \S+ has changed|Managed SSH host key changed|No \S+ host key is known for .+ and you have requested strict checking/iu;
 // The desktop's own prompt endings (DesktopSshPasswordPrompts): dismissed,
@@ -66,7 +63,7 @@ export function sshPreparationFailure(cause: unknown): ConnectionAttemptError {
       detail: `SSH could not verify this host's key. Forget the host and add it again to review its fingerprint. (${message})`,
     });
   }
-  if (!acquisition && AUTH_FAILURE_RE.test(message)) {
+  if (sshAuthenticationFailure(message) !== undefined) {
     return new ConnectionBlockedError({
       reason: "authentication",
       detail: `The SSH host rejected the login. Check your SSH key or ssh-agent, then reconnect. (${message})`,

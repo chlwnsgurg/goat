@@ -96,7 +96,9 @@ must not discard the connection failure's meaning.
   a failed read. Tunnel diagnostics keep their bounded tail.
 
 - **Login rejected.** `Permission denied (publickey…)`, a rejected key-only
-  login, and a cancelled password prompt are `authentication`. A locked
+  login, and a cancelled password prompt are `authentication`. An explicit
+  rejection from any SSH hop takes precedence over a later generic proxy closure
+  in both runtime status and reconnect supervision. A locked
   ssh-agent after wake can also stall authentication. An authentication timeout
   is `authentication`, with an instruction to unlock the key or agent. Blocked
   states still retry on wake and network change.

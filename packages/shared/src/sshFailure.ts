@@ -1,5 +1,9 @@
 // These sentences cross desktop IPC and are also used for runtime status.
 // Keep transport diagnostics browser-safe so both consumers use the same rules.
+// Mirrors isSshAuthFailure in @goat/ssh/auth, which is Node-only, plus the
+// sentence @goat/ssh/tunnel writes when a key-only (agent) login is rejected.
+const AUTH_FAILURE_RE =
+  /permission denied \((?:publickey|password|keyboard-interactive|hostbased|gssapi-with-mic)[^)]*\)|authentication failed|too many authentication failures|Key-based login failed for /iu;
 const UNREACHABLE_RE =
   /SSH connection to .+ timed out after \d+ms before authentication began|Connection closed by UNKNOWN port 65535|(?:kex_exchange_identification|ssh_exchange_identification): (?:read: )?Connection (?:closed|reset) by (?:remote host|peer)|(?:Dial\([^\n]+|dial tcp: lookup [^\n]+): no such host|\bCannot reach .+ over SSH \(|ssh: connect to host \S+ port \d+: |ssh: Could not resolve hostname |Connection timed out during banner exchange|Connection to \S+ port \d+ timed out/u;
 const RUNTIME_ACQUISITION_RE =
@@ -20,6 +24,11 @@ const TIMEOUT_HEADLINE_RE =
 
 export const isSshRuntimeAcquisitionFailure = (message: string): boolean =>
   RUNTIME_ACQUISITION_RE.test(message);
+
+export function sshAuthenticationFailure(message: string) {
+  if (isSshRuntimeAcquisitionFailure(message)) return undefined;
+  return message.split(/\r?\n/u).find((line) => AUTH_FAILURE_RE.test(line));
+}
 
 export const isSshHostUnreachable = (message: string): boolean =>
   !isSshRuntimeAcquisitionFailure(message) && UNREACHABLE_RE.test(message);
@@ -53,6 +62,7 @@ export function sshFailureDiagnostic(message: string, stderr: string) {
   if (TIMEOUT_HEADLINE_RE.test(headline)) return headline;
   return (
     sshLocalProxyFailure(stderr)?.diagnostic ??
+    sshAuthenticationFailure(stderr) ??
     stderr
       .split(/\r?\n/u)
       .map((line) => line.trim())
