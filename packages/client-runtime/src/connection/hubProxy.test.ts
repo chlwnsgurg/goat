@@ -323,6 +323,16 @@ describe("prefix-preserving client URLs", () => {
         expect(new URL(result).pathname).toBe(`${new URL(base).pathname.replace(/\/$/, "")}/ws`);
       }),
   );
+
+  it("sends a direct target with a leftover path to its origin root", () => {
+    const base = "https://environment.test/pair";
+    expect(environmentEndpointUrl(base, "/api/auth/session")).toBe(
+      "https://environment.test/api/auth/session",
+    );
+    expect(resolveAssetUrl(base, "/api/assets/token/file.png")).toBe(
+      "https://environment.test/api/assets/token/file.png",
+    );
+  });
 });
 
 describe("hubProxyRefusal", () => {
