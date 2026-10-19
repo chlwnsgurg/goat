@@ -38,6 +38,12 @@ describe("findPatchFile", () => {
     expect(file && resolveFileDiffPath(file)).toBe("src/index.ts");
   });
 
+  it("compares inside the workspace by relative path, so a reverted file matches nothing", () => {
+    const root = "/Users/jun/.goat/worktrees/goat/fix-x";
+    expect(findPatchFile(files, `${root}/index.ts`, root)?.name).toBe("index.ts");
+    expect(findPatchFile(files, `${root}/lib/index.ts`, root)).toBeNull();
+  });
+
   it("matches relative and Windows paths, and misses unrelated files", () => {
     expect(findPatchFile(files, "./index.ts")?.name).toBe("index.ts");
     expect(findPatchFile(files, "C:\\repo\\src\\index.ts")?.name).toBe("src/index.ts");

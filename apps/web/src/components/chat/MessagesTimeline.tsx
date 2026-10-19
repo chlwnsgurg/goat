@@ -5726,6 +5726,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
             threadRef={threadRef}
             runId={inlineDiffRunId}
             paths={fileChangeTargetPaths(projectedFileChange)}
+            workspaceRoot={workspaceRoot}
             resolvedTheme={ctx.resolvedTheme}
             onOpenTurnDiff={ctx.onOpenTurnDiff}
           />

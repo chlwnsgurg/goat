@@ -11,13 +11,19 @@ export function resolveDiffPanelTurn<T extends { readonly runId: RunId }>(input:
   readonly selectedRunId: RunId | null;
   readonly activeRunId: RunId | null | undefined;
   readonly latestRunId: RunId | null | undefined;
-}): { readonly turn: T | undefined; readonly awaitingCheckpoint: boolean } {
+}): {
+  readonly turn: T | undefined;
+  /** The selected run is the thread's latest and has no checkpoint summary yet. */
+  readonly awaitingCheckpoint: boolean;
+  readonly runActive: boolean;
+} {
   const { orderedSummaries, selectedRunId } = input;
-  if (selectedRunId === null) return { turn: undefined, awaitingCheckpoint: false };
+  const runActive = selectedRunId !== null && selectedRunId === input.activeRunId;
+  if (selectedRunId === null) return { turn: undefined, awaitingCheckpoint: false, runActive };
   const exact = orderedSummaries.find((summary) => summary.runId === selectedRunId);
-  if (exact !== undefined) return { turn: exact, awaitingCheckpoint: false };
-  if (selectedRunId === input.activeRunId || selectedRunId === input.latestRunId) {
-    return { turn: undefined, awaitingCheckpoint: true };
+  if (exact !== undefined) return { turn: exact, awaitingCheckpoint: false, runActive };
+  if (runActive || selectedRunId === input.latestRunId) {
+    return { turn: undefined, awaitingCheckpoint: true, runActive };
   }
-  return { turn: orderedSummaries[0], awaitingCheckpoint: false };
+  return { turn: orderedSummaries[0], awaitingCheckpoint: false, runActive };
 }

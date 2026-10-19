@@ -16,7 +16,18 @@ describe("resolveDiffPanelTurn", () => {
         activeRunId: current.runId,
         latestRunId: current.runId,
       }),
-    ).toEqual({ turn: undefined, awaitingCheckpoint: true });
+    ).toEqual({ turn: undefined, awaitingCheckpoint: true, runActive: true });
+  });
+
+  it("keeps a finished latest run selected while its checkpoint is captured", () => {
+    expect(
+      resolveDiffPanelTurn({
+        orderedSummaries: [previous],
+        selectedRunId: current.runId,
+        activeRunId: null,
+        latestRunId: current.runId,
+      }),
+    ).toEqual({ turn: undefined, awaitingCheckpoint: true, runActive: false });
   });
 
   it("shows the clicked run once its checkpoint arrives", () => {
@@ -27,7 +38,7 @@ describe("resolveDiffPanelTurn", () => {
         activeRunId: null,
         latestRunId: current.runId,
       }),
-    ).toEqual({ turn: current, awaitingCheckpoint: false });
+    ).toEqual({ turn: current, awaitingCheckpoint: false, runActive: false });
   });
 
   it("falls back to the latest turn when the selected run no longer exists", () => {
@@ -38,6 +49,6 @@ describe("resolveDiffPanelTurn", () => {
         activeRunId: null,
         latestRunId: current.runId,
       }),
-    ).toEqual({ turn: current, awaitingCheckpoint: false });
+    ).toEqual({ turn: current, awaitingCheckpoint: false, runActive: false });
   });
 });

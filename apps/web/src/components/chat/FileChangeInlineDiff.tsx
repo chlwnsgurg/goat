@@ -1,5 +1,6 @@
 import type { RunId, ScopedThreadRef } from "@goat/contracts";
 import { FileDiff } from "@pierre/diffs/react";
+import type { FileDiffMetadata } from "@pierre/diffs";
 import { memo, type ReactNode } from "react";
 
 import { useClientSettings } from "../../hooks/useSettings";
@@ -25,6 +26,24 @@ function InlineDiffNote({ children }: { children: ReactNode }) {
   return <p className="ms-7 py-1 text-xs text-muted-foreground">{children}</p>;
 }
 
+// Every expanded row of a turn reads the same patch; parse it once per patch and theme.
+const parsedPatchCache = new Map<string, ReadonlyArray<FileDiffMetadata>>();
+const PARSED_PATCH_CACHE_SIZE = 4;
+
+function parseTurnPatch(patch: string, scope: string): ReadonlyArray<FileDiffMetadata> {
+  const key = `${scope}\u0000${patch}`;
+  const cached = parsedPatchCache.get(key);
+  if (cached !== undefined) return cached;
+  const renderable = getRenderablePatch(patch, scope);
+  const files = renderable?.kind === "files" ? renderable.files : [];
+  parsedPatchCache.set(key, files);
+  const oldest = parsedPatchCache.keys().next().value;
+  if (parsedPatchCache.size > PARSED_PATCH_CACHE_SIZE && oldest !== undefined) {
+    parsedPatchCache.delete(oldest);
+  }
+  return files;
+}
+
 /**
  * The turn's checkpoint diff for the files one edit touched. Provider payloads do not reach
  * clients (see projectTurnItemForWire), and the checkpoint is the same source the diff panel
@@ -34,10 +53,11 @@ export const FileChangeInlineDiff = memo(function FileChangeInlineDiff(props: {
   readonly threadRef: ScopedThreadRef;
   readonly runId: RunId;
   readonly paths: ReadonlyArray<string>;
+  readonly workspaceRoot: string | undefined;
   readonly resolvedTheme: "light" | "dark";
   readonly onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
 }) {
-  const { threadRef, runId, paths, resolvedTheme, onOpenTurnDiff } = props;
+  const { threadRef, runId, paths, workspaceRoot, resolvedTheme, onOpenTurnDiff } = props;
   const ignoreWhitespace = useClientSettings((settings) => settings.diffIgnoreWhitespace);
   const summary = useThreadCheckpointSummaries(threadRef).find(
     (candidate) => candidate.runId === runId,
@@ -66,11 +86,10 @@ export const FileChangeInlineDiff = memo(function FileChangeInlineDiff(props: {
       <InlineDiffNote>Loading diff…</InlineDiffNote>
     );
   }
-  // The panel's cache scope, so opening the panel reuses this parse.
-  const renderable = getRenderablePatch(patch, `diff-panel:${resolvedTheme}`);
-  const files = renderable?.kind === "files" ? renderable.files : [];
+  // The panel's cache scope, so its highlighting cache is shared too.
+  const files = parseTurnPatch(patch, `diff-panel:${resolvedTheme}`);
   const matched = paths.flatMap((path) => {
-    const file = findPatchFile(files, path);
+    const file = findPatchFile(files, path, workspaceRoot);
     return file === null ? [] : [file];
   });
   const uniqueFiles = [...new Set(matched)];
@@ -79,7 +98,8 @@ export const FileChangeInlineDiff = memo(function FileChangeInlineDiff(props: {
   }
 
   return (
-    <div className="flex flex-col gap-2">
+    // The row toggles on Enter and Space; keys pressed on the card's buttons stay here.
+    <div className="flex flex-col gap-2" onKeyDown={(event) => event.stopPropagation()}>
       {uniqueFiles.map((file) => {
         const filePath = resolveFileDiffPath(file);
         const stat = getDiffLineStat([file]);

@@ -280,7 +280,11 @@ export default function DiffPanel({
   const selectedFilePath = diffSelection.kind === "turn" ? diffSelection.filePath : null;
   const selectedFileRevealRequestId =
     diffSelection.kind === "turn" ? diffSelection.revealRequestId : 0;
-  const { turn: selectedTurn, awaitingCheckpoint } = resolveDiffPanelTurn({
+  const {
+    turn: selectedTurn,
+    awaitingCheckpoint,
+    runActive: selectedRunActive,
+  } = resolveDiffPanelTurn({
     orderedSummaries: orderedTurnDiffSummaries,
     selectedRunId,
     activeRunId: activeThread?.runtime?.activeRunId,
@@ -525,7 +529,7 @@ export default function DiffPanel({
   const fileTreeEntries = diffFileTreeEntries(renderableFiles);
   // Edit rows name the file as the provider reported it, often an absolute path on the host.
   const selectedPatchFile = selectedFilePath
-    ? findPatchFile(renderableFiles, selectedFilePath)
+    ? findPatchFile(renderableFiles, selectedFilePath, activeCwd)
     : null;
   const selectedPatchFilePath = selectedPatchFile ? resolveFileDiffPath(selectedPatchFile) : null;
   const selectedDiffFileKey = selectedPatchFilePath
@@ -1008,7 +1012,9 @@ export default function DiffPanel({
         </div>
       ) : awaitingCheckpoint ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
-          This turn&apos;s changes appear here when it finishes.
+          {selectedRunActive
+            ? "This turn's changes appear here when it finishes."
+            : "No checkpoint for this turn yet."}
         </div>
       ) : selectedRunId !== null && orderedTurnDiffSummaries.length === 0 ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
