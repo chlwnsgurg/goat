@@ -15,7 +15,7 @@ import {
 } from "@goat/client-runtime/state/runtime";
 import type { EnvironmentId } from "@goat/contracts";
 import { useEffect, useState } from "react";
-import { Pressable, ScrollView as HubChoices, View } from "react-native";
+import { Pressable, View } from "react-native";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
 import { AppText as Text } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
@@ -57,33 +57,44 @@ function HubNodesSelection({
     targets.find((target) => target.environmentId === choice?.environmentId)?.label ??
     choice?.label;
   return (
-    <View className="flex-1">
+    // One scroll container: the header inset applies to the chooser, and a long chooser scrolls
+    // with the devices instead of crowding them out.
+    <ScrollView
+      contentInsetAdjustmentBehavior="automatic"
+      className="flex-1"
+      contentContainerClassName="gap-4 p-5 pb-10"
+    >
       {targets.length > 1 ||
       (targets.length === 1 && targets[0]?.environmentId !== choice?.environmentId) ? (
-        // Bounded so a long list of saved environments still leaves room for the devices below.
-        <HubChoices className="max-h-64 grow-0" contentContainerClassName="gap-2 p-5">
+        <View className="gap-2">
           <Text className="text-sm text-foreground-muted">Choose a hub</Text>
-          {targets.map((target) => (
-            <Pressable
-              key={target.environmentId}
-              accessibilityRole="radio"
-              accessibilityLabel={`Use hub ${target.label}`}
-              accessibilityState={{ checked: target.environmentId === choice?.environmentId }}
-              onPress={() => setChoice(target)}
-              className="min-h-12 justify-center rounded-xl bg-grouped-card px-4"
-            >
-              <Text className="text-foreground">{target.label}</Text>
-            </Pressable>
-          ))}
-        </HubChoices>
+          {targets.map((target) => {
+            const state = connectedTargets.some(
+              (connected) => connected.environmentId === target.environmentId,
+            )
+              ? "Connected"
+              : "Not connected";
+            return (
+              <Pressable
+                key={target.environmentId}
+                accessibilityRole="radio"
+                accessibilityLabel={`Use hub ${target.label}, ${state.toLowerCase()}`}
+                accessibilityState={{ checked: target.environmentId === choice?.environmentId }}
+                onPress={() => setChoice(target)}
+                className="min-h-12 justify-center rounded-xl bg-grouped-card px-4 py-2"
+              >
+                <Text className="text-foreground">{target.label}</Text>
+                <Text className="text-sm text-foreground-muted">{state}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
       ) : null}
-      {choice ? (
-        <Text className="px-5 py-3 font-goat-medium text-foreground">Hub: {label}</Text>
-      ) : null}
+      {choice ? <Text className="font-goat-medium text-foreground">Hub: {label}</Text> : null}
       {hub ? (
         <HubNodesList key={hub.environmentId} environmentId={hub.environmentId} />
       ) : (
-        <Text className="p-5 text-foreground-muted">
+        <Text className="text-foreground-muted">
           {choice
             ? `${label} is disconnected. Reconnect to manage its devices.`
             : targets.length > 0
@@ -91,7 +102,7 @@ function HubNodesSelection({
               : "Select a connected hub in Settings to see its devices."}
         </Text>
       )}
-    </View>
+    </ScrollView>
   );
 }
 
@@ -126,11 +137,7 @@ function HubNodesList({ environmentId }: { readonly environmentId: EnvironmentId
   };
   if (isHubNodesUnsupportedError(listed.cause)) return null;
   return (
-    <ScrollView
-      contentInsetAdjustmentBehavior="automatic"
-      className="flex-1"
-      contentContainerClassName="gap-4 p-5 pb-10"
-    >
+    <View className="gap-4">
       <Text className="text-sm text-foreground-muted">
         Add devices from the hub's Settings on desktop or web.
       </Text>
@@ -216,6 +223,6 @@ function HubNodesList({ environmentId }: { readonly environmentId: EnvironmentId
           ) : null}
         </View>
       ))}
-    </ScrollView>
+    </View>
   );
 }
