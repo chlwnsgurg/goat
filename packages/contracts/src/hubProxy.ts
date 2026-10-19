@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import {
+  AuthFilesystemReadScope,
   AuthHubProxyScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -30,6 +31,8 @@ export type HubProxyNodeId = typeof HubProxyNodeId.Type;
 export const HUB_PROXY_NODE_SCOPE_CEILING: ReadonlyArray<AuthEnvironmentScope> = [
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
+  // The folder chooser for a new thread on the node.
+  AuthFilesystemReadScope,
 ];
 
 /** The client's rights on a node: none without `hub:proxy`, otherwise its scopes within the ceiling. */
@@ -50,6 +53,10 @@ const HUB_PROXY_METHOD_POLICY: Readonly<Record<string, (payload: unknown) => boo
   // Image and file follow-ups: the node mints a signed upload URL the hub forwards bytes to.
   "attachments.createUploadUrl": () => true,
   "attachments.delete": () => true,
+  // A new thread on the node, in a project that exists or one made from a chosen folder.
+  "orchestration.launchThread": () => true,
+  "filesystem.browse": () => true,
+  "projects.mutate": (payload) => hubProxyAdmitsProjectMutation(payload),
 };
 
 /** Orchestration commands a client may send to a node through the hub. */
@@ -58,6 +65,11 @@ export const HUB_PROXY_COMMAND_TYPES: ReadonlySet<string> = new Set([
   "message.dispatch",
   // The stop button.
   "run.interrupt",
+  // Answers to a provider's approval request or question, and dismissing a question.
+  "runtime-request.respond",
+  "thread.user-input.dismiss",
+  // A new thread record, as "implement in a new thread" and side chats create.
+  "thread.create",
 ]);
 
 const hubProxyAdmitsCommand = (payload: unknown): boolean => {
@@ -103,6 +115,24 @@ const hubProxyAdmitsFollowUp = (payload: object): boolean => {
     message.createdBy === "user" &&
     message.dispatchMode?.type !== "defer_start" &&
     (message.memoryGrantCeiling === undefined || message.memoryGrantCeiling === "none")
+  );
+};
+
+/**
+ * Only registering an existing folder as a project. Scripts need settings:write, and creating the
+ * folder would let the chooser write to the node's filesystem.
+ */
+const hubProxyAdmitsProjectMutation = (payload: unknown): boolean => {
+  if (typeof payload !== "object" || payload === null) return false;
+  const mutation = payload as {
+    readonly type?: unknown;
+    readonly scripts?: unknown;
+    readonly createWorkspaceRootIfMissing?: unknown;
+  };
+  return (
+    mutation.type === "project.create" &&
+    mutation.scripts === undefined &&
+    mutation.createWorkspaceRootIfMissing !== true
   );
 };
 

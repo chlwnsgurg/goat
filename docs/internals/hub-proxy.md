@@ -63,9 +63,14 @@ for `12` would leave the call hanging. An SSH node session holds exactly the int
 the node enforces it again. A linked node only enforces its enrollment grant, which is why the
 hub check is not optional.
 
-The policy lets a client send a follow-up (`message.dispatch`), stop a run (`run.interrupt`)
-and upload the attachments a follow-up references. Every other orchestration command, such as
-archiving, deleting or renaming a thread, stays with the node's own clients.
+The policy lets a client send a follow-up (`message.dispatch`), stop a run (`run.interrupt`),
+upload the attachments a follow-up references, answer a provider's approval request or question
+(`runtime-request.respond`, `thread.user-input.dismiss`), and start a thread
+(`orchestration.launchThread`, `thread.create`), browsing the node's folders and registering an
+existing one as a project. A project carries no scripts (they need `settings:write`) and the hub
+never asks the node to create a missing folder. Every other orchestration command, such as
+archiving, deleting or renaming a thread, stays with the node's own clients. Approval support is
+each provider's own on the node; the hub only forwards the generic response.
 
 A forwarded follow-up carries only what a person's composer sends: text, context, attachments
 that are pending uploads or already belong to that thread, the model picked in the composer, and

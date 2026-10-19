@@ -201,6 +201,84 @@ it("4b: an operate client may upload follow-up attachments through the hub", () 
   ).toMatchObject({ requiredScope: "orchestration:operate" });
 });
 
+const full = ["orchestration:read", "orchestration:operate", "filesystem:read"] as const;
+
+it("4c: an operate client may answer approvals, dismiss questions and start threads on a node", () => {
+  for (const command of [
+    {
+      type: "runtime-request.respond",
+      commandId: "c1",
+      threadId: "t1",
+      requestId: "q1",
+      decision: "accept",
+    },
+    { type: "thread.user-input.dismiss", commandId: "c2", threadId: "t1", requestId: "q1" },
+    {
+      type: "thread.create",
+      commandId: "c3",
+      threadId: "t2",
+      projectId: "p1",
+      title: "New",
+      modelSelection: { instanceId: "codex", model: "m" },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "mobile",
+    },
+  ])
+    expect(refuseProxiedCall(full, write, command)).toBeUndefined();
+  expect(
+    refuseProxiedCall(full, "orchestration.launchThread", {
+      commandId: "c4",
+      projectId: "p1",
+      title: "Investigate",
+      modelSelection: { instanceId: "codex", model: "m" },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      workspaceStrategy: { type: "root" },
+    }),
+  ).toBeUndefined();
+  expect(refuseProxiedCall(full, "filesystem.browse", { partialPath: "~/" })).toBeUndefined();
+});
+
+it("4c: projects are only registered from an existing folder, without scripts", () => {
+  const create = {
+    type: "project.create",
+    commandId: "c5",
+    projectId: "p2",
+    title: "repo",
+    workspaceRoot: "/home/me/repo",
+  };
+  expect(refuseProxiedCall(full, "projects.mutate", create)).toBeUndefined();
+  expect(
+    refuseProxiedCall(full, "projects.mutate", { ...create, createWorkspaceRootIfMissing: true }),
+  ).toMatchObject({ requiredScope: "hub:proxy" });
+  // Scripts need settings:write, which never reaches a node through the hub.
+  expect(refuseProxiedCall(full, "projects.mutate", { ...create, scripts: [] })).toMatchObject({
+    requiredPermission: "settings:write",
+  });
+  expect(
+    refuseProxiedCall(full, "projects.mutate", {
+      type: "project.delete",
+      commandId: "c6",
+      projectId: "p1",
+    }),
+  ).toMatchObject({ requiredScope: "hub:proxy" });
+});
+
+it("4c: a read-only client cannot answer an approval", () => {
+  expect(
+    admit(write, {
+      type: "runtime-request.respond",
+      commandId: "c7",
+      threadId: "t1",
+      requestId: "q1",
+    }),
+  ).toMatchObject({ requiredScope: "orchestration:operate" });
+});
+
 const isCommand = Schema.is(OrchestrationV2Command);
 
 const assertFollowUpFrame = (payload: unknown, admitted: boolean) => {
