@@ -16,10 +16,11 @@ export const FOCUS_PROBE_MIN_INTERVAL_MS = 30_000;
 
 export type DesktopWakeup = Extract<
   Wakeups.ConnectionWakeup,
-  "application-active-probe" | "application-active-reconnect"
+  "suspend" | "application-active-probe" | "application-active-reconnect"
 >;
 
 export function desktopSystemWakeup(event: DesktopSystemWakeEvent): DesktopWakeup {
+  if (event.reason === "suspend") return "suspend";
   if (event.reason !== "resume") return "application-active-probe";
   // A resume without a recorded suspend still followed a sleep of unknown length.
   return event.asleepMs === null || event.asleepMs >= DESKTOP_SLEEP_RECONNECT_AFTER_MS
@@ -59,6 +60,12 @@ export function desktopWakeups(sources: DesktopWakeupSources): Stream.Stream<Des
         const unsubscribe = sources.onSystemWake((event) => {
           const now = sources.nowMs();
           const wakeup = desktopSystemWakeup(event);
+          if (wakeup === "suspend") {
+            lastSystemWakeAtMs = Number.NEGATIVE_INFINITY;
+            lastSystemWakeup = null;
+            emit(wakeup);
+            return;
+          }
           // A resume whose suspend came after the last wake is a new sleep, never a duplicate.
           const sleptSinceLastWake =
             event.reason === "resume" &&

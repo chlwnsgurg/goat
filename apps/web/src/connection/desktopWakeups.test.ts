@@ -54,6 +54,7 @@ describe("desktop wakeups", () => {
     expect(
       desktopSystemWakeup({ reason: "resume", asleepMs: DESKTOP_SLEEP_RECONNECT_AFTER_MS - 1 }),
     ).toBe("application-active-probe");
+    expect(desktopSystemWakeup({ reason: "suspend", asleepMs: null })).toBe("suspend");
     expect(desktopSystemWakeup({ reason: "unlock-screen", asleepMs: null })).toBe(
       "application-active-probe",
     );
@@ -134,6 +135,28 @@ describe("desktop wakeups", () => {
 
         yield* Fiber.interrupt(fiber);
       }),
+  );
+
+  it.effect("forwards suspend after a recent wake and permits the next short resume", () =>
+    Effect.gen(function* () {
+      const shell = makeDesktopShell();
+      const seen: Array<DesktopWakeup> = [];
+      const fiber = yield* desktopWakeups(shell.sources).pipe(
+        Stream.runForEach((wakeup) => Effect.sync(() => seen.push(wakeup))),
+        Effect.forkChild,
+      );
+      yield* settle;
+      shell.wake({ reason: "resume", asleepMs: 120_000 });
+      shell.advance(100);
+      shell.wake({ reason: "suspend", asleepMs: null });
+      yield* settle;
+      expect(seen).toEqual(["application-active-reconnect", "suspend"]);
+      shell.advance(100);
+      shell.wake({ reason: "resume", asleepMs: 100 });
+      yield* settle;
+      expect(seen).toEqual(["application-active-reconnect", "suspend", "application-active-probe"]);
+      yield* Fiber.interrupt(fiber);
+    }),
   );
 
   it.effect("still reports a second real sleep that starts right after a wake", () =>

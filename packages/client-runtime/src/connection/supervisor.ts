@@ -47,6 +47,9 @@ const synchronizationTimeout = Duration.fromInputUnsafe("75 seconds");
 const CONNECTION_PROBE_TIMEOUT = "15 seconds";
 const QUICK_CONNECTION_PROBE_TIMEOUT = "3 seconds";
 const BACKOFF_RESET_AFTER_MS = 30_000;
+const WAKE_RETRY_WINDOW_MS = 30_000;
+const WAKE_RETRY_DELAY_MS = 2_000;
+const LOCAL_PROXY_RECHECK_MS = 60_000;
 const BETTER_ROUTE_CHECK_INTERVAL = "60 seconds";
 // A better route that answered the check but then failed to connect is not
 // tried again for this long, so a flaky LAN cannot bounce the connection.
@@ -272,6 +275,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   const signals = yield* Queue.unbounded<QueuedSupervisorSignal>();
   const resetRetryState = yield* Ref.make(false);
   const probeUnanswered = yield* Ref.make(false);
+  // Cancellation consumes its signal; suspension must still gate later queued requests.
+  const suspended = yield* Ref.make(false);
+  const wakeRetryUntil = yield* Ref.make(0);
   const state = yield* SubscriptionRef.make<SupervisorConnectionState>(
     !initialIntent.desired
       ? availableState(initialIntent, 0)
@@ -375,6 +381,16 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   });
 
   const signal = Effect.fn("EnvironmentSupervisor.signal")(function* (next: SupervisorSignal) {
+    if (next._tag === "Wakeup") {
+      if (next.reason === "suspend") {
+        yield* Ref.set(suspended, true);
+      } else if (next.reason !== "credentials-changed" && next.reason !== "network-changed") {
+        yield* Ref.set(suspended, false);
+      }
+      if (next.reason === "application-active-reconnect") {
+        yield* Ref.set(wakeRetryUntil, (yield* Clock.currentTimeMillis) + WAKE_RETRY_WINDOW_MS);
+      }
+    }
     // Delayed signals may target an attempt that their replacement already superseded.
     const targetedAttempt = yield* Ref.get(attemptSequence);
     yield* Queue.offer(signals, { ...next, attemptSequence: targetedAttempt });
@@ -400,6 +416,14 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     if ("prepared" in progress) {
       yield* SubscriptionRef.set(prepared, Option.some(progress.prepared));
     }
+    const current = yield* SubscriptionRef.get(state);
+    // A local dependency may still be down; a background check must not flash "connecting".
+    if (
+      current.phase === "blocked" &&
+      current.lastFailure?._tag === "ConnectionBlockedError" &&
+      current.lastFailure.localProxyUnavailable === true
+    )
+      return;
     yield* setState(
       connectingState(yield* Ref.get(intent), generation, attempt, lastFailure, progress.stage),
     );
@@ -520,6 +544,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         case "BetterRouteAvailable":
           break;
         case "Wakeup":
+          if (next.reason === "suspend") return false;
           if (ConnectionWakeups.resetsRetryBackoff(next.reason)) {
             yield* Ref.set(resetRetryState, true);
           }
@@ -927,6 +952,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         yield* waitForSignal;
         continue;
       }
+      if (yield* Ref.get(suspended)) {
+        const applicationActivated = yield* waitForSignal;
+        if (applicationActivated) resetRetryLadder();
+        continue;
+      }
       if (currentIntent.network === "offline" && !replacing) {
         yield* clearLease;
         yield* setState(offlineState(currentIntent, generation, failureCount + 1, latestFailure));
@@ -964,6 +994,8 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         continue;
       }
 
+      if (yield* Ref.get(suspended)) continue;
+
       const attemptSpan: Option.Option<Tracer.Span> = outcome.failure.attemptSpan;
       const error: ConnectionAttemptError = outcome.failure.error;
       if (!outcome.established) {
@@ -981,7 +1013,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           lastFailure: error,
           retryAt: null,
         });
-        const applicationActivated = yield* waitForSignal;
+        const blockedWait =
+          error.reason === "configuration" && error.localProxyUnavailable === true
+            ? waitForRetrySignal(LOCAL_PROXY_RECHECK_MS)
+            : waitForSignal;
+        const applicationActivated = yield* blockedWait;
         if (applicationActivated) {
           resetRetryLadder();
         }
@@ -994,8 +1030,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         continue;
       }
 
-      failureCount += 1;
-      const delayMs = retryDelayMs(failureCount - 1, yield* Random.next);
+      const inWakeWindow = (yield* Clock.currentTimeMillis) < (yield* Ref.get(wakeRetryUntil));
+      const delayMs = inWakeWindow
+        ? WAKE_RETRY_DELAY_MS
+        : retryDelayMs(failureCount, yield* Random.next);
+      if (!inWakeWindow) failureCount += 1;
       pendingRetry = Option.map(attemptSpan, (previousAttempt) => ({
         previousAttempt,
         failureCount,
@@ -1008,7 +1047,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         network: failedIntent.network,
         phase: "backoff",
         stage: null,
-        attempt: failureCount,
+        attempt: Math.max(1, failureCount),
         generation,
         lastFailure: latestFailure,
         retryAt: (yield* Clock.currentTimeMillis) + delayMs,

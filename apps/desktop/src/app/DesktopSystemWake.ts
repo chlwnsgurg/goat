@@ -10,7 +10,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { SYSTEM_WAKE_CHANNEL } from "../ipc/channels.ts";
 import * as DesktopSshEnvironment from "../ssh/DesktopSshEnvironment.ts";
 
-type PowerTransition = "suspend" | DesktopSystemWakeEvent["reason"];
+type PowerTransition = DesktopSystemWakeEvent["reason"];
 
 /** Repeated macOS powerMonitor resume events within this window belong to the same wake. */
 export const RESUME_DEDUP_WINDOW_MS = 3_000;
@@ -47,7 +47,6 @@ export const layer = Layer.effectDiscard(
         const nowMs = yield* Clock.currentTimeMillis;
         if (transition === "suspend") {
           suspendedAtMs = nowMs;
-          continue;
         }
         if (
           transition === "resume" &&
