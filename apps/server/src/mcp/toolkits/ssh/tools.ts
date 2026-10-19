@@ -247,6 +247,12 @@ const SshThreadLaunchTool = Tool.make(agentSurfaceRegistry["ssh.thread_launch"].
           "Route this launch's watch reports (run ended, waiting on a question, host unavailable) to ONE webhook receiver, for the agent outside GOAT that dispatched it: {name} for a target configured in this machine's server settings (completionWebhook.targets), or {url, secretRef?} for an inline receiver, where secretRef comes from request_secret and signs each post. Only this receiver gets the reports; the server's default webhook does not. Needs the launch watch (notifyOnCompletion not false). An unknown name, a non-http(s) url, a url that resolves to a loopback, private, or link-local address (a local receiver needs a named target), or webhooks switched off in settings refuse the launch before any thread is created.",
       }),
     ),
+    selfHeal: Schema.optional(
+      Schema.Boolean.annotate({
+        description:
+          "Default false. True asks this machine to keep the work alive: the thread is asked to push its worktree branch at the end of every turn, and when it stalls, fails with a transport or provider error, or its host stays unreachable or is drained, GOAT steers or restarts it, or resumes it on another healthy host from the pushed branch on a new branch <branch>-r<n>. Needs workspace type worktree. goat_host_status shows host conditions; goat_thread_reschedule moves it by hand.",
+      }),
+    ),
   }),
   success: Schema.Struct({
     host: Schema.String,

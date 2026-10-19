@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { FleetHostCondition } from "./fleetHealth.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits } from "./providerUsageLimits.ts";
 import { HostResourcesSnapshot } from "./resourceTelemetry.ts";
@@ -95,6 +96,8 @@ export const HostStatusEntry = Schema.Struct({
    */
   versionMismatch: Schema.optional(Schema.Literal(true)),
   message: Schema.optional(Schema.String),
+  /** Self-healing conditions this machine derived for the host. Older servers omit it. */
+  conditions: Schema.optional(Schema.Array(FleetHostCondition)),
 });
 export type HostStatusEntry = typeof HostStatusEntry.Type;
 
