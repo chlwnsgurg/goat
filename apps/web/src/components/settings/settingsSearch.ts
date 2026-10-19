@@ -1,3 +1,4 @@
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { HOSTED_APP_CHANNEL } from "~/branding";
 import { isElectron } from "~/env";
 import { isMacPlatform, isWindowsPlatform, normalizeSearchText } from "~/lib/utils";
@@ -1029,6 +1030,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     wslAvailableOnly: true,
   },
   {
+    id: "goat-connect-coming-soon",
+    title: `${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}`,
+    to: "/settings/connections",
+    searchTerms: ["Tailscale guide"],
+  },
+  {
     id: "t3-connect",
     localEnvironmentOnly: true,
     title: "T3 Connect",
@@ -1236,6 +1243,7 @@ export function filterAvailableSettingsSearchItems(
   const items: ReadonlyArray<SettingsSearchItem> = SETTINGS_SEARCH_ITEMS;
   return items.filter(
     (item) =>
+      (item.id !== "goat-connect-coming-soon" || !isGoatConnectEnabled()) &&
       (!item.requiresMemory || availability.hasMemory === true) &&
       (!item.cloudOnly || availability.hasCloudPublicConfig) &&
       (!item.environmentOnly || availability.hasEnvironment) &&

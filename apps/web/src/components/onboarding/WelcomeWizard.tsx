@@ -61,6 +61,7 @@ import { readProjects, useProjects } from "../../state/entities";
 import { useEnvironments, usePrimaryEnvironment } from "../../state/environments";
 import {
   isOnboardingRelayEnvironment,
+  isOnboardingEnvironmentAvailable,
   resolveOnboardingSetup,
 } from "../../onboarding/targetEnvironment.logic";
 import { useProjectScans } from "../../onboarding/useProjectScans";
@@ -119,7 +120,8 @@ export function WelcomeWizard({
   readonly onDone: (projectRef?: ScopedProjectRef) => void | Promise<void>;
 }) {
   const [step, setStep] = useState<WizardStep>(resumeEnvironmentId ? "agents" : "connection");
-  const { environments } = useEnvironments();
+  const { environments: savedEnvironments } = useEnvironments();
+  const environments = savedEnvironments.filter(isOnboardingEnvironmentAvailable);
   const [selection, setSelection] = useState<ReadonlySet<EnvironmentId> | null>(null);
   // One registry for the wizard's lifetime, shared with the connect list, so a computer is
   // auto-selected once even after the user unchecks it.
@@ -304,7 +306,8 @@ function ConnectionStep({
   readonly onContinue: () => void;
   readonly onPaired: (environmentId: EnvironmentId) => void;
 }) {
-  const { environments } = useEnvironments();
+  const { environments: savedEnvironments } = useEnvironments();
+  const environments = savedEnvironments.filter(isOnboardingEnvironmentAvailable);
   const cloudEnabled = hasCloudPublicConfig();
   const directEnvironments = environments.filter(
     (environment) => !cloudEnabled || !isOnboardingRelayEnvironment(environment),

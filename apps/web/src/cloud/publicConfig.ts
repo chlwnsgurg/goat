@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { relayClerkTokenOptions } from "@goat/shared/relayAuth";
 import { normalizeSecureRelayUrl } from "@goat/shared/relayUrl";
 import * as Schema from "effect/Schema";
@@ -38,6 +39,14 @@ function normalizeSecureUrl(value: string): string | null {
 }
 
 export function resolveCloudPublicConfig(): CloudPublicConfig {
+  if (!isGoatConnectEnabled()) {
+    return {
+      clerkPublishableKey: null,
+      clerkJwtTemplate: null,
+      relayUrl: null,
+      relayTracing: { tracesUrl: null, tracesDataset: null, tracesToken: null },
+    };
+  }
   return {
     clerkPublishableKey: trimNonEmpty(
       import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined,

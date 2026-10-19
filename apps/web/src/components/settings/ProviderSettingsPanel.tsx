@@ -1,3 +1,5 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import { environmentTransportLabel } from "./EnvironmentRow.logic";
 import { SettingsGroup } from "./SettingsGroup";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import {
@@ -200,7 +202,8 @@ function ProviderLastChecked({ environmentId }: { environmentId: EnvironmentId }
 
 function providerEnvironmentDetail(environment: EnvironmentPresentation): string {
   if (environment.entry.target._tag === "PrimaryConnectionTarget") return "Primary device";
-  if (environment.relayManaged) return "T3 Connect";
+  if (environment.relayManaged)
+    return isGoatConnectEnabled() ? "T3 Connect" : environmentTransportLabel(environment);
   if (environment.entry.target._tag === "SshConnectionTarget") return "SSH";
   if (isDesktopLocalConnectionTarget(environment.entry.target)) return "Local device";
   return environment.displayUrl ?? "Remote device";

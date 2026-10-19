@@ -464,3 +464,8 @@ describe("welcome agent terminal setup", () => {
     expect(pageText()).toContain("Connect your computers");
   });
 });
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));

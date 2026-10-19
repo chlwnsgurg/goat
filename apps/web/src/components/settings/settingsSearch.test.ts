@@ -183,6 +183,17 @@ describe("searchSettings", () => {
       hasThreadAutoSettlement: false,
     });
 
+    expect(available).toContainEqual(
+      expect.objectContaining({
+        id: "goat-connect-coming-soon",
+        title: "GOAT Connect · Coming soon",
+        to: "/settings/connections",
+      }),
+    );
+    expect(searchSettings("Tailscale guide", available).map((item) => item.id)).toContain(
+      "goat-connect-coming-soon",
+    );
+
     const gatedIds = new Set<string>([
       "follow-change-request-templates",
       "git-fetch-interval",

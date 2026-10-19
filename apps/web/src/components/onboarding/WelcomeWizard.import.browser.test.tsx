@@ -404,3 +404,8 @@ it("completes accepted imports when permission is revoked after the final server
   expect(state.completeOnboarding).toHaveBeenCalledOnce();
   expect(state.onDone).toHaveBeenCalledOnce();
 });
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));

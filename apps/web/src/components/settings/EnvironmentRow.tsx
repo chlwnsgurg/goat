@@ -1,53 +1,8 @@
-import {
-  type ConnectionTarget,
-  connectionRouteId,
-  connectionRouteLabel,
-  connectionRoutes,
-} from "@goat/client-runtime/connection";
-import type { DesktopSshEnvironmentTarget, EnvironmentMachineKind } from "@goat/contracts";
-import * as Option from "effect/Option";
+import type { EnvironmentMachineKind } from "@goat/contracts";
 import type { ReactNode } from "react";
-
 import { cn } from "~/lib/utils";
-import type { EnvironmentPresentation } from "~/state/environments";
-import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "~/connection/desktopLocal";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
-
-export function formatDesktopSshTarget(target: DesktopSshEnvironmentTarget): string {
-  const authority = target.username ? `${target.username}@${target.hostname}` : target.hostname;
-  return target.port ? `${authority}:${target.port}` : authority;
-}
-
-export function environmentTransportLabel(
-  environment: EnvironmentPresentation,
-  activeTarget: ConnectionTarget | null = null,
-): string {
-  const { entry } = environment;
-  if (entry.target._tag === "PrimaryConnectionTarget") return "This machine";
-  const routes = connectionRoutes(entry);
-  if (routes.length > 1) {
-    const active =
-      activeTarget === null
-        ? undefined
-        : routes.find(
-            (route) => connectionRouteId(route.target) === connectionRouteId(activeTarget),
-          );
-    return active === undefined
-      ? connectionRouteLabel(routes[0]!)
-      : `via ${connectionRouteLabel(active)}`;
-  }
-  if (environment.relayManaged) return "T3 Connect";
-  if (isDesktopLocalConnectionTarget(entry.target))
-    return isWslConnectionTarget(entry.target) ? "WSL" : "Local device";
-  if (
-    entry.target._tag === "SshConnectionTarget" &&
-    Option.isSome(entry.profile) &&
-    entry.profile.value._tag === "SshConnectionProfile"
-  ) {
-    return `SSH ${formatDesktopSshTarget(entry.profile.value.target)}`;
-  }
-  return environment.displayUrl ?? "Remote link";
-}
+export { environmentTransportLabel, formatDesktopSshTarget } from "./EnvironmentRow.logic";
 
 export function EnvironmentRow({
   kind,

@@ -229,3 +229,8 @@ it("keeps setup open when saving completion fails and preserves the import warni
     }),
   );
 });
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));
