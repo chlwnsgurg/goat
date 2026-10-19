@@ -1,3 +1,4 @@
+import * as Onboarding from "../provider/ProviderOnboarding.ts";
 import * as HomeRequests from "../provider/CodexHomeRequests.ts";
 import * as ProviderDiagnosisRouting from "../provider/ProviderDiagnosisRouting.ts";
 import * as ProviderHostSync from "../provider/ProviderHostSync.ts";
@@ -158,6 +159,7 @@ const dependencies = Layer.mergeAll(
   Layer.mock(ProviderDiagnosisRouting.ProviderDiagnosisRouting)({}),
   Layer.mock(HomeRequests.CodexHomeRequests)({}),
   Layer.mock(ProviderHostSync.ProviderHostSync)({}),
+  Layer.mock(Onboarding.ProviderOnboarding)({}),
   Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
     namedProjectsRoot: "/tmp/agent-surface-catalog",
   }),
@@ -197,7 +199,7 @@ const client = McpSchema.McpServerClient.of({
 });
 
 it("gives every entry a unique path, legacy name and resolvable schema reference", () => {
-  expect(entries).toHaveLength(150); // Includes current memory, browser, provider, SSH runtime, GOAT Bot home and fleet resource tools.
+  expect(entries).toHaveLength(155); // Includes current memory, browser, provider, SSH runtime, GOAT Bot home and fleet resource tools.
   expect(new Set(entries.map((entry) => entry.name)).size).toBe(entries.length);
   for (const [path, entry] of Object.entries(agentSurfaceRegistry)) {
     expect(path).toBe(entry.path);

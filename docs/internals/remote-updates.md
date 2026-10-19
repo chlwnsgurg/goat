@@ -74,7 +74,7 @@ all of them for security, and a judge writing the verdict.
   server owns its channel, schedules its own updates, and tells clients to update.
   Destination ownership of the selected version and idle-only activation were
   kept. Launcher-managed stable and nightly servers now schedule their own idle
-  updates under ADR-0016. Removing client archive uploads after bootstrap and
+  updates under ADR-0019. Removing client archive uploads after bootstrap and
   moving client-launched SSH runtimes under the service launcher remain deferred.
 
 The red team's findings that changed the design: a launcher-managed update

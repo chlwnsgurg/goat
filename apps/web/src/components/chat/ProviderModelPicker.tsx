@@ -1,11 +1,12 @@
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
+  AuthProvidersManageScope,
   type ProviderInstanceId,
   type EnvironmentId,
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
 } from "@goat/contracts";
-import { memo, useEffect, useState } from "react";
+import { lazy, memo, Suspense, useEffect, useState } from "react";
 import { Badge } from "../ui/badge";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -26,6 +27,15 @@ import {
 } from "./ComposerControl";
 import { useComposerMenuProps } from "./composerEventScope";
 import { shortcutLabelForCommand } from "../../keybindings";
+import { useEnvironment } from "../../state/environments";
+import { useEnvironmentScope } from "../../state/session";
+
+// The wizard only loads once someone presses "Add provider" in the rail.
+const AddProviderInstanceDialog = lazy(() =>
+  import("../settings/AddProviderInstanceDialog").then((module) => ({
+    default: module.AddProviderInstanceDialog,
+  })),
+);
 
 export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   environmentId: EnvironmentId | null;
@@ -60,6 +70,15 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
   const isMenuOpen = props.open ?? uncontrolledIsMenuOpen;
   const size = props.size ?? "sm";
+  // Only the composer's picker offers "Add provider"; settings pickers already sit next to provider settings.
+  const addProviderEnvironmentId = props.isComposerOwned ? props.environmentId : null;
+  const canManageProviders = useEnvironmentScope(
+    addProviderEnvironmentId,
+    AuthProvidersManageScope,
+  );
+  const environmentLabel = useEnvironment(addProviderEnvironmentId)?.label ?? "this environment";
+  const [isAddProviderOpen, setIsAddProviderOpen] = useState(false);
+  const [addedInstanceId, setAddedInstanceId] = useState<ProviderInstanceId | null>(null);
 
   const activeEntry =
     props.instanceEntries.find((entry) => entry.instanceId === props.activeInstanceId) ?? null;
@@ -87,10 +106,22 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     activeEntry !== null && shouldShowInstanceBadge(activeEntry, props.instanceEntries);
 
   const setIsMenuOpen = (open: boolean) => {
+    if (!open) setAddedInstanceId(null);
     props.onOpenChange?.(open);
     if (props.open === undefined) {
       setUncontrolledIsMenuOpen(open);
     }
+  };
+
+  // The picker closes while the dialog is open so its window shortcuts and outside-press
+  // handling stay out of the wizard, then reopens on whatever the person added.
+  const openAddProvider = () => {
+    setIsMenuOpen(false);
+    setIsAddProviderOpen(true);
+  };
+  const closeAddProvider = () => {
+    setIsAddProviderOpen(false);
+    if (!props.disabled) setIsMenuOpen(true);
   };
 
   useEffect(() => {
@@ -303,6 +334,15 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           modelOptionsByInstance={props.modelOptionsByInstance}
           terminalOpen={props.terminalOpen ?? false}
           onRequestClose={() => setIsMenuOpen(false)}
+          {...(addProviderEnvironmentId
+            ? {
+                onAddProvider: openAddProvider,
+                addProviderDisabledReason: canManageProviders
+                  ? null
+                  : `You don't have permission to manage providers on ${environmentLabel}.`,
+                initialSelectedInstanceId: addedInstanceId,
+              }
+            : {})}
           {...(props.onOpenProviderSetup ? { onOpenProviderSetup: props.onOpenProviderSetup } : {})}
           {...(props.getModelDisabledReason
             ? { getModelDisabledReason: props.getModelDisabledReason }
@@ -313,6 +353,19 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           <ChatGptSharingControl provider={activeEntry?.snapshot ?? null} />
         ) : null}
       </PopoverPopup>
+      {addProviderEnvironmentId && isAddProviderOpen && canManageProviders ? (
+        <Suspense fallback={null}>
+          <AddProviderInstanceDialog
+            open
+            environmentId={addProviderEnvironmentId}
+            environmentLabel={environmentLabel}
+            onOpenChange={(open) => {
+              if (!open) closeAddProvider();
+            }}
+            onFinished={({ instanceId }) => setAddedInstanceId(instanceId)}
+          />
+        </Suspense>
+      ) : null}
     </Popover>
   );
 });

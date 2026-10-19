@@ -1,3 +1,4 @@
+import * as Onboarding from "../../../provider/ProviderOnboarding.ts";
 import * as DateTime from "effect/DateTime";
 import { ThreadId, ProviderInstanceId, TurnItemId } from "@goat/contracts";
 import * as HomeRequests from "../../../provider/CodexHomeRequests.ts";
@@ -41,6 +42,7 @@ it.effect.each([undefined, "box"])("uses one routing entry point for host=%s", (
       Layer.provide(liveThreadsLayer),
       Layer.provide(Layer.mock(HomeRequests.CodexHomeRequests)({})),
       Layer.provide(Layer.mock(HostSync.ProviderHostSync)({})),
+      Layer.provide(Layer.mock(Onboarding.ProviderOnboarding)({})),
       Layer.provide(
         Layer.mock(Routing.ProviderDiagnosisRouting)({
           diagnose: (input, caller) =>
@@ -79,6 +81,7 @@ it.effect(
         Layer.provide(liveThreadsLayer),
         Layer.provide(Layer.mock(HomeRequests.CodexHomeRequests)({})),
         Layer.provide(Layer.mock(HostSync.ProviderHostSync)({})),
+        Layer.provide(Layer.mock(Onboarding.ProviderOnboarding)({})),
         Layer.provide(
           Layer.mock(Routing.ProviderDiagnosisRouting)({
             diagnose: () =>
@@ -132,6 +135,7 @@ it.effect(
         Layer.provide(liveThreadsLayer),
         Layer.provide(Layer.mock(Routing.ProviderDiagnosisRouting)({})),
         Layer.provide(Layer.mock(HostSync.ProviderHostSync)({})),
+        Layer.provide(Layer.mock(Onboarding.ProviderOnboarding)({})),
         Layer.provide(
           Layer.mock(HomeRequests.CodexHomeRequests)({
             request: (input, authenticated) =>
