@@ -127,6 +127,14 @@ it.effect("public dispatch gates all new-work sources while metadata and stop co
       })
       .pipe(Effect.flip);
     assert.equal(retry._tag, "ServerDrainingError");
+    const resume = yield* orchestrator
+      .dispatch({
+        type: "queue.resume",
+        commandId: CommandId.make("resume-held-queue"),
+        threadId,
+      })
+      .pipe(Effect.flip);
+    assert.equal(resume._tag, "ServerDrainingError");
     yield* orchestrator.dispatch({
       type: "thread.metadata.update",
       commandId: CommandId.make("rename"),
