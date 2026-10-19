@@ -282,6 +282,30 @@ describe("matchRemoteProject", () => {
     ).toBe(project);
   });
 
+  it.each([
+    "C:\\Users\\super\\Developer\\goat",
+    "c:\\users\\super\\developer\\goat\\",
+    "C:/Users/super/Developer/goat",
+    "/c/Users/super/Developer/goat",
+  ])("matches a linked Windows host's project by Windows rules: %s", (cwd) => {
+    // A linked host reports no OS; its native project roots show it is Windows.
+    const windows = { id: "windows", workspaceRoot: "C:\\Users\\super\\Developer\\goat" };
+    expect(matchRemoteProject([project, windows], { path: cwd, realPath: cwd, os: null })).toBe(
+      windows,
+    );
+  });
+
+  it("never folds a POSIX project root on a host without an OS", () => {
+    const posix = { id: "posix", workspaceRoot: "/c/Users/super/goat" };
+    expect(
+      matchRemoteProject([posix], {
+        path: "C:/Users/super/goat",
+        realPath: "C:/Users/super/goat",
+        os: null,
+      }),
+    ).toBeUndefined();
+  });
+
   it.each(["Linux", "Windows_NT", "darwin", null])("keeps case-sensitive matching on %s", (os) => {
     expect(
       matchRemoteProject([project], {

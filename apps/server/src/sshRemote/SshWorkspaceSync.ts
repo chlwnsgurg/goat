@@ -207,8 +207,10 @@ else
     fi
   fi
 fi
-if [ "$(git -C "$repo" rev-parse --is-bare-repository)" != false ] ||
-   [ "$(git -C "$repo" rev-parse --show-toplevel)" != "$repo" ]; then
+top="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null)" || top=
+# Git for Windows prints C:/…, while $HOME in Git Bash or Cygwin is /c/… or /cygdrive/c/….
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) [ -z "$top" ] || top="$(cygpath -u "$top")" ;; esac
+if [ "$(git -C "$repo" rev-parse --is-bare-repository)" != false ] || [ "$top" != "$repo" ]; then
   printf 'GOAT_FOREIGN_PATH\\n'
   exit 0
 fi
