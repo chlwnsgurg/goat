@@ -20,6 +20,7 @@ import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import { McpSchema, McpServer } from "effect/ai";
 
+import * as CloudAgents from "../cloudAgents/CloudAgentService.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Handoffs from "../handoffs/Handoffs.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
@@ -215,6 +216,7 @@ const harness = Effect.gen(function* () {
     Layer.provide(Layer.mock(HomeRequests.CodexHomeRequests)({})),
     Layer.provide(Layer.mock(Routing.ProviderDiagnosisRouting)({})),
     Layer.provide(Layer.mock(HostSync.ProviderHostSync)({})),
+    Layer.provide(Layer.mock(CloudAgents.CloudAgentService)({})),
     Layer.provide(Onboarding.layer),
     Layer.provide(dependencies),
   );

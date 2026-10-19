@@ -11,6 +11,7 @@ import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as Invocation from "../../McpInvocationContext.ts";
 import * as Routing from "../../../provider/ProviderDiagnosisRouting.ts";
 import * as HostSync from "../../../provider/ProviderHostSync.ts";
+import * as CloudAgents from "../../../cloudAgents/CloudAgentService.ts";
 import { liveThreadsLayer } from "../../McpToolAccess.testkit.ts";
 import { ProviderToolkit } from "./tools.ts";
 import * as Handlers from "./handlers.ts";
@@ -43,6 +44,7 @@ it.effect.each([undefined, "box"])("uses one routing entry point for host=%s", (
       Layer.provide(Layer.mock(HomeRequests.CodexHomeRequests)({})),
       Layer.provide(Layer.mock(HostSync.ProviderHostSync)({})),
       Layer.provide(Layer.mock(Onboarding.ProviderOnboarding)({})),
+      Layer.provide(Layer.mock(CloudAgents.CloudAgentService)({})),
       Layer.provide(
         Layer.mock(Routing.ProviderDiagnosisRouting)({
           diagnose: (input, caller) =>
@@ -82,6 +84,7 @@ it.effect(
         Layer.provide(Layer.mock(HomeRequests.CodexHomeRequests)({})),
         Layer.provide(Layer.mock(HostSync.ProviderHostSync)({})),
         Layer.provide(Layer.mock(Onboarding.ProviderOnboarding)({})),
+        Layer.provide(Layer.mock(CloudAgents.CloudAgentService)({})),
         Layer.provide(
           Layer.mock(Routing.ProviderDiagnosisRouting)({
             diagnose: () =>
@@ -136,6 +139,7 @@ it.effect(
         Layer.provide(Layer.mock(Routing.ProviderDiagnosisRouting)({})),
         Layer.provide(Layer.mock(HostSync.ProviderHostSync)({})),
         Layer.provide(Layer.mock(Onboarding.ProviderOnboarding)({})),
+        Layer.provide(Layer.mock(CloudAgents.CloudAgentService)({})),
         Layer.provide(
           Layer.mock(HomeRequests.CodexHomeRequests)({
             request: (input, authenticated) =>

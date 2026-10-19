@@ -2,6 +2,16 @@ import * as HomeRequests from "../../../provider/CodexHomeRequests.ts";
 import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
 import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import {
+  CloudHoldersInput,
+  CloudHoldersResult,
+  CloudLaunchInput,
+  CloudLaunchResult,
+  CloudRunForgetInput,
+  CloudRunForgetResult,
+  CloudRunListInput,
+  CloudRunListResult,
+  CloudRunRegisterInput,
+  CloudRunRegisterResult,
   OrchestratorMcpFailure,
   ProviderAddableListResult,
   ProviderHomeRequestInput,
@@ -23,6 +33,7 @@ import {
 } from "@goat/contracts";
 import { Tool, Toolkit } from "effect/ai";
 
+import * as CloudAgents from "../../../cloudAgents/CloudAgentService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderDiagnosisRouting from "../../../provider/ProviderDiagnosisRouting.ts";
 import * as ProviderHostSync from "../../../provider/ProviderHostSync.ts";
@@ -138,6 +149,50 @@ const ProviderLoginCancelTool = Tool.make(agentSurfaceRegistry["provider.login_c
   failureMode: "return" as const,
   dependencies: onboardingDependencies,
 }).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["provider.login_cancel"]));
+const cloudTool = {
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+    CloudAgents.CloudAgentService,
+  ],
+};
+
+const CloudHoldersTool = Tool.make(agentSurfaceRegistry["cloud_agent.holders"].name, {
+  ...cloudTool,
+  description: agentSurfaceRegistry["cloud_agent.holders"].description,
+  parameters: CloudHoldersInput,
+  success: CloudHoldersResult,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["cloud_agent.holders"]));
+
+const CloudLaunchTool = Tool.make(agentSurfaceRegistry["cloud_agent.launch"].name, {
+  ...cloudTool,
+  description: agentSurfaceRegistry["cloud_agent.launch"].description,
+  parameters: CloudLaunchInput,
+  success: CloudLaunchResult,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["cloud_agent.launch"]));
+
+const CloudRunRegisterTool = Tool.make(agentSurfaceRegistry["cloud_agent.run_register"].name, {
+  ...cloudTool,
+  description: agentSurfaceRegistry["cloud_agent.run_register"].description,
+  parameters: CloudRunRegisterInput,
+  success: CloudRunRegisterResult,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["cloud_agent.run_register"]));
+
+const CloudRunListTool = Tool.make(agentSurfaceRegistry["cloud_agent.run_list"].name, {
+  ...cloudTool,
+  description: agentSurfaceRegistry["cloud_agent.run_list"].description,
+  parameters: CloudRunListInput,
+  success: CloudRunListResult,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["cloud_agent.run_list"]));
+
+const CloudRunForgetTool = Tool.make(agentSurfaceRegistry["cloud_agent.run_forget"].name, {
+  ...cloudTool,
+  description: agentSurfaceRegistry["cloud_agent.run_forget"].description,
+  parameters: CloudRunForgetInput,
+  success: CloudRunForgetResult,
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["cloud_agent.run_forget"]));
 
 export const ProviderToolkit = Toolkit.make(
   ProviderDiagnoseTool,
@@ -151,4 +206,9 @@ export const ProviderToolkit = Toolkit.make(
   ProviderLoginStartTool,
   ProviderLoginStatusTool,
   ProviderLoginCancelTool,
+  CloudHoldersTool,
+  CloudLaunchTool,
+  CloudRunRegisterTool,
+  CloudRunListTool,
+  CloudRunForgetTool,
 );

@@ -155,6 +155,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.scheduledTasksGetWebhookDelivery]: AuthOrchestrationOperateScope,
   [WS_METHODS.remoteLaunchesList]: AuthOrchestrationReadScope,
   [WS_METHODS.cloudMachinesList]: AuthOrchestrationReadScope,
+  [WS_METHODS.cloudAgentsListRuns]: AuthOrchestrationReadScope,
   [WS_METHODS.cloudMachinesConfigure]: AuthSettingsWriteScope,
   [WS_METHODS.cloudMachinesDisconnect]: AuthSettingsWriteScope,
   [WS_METHODS.cloudMachinesCreate]: AuthSettingsWriteScope,
