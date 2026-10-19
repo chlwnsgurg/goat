@@ -4953,6 +4953,9 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     if (closed || (generations.get(input.key) ?? 0) !== generation)
       return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
     const phase: SshRuntimeProgressCallback = ({ phase }) => {
+      // A background refresh of a host whose forward still works keeps its published status;
+      // "preparing" would drop provider diagnosis and flap a healthy host every ten minutes.
+      if (input.background === true && tunnels.has(input.key)) return;
       if (!closed && (generations.get(input.key) ?? 0) === generation) {
         publishPhase(
           input.key,

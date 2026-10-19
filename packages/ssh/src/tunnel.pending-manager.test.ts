@@ -1084,6 +1084,35 @@ describe("SSH archive refresh retry", () => {
         );
       }).pipe(Effect.scoped),
   );
+  it.effect("a background archive retry keeps provider diagnosis on the working host", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.setMode("archive");
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        const operation = yield* manager.beginSetupOperation(uploadTarget, "archive-setup");
+        yield* manager.ensureEnvironment(uploadTarget, { keyOnly: true });
+        yield* manager.publishProviderDiagnosis(uploadTarget, operation, {
+          checkedAt: operationDate,
+          ready: false,
+          fixes: [{ actor: "human", instruction: "Sign in" }],
+        });
+        assert.equal((yield* manager.status(uploadTarget)).status?.state, "providers_not_ready");
+        yield* TestClock.adjust("10 minutes");
+        yield* Deferred.await(f.completed[1]!);
+        assert.equal(f.count.launches, 2);
+        const after = yield* manager.status(uploadTarget);
+        yield* decodeHostResult(after);
+        assert.equal(after.status?.state, "providers_not_ready");
+        assert.equal(after.status?.providers?.ready, false);
+        assert.equal(after.status?.refreshDeferred?.reason, "archive_unavailable");
+      }).pipe(
+        Effect.provide(f.layer),
+        Effect.provideService(Tracer.Tracer, f.tracer),
+        Effect.scoped,
+      );
+    }).pipe(Effect.scoped),
+  );
 });
 
 it.effect("terminal setup failure fences an archive refresh already in flight", () =>
