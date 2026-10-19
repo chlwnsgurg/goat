@@ -1,0 +1,178 @@
+import { EnvironmentId, type HostStatusEntry } from "@goat/contracts";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+import "~/index.css";
+
+import { PERSISTED_STATE_KEY, useUiStateStore } from "../../uiStateStore";
+
+const environmentId = EnvironmentId.make("console-environment");
+const SAMPLED_AT = Date.parse("2026-10-20T12:00:00.000Z");
+const host: HostStatusEntry = {
+  host: null,
+  reachability: "ok",
+  metrics: {
+    sampledAt: SAMPLED_AT,
+    cpuUtilization: 0.91,
+    cpuCount: 10,
+    availableMemoryBytes: 4,
+    totalMemoryBytes: 16,
+    loadAvg: { oneMinute: 17, fiveMinutes: 15, fifteenMinutes: 12 },
+    disk: null,
+    threads: { running: 0, waiting: 0, queued: 0 },
+    quotas: [],
+  },
+};
+
+const hostStatus = vi.hoisted(() => ({ reads: 0 }));
+vi.mock(import("./fleetHostStatus"), () => ({
+  useFleetHostStatus: () => {
+    hostStatus.reads += 1;
+    return {
+      reads: [{ environmentId, hosts: [host] }],
+      sources: [],
+      history: new Map(),
+      loading: false,
+      sampledAt: SAMPLED_AT,
+    };
+  },
+  FleetHostStatusRefresh: () => null,
+}));
+
+import { FleetConsoleSlot } from "./FleetConsoleSlot";
+
+const snapshot = {
+  machines: [
+    {
+      id: "macmini",
+      label: "macmini",
+      subtitle: null,
+      kind: "environment" as const,
+      os: null,
+      machineKind: null,
+      environmentId,
+      reachedVia: null,
+      cloudState: null,
+      running: 9,
+      attention: 2,
+      reported: 3,
+      agents: [],
+    },
+  ],
+  threads: [],
+  totals: { running: 9, attention: 2, reported: 3, machines: 6 },
+};
+
+let container: HTMLDivElement;
+let root: Root;
+
+function render() {
+  return act(async () => {
+    root.render(<FleetConsoleSlot snapshot={snapshot} connections={new Map()} />);
+  });
+}
+
+const placeholder = () => container.querySelector<HTMLElement>("[data-fleet-console-placeholder]");
+const console_ = () =>
+  container.querySelector<HTMLElement>('section[aria-label="Fleet telemetry"]');
+/** The idle callback and the lazy chunk settle outside React; let each step flush inside act. */
+async function mounted() {
+  for (let attempt = 0; attempt < 100 && console_() === null; attempt++) {
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+  }
+  expect(console_()).not.toBeNull();
+}
+const toggle = () => container.querySelector<HTMLButtonElement>("button[aria-expanded]")!;
+
+function stubReducedMotion(reduced: boolean) {
+  const real = window.matchMedia.bind(window);
+  vi.spyOn(window, "matchMedia").mockImplementation((query: string) =>
+    query.includes("prefers-reduced-motion")
+      ? ({
+          matches: reduced,
+          media: query,
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        } as unknown as MediaQueryList)
+      : real(query),
+  );
+}
+
+beforeEach(() => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  hostStatus.reads = 0;
+  useUiStateStore.setState({ fleetConsoleCollapsed: false });
+  container = document.createElement("div");
+  container.style.width = "1100px";
+  document.body.append(container);
+  root = createRoot(container);
+});
+
+afterEach(async () => {
+  await act(async () => root.unmount());
+  container.remove();
+  localStorage.clear();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe("FleetConsoleSlot", () => {
+  it("holds the console's height with a placeholder until the page has painted, then swaps it in", async () => {
+    await render();
+    expect(console_()).toBeNull();
+    const reserved = placeholder()!.getBoundingClientRect().height;
+    expect(reserved).toBeGreaterThan(200);
+
+    await mounted();
+    expect(placeholder()).toBeNull();
+    expect(console_()!.getBoundingClientRect().height).toBe(reserved);
+    expect(console_()!.textContent).toContain("91%");
+  });
+
+  it("remembers that it was collapsed, and reads no host status while collapsed", async () => {
+    await render();
+    await mounted();
+    await act(async () => toggle().click());
+
+    expect(toggle().getAttribute("aria-expanded")).toBe("false");
+    expect(console_()!.getBoundingClientRect().height).toBe(40);
+    expect(console_()!.textContent).toContain("9 running");
+    await vi.waitFor(
+      () =>
+        expect(JSON.parse(localStorage.getItem(PERSISTED_STATE_KEY)!).fleetConsoleCollapsed).toBe(
+          true,
+        ),
+      { timeout: 2000 },
+    );
+
+    await act(async () => root.unmount());
+    hostStatus.reads = 0;
+    root = createRoot(container);
+    await render();
+    expect(placeholder()!.getBoundingClientRect().height).toBe(40);
+    await mounted();
+    expect(toggle().getAttribute("aria-expanded")).toBe("false");
+    expect(hostStatus.reads).toBe(0);
+
+    await act(async () => toggle().click());
+    expect(hostStatus.reads).toBeGreaterThan(0);
+    expect(useUiStateStore.getState().fleetConsoleCollapsed).toBe(false);
+  });
+
+  it("sweeps once per sample, and not at all with reduced motion", async () => {
+    stubReducedMotion(false);
+    await render();
+    await mounted();
+    expect(container.querySelectorAll(".fleet-console-sweep")).toHaveLength(1);
+    await act(async () => root.unmount());
+
+    vi.restoreAllMocks();
+    stubReducedMotion(true);
+    root = createRoot(container);
+    await render();
+    await mounted();
+    expect(console_()!.textContent).toContain("91%");
+    expect(container.querySelector(".fleet-console-sweep")).toBeNull();
+  });
+});

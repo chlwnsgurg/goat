@@ -13,6 +13,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsIcon } from "~/components/solar";
 import { ConnectionCatalogUnreadableAlert } from "../desktop/ConnectionCatalogUnreadableNotice";
 import { ConnectionEnvironmentsSection } from "../settings/ConnectionEnvironmentsSection";
+import { FleetConsoleSlot } from "./FleetConsoleSlot";
 import { FleetGraph } from "./FleetGraph";
 import { describeMachine } from "./describeMachine";
 import { fleetConnectionLegend, UNKNOWN_FLEET_CONNECTION } from "./fleetConnection";
@@ -77,6 +78,7 @@ export function FleetPage() {
         </WorkspacePageHeader>
         <main className="min-h-0 flex-1 overflow-y-auto">
           <WorkspacePageContainer width="expanded">
+            <FleetConsoleSlot snapshot={snapshot} connections={connections} />
             <p className="text-sm text-muted-foreground" role="status">
               {totals.running + totals.attention === 0
                 ? "Nothing running on " + plural(totals.machines, "machine") + "."
