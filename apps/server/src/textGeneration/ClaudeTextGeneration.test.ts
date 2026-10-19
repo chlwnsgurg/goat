@@ -1302,6 +1302,7 @@ it.layer(layerClaudeTextGenerationTest)("channel reception", (it) => {
             remember: "",
             rememberQuote: "",
             notesChangeRequested: "",
+            clarifyAbout: "other",
           },
         }),
         cwdMustNotBe: process.cwd(),
