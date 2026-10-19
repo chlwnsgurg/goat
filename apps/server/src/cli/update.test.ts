@@ -16,7 +16,12 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as HostProcess from "@goat/shared/HostProcess";
 
-import { repointLauncher, resolveLauncherPath, resolveNewestVersion } from "./update.ts";
+import {
+  repointLauncher,
+  resolveLauncherPath,
+  resolveNewestRelease,
+  resolveNewestVersion,
+} from "./update.ts";
 
 it.layer(NodeServices.layer)("t3 update launcher", (it) => {
   it.effect("repoints a symlink that lives in a runtime versions tree", () =>
@@ -135,6 +140,56 @@ function releaseIndexHarness(
 }
 
 it.layer(NodeServices.layer)("goat release index", (it) => {
+  it.effect(
+    "preserves publication metadata from HTTP and cache while keeping version-only callers",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-release-index-" });
+        const publishedAt = "2026-10-01T00:00:00Z";
+        const h = releaseIndexHarness(() =>
+          Response.json([{ tag_name: `v${stableRelease}`, published_at: publishedAt }]),
+        );
+        const lookup = resolveNewestRelease({ baseDir, channel: "stable" }).pipe(
+          Effect.provide(h.layer),
+        );
+        assert.deepEqual(yield* lookup, { version: stableRelease, publishedAt });
+        assert.deepEqual(yield* lookup, { version: stableRelease, publishedAt });
+        assert.equal(
+          yield* resolveNewestVersion({ baseDir, channel: "stable" }).pipe(Effect.provide(h.layer)),
+          stableRelease,
+        );
+        assert.equal(h.requests.length, 1);
+      }),
+  );
+
+  it.effect("accepts old cache entries without published_at", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-release-index-" });
+      yield* fs.makeDirectory(`${baseDir}/cache`);
+      yield* fs.writeFileString(
+        `${baseDir}/cache/release-index.json`,
+        encodeJson([
+          {
+            repository: CLI_RELEASE_REPOSITORY,
+            channel: "stable",
+            cachedAt: yield* Clock.currentTimeMillis,
+            releases: [{ tag_name: `v${stableRelease}` }],
+          },
+        ]),
+      );
+      const h = releaseIndexHarness(() => {
+        throw new Error("old cache should be reused");
+      });
+      assert.deepEqual(
+        yield* resolveNewestRelease({ baseDir, channel: "stable" }).pipe(Effect.provide(h.layer)),
+        { version: stableRelease, publishedAt: undefined },
+      );
+      assert.equal(h.requests.length, 0);
+    }),
+  );
+
   it.effect.each([500, 502, 503, 403, 429, "network"] as const)(
     "retries transient %s twice with exponential backoff",
     (failure) =>
