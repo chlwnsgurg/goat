@@ -2,6 +2,10 @@ export interface UpdateManifestFile {
   readonly url: string;
   readonly sha512: string;
   readonly size: number;
+  /** Written by electron-builder for AppImage (and other blockmap) files. */
+  readonly blockMapSize?: number;
+  /** Written by electron-builder for per-machine NSIS installers. */
+  readonly isAdminRightsRequired?: boolean;
 }
 
 export type UpdateManifestScalar = string | number | boolean;
@@ -17,6 +21,8 @@ interface MutableUpdateManifestFile {
   url?: string;
   sha512?: string;
   size?: number;
+  blockMapSize?: number;
+  isAdminRightsRequired?: boolean;
 }
 
 function stripSingleQuotes(value: string): string {
@@ -48,6 +54,10 @@ function parseFileRecord(
     url: currentFile.url,
     sha512: currentFile.sha512,
     size: currentFile.size,
+    ...(currentFile.blockMapSize === undefined ? {} : { blockMapSize: currentFile.blockMapSize }),
+    ...(currentFile.isAdminRightsRequired === undefined
+      ? {}
+      : { isAdminRightsRequired: currentFile.isAdminRightsRequired }),
   };
 }
 
@@ -110,6 +120,19 @@ export function parseUpdateManifest(
         );
       }
       currentFile.size = Number(fileSizeMatch[1]);
+      continue;
+    }
+
+    const fileBlockMapSizeMatch = line.match(/^    blockMapSize:\s*(\d+)$/);
+    const fileAdminMatch = line.match(/^    isAdminRightsRequired:\s*(true|false)$/);
+    if (fileBlockMapSizeMatch?.[1] || fileAdminMatch?.[1]) {
+      if (currentFile === null) {
+        throw new Error(
+          `Invalid ${platformLabel} update manifest at ${sourcePath}:${lineNumber}: file field without a file entry.`,
+        );
+      }
+      if (fileBlockMapSizeMatch?.[1]) currentFile.blockMapSize = Number(fileBlockMapSizeMatch[1]);
+      if (fileAdminMatch?.[1]) currentFile.isAdminRightsRequired = fileAdminMatch[1] === "true";
       continue;
     }
 
@@ -219,7 +242,13 @@ export function mergeUpdateManifests(
   const filesByUrl = new Map<string, UpdateManifestFile>();
   for (const file of [...primary.files, ...secondary.files]) {
     const existing = filesByUrl.get(file.url);
-    if (existing && (existing.sha512 !== file.sha512 || existing.size !== file.size)) {
+    if (
+      existing &&
+      (existing.sha512 !== file.sha512 ||
+        existing.size !== file.size ||
+        existing.blockMapSize !== file.blockMapSize ||
+        existing.isAdminRightsRequired !== file.isAdminRightsRequired)
+    ) {
       throw new Error(
         `Cannot merge ${platformLabel} update manifests: conflicting file entry for ${file.url}.`,
       );
@@ -259,6 +288,9 @@ export function serializeUpdateManifest(
     lines.push(`  - url: ${file.url}`);
     lines.push(`    sha512: ${file.sha512}`);
     lines.push(`    size: ${file.size}`);
+    if (file.blockMapSize !== undefined) lines.push(`    blockMapSize: ${file.blockMapSize}`);
+    if (file.isAdminRightsRequired !== undefined)
+      lines.push(`    isAdminRightsRequired: ${file.isAdminRightsRequired}`);
   }
 
   for (const key of Object.keys(manifest.extras).toSorted()) {
