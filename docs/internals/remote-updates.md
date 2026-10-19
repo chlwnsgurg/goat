@@ -308,12 +308,12 @@ environment.
 
 ## Rollback
 
-Rollback is the existing machinery, unchanged. The launcher trial restores the
-SQLite snapshot and the previous runtime if the trial does not commit; the SSH
-supervisor restores the database and `run-t3.sh` and starts the previous version.
-Both refuse to restore over another server's writes. After commit the new version
-is authoritative: a later downgrade is a new, deliberate update with its own
-migration check, never a stale client reconnecting.
+The launcher restores the SQLite snapshot and the previous runtime if the trial does
+not commit, fails its smoke probe, or exits during the ten-minute probation after
+commit; the SSH supervisor restores the database and `run-t3.sh` and starts the
+previous version. Both refuse to restore over another server's writes. Once probation
+expires the new version is authoritative: a later downgrade is a new, deliberate
+update with its own migration check, never a stale client reconnecting.
 
 ## Server auto-update
 

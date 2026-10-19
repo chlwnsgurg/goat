@@ -108,9 +108,9 @@ records its reason, so recovery still finishes that rollback if ownership stays
 busy beyond the probation deadline. A durable restore marker makes an interrupted
 restore finish before either version boots. Keep the snapshot until probation
 expires, or until both restoration and the terminal rollback state are durable.
-The owner-log rule also applies after launcher restarts: a restarted active server
-records a normal service owner, so its writes prevent restoration of the earlier
-trial snapshot even though the version still rolls back.
+The owner-log rule also applies after launcher restarts. A target the launcher restarts
+while its update is on probation records `service-probation:<updateId>`, so a probation
+rollback still restores the snapshot; any other server's writes keep it.
 Attachments and other files outside SQLite are outside this rollback boundary.
 
 ## Client acknowledgement
