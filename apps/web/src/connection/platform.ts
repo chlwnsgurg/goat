@@ -44,6 +44,7 @@ import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -384,12 +385,10 @@ export const provisionDesktopSshEnvironment = Effect.fn(
 export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ssh.prepareDesktop")(
   function* (
     bridge: DesktopBridge,
-    input: {
-      readonly target: DesktopSshEnvironmentTarget;
-      readonly expectedEnvironmentId: EnvironmentId;
-      readonly bearerToken?: string;
-      readonly onHostAnswered?: Effect.Effect<void>;
-    },
+    input: Omit<
+      Parameters<ClientCapabilities.SshEnvironmentGateway["Service"]["prepare"]>[0],
+      "connectionId"
+    >,
     readyCloudMachine: CloudMachinePreflight = readyCloudMachineThroughPrimary,
     grants: SshPairingGrants = sshPairingGrants,
   ) {
@@ -428,6 +427,29 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
           detail: `That host reaches ${descriptor.label}, a different machine. Add it as its own environment instead.`,
         });
       }
+      const prepared = {
+        bootstrap,
+        bearerToken,
+        verifiedEndpoint: { httpBaseUrl: bootstrap.httpBaseUrl, descriptor },
+      };
+      // Keep ticket errors as values until the session check decides whether to
+      // pair. This scope discards speculative work on cancellation or re-pairing.
+      const endpointVerified = yield* Deferred.make<
+        ExecutionEnvironmentDescriptor,
+        ConnectionAttemptError
+      >();
+      const authorization =
+        input.authorize === undefined
+          ? undefined
+          : yield* input
+              .authorize(prepared, (descriptor) => Deferred.succeed(endpointVerified, descriptor))
+              .pipe(
+                Effect.tapCause((cause) => Deferred.failCause(endpointVerified, cause)),
+                Effect.result,
+                Effect.forkScoped,
+              );
+      const verifiedDescriptor =
+        authorization === undefined ? descriptor : yield* Deferred.await(endpointVerified);
       const session = yield* Effect.tryPromise({
         try: () => bridge.fetchSshSessionState(bootstrap.httpBaseUrl, bearerToken),
         catch: sshPreparationFailure,
@@ -437,16 +459,24 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       const granted = session.permissions ?? session.scopes ?? [];
       if (
         session.authenticated &&
-        requiredSshTokenScopes(grants, descriptor, bootstrap.target).every((scope) =>
+        requiredSshTokenScopes(grants, verifiedDescriptor, bootstrap.target).every((scope) =>
           granted.includes(scope),
         )
       ) {
-        return {
-          bootstrap,
-          bearerToken,
-          verifiedEndpoint: { httpBaseUrl: bootstrap.httpBaseUrl, descriptor },
+        const authorized: ClientCapabilities.PreparedSshEnvironment = {
+          ...prepared,
+          verifiedEndpoint: { httpBaseUrl: bootstrap.httpBaseUrl, descriptor: verifiedDescriptor },
+          ...(authorization === undefined
+            ? {}
+            : {
+                authorization: yield* Fiber.join(authorization).pipe(
+                  Effect.flatMap(Effect.fromResult),
+                ),
+              }),
         };
+        return authorized;
       }
+      if (authorization !== undefined) yield* Fiber.interrupt(authorization);
     }
     // The cloud machine was readied above; pairing again must not ready it twice.
     const provisioned = yield* provisionDesktopSshEnvironment(
@@ -457,11 +487,12 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       () => Effect.void,
       grants,
     );
-    return {
+    const prepared: ClientCapabilities.PreparedSshEnvironment = {
       bootstrap: provisioned.bootstrap,
       bearerToken: provisioned.bearerToken,
       verifiedEndpoint: provisioned.verifiedEndpoint,
     };
+    return prepared;
   },
   Effect.scoped,
 );

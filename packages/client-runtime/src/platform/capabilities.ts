@@ -3,18 +3,21 @@ import {
   type DesktopSshEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
   EnvironmentId,
+  type ExecutionEnvironmentDescriptor,
 } from "@goat/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 
 import type { ConnectionAttemptError } from "../connection/model.ts";
+import type { AuthorizedRemoteEnvironment } from "../authorization/service.ts";
 import type { VerifiedSshEndpoint } from "../environment/descriptor.ts";
 
 export interface PreparedSshEnvironment {
   readonly bootstrap: DesktopSshEnvironmentBootstrap;
   readonly bearerToken: string;
   readonly verifiedEndpoint?: VerifiedSshEndpoint;
+  readonly authorization?: AuthorizedRemoteEnvironment;
 }
 
 export interface ProvisionedSshEnvironment extends PreparedSshEnvironment {
@@ -80,6 +83,11 @@ export class SshEnvironmentGateway extends Context.Service<
       readonly target: DesktopSshEnvironmentTarget;
       readonly bearerToken?: string;
       readonly onHostAnswered?: Effect.Effect<void>;
+      /** Runs beside saved-session validation; its result is used only if that session is accepted. */
+      readonly authorize?: (
+        prepared: PreparedSshEnvironment,
+        onEndpointVerified: (descriptor: ExecutionEnvironmentDescriptor) => Effect.Effect<void>,
+      ) => Effect.Effect<AuthorizedRemoteEnvironment, ConnectionAttemptError>;
     }) => Effect.Effect<PreparedSshEnvironment, ConnectionAttemptError>;
     readonly disconnect: (
       target: DesktopSshEnvironmentTarget,

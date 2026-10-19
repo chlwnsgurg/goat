@@ -7,7 +7,7 @@ import { executeEnvironmentHttpRequest, makeEnvironmentHttpApiGroupClient } from
 
 const DEFAULT_REMOTE_REQUEST_TIMEOUT_MS = 10_000;
 
-/** Fresh identity evidence from this connection attempt, never persisted or shared across routes. */
+/** SSH discovery metadata; revalidate before sending credentials because a forward can be replaced. */
 export interface VerifiedSshEndpoint {
   readonly httpBaseUrl: string;
   readonly descriptor: ExecutionEnvironmentDescriptor;

@@ -229,12 +229,32 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
     // Each pairing adds a session on the host, so connects reuse the saved token.
     const saved = Option.getOrUndefined(yield* credentials.get(target.connectionId));
     const savedToken = saved !== undefined && isBearerCredential(saved) ? saved.token : undefined;
+    const authorize = (
+      prepared: ClientCapabilities.PreparedSshEnvironment,
+      onEndpointVerified?: Parameters<
+        RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]["authorizeBearer"]
+      >[0]["onEndpointVerified"],
+    ) =>
+      remote
+        .authorizeBearer({
+          expectedEnvironmentId: target.environmentId,
+          httpBaseUrl: prepared.bootstrap.httpBaseUrl,
+          wsBaseUrl: prepared.bootstrap.wsBaseUrl,
+          bearerToken: prepared.bearerToken,
+          connectionMethod: "ssh",
+          ...(onEndpointVerified === undefined ? {} : { onEndpointVerified }),
+          ...(prepared.verifiedEndpoint === undefined
+            ? {}
+            : { verifiedSshEndpoint: prepared.verifiedEndpoint }),
+        })
+        .pipe(withSshConnectionTiming("authorization"));
     const prepared = yield* ssh.prepare({
       connectionId: target.connectionId,
       expectedEnvironmentId: target.environmentId,
       target: profile.target,
       ...(savedToken === undefined ? {} : { bearerToken: savedToken }),
       ...(onHostAnswered === undefined ? {} : { onHostAnswered }),
+      authorize,
     });
     if (prepared.bearerToken !== savedToken) {
       yield* credentials.put(
@@ -256,18 +276,7 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
       yield* permissions.forget(target.environmentId);
     }
     yield* profiles.put(preparedProfile);
-    const authorized = yield* remote
-      .authorizeBearer({
-        expectedEnvironmentId: target.environmentId,
-        httpBaseUrl: prepared.bootstrap.httpBaseUrl,
-        wsBaseUrl: prepared.bootstrap.wsBaseUrl,
-        bearerToken: prepared.bearerToken,
-        connectionMethod: "ssh",
-        ...(prepared.verifiedEndpoint === undefined
-          ? {}
-          : { verifiedSshEndpoint: prepared.verifiedEndpoint }),
-      })
-      .pipe(withSshConnectionTiming("authorization"));
+    const authorized = prepared.authorization ?? (yield* authorize(prepared));
     return {
       prepared: {
         environmentId: authorized.environmentId,

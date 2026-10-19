@@ -238,9 +238,11 @@ const makeHarness = Effect.fn("TestRemoteAuthorization.makeHarness")(function* (
 });
 
 describe("RemoteEnvironmentAuthorization", () => {
-  it.effect("uses this attempt's verified SSH identity without another descriptor request", () =>
+  it.effect("revalidates the SSH attachment before a ticket and reuses that fresh descriptor", () =>
     Effect.gen(function* () {
-      const harness = yield* makeHarness({ responses: [websocketTicket("ssh-ticket")] });
+      const harness = yield* makeHarness({
+        responses: [Response.json(DESCRIPTOR), websocketTicket("ssh-ticket")],
+      });
       const verifiedSshEndpoint = { httpBaseUrl: ENDPOINT.httpBaseUrl, descriptor: DESCRIPTOR };
       const authorized = yield* Effect.gen(function* () {
         const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
@@ -254,8 +256,36 @@ describe("RemoteEnvironmentAuthorization", () => {
       }).pipe(Effect.provide(harness.layer));
       expect(authorized.verifiedEndpoint).toEqual(verifiedSshEndpoint);
       expect(harness.fetch.calls.map(([url]) => String(url))).toEqual([
+        `${ENDPOINT.httpBaseUrl}/.well-known/goat/environment`,
         `${ENDPOINT.httpBaseUrl}/api/auth/websocket-ticket`,
       ]);
+      expect(new Headers(harness.fetch.calls[0]?.[1].headers).has("Authorization")).toBe(false);
+    }),
+  );
+
+  it.effect("rejects a same-URL SSH replacement before any bearer request", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        responses: [
+          Response.json({ ...DESCRIPTOR, environmentId: EnvironmentId.make("replacement") }),
+        ],
+      });
+      const failure = yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        return yield* remote.authorizeBearer({
+          expectedEnvironmentId: ENVIRONMENT_ID,
+          ...ENDPOINT,
+          bearerToken: "saved-token",
+          connectionMethod: "ssh",
+          verifiedSshEndpoint: { httpBaseUrl: ENDPOINT.httpBaseUrl, descriptor: DESCRIPTOR },
+        });
+      }).pipe(Effect.provide(harness.layer), Effect.flip);
+      expect(harness.fetch.calls).toHaveLength(1);
+      expect(String(harness.fetch.calls[0]?.[0])).toBe(
+        `${ENDPOINT.httpBaseUrl}/.well-known/goat/environment`,
+      );
+      expect(new Headers(harness.fetch.calls[0]?.[1].headers).has("Authorization")).toBe(false);
+      expect(failure).toMatchObject({ reason: "configuration" });
     }),
   );
 
