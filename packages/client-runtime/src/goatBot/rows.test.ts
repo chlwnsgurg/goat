@@ -13,6 +13,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildGoatBotTimeline,
+  goatBotConversationPreview,
   goatBotReplyingSince,
   type GoatBotItemReaders,
   type GoatBotMessagePresentation,
@@ -131,6 +132,89 @@ function readers(
 }
 
 const content = (rows: GoatBotRow[]) => rows.filter((row) => row.kind !== "day");
+
+function preview(
+  items: ReadonlyArray<OrchestrationV2TurnItem>,
+  lastVisitedAt: string | null = null,
+  active = false,
+  cards: Record<string, GoatBotTaskCard> = {},
+) {
+  return goatBotConversationPreview({
+    rows: buildGoatBotTimeline({
+      visibleTurnItems: rowsOf(items),
+      pendingInputs: [],
+      readers: readers({}, cards),
+    }),
+    lastVisitedAt,
+    active,
+  });
+}
+
+describe("goatBotConversationPreview", () => {
+  const first = "2026-10-12T12:00:00Z";
+  const visit = "2026-10-12T12:02:00Z";
+  const answer = "2026-10-12T12:03:00Z";
+
+  it("has no preview for an empty conversation", () => {
+    expect(preview([])).toBeNull();
+  });
+
+  it("shows the latest user message without making it unread", () => {
+    expect(preview([user("u", first, "Hello")])).toEqual({
+      text: "You: Hello",
+      at: "2026-10-12T12:00:00.000Z",
+      unread: false,
+    });
+  });
+
+  it("marks a bot reply unread for a never-visited thread, except while open", () => {
+    const items = [bot("b", answer, "On it")];
+    expect(preview(items)).toMatchObject({ text: "On it", unread: true });
+    expect(preview(items, null, true)).toMatchObject({ unread: false });
+  });
+
+  it("clears a reply on visit and marks the next reply unread", () => {
+    const closed = [user("u", first, "Hi"), bot("b1", "2026-10-12T12:01:00Z", "Hello")];
+    expect(preview(closed, first)?.unread).toBe(true);
+    expect(preview(closed, visit)?.unread).toBe(false);
+    expect(preview([...closed, bot("b2", answer, "Again")], visit)).toMatchObject({
+      text: "Again",
+      unread: true,
+    });
+  });
+
+  it("tracks a card revision after visit even when a user message is displayed last", () => {
+    const initial = card("task", 1, "Working");
+    const revised = { ...card("task", 2, "Done"), updatedAt: answer };
+    const items = [notice("n1", first), user("u", visit, "Thanks"), notice("n2", answer)];
+    expect(preview(items, visit, false, { n1: initial, n2: revised })).toEqual({
+      text: "You: Thanks",
+      at: "2026-10-12T12:02:00.000Z",
+      unread: true,
+    });
+    expect(preview([notice("n1", first)], null, false, { n1: revised })).toEqual({
+      text: "Done: Task task",
+      at: answer,
+      unread: true,
+    });
+  });
+
+  it("recomputes the correct latest row and unread state across 75 visible items", () => {
+    const at = (seconds: number) =>
+      DateTime.formatIso(DateTime.add(DateTime.makeUnsafe(first), { seconds }));
+    const items = Array.from({ length: 75 }, (_, index) =>
+      index % 2 === 0
+        ? user(`u${index}`, at(index), `User ${index}`)
+        : bot(`b${index}`, at(index), `Bot ${index}`),
+    );
+    expect(preview(items, at(73))).toEqual({
+      text: "You: User 74",
+      at: at(74),
+      unread: false,
+    });
+    expect(preview(items, at(72))?.unread).toBe(true);
+  });
+});
 
 describe("buildGoatBotTimeline", () => {
   it("keeps only the conversation and work cards, hiding tool calls and reasoning", () => {

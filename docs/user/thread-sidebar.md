@@ -50,6 +50,11 @@ and worktree while you stay in the new thread composer. This requires a Git proj
 
 Pin a thread from its menu to keep it above your active work.
 
+The GOAT Bot row shows its latest message or task update. A blue dot means the bot has
+sent something since you last opened it; the number badge counts tasks awaiting your
+response. If the connected server does not track visits yet, the row shows its last
+activity time and waiting count until that server is updated.
+
 On web and desktop, unpinning, settling, snoozing, and archiving a thread each show
 a notification with **Undo** for five seconds. Undo restores the thread's previous
 state, including its pinned position, and reopens an archived thread you were

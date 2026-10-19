@@ -18,6 +18,7 @@ import { threadEnvironment } from "~/state/threads";
 import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 
 import { toastManager } from "../ui/toast";
+import { ThreadVisitWatermark } from "../ThreadVisitWatermark";
 import { GoatBotChatView } from "./GoatBotChatView";
 import { resolveGoatBotRemoval, type GoatBotRemoval } from "@goat/client-runtime/goatBot";
 import { GoatBotChannelContext } from "./goatBotChannelPort";
@@ -103,6 +104,7 @@ function GoatBotThreadSession({
   const unarchive = useOrchestrationCommand(threadEnvironment.unarchive, { reportFailure: false });
   return (
     <>
+      {shell !== null ? <ThreadVisitWatermark threadRef={threadRef} /> : null}
       {shell === null && bootstrapped && confirmedHere && removal !== "deleted" ? (
         <GoatBotRemovalProbe
           environmentId={environmentId}

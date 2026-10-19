@@ -138,6 +138,42 @@ export type GoatBotRow =
       readonly groupPosition: GoatBotGroupPosition;
     };
 
+export interface GoatBotConversationPreview {
+  readonly text: string;
+  readonly at: string;
+  readonly unread: boolean;
+}
+
+/** The display row stays at a card's first position while its revision can arrive later. */
+export function goatBotConversationPreview(input: {
+  readonly rows: ReadonlyArray<GoatBotRow>;
+  readonly lastVisitedAt: string | null | undefined;
+  readonly active: boolean;
+}): GoatBotConversationPreview | null {
+  const last = input.rows.findLast((row) => row.kind !== "day");
+  if (!last) return null;
+  const visitedAt = input.lastVisitedAt
+    ? Date.parse(input.lastVisitedAt)
+    : Number.NEGATIVE_INFINITY;
+  const unread =
+    !input.active &&
+    input.rows.some(
+      (row) =>
+        (row.kind === "bot" && Date.parse(row.createdAt) > visitedAt) ||
+        (row.kind === "task" && Date.parse(row.card.updatedAt) > visitedAt),
+    );
+  return {
+    text:
+      last.kind === "user"
+        ? `You: ${last.text}`
+        : last.kind === "bot"
+          ? last.text
+          : `${last.card.statusLabel}: ${last.card.title}`,
+    at: last.kind === "task" ? last.card.updatedAt : last.createdAt,
+    unread,
+  };
+}
+
 /** Messages further apart than this start a new group. */
 const GOAT_BOT_GROUP_GAP_MS = 5 * 60 * 1000;
 const GOAT_BOT_STAMP_GAP_MS = 60 * 60 * 1000;
