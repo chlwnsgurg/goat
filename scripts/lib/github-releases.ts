@@ -197,10 +197,16 @@ export const makeGitHubReleasesClient = Effect.fn("makeGitHubReleasesClient")(fu
       ),
     // Nightlies are prereleases that are never "latest"; a stable release becomes
     // the repository's latest, which is what stable desktop feeds read.
-    createDraft: (version: string, name: string, body: string, prerelease: boolean) =>
+    createDraft: (
+      version: string,
+      name: string,
+      body: string,
+      prerelease: boolean,
+      target = "main",
+    ) =>
       jsonRequest(`${base}/releases`, "POST", {
         tag_name: `v${version}`,
-        target_commitish: "main",
+        target_commitish: target,
         draft: true,
         prerelease,
         make_latest: prerelease ? "false" : "true",

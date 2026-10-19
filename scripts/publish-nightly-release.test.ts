@@ -41,18 +41,23 @@ const fixture = (
     synced?: boolean;
     version?: string;
     newer?: string;
+    assetsOnly?: boolean;
   } = {},
 ) =>
   Effect.gen(function* () {
     const target = options.version ?? version;
     const newerTag = options.newer ?? newer;
-    const files = new Map<string, Uint8Array>([
-      ["install.sh", new TextEncoder().encode("#!/bin/sh\necho GOAT\n")],
-      ["install.ps1", new TextEncoder().encode("Write-Host GOAT\n")],
-      ["install-goat-server.sh", new TextEncoder().encode("#!/bin/sh\necho GOAT server\n")],
-      ["THIRD_PARTY_NOTICES.md", new TextEncoder().encode("Notices\n")],
-      ["GOAT-arm64.dmg", new TextEncoder().encode("macos artifact")],
-    ]);
+    const files = new Map<string, Uint8Array>(
+      options.assetsOnly
+        ? [[`goat-${target}-linux-x64.tar.gz`, new TextEncoder().encode("runtime archive")]]
+        : [
+            ["install.sh", new TextEncoder().encode("#!/bin/sh\necho GOAT\n")],
+            ["install.ps1", new TextEncoder().encode("Write-Host GOAT\n")],
+            ["install-goat-server.sh", new TextEncoder().encode("#!/bin/sh\necho GOAT server\n")],
+            ["THIRD_PARTY_NOTICES.md", new TextEncoder().encode("Notices\n")],
+            ["GOAT-arm64.dmg", new TextEncoder().encode("macos artifact")],
+          ],
+    );
     const lines: string[] = [];
     for (const [name, bytes] of files) lines.push(`${yield* hashBytes(bytes)}  ${name}\n`);
     files.set("SHA256SUMS", new TextEncoder().encode(lines.join("")));
@@ -160,10 +165,14 @@ const fixture = (
       readFile: (file) => Effect.succeed(files.get(file.slice(dir.length + 1))!),
     });
     const run = (dryRun = false) =>
-      publishNightlyRelease({ client, dir, version: target, name: "GOAT Nightly", dryRun }).pipe(
-        Effect.provideService(FileSystem.FileSystem, fs),
-        Effect.provide(NodeServices.layer),
-      );
+      publishNightlyRelease({
+        client,
+        dir,
+        version: target,
+        name: "GOAT Nightly",
+        dryRun,
+        ...(options.assetsOnly ? { assetsOnly: true, target: "abc1234" } : {}),
+      }).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.provide(NodeServices.layer));
     return { run, calls, assets, files, releases };
   });
 
@@ -226,6 +235,23 @@ describe("publish nightly release", () => {
         expect(
           state.calls.some((call) => call.path.endsWith("/releases") && call.method === "POST"),
         ).toBe(false);
+      }),
+  );
+
+  it.effect(
+    "assets-only publishes runtime archives at the built commit without installers or repository commits",
+    () =>
+      Effect.gen(function* () {
+        const state = yield* fixture({ assetsOnly: true });
+        expect(yield* state.run()).toBe("published");
+        expect(state.assets.map((asset) => asset.name).toSorted()).toEqual(
+          [...state.files.keys()].toSorted(),
+        );
+        expect(
+          state.calls.find((call) => call.path.endsWith("/releases") && call.method === "POST")!
+            .body,
+        ).toMatchObject({ tag_name: `v${version}`, target_commitish: "abc1234" });
+        expect(state.calls.some((call) => call.path.includes("/contents/"))).toBe(false);
       }),
   );
 

@@ -46,7 +46,10 @@ export function releaseChannelOfVersion(version: string): "nightly" | "stable" |
 }
 
 /** SHA256SUMS is the local asset inventory; verify it before any mutation. */
-export const readLocalReleaseAssets = Effect.fn("readLocalReleaseAssets")(function* (dir: string) {
+export const readLocalReleaseAssets = Effect.fn("readLocalReleaseAssets")(function* (
+  dir: string,
+  requireRepositoryFiles = true,
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const sums = yield* fs.readFile(path.join(dir, "SHA256SUMS"));
@@ -68,7 +71,10 @@ export const readLocalReleaseAssets = Effect.fn("readLocalReleaseAssets")(functi
     }
     checksums.set(name, match[1].toLowerCase());
   }
-  if (checksums.size === 0 || REPOSITORY_RELEASE_FILES.some((file) => !checksums.has(file))) {
+  if (
+    checksums.size === 0 ||
+    (requireRepositoryFiles && REPOSITORY_RELEASE_FILES.some((file) => !checksums.has(file)))
+  ) {
     return yield* new NightlyPublishError({
       message: "SHA256SUMS must include the installers and third-party notices.",
     });
@@ -110,8 +116,17 @@ export const publishNightlyRelease = Effect.fn("publishNightlyRelease")(function
   readonly version: string;
   readonly name: string;
   readonly dryRun?: boolean;
+  /**
+   * Publish only the release assets: no installers are required and nothing is committed
+   * to the repository. Used for goat-si/goat's own releases, which carry the runtime
+   * archives for SSH hosts and `goat update`.
+   */
+  readonly assetsOnly?: boolean;
+  /** Commit the release tag points at; goat-releases tags its own main. */
+  readonly target?: string;
 }) {
-  const { client, dir, version, name, dryRun = false } = input;
+  const { client, dir, version, name, dryRun = false, assetsOnly = false } = input;
+  const repositoryFiles = assetsOnly ? [] : REPOSITORY_RELEASE_FILES;
   const channel = releaseChannelOfVersion(version);
   if (channel === undefined) {
     return yield* new NightlyPublishError({
@@ -121,7 +136,7 @@ export const publishNightlyRelease = Effect.fn("publishNightlyRelease")(function
   const prerelease = channel === "nightly";
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const local = yield* readLocalReleaseAssets(dir);
+  const local = yield* readLocalReleaseAssets(dir, !assetsOnly);
   const releases = yield* client.listReleases();
   const sameTag = releases.find((release) => !release.draft && release.tag_name === `v${version}`);
   const allMatch = Effect.fn("nightlyAssetsMatch")(function* (id: number) {
@@ -154,7 +169,7 @@ export const publishNightlyRelease = Effect.fn("publishNightlyRelease")(function
   let draft = releases.find((release) => release.draft && release.tag_name === `v${version}`);
   if (dryRun) {
     if (draft) yield* client.listAssets(draft.id);
-    for (const file of REPOSITORY_RELEASE_FILES) yield* client.getContents(file);
+    for (const file of repositoryFiles) yield* client.getContents(file);
     yield* Console.log(
       `Would ${draft ? "reconcile" : "create"} ${channel} draft v${version}, verify ${local.length} assets, sync repository files, recheck supersession, and publish.\n${renderReleaseNotes(
         version,
@@ -173,6 +188,7 @@ export const publishNightlyRelease = Effect.fn("publishNightlyRelease")(function
       local.map((asset) => asset.name),
     ),
     prerelease,
+    input.target,
   );
   if (!draft.draft)
     return yield* new NightlyPublishError({
@@ -198,9 +214,9 @@ export const publishNightlyRelease = Effect.fn("publishNightlyRelease")(function
   if (!(yield* allMatch(draft.id))) {
     return yield* new NightlyPublishError({ message: "Draft assets differ after reconciliation." });
   }
-  // A superseded run must not touch goat-releases main either.
+  // A superseded run must not touch the repository's files either.
   if (superseded(yield* client.listReleases())) return "superseded" as const;
-  for (const file of REPOSITORY_RELEASE_FILES) {
+  for (const file of repositoryFiles) {
     const bytes = yield* fs.readFile(path.join(dir, file));
     if ((yield* hashBytes(bytes)) !== local.find((asset) => asset.name === file)!.sha256) {
       return yield* new NightlyPublishError({
@@ -242,11 +258,17 @@ const command = Command.make(
     version: Flag.String("version"),
     name: Flag.String("name"),
     dryRun: Flag.Boolean("dry-run").pipe(Flag.withDefault(false)),
+    assetsOnly: Flag.Boolean("assets-only").pipe(Flag.withDefault(false)),
+    target: Flag.String("target").pipe(Flag.optional),
   },
   (input) =>
     Effect.gen(function* () {
       const client = yield* makeGitHubReleasesClient(input.repo);
-      const outcome = yield* publishNightlyRelease({ ...input, client });
+      const outcome = yield* publishNightlyRelease({
+        ...input,
+        target: Option.getOrUndefined(input.target),
+        client,
+      });
       if (outcome !== undefined) {
         if (input.dryRun) yield* Console.log(`Dry-run: outcome=${outcome}; no changes planned.`);
         else yield* writePublishOutcome(outcome);

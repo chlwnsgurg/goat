@@ -890,6 +890,44 @@ jobs:
         run: |
           node scripts/prune-nightly-releases.ts --repo goat-si/goat-releases --keep 30 \
             --max-age-days 30 --protect "$GOAT_PROTECTED_TAGS"
+
+      # goat-si/goat's own releases carry the runtime archives too, so the runtime supply
+      # and `goat update` can move there (CLI_RELEASE_REPOSITORY). Only the archives and
+      # their SHA256SUMS lines go there; installers and the desktop feed stay in
+      # goat-releases. GITHUB_TOKEN cannot create a release at a commit whose workflows
+      # differ from the default branch, so this needs the goat-releases App installed on
+      # goat-si/goat; it is skipped until GOAT_SOURCE_RELEASES_PUBLISH is true. Old
+      # nightlies there are not pruned: nothing marks which nightly tags this job owns.
+      - name: Create goat-si/goat release token
+        id: source_token
+        if: >-
+          vars.GOAT_SOURCE_RELEASES_PUBLISH == 'true' &&
+          (steps.publish.outputs.outcome == 'published' || steps.publish.outputs.outcome == 'already-published')
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.GOAT_RELEASES_APP_ID }}
+          private-key: ${{ secrets.GOAT_RELEASES_APP_PRIVATE_KEY }}
+          owner: goat-si
+          repositories: goat
+
+      - name: Publish runtime archives to goat-si/goat
+        if: steps.source_token.outcome == 'success'
+        env:
+          GOAT_RELEASES_TOKEN: ${{ steps.source_token.outputs.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # A build from before --assets-only still published goat-releases above.
+          if ! node scripts/publish-nightly-release.ts --help | grep -q -- '--assets-only'; then
+            echo "::notice::This build predates --assets-only; goat-si/goat gets no runtime release for v$VERSION."
+            exit 0
+          fi
+          mkdir release-runtime
+          grep -E '^[0-9a-f]{64} [ *]goat-[^ ]+-(darwin|linux|win32)-(arm64|x64)\.(tar\.gz|zip)$' \
+            release/SHA256SUMS > release-runtime/SHA256SUMS
+          while read -r _ name; do cp "release/${name#\*}" release-runtime/; done < release-runtime/SHA256SUMS
+          node scripts/publish-nightly-release.ts --repo goat-si/goat --dir release-runtime --assets-only \
+            --target "$SHA" --version "$VERSION" --name "$RELEASE_NAME"
   # Deletes this run's hand-off drafts whatever happened, including cancellation,
   # and any staging draft a crashed run left behind for more than 72 hours. A dry run
   # (assemble passed, nothing published) keeps the release-assets draft so the

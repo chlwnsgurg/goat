@@ -209,6 +209,14 @@ download names one exact tag, so a host never follows a channel on its own. Paid
 buckets, CDNs and npm were not needed: GitHub release assets are free, public and
 already published by the nightly workflow.
 
+Every build that names a published version can be found there: nightly and stable
+come from the same workflow and publish the archives with the apps, and dev and PR
+builds never publish, so they upload. A nightly is pruned once it is both outside
+the newest 30 and older than 30 days; an app on such a nightly falls back to
+uploading its bundled archive. The release repository is the single constant
+`CLI_RELEASE_REPOSITORY`, so moving to goat-si/goat changes only that line once it
+carries the archives (see [release channels](./release-channels.md#where-releases-go)).
+
 Upstream T3 Code (`pingdotgg/t3code` at `771fd93f`) only downloads on the host,
 with a single attempt and no upload. GOAT kept that download block in `run-t3.sh`
 and added client supply and upload ahead of it, so outside a mirror the host
