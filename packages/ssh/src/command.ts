@@ -300,7 +300,12 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
   target: DesktopSshEnvironmentTarget,
   input: RunSshCommandOptions,
   commandScope: Scope.Scope,
-  progress: { authenticating: boolean; authenticated: boolean; stderr: string },
+  progress: {
+    authenticating: boolean;
+    authenticated: boolean;
+    proxyPending: boolean;
+    stderr: string;
+  },
 ): Effect.fn.Return<
   SshCommandResult,
   SshCommandError | SshInvalidTargetError,
@@ -374,20 +379,32 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
     [
       collectProcessOutput(child.stdout),
       sshDiagnosticChunks(child.stderr, (line) => {
-        // A jump's login is not the target's login. These milestones start the
-        // next hop, even when the jump has its own verbose configuration.
-        if (/^debug1: (?:channel_connect_stdio_fwd:|Authenticating to )/u.test(line)) {
+        // A VERBOSE jump can report success without DEBUG1 forwarding details.
+        // Ignore its auth milestones until the final target starts its own login.
+        if (
+          /^debug1: (?:Setting implicit ProxyCommand from ProxyJump:|Executing proxy command:|channel_connect_stdio_fwd:)/u.test(
+            line,
+          )
+        ) {
+          progress.proxyPending = true;
           progress.authenticating = false;
           progress.authenticated = false;
         }
-        progress.authenticating ||=
-          /^debug1: (?:SSH2_MSG_SERVICE_ACCEPT received|Authentications that can continue:|Next authentication method:)/u.test(
-            line,
-          );
-        progress.authenticated ||=
-          /^(?:Authenticated to |debug1: Authentication succeeded|debug1: mux_client_request_session: master session id:)/u.test(
-            line,
-          );
+        if (line.startsWith("debug1: Authenticating to ")) {
+          progress.proxyPending = false;
+          progress.authenticating = false;
+          progress.authenticated = false;
+        }
+        if (!progress.proxyPending) {
+          progress.authenticating ||=
+            /^debug1: (?:SSH2_MSG_SERVICE_ACCEPT received|Authentications that can continue:|Next authentication method:)/u.test(
+              line,
+            );
+          progress.authenticated ||=
+            /^(?:Authenticated to |debug1: Authentication succeeded|debug1: mux_client_request_session: master session id:)/u.test(
+              line,
+            );
+        }
       }).pipe(
         Stream.runForEach((line) =>
           Effect.sync(() => {
@@ -452,7 +469,7 @@ export const runSshCommand = Effect.fn("ssh/command.runSshCommand")(function* (
   SshCommandError | SshInvalidTargetError,
   ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
 > {
-  const progress = { authenticating: false, authenticated: false, stderr: "" };
+  const progress = { authenticating: false, authenticated: false, proxyPending: false, stderr: "" };
   return yield* Effect.scopedWith((commandScope) =>
     runSshCommandInScope(target, input, commandScope, progress),
   ).pipe(

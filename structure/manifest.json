@@ -101,7 +101,7 @@
       "path": "shared.md",
       "tier": 2,
       "title": "Shared",
-      "scope": "Subpath helpers for settings merge, worktree homes, mobile identity, and SSH runtime archives.",
+      "scope": "Subpath helpers for settings merge, worktree homes, mobile identity, SSH failure classification, and runtime archives.",
       "documents": [
         "packages/shared",
         "packages/shared/package.json",
@@ -109,6 +109,7 @@
         "packages/shared/src/devHome.ts",
         "packages/shared/src/mobileAppIdentity.ts",
         "packages/shared/src/sshRuntimeProtocol.ts",
+        "packages/shared/src/sshFailure.ts",
         "packages/shared/src/cliRelease.ts",
         "packages/shared/src/path.ts",
         "packages/shared/src/themePalettes.ts",

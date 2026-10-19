@@ -55,7 +55,11 @@ The desktop bridge carries only an error message across IPC, so
 reads the sentences `@goat/ssh` writes. A change to those sentences in
 `packages/ssh/src/command.ts` or the launch script in
 `packages/ssh/src/tunnel.ts` must keep the classifier's patterns matching; the
-classifier's tests use the real strings.
+classifier's tests use the real strings. Both runtime status and reconnect
+supervision use the browser-safe [shared failure rules](../../packages/shared/src/sshFailure.ts)
+for proxy diagnoses and reachability. Status checks retain both the normalized
+SSH message and raw stderr as evidence; selecting one public diagnostic line
+must not discard the connection failure's meaning.
 
 - **Unreachable.** ssh exited before it reached the host: connect timeout, no
   route, refused, could not resolve, a banner timeout, or a proxy that closes
@@ -78,7 +82,10 @@ classifier's tests use the real strings.
   it as banner text: commands and tunnel startup retain only those known status
   lines from DEBUG1. Missing executables require a real spawn or shell execution
   diagnostic, not arbitrary "not found" text. The public diagnostic prefers the
-  local proxy cause over a subsequent generic closure.
+  local proxy cause over a subsequent generic closure. Shell execution errors
+  require that closure, so a remote profile warning cannot hide a later runtime
+  diagnosis. Direct Tailscale status sentences get the same human fix in runtime
+  status and reconnect supervision.
 
   Commands use `LogLevel=DEBUG1` rather than `-v`, so GOAT does not request
   verbose logging from ProxyJump's child SSH. Lower levels omit the required
@@ -106,7 +113,10 @@ classifier's tests use the real strings.
   milestones (including a reused control connection) to distinguish an auth
   stall from a remote command stall; a TCP connection alone does not prove
   authentication began. A jump host's login does not authenticate the final
-  target: forwarding and a new target-authentication milestone reset the stage.
+  target. A proxy stays pending until the target's own authentication starts;
+  jump authentication messages are ignored while it is pending. This also works
+  when the jump's user configuration enables VERBOSE login messages without
+  DEBUG1 forwarding details.
   Timeout headlines take precedence over incidental stderr warnings in public
   diagnostics and runtime status. After login, command, runtime install/download,
   launch, and pairing deadlines name their operation and remain `remote-unavailable`.

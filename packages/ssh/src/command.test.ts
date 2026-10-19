@@ -353,10 +353,34 @@ describe("ssh command", () => {
       "host-unreachable",
     ],
     [
-      'Authenticated to jump using "publickey".\ndebug1: channel_connect_stdio_fwd: devbox.example.com:2222\ndebug1: SSH2_MSG_SERVICE_ACCEPT received\n',
+      'Authenticated to jump using "publickey".\ndebug1: channel_connect_stdio_fwd: devbox.example.com:2222\ndebug1: Authenticating to devbox.example.com:2222 as "julius"\ndebug1: SSH2_MSG_SERVICE_ACCEPT received\n',
       {},
       "SSH authentication timed out for devbox (devbox.example.com:2222) after 1ms. Unlock your SSH key or ssh-agent, then reconnect.",
       "authentication",
+    ],
+    [
+      'debug1: Setting implicit ProxyCommand from ProxyJump: ssh -W %h:%p jump\nAuthenticated to jump ([192.0.2.2]:22) using "publickey".\n',
+      {},
+      "SSH connection to devbox (devbox.example.com:2222) timed out after 1ms before authentication began. Check the network or SSH ProxyCommand.",
+      "host-unreachable",
+    ],
+    [
+      'debug1: Executing proxy command: exec ssh -W target:22 jump\nAuthenticated to jump ([192.0.2.2]:22) using "publickey".\n',
+      {},
+      "SSH connection to devbox (devbox.example.com:2222) timed out after 1ms before authentication began. Check the network or SSH ProxyCommand.",
+      "host-unreachable",
+    ],
+    [
+      'debug1: Executing proxy command: exec ssh -W target:22 jump\nAuthenticated to jump using "publickey".\ndebug1: Authenticating to target:22 as "fixture"\ndebug1: SSH2_MSG_SERVICE_ACCEPT received\n',
+      {},
+      "SSH authentication timed out for devbox (devbox.example.com:2222) after 1ms. Unlock your SSH key or ssh-agent, then reconnect.",
+      "authentication",
+    ],
+    [
+      'debug1: Executing proxy command: exec ssh -W target:22 jump\nAuthenticated to jump using "publickey".\ndebug1: Authenticating to target:22 as "fixture"\nAuthenticated to target using "publickey".\n',
+      {},
+      "Remote SSH command on devbox (devbox.example.com:2222) timed out after 1ms.",
+      "remote-unavailable",
     ],
     [
       "debug1: mux_client_request_session: master session id: 2\n",

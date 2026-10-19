@@ -1,4 +1,9 @@
 import {
+  isSshHostUnreachable,
+  sshFailureDiagnostic,
+  sshLocalProxyFailure,
+} from "@goat/shared/sshFailure";
+import {
   LEGACY_SSH_ARCHIVE_VERSION_KEY,
   LEGACY_SSH_NODE_SCRIPT_PATH_KEY,
 } from "@goat/contracts/legacyT3Names";
@@ -3600,27 +3605,11 @@ function archiveFailure(error: SshLaunchError): SshHostFailure | undefined {
 // A timeout headline and a local proxy diagnosis outrank incidental warnings
 // and OpenSSH's trailing generic closure. Only one sanitized line is public.
 function publicSshDiagnostic(error: SshEnvironmentEffectError) {
-  const headline = error.message.split(/\r?\n/u)[0] ?? "";
-  const timeout =
-    /^(?:SSH authentication timed out for .+ after \d+ms\.|SSH connection to .+ timed out after \d+ms before authentication began\.|(?:Remote SSH command|GOAT runtime (?:install\/download|launch)|GOAT pairing) on .+ timed out after \d+ms\.)/u.test(
-      headline,
-    );
-  const stderr = error instanceof SshCommandError ? error.stderr : error.message;
-  const proxy = stderr
-    .split(/\r?\n/u)
-    .find(
-      (line) =>
-        /^Tailscale proxy status: (?:Tailscale is stopped\.|Logged out\.|Machine is not yet approved by tailnet admin\.)$/u.test(
-          line,
-        ) ||
-        /^(?:.*?: )?failed to connect to local Tailscale(?:d| daemon)\b/iu.test(line) ||
-        /^posix_spawn(?:p)?: No such file or directory$/iu.test(line) ||
-        /^(?:(?:\S*\/)?(?:ba|da|z|k|c|fi)?sh): ?(?:(?:line )?\d+: ?)?(?:[^:\r\n]+: (?:command not found|not found|No such file or directory)|no such file or directory: [^\r\n]+)$/iu.test(
-          line,
-        ),
-    );
   return (
-    (timeout ? headline : proxy || getLastNonEmptyOutputLine(stderr) || error.message)
+    sshFailureDiagnostic(
+      error.message,
+      error instanceof SshCommandError ? error.stderr : error.message,
+    )
       // oxlint-disable-next-line no-control-regex -- strips ANSI escape sequences
       .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, "")
       .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/giu, "$1[redacted]@")
@@ -3657,6 +3646,16 @@ function runtimeFailureResult(
     if (error.reason === "runtime-newer") {
       return { kind: "ok", status: { ...base, state: "update_blocked", detail: diagnostic } };
     }
+  }
+  const source = `${error.message}\n${evidence}`;
+  const proxy = sshLocalProxyFailure(source);
+  if (proxy !== undefined) {
+    return {
+      kind: "error",
+      code: "operation_failed",
+      message: `${host}: ${diagnostic}`,
+      fix: { actor: "human", instruction: proxy.fix },
+    };
   }
   if (
     /REMOTE HOST IDENTIFICATION HAS CHANGED|host key.*changed|offending .* key/iu.test(evidence)
@@ -3704,10 +3703,7 @@ function runtimeFailureResult(
   return {
     kind: "error",
     code:
-      error instanceof SshCommandError &&
-      /cannot reach|SSH connection to .+ timed out after \d+ms before authentication began|Connection closed by UNKNOWN port 65535|(?:kex_exchange_identification|ssh_exchange_identification): (?:read: )?Connection (?:closed|reset) by (?:remote host|peer)|(?:Dial\([^\n]+|dial tcp: lookup [^\n]+): no such host|connection (?:refused|timed out)|operation timed out|no route to host|could not resolve hostname|network is unreachable/iu.test(
-        diagnostic,
-      )
+      error instanceof SshCommandError && isSshHostUnreachable(source)
         ? "host_unreachable"
         : "operation_failed",
     message: `${host}: ${diagnostic}`,
