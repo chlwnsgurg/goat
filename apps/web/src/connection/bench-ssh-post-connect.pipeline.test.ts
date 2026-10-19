@@ -12,23 +12,23 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Authorization from "../packages/client-runtime/src/authorization/service.ts";
-import * as Capabilities from "../packages/client-runtime/src/platform/capabilities.ts";
-import * as Relay from "../packages/client-runtime/src/relay/managedRelay.ts";
-import * as TokenStore from "../packages/client-runtime/src/authorization/tokenStore.ts";
-import * as RpcHttp from "../packages/client-runtime/src/rpc/http.ts";
-import * as Session from "../packages/client-runtime/src/rpc/session.ts";
-import type { WsRpcProtocolClient } from "../packages/client-runtime/src/rpc/protocol.ts";
-import * as Driver from "../packages/client-runtime/src/connection/driver.ts";
-import * as Resolver from "../packages/client-runtime/src/connection/resolver.ts";
-import * as Profiles from "../packages/client-runtime/src/connection/profileStore.ts";
-import * as Credentials from "../packages/client-runtime/src/connection/credentialStore.ts";
+import * as Authorization from "@goat/client-runtime/authorization/service";
+import { ClientCapabilities as Capabilities } from "@goat/client-runtime/platform";
+import { ManagedRelay as Relay } from "@goat/client-runtime/relay";
+import { TokenStore } from "@goat/client-runtime/authorization";
+import * as RpcHttp from "@goat/client-runtime/rpc";
+import * as Session from "@goat/client-runtime/rpc/session";
+import type { WsRpcProtocolClient } from "@goat/client-runtime/rpc";
+import * as Driver from "@goat/client-runtime/connection/driver";
+import * as Resolver from "@goat/client-runtime/connection/resolver";
 import {
   BearerConnectionCredential,
+  CredentialStore as Credentials,
+  ProfileStore as Profiles,
   SshConnectionProfile,
-} from "../packages/client-runtime/src/connection/catalog.ts";
-import { SshConnectionTarget } from "../packages/client-runtime/src/connection/model.ts";
-import { prepareDesktopSshEnvironment } from "../apps/web/src/connection/platform.ts";
+  SshConnectionTarget,
+} from "@goat/client-runtime/connection";
+import { prepareDesktopSshEnvironment } from "./platform.ts";
 
 const ENVIRONMENT_ID = EnvironmentId.make("ssh-environment");
 const TARGET = { alias: "devbox", hostname: "devbox.test", username: "developer", port: 22 };
