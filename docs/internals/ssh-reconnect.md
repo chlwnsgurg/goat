@@ -86,7 +86,8 @@ broken, which deserves the louder state.
 
 `retryDelayMs` doubles a ceiling from 2 s to 5 minutes and picks a point in
 its upper half, so clients that lost the same host do not reconnect together.
-The ladder resets once a connection stays up for 30 s. Codex's exec-server uses
+The ladder resets once a connection stays up for 30 s, and the published
+attempt number returns to 1 at that boundary. Codex's exec-server uses
 the same shape with a 30 s cap and a 120 s stability window
 ([`reconnect_backoff.rs`](https://github.com/openai/codex/blob/816fa702ec66a4c81b204701a03371a1ac3511e6/codex-rs/exec-server/src/remote/reconnect_backoff.rs#L6)).
 GOAT's cap is longer because an SSH attempt spawns a process and can wait 10 s
@@ -95,8 +96,10 @@ cap never delays a return: every signal that conditions changed skips the wait.
 
 ## Resuming
 
-These signals start an attempt at once. All but the return to online also
-reset the ladder to its first rung:
+These signals skip a pending retry delay. If an attempt is already establishing,
+it satisfies the request and keeps running; resetting signals reset the ladder
+for its next failure. Queued signals are coalesced when an attempt starts.
+All but the return to online reset the ladder to its first rung:
 
 - The app returns to the foreground (`application-active`).
 - The device moves to another network (`network-changed`), the likely moment a
@@ -110,7 +113,8 @@ reset the ladder to its first rung:
 A connected session receiving one of these is probed, not replaced, so a
 healthy tunnel survives a spurious offline report. A long sleep is the
 exception: it replaces the session at once, because the OS may have killed the
-socket without reporting it.
+socket without reporting it. A replacement already establishing on long resume
+also tolerates offline reports while the network recovers.
 
 ## Notifications
 
