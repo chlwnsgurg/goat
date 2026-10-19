@@ -42,7 +42,6 @@ const base = cliReleaseDownloadBaseUrl(PUBLISHED);
 afterEach(() => {
   vi.unstubAllGlobals();
   resetPublishedRuntimeIndexCache();
-  SshTunnel.resetPublishedRuntimeRejections();
 });
 
 type Release = "pre-manifest" | "manifest" | "manifest-tampered" | "manifest-newer-protocol";
@@ -269,11 +268,11 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         Effect.gen(function* () {
           const first = yield* prepare({ release: "pre-manifest", binary });
           assert.equal(failureOf(first.result).reason, "archive-unavailable");
-          // Removed, so installed-runtime recovery cannot pick it up on the next connection.
-          assert.isFalse(first.installed);
+          // Stays installed but held, so neither installed-runtime recovery nor the search
+          // picks it up on the next connection.
+          assert.isTrue(first.installed);
           const second = yield* first.again;
           failureOf(second.result);
-          assert.isFalse(second.installed);
           assert.notInclude(second.requests, `${base}/${asset}`);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
@@ -311,9 +310,9 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
-    it.live("refuses to start it when GOAT data appeared during setup", () =>
+    it.live("refuses to start it when GOAT data appeared during setup, then and later", () =>
       Effect.gen(function* () {
-        const { result } = yield* prepare({
+        const { result, again } = yield* prepare({
           release: "manifest",
           launch: true,
           dataDuringSearch: true,
@@ -321,6 +320,9 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         assert.isTrue(Result.isFailure(result));
         if (Result.isFailure(result))
           assert.include(String((result.failure as Error).message), "GOAT data appeared");
+        // The next connection must not start it through installed-runtime recovery either.
+        const next = yield* again;
+        assert.isTrue(Result.isFailure(next.result));
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 

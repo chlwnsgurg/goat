@@ -164,6 +164,11 @@ replacement needs a person's confirmation bound to that environment and target.
   After installing, the client re-probes and starts the runtime only if its own
   binary reports compatible protocols, a provable build order against the
   requested build, and lists `memory:read` among the scopes it can issue (#285).
+  Until launch confirms, under the host lock, that the host still has no
+  database, the version is held (`~/.goat/runtime/goat/held/<version>`), and
+  installed-runtime recovery skips held versions. A runtime that fails
+  verification stays held as `rejected`, so no later connection starts it or
+  downloads it again; deleting it instead would race other clients and runners.
   An older fallback is labelled "Upgrade to <requested> deferred" and retried
   every 10 minutes like any other deferred refresh. The release index is cached
   for 10 minutes (2 after a failure, longer when GitHub's rate limit says so).

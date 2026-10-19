@@ -2270,6 +2270,7 @@ else
         printf 'GOAT data appeared on this host while it was being set up; reconnect.\\n' >&2; exit 1
       fi
     done
+    rm -f "$HOME/.goat/runtime/goat/held/$SELECTED_VERSION"
   fi
   publish_selected_runner
 fi
@@ -2970,6 +2971,8 @@ collect_installed_candidates() {
     if candidate_commit="$(build_commit_time "$dir/goat")"; then
       candidate_fields="$candidate_fields,\\"commitTime\\":$candidate_commit"
     fi
+    held_state="$(cat "$HOME/.goat/runtime/goat/held/$recorded_version" 2>/dev/null || true)"
+    case "$held_state" in pending | rejected) candidate_fields="$candidate_fields,\\"held\\":\\"$held_state\\"" ;; esac
     installed_versions="$installed_versions $recorded_version"
     installed_candidates="$installed_candidates\${installed_candidates:+,}$candidate_fields}"
   done
@@ -2998,6 +3001,8 @@ collect_installed_candidates() {
     if candidate_commit="$(build_commit_time "$dir/goat")"; then
       candidate_fields="$candidate_fields,\\"commitTime\\":$candidate_commit"
     fi
+    held_state="$(cat "$HOME/.goat/runtime/goat/held/$candidate_version" 2>/dev/null || true)"
+    case "$held_state" in pending | rejected) candidate_fields="$candidate_fields,\\"held\\":\\"$held_state\\"" ;; esac
     installed_versions="$installed_versions $candidate_version"
     installed_candidates="$installed_candidates\${installed_candidates:+,}$candidate_fields}"
   done
@@ -3105,6 +3110,8 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
             signals: RuntimeSignals,
             commitTime: Schema.optionalKey(Schema.Int),
             unrecorded: Schema.optionalKey(Schema.Boolean),
+            /** A published fallback still being verified (`pending`) or refused (`rejected`). */
+            held: Schema.optionalKey(Schema.Literals(["pending", "rejected"])),
             executableSha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
           }),
         ),
@@ -3654,6 +3661,7 @@ export const prepareRemoteRuntime = (
         : undefined;
       for (const candidate of probe.installedCandidates ?? []) {
         if (
+          candidate.held !== undefined ||
           candidate.signals.serverVersion !== candidate.version ||
           !matchesSignals(candidate.signals, version) ||
           compareRuntimeBuilds(candidate, requestedBuild) === undefined
@@ -3723,12 +3731,13 @@ export const prepareRemoteRuntime = (
     // A host that has never run GOAT: nothing installed, nothing running, no data. Only such a
     // host may get a published runtime other than the requested one, because GOAT has no way
     // to prove that an older build can read data a newer one wrote (unknown migrations only
-    // warn). Liveness the probe could not establish is never read as stopped.
+    // warn). Liveness the probe could not establish is never read as stopped. Held runtimes are
+    // earlier published fallbacks that never passed verification and launch.
     const coldHost =
       probe.liveStatus !== "live" &&
       probe.liveStatus !== "unknown" &&
       probe.retainedVersion === undefined &&
-      (probe.installedCandidates ?? []).length === 0;
+      (probe.installedCandidates ?? []).every((candidate) => candidate.held !== undefined);
     if (
       runner?.publishedFallback !== true ||
       !owningLaunch ||
@@ -3772,7 +3781,7 @@ export const prepareRemoteRuntime = (
           ),
         );
       return Effect.gen(function* () {
-        const gate = (mode: "fresh" | "capable" | "discard", candidate = "") =>
+        const gate = (mode: "fresh" | "capable" | "hold" | "reject", candidate = "") =>
           runSshCommand(target, {
             ...authOptions,
             remoteCommandArgs: ["sh", "-s", "--", mode, candidate],
@@ -3791,7 +3800,11 @@ export const prepareRemoteRuntime = (
         const search = yield* findPublishedRuntime({
           platformKey: key,
           requestedVersion: version,
-          exclude: rejectedPublishedRuntimes.get(publishedRejectionKey(target)) ?? new Set(),
+          exclude: new Set(
+            (probe.installedCandidates ?? [])
+              .filter((candidate) => candidate.held === "rejected")
+              .map((candidate) => candidate.version),
+          ),
         }).pipe(
           Effect.catchCause((cause) =>
             Effect.succeed({ miss: "unreachable" as const, rejected: [Cause.pretty(cause)] }),
@@ -3808,6 +3821,10 @@ export const prepareRemoteRuntime = (
           rejected: search.rejected.join("; "),
         });
         yield* Effect.annotateCurrentSpan("goat.runtime.published", published.version);
+        // Held from before installation until launch confirms the host still has no data, so
+        // installed-runtime recovery never starts it unverified, here or from another client.
+        if (!(yield* gate("hold", published.version)))
+          return yield* giveUp("none", `Could not hold GOAT ${published.version} on the host.`);
         yield* acquireVersion(published.version, true).pipe(
           Effect.catchTags({
             SshLaunchError: (error) =>
@@ -3841,21 +3858,16 @@ export const prepareRemoteRuntime = (
         );
         const order =
           installed === undefined ? undefined : compareRuntimeBuilds(installed, requestedBuild);
-        const quiet = after.liveStatus !== "live" && after.liveStatus !== "unknown";
         if (
           installed === undefined ||
+          installed.held === "rejected" ||
           order === undefined ||
-          !quiet ||
+          after.liveStatus === "live" ||
+          after.liveStatus === "unknown" ||
           !(yield* gate("capable", published.version))
         ) {
-          // Left installed, a rejected runtime would be picked up by installed-runtime recovery on
-          // the next connection, and offered again by the search. Remove it and remember it.
-          const hostKey = publishedRejectionKey(target);
-          rejectedPublishedRuntimes.set(
-            hostKey,
-            new Set([...(rejectedPublishedRuntimes.get(hostKey) ?? []), published.version]),
-          );
-          if (quiet) yield* gate("discard", published.version);
+          // Stays installed but held for good: recovery skips it and the search never offers it.
+          yield* gate("reject", published.version);
           return yield* giveUp(
             "none",
             `GOAT ${published.version} was installed but cannot serve this app (protocol, build order or capability).`,
@@ -3926,6 +3938,9 @@ export const prepareRemoteRuntime = (
 /**
  * `fresh`: prints yes when the host has no GOAT database. `capable <version>`: prints yes
  * when that installed runtime lists `memory:read` among the scopes it can issue (#285).
+ * `hold <version>` / `reject <version>`: marks it held (`pending`) or refused for good. The
+ * probe reports the mark, installed-runtime recovery skips held runtimes, and launch clears
+ * a `pending` mark once it has confirmed the host still has no data.
  */
 const REMOTE_PUBLISHED_RUNTIME_GATE_SCRIPT = `set -u
 case "$1" in
@@ -3938,27 +3953,14 @@ case "$1" in
     exe="$HOME/.goat/runtime/goat/versions/$2/goat"
     [ -x "$exe" ] || { echo no; exit 0; }
     case "$("$exe" auth session issue --help 2>/dev/null)" in *memory:read*) echo yes ;; *) echo no ;; esac ;;
-  discard)
+  hold | reject)
     case "$2" in '' | */* | . | ..) exit 2 ;; esac
-    dir="$HOME/.goat/runtime/goat/versions/$2"
-    [ -d "$dir" ] || { echo yes; exit 0; }
-    # Never remove a runtime that a runner names or a process runs from.
-    if grep -qsF "$dir/" "$HOME"/.goat/ssh-launch/*/run-t3.sh ||
-       ps -eo args 2>/dev/null | awk -v d="$dir/" 'index($0, d) == 1 { found = 1 } END { exit !found }'; then
-      echo no; exit 0
-    fi
-    trash="$dir.discard.$$"
-    mv "$dir" "$trash" && rm -rf "$trash" && echo yes ;;
+    mkdir -p "$HOME/.goat/runtime/goat/held" &&
+      if [ "$1" = hold ]; then state=pending; else state=rejected; fi &&
+      printf '%s\\n' "$state" > "$HOME/.goat/runtime/goat/held/$2" && echo yes ;;
   *) exit 2 ;;
 esac
 `;
-
-/** Published runtimes this process installed on a host and then refused, per host. */
-const rejectedPublishedRuntimes = new Map<string, ReadonlySet<string>>();
-/** Test seam: forget refused published runtimes. */
-export const resetPublishedRuntimeRejections = () => rejectedPublishedRuntimes.clear();
-const publishedRejectionKey = (target: DesktopSshEnvironmentTarget) =>
-  `${target.username ?? ""}@${target.hostname}:${target.port ?? ""}`;
 
 /** The single next step for a host that has no runtime this app can start. */
 function missAction(miss: PublishedRuntimeMiss, asset: string, directory: string): string {
