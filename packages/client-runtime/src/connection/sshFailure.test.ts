@@ -55,6 +55,8 @@ describe("sshPreparationFailure", () => {
     "Live GOAT PID=812 port=3773 is incompatible; it was left running. Upgrade with the owning client or reconnect.",
     "Remote runtime GOAT 0.1.0-dev.abc cannot be ordered against this app (GOAT 0.1.0-dev.def); it was left running. Stop it on the remote host when its work is done, then reconnect.",
     "Cannot verify remote version ordering; process was preserved.",
+    "Live GOAT PID=812 port=3773 was started by an older app that cannot hand over ownership without draining; it was left running.",
+    "Live GOAT PID=812 port=3773 is incompatible; it was left running because it cannot drain for a replacement and this app cannot attach to it.",
   ])("blocks a runtime that refuses this client without disabling it: %s", (message) => {
     // "unsupported" would switch the environment off; this needs a person instead.
     expect(sshPreparationFailure(new Error(message))).toMatchObject({
@@ -93,6 +95,7 @@ describe("sshPreparationFailure", () => {
     for (const message of [
       "Cannot verify live GOAT PID=812 port=3773: descriptor unavailable or persisted identity disagrees; it may predate GOAT SSH runtime protocol metadata. It was left running, and the runner and ownership files were preserved. If this is your earlier GOAT server, stop it on the remote host (kill 812) and reconnect.",
       "GOAT ownership could not be verified; process and ownership files were preserved.",
+      "Live GOAT PID=812 port=3773 cannot drain for a replacement and this app cannot attach to it; it was left running.",
     ]) {
       expect(sshPreparationFailure(new Error(message))).toMatchObject({
         _tag: "ConnectionTransientError",
