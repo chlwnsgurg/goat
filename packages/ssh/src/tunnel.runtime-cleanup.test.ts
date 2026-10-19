@@ -1,18 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off - real shell and filesystem fixtures exercise deletion boundaries.
-import {
-  mkdtempSync,
-  mkdirSync,
-  writeFileSync,
-  symlinkSync,
-  existsSync,
-  readdirSync,
-  rmSync,
-  readFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as HostProcess from "@goat/shared/HostProcess";
 import { afterEach, assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -25,35 +17,36 @@ import { remoteShell, uploadTarget } from "./tunnel.fixture.ts";
 
 const homes: string[] = [];
 afterEach(() => {
-  for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  for (const home of homes.splice(0)) NodeFS.rmSync(home, { recursive: true, force: true });
 });
 const quote = (s: string) => "'" + s.replaceAll("'", "'\\''") + "'";
 
 function fixture() {
-  const home = mkdtempSync(join(tmpdir(), "goat-cleanup-"));
+  const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-cleanup-"));
   homes.push(home);
-  const versions = join(home, ".goat/runtime/goat/versions");
-  const bin = join(home, "bin");
-  mkdirSync(versions, { recursive: true });
-  mkdirSync(bin);
-  mkdirSync(join(home, "proc/self"), { recursive: true });
-  mkdirSync(join(home, "proc/42"));
-  const executable = (file: string, script: string) => writeFileSync(file, script, { mode: 0o700 });
-  executable(join(bin, "flock"), "#!/bin/sh\nexit 0\n");
+  const versions = NodePath.join(home, ".goat/runtime/goat/versions");
+  const bin = NodePath.join(home, "bin");
+  NodeFS.mkdirSync(versions, { recursive: true });
+  NodeFS.mkdirSync(bin);
+  NodeFS.mkdirSync(NodePath.join(home, "proc/self"), { recursive: true });
+  NodeFS.mkdirSync(NodePath.join(home, "proc/42"));
+  const executable = (file: string, script: string) =>
+    NodeFS.writeFileSync(file, script, { mode: 0o700 });
+  executable(NodePath.join(bin, "flock"), "#!/bin/sh\nexit 0\n");
   executable(
-    join(bin, "ps"),
+    NodePath.join(bin, "ps"),
     // Cleanup must ask only for this user's processes; other users' /proc links are unreadable.
     '#!/bin/sh\ncase "$*" in *-U*) ;; *) exit 1 ;; esac\ncase "$*" in *command=*) echo unrelated ;; *pid=*) printf "42\\n${GOAT_TEST_EXTRA_PID:-}\\n" ;; *) exit 1 ;; esac\n',
   );
-  symlinkSync("/bin/unrelated", join(home, "proc/42/exe"));
-  symlinkSync("/tmp", join(home, "proc/42/cwd"));
+  NodeFS.symlinkSync("/bin/unrelated", NodePath.join(home, "proc/42/exe"));
+  NodeFS.symlinkSync("/tmp", NodePath.join(home, "proc/42/cwd"));
   const semver = new URL("../../shared/src/semver.ts", import.meta.url).href;
   const add = (v: string) => {
-    const dir = join(versions, v);
-    mkdirSync(dir);
-    writeFileSync(join(dir, ".install-complete"), v + "\n");
+    const dir = NodePath.join(versions, v);
+    NodeFS.mkdirSync(dir);
+    NodeFS.writeFileSync(NodePath.join(dir, ".install-complete"), v + "\n");
     executable(
-      join(dir, "goat"),
+      NodePath.join(dir, "goat"),
       `#!${process.execPath}
 (async () => {
 const args = process.argv.slice(2);
@@ -73,10 +66,10 @@ console.log(order === undefined ? 'unknown' : order > 0 ? 'newer' : order < 0 ? 
   };
   for (const v of ["2.0.0", "1.9.0", "1.8.0", "1.7.0", "1.6.0", "1.5.0", "2.0.0-dev.abc", "3.0.0"])
     add(v);
-  const lock = join(home, "replacement.lock");
-  symlinkSync("our-owner", lock);
+  const lock = NodePath.join(home, "replacement.lock");
+  NodeFS.symlinkSync("our-owner", lock);
   const run = (prefix = "") =>
-    spawnSync(remoteShell, ["-s"], {
+    NodeChildProcess.spawnSync(remoteShell, ["-s"], {
       input: `set -eu
 GOAT_HOST_WINDOWS=0; GOAT_ARCHIVE_MODE=1; LOCK_HELD=1; STATE_DIR="$HOME"
 LOCK=${quote(lock)}; OWNER=our-owner; SELECTED_VERSION=2.0.0; REMOTE_PORT=1234
@@ -96,19 +89,19 @@ echo connected
   return { home, versions, bin, add, run, executable };
 }
 
-describe.skipIf(process.platform === "win32")("SSH runtime cleanup", () => {
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH runtime cleanup", () => {
   it("keeps live, retained, requested, rollback, unordered, newer, symlinks and in-use cwd; removes older unused", () => {
     const f = fixture();
-    rmSync(join(f.home, "proc/42/cwd"));
-    symlinkSync(join(f.versions, "1.6.0"), join(f.home, "proc/42/cwd"));
-    const outside = join(f.home, "outside");
-    mkdirSync(outside);
-    writeFileSync(join(outside, "keep"), "safe");
-    symlinkSync(outside, join(f.versions, "1.4.0"));
+    NodeFS.rmSync(NodePath.join(f.home, "proc/42/cwd"));
+    NodeFS.symlinkSync(NodePath.join(f.versions, "1.6.0"), NodePath.join(f.home, "proc/42/cwd"));
+    const outside = NodePath.join(f.home, "outside");
+    NodeFS.mkdirSync(outside);
+    NodeFS.writeFileSync(NodePath.join(outside, "keep"), "safe");
+    NodeFS.symlinkSync(outside, NodePath.join(f.versions, "1.4.0"));
     const r = f.run();
     assert.equal(r.status, 0, r.stderr);
     assert.include(r.stdout, "connected");
-    assert.isFalse(existsSync(join(f.versions, "1.5.0")), r.stderr);
+    assert.isFalse(NodeFS.existsSync(NodePath.join(f.versions, "1.5.0")), r.stderr);
     for (const v of [
       "2.0.0",
       "1.9.0",
@@ -119,25 +112,28 @@ describe.skipIf(process.platform === "win32")("SSH runtime cleanup", () => {
       "3.0.0",
       "1.4.0",
     ])
-      assert.isTrue(existsSync(join(f.versions, v)), v);
-    assert.equal(readFileSync(join(outside, "keep"), "utf8"), "safe");
-    assert.isFalse(readdirSync(f.versions).some((v) => v.startsWith(".trash-")));
+      assert.isTrue(NodeFS.existsSync(NodePath.join(f.versions, v)), v);
+    assert.equal(NodeFS.readFileSync(NodePath.join(outside, "keep"), "utf8"), "safe");
+    assert.isFalse(NodeFS.readdirSync(f.versions).some((v) => v.startsWith(".trash-")));
   });
 
   it("ignores a process that exited after ps listed it", () => {
     const f = fixture();
     const r = f.run("GOAT_TEST_EXTRA_PID=77; export GOAT_TEST_EXTRA_PID");
     assert.equal(r.status, 0, r.stderr);
-    assert.isFalse(existsSync(join(f.versions, "1.5.0")), r.stderr);
+    assert.isFalse(NodeFS.existsSync(NodePath.join(f.versions, "1.5.0")), r.stderr);
   });
 
   it("keeps an executable in use even when its command hides its path", () => {
     const f = fixture();
-    rmSync(join(f.home, "proc/42/exe"));
-    symlinkSync(join(f.versions, "1.5.0/goat"), join(f.home, "proc/42/exe"));
+    NodeFS.rmSync(NodePath.join(f.home, "proc/42/exe"));
+    NodeFS.symlinkSync(
+      NodePath.join(f.versions, "1.5.0/goat"),
+      NodePath.join(f.home, "proc/42/exe"),
+    );
     const r = f.run();
     assert.equal(r.status, 0, r.stderr);
-    assert.isTrue(existsSync(join(f.versions, "1.5.0")));
+    assert.isTrue(NodeFS.existsSync(NodePath.join(f.versions, "1.5.0")));
   });
 
   it("uses verified commit stamps for dev builds and keeps unordered rollback candidates", () => {
@@ -148,17 +144,20 @@ describe.skipIf(process.platform === "win32")("SSH runtime cleanup", () => {
       ["2.0.0-dev.abc", 2000],
       ["2.0.0-dev.old", 1000],
     ] as const) {
-      const dir = join(f.versions, version);
-      writeFileSync(join(dir, ".commit-time"), String(time));
-      const hash = createHash("sha256")
-        .update(readFileSync(join(dir, "goat")))
+      const dir = NodePath.join(f.versions, version);
+      NodeFS.writeFileSync(NodePath.join(dir, ".commit-time"), String(time));
+      const hash = NodeCrypto.createHash("sha256")
+        .update(NodeFS.readFileSync(NodePath.join(dir, "goat")))
         .digest("hex");
-      writeFileSync(join(dir, ".install-record"), `${version} ${"a".repeat(64)} ${hash} cache\n`);
+      NodeFS.writeFileSync(
+        NodePath.join(dir, ".install-record"),
+        `${version} ${"a".repeat(64)} ${hash} cache\n`,
+      );
     }
     const r = f.run();
     assert.equal(r.status, 0, r.stderr);
-    assert.isTrue(existsSync(join(f.versions, "2.0.0-dev.abc")));
-    assert.isFalse(existsSync(join(f.versions, "2.0.0-dev.old")), r.stderr);
+    assert.isTrue(NodeFS.existsSync(NodePath.join(f.versions, "2.0.0-dev.abc")));
+    assert.isFalse(NodeFS.existsSync(NodePath.join(f.versions, "2.0.0-dev.old")), r.stderr);
   });
 
   it("keeps every rollback candidate whose order against the other candidates is unknown", () => {
@@ -168,7 +167,7 @@ describe.skipIf(process.platform === "win32")("SSH runtime cleanup", () => {
     const r = f.run();
     assert.equal(r.status, 0, r.stderr);
     for (const v of ["1.9.0", "1.9.0-dev.aaa", "1.9.0-dev.bbb"])
-      assert.isTrue(existsSync(join(f.versions, v)));
+      assert.isTrue(NodeFS.existsSync(NodePath.join(f.versions, v)));
   });
 
   it.each([
@@ -188,27 +187,29 @@ describe.skipIf(process.platform === "win32")("SSH runtime cleanup", () => {
     let prefix = "";
     if (kind === "replacement") prefix = "LOCK_HELD=0";
     if (kind === "rollback") prefix = "UPGRADE_VERSION=1.9.0";
-    if (kind === "supervisor") writeFileSync(join(f.home, "run-t3.previous"), "rollback window");
-    if (kind === "install") mkdirSync(join(f.versions, ".1.4.0.install.lock"));
-    if (kind === "mutex") f.executable(join(f.bin, "flock"), "#!/bin/sh\nexit 1\n");
-    if (kind === "ps") f.executable(join(f.bin, "ps"), "#!/bin/sh\nexit 1\n");
-    if (kind === "cwd") rmSync(join(f.home, "proc/42/cwd"));
+    if (kind === "supervisor")
+      NodeFS.writeFileSync(NodePath.join(f.home, "run-t3.previous"), "rollback window");
+    if (kind === "install") NodeFS.mkdirSync(NodePath.join(f.versions, ".1.4.0.install.lock"));
+    if (kind === "mutex") f.executable(NodePath.join(f.bin, "flock"), "#!/bin/sh\nexit 1\n");
+    if (kind === "ps") f.executable(NodePath.join(f.bin, "ps"), "#!/bin/sh\nexit 1\n");
+    if (kind === "cwd") NodeFS.rmSync(NodePath.join(f.home, "proc/42/cwd"));
     if (kind === "windows") prefix = "GOAT_HOST_WINDOWS=1";
-    if (kind === "rename") f.executable(join(f.bin, "mv"), "#!/bin/sh\nexit 1\n");
-    if (kind === "delete") f.executable(join(f.bin, "rm"), "#!/bin/sh\nexit 1\n");
+    if (kind === "rename") f.executable(NodePath.join(f.bin, "mv"), "#!/bin/sh\nexit 1\n");
+    if (kind === "delete") f.executable(NodePath.join(f.bin, "rm"), "#!/bin/sh\nexit 1\n");
     if (kind === "parent-symlink") {
-      const target = join(f.home, "elsewhere");
-      mkdirSync(target);
-      rmSync(f.versions, { recursive: true });
-      symlinkSync(target, f.versions);
+      const target = NodePath.join(f.home, "elsewhere");
+      NodeFS.mkdirSync(target);
+      NodeFS.rmSync(f.versions, { recursive: true });
+      NodeFS.symlinkSync(target, f.versions);
     }
     const r = f.run(prefix);
     assert.equal(r.status, 0, r.stderr);
     assert.include(r.stdout, "connected");
     if (kind === "delete") {
-      assert.isFalse(existsSync(join(f.versions, "1.5.0")));
-      assert.isTrue(readdirSync(f.versions).some((v) => v.startsWith(".trash-")));
-    } else if (kind !== "parent-symlink") assert.isTrue(existsSync(join(f.versions, "1.5.0")));
+      assert.isFalse(NodeFS.existsSync(NodePath.join(f.versions, "1.5.0")));
+      assert.isTrue(NodeFS.readdirSync(f.versions).some((v) => v.startsWith(".trash-")));
+    } else if (kind !== "parent-symlink")
+      assert.isTrue(NodeFS.existsSync(NodePath.join(f.versions, "1.5.0")));
   });
 
   it.live("a plain attach skips cleanup and keeps older runtimes", () =>
