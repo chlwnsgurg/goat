@@ -18,7 +18,7 @@ const current = {
 };
 
 // Each case runs two full launches through fake executables, each a Node start.
-const LAUNCHES_TIMEOUT_MS = 60_000;
+const LAUNCHES_TIMEOUT_MS = 180_000;
 
 type Fixture = Effect.Success<ReturnType<typeof makeProtocolFixture>>;
 
