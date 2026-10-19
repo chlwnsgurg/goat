@@ -400,8 +400,7 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
     input: Omit<
       Parameters<ClientCapabilities.SshEnvironmentGateway["Service"]["prepare"]>[0],
       "connectionId"
-    >
-    & { readonly connectionId?: string },
+    > & { readonly connectionId?: string },
     readyCloudMachine: CloudMachinePreflight = readyCloudMachineThroughPrimary,
     grants: SshPairingGrants = sshPairingGrants,
   ) {
@@ -512,8 +511,8 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       const granted = session.permissions ?? session.scopes ?? [];
       if (
         session.authenticated &&
-        requiredSshTokenScopes(effectiveGrants, verifiedDescriptor, bootstrap.target).every((scope) =>
-          granted.includes(scope),
+        requiredSshTokenScopes(effectiveGrants, verifiedDescriptor, bootstrap.target).every(
+          (scope) => granted.includes(scope),
         )
       ) {
         const authorized: ClientCapabilities.PreparedSshEnvironment = {

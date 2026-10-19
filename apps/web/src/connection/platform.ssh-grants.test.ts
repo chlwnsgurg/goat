@@ -10,6 +10,8 @@ import {
 } from "@goat/client-runtime/platform";
 import { AuthStandardClientScopes, EnvironmentId, type DesktopBridge } from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 
 import { prepareDesktopSshEnvironment, provisionDesktopSshEnvironment } from "./platform";
@@ -23,6 +25,11 @@ const decode = Schema.decodeUnknownSync(Schema.fromJsonString(ConnectionCatalogD
 function fixture() {
   let raw = JSON.stringify(EMPTY_CONNECTION_CATALOG_DOCUMENT);
   let pairings = 0;
+  let writes = 0;
+  let releaseSession: (() => void) | undefined;
+  const sessionBlocked = new Promise<void>((resolve) => {
+    releaseSession = resolve;
+  });
   let connectionId = "";
   let token = "";
   const state = {
@@ -34,6 +41,7 @@ function fixture() {
     unavailable: false,
     failRead: false,
     sessionError: undefined as Error | undefined,
+    beforeSession: async () => {},
     afterSession: () => {},
   };
   const bridge = {
@@ -44,6 +52,7 @@ function fixture() {
     setConnectionCatalog: async (next: string, expected: string | null) => {
       if (state.unavailable) return false;
       if (raw !== expected) return "conflict";
+      writes++;
       raw = next;
       return true;
     },
@@ -65,6 +74,7 @@ function fixture() {
       capabilities: { repositoryIdentity: true },
     }),
     fetchSshSessionState: async () => {
+      await state.beforeSession();
       state.afterSession();
       if (state.sessionError) throw state.sessionError;
       return { authenticated: state.authenticated, permissions: scopes };
@@ -91,19 +101,32 @@ function fixture() {
     token = registration.credential.token;
     raw = JSON.stringify(registerConnectionInCatalog(document(), registration));
   });
-  const reconnect = Effect.suspend(() =>
-    prepareDesktopSshEnvironment(
-      bridge,
-      { connectionId, target, expectedEnvironmentId: environmentId, bearerToken: token },
-      undefined,
-      new Map(),
-    ),
-  );
+  const reconnectWithAuthorization = (
+    authorize?: Parameters<typeof prepareDesktopSshEnvironment>[1]["authorize"],
+  ) =>
+    Effect.suspend(() =>
+      prepareDesktopSshEnvironment(
+        bridge,
+        {
+          connectionId,
+          target,
+          expectedEnvironmentId: environmentId,
+          bearerToken: token,
+          ...(authorize === undefined ? {} : { authorize }),
+        },
+        undefined,
+        new Map(),
+      ),
+    );
   return {
     state,
     bridge,
     register,
-    reconnect,
+    reconnect: reconnectWithAuthorization(),
+    reconnectWithAuthorization,
+    writes: () => writes,
+    sessionBlocked,
+    releaseSession: () => releaseSession!(),
     document,
     credential,
     pairings: () => pairings,
@@ -132,6 +155,107 @@ describe("secure SSH pairing grants", () => {
         }
         expect(f.pairings()).toBe(1);
       }),
+  );
+
+  it.effect.each([401, 403, "unauthenticated"] as const)(
+    "invalidates %s after a speculative ticket completes without persisting it",
+    (rejection) =>
+      Effect.gen(function* () {
+        const f = fixture();
+        yield* f.register;
+        f.state.beforeSession = () => f.sessionBlocked;
+        if (rejection === "unauthenticated") {
+          f.state.authenticated = false;
+          f.state.failPairing = true;
+        } else {
+          f.state.sessionError = new Error(`[ssh_http:${rejection}]`);
+        }
+        let tickets = 0;
+        const attempt = f.reconnectWithAuthorization((prepared, verified) =>
+          Effect.gen(function* () {
+            const descriptor = prepared.verifiedEndpoint!.descriptor;
+            yield* verified(descriptor);
+            tickets++;
+            f.releaseSession();
+            return {
+              environmentId,
+              label: descriptor.label,
+              httpBaseUrl: prepared.bootstrap.httpBaseUrl,
+              socketUrl: prepared.bootstrap.wsBaseUrl,
+              httpAuthorization: { _tag: "Bearer", token: prepared.bearerToken },
+            };
+          }),
+        );
+        yield* attempt.pipe(Effect.flip);
+        expect(tickets).toBe(1);
+        expect(f.credential()?.sshPairingGrant).toBeUndefined();
+        expect(f.credential()?.token).toBe(f.token());
+        expect(f.writes()).toBe(1);
+        expect(f.pairings()).toBe(1);
+      }),
+  );
+
+  it.effect("keeps ticket and session validation concurrent without rewriting the grant", () =>
+    Effect.gen(function* () {
+      const f = fixture();
+      yield* f.register;
+      const sessionStarted = yield* Deferred.make<void>();
+      const releaseTicket = yield* Deferred.make<void>();
+      f.state.afterSession = () => {
+        Deferred.doneUnsafe(sessionStarted, Effect.void);
+      };
+      const fiber = yield* f
+        .reconnectWithAuthorization((prepared, verified) =>
+          Effect.gen(function* () {
+            const descriptor = prepared.verifiedEndpoint!.descriptor;
+            yield* verified(descriptor);
+            yield* Deferred.await(releaseTicket);
+            return {
+              environmentId,
+              label: descriptor.label,
+              httpBaseUrl: prepared.bootstrap.httpBaseUrl,
+              socketUrl: prepared.bootstrap.wsBaseUrl,
+              httpAuthorization: { _tag: "Bearer", token: prepared.bearerToken },
+            };
+          }),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(sessionStarted);
+      expect(f.writes()).toBe(0);
+      yield* Deferred.succeed(releaseTicket, undefined);
+      const prepared = yield* Fiber.join(fiber);
+      expect(prepared.authorization).toBeDefined();
+      expect(prepared.sshPairingGrant).toEqual(f.credential()?.sshPairingGrant);
+      expect(f.writes()).toBe(0);
+      expect(f.pairings()).toBe(1);
+    }),
+  );
+
+  it.effect("invalidates using the fresh authorization identity when the forward changes", () =>
+    Effect.gen(function* () {
+      const f = fixture();
+      yield* f.register;
+      f.state.failPairing = true;
+      yield* f
+        .reconnectWithAuthorization((prepared, verified) =>
+          Effect.gen(function* () {
+            const descriptor = {
+              ...prepared.verifiedEndpoint!.descriptor,
+              instanceId: "replacement-instance",
+            };
+            yield* verified(descriptor);
+            return {
+              environmentId,
+              label: descriptor.label,
+              httpBaseUrl: prepared.bootstrap.httpBaseUrl,
+              socketUrl: prepared.bootstrap.wsBaseUrl,
+              httpAuthorization: { _tag: "Bearer", token: prepared.bearerToken },
+            };
+          }),
+        )
+        .pipe(Effect.flip);
+      expect(f.credential()?.sshPairingGrant).toBeUndefined();
+    }),
   );
 
   it.effect.each(["version", "instance"] as const)(
