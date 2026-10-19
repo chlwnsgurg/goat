@@ -1,5 +1,13 @@
 import type { FleetMachine } from "@goat/client-runtime/state/fleet";
 import type { EnvironmentThreadShell } from "@goat/client-runtime/state/models";
+import {
+  FLEET_HEAT_THRESHOLDS,
+  fleetMachineHeat,
+  matchFleetHostEntries,
+  type FleetHeatTier,
+  type FleetMachineHeat,
+} from "@goat/client-runtime/state/fleet-heat";
+import { cpuPercent, loadPerCore } from "@goat/client-runtime/state/host-metrics";
 import type { EnvironmentId, HostStatusEntry, HostStatusQuota } from "@goat/contracts";
 
 import { formatElapsedDurationLabel } from "~/timestampFormat";
@@ -131,32 +139,6 @@ export function lastKnownLabel(
   return age === "just now" ? "last known just now" : "last known " + age + " ago";
 }
 
-const lastKnownByAnswer = new WeakMap<
-  ReadonlyArray<HostStatusEntry>,
-  ReadonlyArray<HostStatusEntry>
->();
-
-/**
- * A cached answer from a refresh that failed: reachable hosts become last known. One stable list
- * per answer, so a failing refresh does not re-render the console each time.
- */
-export function asLastKnown(hosts: ReadonlyArray<HostStatusEntry>): ReadonlyArray<HostStatusEntry> {
-  let stale = lastKnownByAnswer.get(hosts);
-  if (stale === undefined) {
-    stale = hosts.map((entry): HostStatusEntry =>
-      entry.reachability === "ok"
-        ? {
-            ...entry,
-            reachability: "unreachable",
-            ...(entry.metrics === undefined ? {} : { lastKnown: true as const }),
-          }
-        : entry,
-    );
-    lastKnownByAnswer.set(hosts, stale);
-  }
-  return stale;
-}
-
 export type FleetHostTone = "ok" | "stale" | "unreachable" | "unsupported" | "none";
 
 export interface FleetHostRow {
@@ -178,71 +160,43 @@ function toneOf(entry: HostStatusEntry | null): FleetHostTone {
 }
 
 /**
- * Pairs each Fleet machine with the host-status entry that describes it, and never guesses:
- *
- * 1. An environment's own read, its `host: null` entry, is that machine.
- * 2. Otherwise the primary environment's entry for one of the SSH aliases this client reaches
- *    the environment through.
- * 3. A host with no environment of its own matches only the dispatcher that reported it, by the
- *    alias that dispatcher used.
- *
- * Anything else shows "no metrics". Entries no machine claims follow as hosts of their own.
+ * One row per Fleet machine, matched by the same rule as the graph's heat
+ * (matchFleetHostEntries), so a row and its node never describe different hosts.
+ * Hosts a read reported that no machine claims follow under their alias, except the
+ * primary's entries for this client's own SSH aliases, which are machines already listed.
  */
-export function matchHostRows(input: {
+export function fleetHostRows(input: {
   readonly machines: ReadonlyArray<FleetMachine>;
-  readonly aliasesByEnvironment: ReadonlyMap<EnvironmentId, ReadonlyArray<string>>;
-  readonly reads: ReadonlyArray<FleetHostRead>;
+  readonly sshAliases: ReadonlyMap<EnvironmentId, ReadonlyArray<string>>;
+  readonly reports: ReadonlyMap<EnvironmentId, ReadonlyArray<HostStatusEntry>>;
   readonly primaryEnvironmentId: EnvironmentId | null;
 }): ReadonlyArray<FleetHostRow> {
-  const reads = input.reads.toSorted(
-    (left, right) =>
-      Number(right.environmentId === input.primaryEnvironmentId) -
-      Number(left.environmentId === input.primaryEnvironmentId),
-  );
-  const readOf = new Map(reads.map((read) => [read.environmentId, read]));
+  const matched = matchFleetHostEntries(input);
+  const sourceOf = new Map<HostStatusEntry, string>();
+  for (const [environmentId, hosts] of input.reports) {
+    for (const entry of hosts) sourceOf.set(entry, hostSourceKey(environmentId, entry.host));
+  }
   const claimed = new Set<string>();
-  const find = (environmentId: EnvironmentId, host: string | null) => {
-    const entry = readOf.get(environmentId)?.hosts.find((candidate) => candidate.host === host);
-    return entry === undefined ? null : { key: hostSourceKey(environmentId, host), entry };
-  };
-
   const rows: FleetHostRow[] = input.machines.map((machine) => {
-    let match: { key: string; entry: HostStatusEntry } | null = null;
-    if (machine.environmentId !== null) {
-      const aliases = input.aliasesByEnvironment.get(machine.environmentId) ?? [];
-      // Aliases are this client's names for its own SSH connections, which the primary
-      // environment holds. Another dispatcher's host with the same name is another machine.
-      const viaAlias: Array<{ key: string; entry: HostStatusEntry }> = [];
-      if (input.primaryEnvironmentId !== null) {
-        for (const alias of aliases) {
-          const found = find(input.primaryEnvironmentId, alias);
-          if (found !== null) viaAlias.push(found);
-        }
-      }
-      for (const found of viaAlias) claimed.add(found.key);
-      match =
-        find(machine.environmentId, null) ??
-        viaAlias.find((found) => found.entry.reachability === "ok") ??
-        viaAlias[0] ??
-        null;
-    } else if (machine.reachedVia !== null) {
-      match = find(machine.reachedVia.dispatcherEnvironmentId, machine.reachedVia.alias);
-    }
-    if (match !== null) claimed.add(match.key);
+    const entry = matched.get(machine.id) ?? null;
+    const sourceKey = entry === null ? null : (sourceOf.get(entry) ?? null);
+    if (sourceKey !== null) claimed.add(sourceKey);
     return {
       key: machine.id,
       label: machine.label,
       machineId: machine.id,
-      sourceKey: match?.key ?? null,
-      entry: match?.entry ?? null,
-      tone: toneOf(match?.entry ?? null),
+      sourceKey,
+      entry,
+      tone: toneOf(entry),
     };
   });
-
-  for (const read of reads) {
-    for (const entry of read.hosts) {
-      const key = hostSourceKey(read.environmentId, entry.host);
-      if (entry.host === null || claimed.has(key)) continue;
+  const ownAliases = new Set([...input.sshAliases.values()].flat());
+  for (const [environmentId, hosts] of input.reports) {
+    for (const entry of hosts) {
+      if (entry.host === null) continue;
+      const key = hostSourceKey(environmentId, entry.host);
+      if (claimed.has(key)) continue;
+      if (environmentId === input.primaryEnvironmentId && ownAliases.has(entry.host)) continue;
       claimed.add(key);
       rows.push({
         key,
@@ -257,27 +211,56 @@ export function matchHostRows(input: {
   return rows;
 }
 
+/**
+ * A reading's tier on the graph's thresholds. Without the graph's hysteresis: a value is
+ * colored by what it is now, while the node's ring holds its tier through small dips.
+ */
+export function signalTier(
+  key: keyof typeof FLEET_HEAT_THRESHOLDS,
+  value: number | null,
+): FleetHeatTier {
+  if (value === null) return "normal";
+  const threshold = FLEET_HEAT_THRESHOLDS[key];
+  if (value >= threshold.burning) return "burning";
+  if (value >= threshold.hot) return "hot";
+  return value >= threshold.warm ? "warm" : "normal";
+}
+
+const TIER_RANK: Record<FleetHeatTier, number> = { normal: 0, warm: 1, hot: 2, burning: 3 };
+
 export interface HottestHost {
   readonly row: FleetHostRow;
+  /** The machine's tier as the graph shows it, or the reading's own for a host with no node. */
+  readonly tier: FleetHeatTier;
   readonly cpu: number | null;
-  /** One-minute load per core, where the OS reports load. */
   readonly loadPerCore: number | null;
 }
 
-/** The reachable host working hardest: CPU first, load per core where CPU is unknown. */
-export function hottestHost(rows: ReadonlyArray<FleetHostRow>): HottestHost | null {
-  let best: { host: HottestHost; score: number } | null = null;
+/** The reachable host working hardest: highest heat tier, then CPU, then load per core. */
+export function hottestHost(
+  rows: ReadonlyArray<FleetHostRow>,
+  heat: ReadonlyMap<string, FleetMachineHeat>,
+): HottestHost | null {
+  let best: { host: HottestHost; score: readonly [number, number] } | null = null;
   for (const row of rows) {
     const metrics = row.entry?.metrics;
     if (row.tone !== "ok" || metrics === undefined) continue;
-    const cpu = metrics.cpuUtilization === null ? null : percent(metrics.cpuUtilization);
-    const loadPerCore =
-      metrics.loadAvg === null || metrics.cpuCount <= 0
-        ? null
-        : metrics.loadAvg.oneMinute / metrics.cpuCount;
-    const score = cpu ?? (loadPerCore === null ? null : percent(Math.min(1, loadPerCore)));
-    if (score === null) continue;
-    if (best === null || score > best.score) best = { host: { row, cpu, loadPerCore }, score };
+    const cpu = cpuPercent(metrics);
+    const perCore = loadPerCore(metrics);
+    const tier =
+      (row.machineId === null ? undefined : heat.get(row.machineId)?.tier) ??
+      fleetMachineHeat(row.entry!).tier;
+    const score = [
+      TIER_RANK[tier],
+      cpu ?? (perCore === null ? -1 : Math.min(100, perCore * 100)),
+    ] as const;
+    if (
+      best === null ||
+      score[0] > best.score[0] ||
+      (score[0] === best.score[0] && score[1] > best.score[1])
+    ) {
+      best = { host: { row, tier, cpu, loadPerCore: perCore }, score };
+    }
   }
   return best?.host ?? null;
 }

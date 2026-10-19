@@ -1,4 +1,5 @@
 import type { FleetSnapshot } from "@goat/client-runtime/state/fleet";
+import type { FleetMachineHeat } from "@goat/client-runtime/state/fleet-heat";
 import { lazy, Suspense, useEffect, useState } from "react";
 
 import { useUiStateStore } from "~/uiStateStore";
@@ -29,6 +30,7 @@ function useAfterFirstPaint() {
 export function FleetConsoleSlot(props: {
   readonly snapshot: FleetSnapshot;
   readonly connections: ReadonlyMap<string, FleetConnection>;
+  readonly heat: ReadonlyMap<string, FleetMachineHeat>;
 }) {
   const collapsed = useUiStateStore((state) => state.fleetConsoleCollapsed);
   const ready = useAfterFirstPaint();

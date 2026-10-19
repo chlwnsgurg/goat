@@ -11,16 +11,16 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { FleetConnection } from "./fleetConnection";
 import {
-  asLastKnown,
   fleetAlerts,
+  fleetHostRows,
   fleetThroughput,
   hostSourceKey,
   hottestHost,
-  matchHostRows,
   pushBounded,
   quotaRows,
   recordHostSamples,
   recordLastSeen,
+  signalTier,
   sparklinePath,
   type FleetHostRead,
   type ThroughputShell,
@@ -76,7 +76,7 @@ function machine(id: string, overrides: Partial<FleetMachine> = {}): FleetMachin
     os: null,
     machineKind: null,
     environmentId: null,
-    reachedVia: null,
+    sshHost: null,
     cloudState: null,
     running: 0,
     attention: 0,
@@ -85,6 +85,9 @@ function machine(id: string, overrides: Partial<FleetMachine> = {}): FleetMachin
     ...overrides,
   };
 }
+
+const reportsOf = (...reads: ReadonlyArray<FleetHostRead>) =>
+  new Map(reads.map((read) => [read.environmentId, read.hosts] as const));
 
 describe("pushBounded", () => {
   it("keeps only the newest items up to capacity", () => {
@@ -150,15 +153,13 @@ describe("recordHostSamples with host clocks that disagree", () => {
       [{ environmentId: studio, hosts: [entry("box", { at: ahead })] }],
       NOW,
     );
-    const rows = matchHostRows({
+    const rows = fleetHostRows({
       machines: [],
-      aliasesByEnvironment: new Map(),
-      reads: [
-        {
-          environmentId: studio,
-          hosts: [entry("box", { at: ahead, reachability: "unreachable", lastKnown: true })],
-        },
-      ],
+      sshAliases: new Map(),
+      reports: reportsOf({
+        environmentId: studio,
+        hosts: [entry("box", { at: ahead, reachability: "unreachable", lastKnown: true })],
+      }),
       primaryEnvironmentId: studio,
     });
     const detail = (now: number) =>
@@ -168,35 +169,18 @@ describe("recordHostSamples with host clocks that disagree", () => {
   });
 });
 
-describe("asLastKnown", () => {
-  it("turns a failed refresh's cached answer into last-known hosts, once per answer", () => {
-    const cached = [
-      entry(null),
-      entry("ancient", { reachability: "unsupported", noMetrics: true }),
-    ];
-    const stale = asLastKnown(cached);
-    expect(stale.map((host) => [host.reachability, host.lastKnown])).toEqual([
-      ["unreachable", true],
-      ["unsupported", undefined],
-    ]);
-    expect(asLastKnown(cached)).toBe(stale);
-  });
-});
-
-describe("matchHostRows", () => {
-  const aliases = new Map([[mini, ["macmini"]]]);
-
-  it("prefers an environment's own answer and does not list its alias entry again", () => {
-    const rows = matchHostRows({
+describe("fleetHostRows", () => {
+  it("uses the graph's matching and does not list a machine's alias entry again", () => {
+    const rows = fleetHostRows({
       machines: [
         machine("studio", { environmentId: studio }),
         machine("mini", { environmentId: mini }),
       ],
-      aliasesByEnvironment: aliases,
-      reads: [
+      sshAliases: new Map([[mini, ["macmini"]]]),
+      reports: reportsOf(
         { environmentId: studio, hosts: [entry(null), entry("macmini", { cpu: 0.1 })] },
         { environmentId: mini, hosts: [entry(null, { cpu: 0.9 })] },
-      ],
+      ),
       primaryEnvironmentId: studio,
     });
     expect(rows.map((row) => [row.label, row.sourceKey])).toEqual([
@@ -205,126 +189,82 @@ describe("matchHostRows", () => {
     ]);
   });
 
-  it("falls back to the alias entry, matches SSH hosts by dispatcher, and never guesses", () => {
-    const rows = matchHostRows({
+  it("matches a dispatched host by its dispatcher, never guesses, and lists unclaimed hosts", () => {
+    const other = EnvironmentId.make("other");
+    const rows = fleetHostRows({
       machines: [
-        machine("mini", { environmentId: mini }),
-        machine("box", {
-          kind: "ssh",
-          reachedVia: { dispatcherEnvironmentId: studio, alias: "box" },
-        }),
-        // Same alias, reported by a dispatcher with no read: no metrics, not studio's box.
-        machine("other-box", {
-          label: "box",
-          kind: "ssh",
-          reachedVia: { dispatcherEnvironmentId: mini, alias: "box" },
-        }),
+        machine("box", { kind: "ssh", sshHost: { via: studio, alias: "box" } }),
         machine("cloud", { kind: "cloud", label: "Cloud dev" }),
       ],
-      aliasesByEnvironment: aliases,
-      reads: [
-        {
-          environmentId: studio,
-          hosts: [entry(null), entry("macmini"), entry("box"), entry("lidge-ai")],
-        },
-      ],
+      sshAliases: new Map(),
+      reports: reportsOf(
+        { environmentId: studio, hosts: [entry(null), entry("box"), entry("lidge-ai")] },
+        { environmentId: other, hosts: [entry("box", { cpu: 0.7 })] },
+      ),
       primaryEnvironmentId: studio,
     });
     expect(rows.map((row) => [row.key, row.sourceKey, row.tone])).toEqual([
-      ["mini", hostSourceKey(studio, "macmini"), "ok"],
       ["box", hostSourceKey(studio, "box"), "ok"],
-      ["other-box", null, "none"],
       ["cloud", null, "none"],
       [hostSourceKey(studio, "lidge-ai"), hostSourceKey(studio, "lidge-ai"), "ok"],
+      [hostSourceKey(other, "box"), hostSourceKey(other, "box"), "ok"],
     ]);
   });
+});
 
-  it("prefers an alias that answers over one that does not", () => {
-    const rows = matchHostRows({
-      machines: [machine("mini", { environmentId: mini })],
-      aliasesByEnvironment: new Map([[mini, ["old-mini", "macmini"]]]),
-      reads: [
-        {
-          environmentId: studio,
-          hosts: [
-            entry("old-mini", { reachability: "unreachable", lastKnown: true }),
-            entry("macmini"),
-          ],
-        },
-      ],
-      primaryEnvironmentId: studio,
-    });
-    expect(rows.map((row) => [row.sourceKey, row.tone])).toEqual([
-      [hostSourceKey(studio, "macmini"), "ok"],
-    ]);
-  });
-
-  it("keeps another dispatcher's host that shares an alias with a connected environment", () => {
-    const other = EnvironmentId.make("other");
-    const rows = matchHostRows({
-      machines: [machine("mini", { environmentId: mini })],
-      aliasesByEnvironment: aliases,
-      reads: [
-        { environmentId: studio, hosts: [entry("macmini")] },
-        { environmentId: other, hosts: [entry(null), entry("macmini", { cpu: 0.7 })] },
-      ],
-      primaryEnvironmentId: studio,
-    });
-    expect(rows.map((row) => row.sourceKey)).toEqual([
-      hostSourceKey(studio, "macmini"),
-      hostSourceKey(other, "macmini"),
-    ]);
+describe("signalTier", () => {
+  it("colors a reading on the graph's heat thresholds", () => {
+    expect(signalTier("cpu", 59)).toBe("normal");
+    expect(signalTier("cpu", 60)).toBe("warm");
+    expect(signalTier("load", 1)).toBe("hot");
+    expect(signalTier("memory", 95)).toBe("burning");
   });
 });
 
 describe("hottestHost", () => {
   it("picks the busiest reachable host, using load per core when CPU is unknown", () => {
-    const rows = matchHostRows({
+    const rows = fleetHostRows({
       machines: [],
-      aliasesByEnvironment: new Map(),
-      reads: [
-        {
-          environmentId: studio,
-          hosts: [
-            entry("a", { cpu: 0.4 }),
-            entry("b", { cpu: null, load: 7.6, cores: 8 }),
-            entry("c", { cpu: 0.99, reachability: "unreachable", lastKnown: true }),
-          ],
-        },
-      ],
+      sshAliases: new Map(),
+      reports: reportsOf({
+        environmentId: studio,
+        hosts: [
+          entry("a", { cpu: 0.4 }),
+          entry("b", { cpu: null, load: 7.6, cores: 8 }),
+          entry("c", { cpu: 0.99, reachability: "unreachable", lastKnown: true }),
+        ],
+      }),
       primaryEnvironmentId: studio,
     });
-    const hottest = hottestHost(rows);
+    const hottest = hottestHost(rows, new Map());
     expect(hottest?.row.label).toBe("b");
     expect(hottest?.loadPerCore).toBeCloseTo(0.95);
-    expect(hottestHost([])).toBeNull();
+    expect(hottestHost([], new Map())).toBeNull();
   });
 });
 
 describe("fleetAlerts", () => {
   it("reports down connections, stale hosts and version drift, most severe first", () => {
-    const rows = matchHostRows({
+    const rows = fleetHostRows({
       machines: [
         machine("studio", { environmentId: studio }),
         machine("mini", { environmentId: mini }),
       ],
-      aliasesByEnvironment: new Map([[mini, ["macmini"]]]),
-      reads: [
-        {
-          environmentId: studio,
-          hosts: [
-            entry(null),
-            entry("macmini", {
-              reachability: "unreachable",
-              lastKnown: true,
-              at: NOW - 4 * 60_000,
-            }),
-            entry("box", { reachability: "unreachable", lastKnown: true, at: NOW - 4 * 60_000 }),
-            entry("old", { versionMismatch: true }),
-            entry("ancient", { reachability: "unsupported", noMetrics: true }),
-          ],
-        },
-      ],
+      sshAliases: new Map([[mini, ["macmini"]]]),
+      reports: reportsOf({
+        environmentId: studio,
+        hosts: [
+          entry(null),
+          entry("macmini", {
+            reachability: "unreachable",
+            lastKnown: true,
+            at: NOW - 4 * 60_000,
+          }),
+          entry("box", { reachability: "unreachable", lastKnown: true, at: NOW - 4 * 60_000 }),
+          entry("old", { versionMismatch: true }),
+          entry("ancient", { reachability: "unsupported", noMetrics: true }),
+        ],
+      }),
       primaryEnvironmentId: studio,
     });
     const connections = new Map<string, FleetConnection>([
@@ -440,26 +380,24 @@ describe("quotaRows", () => {
   });
 
   it("merges accounts only by fingerprint and sorts by the fullest window", () => {
-    const rows = matchHostRows({
+    const rows = fleetHostRows({
       machines: [],
-      aliasesByEnvironment: new Map(),
-      reads: [
-        {
-          environmentId: studio,
-          hosts: [
-            entry("a", { quotas: [quota("codex", [10, 30, 5], { fingerprint: "acct" })] }),
-            entry("b", {
-              quotas: [
-                quota("codex", [12, 40], {
-                  fingerprint: "acct",
-                  checkedAt: "2026-10-20T11:30:00.000Z",
-                }),
-              ],
-            }),
-            entry("c", { quotas: [quota("codex", [80])] }),
-          ],
-        },
-      ],
+      sshAliases: new Map(),
+      reports: reportsOf({
+        environmentId: studio,
+        hosts: [
+          entry("a", { quotas: [quota("codex", [10, 30, 5], { fingerprint: "acct" })] }),
+          entry("b", {
+            quotas: [
+              quota("codex", [12, 40], {
+                fingerprint: "acct",
+                checkedAt: "2026-10-20T11:30:00.000Z",
+              }),
+            ],
+          }),
+          entry("c", { quotas: [quota("codex", [80])] }),
+        ],
+      }),
       primaryEnvironmentId: studio,
     });
     expect(quotaRows(rows).map((row) => [row.host, row.windows.map((w) => w.usedPercent)])).toEqual(

@@ -101,7 +101,7 @@ export function FleetPage() {
         </WorkspacePageHeader>
         <main className="min-h-0 flex-1 overflow-y-auto">
           <WorkspacePageContainer width="expanded">
-            <FleetConsoleSlot snapshot={snapshot} connections={connections} />
+            <FleetConsoleSlot snapshot={snapshot} connections={connections} heat={heat} />
             <p className="text-sm text-muted-foreground" role="status">
               {totals.running + totals.attention === 0
                 ? "Nothing running on " + plural(totals.machines, "machine") + "."

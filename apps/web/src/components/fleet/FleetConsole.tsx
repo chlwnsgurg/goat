@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { FleetSnapshot } from "@goat/client-runtime/state/fleet";
+import type { FleetHeatTier, FleetMachineHeat } from "@goat/client-runtime/state/fleet-heat";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 import { memo, useEffect, useRef } from "react";
@@ -18,12 +19,13 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { FleetConnection } from "./fleetConnection";
 import { fleetConsoleFrameClassName } from "./fleetConsoleFrame";
-import { FleetHostStatusRefresh, fleetHostStatusAtom, useFleetHostStatus } from "./fleetHostStatus";
+import { fleetConsoleTelemetryAtom } from "./fleetConsoleTelemetry";
 import {
   fleetAlerts,
   fleetThroughput,
+  fleetHostRows,
   hottestHost,
-  matchHostRows,
+  signalTier,
   quotaRows,
   sparklinePath,
   throughputEqual,
@@ -43,7 +45,7 @@ import {
  */
 const fleetThroughputAtom = Atom.make((get): FleetThroughput => {
   const connected = new Set(get(fleetEnvironmentsAtom).map((env) => env.environmentId));
-  get(fleetHostStatusAtom);
+  get(fleetConsoleTelemetryAtom);
   const next = fleetThroughput(
     get(environmentThreadShells.threadShellsAtom),
     connected,
@@ -61,21 +63,30 @@ const Label = ({ children, className }: { children: React.ReactNode; className?:
   </span>
 );
 
-const usageTone = (value: number | null) =>
-  value === null ? "muted" : value >= 90 ? "destructive" : value >= 70 ? "warning" : "normal";
+/** A reading colored on the graph's heat thresholds and palette; muted when the host sent none. */
+const tone = (key: Parameters<typeof signalTier>[0], value: number | null) =>
+  value === null ? "muted" : signalTier(key, value);
 
 const TONE_TEXT = {
   normal: "text-foreground",
-  warning: "text-warning",
-  destructive: "text-destructive",
+  warm: "text-heat-warm",
+  hot: "text-heat-hot",
+  burning: "text-heat-burning",
   muted: "text-muted-foreground",
 } as const;
 
 const TONE_BAR = {
   normal: "bg-primary",
-  warning: "bg-warning",
-  destructive: "bg-destructive",
+  warm: "bg-heat-warm",
+  hot: "bg-heat-hot",
+  burning: "bg-heat-burning",
   muted: "bg-muted-foreground",
+} as const;
+
+const HEAT_DOT = {
+  warm: "bg-heat-warm",
+  hot: "bg-heat-hot",
+  burning: "bg-heat-burning",
 } as const;
 
 const ALERT_DOT: Record<FleetAlertTone, string> = {
@@ -135,11 +146,14 @@ function HostRow({
   samples,
   lastSeen,
   observedAt,
+  heatTier,
 }: {
   readonly row: FleetHostRow;
   readonly samples: ReadonlyArray<HostSample>;
   readonly lastSeen: HostLastSeen;
   readonly observedAt: number;
+  /** The machine's tier as its node in the graph shows it. */
+  readonly heatTier: FleetHeatTier;
 }) {
   const metrics = row.entry?.metrics;
   const stale = row.tone === "stale";
@@ -159,7 +173,7 @@ function HostRow({
   const load = metrics?.loadAvg?.oneMinute ?? null;
   const cores = metrics?.cpuCount ?? 1;
   const loadMax = Math.max(cores, ...samples.map((sample) => sample.load ?? 0));
-  const loadTone = load === null ? "muted" : usageTone((load / cores) * 100);
+  const loadTone = tone("load", load === null ? null : load / cores);
   return (
     <li className="grid h-7 grid-cols-[minmax(0,6.5rem)_repeat(3,minmax(0,1fr))] items-center gap-3">
       <span className="flex min-w-0 items-center gap-1.5 text-xs">
@@ -168,7 +182,9 @@ function HostRow({
           className={cn(
             "size-1.5 shrink-0 rounded-full",
             row.tone === "ok"
-              ? "bg-success"
+              ? heatTier === "normal"
+                ? "bg-success"
+                : HEAT_DOT[heatTier]
               : row.tone === "stale" || row.tone === "unreachable"
                 ? "bg-warning"
                 : "border border-muted-foreground",
@@ -189,7 +205,7 @@ function HostRow({
         <>
           <MetricCell
             value={formatPercent(cpu)}
-            tone={usageTone(cpu)}
+            tone={tone("cpu", cpu)}
             stale={stale}
             samples={samples}
             field="cpu"
@@ -197,7 +213,7 @@ function HostRow({
           />
           <MetricCell
             value={formatPercent(memory)}
-            tone={usageTone(memory)}
+            tone={tone("memory", memory)}
             stale={stale}
             samples={samples}
             field="memory"
@@ -306,20 +322,19 @@ const clock = new Intl.DateTimeFormat(undefined, {
 function FleetConsoleExpanded(props: {
   readonly snapshot: FleetSnapshot;
   readonly connections: ReadonlyMap<string, FleetConnection>;
+  readonly heat: ReadonlyMap<string, FleetMachineHeat>;
   readonly reduced: boolean;
   readonly onCollapse: () => void;
 }) {
-  const { snapshot, connections, reduced } = props;
-  const status = useFleetHostStatus();
+  const { snapshot, connections, heat, reduced } = props;
+  const status = useAtomValue(fleetConsoleTelemetryAtom);
   const environments = useAtomValue(fleetPageEnvironmentsAtom);
   const primaryEnvironmentId = useAtomValue(primaryEnvironmentIdAtom);
   const throughput = useAtomValue(fleetThroughputAtom);
-  const rows = matchHostRows({
+  const rows = fleetHostRows({
     machines: snapshot.machines,
-    aliasesByEnvironment: new Map(
-      environments.map((env) => [env.environmentId, env.sshAliases] as const),
-    ),
-    reads: status.reads,
+    sshAliases: new Map(environments.map((env) => [env.environmentId, env.sshAliases] as const)),
+    reports: status.reports,
     primaryEnvironmentId,
   });
   const unreadable = status.failed.map((environmentId) => ({
@@ -330,7 +345,7 @@ function FleetConsoleExpanded(props: {
     unreadable,
     lastSeen: status.lastSeen,
   });
-  const hottest = hottestHost(rows);
+  const hottest = hottestHost(rows, heat);
   const quotas = quotaRows(rows).slice(0, 3);
   const { totals } = snapshot;
   const reporting = rows.filter((row) => row.tone === "ok").length;
@@ -342,9 +357,7 @@ function FleetConsoleExpanded(props: {
           <span className="hidden min-w-0 items-baseline gap-1.5 sm:flex">
             <Label>Hottest</Label>
             <span className="truncate text-xs font-medium">{hottest.row.label}</span>
-            <span
-              className={cn("font-mono text-xs tabular-nums", TONE_TEXT[usageTone(hottest.cpu)])}
-            >
+            <span className={cn("font-mono text-xs tabular-nums", TONE_TEXT[hottest.tier])}>
               {hottest.cpu === null
                 ? hottest.loadPerCore!.toFixed(1) + "/core"
                 : Math.round(hottest.cpu) + "%"}
@@ -361,9 +374,6 @@ function FleetConsoleExpanded(props: {
         ) : null}
       </ConsoleHeader>
       <div className="grid h-[calc(100%-2.5rem)] auto-rows-max grid-cols-1 overflow-y-auto md:auto-rows-[minmax(0,1fr)] md:grid-cols-[12.5rem_minmax(0,1fr)_16rem] md:overflow-hidden">
-        {status.sources.map((environmentId) => (
-          <FleetHostStatusRefresh key={environmentId} environmentId={environmentId} />
-        ))}
         {reduced || status.sampledAt === 0 ? null : (
           // Restarts once per new sample; nothing runs between samples.
           <span key={status.sampledAt} aria-hidden className="fleet-console-sweep" />
@@ -411,6 +421,9 @@ function FleetConsoleExpanded(props: {
                   key={row.key}
                   row={row}
                   lastSeen={status.lastSeen}
+                  heatTier={
+                    row.machineId === null ? "normal" : (heat.get(row.machineId)?.tier ?? "normal")
+                  }
                   observedAt={status.observedAt}
                   samples={
                     (row.sourceKey === null ? undefined : status.history.get(row.sourceKey)) ??
@@ -450,7 +463,10 @@ function FleetConsoleExpanded(props: {
                     aria-valuenow={Math.round(quota.peak)}
                   >
                     <span
-                      className={cn("block h-full rounded-full", TONE_BAR[usageTone(quota.peak)])}
+                      className={cn(
+                        "block h-full rounded-full",
+                        TONE_BAR[tone("quota", quota.peak)],
+                      )}
                       style={{ width: Math.max(2, quota.peak) + "%" }}
                     />
                   </span>
@@ -529,12 +545,14 @@ function ConsoleHeader(props: {
 }
 
 /**
- * Live fleet analytics above the graph. Collapsing unmounts the body, which stops its host
- * reads and its sweep; the frame keeps the same height as the placeholder that preceded it.
+ * Live fleet analytics above the graph, from the same reads and heat the graph uses.
+ * Collapsing unmounts the body and its sweep; the frame keeps the same height as the
+ * placeholder that preceded it.
  */
 export default function FleetConsole(props: {
   readonly snapshot: FleetSnapshot;
   readonly connections: ReadonlyMap<string, FleetConnection>;
+  readonly heat: ReadonlyMap<string, FleetMachineHeat>;
 }) {
   const collapsed = useUiStateStore((state) => state.fleetConsoleCollapsed);
   const setCollapsed = useUiStateStore((state) => state.setFleetConsoleCollapsed);
@@ -563,6 +581,7 @@ export default function FleetConsole(props: {
         <FleetConsoleExpanded
           snapshot={props.snapshot}
           connections={props.connections}
+          heat={props.heat}
           reduced={reduced}
           onCollapse={() => setCollapsed(true)}
         />

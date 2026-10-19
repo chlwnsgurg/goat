@@ -26,23 +26,23 @@ const host: HostStatusEntry = {
 };
 
 const hostStatus = vi.hoisted(() => ({ reads: 0 }));
-vi.mock(import("./fleetHostStatus"), async (original) => ({
-  ...(await original()),
-  useFleetHostStatus: () => {
-    hostStatus.reads += 1;
-    return {
-      reads: [{ environmentId, hosts: [host] }],
-      sources: [],
-      history: new Map(),
-      lastSeen: new Map(),
-      loading: false,
-      failed: [],
-      sampledAt: SAMPLED_AT,
-      observedAt: SAMPLED_AT,
-    };
-  },
-  FleetHostStatusRefresh: () => null,
-}));
+vi.mock(import("./fleetConsoleTelemetry"), async () => {
+  const { Atom } = await import("effect/reactivity");
+  return {
+    fleetConsoleTelemetryAtom: Atom.make(() => {
+      hostStatus.reads += 1;
+      return {
+        reports: new Map([[environmentId, [host]]]),
+        history: new Map(),
+        lastSeen: new Map(),
+        loading: false,
+        failed: [],
+        sampledAt: SAMPLED_AT,
+        observedAt: SAMPLED_AT,
+      };
+    }),
+  };
+});
 
 import { FleetConsoleSlot } from "./FleetConsoleSlot";
 
@@ -56,7 +56,7 @@ const snapshot = {
       os: null,
       machineKind: null,
       environmentId,
-      reachedVia: null,
+      sshHost: null,
       cloudState: null,
       running: 9,
       attention: 2,
@@ -73,7 +73,7 @@ let root: Root;
 
 function render() {
   return act(async () => {
-    root.render(<FleetConsoleSlot snapshot={snapshot} connections={new Map()} />);
+    root.render(<FleetConsoleSlot snapshot={snapshot} connections={new Map()} heat={new Map()} />);
   });
 }
 
@@ -134,7 +134,7 @@ describe("FleetConsoleSlot", () => {
     expect(console_()!.textContent).toContain("91%");
   });
 
-  it("remembers that it was collapsed, and reads no host status while collapsed", async () => {
+  it("remembers that it was collapsed, and computes no telemetry while collapsed", async () => {
     await render();
     await mounted();
     await act(async () => toggle().click());
