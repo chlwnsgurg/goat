@@ -343,8 +343,14 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             yield* f.fs.writeFileString(`${f.home}/.goat/userdata/statev2.sqlite`, "");
           }
           const second = yield* first.again;
-          if (data === "data") assert.isTrue(Result.isFailure(second.result));
-          else {
+          if (data === "data") {
+            assert.isTrue(Result.isFailure(second.result));
+            if (Result.isFailure(second.result))
+              assert.match(
+                String((second.result.failure as Error).message),
+                /^No GOAT runtime for /,
+              );
+          } else {
             assert.isTrue(Result.isSuccess(second.result));
             if (Result.isSuccess(second.result))
               assert.equal(second.result.success.version, PUBLISHED);

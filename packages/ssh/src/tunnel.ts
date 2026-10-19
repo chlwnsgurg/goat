@@ -3976,8 +3976,8 @@ export const prepareRemoteRuntime = (
  * `fresh`: prints yes when the host has no GOAT database. `capable <version>`: prints yes
  * when that installed runtime lists `memory:read` among the scopes it can issue (#285).
  * `hold <version>` / `reject <version>`: marks it held (`pending`) or refused for good. The
- * probe reports the mark, installed-runtime recovery skips held runtimes, and launch clears
- * a `pending` mark once it has confirmed the host still has no data.
+ * probe reports the mark, installed and retained recovery skip held runtimes, and launch
+ * clears a `pending` mark once the server it started on a host without data is ready.
  */
 const REMOTE_PUBLISHED_RUNTIME_GATE_SCRIPT = `set -u
 case "$1" in
