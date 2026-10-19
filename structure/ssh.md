@@ -129,8 +129,12 @@ desktop and the server's SSH dispatch (`resolveSshCliRunner` in
 `apps/server/src/sshRemote/SshRemoteDispatch.ts`) both set `refreshOwnedRuntimeOnFirstConnection`.
 
 - With no server running, the client installs and starts its release, even when `run-t3.sh` names
-  an older compatible release that is still installed. It keeps the retained release only when that
-  one is newer, or when its own archive cannot be acquired. `ssh.runtime.upgrade.skipped` logs why.
+  an older compatible release that is still installed. It keeps the retained release when that
+  one is newer or cannot be ordered. If its exact archive cannot be acquired, recovery may select
+  a newer compatible installed build, including one newer than the client, only with a proven
+  build order and an installer record whose executable digest matches before any helper runs.
+  Legacy directories without records remain eligible only through the retained runner.
+  `ssh.runtime.upgrade.skipped` logs the selected version and reason.
 - With an older compatible server running, the first connection of each manager drains it once it
   answers `idle` (see [Replacement](#replacement)). While it is busy, the client attaches to it,
   logs `ssh.runtime.refresh.deferred` with the reason, and retries every 10 minutes.
