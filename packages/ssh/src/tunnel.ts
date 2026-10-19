@@ -2637,10 +2637,11 @@ collect_installed_candidates() {
   for marker in $marker_list; do
     IFS="$old_ifs"
     dir="\${marker%/.install-complete}"; candidate_version="\${dir##*/}"
-    valid_version "$candidate_version" || continue
-    [ "$candidate_version" != "$retained_version" ] || continue
     [ ! -e "$dir/.install-record" ] && [ ! -L "$dir/.install-record" ] || continue
     [ ! -L "$dir" ] && [ ! -L "$marker" ] && [ ! -L "$dir/goat" ] || continue
+    [ "$candidate_version" != "$retained_version" ] || continue
+    # Builtin exclusions first: valid_version spawns grep, and recorded installs can be numerous.
+    valid_version "$candidate_version" || continue
     ready_version "$candidate_version" || continue
     case " $installed_versions " in *" $candidate_version "*) continue ;; esac
     [ "$eligible" -lt 8 ] || break
@@ -5740,6 +5741,10 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     let observed = active;
     let generation = generations.get(key) ?? 0;
     const initialGeneration = generation;
+    // Applied only after the generation/snapshot checks below, so a stale probe cannot clear newer state.
+    let clearArchiveDeferral:
+      | { readonly failure: SshHostFailure | undefined; readonly intent: unknown }
+      | undefined;
     const result = yield* Effect.gen(function* () {
       const { resolvedTarget } = yield* resolveManagedTarget(target);
       key = targetConnectionKey(resolvedTarget);
@@ -5858,9 +5863,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       // A successful probe observes liveness; it does not retry a failed acquisition.
       const previousFailure = acquisitionFailures.get(key);
       if (compatibleLive && snapshot.runtimeVersion === requestedVersion) {
-        acquisitionFailures.delete(key);
-        if (pendingReplacements.get(key)?.archiveFailure !== undefined)
-          pendingReplacements.delete(key);
+        clearArchiveDeferral = { failure: previousFailure, intent: pendingReplacements.get(key) };
       } else if (
         compatibleLive &&
         previousFailure?.reason === "archive_unavailable" &&
@@ -5921,6 +5924,17 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     if (latest !== observed && latest !== undefined) return latest;
     const enriched = yield* enrichFailure(target, result);
     if (closed || (generations.get(key) ?? 0) !== generation) return statuses.get(key) ?? enriched;
+    if (clearArchiveDeferral !== undefined) {
+      if (acquisitionFailures.get(key) === clearArchiveDeferral.failure)
+        acquisitionFailures.delete(key);
+      const intent = pendingReplacements.get(key);
+      if (
+        intent !== undefined &&
+        intent === clearArchiveDeferral.intent &&
+        intent.archiveFailure !== undefined
+      )
+        pendingReplacements.delete(key);
+    }
     statuses.set(key, enriched);
     return enriched;
   });
