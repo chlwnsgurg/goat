@@ -1512,3 +1512,28 @@ describe("OpenCodex Home routing", () => {
     expect(restored.message).toBe("Server settings write-file failed at /sandbox/settings.json.");
   });
 });
+
+describe("automatic server updates", () => {
+  it("defaults existing settings to enabled", () => {
+    expect(decodeServerSettings({}).automaticServerUpdates).toBe(true);
+    expect(DEFAULT_SERVER_SETTINGS.automaticServerUpdates).toBe(true);
+  });
+
+  it.each([true, false])(
+    "round-trips %s in environment and project patches",
+    (automaticServerUpdates) => {
+      const input = {
+        automaticServerUpdates,
+        projectSettingsOverrides: { project: { automaticServerUpdates } },
+      };
+      expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+      expect(decodeServerSettingsPatch(input)).toEqual(input);
+      expect(requiredScopesForServerSettingsPatch(input)).toContain("settings:write");
+    },
+  );
+
+  it.each(["false", null, 0])("rejects a non-boolean value %s", (automaticServerUpdates) => {
+    expect(() => decodeServerSettings({ automaticServerUpdates })).toThrow();
+    expect(() => decodeServerSettingsPatch({ automaticServerUpdates })).toThrow();
+  });
+});

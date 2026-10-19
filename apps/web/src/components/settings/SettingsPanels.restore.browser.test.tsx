@@ -79,6 +79,14 @@ describe("restoring V2 settings", () => {
     expect(state.update.mock.calls[0]?.[0][key]).toBe(DEFAULT_UNIFIED_SETTINGS[key]);
   });
 
+  it("restores automatic server updates after an opt-out", async () => {
+    state.settings = { ...DEFAULT_UNIFIED_SETTINGS, automaticServerUpdates: false };
+    await render();
+    expect(restore.changedSettingLabels).toEqual(["Automatic server updates"]);
+    await act(() => restore.restoreDefaults());
+    expect(state.update.mock.calls[0]?.[0].automaticServerUpdates).toBe(true);
+  });
+
   it("does not reset settings after cancellation", async () => {
     state.settings = { ...DEFAULT_UNIFIED_SETTINGS, autoResumeLimitedThreads: true };
     state.confirm.mockResolvedValue(false);
