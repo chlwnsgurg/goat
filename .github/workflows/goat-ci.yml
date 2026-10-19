@@ -141,6 +141,14 @@ jobs:
           echo "TMPDIR=$dir" >> "$GITHUB_ENV"
           echo "GOAT_TEST_TMP_GUARD=fail" >> "$GITHUB_ENV"
 
+      # SshWorkspaceSync's real-sshd test runs sshd with UsePAM no, which refuses a locked account
+      # even for a public key. The hosted runner user's password is locked; the VM is discarded.
+      - name: Unlock the runner account for the test sshd
+        if: matrix.task == 'test-server'
+        run: |
+          sudo passwd -S "$USER"
+          sudo usermod -p '*' "$USER"
+
       - name: Check
         if: matrix.task == 'check'
         run: vp check
