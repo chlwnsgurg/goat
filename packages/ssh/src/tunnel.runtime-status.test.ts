@@ -879,7 +879,7 @@ it.effect.each(
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "live no-drain attachment status",
   () => {
-    it.live("the real probe preserves admission through diagnosis and an agent session", () =>
+    it.live("busy runtime admission survives diagnosis and agent sessions", () =>
       Effect.gen(function* () {
         const f = yield* makeProtocolFixture({
           live: true,
@@ -888,6 +888,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           ssh: SSH_RUNTIME_PROTOCOL_VERSION,
           orchestration: ORCHESTRATION_PROTOCOL_VERSION,
         });
+        yield* f.fs.writeFileString(`${f.test}/activity`, "busy");
         const before = yield* f.snapshot;
         yield* Effect.gen(function* () {
           const manager = yield* SshTunnel.SshEnvironmentManager;

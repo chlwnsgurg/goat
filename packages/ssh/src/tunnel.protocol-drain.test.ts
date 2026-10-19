@@ -482,40 +482,43 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
-    it.live("attaches to an older server that cannot drain instead of refreshing it", () =>
-      Effect.gen(function* () {
-        const f = yield* makeProtocolFixture({
-          live: true,
-          kind: "managed",
-          oldVersion: OLDER,
-          ...compatible,
-        });
-        const before = yield* f.snapshot;
-        const result = yield* f.run("launch", false, {
-          refreshOwnedRuntimeOnFirstConnection: true,
-        });
-        assert.isTrue(Result.isSuccess(result), describeFailure(result));
-        if (Result.isSuccess(result)) {
-          assert.equal(result.success.version, OLDER);
-          assert.equal(result.success.status, "ready");
-          assert.deepEqual(result.success.pending, {
-            reason: "unknown",
-            detail: "drain-unavailable",
-            replacement: "older",
-            requestedVersion: ARCHIVE.archiveVersion,
-            liveVersion: OLDER,
+    it.live.each(["idle", "busy"] as const)(
+      "attaches to an older %s server that cannot drain instead of refreshing it",
+      (activity) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: OLDER,
+            ...compatible,
           });
-          assert.isUndefined(result.success.refresh);
-        }
-        const log = yield* events(f);
-        assert.isFalse(
-          log.some((entry) =>
-            ["drain", "drain-request", "stop", "activity", "supervise"].includes(entry.type),
-          ),
-        );
-        assert.isTrue(isAlive(f.pid));
-        assert.deepEqual(yield* f.snapshot, before);
-      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+          yield* f.fs.writeFileString(`${f.test}/activity`, activity);
+          const before = yield* f.snapshot;
+          const result = yield* f.run("launch", false, {
+            refreshOwnedRuntimeOnFirstConnection: true,
+          });
+          assert.isTrue(Result.isSuccess(result), describeFailure(result));
+          if (Result.isSuccess(result)) {
+            assert.equal(result.success.version, OLDER);
+            assert.equal(result.success.status, "ready");
+            assert.deepEqual(result.success.pending, {
+              reason: "unknown",
+              detail: "drain-unavailable",
+              replacement: "older",
+              requestedVersion: ARCHIVE.archiveVersion,
+              liveVersion: OLDER,
+            });
+            assert.isUndefined(result.success.refresh);
+          }
+          const log = yield* events(f);
+          assert.isFalse(
+            log.some((entry) =>
+              ["drain", "drain-request", "stop", "activity", "supervise"].includes(entry.type),
+            ),
+          );
+          assert.isTrue(isAlive(f.pid));
+          assert.deepEqual(yield* f.snapshot, before);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
     it.live.each([
