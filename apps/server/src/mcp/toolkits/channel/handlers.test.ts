@@ -1,6 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
-  EnvironmentAuthorizationError,
+  type AuthMcpClientAccess,
   EnvironmentId,
   ProviderInstanceId,
   ThreadId,
@@ -10,7 +10,6 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
 import * as ChannelLedger from "../../../channels/ChannelLedger.ts";
@@ -266,20 +265,21 @@ it.effect.each([
   }).pipe(Effect.provide(harness.layer));
 });
 
-const homeScope = (input: {
-  readonly access?: "full-access" | "read-only";
-  readonly grantedScopes?: ReadonlyArray<"settings:write" | "orchestration:read">;
-  readonly reauthorize?: Effect.Effect<void, EnvironmentAuthorizationError>;
-}) =>
+/** `access` is read on every check, so a test can lower it while a claim waits. */
+const homeScope = (access: () => AuthMcpClientAccess) =>
   Layer.succeed(McpInvocationContext.McpInvocationContext, {
     environmentId,
     capabilities: new Set(["orchestration"] as const),
     issuedAt: 0,
     requestNamespace: "home-claim",
     thread: undefined,
-    client: { sessionId: "home-claim", label: "Agent", access: input.access ?? "full-access" },
-    ...(input.grantedScopes === undefined ? {} : { grantedScopes: input.grantedScopes }),
-    ...(input.reauthorize === undefined ? {} : { reauthorize: () => input.reauthorize! }),
+    client: {
+      sessionId: "home-claim",
+      label: "Agent",
+      get access() {
+        return access();
+      },
+    },
   });
 const gone = EnvironmentId.make("environment:gone");
 const goneHome = { environmentId: gone, claimedAt: 1_792_398_593_330, claimId: "gone" };
@@ -289,10 +289,6 @@ const callHomeTool = (name: "channel_bot_home" | "channel_bot_home_claim") =>
     Effect.flatMap((toolkit) => toolkit.handle(name, {}).pipe(Stream.unwrap, Stream.runCollect)),
     Effect.map((result) => result.at(-1)!.result),
   );
-const revoked = new EnvironmentAuthorizationError({
-  message: "revoked",
-  requiredScope: "settings:write",
-});
 
 it.effect("an agent moves GOAT Bot off a vanished home and the bot takes messages again", () => {
   const harness = makeHarness();
@@ -318,60 +314,21 @@ it.effect("an agent moves GOAT Bot off a vanished home and the bot takes message
   }).pipe(
     Effect.provide(
       Layer.merge(
-        homeScope({ grantedScopes: ["settings:write"], reauthorize: Effect.void }),
+        homeScope(() => "full-access"),
         harness.layer,
       ),
     ),
   );
 });
 
-it.effect.each([
-  { name: "no settings grant", grantedScopes: ["orchestration:read"], reauthorize: Effect.void },
-  {
-    name: "a read-only client",
-    access: "read-only",
-    grantedScopes: ["settings:write"],
-    reauthorize: Effect.void,
-  },
-  { name: "a revoked grant", grantedScopes: ["settings:write"], reauthorize: Effect.fail(revoked) },
-] as const)("refuses to move GOAT Bot's home for $name", (grant) => {
-  const harness = makeHarness();
-  return Effect.gen(function* () {
-    const settings = yield* ServerSettings.ServerSettingsService;
-    yield* settings.updateSettings({ goatBotHome: goneHome });
-    const failure = yield* callHomeTool("channel_bot_home_claim");
-    assert.isTrue(
-      "code" in failure && failure.code === "capability_denied",
-      JSON.stringify(failure),
-    );
-    assert.deepStrictEqual((yield* settings.getSettings).goatBotHome, goneHome);
-  }).pipe(Effect.provide(Layer.merge(homeScope(grant), harness.layer)));
-});
-
-it.effect("a grant revoked while the claim waits for the settings lock changes nothing", () => {
-  const harness = makeHarness();
-  return Effect.gen(function* () {
-    const granted = yield* Ref.make(true);
-    const firstCheck = yield* Deferred.make<void>();
-    const release = yield* Deferred.make<void>();
-    // The pre-check passes and signals; the commit-time check then sees the revocation.
-    const reauthorize = Ref.get(granted).pipe(
-      Effect.flatMap((ok) => (ok ? Effect.void : Effect.fail(revoked))),
-      Effect.tap(() => Deferred.succeed(firstCheck, undefined)),
-    );
-    return yield* Effect.gen(function* () {
+it.effect.each(["read-only", "approval-required", "auto-accept-edits"] as const)(
+  "refuses to move GOAT Bot's home for a %s client",
+  (access) => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
       const settings = yield* ServerSettings.ServerSettingsService;
       yield* settings.updateSettings({ goatBotHome: goneHome });
-      // Another settings write holds the lock until released.
-      const holder = yield* settings
-        .updateSettings({}, Deferred.await(release))
-        .pipe(Effect.forkChild);
-      const claim = yield* callHomeTool("channel_bot_home_claim").pipe(Effect.forkChild);
-      yield* Deferred.await(firstCheck);
-      yield* Ref.set(granted, false);
-      yield* Deferred.succeed(release, undefined);
-      yield* Fiber.join(holder);
-      const failure = yield* Fiber.join(claim);
+      const failure = yield* callHomeTool("channel_bot_home_claim");
       assert.isTrue(
         "code" in failure && failure.code === "capability_denied",
         JSON.stringify(failure),
@@ -379,8 +336,11 @@ it.effect("a grant revoked while the claim waits for the settings lock changes n
       assert.deepStrictEqual((yield* settings.getSettings).goatBotHome, goneHome);
     }).pipe(
       Effect.provide(
-        Layer.merge(homeScope({ grantedScopes: ["settings:write"], reauthorize }), harness.layer),
+        Layer.merge(
+          homeScope(() => access),
+          harness.layer,
+        ),
       ),
     );
-  });
-});
+  },
+);

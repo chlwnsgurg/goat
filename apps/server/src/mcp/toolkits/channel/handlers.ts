@@ -43,11 +43,11 @@ const failureFor = (error: ChannelGatewayError | ChannelLedger.ChannelLedgerErro
         : error.message,
   });
 
-/** Marks the failure of a grant revoked while the claim waited for the settings write lock. */
+/** Marks a caller that lost full access while the claim waited for the settings write lock. */
 const HOME_CLAIM_REVOKED = "<goat-bot-home-claim-revoked>";
 
 const HOME_CLAIM_DENIAL =
-  "Moving GOAT Bot needs a caller allowed to change this machine's settings.";
+  "Moving GOAT Bot needs a live full-access/default calling thread or a full-access client.";
 
 const ownerIdOf = McpInvocationContext.McpInvocationContext.pipe(
   Effect.map((scope) => channelOwnerIdFor(scope.environmentId)),
@@ -212,13 +212,17 @@ export const layer = McpToolAccess.toLayer(
           return yield* home.read.pipe(Effect.mapError(failureFor));
         }),
       ),
-      channel_bot_home_claim: McpToolAccess.writes(() =>
+      // Agents never hold settings:write, so the environment-write gate decides, as for
+      // goat_connection_add_ssh: a full-access caller can already edit settings itself.
+      channel_bot_home_claim: McpToolAccess.writesEnvironment((_, check) =>
         Effect.gen(function* () {
-          const reauthorize = yield* McpToolAccess.requireSettingsWrite(HOME_CLAIM_DENIAL);
+          const services = yield* Effect.context<Effect.Services<typeof check>>();
           const home = yield* ChannelBotHome.ChannelBotHome;
           return yield* home
             .claimHere(
-              reauthorize.pipe(
+              check.pipe(
+                Effect.provideContext(services),
+                Effect.asVoid,
                 Effect.mapError(
                   () =>
                     new ServerSettingsError({

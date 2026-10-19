@@ -144,7 +144,7 @@ export const agentSurfaceRegistry = {
     toolkit: "channel",
     summary: "Make this machine GOAT Bot's home",
     description:
-      "Make this machine GOAT Bot's home, replacing a home claim that names a machine that is gone or no longer connects. Other machines adopt the new home when a GOAT app connected to them syncs it; the newest claim wins. Needs a caller allowed to change this machine's settings. Returns claimed:false with the current home when a newer claim names another machine.",
+      "Make this machine GOAT Bot's home, replacing a home claim that names a machine that is gone or no longer connects. Other machines adopt the new home when a GOAT app connected to them syncs it; the newest claim wins. Needs a live full-access calling thread or a full-access client. Returns claimed:false with the current home when a newer claim names another machine.",
     effect: "write",
     hostRoutable: false,
     requires: "either",

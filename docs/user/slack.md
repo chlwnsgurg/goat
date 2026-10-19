@@ -63,9 +63,9 @@ GOAT Bot screen shows only a chip for the work and its final report.
 - If the machine GOAT Bot lives on is gone or stays disconnected, GOAT Bot
   stops answering on every machine and its screen says so. Use **Move GOAT Bot
   to …** there, or pick another machine in **Settings → Integrations → GOAT
-  Bot**. An agent can do the same on the machine it runs on with the
-  `channel_bot_home_claim` tool. Other machines follow the move once a GOAT
-  app connected to them is open.
+  Bot**. An agent with full access can do the same on the machine it runs on
+  with the `channel_bot_home_claim` tool. Other machines follow the move once
+  a GOAT app connected to them is open.
 - When GOAT Bot can't read a message, its reply says why, such as a model that
   needs you to sign in again or a usage limit, so you know whether resending
   helps.

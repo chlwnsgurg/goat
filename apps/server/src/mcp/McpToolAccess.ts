@@ -341,24 +341,3 @@ export const toLayer = <Tools extends Record<string, Tool.Any>, EX = never, RX =
     ),
   );
 };
-
-/**
- * A live settings:write grant, reconfirmed for this call (as memory's settings tools). Returns the
- * reconfirmation so a handler can repeat it inside a settings write lock. `denial` says what the
- * caller tried to change.
- */
-export const requireSettingsWrite = (denial: string) =>
-  McpInvocationContext.McpInvocationContext.pipe(
-    Effect.flatMap((scope) => {
-      const deny = () => new OrchestratorMcpFailure({ code: "capability_denied", message: denial });
-      if (
-        scope.readOnly ||
-        scope.client?.access === "read-only" ||
-        !scope.grantedScopes?.includes("settings:write") ||
-        !scope.reauthorize
-      )
-        return Effect.fail(deny());
-      const reauthorize = scope.reauthorize(["settings:write"]).pipe(Effect.mapError(deny));
-      return reauthorize.pipe(Effect.as(reauthorize));
-    }),
-  );

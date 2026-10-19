@@ -114,7 +114,8 @@ export function GoatBotChatView({
             : availability.kind === "offline"
               ? "GOAT Bot's computer is offline. You can send messages again once it reconnects."
               : "Connecting to GOAT Bot…"}
-          {availability.kind === "home_offline" && homeMove ? (
+          {/* With no history the notice below carries the same action. */}
+          {availability.kind === "home_offline" && homeMove && rows.length > 0 ? (
             <div className="mt-2">
               <Button
                 size="sm"

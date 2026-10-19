@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
 import { DEFAULT_SERVER_SETTINGS, EnvironmentId, ServerSettingsError } from "@goat/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -77,3 +79,50 @@ describe("ChannelBotHome.claimHere", () => {
     }).pipe(Effect.provide(layer)),
   );
 });
+
+it.effect("checks the caller again inside the settings lock, after a write that held it", () =>
+  Effect.gen(function* () {
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const home = yield* ChannelBotHome.ChannelBotHome;
+    yield* settings.updateSettings({
+      goatBotHome: { environmentId: other, claimedAt: 5, claimId: "x" },
+    });
+    const locked = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    let holderDone = false;
+    const holder = yield* settings
+      .updateSettings(
+        {},
+        Deferred.succeed(locked, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.andThen(Effect.sync(() => void (holderDone = true))),
+        ),
+      )
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(locked);
+    const seenAtCommit: Array<boolean> = [];
+    const claim = yield* home
+      .claimHere(
+        Effect.sync(() => void seenAtCommit.push(holderDone)).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ServerSettingsError({ settingsPath: "revoked", operation: "normalize" }),
+            ),
+          ),
+        ),
+      )
+      .pipe(Effect.flip, Effect.forkChild);
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(holder);
+    assert.strictEqual((yield* Fiber.join(claim)).settingsPath, "revoked");
+    // The authorization ran once, inside the lock and after the holder's write.
+    assert.deepStrictEqual(seenAtCommit, [true]);
+    assert.strictEqual((yield* settings.getSettings).goatBotHome?.environmentId, other);
+  }).pipe(
+    Effect.provide(
+      ChannelBotHome.layer.pipe(
+        Layer.provideMerge(Layer.mergeAll(ServerSettings.layerTest(), identity)),
+      ),
+    ),
+  ),
+);
