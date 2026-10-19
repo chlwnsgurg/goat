@@ -60,8 +60,8 @@ const live = (hub = false, configured = false) =>
             : {}),
           ...(configured
             ? {
-                defaultModelSelection: {
-                  instanceId: M.ProviderInstanceId.make("fixture"),
+                memoryModelSelection: {
+                  instanceId: M.ProviderInstanceId.make("codex"),
                   model: "fixture",
                 },
               }

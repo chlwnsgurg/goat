@@ -37,7 +37,8 @@ const environmentId = M.EnvironmentId.make("fixture");
 const space = M.MemorySpaceId.make(id(1));
 const memoryId = M.MemoryId.make(id(2));
 const threadId = M.ThreadId.make("thread");
-const selection = { instanceId: M.ProviderInstanceId.make("fixture"), model: "fixture" };
+// Memory falls back from disabled instances, so the fixture runs on a default-enabled one.
+const selection = { instanceId: M.ProviderInstanceId.make("codex"), model: "fixture" };
 const now = "2026-10-14T00:00:00.000Z";
 const setup = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -83,7 +84,8 @@ const live = (
     Layer.provideMerge(
       Settings.layerTest(
         {
-          defaultModelSelection: unconfigured ? null : selection,
+          memoryEnabled: !unconfigured,
+          memoryModelSelection: selection,
           memoryHub: local ? { mode: "disabled" } : { mode: "hub", memorySpaceId: space },
         },
         "memoryHub",
@@ -370,7 +372,7 @@ describe("MemoryWorker", () => {
       );
     }).pipe(Effect.provide(live())),
   );
-  it.effect("resumes skipped summaries after configuring a model without a new event", () =>
+  it.effect("resumes skipped summaries after turning memory on without a new event", () =>
     Effect.gen(function* () {
       yield* seed;
       const worker = yield* Worker.MemoryWorker;
@@ -379,7 +381,7 @@ describe("MemoryWorker", () => {
       assert.strictEqual(yield* store.readThreadHookWatermark(), 2);
       assert.strictEqual((yield* store.dueWork(0, 100)).length, 0);
       const settings = yield* Settings.ServerSettingsService;
-      yield* settings.updateSettings({ defaultModelSelection: selection });
+      yield* settings.updateSettings({ memoryEnabled: true });
       yield* worker.sweepDue();
       const page = yield* store.list({
         memorySpaceId: space,
@@ -390,7 +392,7 @@ describe("MemoryWorker", () => {
       assert.strictEqual(page[0]!.status, "active");
     }).pipe(Effect.provide(live(false, undefined, false, 0, true))),
   );
-  it.effect("still cancels deleted thread work when no default model is configured", () =>
+  it.effect("still cancels deleted thread work while memory is off", () =>
     Effect.gen(function* () {
       yield* seed;
       const sql = yield* SqlClient.SqlClient;
@@ -409,6 +411,56 @@ describe("MemoryWorker", () => {
       assert.isNotNull((yield* store.ftsState(environmentId)).measuredAt);
     }).pipe(Effect.provide(live(false, undefined, false, 0, true))),
   );
+  it.effect("moves queued work off an unusable model onto the memory model", () => {
+    const inputs: M.GenerateMemorySummaryInput[] = [];
+    return Effect.gen(function* () {
+      yield* seed;
+      const store = yield* Store.MemoryStore;
+      const stuck = work();
+      yield* store.enqueueWork({
+        ...stuck,
+        status: "retry",
+        claimedBy: null,
+        claimedUntil: null,
+        metadata: {
+          ...(stuck.metadata as Extract<Store.MemoryWork["metadata"], { kind: "summary" }>),
+          modelSelection: { instanceId: selection.instanceId, model: "unsupported-thread-model" },
+        },
+      });
+      const worker = yield* Worker.MemoryWorker;
+      yield* store.claimWork("work", "worker", Date.parse(now), Number.MAX_SAFE_INTEGER);
+      yield* worker.execute((yield* store.readWork("work"))!);
+      const done = yield* store.readWork("work");
+      assert.strictEqual(done?.status, "completed");
+      assert.deepStrictEqual(
+        done?.metadata.kind === "summary" ? done.metadata.modelSelection : null,
+        selection,
+      );
+      assert.isAbove(inputs.length, 0);
+      assert.isTrue(inputs.every((input) => input.modelSelection.model === selection.model));
+    }).pipe(Effect.provide(live(false, (input) => inputs.push(input))));
+  });
+  it.effect("keeps queued summaries while memory is off and resumes when it is on", () => {
+    const inputs: M.GenerateMemorySummaryInput[] = [];
+    return Effect.gen(function* () {
+      yield* seed;
+      const store = yield* Store.MemoryStore;
+      yield* store.enqueueWork({
+        ...work(),
+        status: "pending",
+        claimedBy: null,
+        claimedUntil: null,
+      });
+      const worker = yield* Worker.MemoryWorker;
+      yield* worker.sweepDue();
+      assert.strictEqual((yield* store.readWork("work"))?.status, "pending");
+      assert.strictEqual(inputs.length, 0);
+      const settings = yield* Settings.ServerSettingsService;
+      yield* settings.updateSettings({ memoryEnabled: true });
+      yield* worker.sweepDue();
+      assert.strictEqual((yield* store.readWork("work"))?.status, "completed");
+    }).pipe(Effect.provide(live(false, (input) => inputs.push(input), false, 0, true)));
+  });
   it.effect("inherits summary lineage across incremental generation chunks", () => {
     const inputs: M.GenerateMemorySummaryInput[] = [];
     return Effect.gen(function* () {

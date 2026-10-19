@@ -1,6 +1,7 @@
 import { MemoryHubDiagnosticsSettings } from "./MemoryHubDiagnosticsSettings";
 import { MemoryImportSettings } from "./MemoryImportSettings";
 import { MemoryAgentAccessSettings } from "./MemoryAgentAccessSettings";
+import { MemoryGenerationSettings } from "./MemoryGenerationSettings";
 import { MemoryReportRetrySettings } from "./MemoryReportRetrySettings";
 import { XIcon } from "../solar";
 import { MemoryAdministration } from "./MemorySharingSettings";
@@ -256,6 +257,7 @@ function MemoryDestinationContent({
 
   return (
     <>
+      <MemoryGenerationSettings environmentId={environmentId} />
       <MemoryAgentAccessSettings environmentId={environmentId} />
       {sync ? <MemoryStatusRows sync={sync} /> : null}
       {sync ? (

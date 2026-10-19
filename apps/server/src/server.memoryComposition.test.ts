@@ -21,7 +21,7 @@ import {
 } from "./server.ts";
 
 it.effect(
-  "the application registers the nine core tools and the disable-only tool on one MCP server",
+  "the application registers the nine core tools and three administration tools on one MCP server",
   () =>
     Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
@@ -29,7 +29,7 @@ it.effect(
       expect(names.sort()).toEqual(
         [...M.MEMORY_MCP_TOOLS, ...M.MEMORY_ADMINISTRATION_MCP_TOOLS].sort(),
       );
-      expect(new Set(names).size).toBe(10);
+      expect(new Set(names).size).toBe(12);
       const result = yield* Fixture.call(
         "memory_hub_disable",
         { requestId: M.MemoryOperationId.make(Fixture.id(30)), expectedVersion: 3 },
@@ -41,6 +41,7 @@ it.effect(
       Effect.provide(
         layerMemoryToolkits.pipe(
           Layer.provide(Fixture.core),
+          Layer.provide(Layer.mock(Settings.ServerSettingsService)({})),
           Layer.provide(
             Layer.mock(Sync.MemorySyncService)({
               updateHubSettings: (input, permit) =>

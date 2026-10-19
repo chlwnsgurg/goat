@@ -652,7 +652,17 @@ const cluster = (resolveB?: Resolve) =>
       );
       yield* member.run(
         Settings.ServerSettingsService.use((s) =>
-          s.updateSettings({ defaultModelSelection: member.selection }),
+          s.updateSettings({
+            // Memory falls back from disabled instances, so the fixture model needs one.
+            providerInstances: {
+              [member.selection.instanceId]: {
+                driver: M.ProviderDriverKind.make("codex"),
+                enabled: true,
+                config: {},
+              },
+            },
+            memoryModelSelection: member.selection,
+          }),
         ),
       );
       yield* member.tick;
