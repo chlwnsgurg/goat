@@ -661,3 +661,20 @@ describe("SshHostStatus upload counters", () => {
     ).toBe("Failure");
   });
 });
+
+describe("SshPreflightReport destination", () => {
+  it("accepts a person's own long ~/.ssh/config alias", () => {
+    const alias = "a".repeat(66);
+    const report = {
+      host: alias,
+      destination: { alias, hostname: "box.example", user: "jun", port: 22 },
+      steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({
+        id,
+        state: "passed" as const,
+        summary: "ok",
+      })),
+      ready: true,
+    } as const;
+    expect(Schema.encodeSync(SshPreflightReport)(report).destination.alias).toBe(alias);
+  });
+});

@@ -230,7 +230,10 @@ export type SshPreflightInput = typeof SshPreflightInput.Type;
 export const SshPreflightReport = Schema.Struct({
   host: TrimmedNonEmptyString,
   destination: Schema.Struct({
-    alias: Schema.optionalKey(SshHostAlias),
+    // A person's own ~/.ssh/config alias; only aliases GOAT creates carry the SshHostAlias limit.
+    alias: Schema.optionalKey(TrimmedNonEmptyString),
+    /** The alias is GOAT's managed entry, so Forget host can remove it and its pin. */
+    managed: Schema.optionalKey(Schema.Literal(true)),
     hostname: TrimmedNonEmptyString,
     user: TrimmedNonEmptyString,
     port: PortSchema,
