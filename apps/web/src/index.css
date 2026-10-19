@@ -252,6 +252,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --color-warning-foreground: var(--warning-foreground);
   --color-warning: var(--warning);
   --color-warning-surface: var(--warning-surface);
+  --color-heat-warm: var(--heat-warm);
+  --color-heat-hot: var(--heat-hot);
+  --color-heat-burning: var(--heat-burning);
+  --color-heat-ember: var(--heat-ember);
   /* GOAT Bot's face follows the theme's text and canvas without an accent hue. */
   --color-goat-avatar: color-mix(in oklab, var(--foreground) 6%, var(--background));
   --color-goat-avatar-border: color-mix(in oklab, var(--foreground) 12%, var(--background));
@@ -1185,6 +1189,12 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --warning: var(--color-amber-500);
   --warning-foreground: var(--color-amber-700);
   --warning-surface: color-mix(in srgb, var(--warning) 8%, transparent);
+  /* Fleet machine heat (FleetGraph): warm, hot, and burning, plus the ember
+     highlight its flames fade into. */
+  --heat-warm: var(--color-amber-500);
+  --heat-hot: var(--color-orange-500);
+  --heat-burning: var(--color-red-500);
+  --heat-ember: var(--color-amber-400);
   --update: var(--primary);
   --update-foreground: var(--primary);
   --update-surface: color-mix(in srgb, var(--update) 12%, transparent);
@@ -1245,6 +1255,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
     --merged-foreground: var(--color-violet-400);
     --warning-foreground: var(--color-amber-400);
     --warning-surface: color-mix(in srgb, var(--warning) 16%, transparent);
+    --heat-warm: var(--color-amber-400);
+    --heat-hot: var(--color-orange-400);
+    --heat-burning: var(--color-red-500);
+    --heat-ember: var(--color-amber-200);
     --update-foreground: var(--color-blue-400);
     --update-surface: color-mix(in srgb, var(--update) 18%, transparent);
     --sidebar: var(--card);
@@ -2500,7 +2514,61 @@ code {
   .fleet-graph .fleet-ring {
     animation: fleet-ring 1.8s ease-out infinite;
   }
+  /* Machine heat (HeatLayer): a still glow when hot; a flickering crown of
+     flames and two embers when burning. These HTML boxes animate only
+     transform and opacity, and each running animation is still a little main
+     thread work per frame, so only burning machines move. */
+  .fleet-graph .fleet-heat,
+  .fleet-graph .fleet-heat-spot {
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+  .fleet-graph .fleet-heat[data-tier="hot"] {
+    --fleet-heat-color: var(--heat-hot);
+  }
+  .fleet-graph .fleet-heat[data-tier="burning"] {
+    --fleet-heat-color: var(--heat-burning);
+  }
+  .fleet-graph .fleet-heat-glow {
+    position: absolute;
+    top: -34px;
+    left: -34px;
+    width: 68px;
+    height: 68px;
+    border-radius: 9999px;
+    background: radial-gradient(
+      closest-side,
+      color-mix(in srgb, var(--fleet-heat-color) 50%, transparent) 45%,
+      transparent
+    );
+  }
+  .fleet-graph .fleet-flames {
+    position: absolute;
+    transform-origin: 0 0;
+    animation: fleet-flame 1.3s ease-in-out infinite alternate;
+  }
+  .fleet-graph .fleet-flame {
+    position: absolute;
+    bottom: 0;
+    left: -7.5px;
+    width: 15px;
+    height: 24px;
+    overflow: visible;
+    transform-origin: 50% 100%;
+  }
+  .fleet-graph .fleet-ember {
+    position: absolute;
+    translate: -50% -50%;
+    border-radius: 9999px;
+    background: radial-gradient(var(--heat-ember) 30%, var(--heat-hot));
+    opacity: 0;
+    animation: fleet-ember 2.4s ease-out infinite;
+  }
   .fleet-graph svg[data-paused] * {
+    animation-play-state: paused;
+  }
+  .fleet-graph[data-paused] .fleet-heat-layer * {
     animation-play-state: paused;
   }
   .fleet-graph .fleet-node:focus-visible .fleet-node-ring {
@@ -2542,6 +2610,37 @@ code {
   }
   to {
     transform: scale(1.35);
+    opacity: 0;
+  }
+}
+@keyframes fleet-flame {
+  0% {
+    transform: scale(1, 1) skewX(0deg);
+    opacity: 0.92;
+  }
+  35% {
+    transform: scale(0.94, 1.08) skewX(-4deg);
+    opacity: 1;
+  }
+  70% {
+    transform: scale(1.04, 0.92) skewX(3deg);
+    opacity: 0.85;
+  }
+  100% {
+    transform: scale(0.97, 1.04) skewX(-1deg);
+    opacity: 0.95;
+  }
+}
+@keyframes fleet-ember {
+  0% {
+    transform: translate(0, 0);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(0, -22px);
     opacity: 0;
   }
 }
