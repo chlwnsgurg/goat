@@ -193,11 +193,15 @@ export class ChannelLedger extends Context.Service<
       conversationId: ChannelConversationId,
       limit: number,
     ) => Effect.Effect<ReadonlyArray<ChannelTailEntry>, ChannelLedgerError>;
-    /** Inputs in one conversation whose text or reply contains `query`, newest first. */
+    /**
+     * Inputs in one conversation, accepted before `beforeInputId`, whose text or reply contains
+     * `query`, newest first. The asking input and anything after it are never their own history.
+     */
     readonly searchConversation: (
       conversationId: ChannelConversationId,
       query: string,
       limit: number,
+      beforeInputId: ChannelInputId,
     ) => Effect.Effect<ReadonlyArray<ChannelTailEntry>, ChannelLedgerError>;
     readonly listConversationTasks: (
       conversationId: ChannelConversationId,
@@ -916,7 +920,7 @@ const make = Effect.gen(function* () {
         Effect.mapError(toLedgerError("readConversationTail")),
       ),
 
-    searchConversation: (conversationId, query, limit) => {
+    searchConversation: (conversationId, query, limit, beforeInputId) => {
       const pattern = "%" + query.replace(/[\\%_]/gu, (char) => "\\" + char) + "%";
       return sql<{
         readonly input_id: ChannelInputId;
@@ -926,6 +930,11 @@ const make = Effect.gen(function* () {
       }>`
         SELECT input_id, message_json, accepted_at, reply_json FROM channel_inbox
         WHERE conversation_id = ${conversationId} AND state != 'rejected'
+          -- Rows are stored in the order inputs were accepted, so rowid orders them without ties.
+          AND EXISTS (
+            SELECT 1 FROM channel_inbox AS asking WHERE asking.input_id = ${beforeInputId}
+              AND channel_inbox.rowid < asking.rowid
+          )
           AND (json_extract(message_json, '$.text') LIKE ${pattern} ESCAPE '\\'
             OR json_extract(reply_json, '$.text') LIKE ${pattern} ESCAPE '\\')
         ORDER BY accepted_at DESC, input_id DESC LIMIT ${limit}

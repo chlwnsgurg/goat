@@ -12,6 +12,8 @@ export const CHANNEL_COPY = {
     'I can\'t take work from this account yet. Open GOAT, create a link code under Settings → GOAT Bot → Slack, and send me "link <code>".',
   botMoved: "GOAT Bot moved to another machine. Please resend your message there.",
   receptionFailed: "I couldn't read that just now. Please send it again.",
+  readFoundNothing:
+    "I looked through what I can see and couldn't find that. Can you tell me more about it?",
   agentCannotCreateWork:
     "Only people can start new work. I can tell you how existing work is going.",
   agentCannotMoveWork: "Only people with access to run work can move it to another machine.",

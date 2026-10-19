@@ -45,7 +45,9 @@ two generations. Reads change nothing, so a reception retried after a crash read
 - **Who sees what.** Everyone sees the work of the conversation they write in. A person also sees
   work they asked for elsewhere, and all of the owner's work when they hold `orchestration:read`.
   Agents over MCP see only their own conversation. A Slack or iMessage link acts as the GOAT
-  principal who made the link code, so it sees what that principal sees. Read results and journal
+  principal who made the link code, so it sees what that principal sees, judged with the link as
+  it stands when reception reads: a link removed or narrowed after the message arrived leaves
+  only that conversation's work. Read results and journal
   lines are labelled as records for the model, but the filtering above is what keeps them private.
 
 An owner has one bot, in the Scratch project, and one bot conversation keyed by the owner rather

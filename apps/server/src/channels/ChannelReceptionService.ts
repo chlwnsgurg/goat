@@ -73,6 +73,7 @@ import {
   matchTasks,
   pullRequestLabel,
   RECALL_MEMORY_LINES,
+  RECALL_RESULT_CHARS,
   RECALL_TASK_SCAN,
   RECALL_THREAD_RUNS,
   taskDigest,
@@ -345,9 +346,32 @@ const make = Effect.gen(function* () {
         connectionId,
         externalActorId: viewer.externalActorId,
       });
-      return linked === undefined
+      return linked === undefined || linked.principalId !== viewer.principalId
         ? []
         : viewer.grantedScopes.filter((scope) => linked.grantedScopes.includes(scope));
+    });
+
+  /**
+   * The requester as reads judge them now. A Slack or iMessage link removed or moved to another
+   * person since the message arrived leaves only this conversation's work visible.
+   */
+  const viewerNow = (requester: ChannelRequester, connectionId: string) =>
+    Effect.gen(function* () {
+      const scopes = yield* scopesNow(requester, connectionId).pipe(
+        Effect.orElseSucceed((): ReadonlyArray<string> => []),
+      );
+      const external = requester.originKind === "slack" || requester.originKind === "imessage";
+      const linkedNow =
+        !external ||
+        (requester.externalActorId !== undefined &&
+          (yield* ledger
+            .findIdentity({ connectionId, externalActorId: requester.externalActorId })
+            .pipe(Effect.orElseSucceed(() => undefined)))?.principalId === requester.principalId);
+      return {
+        ...requester,
+        grantedScopes: requester.grantedScopes.filter((scope) => scopes.includes(scope)),
+        ...(linkedNow ? {} : { principalId: "unlinked:" + (requester.externalActorId ?? "") }),
+      } satisfies ChannelRequester;
     });
 
   /**
@@ -402,12 +426,18 @@ const make = Effect.gen(function* () {
     viewer: ChannelRequester,
     conversationId: ChannelConversationId,
     connectionId: string,
+    inputId: ChannelInputId,
   ) =>
     Effect.gen(function* () {
       switch (read.kind) {
         case "memory": {
           const notes = yield* readChannelBotNotes(fileSystem, botFiles);
-          const journal = journalFor(yield* visibleTasks(viewer, conversationId), RECALL_TASK_SCAN);
+          // The whole visible journal is searched; only the prompt's copy is cut to size.
+          const journal = journalFor(
+            yield* visibleTasks(viewer, conversationId),
+            RECALL_TASK_SCAN,
+            Number.POSITIVE_INFINITY,
+          );
           const local = matchMemoryLines(notes + "\n" + journal, read.query);
           const goat = yield* searchGoatMemory(viewer, connectionId, read.query);
           if (local.length === 0 && goat.length === 0) return "Nothing in memory matches.";
@@ -444,8 +474,9 @@ const make = Effect.gen(function* () {
           const records = yield* threads.getThreadRecords(worker.threadId, ["messages"], {
             messageRunIds: recentRuns,
           });
+          const digest = taskDigest(task);
           return (
-            taskDigest(task) +
+            digest +
             "\n" +
             threadDigest(
               records.thread.title || task.title,
@@ -454,11 +485,12 @@ const make = Effect.gen(function* () {
                 text: message.text,
                 createdAt: DateTime.formatIso(message.createdAt),
               })),
+              RECALL_RESULT_CHARS - digest.length - 1,
             )
           );
         }
         case "conversation": {
-          const found = yield* ledger.searchConversation(conversationId, read.query, 5);
+          const found = yield* ledger.searchConversation(conversationId, read.query, 5, inputId);
           return found.length === 0
             ? "No earlier message in this conversation matches."
             : found
@@ -481,11 +513,12 @@ const make = Effect.gen(function* () {
     viewer: ChannelRequester,
     conversationId: ChannelConversationId,
     connectionId: string,
+    inputId: ChannelInputId,
   ): Effect.Effect<ReadonlyArray<ChannelReceptionReadResult>> =>
     Effect.forEach(
       reads,
       (read) =>
-        runRead(read, viewer, conversationId, connectionId).pipe(
+        runRead(read, viewer, conversationId, connectionId, inputId).pipe(
           Effect.timeoutOption(CHANNEL_READ_TIMEOUT_MS),
           Effect.map((text) => ({
             kind: read.kind,
@@ -604,8 +637,10 @@ const make = Effect.gen(function* () {
                 const recent = recentThreads(shells, targets, bot?.threadId);
                 const facts = yield* hostFacts(shells);
                 const notes = yield* readChannelBotNotes(fileSystem, botFiles);
+                // Everything this pass sees about other work is judged with the link as it is now.
+                const viewer = yield* viewerNow(requester, message.connectionId);
                 const journal = journalFor(
-                  yield* visibleTasks(requester, conversationId).pipe(
+                  yield* visibleTasks(viewer, conversationId).pipe(
                     Effect.orElseSucceed((): ReadonlyArray<ChannelTask> => []),
                   ),
                 );
@@ -666,14 +701,16 @@ const make = Effect.gen(function* () {
                 // may see; a second request to read is answered with what the pass wrote.
                 const readResults = yield* runReads(
                   first.value.action.reads,
-                  requester,
+                  viewer,
                   conversationId,
                   message.connectionId,
+                  inputId,
                 );
                 const second = yield* generate({ ...base, readsAllowed: false, readResults });
+                // A pass that asks to read again found nothing to answer from; say so plainly.
                 return Option.map(second, (result): ChannelReceptionResult =>
                   result.action.type === "read"
-                    ? { replyText: result.replyText, action: { type: "report_only" } }
+                    ? { replyText: CHANNEL_COPY.readFoundNothing, action: { type: "report_only" } }
                     : result,
                 );
               }),

@@ -163,9 +163,13 @@ export const taskDigest = (task: ChannelTask): string => {
  * ledger. Built per requester so it never shows work `canSeeTask` hides, and never written to
  * a file, so it cannot drift from the ledger or lose an entry in a crash.
  */
-export const journalFor = (tasks: ReadonlyArray<ChannelTask>, entries = JOURNAL_ENTRIES) => {
+export const journalFor = (
+  tasks: ReadonlyArray<ChannelTask>,
+  entries = JOURNAL_ENTRIES,
+  chars = JOURNAL_CHARS,
+) => {
   const lines: Array<string> = [];
-  let chars = 0;
+  let used = 0;
   for (const task of tasks
     .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     .slice(0, entries)) {
@@ -182,9 +186,9 @@ export const journalFor = (tasks: ReadonlyArray<ChannelTask>, entries = JOURNAL_
         ? ""
         : " — " + cut(task.resultSummary.replace(/\s+/gu, " ").trim(), JOURNAL_RESULT_CHARS)) +
       (prs.length === 0 ? "" : " — " + prs.join(", "));
-    if (chars + line.length + 1 > JOURNAL_CHARS) break;
+    if (used + line.length + 1 > chars) break;
     lines.push(line);
-    chars += line.length + 1;
+    used += line.length + 1;
   }
   return lines.join("\n");
 };
@@ -212,14 +216,19 @@ export interface RecallMessage {
   readonly createdAt: string;
 }
 
-/** The newest messages of a thread, oldest first, each cut to size. */
-export const threadDigest = (title: string, messages: ReadonlyArray<RecallMessage>) => {
-  const newest = messages
+/**
+ * The newest messages of a thread that fit in `budget` characters, shown oldest first. Messages
+ * are taken from the newest backward, so the latest answer is the last thing cut.
+ */
+export const threadDigest = (
+  title: string,
+  messages: ReadonlyArray<RecallMessage>,
+  budget: number = RECALL_RESULT_CHARS,
+) => {
+  const rendered = messages
     .filter((message) => message.role !== "system" && message.text.trim() !== "")
-    .slice(-RECALL_THREAD_MESSAGES);
-  return [
-    "thread " + JSON.stringify(title) + ", newest " + newest.length + " messages:",
-    ...newest.map(
+    .slice(-RECALL_THREAD_MESSAGES)
+    .map(
       (message) =>
         "- " +
         message.createdAt.slice(0, 16) +
@@ -227,7 +236,17 @@ export const threadDigest = (title: string, messages: ReadonlyArray<RecallMessag
         (message.role === "user" ? "request" : "agent") +
         ": " +
         cut(message.text.replace(/\s+/gu, " ").trim(), RECALL_MESSAGE_CHARS),
-    ),
+    );
+  const kept: Array<string> = [];
+  let used = 80 + title.length;
+  for (const line of rendered.toReversed()) {
+    if (used + line.length + 1 > budget) break;
+    kept.unshift(line);
+    used += line.length + 1;
+  }
+  return [
+    "thread " + JSON.stringify(title) + ", newest " + kept.length + " messages:",
+    ...kept,
   ].join("\n");
 };
 

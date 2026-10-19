@@ -25,7 +25,10 @@ import {
   matchMemoryLines,
   matchTasks,
   taskDigest,
+  threadDigest,
 } from "./channelBotRecall.ts";
+import * as ChannelLedger from "./ChannelLedger.ts";
+import { CHANNEL_COPY } from "./channelCopy.ts";
 import {
   botMessages,
   defaultScript,
@@ -184,6 +187,36 @@ describe("GOAT Bot journal", () => {
     ]);
     assert.include(withPr, "goat-si/goat#9 (merged)");
   });
+
+  it("searches every visible entry, not only the part a pass sees", () => {
+    const many = Array.from({ length: 40 }, (_, index) =>
+      task({
+        taskId: ChannelTaskId.make("task:old-" + index),
+        title: index === 0 ? "Rotate the staging certificate" : "Task " + index,
+        resultSummary: "x".repeat(400),
+        updatedAt: "2026-10-12T00:" + String(index).padStart(2, "0") + ":00.000Z",
+      }),
+    );
+    assert.notInclude(journalFor(many), "certificate");
+    const found = matchMemoryLines(journalFor(many, 200, Number.POSITIVE_INFINITY), "certificate");
+    assert.lengthOf(found, 1);
+  });
+});
+
+describe("reading a thread back", () => {
+  it("keeps the newest messages when the result must be cut", () => {
+    const messages = Array.from({ length: 6 }, (_, index) => ({
+      role: "assistant" as const,
+      text: "message " + index + " " + "y".repeat(690),
+      createdAt: "2026-10-12T00:0" + index + ":00.000Z",
+    }));
+    const digest = threadDigest("Login fix", messages, 2_000);
+    assert.isAtMost(digest.length, 2_000);
+    assert.include(digest, "message 5 ");
+    assert.notInclude(digest, "message 0 ");
+    // Oldest kept first, so the thread still reads in order.
+    assert.isBelow(digest.indexOf("message 4 "), digest.indexOf("message 5 "));
+  });
 });
 
 const mergedLink: ThreadPullRequestLink = {
@@ -313,6 +346,7 @@ describe("GOAT Bot reads its memory and work before answering", () => {
                 { kind: "memory", query: "staging" },
                 { kind: "conversation", query: '61% "lighthouse"' },
                 { kind: "conversation", query: "message_json" },
+                { kind: "conversation", query: "mention that score" },
               ],
             },
           });
@@ -333,22 +367,24 @@ describe("GOAT Bot reads its memory and work before answering", () => {
       yield* runtime.drain;
       yield* gateway.ingest(goatInput("when did I mention that score?", "c3"), rpcContext);
       yield* runtime.drain;
-      const [memory, older, metadata] = results[0]!;
+      const [memory, older, metadata, asking] = results[0]!;
       assert.include(memory!.text, "The staging password rotates monthly.");
       assert.include(older!.text, 'the score dropped to 61% "lighthouse"');
       // Only the words people wrote are searched, never the stored record around them.
       assert.strictEqual(metadata!.text, "No earlier message in this conversation matches.");
+      // The question being answered is not its own history.
+      assert.strictEqual(asking!.text, "No earlier message in this conversation matches.");
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.effect("answers with what the second pass wrote when it asks to read again", () => {
+  it.effect("says it found nothing when the second pass asks to read again", () => {
     const harness = makeHarness();
     let calls = 0;
     harness.script.current = (input) => {
       if (input.mode !== "input") return defaultScript(input);
       calls += 1;
       return Effect.succeed({
-        replyText: input.readsAllowed === true ? "Looking." : "I could not find it.",
+        replyText: input.readsAllowed === true ? "Looking." : "",
         action: { type: "read", reads: [{ kind: "work", query: "anything" }] },
       });
     };
@@ -360,8 +396,9 @@ describe("GOAT Bot reads its memory and work before answering", () => {
       yield* runtime.drain;
       assert.strictEqual(calls, 2);
       const texts = (yield* botMessages).messages.map((message) => message.text);
-      assert.include(texts, "I could not find it.");
+      assert.include(texts, CHANNEL_COPY.readFoundNothing);
       assert.notInclude(texts, "Looking.");
+      assert.notInclude(texts, "Looking that up.");
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -515,6 +552,60 @@ describe("GOAT Bot reads GOAT memory under the asker's current link", () => {
       const texts = results.map((result) => result[0]!.text);
       assert.isTrue(texts.some((text) => text.includes("Prefers replies in Korean.")));
       assert.isTrue(texts.some((text) => text === "Nothing in memory matches."));
+    }).pipe(Effect.provide(harness.layer));
+  });
+});
+
+describe("GOAT Bot judges visibility with the link as it is when it reads", () => {
+  it.effect("shows nothing of others' work once the asker's link is removed", () => {
+    const harness = makeHarness();
+    const inputs: Array<ChannelReceptionInput> = [];
+    harness.script.current = (input) => {
+      if (!(input.inputText ?? "").startsWith("what happened")) return defaultScript(input);
+      inputs.push(input);
+      if (input.readsAllowed === true) {
+        return Effect.succeed({
+          replyText: "",
+          action: { type: "read", reads: [{ kind: "work", query: "payroll" }] },
+        });
+      }
+      return Effect.succeed({ replyText: "Okay.", action: { type: "report_only" } });
+    };
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const identities = yield* ChannelIdentityService.ChannelIdentityService;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      yield* gateway.ingest(goatInput("do: fix payroll export", "x1"), rpcContext);
+      yield* runtime.drain;
+      // A teammate who could read every thread when the message arrived.
+      const { code } = yield* identities.createLink(
+        {
+          connectionId: "slack-1",
+          runtimeModeCeiling: "auto-accept-edits",
+          grantedScopes: ["orchestration:read", "orchestration:operate"],
+        },
+        { ...owner, principalId: "teammate", displayName: "Teammate" },
+      );
+      yield* gateway.linkIdentity(
+        {
+          connectionId: "slack-1",
+          externalActorId: "U3",
+          code,
+          idempotencyKey: "link-U3",
+          replyAddress: slackInput("", "unused").replyAddress,
+        },
+        slackContext,
+      );
+      yield* gateway.ingest(
+        slackInput("what happened with payroll?", "Ev-x2", "1760000000.000500", "U3"),
+        slackContext,
+      );
+      yield* ledger.unlinkIdentity({ connectionId: "slack-1", externalActorId: "U3" });
+      yield* runtime.drain;
+      assert.lengthOf(inputs, 2);
+      for (const input of inputs) assert.notInclude(JSON.stringify(input), "payroll export");
     }).pipe(Effect.provide(harness.layer));
   });
 });
