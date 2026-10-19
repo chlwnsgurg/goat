@@ -24,6 +24,8 @@ export const ChannelReceptionModelOutput = Schema.Struct({
   replyText: Schema.String,
   action: Schema.Literals([
     "create_task",
+    "run_turn",
+    "follow_up",
     "read",
     "move_task",
     "status",
@@ -95,6 +97,20 @@ function toActionResult(
         replyText,
         action: { type: "move_task", taskId: output.taskId, host: output.host.trim() },
       });
+    case "run_turn":
+      return decodeResult({
+        replyText,
+        action: {
+          type: "run_turn",
+          title: output.title,
+          instruction: output.instruction,
+          ...(output.notesChangeRequested.trim() === ""
+            ? {}
+            : { notesChangeRequested: output.notesChangeRequested.trim() }),
+        },
+      });
+    case "follow_up":
+      return decodeResult({ replyText, action: { type: "follow_up", taskId: output.taskId } });
     case "read":
       return decodeResult({
         // The reply to a read is never shown; the answer comes from the next pass.
@@ -156,6 +172,7 @@ export function buildChannelReceptionPrompt(input: ChannelReceptionInput) {
         " [" +
         task.status +
         "] " +
+        (task.kind === "turn" ? "(your own turn) " : "") +
         task.title +
         (task.resultSummary === undefined ? "" : " — " + task.resultSummary) +
         (task.host === undefined ? "" : " (on " + task.host + ")") +
@@ -219,7 +236,9 @@ export function buildChannelReceptionPrompt(input: ChannelReceptionInput) {
         ]
       : []),
     "- The machine facts describe the computer running GOAT and its agents. The person may be typing from another device, such as a phone or Slack; say which one you mean when it matters.",
-    "- Start a coding agent only for work that needs tools: reading or changing files, running commands, checking a repository, the web, or anything the facts do not cover. Say in one line that it is starting; the person can keep chatting and hears back when it finishes or needs them.",
+    "- When the answer needs tools but no change to a repository (looking into files or logs on this machine, comparing things, researching on the web, checking several threads, editing your notes), take a turn yourself with run_turn: you work with tools on your own model, can hand research to subagents, and answer when done. Say in one line that you are on it.",
+    "- Start a coding agent with create_task for work that changes a repository or runs in a project: fixing, building, refactoring, opening pull requests. Say in one line that it is starting; the person can keep chatting and hears back when it finishes or needs them.",
+    "- When the new message adds to, corrects, or redirects work listed below as running in this conversation, choose follow_up with that task's taskId: the message goes to the agent already doing it instead of starting new work. Start new work only for a new topic.",
     "- Pick the project yourself. Use the project the conversation is about, else the project of the most recent related thread. Work about the machine itself, or not about any repository, goes to " +
       JSON.stringify(CHANNEL_HOST_WORKSPACE_LABEL) +
       " when it is listed. Ask only when two projects fit equally well, and then offer them as options with the one you recommend first.",
@@ -237,6 +256,8 @@ export function buildChannelReceptionPrompt(input: ChannelReceptionInput) {
     "",
     "Choose exactly one action:",
     "- create_task: work that needs a coding agent. Fill title (short, in the person's language) and instruction (complete and self-contained: the goal, the context from this conversation, relevant standing notes, and what to report back). Set projectId to one listed below whenever one fits. Set host only when the person asks for the work to run on one of the other machines listed below.",
+    "- run_turn: you look into it yourself with tools and answer when done. Fill title (short, in the person's language) and instruction (the question, the context from this conversation, and what the answer should cover). To change or forget a note this way, copy the exact words asking for it into notesChangeRequested.",
+    "- follow_up: the message belongs to running work listed below. Fill taskId; say in replyText that you passed it on.",
     ...(readsAllowed
       ? [
           "- read: look things up before answering, as described above. Fill reads; leave the other keys empty.",

@@ -24,8 +24,10 @@ const allowedFrom: Record<ChannelTaskEvent["type"], ReadonlyArray<ChannelTaskSta
   "task.brief.frozen": ["dispatching"],
   "task.worker.bound": ["dispatching", "running", "waiting_input"],
   "task.progress": ["running"],
-  "task.question.opened": ["received", "dispatching", "running"],
+  // A question can open while another waits: a follow-up the worker refused asks its own.
+  "task.question.opened": ["received", "dispatching", "running", "waiting_input"],
   "task.question.answered": ["waiting_input"],
+  "task.followup.received": ["running"],
   "task.completion.proposed": ["running"],
   "task.completed": ["running"],
   "task.failed": ["received", "dispatching", "running", "waiting_input"],
@@ -138,6 +140,9 @@ export function applyChannelTaskEvent(
             : "running";
       return { ok: true, task: { ...base, status, openQuestions } };
     }
+    // The worker takes the follow-up; the task keeps running until the run that took it settles.
+    case "task.followup.received":
+      return { ok: true, task: base };
     case "task.completion.proposed": {
       if (task.worker?.runId !== event.payload.proposal.runId) {
         return reject("The proposal names a run the task is not bound to.");

@@ -118,6 +118,10 @@ export class WorkerWorld {
   readonly dispatchFailures = new Set<string>();
   readonly launches: Array<ThreadLaunch.ThreadLaunchInput> = [];
   readonly sends: Array<ThreadManagement.ThreadManagementSendInput> = [];
+  /** Follow-ups that joined a running run, by message id, and the run they joined. */
+  readonly steered = new Map<string, RunId>();
+  /** Sends to fail, by message id, with the error the orchestrator would give. */
+  readonly sendFailures = new Map<string, unknown>();
 
   addRun(threadId: ThreadId, userMessageId: MessageId) {
     const existing = this.runs.get(threadId) ?? [];
@@ -409,6 +413,26 @@ export function makeHarness(
         sendToThread: (input) => {
           if (!isWorker(input.threadId)) return real.sendToThread(input);
           world.sends.push(input);
+          const failure = world.sendFailures.get(input.messageId);
+          if (failure !== undefined) return Effect.fail(failure as never);
+          // "auto" joins a running run, as steering does, and starts the next run otherwise. A
+          // repeated message id lands where it landed the first time, as command receipts do.
+          const steeredInto = world.steered.get(input.messageId);
+          const latest = world.latestRun(input.threadId);
+          if (steeredInto !== undefined) {
+            const run = (world.runs.get(input.threadId) ?? []).find((r) => r.id === steeredInto);
+            return Effect.succeed({ run, delivery: "steered" } as never);
+          }
+          if (
+            input.mode === "auto" &&
+            latest?.status === "running" &&
+            !(world.runs.get(input.threadId) ?? []).some(
+              (run) => run.userMessageId === input.messageId,
+            )
+          ) {
+            world.steered.set(input.messageId, latest.id);
+            return Effect.succeed({ run: latest, delivery: "steered" } as never);
+          }
           if (
             !(world.runs.get(input.threadId) ?? []).some(
               (run) => run.userMessageId === input.messageId,
@@ -416,7 +440,10 @@ export function makeHarness(
           ) {
             world.addRun(input.threadId, input.messageId);
           }
-          return Effect.succeed({} as never);
+          const run = (world.runs.get(input.threadId) ?? []).find(
+            (candidate) => candidate.userMessageId === input.messageId,
+          );
+          return Effect.succeed({ run, delivery: "started" } as never);
         },
         delegatedTaskResultPending: () => Effect.succeed(false),
       });

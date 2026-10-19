@@ -280,6 +280,15 @@ export class ChannelLedger extends Context.Service<
     readonly listPendingForwards: (
       limit: number,
     ) => Effect.Effect<ReadonlyArray<ChannelPendingEvent>, ChannelLedgerError>;
+    /** Whether any recorded answer or follow-up for this task is still waiting to be sent. */
+    readonly hasPendingForward: (
+      taskId: ChannelTaskId,
+    ) => Effect.Effect<boolean, ChannelLedgerError>;
+    /** Whether a forward for this task was recorded before `sequence` and is still waiting. */
+    readonly hasEarlierPendingForward: (input: {
+      readonly taskId: ChannelTaskId;
+      readonly sequence: number;
+    }) => Effect.Effect<boolean, ChannelLedgerError>;
     readonly completeForward: (input: {
       readonly owner: string;
       readonly sequence: number;
@@ -1254,6 +1263,26 @@ const make = Effect.gen(function* () {
           rows.map((row) => ({ sequence: row.sequence, event: decodeEvent(row.event_json) })),
         ),
         Effect.mapError(toLedgerError("listPendingForwards")),
+      ),
+
+    hasPendingForward: (taskId) =>
+      sql<{ readonly found: number }>`
+        SELECT 1 AS found FROM channel_task_events
+        WHERE task_id = ${taskId} AND forward_state = 'pending' LIMIT 1
+      `.pipe(
+        Effect.map((rows) => rows.length > 0),
+        Effect.mapError(toLedgerError("hasPendingForward")),
+      ),
+
+    hasEarlierPendingForward: (input) =>
+      sql<{ readonly found: number }>`
+        SELECT 1 AS found FROM channel_task_events
+        WHERE task_id = ${input.taskId} AND forward_state = 'pending'
+          AND sequence < ${input.sequence}
+        LIMIT 1
+      `.pipe(
+        Effect.map((rows) => rows.length > 0),
+        Effect.mapError(toLedgerError("hasEarlierPendingForward")),
       ),
 
     completeForward: (input) =>
