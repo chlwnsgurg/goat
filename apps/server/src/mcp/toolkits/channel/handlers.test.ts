@@ -354,18 +354,24 @@ it.effect(
   "a credential revoked while the claim waits for the settings lock changes nothing",
   () => {
     const harness = makeHarness();
-    // The write holding the lock revokes the credential as it finishes, so any check made after
-    // the claim gets the lock sees the revocation, whenever the claim's first check ran.
     let revoked = false;
+    let started: Deferred.Deferred<void> | undefined;
     const reauthorize = () =>
-      revoked
-        ? Effect.fail(
-            new EnvironmentAuthorizationError({
-              message: "revoked",
-              requiredScope: "settings:write",
-            }),
-          )
-        : Effect.void;
+      Effect.suspend(() =>
+        revoked
+          ? Effect.fail(
+              new EnvironmentAuthorizationError({
+                message: "revoked",
+                requiredScope: "settings:write",
+              }),
+            )
+          : Effect.void,
+      );
+    // The claim's first check reads the client's access; that read marks it as started.
+    const access = (): AuthMcpClientAccess => {
+      if (started !== undefined) Deferred.doneUnsafe(started, Effect.void);
+      return "full-access";
+    };
     return Effect.gen(function* () {
       const settings = yield* ServerSettings.ServerSettingsService;
       yield* settings.updateSettings({ goatBotHome: goneHome });
@@ -374,14 +380,16 @@ it.effect(
       const holder = yield* settings
         .updateSettings(
           {},
-          Deferred.succeed(locked, undefined).pipe(
-            Effect.andThen(Deferred.await(release)),
-            Effect.andThen(Effect.sync(() => void (revoked = true))),
-          ),
+          Deferred.succeed(locked, undefined).pipe(Effect.andThen(Deferred.await(release))),
         )
         .pipe(Effect.forkChild);
       yield* Deferred.await(locked);
+      const begun = yield* Deferred.make<void>();
+      started = begun;
       const claim = yield* callHomeTool("channel_bot_home_claim").pipe(Effect.forkChild);
+      yield* Deferred.await(begun);
+      // Revoked after the claim passed its first check and while the lock is still held.
+      revoked = true;
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(holder);
       const failure = yield* Fiber.join(claim);
@@ -390,13 +398,6 @@ it.effect(
         JSON.stringify(failure),
       );
       assert.deepStrictEqual((yield* settings.getSettings).goatBotHome, goneHome);
-    }).pipe(
-      Effect.provide(
-        Layer.merge(
-          homeScope(() => "full-access", reauthorize),
-          harness.layer,
-        ),
-      ),
-    );
+    }).pipe(Effect.provide(Layer.merge(homeScope(access, reauthorize), harness.layer)));
   },
 );

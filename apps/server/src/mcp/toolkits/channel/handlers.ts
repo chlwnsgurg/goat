@@ -222,7 +222,7 @@ export const layer = McpToolAccess.toLayer(
           // Inside the settings lock: the caller must still have full access and, when it
           // holds a credential, that credential must still be live.
           const stillAllowed = check.pipe(
-            Effect.andThen(scope.reauthorize?.([]) ?? Effect.void),
+            Effect.andThen(Effect.suspend(() => scope.reauthorize?.([]) ?? Effect.void)),
             Effect.provideContext(services),
           );
           return yield* home
