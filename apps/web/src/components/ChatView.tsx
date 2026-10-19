@@ -234,6 +234,7 @@ import {
 } from "../types";
 import { useTheme } from "../hooks/useTheme";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
+import { useCopyConnectionDiagnostic } from "../hooks/useCopyConnectionDiagnostic";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { settleAndAdvance } from "../settleAndAdvance";
 import { subscribeSnapShotComposerFocus } from "../lib/desktopSnapShot";
@@ -2100,6 +2101,7 @@ export default function ChatView(props: ChatViewProps) {
     );
   }, [activeReconnectingEnvironmentId]);
   const activeEnvironmentUnavailableLabel = activeEnvironment?.label ?? null;
+  const copyConnectionDiagnostic = useCopyConnectionDiagnostic(activeEnvironment);
   const activeEnvironmentUnavailableState = (() => {
     if (!activeEnvironmentUnavailable || !activeEnvironmentUnavailableLabel || !activeEnvironment) {
       return null;
@@ -2425,6 +2427,9 @@ export default function ChatView(props: ChatViewProps) {
               {environmentReconnecting ? "Retry now" : "Reconnect"}
             </Button>
             {disconnectAction}
+            <Button size="xs" variant="ghost" onClick={copyConnectionDiagnostic}>
+              Copy diagnostic
+            </Button>
           </>
         ),
       });

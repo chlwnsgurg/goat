@@ -42,6 +42,7 @@ import {
 } from "@goat/client-runtime/state/runtime";
 import * as Option from "effect/Option";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { useCopyConnectionDiagnostic } from "../../hooks/useCopyConnectionDiagnostic";
 import { cn } from "../../lib/utils";
 import { SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
@@ -379,6 +380,7 @@ function SavedBackendListRow({
   const runtimeResult = useAtomValue(runtimeAtom);
   const runtimeStatus = runtimeResult?.status;
   const errorTraceId = environment.connection.traceId;
+  const copyDiagnostic = useCopyConnectionDiagnostic(environment);
   const { copyToClipboard: copyTraceIdToClipboard } = useCopyToClipboard<{ traceId: string }>({
     target: "trace ID",
     onCopy: ({ traceId }) => {
@@ -674,6 +676,7 @@ function SavedBackendListRow({
           {errorTraceId ? (
             <MenuItem onClick={() => copyTraceId(errorTraceId)}>Copy trace ID</MenuItem>
           ) : null}
+          <MenuItem onClick={copyDiagnostic}>Copy diagnostic</MenuItem>
           <MenuSeparator />
           {savedSshTarget && isSshHostAlias(savedSshTarget.alias) && onForget ? (
             <MenuItem variant="destructive" onClick={() => onForget(environment)}>

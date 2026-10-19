@@ -158,6 +158,12 @@ describe("connection presentation", () => {
       error: "Socket closed.",
       traceId: "trace-previous",
       stage: "preparing",
+      failure: {
+        kind: "retrying",
+        reason: "transport",
+        detail: "Socket closed.",
+        traceId: "trace-previous",
+      },
     });
     expect(
       presentConnectionState(
@@ -177,6 +183,12 @@ describe("connection presentation", () => {
       error: "Disconnected.",
       traceId: "trace-1",
       retryAt: 1,
+      failure: {
+        kind: "retrying",
+        reason: "transport",
+        detail: "Disconnected.",
+        traceId: "trace-1",
+      },
     });
   });
 
@@ -199,6 +211,12 @@ describe("connection presentation", () => {
       error: "Relay connection timed out.",
       traceId: "trace-retry",
       stage: "opening",
+      failure: {
+        kind: "retrying",
+        reason: "transport",
+        detail: "Relay connection timed out.",
+        traceId: "trace-retry",
+      },
     });
   });
 
