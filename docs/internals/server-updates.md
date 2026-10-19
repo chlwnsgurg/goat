@@ -35,14 +35,37 @@ same-directory replacement with file and directory fsync. Invalid state stops
 startup rather than guessing which runtime to boot.
 
 The trial must finish migrations, acquire dependencies, bind HTTP, and park every
-long-running root at the activation gate before reporting `prepared`. The launcher
-then commits the target version durably and replies `committed`. Only then may the
+long-running root at the activation gate before reporting `prepared` with the bound
+HTTP port. The descriptor route already serves while those roots are parked:
+`routesReady` is part of the prepared barrier, and metadata does not wait for
+activation. The launcher probes `/.well-known/goat/environment` over IPv4 loopback
+with a 30-second deadline covering connection through the complete JSON body. It
+requires HTTP 200, the exact target `serverVersion`, and valid SSH and orchestration
+ranges using the shared protocol comparator. The launcher's own older protocol
+versions do not constrain the ranges the new build may serve.
+
+After a successful probe the launcher commits the target version durably and
+replies `committed`. Only then may the
 child release its gates, accept commands, and publish ready. Keep fallible startup
 acquisitions before this boundary. A listener alone does not prove the runtime is
 ready to commit.
 
-A failed or timed-out trial returns to the old version. After commit, the target
-is authoritative and the service manager's ordinary restart policy applies.
+A failed or timed-out trial returns to the old version; a failed probe records
+`rolled-back` with `smoke-failed:<category>`. An older trial without a port skips
+the probe with a launcher log and still receives probation. These optional fields
+keep launcher protocol 3: older decoders ignore the port and new decoders accept
+its absence. A surviving older launcher cannot supply the new health guarantees
+until a local service update replaces it.
+
+For ten minutes after commit, the target is on probation and the database snapshot
+stays available. Any child exit, including exit code zero or a signal, rolls back
+with `probation-exit:<code-or-signal>`, except an explicit service stop, a stop
+marker, or the state-directory-owned idle path. Another update is refused during
+probation so there is only one rollback snapshot. The deadline and database path
+are persisted in service state; a launcher restart retains the original deadline.
+Expiry durably clears probation and discards the snapshot. After that, an unexpected
+active exit fails the launcher so the service manager's ordinary restart policy
+applies.
 
 The prepared deadline is long because migrations can scale with the database
 and block the trial's main thread, so it cannot report progress. A missed
@@ -71,9 +94,14 @@ A rollback that finds the lock busy stays pending and retries, across launcher
 restarts too. Servers older than the lock do not record themselves, so they stay
 invisible to this check.
 
-Rollback stops the trial before restoring. A durable restore marker makes an
-interrupted restore finish before either version boots. Keep the snapshot until
-commit, or until both restoration and the terminal rollback state are durable.
+Rollback stops the trial before restoring. A probation rollback first durably
+records its reason, so recovery still finishes that rollback if ownership stays
+busy beyond the probation deadline. A durable restore marker makes an interrupted
+restore finish before either version boots. Keep the snapshot until probation
+expires, or until both restoration and the terminal rollback state are durable.
+The owner-log rule also applies after launcher restarts: a restarted active server
+records a normal service owner, so its writes prevent restoration of the earlier
+trial snapshot even though the version still rolls back.
 Attachments and other files outside SQLite are outside this rollback boundary.
 
 ## Client acknowledgement
