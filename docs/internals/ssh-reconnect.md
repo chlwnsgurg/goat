@@ -156,11 +156,13 @@ for `ConnectTimeout`, and a sleeping laptop can stay away for hours. The long
 cap never delays a return: every signal that conditions changed skips the wait.
 
 A long resume (`application-active-reconnect`) resets the ladder and opens a
-30 s window measured with the Effect Clock. Failed attempts in that window
-retry after a flat 2 s, including the published `retryAt`, and do not advance
+30 s window measured with the Effect Clock's monotonic time. Failed attempts
+in that window retry after a flat 2 s, including the published `retryAt`, and do not advance
 the failure count. The first failure at or after the window ends uses the
 ladder's first step (1–2 s); subsequent failures escalate normally. Ordinary
-foreground and short-resume probes do not open this window.
+foreground and short-resume probes do not open this window. A successful
+connection or an explicit disconnect clears it; published `retryAt` values
+still use wall time.
 
 ## Resuming
 
@@ -172,7 +174,10 @@ duplicates targeting its predecessor. A later Retry can still replace that
 attempt if it stalls. Ordinary foreground and network-change signals leave
 establishment running. Desktop suspend cancels an in-flight establishment and
 any pending retry timer without counting a failure. No new attempt starts
-until a foreground/resume signal arrives; the next wake runs one replacement.
+until a foreground/resume signal, Connect, Retry, or an online network change
+arrives. A cancelled establishment is shown as offline with no active stage
+or retry timer. A long resume still runs one replacement if the network reports
+offline while recovering, including when it ends the suspend wait.
 An already connected session is left for the wake's probe or replacement.
 All but the return to online reset the retry ladder:
 

@@ -277,7 +277,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   const probeUnanswered = yield* Ref.make(false);
   // Cancellation consumes its signal; suspension must still gate later queued requests.
   const suspended = yield* Ref.make(false);
-  const wakeRetryUntil = yield* Ref.make(0);
+  const wakeRetryUntil = yield* Ref.make(0n);
   const state = yield* SubscriptionRef.make<SupervisorConnectionState>(
     !initialIntent.desired
       ? availableState(initialIntent, 0)
@@ -381,14 +381,30 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   });
 
   const signal = Effect.fn("EnvironmentSupervisor.signal")(function* (next: SupervisorSignal) {
+    if (
+      next._tag === "ConnectRequested" ||
+      next._tag === "RetryRequested" ||
+      (next._tag === "NetworkChanged" && next.network === "online")
+    ) {
+      yield* Ref.set(suspended, false);
+    }
+    if (next._tag === "DisconnectRequested") {
+      yield* Ref.set(wakeRetryUntil, 0n);
+    }
     if (next._tag === "Wakeup") {
       if (next.reason === "suspend") {
         yield* Ref.set(suspended, true);
-      } else if (next.reason !== "credentials-changed" && next.reason !== "network-changed") {
+      } else if (
+        next.reason !== "credentials-changed" &&
+        (next.reason !== "network-changed" || (yield* Ref.get(intent)).network === "online")
+      ) {
         yield* Ref.set(suspended, false);
       }
       if (next.reason === "application-active-reconnect") {
-        yield* Ref.set(wakeRetryUntil, (yield* Clock.currentTimeMillis) + WAKE_RETRY_WINDOW_MS);
+        yield* Ref.set(
+          wakeRetryUntil,
+          (yield* Clock.monotonicTimeNanos) + BigInt(WAKE_RETRY_WINDOW_MS) * 1_000_000n,
+        );
       }
     }
     // Delayed signals may target an attempt that their replacement already superseded.
@@ -812,6 +828,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       } satisfies AttemptOutcome;
     }
 
+    yield* Ref.set(wakeRetryUntil, 0n);
     const connectedAt = yield* Clock.currentTimeMillis;
     yield* Queue.clear(betterRouteChecks);
     yield* Queue.take(betterRouteChecks).pipe(
@@ -889,20 +906,19 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   }, Effect.ensuring(clearLease));
 
   const waitForRetrySignal = Effect.fnUntraced(function* (delayMs: number) {
-    // @effect-diagnostics-next-line raceFirstWithSleepToTimeout:off - the sleep is the retry delay (false), not a timeout around the signal loop
+    // @effect-diagnostics-next-line raceFirstWithSleepToTimeout:off - the sleep is the retry delay, not a timeout around the signal loop
     return yield* Effect.raceFirst(
-      Effect.sleep(delayMs).pipe(Effect.as(false)),
+      Effect.sleep(delayMs).pipe(Effect.as(undefined)),
       Effect.gen(function* () {
         for (;;) {
           const next = yield* Queue.take(signals);
           switch (next._tag) {
             case "Wakeup":
-              return ConnectionWakeups.resetsRetryBackoff(next.reason);
             case "ConnectRequested":
             case "DisconnectRequested":
             case "RetryRequested":
             case "NetworkChanged":
-              return false;
+              return next;
             case "BetterRouteAvailable":
               break;
           }
@@ -913,9 +929,6 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
 
   const waitForSignal = Queue.take(signals).pipe(
     Effect.repeat({ while: (next) => next._tag === "BetterRouteAvailable" }),
-    Effect.map(
-      (next) => next._tag === "Wakeup" && ConnectionWakeups.resetsRetryBackoff(next.reason),
-    ),
   );
 
   const run = Effect.fnUntraced(function* () {
@@ -928,14 +941,17 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       pendingRetry = Option.none();
     };
     let replacing = false;
+    const handleSignal = (next: SupervisorSignal | undefined) => {
+      if (next?._tag === "Wakeup") {
+        if (ConnectionWakeups.resetsRetryBackoff(next.reason)) resetRetryLadder();
+        if (next.reason === "application-active-reconnect") replacing = true;
+      }
+    };
 
     for (;;) {
       const pendingSignals = yield* Queue.clear(signals);
       for (const next of pendingSignals) {
-        if (next._tag === "Wakeup") {
-          if (ConnectionWakeups.resetsRetryBackoff(next.reason)) resetRetryLadder();
-          if (next.reason === "application-active-reconnect") replacing = true;
-        }
+        handleSignal(next);
       }
       if (yield* Ref.getAndSet(resetRetryState, false)) {
         failureCount = 0;
@@ -949,21 +965,19 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         replacing = false;
         yield* clearLease;
         yield* setState(availableState(currentIntent, generation));
-        yield* waitForSignal;
+        handleSignal(yield* waitForSignal);
         continue;
       }
       if (yield* Ref.get(suspended)) {
-        const applicationActivated = yield* waitForSignal;
-        if (applicationActivated) resetRetryLadder();
+        yield* clearLease;
+        yield* setState(offlineState(currentIntent, generation, failureCount + 1, latestFailure));
+        handleSignal(yield* waitForSignal);
         continue;
       }
       if (currentIntent.network === "offline" && !replacing) {
         yield* clearLease;
         yield* setState(offlineState(currentIntent, generation, failureCount + 1, latestFailure));
-        const applicationActivated = yield* waitForSignal;
-        if (applicationActivated) {
-          resetRetryLadder();
-        }
+        handleSignal(yield* waitForSignal);
         continue;
       }
 
@@ -1017,10 +1031,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           error.reason === "configuration" && error.localProxyUnavailable === true
             ? waitForRetrySignal(LOCAL_PROXY_RECHECK_MS)
             : waitForSignal;
-        const applicationActivated = yield* blockedWait;
-        if (applicationActivated) {
-          resetRetryLadder();
-        }
+        handleSignal(yield* blockedWait);
         continue;
       }
 
@@ -1030,7 +1041,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         continue;
       }
 
-      const inWakeWindow = (yield* Clock.currentTimeMillis) < (yield* Ref.get(wakeRetryUntil));
+      const inWakeWindow = (yield* Clock.monotonicTimeNanos) < (yield* Ref.get(wakeRetryUntil));
       const delayMs = inWakeWindow
         ? WAKE_RETRY_DELAY_MS
         : retryDelayMs(failureCount, yield* Random.next);
@@ -1052,10 +1063,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         lastFailure: latestFailure,
         retryAt: (yield* Clock.currentTimeMillis) + delayMs,
       });
-      const applicationActivated = yield* waitForRetrySignal(delayMs);
-      if (applicationActivated) {
-        resetRetryLadder();
-      }
+      handleSignal(yield* waitForRetrySignal(delayMs));
     }
   });
 
