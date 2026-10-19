@@ -7,8 +7,25 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 import * as HostProcess from "@goat/shared/HostProcess";
-import { makeOwnedSshTunnelCommand } from "./tunnelOwner.ts";
+import { makeOwnedSshTunnelCommand, ownedAuthDirectory } from "./tunnelOwner.ts";
 import { assert, describe, expect, it } from "@effect/vitest";
+
+describe("owned auth directory", () => {
+  it("deletes only GOAT's per-forward askpass temp directory", () => {
+    assert.equal(
+      ownedAuthDirectory(
+        "/var/folders/x/T/goat-ssh-runtime-a1B2/t3code-ssh-askpass/ssh-askpass.sh",
+      ),
+      "/var/folders/x/T/goat-ssh-runtime-a1B2",
+    );
+    assert.equal(ownedAuthDirectory(undefined), "");
+    assert.equal(ownedAuthDirectory("/usr/libexec/ssh-askpass"), "");
+    assert.equal(
+      ownedAuthDirectory("/Users/jo/.goat/desktop/t3code-ssh-askpass/ssh-askpass.sh"),
+      "",
+    );
+  });
+});
 
 const listen = (server: NodeNet.Server, port = 0) =>
   new Promise<void>((resolve, reject) => {

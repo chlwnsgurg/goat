@@ -64,7 +64,7 @@ import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as SshAuth from "./auth.ts";
-import { makeOwnedSshTunnelCommand } from "./tunnelOwner.ts";
+import { makeOwnedSshTunnelCommand, ownedAuthDirectory } from "./tunnelOwner.ts";
 import { readLocalRuntimeArchive } from "./runtimeArchive.ts";
 import { downloadRuntimeArchiveWithGh } from "./runtimeArchiveGh.ts";
 import { downloadRuntimeArchiveWithHttps } from "./runtimeArchiveHttp.ts";
@@ -3391,11 +3391,7 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
   ];
   const sshCommand = yield* resolveSshCommand;
   const platform = yield* HostProcess.Platform;
-  const path = yield* Path.Path;
-  const authDirectory =
-    childEnvironment.SSH_ASKPASS === undefined
-      ? ""
-      : path.dirname(path.dirname(childEnvironment.SSH_ASKPASS));
+  const authDirectory = ownedAuthDirectory(childEnvironment.SSH_ASKPASS);
   const tunnelCommand = [sshCommand, ...args];
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const { scope } = input;
