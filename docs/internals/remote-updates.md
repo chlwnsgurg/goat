@@ -21,9 +21,9 @@ working with servers that did not.
 App and server update independently. Compatibility is decided by the protocol
 range a server advertises and by individual capabilities, never by release
 versions. Every update targets one exact, verified build, moves a server only
-when someone asked for it (a person, an agent with the grant, or the owning
-client's idle refresh), waits for idle unless a person confirmed otherwise, and
-records who asked.
+when a person, an agent with the grant, the owning client's idle refresh, or
+the server's enabled auto-update scheduler asks for it. It waits for idle unless a
+person confirmed otherwise and records who asked.
 
 Concretely:
 
@@ -42,7 +42,9 @@ Concretely:
    cache, mirror, public release, then `gh`. When the exact archive is
    unavailable, the host keeps a compatible runtime it already has and reports
    that. It may move to a newer installed runtime only when GOAT itself recorded
-   and verified that install. It never picks a "latest" release on its own.
+   and verified that install. Launcher-managed servers also resolve their own
+   channel's newest release under the staged auto-update policy below; installation
+   still names one exact build.
 4. **Ranges, not versions.** A client speaks one orchestration protocol. A server
    serves a range and advertises it. The client connects when the range includes
    its protocol; otherwise exactly one side is named as the one to update.
@@ -71,9 +73,9 @@ all of them for security, and a judge writing the verdict.
 - **Server-led** (Tailscale auto-update, herdr's settings-driven updates): each
   server owns its channel, schedules its own updates, and tells clients to update.
   Destination ownership of the selected version and idle-only activation were
-  kept. A scheduler, removing client archive uploads after bootstrap, and moving
-  SSH runtimes under the service launcher were deferred: none is needed for safe
-  manual and owner-driven updates, and each is substantial.
+  kept. Launcher-managed stable and nightly servers now schedule their own idle
+  updates under ADR-0016. Removing client archive uploads after bootstrap and
+  moving client-launched SSH runtimes under the service launcher remain deferred.
 
 The red team's findings that changed the design: a launcher-managed update
 stopped running work without an idle check or confirmation; an installed-runtime
@@ -125,14 +127,16 @@ Precedents that shaped specific rules:
 | unknown or malformed             | Compatibility cannot be established; no automatic replacement.                                                      | Owner of either side. |
 
 An incompatible pair restricts the connection. It never forces an unattended
-restart. Compatible updates are optional and idle-only by default; an immediate
-replacement needs a person's confirmation bound to that environment and target.
+restart. Compatible updates are idle-only by default. Background services
+auto-update unless their owner disables the setting; an immediate replacement
+needs a person's confirmation bound to that environment and target.
 
 ## Runtime supply and selection
 
 - **Exact target.** An update resolves one exact version. The SSH path targets the
   owning client's release; `goat update` and `server.updateServer` target the
-  requested version. The launcher refuses anything that is not newer.
+  requested version. Automatic service updates resolve the newest release on the
+  server's own channel. The launcher refuses anything that is not newer.
 - **Supply order** starts on the host. For a published version (stable, nightly
   or preview) with no mirror configured, the host downloads the archive from the
   public release itself and verifies it against `SHA256SUMS`. If it cannot (no
@@ -209,7 +213,8 @@ Integrity is TLS plus `SHA256SUMS` from the same release; the archive executable
 must also report the exact version before the install is published. Release
 signatures would need a signing key and a verifier on every host, which no host
 has today. Channels follow the version string (`cliReleaseChannelOf`), and every
-download names one exact tag, so a host never follows a channel on its own. Paid
+download names one exact tag. The service scheduler follows only the server's
+own stable or nightly channel; the SSH client path keeps its exact target. Paid
 buckets, CDNs and npm were not needed: GitHub release assets are free, public and
 already published by the nightly workflow.
 
@@ -310,6 +315,29 @@ Both refuse to restore over another server's writes. After commit the new versio
 is authoritative: a later downgrade is a new, deliberate update with its own
 migration check, never a stale client reconnecting.
 
+## Server auto-update
+
+Launcher-managed servers enable `automaticServerUpdates` by default. The root parks
+at activation, checks after 10 minutes, then every six hours. Only publishable
+stable and nightly builds participate, always on their own channel. Desktop-managed
+and foreground servers and dev, PR and preview builds never do. The newest target must be strictly
+newer and differ from the launcher's last failed or rolled-back target.
+
+A release without a valid publication time is ineligible. SHA-256 of
+`environmentId:targetVersion`, taking the first four bytes as an unsigned big-endian
+integer modulo 100, fixes each server's bucket. Stable waits 48 hours, then opens
+over 72 hours; nightly opens over 12 hours without a soak. The bucket's fraction of
+the window determines eligibility, so retries and restarts never move a server
+into an earlier cohort.
+
+Preparation uses the same checksum verification and preflight as manual updates.
+Activation calls `ServerSelfUpdate.update` with actor `auto-update` and without
+`confirmReplacement`, retaining both idle checks and admission closure. Busy
+activation retries every 10 minutes using the installed runtime; it does not
+redownload. Opt-out is checked again before activation. Discovery or preparation
+failure logs and waits for the next six-hour check. The scheduler shares the manual
+updater's in-flight guard and never creates a second replacement path.
+
 ## Migration plan
 
 1. Read the advertised orchestration range everywhere (no behavior change while
@@ -322,7 +350,7 @@ migration check, never a stale client reconnecting.
    so it can update without the app, preserving its identity, data, and port
    (this also narrows issue #1, where the desktop and SSH servers on one host are
    separate environments); serve the previous protocol only when a protocol bump
-   needs it; and a consented, idle-only update scheduler on servers.
+   needs it. The idle-only service scheduler is implemented as described above.
 
 ## Test plan
 
