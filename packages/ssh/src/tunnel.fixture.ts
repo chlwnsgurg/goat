@@ -163,7 +163,7 @@ export const makeProtocolTestSpawner = (spawn: Parameters<typeof ChildProcessSpa
         const script = new TextDecoder().decode(
           new Uint8Array(bytes.flatMap((chunk) => Array.from(chunk))),
         );
-        if (script.includes("ready=false"))
+        if (script.includes("ready=false") && !isRemoteLaunch(commandArgs(command)))
           return makeSuccessfulProcess(JSON.stringify({ platform, arch, ready: true }));
         if (command._tag === "StandardCommand")
           return yield* spawn({

@@ -16,6 +16,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { SshLaunchError } from "./errors.ts";
 import { downloadRuntimeArchiveWithGh } from "./runtimeArchiveGh.ts";
 import * as SshTunnel from "./tunnel.ts";
+import { isRemoteLaunch } from "./tunnel.fixture.ts";
 
 const version = "1.2.3-preview.20260911.4";
 const asset = cliArchiveFileName(version, "linux-x64");
@@ -111,7 +112,7 @@ const fixture = Effect.fn("test.ghFixture")(function* (
         return processHandle();
       }
       const script = new TextDecoder().decode(data);
-      if (script.includes("ready=false")) {
+      if (script.includes("ready=false") && !isRemoteLaunch(command.args)) {
         calls.push("probe");
         if (barrier !== undefined && calls.filter((call) => call === "probe").length === 2) {
           yield* Deferred.succeed(barrier.secondProbe, undefined);
@@ -128,7 +129,7 @@ const fixture = Effect.fn("test.ghFixture")(function* (
         calls.push("mcp");
         return processHandle('T3_CEILING=default\n{"token":"fixture-session","expiresAt":null}');
       }
-      if (command.args.some((arg, index) => arg === "-s" && command.args[index + 1] === "--")) {
+      if (isRemoteLaunch(command.args)) {
         calls.push("launch");
         return processHandle(
           JSON.stringify({

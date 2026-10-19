@@ -80,6 +80,14 @@ A changed, reinstalled, or removed executable, or a replaced or restarted server
 asked again, so the rechecks still guard every step. The probe prunes facts only when their
 version path is absent, preserving installed versions and symlinks. Windows hosts record nothing.
 
+A stale forward can fold the full probe into the launch command for a previously selected
+owned runtime, with no deferred replacement, blocked update or acquisition failure.
+The probe's answer and a fingerprint of the executable, live process records, runner and
+ownership must match the last launch. A mismatch returns the observed probe to the normal
+selection path before launching anything. Explicit refreshes and confirmations, first-connection
+refreshes, and Windows hosts keep the separate probe. The cost log names the folded attempt
+`runtime-probe-folded`; the launch still rechecks its selection before use.
+
 The runner keeps `run-t3.sh` because independently updated clients and retained supervisors
 use that path for reuse, replacement, and rollback. Its shell variables use `GOAT_*`;
 only literal `T3_ARCHIVE_VERSION` and `T3_NODE_SCRIPT_PATH` declarations remain as metadata

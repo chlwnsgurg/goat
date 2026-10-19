@@ -24,6 +24,7 @@ import {
   testHttpClient,
   testNetService,
   uploadTarget,
+  isRemoteLaunch,
 } from "./tunnel.fixture.ts";
 import { makeProtocolFixture } from "./tunnel.protocol.fixture.ts";
 
@@ -77,7 +78,8 @@ const fixture = (initial: unknown, runnerOptions: SshTunnel.RemoteGoatRunnerOpti
           ? yield* input.stream.pipe(Stream.decodeText(), Stream.mkString)
           : "";
       if (script.includes("GOAT_TOOL_FIX_PROBE")) return makeSuccessfulProcess(toolFixProbe);
-      if (script.includes("ready=false")) {
+      if (command.args.includes("goat-runtime-cleanup")) return makeSuccessfulProcess("");
+      if (script.includes("ready=false") && !isRemoteLaunch(command.args)) {
         calls.probes++;
         calls.strict = ["StrictHostKeyChecking=yes", "UpdateHostKeys=no", "BatchMode=yes"].every(
           (arg) => command.args.includes(arg),
@@ -90,7 +92,6 @@ const fixture = (initial: unknown, runnerOptions: SshTunnel.RemoteGoatRunnerOpti
           };
         return makeSuccessfulProcess(typeof probe === "string" ? probe : JSON.stringify(probe));
       }
-      if (command.args.includes("goat-runtime-cleanup")) return makeSuccessfulProcess("");
       calls.launches++;
       return makeSuccessfulProcess(
         JSON.stringify({

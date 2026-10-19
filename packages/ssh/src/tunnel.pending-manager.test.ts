@@ -21,6 +21,7 @@ import * as SshAuth from "./auth.ts";
 import * as SshTunnel from "./tunnel.ts";
 import {
   ARCHIVE,
+  isRemoteLaunch,
   makeSuccessfulProcess,
   makeRunningProcess,
   testNetService,
@@ -131,7 +132,7 @@ const fixture = Effect.gen(function* () {
         Stream.isStream(input.stream)
           ? yield* input.stream.pipe(Stream.decodeText(), Stream.mkString)
           : "";
-      if (script.includes("ready=false"))
+      if (script.includes("ready=false") && !isRemoteLaunch(command.args))
         return makeSuccessfulProcess(
           JSON.stringify({
             platform: "linux",

@@ -1111,7 +1111,10 @@ else exit 2; fi
             assert.include(command.args.join(" "), ARCHIVE.archiveVersion);
             return makeSuccessfulProcess("");
           }
-          if (new TextDecoder().decode(data).includes("ready=false")) {
+          if (
+            !isRemoteLaunch(command.args) &&
+            new TextDecoder().decode(data).includes("ready=false")
+          ) {
             calls.push("probe");
             // Execute the real probe against the isolated remote HOME.
             return yield* realSpawner.spawn(
