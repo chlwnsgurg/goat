@@ -79,6 +79,12 @@ const fakeDispatch = (world: World) =>
       Effect.gen(function* () {
         yield* authorize;
         world.calls.push({ host: call.host, tool: call.tool, args: { ...call.arguments } });
+        if (call.host === "nowhere") {
+          return yield* new SshRemoteDispatch.SshRemoteDispatchError({
+            reason: "host_unknown",
+            message: "No SSH host nowhere.",
+          });
+        }
         if (world.reachable[call.host] !== true) return yield* unavailable(call.host);
         if (world.failing.has(call.host + "/" + call.tool)) return yield* unavailable(call.host);
         const thread = world.threads.find(
@@ -508,6 +514,23 @@ describe("Rescheduler", () => {
       expect(
         world.calls.some((call) => call.host === "A" && call.tool === "goat_thread_read"),
       ).toBe(true);
+    }),
+  );
+
+  testScoped("treats an unknown host alias as no answer, never as Ready", (world) =>
+    Effect.gen(function* () {
+      const rescheduler = yield* Rescheduler.Rescheduler;
+      const monitor = yield* HostHealthMonitor.HostHealthMonitor;
+      const nowhere = { host: "nowhere", threadId: ThreadId.make("thread:x"), watchId: null };
+      expect(
+        yield* rescheduler.reschedule(request({ ref: nowhere, reason: "manual" })),
+      ).toMatchObject({
+        reason: "host_still_answers",
+      });
+      expect(
+        (yield* monitor.conditions("nowhere")).conditions.map((condition) => condition.type),
+      ).not.toContain("Ready");
+      expect(world.launches).toHaveLength(0);
     }),
   );
 
