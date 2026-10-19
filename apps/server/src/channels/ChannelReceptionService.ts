@@ -80,7 +80,13 @@ import {
   threadDigest,
 } from "./channelBotRecall.ts";
 import { CHANNEL_COPY } from "./channelCopy.ts";
-import { answerForwardIdsFor, deliveryIdFor, taskEventIdFor, taskIdFor } from "./channelIds.ts";
+import {
+  answerForwardIdsFor,
+  deliveryIdFor,
+  taskEventIdFor,
+  taskIdFor,
+  turnSteerIdsFor,
+} from "./channelIds.ts";
 import { botAddress, chipDelivery, makeTaskEvent, prepareTransition } from "./channelTaskWrites.ts";
 
 /** How long a reception pass may take before the sender gets a failure note instead. */
@@ -179,6 +185,22 @@ const boundTail = (
   }
   return kept;
 };
+
+/**
+ * The GOAT Bot turn a follow-up in this conversation steers: the newest turn whose coding thread
+ * is running here. Messages in other conversations, or when no turn runs, start their own.
+ */
+export const turnToSteer = (tasks: ReadonlyArray<ChannelTask>): ChannelTask | undefined =>
+  tasks
+    .filter(
+      (task) =>
+        task.kind === "turn" &&
+        task.status === "running" &&
+        task.worker !== undefined &&
+        task.worker.host === undefined &&
+        task.target !== undefined,
+    )
+    .toSorted((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
 
 const make = Effect.gen(function* () {
   const ledger = yield* ChannelLedger.ChannelLedger;
@@ -674,6 +696,7 @@ const make = Effect.gen(function* () {
                   ),
                   tasks: tasks.map((task) => ({
                     taskId: task.taskId,
+                    ...(task.kind === undefined ? {} : { kind: task.kind }),
                     title: task.title,
                     status: task.status,
                     ...(task.resultSummary === undefined
@@ -797,15 +820,23 @@ const make = Effect.gen(function* () {
       const deliveries: Array<ChannelLedger.ChannelOutboxInsert> = [];
       const action = decision.action;
 
-      if (action.type === "create_task") {
+      let joining: ChannelTask | undefined;
+      if (action.type === "create_task" || action.type === "run_turn") {
         // People start work; agents may only report on or answer existing work.
-        if (
-          requester.originKind === "mcp" ||
-          !requester.grantedScopes.includes("orchestration:operate")
-        ) {
+        const mayStart =
+          requester.originKind !== "mcp" &&
+          requester.grantedScopes.includes("orchestration:operate");
+        // Busy input: asking for a turn while this conversation's turn runs joins that turn.
+        joining = mayStart && action.type === "run_turn" ? turnToSteer(tasks) : undefined;
+        // The task list was read before the model answered; join only a turn still running now.
+        if (joining !== undefined) {
+          const now = yield* ledger.getTask(joining.taskId);
+          if (now?.task.status !== "running") joining = undefined;
+        }
+        if (!mayStart) {
           replyText = CHANNEL_COPY.agentCannotCreateWork;
           finalDecision = { replyText, action: { type: "report_only" } };
-        } else {
+        } else if (joining === undefined) {
           const taskId = taskIdFor(inputId, 0);
           // Only a task the person asked, in this input, to change or forget a note may edit them.
           const notesChangeRequested =
@@ -815,6 +846,7 @@ const make = Effect.gen(function* () {
               : undefined;
           const task: ChannelTask = {
             taskId,
+            ...(action.type === "run_turn" ? { kind: "turn" as const } : {}),
             conversationId,
             originBindingId: stored.snapshot.bindingId,
             originAddress: origin,
@@ -825,9 +857,13 @@ const make = Effect.gen(function* () {
             status: "received",
             version: 1,
             generation: 1,
-            ...(action.projectId === undefined ? {} : { projectId: action.projectId }),
+            ...(action.type !== "create_task" || action.projectId === undefined
+              ? {}
+              : { projectId: action.projectId }),
             // The dispatcher checks the host again before anything runs there.
-            ...(action.host === undefined ? {} : { host: action.host }),
+            ...(action.type !== "create_task" || action.host === undefined
+              ? {}
+              : { host: action.host }),
             ...(notesChangeRequested === undefined ? {} : { notesChangeRequested }),
             openQuestions: [],
             createdAt: now,
@@ -877,6 +913,66 @@ const make = Effect.gen(function* () {
           ),
         };
       });
+
+      // A follow-up joins its workstream through the ledger: recorded here with the reply, then sent
+      // by the dispatcher, which binds the task to the run that took it. Completion waits for that.
+      const followTaskId = action.type === "follow_up" ? action.taskId : joining?.taskId;
+      if (followTaskId !== undefined) {
+        const storedTask = yield* ledger.getTask(followTaskId);
+        const sender = requester.originKind === "mcp" ? undefined : yield* judgedNow;
+        const running =
+          storedTask !== undefined &&
+          storedTask.task.conversationId === conversationId &&
+          storedTask.task.status === "running" &&
+          storedTask.task.worker !== undefined &&
+          storedTask.task.worker.host === undefined;
+        if (!running) {
+          // The turn this message was joining ended after the check above. Retrying the input
+          // starts the turn it asked for instead of dropping it.
+          if (action.type === "run_turn") {
+            return yield* new ChannelLedger.ChannelLedgerError({
+              reason: "version_conflict",
+              detail: "The turn this message was joining ended; reading it again.",
+            });
+          }
+          replyText =
+            action.type === "follow_up"
+              ? "That work isn't running anymore. Tell me what you'd like done and I'll start it."
+              : replyText;
+          finalDecision = { replyText, action: { type: "report_only" } };
+        } else if (sender === undefined || !mayAnswerFor(sender, storedTask.task.requester)) {
+          replyText = CHANNEL_COPY.answerNotAllowed;
+          finalDecision = { replyText, action: { type: "report_only" } };
+        } else {
+          const prepared = prepareTransition(
+            storedTask,
+            {
+              type: "task.followup.received",
+              payload: {
+                inputId,
+                text: message.text,
+                from: sender.displayName,
+                generation: storedTask.task.generation,
+              },
+            },
+            now,
+            bot,
+            {
+              actor: "user",
+              eventId: taskEventIdFor(storedTask.task.taskId, storedTask.task.version + 1),
+              forward: true,
+              pendingAnswerMessageId: turnSteerIdsFor(inputId).messageId,
+            },
+          );
+          if (prepared.ok) {
+            taskEvents.push(prepared.write);
+            deliveries.push(...prepared.deliveries);
+            finalDecision = { replyText, action: { type: "follow_up", taskId: followTaskId } };
+          } else {
+            finalDecision = { replyText, action: { type: "report_only" } };
+          }
+        }
+      }
 
       if (action.type === "move_task") {
         const storedTask = yield* ledger.getTask(action.taskId);
@@ -1028,6 +1124,13 @@ const make = Effect.gen(function* () {
   const narrationFor = (task: ChannelTask, event: ChannelLedger.ChannelPendingEvent["event"]) => {
     switch (event.type) {
       case "task.completed":
+        // A turn's summary is GOAT Bot's own answer, written for the person on the bot's model.
+        if (task.kind === "turn") {
+          return {
+            kind: "result" as const,
+            text: event.payload.summary.trim() === "" ? "Done." : event.payload.summary,
+          };
+        }
         return {
           kind: "result" as const,
           text:
@@ -1086,9 +1189,10 @@ const make = Effect.gen(function* () {
         request === undefined
           ? []
           : [{ role: "user" as const, text: request.message.text, at: request.message.receivedAt }];
-      // Questions keep their exact words; results and failures may be phrased by the model.
+      // Questions and a turn's answer keep their exact words; other results and failures may be
+      // phrased by the model.
       const worded =
-        base.kind === "question"
+        base.kind === "question" || (task.kind === "turn" && base.kind === "result")
           ? base.text
           : Option.match(
               yield* generate({

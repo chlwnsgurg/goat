@@ -194,3 +194,32 @@ describe("channel reception reads", () => {
     expect(second).toContain("[work: #123]\ngoat-si/goat#123 (merged)");
   });
 });
+
+describe("channel reception turns", () => {
+  it("turns run_turn into a turn with its title, instruction and quoted note change", () => {
+    const result = convert({
+      action: "run_turn",
+      title: "Check the disk",
+      instruction: "Find what fills the disk.",
+      notesChangeRequested: " forget the Friday rule ",
+    });
+    expect(result.action).toEqual({
+      type: "run_turn",
+      title: "Check the disk",
+      instruction: "Find what fills the disk.",
+      notesChangeRequested: "forget the Friday rule",
+    });
+    expect(Option.isNone(toChannelReceptionResult({ ...emptyOutput, action: "run_turn" }))).toBe(
+      true,
+    );
+  });
+});
+
+describe("channel reception follow-ups", () => {
+  it("turns follow_up into the task it joins", () => {
+    expect(convert({ action: "follow_up", taskId: "task:1" }).action).toEqual({
+      type: "follow_up",
+      taskId: "task:1",
+    });
+  });
+});

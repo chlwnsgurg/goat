@@ -52,6 +52,39 @@ two generations. Reads change nothing, so a reception retried after a crash read
   only that conversation's work. Read results and journal
   lines are labelled as records for the model, but the filtering above is what keeps them private.
 
+## The bot's own turns
+
+Some messages need tools but no repository change: why a disk is full, what three threads
+concluded, a web search. Reception answers those with `run_turn`: it acknowledges at once, and a
+ledger task of kind `turn` runs as an ordinary coding thread in the bot's own workspace on this
+machine. Reusing the task path keeps every guarantee the ledger already gives work: one launch per
+generation, the chip, exactly-once narration, restarts that read state, and the requester's
+ceiling. Running a provider session on the bot thread itself would put each new message behind
+the running turn and give the bot thread runs it was built never to have.
+
+- **Model.** A turn runs on `goatBotModelSelection` from the home server's settings. Null follows
+  the bot workspace's new-thread default, then the text generation model; a chosen model this
+  machine no longer offers falls back with a warning, because the person asked a question, not
+  for a model. Reception itself stays on the text generation model so the acknowledgement is fast.
+- **Ceiling.** A turn runs at the lowest of the requester's ceiling, the default runtime mode,
+  and `auto-accept-edits`: it reads and searches freely, while commands the provider gates still
+  ask for approval in the turn's thread. Subagents it starts with `delegate_task` cannot exceed it.
+  Work that changes a repository is a coding task, at the requester's full ceiling.
+- **Answer.** The turn's final report is the bot's reply, delivered as written; it is not
+  reworded by reception the way coding results are, because the turn already wrote it for the
+  person on the chosen model.
+- **Follow-ups.** A message that adds to running work in its conversation (`follow_up`, or
+  `run_turn` while a turn runs there) joins that work instead of starting more, if the sender, as
+  their link stands now, may answer for its requester. Reception records a `task.followup.received`
+  event in the same commit as its reply, with a completion fence (`pendingAnswerMessageId`) and a
+  pending forward. The dispatcher's forward loop sends it with ids derived from the input: into
+  the running run when it can take steering, else as the thread's next run. It then binds the
+  task to whichever run took it and lifts the fence in one write. A crash before or after the send
+  replays the forward onto the same message, and a run that ended just before the follow-up
+  cannot settle the task, because the fence holds it until the follow-up's run is bound. This is
+  the path answers to worker questions already take. Other conversations, and messages the bot
+  answers directly, never wait on running work.
+
 An owner has one bot, in the Scratch project, and one bot conversation keyed by the owner rather
 than the thread. Where Scratch is off because the data directory is inside a Git work tree, the bot
 gets a project of its own under the data directory instead: the bot never runs a provider or

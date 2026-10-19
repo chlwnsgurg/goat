@@ -84,6 +84,19 @@ export const answerForwardIdsFor = (eventId: ChannelTaskEventId) => ({
 });
 
 /**
+ * A follow-up sent to the worker already doing its work; a retried input sends it once. The
+ * "queued" attempt is the second and last one, used only after the orchestrator rejected the
+ * first, since a rejected command id is refused for good.
+ */
+export const turnSteerIdsFor = (inputId: ChannelInputId, attempt: "first" | "queued" = "first") => {
+  const key = attempt === "first" ? [inputId] : [inputId, "queued"];
+  return {
+    commandId: CommandId.make(stableId("channel-steer", key)),
+    messageId: MessageId.make(stableId("channel-steer-message", key)),
+  };
+};
+
+/**
  * The report binding of one task generation on another machine. The remote stores it before it
  * creates the thread and refuses a second binding with the same id, so relaunching a generation
  * can never start a second remote thread.
