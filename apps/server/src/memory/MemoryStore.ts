@@ -171,7 +171,8 @@ const ftsMatchQuery = (text: string) => {
   const clauses = (text.match(/[\p{L}\p{N}_]+/gu) ?? []).map((token) => {
     if (!/[\uAC00-\uD7A3]/u.test(token)) return ftsQuote(token);
     const stemmed = token.replace(/[\uAC00-\uD7A3]+/gu, stripHangulParticle);
-    return `${ftsQuote(stemmed)}*`;
+    // A one-syllable prefix such as 이 would match nearly every Korean body.
+    return stemmed.length < 2 ? ftsQuote(stemmed) : `${ftsQuote(stemmed)}*`;
   });
   if (!clauses.length) return exact;
   const expanded = clauses.length === 1 ? clauses[0]! : `(${clauses.join(" ")})`;
