@@ -123,6 +123,13 @@ jobs:
         if: matrix.task == 'check' || matrix.task == 'typecheck' || matrix.task == 'test' || matrix.task == 'test-desktop' || matrix.task == 'build'
         run: vp run --filter @goat/desktop ensure:electron
 
+      # The desktop build and its tests compile the native libsecret helper.
+      - name: Install libsecret headers
+        if: matrix.task == 'test-desktop' || matrix.task == 'build'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libsecret-1-dev
+
       # Tests get a temp directory of their own, so the shared /tmp tmpfs never collects their
       # leftovers and the guard at the end sees only this job's. Each test file also fails when it
       # leaves goat-* entries behind (packages/shared/src/testing/testTempSandbox.ts).
@@ -270,8 +277,6 @@ jobs:
       - name: Build desktop pipeline
         if: matrix.task == 'build'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libsecret-1-dev
           command -v cc
           pkg-config --exists libsecret-1
           vp run build:desktop
