@@ -15,7 +15,7 @@ import {
 } from "@goat/client-runtime/state/runtime";
 import type { EnvironmentId } from "@goat/contracts";
 import { useEffect, useState } from "react";
-import { Pressable, View } from "react-native";
+import { Pressable, ScrollView as HubChoices, View } from "react-native";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
 import { AppText as Text } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
@@ -60,7 +60,8 @@ function HubNodesSelection({
     <View className="flex-1">
       {targets.length > 1 ||
       (targets.length === 1 && targets[0]?.environmentId !== choice?.environmentId) ? (
-        <View className="gap-2 p-5">
+        // Bounded so a long list of saved environments still leaves room for the devices below.
+        <HubChoices className="max-h-64 grow-0" contentContainerClassName="gap-2 p-5">
           <Text className="text-sm text-foreground-muted">Choose a hub</Text>
           {targets.map((target) => (
             <Pressable
@@ -74,7 +75,7 @@ function HubNodesSelection({
               <Text className="text-foreground">{target.label}</Text>
             </Pressable>
           ))}
-        </View>
+        </HubChoices>
       ) : null}
       {choice ? (
         <Text className="px-5 py-3 font-goat-medium text-foreground">Hub: {label}</Text>
