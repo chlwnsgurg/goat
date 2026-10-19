@@ -654,12 +654,21 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           Effect.sync(() => {
             if (!script.includes('IDENTITY_NEXT="$STATE_DIR/identity.next.$$"')) return;
             injected = true;
-            f.setScriptPrefix(`printf() {
+            // Folded launch executes its body in a nested shell; inject the race there.
+            f.setScriptPrefix(`sh() {
+  if [ "\${3:-}" != runtime ]; then command sh "$@"; return; fi
+  {
+    cat <<'GOAT_PENDING_PROOF'
+printf() {
   case "$1" in
     '"reason":"%s","replacement":"%s","requestedVersion":"%s","liveVersion":"%s"')
       command printf '# changed at pending proof\\n' >> "$RUNNER_FILE" ;;
   esac
   command printf "$@"
+}
+GOAT_PENDING_PROOF
+    cat
+  } | command sh "$@"
 }
 `);
           }),
@@ -670,11 +679,11 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         });
         if (Result.isFailure(result)) throw result.failure;
         assert.isTrue(injected);
+        const after = yield* f.snapshot;
+        assert.equal(after["run-t3.sh"], before["run-t3.sh"] + "# changed at pending proof\n");
         assert.equal(result.success.status, "pending");
         assert.equal(result.success.port, 0);
         assert.equal(result.success.pending?.detail, "drain-unavailable");
-        const after = yield* f.snapshot;
-        assert.equal(after["run-t3.sh"], before["run-t3.sh"] + "# changed at pending proof\n");
         assert.deepEqual({ ...after, "run-t3.sh": null }, { ...before, "run-t3.sh": null });
         assert.isTrue(isAlive(f.pid));
         const log = yield* events(f);
