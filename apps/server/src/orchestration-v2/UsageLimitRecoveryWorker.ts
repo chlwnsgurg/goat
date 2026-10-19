@@ -89,6 +89,8 @@ const makeSweep = Effect.gen(function* () {
       now,
       autoResume: preferences.autoResumeLimitedThreads || coversThreads,
       snooze: preferences.snoozeLimitedThreads,
+      // A limit without a reset time can still move to another model; nothing arms for it.
+      withoutReset: coversThreads,
     });
     const nowMs = DateTime.toEpochMillis(now);
     for (const thread of candidates) {

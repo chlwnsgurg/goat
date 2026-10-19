@@ -37,7 +37,7 @@ const sweep = (options: {
 }) =>
   Effect.gen(function* () {
     yield* TestClock.setTime(NOW);
-    const queried: Array<boolean> = [];
+    const queried: Array<string> = [];
     const asked: Array<string> = [];
     const commands: Array<OrchestrationV2ServerCommand> = [];
     let registered: Effect.Effect<void> | undefined;
@@ -56,7 +56,12 @@ const sweep = (options: {
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getLimitRecoveryCandidates: (input) =>
               Effect.sync(() => {
-                queried.push(input.autoResume);
+                queried.push(
+                  "autoResume=" +
+                    input.autoResume +
+                    " withoutReset=" +
+                    (input.withoutReset === true),
+                );
                 return [candidate("a"), candidate("b"), candidate("goal")];
               }),
           }),
@@ -109,7 +114,11 @@ describe("UsageLimitRecoveryWorker fallback branch", () => {
         switched: new Set(["a"]),
         goalThreads: new Set(["goal"]),
       });
-      assert.deepStrictEqual(result, { queried: [true], asked: ["a", "b"], armed: ["b"] });
+      assert.deepStrictEqual(result, {
+        queried: ["autoResume=true withoutReset=true"],
+        asked: ["a", "b"],
+        armed: ["b"],
+      });
     }),
   );
 
@@ -122,7 +131,11 @@ describe("UsageLimitRecoveryWorker fallback branch", () => {
           coversThreads: true,
           switched: new Set(),
         });
-        assert.deepStrictEqual(result, { queried: [true], asked: ["a", "b", "goal"], armed: [] });
+        assert.deepStrictEqual(result, {
+          queried: ["autoResume=true withoutReset=true"],
+          asked: ["a", "b", "goal"],
+          armed: [],
+        });
       }),
   );
 
@@ -133,9 +146,13 @@ describe("UsageLimitRecoveryWorker fallback branch", () => {
         coversThreads: false,
         switched: new Set(["a"]),
       });
-      assert.deepStrictEqual(result, { queried: [true], asked: [], armed: ["a", "b", "goal"] });
+      assert.deepStrictEqual(result, {
+        queried: ["autoResume=true withoutReset=false"],
+        asked: [],
+        armed: ["a", "b", "goal"],
+      });
       const off = yield* sweep({ autoResume: false, coversThreads: false, switched: new Set() });
-      assert.deepStrictEqual(off.queried, [false]);
+      assert.deepStrictEqual(off.queried, ["autoResume=false withoutReset=false"]);
     }),
   );
 });

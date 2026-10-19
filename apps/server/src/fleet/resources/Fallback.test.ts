@@ -8,6 +8,7 @@ import {
   type OrchestrationV2ThreadShell,
   type ServerProvider,
 } from "@goat/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
@@ -18,6 +19,7 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as Fallback from "./Fallback.ts";
 
 const NOW = Date.parse("2026-10-20T00:00:00.000Z");
+const FAILED_AT = NOW - 60_000;
 const LATER = "2026-10-20T05:00:00.000Z";
 const codex = ProviderInstanceId.make("codex");
 const claudeAgent = ProviderInstanceId.make("claudeAgent");
@@ -27,7 +29,10 @@ const sol = { instanceId: codex, model: "gpt-6.1-sol" };
 const claude = { instanceId: claudeAgent, model: "claude-opus-5-5" };
 const threadId = ThreadId.make("thread:fleet");
 const runId = RunId.make("run:2");
-const GENERATION = Math.floor(NOW / (15 * 60_000));
+const selectId = (model: string) =>
+  "fleet-fallback:thread:fleet:run:2:" +
+  (model === claude.model ? "claudeAgent/" : "codex/") +
+  model;
 
 const shell = (overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
   ({
@@ -42,6 +47,7 @@ const shell = (overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
     deletedAt: null,
     settledOverride: null,
     pendingRuntimeRequest: null,
+    snoozedUntil: null,
     ...overrides,
   }) as OrchestrationV2ThreadShell;
 
@@ -50,6 +56,7 @@ const run = (ordinal: number, status: string, modelSelection: typeof opus) => ({
   ordinal,
   status,
   startedAt: ordinal,
+  completedAt: DateTime.makeUnsafe(FAILED_AT - (2 - ordinal) * 60_000),
   modelSelection,
 });
 
@@ -58,7 +65,8 @@ interface World {
   runs: ReadonlyArray<ReturnType<typeof run>>;
   refuse: ReadonlySet<string>;
   disabledForProject: ReadonlySet<string>;
-  readonly receipts: Set<string>;
+  readonly receipts: Map<string, "accepted" | "rejected">;
+  readonly selects: Array<string>;
   readonly commands: Array<OrchestrationV2ServerCommand>;
 }
 const makeWorld = (overrides: Partial<World> = {}): World => ({
@@ -66,7 +74,8 @@ const makeWorld = (overrides: Partial<World> = {}): World => ({
   runs: [run(1, "completed", opus), run(2, "failed", opus)],
   refuse: new Set(),
   disabledForProject: new Set(),
-  receipts: new Set(),
+  receipts: new Map(),
+  selects: [],
   commands: [],
   ...overrides,
 });
@@ -98,37 +107,41 @@ const threadChain: FleetSettings = {
   fallbackChains: { claude: { steps: [opus, opus2, sol, claude], scope: "goals_and_threads" } },
 };
 
+const threadsLayer = (world: World) =>
+  Layer.mock(ThreadManagement.ThreadManagementService)({
+    getThreadShell: () => Effect.sync(() => world.shell),
+    getThreadRecords: (() => Effect.sync(() => ({ runs: world.runs }))) as never,
+    receiptStatus: (commandId) => Effect.sync(() => world.receipts.get(commandId) ?? null),
+    isProviderInstanceEnabledForProject: ({ instanceId }) =>
+      Effect.sync(() => !world.disabledForProject.has(instanceId)),
+    dispatch: (command) =>
+      Effect.suspend(() => {
+        const target = "modelSelection" in command ? command.modelSelection : undefined;
+        if (target !== undefined) world.selects.push(command.commandId + " " + target.model);
+        if (target !== undefined && world.refuse.has(target.model)) {
+          world.receipts.set(command.commandId, "rejected");
+          return Effect.die("selection refused");
+        }
+        world.receipts.set(command.commandId, "accepted");
+        world.commands.push(command);
+        if (target !== undefined) world.shell = { ...world.shell, modelSelection: target };
+        return Effect.succeed({ sequence: world.commands.length } as never);
+      }),
+  });
+
+const providersLayer = (claudeExhausted: boolean) =>
+  Layer.mock(ProviderRegistry.ProviderRegistry)({
+    getProviders: Effect.succeed([
+      provider(codex, [opus.model, opus2.model, sol.model]),
+      provider(claudeAgent, [claude.model], claudeExhausted),
+    ]),
+  });
+
 const layer = (world: World, fleet: FleetSettings, claudeExhausted = false) =>
   Layer.mergeAll(Fallback.layer, Fallback.layerChains).pipe(
-    Layer.provide(
-      Layer.mock(ThreadManagement.ThreadManagementService)({
-        getThreadShell: () => Effect.sync(() => world.shell),
-        getThreadRecords: (() => Effect.sync(() => ({ runs: world.runs }))) as never,
-        hasReceipt: (commandId) => Effect.sync(() => world.receipts.has(commandId)),
-        isProviderInstanceEnabledForProject: ({ instanceId }) =>
-          Effect.sync(() => !world.disabledForProject.has(instanceId)),
-        dispatch: (command) =>
-          Effect.suspend(() => {
-            const target = "modelSelection" in command ? command.modelSelection : undefined;
-            if (target !== undefined && world.refuse.has(target.model))
-              return Effect.die("selection refused");
-            world.commands.push(command);
-            world.receipts.add(command.commandId);
-            if ("modelSelection" in command && command.modelSelection !== undefined)
-              world.shell = { ...world.shell, modelSelection: command.modelSelection };
-            return Effect.succeed({ sequence: world.commands.length } as never);
-          }),
-      }),
-    ),
+    Layer.provide(threadsLayer(world)),
     Layer.provide(ServerSettings.ServerSettingsService.layerTest({ fleet })),
-    Layer.provide(
-      Layer.mock(ProviderRegistry.ProviderRegistry)({
-        getProviders: Effect.succeed([
-          provider(codex, [opus.model, opus2.model, sol.model]),
-          provider(claudeAgent, [claude.model], claudeExhausted),
-        ]),
-      }),
-    ),
+    Layer.provide(providersLayer(claudeExhausted)),
   );
 
 const summary = (commands: ReadonlyArray<OrchestrationV2ServerCommand>) =>
@@ -139,6 +152,10 @@ const summary = (commands: ReadonlyArray<OrchestrationV2ServerCommand>) =>
         ? command.type + " " + command.modelSelection.model
         : command.type,
   );
+
+const continueOnce = Effect.flatMap(Fallback.Fallback, (fallback) =>
+  fallback.continueThread(threadId),
+);
 
 const withClock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   TestClock.setTime(NOW).pipe(Effect.andThen(effect));
@@ -162,42 +179,91 @@ describe("Fallback.continueThread", () => {
           assert.deepStrictEqual(
             world.commands.map((command) => command.commandId),
             [
-              "fleet-fallback:thread:fleet:run:2:codex/anthropic2/claude-opus-5-5:" + GENERATION,
+              selectId(opus2.model),
               "fleet-fallback-notice:switch:run:2",
               "fleet-fallback:thread:fleet:run:2:continue",
             ],
           );
-          // The failed model now cools down.
+          // The failed model cools down from when it failed.
           assert.deepStrictEqual(
-            (yield* fallback.cooldowns).map((entry) => [entry.model, entry.failure]),
-            [[opus.model, "usage_limit"]],
+            (yield* fallback.cooldowns).map((entry) => [entry.model, entry.failure, entry.until]),
+            [[opus.model, "usage_limit", "2026-10-20T00:14:00.000Z"]],
           );
         }).pipe(Effect.provide(layer(world, threadChain))),
       );
     },
   );
 
+  it.effect("moves a usage limit that has no reset time", () => {
+    const world = makeWorld({ shell: shell({ usageLimitResetAt: null }) });
+    return withClock(
+      continueOnce.pipe(
+        Effect.map((switched) => {
+          assert.isTrue(switched);
+          assert.strictEqual(
+            summary(world.commands)[1],
+            "notice: Switched to codex/anthropic2/claude-opus-5-5 after usage_limit on codex/anthropic/claude-opus-5-5 (fallback chain claude).",
+          );
+        }),
+        Effect.provide(layer(world, threadChain)),
+      ),
+    );
+  });
+
+  it.effect("leaves a snoozed thread asleep", () => {
+    const world = makeWorld({
+      shell: shell({ snoozedUntil: DateTime.makeUnsafe(NOW + 3_600_000) }),
+    });
+    return withClock(
+      continueOnce.pipe(
+        Effect.map((switched) => {
+          assert.isFalse(switched);
+          assert.deepStrictEqual(world.commands, []);
+        }),
+        Effect.provide(layer(world, threadChain)),
+      ),
+    );
+  });
+
   it.effect(
-    "finishes a hop whose selection landed before a restart, even if that account ran out since",
+    "finishes a hop that landed before a long outage, even if that account ran out since",
     () => {
       const world = makeWorld({
         shell: shell({ modelSelection: opus2 }),
-        receipts: new Set([
-          "fleet-fallback:thread:fleet:run:2:codex/anthropic2/claude-opus-5-5:" + GENERATION,
+        receipts: new Map([
+          [selectId(opus2.model), "rejected"],
+          [selectId(opus2.model) + ":retry:1", "accepted"],
         ]),
       });
-      return withClock(
-        Effect.gen(function* () {
-          const fallback = yield* Fallback.Fallback;
-          assert.isTrue(yield* fallback.continueThread(threadId));
+      return TestClock.setTime(NOW + 86_400_000).pipe(
+        Effect.andThen(continueOnce),
+        Effect.map((switched) => {
+          assert.isTrue(switched);
           assert.deepStrictEqual(
             world.commands.map((command) => command.commandId),
             ["fleet-fallback-notice:switch:run:2", "fleet-fallback:thread:fleet:run:2:continue"],
           );
-        }).pipe(Effect.provide(layer(world, threadChain))),
+        }),
+        Effect.provide(layer(world, threadChain)),
       );
     },
   );
+
+  it.effect("leaves a model the user picked by hand, even one a rejected attempt named", () => {
+    const world = makeWorld({
+      shell: shell({ modelSelection: opus2 }),
+      receipts: new Map([[selectId(opus2.model), "rejected"]]),
+    });
+    return withClock(
+      continueOnce.pipe(
+        Effect.map((switched) => {
+          assert.isFalse(switched);
+          assert.deepStrictEqual(world.commands, []);
+        }),
+        Effect.provide(layer(world, threadChain)),
+      ),
+    );
+  });
 
   it.effect("follows the failed tail and crosses to another driver with a provider switch", () => {
     const world = makeWorld({
@@ -205,96 +271,96 @@ describe("Fallback.continueThread", () => {
       runs: [run(1, "failed", opus), run(2, "failed", sol)],
     });
     return withClock(
-      Effect.gen(function* () {
-        const fallback = yield* Fallback.Fallback;
-        assert.isTrue(yield* fallback.continueThread(threadId));
-        assert.strictEqual(summary(world.commands)[0], "provider.switch claude-opus-5-5");
-      }).pipe(Effect.provide(layer(world, threadChain))),
+      continueOnce.pipe(
+        Effect.map(() =>
+          assert.strictEqual(summary(world.commands)[0], "provider.switch claude-opus-5-5"),
+        ),
+        Effect.provide(layer(world, threadChain)),
+      ),
     );
   });
 
-  it.effect(
-    "tries the next step when a selection is refused and cools the refused one down",
-    () => {
-      const world = makeWorld({ refuse: new Set([opus2.model]) });
-      return withClock(
-        Effect.gen(function* () {
-          const fallback = yield* Fallback.Fallback;
-          assert.isTrue(yield* fallback.continueThread(threadId));
-          assert.strictEqual(summary(world.commands)[0], "thread.model-selection.set gpt-6.1-sol");
-          assert.include(
-            (yield* fallback.cooldowns).map((entry) => entry.model + ":" + entry.failure),
-            opus2.model + ":unavailable",
-          );
-        }).pipe(Effect.provide(layer(world, threadChain))),
-      );
-    },
-  );
-
-  it.effect("waits for the reset when no step is left, telling the thread once", () => {
-    const world = makeWorld();
+  it.effect("moves past a refused step in the same decision, even with no cooldown", () => {
+    const world = makeWorld({ refuse: new Set([opus2.model]) });
     return withClock(
-      Effect.gen(function* () {
-        const fallback = yield* Fallback.Fallback;
-        assert.isFalse(yield* fallback.continueThread(threadId));
-        assert.isFalse(yield* fallback.continueThread(threadId));
-        assert.deepStrictEqual(summary(world.commands), [
-          "notice: Fallback chain short did not switch models: no step is available (claudeAgent/claude-opus-5-5 is at its usage limit).",
-        ]);
-      }).pipe(
+      continueOnce.pipe(
+        Effect.map((switched) => {
+          assert.isTrue(switched);
+          assert.deepStrictEqual(world.selects, [
+            selectId(opus2.model) + " " + opus2.model,
+            selectId(sol.model) + " " + sol.model,
+          ]);
+        }),
         Effect.provide(
-          layer(
-            world,
-            { fallbackChains: { short: { steps: [opus, claude], scope: "goals_and_threads" } } },
-            true,
-          ),
+          layer(world, {
+            fallbackChains: {
+              claude: {
+                steps: [opus, opus2, sol, claude],
+                scope: "goals_and_threads",
+                cooldownMs: 0,
+              },
+            },
+          }),
         ),
       ),
     );
   });
 
-  it.effect("leaves goal threads, goal-only chains and unchained threads alone", () => {
-    const world = makeWorld();
-    return withClock(
-      Effect.gen(function* () {
-        assert.isFalse(
-          yield* Effect.flatMap(Fallback.Fallback, (fallback) =>
-            fallback.continueThread(threadId),
-          ).pipe(
-            Effect.provideService(Fallback.GoalThreadOwnership, {
-              isGoalThread: () => Effect.succeed(true),
+  it.effect(
+    "retries a refused step under the next attempt id instead of replaying the refusal",
+    () => {
+      const world = makeWorld({
+        refuse: new Set([opus2.model]),
+        receipts: new Map([[selectId(opus2.model), "rejected"]]),
+      });
+      return withClock(
+        continueOnce.pipe(
+          Effect.map(() =>
+            assert.strictEqual(world.selects[0], selectId(opus2.model) + ":retry:1 " + opus2.model),
+          ),
+          Effect.provide(
+            layer(world, {
+              fallbackChains: {
+                claude: { steps: [opus, opus2], scope: "goals_and_threads", cooldownMs: 0 },
+              },
             }),
-            Effect.provide(layer(world, threadChain)),
           ),
-        );
-        assert.isFalse(
-          yield* Effect.flatMap(Fallback.Fallback, (fallback) =>
-            fallback.continueThread(threadId),
-          ).pipe(
-            Effect.provide(layer(world, { fallbackChains: { claude: { steps: [opus, opus2] } } })),
-          ),
-        );
-        assert.isFalse(
-          yield* Effect.flatMap(Fallback.Fallback, (fallback) =>
-            fallback.continueThread(threadId),
-          ).pipe(Effect.provide(layer(world, {}))),
-        );
-        assert.deepStrictEqual(world.commands, []);
-      }),
-    );
-  });
-  it.effect("leaves a thread whose model the user changed by hand after the failure", () => {
-    const world = makeWorld({ shell: shell({ modelSelection: sol }) });
-    return withClock(
-      Effect.gen(function* () {
-        const fallback = yield* Fallback.Fallback;
-        assert.isFalse(yield* fallback.continueThread(threadId));
-        assert.deepStrictEqual(world.commands, []);
-      }).pipe(Effect.provide(layer(world, threadChain))),
-    );
-  });
+        ),
+      );
+    },
+  );
 
-  it.effect("skips a step whose instance this project disabled", () => {
+  it.effect(
+    "waits without pushing the cooldown out on every sweep, telling the thread once",
+    () => {
+      const world = makeWorld();
+      return withClock(
+        Effect.gen(function* () {
+          const fallback = yield* Fallback.Fallback;
+          assert.isFalse(yield* fallback.continueThread(threadId));
+          yield* TestClock.adjust("5 minutes");
+          assert.isFalse(yield* fallback.continueThread(threadId));
+          assert.deepStrictEqual(summary(world.commands), [
+            "notice: Fallback chain short did not switch models: no step is available (claudeAgent/claude-opus-5-5 is at its usage limit).",
+          ]);
+          assert.deepStrictEqual(
+            (yield* fallback.cooldowns).map((entry) => entry.until),
+            ["2026-10-20T00:14:00.000Z"],
+          );
+        }).pipe(
+          Effect.provide(
+            layer(
+              world,
+              { fallbackChains: { short: { steps: [opus, claude], scope: "goals_and_threads" } } },
+              true,
+            ),
+          ),
+        ),
+      );
+    },
+  );
+
+  it.effect("skips a step whose instance this project disabled without cooling it down", () => {
     const world = makeWorld({
       shell: shell({ modelSelection: sol }),
       runs: [run(1, "failed", opus), run(2, "failed", sol)],
@@ -308,13 +374,40 @@ describe("Fallback.continueThread", () => {
           summary(world.commands)[0],
           "thread.model-selection.set anthropic2/claude-opus-5-5",
         );
+        assert.notInclude(
+          (yield* fallback.cooldowns).map((entry) => entry.model),
+          claude.model,
+        );
       }).pipe(Effect.provide(layer(world, threadChain))),
+    );
+  });
+
+  it.effect("leaves goal threads, goal-only chains and unchained threads alone", () => {
+    const world = makeWorld();
+    return withClock(
+      Effect.gen(function* () {
+        assert.isFalse(
+          yield* continueOnce.pipe(
+            Effect.provideService(Fallback.GoalThreadOwnership, {
+              isGoalThread: () => Effect.succeed(true),
+            }),
+            Effect.provide(layer(world, threadChain)),
+          ),
+        );
+        assert.isFalse(
+          yield* continueOnce.pipe(
+            Effect.provide(layer(world, { fallbackChains: { claude: { steps: [opus, opus2] } } })),
+          ),
+        );
+        assert.isFalse(yield* continueOnce.pipe(Effect.provide(layer(world, {}))));
+        assert.deepStrictEqual(world.commands, []);
+      }),
     );
   });
 });
 
 describe("Fallback.next", () => {
-  it.effect("walks the named or default chain and reports exhaustion without one", () => {
+  it.effect("walks the named or default chain, honours cooldowns on remote hosts too", () => {
     const world = makeWorld();
     return withClock(
       Effect.gen(function* () {
@@ -336,10 +429,13 @@ describe("Fallback.next", () => {
           selection: sol,
           hop: 1,
         });
-        // A remote host's providers are unknown here; placement checks them.
         assert.deepStrictEqual(
-          (yield* fallback.next({ ...base, chain: "claude", host: "lidge-ai", tried: [sol] }))._tag,
-          "SwitchInThread",
+          yield* fallback.next({ ...base, chain: "claude", host: "lidge-ai" }),
+          {
+            _tag: "SwitchInThread",
+            selection: sol,
+            hop: 1,
+          },
         );
         assert.deepStrictEqual(yield* fallback.next({ ...base, chain: "missing", host: null }), {
           _tag: "Exhausted",
@@ -349,6 +445,33 @@ describe("Fallback.next", () => {
     );
   });
 });
+
+/** Settings whose first chain write loses the race to another writer that commits first. */
+const racingSettings = (fleet: FleetSettings) =>
+  Layer.effect(
+    ServerSettings.ServerSettingsService,
+    Effect.gen(function* () {
+      const base = yield* ServerSettings.ServerSettingsService;
+      let raced = false;
+      return ServerSettings.ServerSettingsService.of({
+        ...base,
+        updateSettings: (patch, authorizeAtCommit) =>
+          Effect.gen(function* () {
+            if (!raced) {
+              raced = true;
+              const current = (yield* base.getSettings).fleet;
+              yield* base.updateSettings({
+                fleet: {
+                  fallbackChains: { ...current.fallbackChains, theirs: { steps: [sol] } },
+                  defaultFallbackChain: "theirs",
+                },
+              });
+            }
+            return yield* base.updateSettings(patch, authorizeAtCommit);
+          }),
+      });
+    }),
+  ).pipe(Layer.provide(ServerSettings.ServerSettingsService.layerTest({ fleet })));
 
 describe("FallbackChains", () => {
   it.effect("validates instances, warns on unlisted models, and keeps the default in step", () => {
@@ -375,6 +498,25 @@ describe("FallbackChains", () => {
         assert.deepStrictEqual(Object.keys(removed.chains), ["other"]);
         assert.isNull(removed.defaultFallbackChain);
       }).pipe(Effect.provide(layer(world, {}))),
+    );
+  });
+
+  it.effect("keeps a chain and default another writer saved while this edit was in flight", () => {
+    const world = makeWorld();
+    return withClock(
+      Effect.gen(function* () {
+        const chains = yield* Fallback.FallbackChains;
+        const saved = yield* chains.set({ id: "mine", chain: { steps: [opus] } });
+        assert.deepStrictEqual(Object.keys(saved.chains).toSorted(), ["mine", "theirs"]);
+        assert.strictEqual(saved.defaultFallbackChain, "theirs");
+      }).pipe(
+        Effect.provide(
+          Fallback.layerChains.pipe(
+            Layer.provide(racingSettings({})),
+            Layer.provide(providersLayer(false)),
+          ),
+        ),
+      ),
     );
   });
 });

@@ -441,6 +441,11 @@ export interface ProjectionStoreV2Shape {
     readonly now: DateTime.Utc;
     readonly autoResume: boolean;
     readonly snooze: boolean;
+    /**
+     * Also return usage-limit failures without a future reset time. Only the fallback branch
+     * asks for them; `limitRecoveryCommand` arms nothing for such a failure.
+     */
+    readonly withoutReset?: boolean;
   }) => Effect.Effect<ReadonlyArray<ProjectionLimitRecoveryCandidate>, ProjectionStoreV2Error>;
   readonly getSettlementCandidates: (
     threadId?: ThreadId,
@@ -3747,8 +3752,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             AND json_extract(t.payload_json, '$.archivedAt') IS NULL
             AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
             AND json_extract(item.payload_json, '$.failure.class') = 'usage_limit'
-            AND json_extract(item.payload_json, '$.failure.resetAt') IS NOT NULL
-            AND julianday(json_extract(item.payload_json, '$.failure.resetAt')) > julianday(COALESCE(r.completed_at, json_extract(t.payload_json, '$.updatedAt')))
+            AND (
+              ${booleanInt(options.withoutReset === true)}
+              OR (
+                json_extract(item.payload_json, '$.failure.resetAt') IS NOT NULL
+                AND julianday(json_extract(item.payload_json, '$.failure.resetAt')) > julianday(COALESCE(r.completed_at, json_extract(t.payload_json, '$.updatedAt')))
+              )
+            )
             AND (
               (
                 json_extract(t.payload_json, '$.limitRecovery.runId') IS r.run_id
@@ -6742,17 +6752,20 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 (thread) =>
                   thread.status === "failed" &&
                   thread.lastErrorClass === "usage_limit" &&
-                  thread.usageLimitResetAt !== null &&
+                  (options.withoutReset === true || thread.usageLimitResetAt != null) &&
                   thread.pendingRuntimeRequest === null,
               )
               .filter((thread) => {
-                const resetMs = Date.parse(thread.usageLimitResetAt!);
+                const resetMs = Date.parse(thread.usageLimitResetAt ?? "");
                 const nowMs = DateTime.toEpochMillis(options.now);
                 if (
                   !Number.isFinite(resetMs) ||
                   resetMs <= DateTime.toEpochMillis(thread.latestRunCompletedAt ?? thread.updatedAt)
                 )
-                  return false;
+                  return (
+                    options.withoutReset === true &&
+                    thread.limitRecovery?.runId !== thread.latestRunId
+                  );
                 if (
                   thread.limitRecovery?.runId !== thread.latestRunId ||
                   thread.limitRecovery.resetAt !== thread.usageLimitResetAt
