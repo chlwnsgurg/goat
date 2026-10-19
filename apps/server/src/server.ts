@@ -50,6 +50,7 @@ import * as RuntimeControl from "./runtimeControl.ts";
 import * as RuntimeIdentity from "./runtimeIdentity.ts";
 import * as SshRemoteDispatch from "./sshRemote/SshRemoteDispatch.ts";
 import * as HandoffExpiry from "./handoffs/HandoffExpiry.ts";
+import * as FleetHealth from "./fleet/health/layer.ts";
 import * as HostThreadsMcpService from "./mcp/HostThreadsMcpService.ts";
 import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as ThreadResultService from "./threadResults/ThreadResultService.ts";
@@ -1230,7 +1231,8 @@ const layerMakeRoutes = Layer.mergeAll(
     Ws.layer,
   ),
   Layer.mergeAll(
-    McpHttpServer.layer,
+    // Self-healing serves only the MCP tools; its host status and SSH needs come from below.
+    McpHttpServer.layer.pipe(Layer.provide(FleetHealth.layer)),
     layerMemoryToolkits,
     McpHttpServer.layerProviderToolkit,
     HandoffExpiry.layer,

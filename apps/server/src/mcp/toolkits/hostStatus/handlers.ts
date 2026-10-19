@@ -1,6 +1,7 @@
 import type { GoatHostStatusInput } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 
+import * as Health from "../../../fleet/health/HostHealthMonitor.ts";
 import * as HostStatusMcpService from "../../HostStatusMcpService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -16,7 +17,10 @@ export const layer = McpToolAccess.toLayer(HostStatusToolkit, {
       yield* readCaller();
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const status = yield* HostStatusMcpService.HostStatusMcpService;
-      return yield* status.read(scope, input);
+      const result = yield* status.read(scope, input);
+      // Every read is also a health sample; conditions are additive for older clients.
+      const health = yield* Effect.serviceOption(Health.Health);
+      return health._tag === "Some" ? yield* health.value.annotate(result) : result;
     }),
   ),
 });

@@ -40,6 +40,8 @@ import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { HostStatusToolkit } from "./toolkits/hostStatus/tools.ts";
 import * as HostStatusHandlers from "./toolkits/hostStatus/handlers.ts";
+import { FleetHealthToolkit } from "./toolkits/fleetHealth/tools.ts";
+import * as FleetHealthHandlers from "./toolkits/fleetHealth/handlers.ts";
 import { ProviderToolkit } from "./toolkits/provider/tools.ts";
 import * as ProviderHandlers from "./toolkits/provider/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
@@ -1019,6 +1021,7 @@ export const catalogRegistrations = {
   previewControls: toolkitRegistration(PreviewControlsToolkit, PreviewControlsHandlers.layer),
   environment: toolkitRegistration(EnvironmentToolkit, EnvironmentHandlers.layer),
   hostStatus: toolkitRegistration(HostStatusToolkit, HostStatusHandlers.layer),
+  fleetHealth: toolkitRegistration(FleetHealthToolkit, FleetHealthHandlers.layer),
   provider: toolkitRegistration(ProviderToolkit, ProviderHandlers.layer),
   project: toolkitRegistration(ProjectToolkit, ProjectHandlers.layer),
   connection: toolkitRegistration(ConnectionToolkit, ConnectionHandlers.layer),
@@ -1146,6 +1149,7 @@ export const layer = Layer.mergeAll(
   layerProjectRegistration,
   layerEnvironmentToolkit,
   layerHostStatusToolkit,
+  catalogRegistrations.fleetHealth,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,
   layerPullRequestsToolkit,

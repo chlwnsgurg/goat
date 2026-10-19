@@ -67,7 +67,6 @@ export const FleetWorkerPhase = Schema.Literals([
   "watching",
   "push_requested",
   "launching",
-  "moved",
   "exhausted",
 ]);
 export type FleetWorkerPhase = typeof FleetWorkerPhase.Type;
@@ -110,4 +109,3 @@ export const GoatThreadRescheduleResult = Schema.Struct({
   message: Schema.String,
 });
 export type GoatThreadRescheduleResult = typeof GoatThreadRescheduleResult.Type;
-
