@@ -352,3 +352,45 @@ it.effect("N2: an oversized descriptor is refused without decoding it", () =>
     expect(exchanges).toBe(0);
   }).pipe(Effect.scoped),
 );
+
+it.effect("R3-S1: a refused token exchange releases its unread body", () =>
+  Effect.gen(function* () {
+    const nodes = yield* makeNodes(linkedNode);
+    const secrets = makeSecrets();
+    const cancelled = yield* Deferred.make<void>();
+    // Like fetch, aborting the request's signal is what releases an unread body.
+    const client = HttpClient.make((request, _url, signal) =>
+      Effect.sync(() => {
+        if (request.url.endsWith("/.well-known/goat/environment"))
+          return HttpClientResponse.fromWeb(
+            request,
+            Response.json({ environmentId: sshNode.environmentId }),
+          );
+        signal.addEventListener("abort", () => {
+          Deferred.doneUnsafe(cancelled, Effect.void);
+        });
+        const body = new ReadableStream<Uint8Array>({
+          start: (controller) => controller.enqueue(new TextEncoder().encode("{")),
+        });
+        return HttpClientResponse.fromWeb(request, new Response(body, { status: 403 }));
+      }),
+    );
+    const sessions = yield* makeSessions(
+      nodes.service,
+      makeSsh("http://unused/").service,
+      secrets.service,
+      client,
+    );
+    yield* nodes.subscribed;
+    expect(
+      yield* Effect.flip(
+        sessions.enroll({
+          nodeId: "node-1",
+          pairingUrl: "https://node.invalid/pair#token=pairing-secret",
+        }),
+      ),
+    ).toMatchObject({ reason: "refused" });
+    yield* Deferred.await(cancelled);
+    expect(yield* sessions.unenroll("node-1")).toBe(false);
+  }).pipe(Effect.scoped),
+);

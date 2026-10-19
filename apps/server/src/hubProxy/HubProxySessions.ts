@@ -247,6 +247,22 @@ export const make = Effect.gen(function* () {
       Effect.timeout(UPSTREAM_TIMEOUT),
     );
 
+  /**
+   * Like send, but the response lives only as long as the caller's scope, so a branch that never
+   * reads the body (a refused exchange) still releases the connection when it returns.
+   */
+  const sendScoped = (request: HttpClientRequest.HttpClientRequest) =>
+    HttpClient.withScope(http)
+      .execute(request)
+      .pipe(
+        Effect.provideService(HttpClient.TracerDisabledWhen, () => true),
+        Effect.provideService(FetchHttpClient.RequestInit, {
+          redirect: "manual",
+          credentials: "omit",
+          cache: "no-store",
+        }),
+      );
+
   const readEnrollment = (nodeId: string) =>
     secrets.get(enrollmentSecretName(nodeId)).pipe(
       Effect.flatMap((stored) =>
@@ -488,10 +504,11 @@ export const make = Effect.gen(function* () {
       const generation = state.generation;
       const unreachable = () =>
         new HubProxyError({ reason: "unavailable", message: `${target.baseUrl} did not answer.` });
-      const descriptor = yield* send(
+      const descriptor = yield* sendScoped(
         HttpClientRequest.get(new URL("/.well-known/goat/environment", target.baseUrl).toString()),
       ).pipe(
         Effect.flatMap((response) => readSmallJson(response, NodeDescriptor)),
+        Effect.scoped,
         Effect.timeout(UPSTREAM_TIMEOUT),
         Effect.mapError(unreachable),
       );
@@ -499,7 +516,7 @@ export const make = Effect.gen(function* () {
         return yield* fail("refused", "That pairing link belongs to another machine.");
       return yield* Effect.gen(function* () {
         yield* checkAdmission(input.nodeId, state, key, generation);
-        const response = yield* send(
+        const response = yield* sendScoped(
           HttpClientRequest.post(new URL("/oauth/token", target.baseUrl).toString()).pipe(
             HttpClientRequest.bodyUrlParams({
               grant_type: AuthTokenExchangeGrantType,
@@ -518,6 +535,7 @@ export const make = Effect.gen(function* () {
               ? readSmallJson(response, TokenExchangeResult).pipe(Effect.map(Option.some))
               : Effect.succeed(Option.none()),
           ),
+          Effect.scoped,
           Effect.timeout(UPSTREAM_TIMEOUT),
           Effect.mapError(unreachable),
         );
