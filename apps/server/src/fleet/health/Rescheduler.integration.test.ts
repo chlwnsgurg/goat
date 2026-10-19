@@ -282,7 +282,7 @@ describe("Rescheduler", () => {
           expect(launch).toMatchObject({
             host: "B",
             cwd: "/repo",
-            title: "Resume goal-g1-s0-a2",
+            title: Rescheduler.attemptTitle("goal-g1-s0-a2", "goal:g1:s0:a2:launch"),
             runtimeMode: "full-access",
             workspace: {
               type: "worktree",
@@ -345,6 +345,35 @@ describe("Rescheduler", () => {
                 host: "B",
               });
               expect(world.launches).toHaveLength(1);
+
+              // A host remembered as Lost that answers again is asked first and keeps its work.
+              const second = {
+                host: "A",
+                threadId: ThreadId.make("thread:a2"),
+                title: "Worker 2",
+                phase: "running",
+              };
+              world.threads.push(second);
+              world.reachable.A = false;
+              const ref2 = { ...ref, threadId: second.threadId };
+              const health = yield* Health.Health;
+              for (let minute = 0; minute < 9; minute += 1) {
+                yield* TestClock.adjust(Duration.minutes(1));
+                yield* health.threadHealth(ref2);
+              }
+              expect((yield* health.threadHealth(ref2))._tag).toBe("host_lost");
+              world.reachable.A = true;
+              const back = request({
+                ref: ref2,
+                reason: "stalled",
+                workspace: { baseRef: "dev", branch: "goal-g1-s1-a2", startFromOrigin: true },
+                clientRequestId: "goal:g1:s1:a2:launch",
+              });
+              expect(yield* rescheduler.reschedule(back)).toMatchObject({
+                reason: "host_still_answers",
+              });
+              expect(world.launches).toHaveLength(1);
+              expect(second.phase).toBe("interrupted");
             }),
           );
         }),
@@ -367,7 +396,8 @@ describe("Rescheduler", () => {
             // The lid closes: two contacts fail, then the machine sleeps for an hour.
             yield* observe(2);
             yield* TestClock.adjust(Duration.minutes(60));
-            yield* monitor.tick;
+            // The first call after waking can beat the clock source; it must still see the wake.
+            expect((yield* (yield* Health.Health).threadHealth(ref))._tag).toBe("unknown");
             // Tunnels take a few minutes to come back after waking.
             for (let minute = 0; minute < 4; minute += 1) {
               yield* TestClock.adjust(Duration.minutes(1));

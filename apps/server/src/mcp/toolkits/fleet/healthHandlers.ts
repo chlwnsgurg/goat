@@ -66,6 +66,13 @@ export const layer = McpToolAccess.toLayer(FleetHealthToolkit, {
   goat_thread_reschedule: McpToolAccess.writesEnvironment((input, check) =>
     Effect.gen(function* () {
       const caller = yield* check;
+      if (input.targetHost === FleetHostStates.LOCAL_HOST) {
+        return {
+          status: "refused" as const,
+          reason: "no_capacity" as const,
+          message: "This machine cannot be a move target: moved work is launched on SSH hosts.",
+        };
+      }
       const modelSelection = input.modelSelection ?? caller.caller?.modelSelection;
       if (modelSelection === undefined) {
         return yield* new OrchestratorMcpFailure({

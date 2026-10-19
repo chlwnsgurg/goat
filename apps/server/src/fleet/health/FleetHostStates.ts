@@ -68,7 +68,7 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const at = DateTime.formatIso(yield* DateTime.now);
         // A drain stays a drain when someone cordons again; uncordon clears both.
-        yield* sql`
+        const rows = yield* sql<Row>`
           INSERT INTO fleet_host_states (host, cordoned, draining, reason, changed_by, changed_at)
           VALUES (${input.host}, 1, ${input.draining ? 1 : 0}, ${input.reason}, ${input.changedBy}, ${at})
           ON CONFLICT(host) DO UPDATE SET
@@ -77,8 +77,9 @@ export const make = Effect.gen(function* () {
             reason = COALESCE(excluded.reason, fleet_host_states.reason),
             changed_by = excluded.changed_by,
             changed_at = excluded.changed_at
+          RETURNING *
         `.pipe(Effect.orDie);
-        return (yield* get(input.host))!;
+        return fromRow(rows[0]!);
       }),
     uncordon: (host) =>
       sql`DELETE FROM fleet_host_states WHERE host = ${host}`.pipe(Effect.orDie, Effect.asVoid),

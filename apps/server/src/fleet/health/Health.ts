@@ -41,10 +41,11 @@ const REMOTE_TIMEOUT_MS = 15_000;
 const decodeStatus = Schema.decodeUnknownEffect(OrchestratorMcpThreadStatusResult);
 
 /**
- * A thread's status on another host, at most at ceiling. Null when the host did not answer or
- * the remote predates goat_thread_status; either way the call is recorded as a host contact.
+ * A thread's status on another host, at most at ceiling, and whether the host answered at all.
+ * status is null when the host did not answer, refused, or predates goat_thread_status. Every
+ * call is recorded as a host contact, so a host that comes back clears its outage here.
  */
-export const readRemoteStatus = (host: string, threadId: ThreadId, ceiling: RuntimeMode) =>
+export const probeRemoteStatus = (host: string, threadId: ThreadId, ceiling: RuntimeMode) =>
   Effect.gen(function* () {
     const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
     const monitor = yield* HostHealthMonitor;
@@ -61,16 +62,24 @@ export const readRemoteStatus = (host: string, threadId: ThreadId, ceiling: Runt
       )
       .pipe(Effect.result);
     if (raw._tag === "Failure") {
-      if (raw.failure.reason === "host_unavailable" || raw.failure.reason === "ssh_failed") {
+      const unreachable =
+        raw.failure.reason === "host_unavailable" || raw.failure.reason === "ssh_failed";
+      if (unreachable) {
         yield* monitor.recordContact(host, raw.failure.message);
+      } else {
+        yield* monitor.recordContact(host, null);
       }
-      return null;
+      return { answered: !unreachable, status: null };
     }
     yield* monitor.recordContact(host, null);
     const result = SshRemoteDispatch.readRemoteToolResult("goat_thread_status", raw.success);
-    if (!result.ok) return null;
-    return yield* decodeStatus(result.value).pipe(Effect.orElseSucceed(() => null));
+    if (!result.ok) return { answered: true, status: null };
+    const status = yield* decodeStatus(result.value).pipe(Effect.orElseSucceed(() => null));
+    return { answered: true, status };
   });
+
+export const readRemoteStatus = (host: string, threadId: ThreadId, ceiling: RuntimeMode) =>
+  probeRemoteStatus(host, threadId, ceiling).pipe(Effect.map((probe) => probe.status));
 
 /** A thread on this machine, from its shell row. */
 export const readLocalStatus = (threadId: ThreadId) =>

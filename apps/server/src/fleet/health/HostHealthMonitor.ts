@@ -81,6 +81,8 @@ export const make = (
       change: (contact: HostContact, now: number, clock: MonitorClock) => HostContact,
     ) =>
       Effect.gen(function* () {
+        // Notice a wake before using contacts: a call can arrive before the clock source ticks.
+        yield* tick;
         const now = yield* Clock.currentTimeMillis;
         const current = yield* Ref.get(clock);
         yield* Ref.update(contacts, (all) =>
@@ -104,6 +106,7 @@ export const make = (
 
     const derive = (host: string | null) =>
       Effect.gen(function* () {
+        yield* tick;
         const now = yield* Clock.currentTimeMillis;
         const state = yield* states.get(keyOf(host));
         // This machine always answers itself.
@@ -137,6 +140,7 @@ export const make = (
 
     const annotate: HostHealthMonitorShape["annotate"] = (result) =>
       Effect.gen(function* () {
+        yield* mergeOutages;
         for (const entry of result.hosts) {
           if (entry.host === null) continue;
           const host = entry.host;

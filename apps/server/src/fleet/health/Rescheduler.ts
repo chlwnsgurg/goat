@@ -14,7 +14,7 @@ import * as Semaphore from "effect/Semaphore";
 import { choosePlacement, type PlacementCandidate } from "../../channels/channelPlacement.ts";
 import { isTerminalPhase } from "../../mcp/threadStatus.ts";
 import * as SshRemoteDispatch from "../../sshRemote/SshRemoteDispatch.ts";
-import { readLocalStatus, readRemoteStatus, type FleetThreadRef } from "./Health.ts";
+import { probeRemoteStatus, readLocalStatus, type FleetThreadRef } from "./Health.ts";
 import { HostHealthMonitor } from "./HostHealthMonitor.ts";
 import { isSchedulable } from "./hostHealthModel.ts";
 import {
@@ -108,7 +108,21 @@ const canonicalKeyOf = (identity: unknown) => {
 };
 
 /** The new thread's title: the attempt branch, so a retry can find a launch whose answer was lost. */
-export const attemptTitle = (branch: string) => "Resume " + branch;
+/** FNV-1a, enough to keep two requests for the same branch from sharing a title. */
+const shortHash = (text: string) => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+};
+
+/**
+ * The new thread's title: the attempt branch and a hash of the request id, so a retry finds a
+ * launch whose answer was lost and never adopts an unrelated thread on the same branch name.
+ */
+export const attemptTitle = (branch: string, clientRequestId: string) =>
+  "Resume " + branch + " · " + shortHash(clientRequestId);
 
 const refused = (reason: RescheduleRefusal, message: string): RescheduleResult => ({
   _tag: "Refused",
@@ -187,7 +201,10 @@ export const make = Effect.gen(function* () {
       return { answering, schedulable };
     });
 
-  /** A thread this request already launched, found by its title on any candidate host. */
+  /**
+   * A thread this request already launched, found by its exact title. unchecked lists hosts whose
+   * list failed: the caller must not launch while one of them might hold the thread.
+   */
   const findLaunched = (hosts: ReadonlyArray<string>, title: string, ceiling: RuntimeMode) =>
     Effect.forEach(
       hosts,
@@ -200,14 +217,22 @@ export const make = Effect.gen(function* () {
           ceiling,
         ).pipe(
           Effect.flatMap(decodeThreadList),
-          Effect.map((listed) => listed.threads.find((thread) => thread.title === title)),
-          Effect.map((thread) =>
-            thread === undefined ? null : { host, threadId: thread.threadId },
-          ),
-          Effect.orElseSucceed(() => null),
+          Effect.map((listed) => {
+            const thread = listed.threads.find((entry) => entry.title === title);
+            return { host, checked: true, threadId: thread?.threadId ?? null };
+          }),
+          Effect.orElseSucceed(() => ({ host, checked: false, threadId: null })),
         ),
       { concurrency: 4 },
-    ).pipe(Effect.map((found) => found.find((entry) => entry !== null) ?? null));
+    ).pipe(
+      Effect.map((results) => {
+        const hit = results.find((entry) => entry.threadId !== null);
+        return {
+          found: hit === undefined ? null : { host: hit.host, threadId: hit.threadId! },
+          unchecked: results.filter((entry) => !entry.checked).map((entry) => entry.host),
+        };
+      }),
+    );
 
   const targetCwd = (request: RescheduleRequest, host: string) => {
     const project = request.project;
@@ -226,49 +251,48 @@ export const make = Effect.gen(function* () {
   };
 
   /**
-   * Work leaves a host only when the host is Lost, or answers and its attempt is confirmed
-   * stopped. Null means the move may go ahead.
+   * Work leaves a host only when it does not answer now and is Lost (or Unreachable with force),
+   * or when it answers and its attempt is confirmed stopped. A remembered outage is never enough
+   * on its own: the host is asked first, so one that came back keeps its work. Null means go.
    */
   const gate = (request: RescheduleRequest) =>
     Effect.gen(function* () {
       const host = request.ref.host;
-      const conditions = new Set(
-        (yield* monitor.conditions(host)).conditions.map((condition) => condition.type),
-      );
-      if (conditions.has("Lost")) return null;
-      if (conditions.has("Unreachable")) {
-        return request.force === true
-          ? null
-          : refused(
-              "host_still_answers",
-              (host ?? "This machine") +
-                " is unreachable but not Lost yet; work moves after 5 minutes.",
-            );
+      const where = host ?? "this machine";
+      const probe =
+        host === null
+          ? { answered: true, status: yield* readLocalStatus(request.ref.threadId) }
+          : yield* probeRemoteStatus(host, request.ref.threadId, request.runtimeMode);
+      if (!probe.answered) {
+        const conditions = new Set(
+          (yield* monitor.conditions(host)).conditions.map((condition) => condition.type),
+        );
+        if (conditions.has("Lost")) return null;
+        if (conditions.has("Unreachable") && request.force === true) return null;
+        return refused(
+          "host_still_answers",
+          where + " does not answer but is not Lost yet; work moves after 5 minutes unreachable.",
+        );
       }
       if (request.reason === "host_unreachable") {
-        return refused(
-          "host_still_answers",
-          (host ?? "This machine") + " answers again, so its work stays.",
-        );
+        return refused("host_still_answers", where + " answers again, so its work stays.");
       }
-      const status =
-        host === null
-          ? yield* readLocalStatus(request.ref.threadId)
-          : yield* readRemoteStatus(host, request.ref.threadId, request.runtimeMode);
+      const status = probe.status;
       if (status === null) {
-        return refused(
-          "host_still_answers",
-          "Could not confirm the attempt stopped on " + (host ?? "this machine") + ".",
-        );
+        return refused("host_still_answers", "Could not read the attempt on " + where + ".");
       }
-      if (isTerminalPhase(status.phase) || status.phase === "idle") return null;
+      const stopped =
+        (isTerminalPhase(status.phase) || status.phase === "idle") &&
+        status.queuedRunId === null &&
+        status.pendingRequest === null;
+      if (stopped) return null;
       if (host === null) {
         return refused(
           "host_still_answers",
-          "The attempt is still running on this machine; stop it first.",
+          "The attempt is still active on this machine; stop it first.",
         );
       }
-      yield* call(
+      const interrupted = yield* call(
         host,
         "goat_thread_interrupt",
         {
@@ -278,7 +302,25 @@ export const make = Effect.gen(function* () {
         },
         true,
         request.runtimeMode,
-      ).pipe(Effect.ignore);
+      ).pipe(Effect.result);
+      if (interrupted._tag === "Failure") {
+        const error = interrupted.failure;
+        if (error.reason === "host_unavailable" || error.reason === "ssh_failed") {
+          yield* monitor.recordContact(host, error.message);
+        }
+        yield* Effect.logWarning("fleet.reschedule.interrupt_failed", {
+          owner: request.owner,
+          host,
+          reason: error.reason,
+        });
+        return refused(
+          "host_still_answers",
+          "Could not interrupt the attempt on " +
+            host +
+            ": " +
+            Array.from(error.message).slice(0, 300).join(""),
+        );
+      }
       return refused(
         "host_still_answers",
         "Interrupt requested on " +
@@ -292,7 +334,7 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const from = request.ref.host;
         const newBranch = request.workspace.branch;
-        const title = attemptTitle(newBranch);
+        const title = attemptTitle(newBranch, request.clientRequestId);
         const resumedFrom =
           request.previousBranch !== null
             ? "branch"
@@ -307,7 +349,17 @@ export const make = Effect.gen(function* () {
         const lookIn = [
           ...new Set([...(requested === null ? [] : [requested]), ...survey.answering]),
         ];
-        const already = yield* findLaunched(lookIn, title, request.runtimeMode);
+        const lookup = yield* findLaunched(lookIn, title, request.runtimeMode);
+        const already = lookup.found;
+        if (already === null && lookup.unchecked.length > 0) {
+          // A host that could not be searched may hold the earlier launch; never risk a second.
+          return refused(
+            "no_capacity",
+            "Could not check " +
+              lookup.unchecked.join(", ") +
+              " for an earlier launch of this attempt; try again.",
+          );
+        }
         if (already !== null) {
           return {
             _tag: "Rescheduled",
@@ -337,16 +389,14 @@ export const make = Effect.gen(function* () {
         let target = requested;
         if (target === null) {
           const now = yield* Clock.currentTimeMillis;
-          const scored: Array<PlacementCandidate<string>> = candidates
-            .filter((entry) => entry.sample?.reachability === "ok")
-            .map((entry) => ({
-              value: entry.host,
-              host: entry.host,
-              providerLabel: request.modelSelection.instanceId,
-              preferred: false,
-              windows: quotaWindows(entry.sample, request.modelSelection.instanceId),
-              activeTasks: entry.sample?.metrics?.threads.running ?? 0,
-            }));
+          const scored: Array<PlacementCandidate<string>> = candidates.map((entry) => ({
+            value: entry.host,
+            host: entry.host,
+            providerLabel: request.modelSelection.instanceId,
+            preferred: false,
+            windows: quotaWindows(entry.sample, request.modelSelection.instanceId),
+            activeTasks: entry.sample?.metrics?.threads.running ?? 0,
+          }));
           target = choosePlacement(scored, now)?.chosen.value ?? null;
         } else if (!isSchedulable((yield* monitor.conditions(target)).conditions)) {
           return refused(
@@ -446,7 +496,7 @@ export const fenceStaleAttempt = (input: {
 }) =>
   Effect.gen(function* () {
     const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
-    yield* dispatch.callHostTool(
+    const raw = yield* dispatch.callHostTool(
       {
         host: input.ref.host,
         tool: "goat_thread_interrupt",
@@ -463,4 +513,13 @@ export const fenceStaleAttempt = (input: {
       },
       Effect.succeed(input.ceiling),
     );
+    // A refusal comes back as a tool result, not a transport error; it is not a stop.
+    const result = SshRemoteDispatch.readRemoteToolResult("goat_thread_interrupt", raw);
+    if (!result.ok) {
+      return yield* new SshRemoteDispatch.SshRemoteDispatchError({
+        reason: "remote_refused",
+        message: result.message,
+        ...(result.code === undefined ? {} : { remoteCode: result.code }),
+      });
+    }
   });
