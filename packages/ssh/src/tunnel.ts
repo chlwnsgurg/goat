@@ -38,6 +38,7 @@ import {
 } from "@goat/shared/cliRelease";
 import * as KeyedLock from "@goat/shared/KeyedLock";
 import * as NetService from "@goat/shared/Net";
+import * as HostProcess from "@goat/shared/HostProcess";
 import { extractJsonObject, fromLenientJson } from "@goat/shared/schemaJson";
 import { compareRuntimeBuilds } from "@goat/shared/semver";
 import {
@@ -60,10 +61,11 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/http";
-import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as SshAuth from "./auth.ts";
 import { REMOTE_NODE_ENGINE_CHECK_SCRIPT } from "./remoteNodeEngineCheck.ts";
+import { makeOwnedSshTunnelCommand, ownedAuthDirectory } from "./tunnelOwner.ts";
 import { readLocalRuntimeArchive } from "./runtimeArchive.ts";
 import { downloadRuntimeArchiveWithGh } from "./runtimeArchiveGh.ts";
 import { downloadRuntimeArchiveWithHttps } from "./runtimeArchiveHttp.ts";
@@ -3371,6 +3373,8 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
     hostSpec,
   ];
   const sshCommand = yield* resolveSshCommand;
+  const platform = yield* HostProcess.Platform;
+  const authDirectory = ownedAuthDirectory(childEnvironment.SSH_ASKPASS);
   const tunnelCommand = [sshCommand, ...args];
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const { scope } = input;
@@ -3384,14 +3388,22 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
   });
   const child = yield* spawner
     .spawn(
-      ChildProcess.make(sshCommand, args, {
-        env: childEnvironment,
-        extendEnv: true,
-        stdin: {
-          stream: Stream.empty,
-          endOnDone: true,
+      makeOwnedSshTunnelCommand(
+        platform,
+        sshCommand,
+        args,
+        {
+          // Spawn can be interrupted before the handle's explicit kill finalizer is installed.
+          forceKillAfter: TUNNEL_SHUTDOWN_TIMEOUT_MS,
+          env: childEnvironment,
+          extendEnv: true,
+          stdin: {
+            stream: Stream.empty,
+            endOnDone: true,
+          },
         },
-      }),
+        authDirectory,
+      ),
     )
     .pipe(
       Effect.provideService(Scope.Scope, scope),
@@ -4462,7 +4474,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       localPort,
       remotePort,
     });
-    const entryScope = yield* Scope.make("sequential");
+    // Shutdown also owns forwards still awaiting readiness, before they enter the tunnel map.
+    const entryScope = yield* Scope.fork(managerScope, "sequential");
     const start = (authOptions: SshAuth.SshAuthOptions) =>
       startSshTunnel({
         key: input.key,

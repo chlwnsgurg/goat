@@ -108,8 +108,9 @@ establishment running. All but the return to online reset the retry ladder:
 - The device moves to another network (`network-changed`), the likely moment a
   host behind a VPN or on home Wi-Fi becomes reachable again.
 - The desktop wakes from sleep. A long suspension replaces the session outright
-  and closes SSH forwards that stopped answering, because ssh's keepalive needs
-  45 s to notice a dead TCP connection.
+  and checks SSH forwards over HTTP. A failed check closes and reaps the local
+  forward after a 2 s window (up to 10 s for a slow link), plus up to 2 s to
+  force termination. This avoids waiting for ssh's roughly 45 s keepalive window.
 - The device comes back online from `offline`.
 - **Retry now** or **Reconnect**.
 
@@ -118,6 +119,20 @@ healthy tunnel survives a spurious offline report. A long sleep is the
 exception: it replaces the session at once, because the OS may have killed the
 socket without reporting it. A replacement already establishing on long resume
 also tolerates offline reports while the network recovers.
+
+The connected RPC session also checks liveness: pings run every 5 s with a
+15 s silence budget, so a hanging forward is detected within roughly 15–20 s
+of the last received frame. HTTP checks run on reuse and resume; they are not
+a second periodic heartbeat.
+
+On POSIX hosts, each local forward runs in a dedicated supervised process
+group. A pipe held by the owning GOAT process fences its lifetime: EOF kills
+that group even when the owner crashes or receives SIGKILL, and removes that
+forward's askpass directory. `ssh -N` itself ignores stdin EOF, so a separate
+reader owns this check. Ordinary scope teardown allows 2 s for SIGTERM before
+SIGKILL and waits for the child to exit before reusing its local port. Windows
+uses the spawner's scoped process-tree termination; the POSIX owner-death fence
+does not cover Windows owner crashes. No startup scan kills existing forwards.
 
 ## Notifications
 
