@@ -49,6 +49,12 @@ GOAT Bot screen shows only a chip for the work and its final report.
   in, work you asked for, and, if your link may read GOAT's threads, the rest.
 - With every message GOAT Bot also sees a short journal of the latest work
   you may see: what was asked, how it ended, and its pull requests.
+- Ask GOAT Bot "what's pending?" to see everything still open: queued,
+  running, waiting on you, or finished but not yet reported to you. Say "stop
+  everything" (or name one piece of work) to stop it, including anything it
+  handed to subagents.
+- GOAT Bot runs up to four pieces of your work at once. More wait in order and
+  start as earlier ones finish; the reply says when something is queued.
 - Ask GOAT Bot to remember a standing rule ("always reply in Korean") and it
   follows it from then on, in Slack and in GOAT. It keeps a note only when the
   message you send asks for it, and each note names the message it came from.

@@ -85,6 +85,31 @@ the running turn and give the bot thread runs it was built never to have.
   the path answers to worker questions already take. Other conversations, and messages the bot
   answers directly, never wait on running work.
 
+## Work items, worker runs, and stopping
+
+A task is a work item: what a person asked for. Its worker runs are separate records, one per
+run of the task's worker thread, kept as `worker-run:<task>:<run>` rows in
+`channel_runtime_state` (a `ChannelWorkerRun`) rather than a new table, so no migration
+competes with other work for an id. Worker reconciliation writes a run's row when its state
+changes: running, waiting (on a person), finished, failed or stopped. A run finishing never
+finishes its item. The item's state comes from the task and from its newest outcome delivery to
+where the work came from (`channelWorkQueue.ts`): finished work stays open as "result not sent
+yet" or "result not delivered" until that delivery is recorded delivered. Workers on other
+machines report through their host, so their runs are not recorded here.
+
+- **What's pending.** A `pending` read lists the open items the requester may see, newest
+  first, with their runs, open questions and age.
+- **At most four at once.** The dispatcher leaves a person's fifth item received while four of
+  their items are dispatching, running or waiting. The runtime dispatches received tasks oldest
+  first, so the queue drains in order as items end. The reply to the queued request and "what's
+  pending" both say it is waiting for a free worker.
+- **Stopping.** `stop_work` (one task, or everything the person may stop) records a
+  `task.cancelled` per item in the same commit as the reply, with its narration and a pending
+  forward. The forward interrupts the worker's run and stops the subagents it started, with ids
+  derived from the stop event, so a crash after the reply still stops each once. A worker on
+  another machine is interrupted there through `goat_thread_interrupt`. Work not yet launched
+  is stopped by the ledger write alone.
+
 An owner has one bot, in the Scratch project, and one bot conversation keyed by the owner rather
 than the thread. Where Scratch is off because the data directory is inside a Git work tree, the bot
 gets a project of its own under the data directory instead: the bot never runs a provider or
