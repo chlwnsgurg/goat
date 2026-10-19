@@ -45,10 +45,35 @@ Before `ProviderSessionManager` opens a new V2 provider session, it asks
 - the concrete provider instance; and
 - the provider session.
 
-The credential grants `preview` and `orchestration` capabilities. Credentials
-expire after a maximum lifetime, expire when idle, and are revoked when the
-provider session is released. The raw token is not persisted in orchestration
-state.
+The credential grants `preview` and `orchestration` capabilities. The raw
+token is not persisted in orchestration state.
+
+A thread keeps one bearer token for as long as GOAT holds its attachment to a
+provider instance. Provider processes keep the header they were given, for the
+rest of a turn (Codex, ACP, OpenCode, Cursor) or for their whole life (Pi,
+Muse), so a change in authority (memory policy, browser or device access,
+read-only, task ceilings) replaces the record behind the same token and bumps
+its `credentialGeneration`. Permits and memory admission taken under an older
+generation are refused. When the committed memory policy moves before the
+thread is re-prepared, the token keeps its other authority and loses only
+memory. A new token is minted only for a different provider instance or after
+revocation.
+
+An idle credential expires after the liveness window unless the session it was
+issued to is still attached, in which case the next call renews it. Releasing
+the provider session revokes it, and a revoked credential is never renewed.
+Local provider processes are scoped children of the server, so a restart or
+update ends them and the next turn opens a new session with a new credential.
+Tokens carry a per-run tag, which lets the server recognize one minted before
+it restarted without persisting anything secret.
+
+Every refusal is logged and traced as `McpHttpServer.refuseCredential` with its
+reason (`expired`, `revoked`, `earlier_server`, `unknown`, `missing`) and,
+when known, the thread and credential id. MCP clients replace a 401 with their
+own text, so a refused `tools/call` carrying a registry-shaped token is answered
+with an `isError` tool result that says what happened and that GOAT
+re-authenticates the thread at its next turn. Other requests, and session
+tokens that may sign in through OAuth, still get 401.
 
 The MCP HTTP server resolves the bearer token and supplies the resulting
 `McpInvocationScope` to tool handlers. Orchestration handlers additionally

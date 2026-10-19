@@ -543,31 +543,37 @@ function layerTest(input: {
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
   readonly projectionReads?: { getThread: number; getThreadShell: number };
+  readonly beforeGetThread?: Ref.Ref<Effect.Effect<void>>;
   readonly fileSystem?: FileSystem.FileSystem;
 }) {
-  const reads = input.projectionReads;
-  const layerConfiguredStores = reads
-    ? Layer.merge(
-        layerTestStores,
-        Layer.effect(
-          ProjectionStore.ProjectionStoreV2,
-          Effect.gen(function* () {
-            const delegate = yield* ProjectionStore.ProjectionStoreV2;
-            return ProjectionStore.ProjectionStoreV2.of({
-              ...delegate,
-              getThread: (threadId) =>
-                Effect.sync(() => reads.getThread++).pipe(
-                  Effect.andThen(delegate.getThread(threadId)),
-                ),
-              getThreadShell: (threadId) =>
-                Effect.sync(() => reads.getThreadShell++).pipe(
-                  Effect.andThen(delegate.getThreadShell(threadId)),
-                ),
-            });
-          }),
-        ).pipe(Layer.provide(layerTestStores)),
-      )
-    : layerTestStores;
+  const reads = input.projectionReads ?? { getThread: 0, getThreadShell: 0 };
+  const beforeGetThread = input.beforeGetThread;
+  const layerConfiguredStores =
+    input.projectionReads || beforeGetThread
+      ? Layer.merge(
+          layerTestStores,
+          Layer.effect(
+            ProjectionStore.ProjectionStoreV2,
+            Effect.gen(function* () {
+              const delegate = yield* ProjectionStore.ProjectionStoreV2;
+              return ProjectionStore.ProjectionStoreV2.of({
+                ...delegate,
+                getThread: (threadId) =>
+                  Effect.sync(() => reads.getThread++).pipe(
+                    Effect.andThen(
+                      beforeGetThread ? Effect.flatten(Ref.get(beforeGetThread)) : Effect.void,
+                    ),
+                    Effect.andThen(delegate.getThread(threadId)),
+                  ),
+                getThreadShell: (threadId) =>
+                  Effect.sync(() => reads.getThreadShell++).pipe(
+                    Effect.andThen(delegate.getThreadShell(threadId)),
+                  ),
+              });
+            }),
+          ).pipe(Layer.provide(layerTestStores)),
+        )
+      : layerTestStores;
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
       ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
@@ -2792,13 +2798,18 @@ it.effect("current memory DTO withholds access until the committed on epoch is i
       assert.isTrue((yield* policy.read).enableAgentMemoryAccess);
       assert.equal((yield* configs.read(threadId))?.providerSessionId, old.providerSessionId);
       assert.isUndefined(yield* registry.currentMemoryPolicy!(old.providerSessionId));
-      assert.isUndefined(yield* registry.resolve(oldToken));
+      // The drifted credential keeps working for everything but memory.
+      const drifted = yield* registry.resolve(oldToken);
+      assert.equal(drifted?.memoryPolicy?.grant, "none");
+      assert.isFalse(drifted?.capabilities.has("memory"));
       assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "none");
       assert.isUndefined((yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess);
       yield* Deferred.succeed(release, undefined);
       yield* Deferred.await(completed);
       const installed = (yield* configs.read(threadId))!;
-      assert.notEqual(installed.providerSessionId, old.providerSessionId);
+      assert.equal(installed.providerSessionId, old.providerSessionId);
+      assert.equal(installed.authorizationHeader, old.authorizationHeader);
+      assert.notEqual(installed.credentialGeneration, old.credentialGeneration);
       const scope = yield* registry.resolve(
         installed.authorizationHeader.replace(/^Bearer\s+/, ""),
       );
@@ -2823,7 +2834,7 @@ it.effect("current memory DTO withholds access until the committed on epoch is i
 );
 
 it.effect.each(["resolve", "unrelated issue"] as const)(
-  "current memory DTO denies expired live attachments before and after prune by %s",
+  "current memory DTO denies idle live attachments until a call renews them, after prune by %s",
   (pruneBy) =>
     Effect.gen(function* () {
       let timestamp = 1_000;
@@ -2906,27 +2917,29 @@ it.effect.each(["resolve", "unrelated issue"] as const)(
             threadId: ThreadId.make("unrelated-live-credential"),
             providerInstanceId: modelSelection.instanceId,
           });
-          timestamp = 1_000;
-          assert.isUndefined(yield* registry.currentMemoryPolicy!(config.providerSessionId));
-          timestamp = 1_101;
+          // An unrelated issue probes attachment and keeps a credential its session still
+          // holds; it stays idle, so snapshot reads still deny it.
+          assert.equal(
+            (yield* configs.read(threadId))?.providerSessionId,
+            config.providerSessionId,
+          );
         }
-        assert.isUndefined(yield* registry.resolve(token));
         assert.isUndefined(yield* registry.currentMemoryPolicy!(config.providerSessionId));
         assert.isUndefined(
           (yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess,
         );
-        // Rewinding only the test hook proves prune removed both lookup keys,
-        // rather than merely hiding a stale ID record behind its expiry check.
-        timestamp = 1_000;
-        assert.isUndefined(yield* registry.currentMemoryPolicy!(config.providerSessionId));
-        assert.isUndefined(yield* registry.resolve(token));
-        assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "none");
-        assert.isUndefined(
-          (yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess,
-        );
+        assert.isUndefined(yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId));
+        // A call from the session GOAT still holds renews its credential, so a
+        // provider that cannot take a new token keeps working after a long idle.
+        assert.equal((yield* registry.resolve(token))?.thread.threadId, threadId);
+        assert.isDefined(yield* registry.currentMemoryPolicy!(config.providerSessionId));
         assert.equal((yield* configs.read(threadId))?.providerSessionId, config.providerSessionId);
         assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
-        assert.isUndefined(yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId));
+        // Once GOAT releases the session an idle credential stays expired.
+        yield* manager.close(providerSessionId);
+        timestamp += 200;
+        assert.isUndefined(yield* registry.resolve(token));
+        assert.isUndefined(yield* registry.currentMemoryPolicy!(config.providerSessionId));
       }).pipe(
         Effect.provide(
           layerTest({
@@ -5898,8 +5911,10 @@ it.effect(
           Effect.forkScoped({ startImmediately: true }),
         );
         yield* settings.updateSettings({ enableAgentMemoryAccess: false });
-        assert.isUndefined(
-          yield* registry.resolve(old!.authorizationHeader.replace(/^Bearer\s+/, "")),
+        assert.equal(
+          (yield* registry.resolve(old!.authorizationHeader.replace(/^Bearer\s+/, "")))
+            ?.memoryPolicy?.grant,
+          "none",
         );
         const off = yield* Deferred.await(offReady);
         assert.deepEqual(off.grantedScopes, ["orchestration:read"]);
@@ -5920,10 +5935,12 @@ it.effect(
           Effect.forkScoped({ startImmediately: true }),
         );
         yield* settings.updateSettings({ enableAgentMemoryAccess: true });
-        assert.isUndefined(
-          yield* registry.resolve(offConfig!.authorizationHeader.replace(/^Bearer\s+/, "")),
-        );
         const on = yield* Deferred.await(onReady);
+        // Re-enabling replaces authority under the token the provider already holds.
+        assert.equal(
+          (yield* configs.read(threadId))?.authorizationHeader,
+          offConfig!.authorizationHeader,
+        );
         assert.deepEqual(on.grantedScopes, ["memory:read", "memory:write", "orchestration:read"]);
         const admitted = yield* readScope();
         assert.isDefined(yield* registry.currentMemoryPolicy!(admitted.thread.providerSessionId));
@@ -7121,4 +7138,182 @@ it.effect("drops a Home instance reservation after open fails", () =>
       ),
     );
   }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 keeps a thread's MCP token through a memory policy change mid-turn",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const projection = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = ThreadId.make("thread-memory-toggle-mid-turn");
+        const now = yield* DateTime.now;
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+          memoryGrantCeiling: null,
+        });
+        const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+        yield* runtime.startTurn({
+          appThread: (yield* projection.getThreadProjection(threadId)).thread,
+          threadId,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId }),
+          providerThread: makeProviderThread({ idAllocator, threadId, providerSessionId, now }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+            text: "long coordinator turn",
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        });
+        // The provider process holds this header for the rest of its turn.
+        const held = yield* configs.read(threadId);
+        assert.isDefined(held);
+        const heldToken = held!.authorizationHeader.replace(/^Bearer\s+/, "");
+        assert.include((yield* registry.resolve(heldToken))?.grantedScopes ?? [], "memory:read");
+
+        const memoryOff = yield* Deferred.make<void>();
+        yield* manager.mcpCredentialRotations!.pipe(
+          Stream.filter((event) => event.memoryPolicy.grant === "none"),
+          Stream.take(1),
+          Stream.runForEach(() => Deferred.succeed(memoryOff, undefined)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        yield* settings.updateSettings({ enableAgentMemoryAccess: false });
+        // Before the manager re-prepares, the stale epoch withdraws only memory.
+        const drifted = yield* registry.resolve(heldToken);
+        assert.isDefined(drifted, "a memory policy change must not end the thread's credential");
+        assert.notInclude(drifted?.grantedScopes ?? [], "memory:read");
+        assert.isFalse(drifted?.capabilities.has("memory"));
+        assert.isTrue(drifted?.capabilities.has("orchestration"));
+
+        yield* Deferred.await(memoryOff);
+        const renewed = yield* configs.read(threadId);
+        assert.equal(renewed?.authorizationHeader, held!.authorizationHeader);
+        assert.equal(renewed?.providerSessionId, held!.providerSessionId);
+        const scope = yield* registry.resolve(heldToken);
+        assert.deepEqual(scope?.grantedScopes, ["orchestration:read"]);
+        assert.equal(scope?.memoryPolicy?.grant, "none");
+
+        yield* settings.updateSettings({ enableAgentMemoryAccess: true });
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: null,
+        });
+        assert.include((yield* registry.resolve(heldToken))?.grantedScopes ?? [], "memory:write");
+
+        yield* manager.close(providerSessionId);
+        assert.isUndefined(yield* registry.resolve(heldToken));
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
+            settingsLayer,
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 memory admission refuses a config whose authority changed during its final check",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      const beforeGetThread = yield* Ref.make<Effect.Effect<void>>(Effect.void);
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const admission = yield* AdapterInfrastructure.ProviderMemoryAdmission;
+        const threadId = ThreadId.make("thread-admission-during-renewal");
+        const now = yield* DateTime.now;
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+          memoryGrantCeiling: null,
+        });
+        const before = (yield* configs.read(threadId))!;
+        assert.include((yield* admission.fence(before))?.grantedScopes ?? [], "memory:write");
+
+        // A fence reads the thread three times: attachment, policy, final attachment.
+        // Pause the last one.
+        const paused = yield* Deferred.make<void>();
+        const resume = yield* Deferred.make<void>();
+        let calls = 0;
+        yield* Ref.set(
+          beforeGetThread,
+          Effect.suspend(() =>
+            ++calls === 3
+              ? Deferred.succeed(paused, undefined).pipe(Effect.andThen(Deferred.await(resume)))
+              : Effect.void,
+          ),
+        );
+        const fenced = yield* admission
+          .fence(before)
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(paused);
+        yield* Ref.set(beforeGetThread, Effect.void);
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: null,
+          readOnly: true,
+        });
+        const after = (yield* configs.read(threadId))!;
+        assert.equal(after.authorizationHeader, before.authorizationHeader);
+        assert.notEqual(after.credentialGeneration, before.credentialGeneration);
+        yield* Deferred.succeed(resume, undefined);
+        assert.isUndefined(yield* Fiber.join(fenced));
+        assert.notInclude((yield* admission.fence(after))?.grantedScopes ?? [], "memory:write");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerTest({
+              state,
+              idleTimeoutMs: 1000,
+              serverSettingsLayer: settingsLayer,
+              beforeGetThread,
+            }),
+            settingsLayer,
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped),
 );

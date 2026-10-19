@@ -503,11 +503,16 @@ export const layerWithOptions = (
         Effect.gen(function* () {
           const threadId = config.threadId;
           const prepared = memoryPrepareInputs.get(threadId);
-          if (
-            !prepared ||
-            (yield* mcpSessions.read(threadId))?.providerSessionId !== config.providerSessionId
-          )
-            return false;
+          const holdsCurrentAuthority = mcpSessions
+            .read(threadId)
+            .pipe(
+              Effect.map(
+                (current) =>
+                  current?.providerSessionId === config.providerSessionId &&
+                  current.credentialGeneration === config.credentialGeneration,
+              ),
+            );
+          if (!prepared || !(yield* holdsCurrentAuthority)) return false;
           const attached =
             isMcpCredentialReserved(threadId, config.providerSessionId) ||
             Array.from((yield* Ref.get(sessions)).values()).some(
@@ -522,7 +527,9 @@ export const layerWithOptions = (
             Option.isSome(thread) &&
             thread.value.deletedAt === null &&
             thread.value.archivedAt === null &&
-            thread.value.providerInstanceId === prepared.providerInstanceId
+            thread.value.providerInstanceId === prepared.providerInstanceId &&
+            // Authority can be replaced under the same id while the thread is read.
+            (yield* holdsCurrentAuthority)
           );
         });
       const currentMemoryPolicy = (threadId: ThreadId) =>
@@ -636,17 +643,24 @@ export const layerWithOptions = (
                     };
                   });
                 let issuedCredentialId: string | undefined;
+                const holdsCredential = (entry: LiveSessionEntry) =>
+                  entry.runtime.instanceId === providerInstanceId &&
+                  entry.attachedThreadIds.has(threadId) &&
+                  entry.mcpCredentialIdByThread.get(threadId) === issuedCredentialId;
                 const isLiveCaller = Ref.get(sessions).pipe(
                   Effect.map((current) =>
                     Array.from(current.values()).some(
                       (entry) =>
-                        entry.runtime.instanceId === providerInstanceId &&
-                        entry.attachedThreadIds.has(threadId) &&
-                        entry.mcpCredentialIdByThread.get(threadId) === issuedCredentialId &&
+                        holdsCredential(entry) &&
                         entry.busyTurnByThread.has(threadId) &&
                         entry.busyTurns.has(entry.busyTurnByThread.get(threadId)!),
                     ),
                   ),
+                );
+                // Renews idle expiry while GOAT still holds the session; a detached
+                // or released one is left to expire.
+                const isAttached = Ref.get(sessions).pipe(
+                  Effect.map((current) => Array.from(current.values()).some(holdsCredential)),
                 );
                 // Reuse a still-valid credential for this thread instead of
                 // rotating: long-lived provider processes (codex app-server)
@@ -694,7 +708,18 @@ export const layerWithOptions = (
                   }
                   dropMcpCredentialReservation(threadId, existing.providerSessionId);
                 }
-                yield* mcpSessionRegistry.revokeThread(threadId);
+                // A provider process keeps the header it was given for its whole
+                // turn, and several harnesses for its whole life, so changed
+                // authority is replaced under the same token. Only a different
+                // provider instance, or a credential already revoked, gets a new one.
+                const renew =
+                  existing !== undefined && existing.providerInstanceId === providerInstanceId
+                    ? {
+                        authorizationHeader: existing.authorizationHeader,
+                        providerSessionId: existing.providerSessionId,
+                      }
+                    : undefined;
+                if (renew === undefined) yield* mcpSessionRegistry.revokeThread(threadId);
                 const credential = yield* mcpSessionRegistry.issue({
                   threadId,
                   providerInstanceId,
@@ -704,9 +729,15 @@ export const layerWithOptions = (
                   memoryPolicy: issuedPolicy,
                   ...(Option.isNone(memoryPolicy) ? {} : { readCurrentPolicy }),
                   isLiveCaller,
+                  isAttached,
                   readOnly,
+                  ...(renew === undefined ? {} : { renew }),
                 });
                 issuedCredentialId = credential.config.providerSessionId;
+                if (renew !== undefined)
+                  yield* mcpSessionRegistry.revokeThread(threadId, {
+                    exceptProviderSessionId: credential.config.providerSessionId,
+                  });
                 yield* mcpSessions.set(credential.config);
                 yield* Ref.update(
                   sessions,
@@ -736,7 +767,12 @@ export const layerWithOptions = (
                 if (Option.isSome(admission)) yield* admission.value.rotated(rotation);
                 else yield* PubSub.publish(credentialRotations, rotation);
                 reserveMcpCredential(threadId, credential.config.providerSessionId);
-                return { mcpCredentialId: credential.config.providerSessionId, issued: true };
+                // A renewed credential is still held by a live process, so a failed
+                // open must not revoke it.
+                return {
+                  mcpCredentialId: credential.config.providerSessionId,
+                  issued: credential.renewed !== true,
+                };
               }),
             );
       /**

@@ -13,11 +13,13 @@ import {
 } from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 import {
   HttpBody,
@@ -25,12 +27,16 @@ import {
   HttpClientRequest,
   HttpRouter,
   HttpServerResponse,
+  HttpServer,
+  HttpServerRequest,
 } from "effect/http";
+import * as NetAddress from "effect/net/NetAddress";
 
 import * as ProjectService from "../project/ProjectService.ts";
 import * as PullRequestReviewGuideService from "../pullRequest/PullRequestReviewGuideService.ts";
 import * as ThreadResultService from "../threadResults/ThreadResultService.ts";
 import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
@@ -910,6 +916,8 @@ it.effect("terminates HTTP MCP sessions with DELETE", () =>
       const layerServer = McpHttpServer.layerMcpTransport.pipe(
         Layer.provide(
           Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+            explainRefusal: () => Effect.succeed({ reason: "unknown" as const }),
+            isRegistryToken: () => false,
             resolve: (presented) =>
               Effect.succeed(
                 presented === token
@@ -1205,6 +1213,8 @@ it.effect("admits provider and OAuth client credentials and points only clients 
         Layer.provideMerge(McpHttpServer.layerMcpTransport),
         Layer.provide(
           Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+            explainRefusal: () => Effect.succeed({ reason: "unknown" as const }),
+            isRegistryToken: () => false,
             resolve: (token) =>
               Effect.succeed(
                 token === providerToken
@@ -1275,4 +1285,161 @@ it.effect("admits provider and OAuth client credentials and points only clients 
       expect(deadProvider.headers["www-authenticate"]).toBe('Bearer error="invalid_token"');
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "explains a refused thread credential to the agent and keeps 401 for everything else",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let timestamp = 1_000;
+        const fakeEnvironment = ServerEnvironment.ServerEnvironment.of({
+          getEnvironmentId: Effect.succeed(environmentId),
+          getDescriptor: Effect.die("unused"),
+        });
+        const makeRegistry = McpSessionRegistry.__testing
+          .make({ now: () => timestamp, livenessWindowMs: 100 })
+          .pipe(
+            Effect.provideService(
+              HttpServer.HttpServer,
+              HttpServer.HttpServer.of({
+                address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 43123),
+                serve: (() => Effect.void) as HttpServer.HttpServer["Service"]["serve"],
+              }),
+            ),
+            Effect.provideService(ServerEnvironment.ServerEnvironment, fakeEnvironment),
+            Effect.provide(NodeServices.layer),
+          );
+        const registry = yield* makeRegistry;
+        const earlierRun = yield* makeRegistry;
+        const tokenOf = (issued: McpSessionRegistry.McpIssuedCredential) =>
+          issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+        const issue = (from: McpSessionRegistry.McpSessionRegistryShape, thread: string) =>
+          from
+            .issue({
+              threadId: ThreadId.make(thread),
+              providerInstanceId: ProviderInstanceId.make("codex"),
+            })
+            .pipe(Effect.map(tokenOf));
+
+        yield* HttpRouter.serve(
+          McpHttpServer.layerMcpTransport.pipe(
+            Layer.provide(Layer.succeed(McpSessionRegistry.McpSessionRegistry, registry)),
+          ),
+          { disableListenLog: true, disableLogger: true },
+        ).pipe(Layer.build);
+        const httpClient = yield* HttpClient.HttpClient;
+        const post = (token: string, body: string) =>
+          httpClient.post("/mcp", {
+            headers: {
+              accept: "application/json, text/event-stream",
+              authorization: "Bearer " + token,
+            },
+            body: HttpBody.text(body, "application/json"),
+          });
+        const toolCall =
+          '{"jsonrpc":"2.0","id":"call-7","method":"tools/call","params":{"name":"link_pull_request","arguments":{}}}';
+        const initialize =
+          '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0.0"}}}';
+        const refusedText = (token: string) =>
+          Effect.gen(function* () {
+            const response = yield* post(token, toolCall);
+            expect(response.status).toBe(200);
+            const body = (yield* response.json) as {
+              readonly id: unknown;
+              readonly result: {
+                readonly isError: boolean;
+                readonly content: ReadonlyArray<{ readonly text: string }>;
+              };
+            };
+            expect(body.id).toBe("call-7");
+            expect(body.result.isError).toBe(true);
+            return body.result.content[0]!.text;
+          });
+
+        const released = yield* issue(registry, "thread-released");
+        yield* registry.revokeThread(ThreadId.make("thread-released"));
+        expect(yield* refusedText(released)).toBe(
+          McpHttpServer.credentialRefusalMessage("revoked"),
+        );
+        const releasedInitialize = yield* post(released, initialize);
+        expect(releasedInitialize.status).toBe(401);
+        expect(((yield* releasedInitialize.json) as { message: string }).message).toContain(
+          "next turn",
+        );
+
+        const fromEarlierRun = yield* issue(earlierRun, "thread-before-restart");
+        expect(yield* refusedText(fromEarlierRun)).toContain("restarted or updated");
+        // A chunked body declares no length and still gets the explanation.
+        const chunked = yield* httpClient.post("/mcp", {
+          headers: {
+            accept: "application/json, text/event-stream",
+            authorization: "Bearer " + fromEarlierRun,
+          },
+          body: HttpBody.stream(
+            Stream.make(
+              new TextEncoder().encode(toolCall.slice(0, 20)),
+              new TextEncoder().encode(toolCall.slice(20)),
+            ),
+            "application/json",
+          ),
+        });
+        expect(chunked.status).toBe(200);
+        expect(JSON.stringify(yield* chunked.json)).toContain("restarted or updated");
+        const streamed = (body: Stream.Stream<Uint8Array>) =>
+          httpClient.post("/mcp", {
+            headers: {
+              accept: "application/json, text/event-stream",
+              authorization: "Bearer " + fromEarlierRun,
+            },
+            body: HttpBody.stream(body, "application/json"),
+          });
+        // Over the bound, or never finished, the body is not read as a tool call. The
+        // server answers before the oversized upload ends, so the client may see the close.
+        const oversized = yield* streamed(
+          Stream.make(new TextEncoder().encode(toolCall), new Uint8Array(1024 * 1024)),
+        ).pipe(
+          Effect.map((response) => response.status),
+          Effect.catchTags({ HttpClientError: () => Effect.succeed("closed before upload ended") }),
+        );
+        expect([401, "closed before upload ended"]).toContain(oversized);
+
+        const idle = yield* issue(registry, "thread-idle");
+        timestamp += 101;
+        expect(yield* registry.resolve(idle)).toBeUndefined();
+        expect(yield* refusedText(idle)).toBe(McpHttpServer.credentialRefusalMessage("expired"));
+
+        // Session tokens and garbage are never answered as tool results.
+        const sessionToken = yield* post("payload.signature", toolCall);
+        expect(sessionToken.status).toBe(401);
+        expect(((yield* sessionToken.json) as { message: string }).message).toBe(
+          "A valid GOAT MCP credential is required.",
+        );
+        expect((yield* post("not-a-goat-token", toolCall)).status).toBe(401);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("a refused body that never finishes stops being read at its deadline", () =>
+  Effect.gen(function* () {
+    const body = new ReadableStream<Uint8Array>({
+      start: (controller) =>
+        controller.enqueue(
+          new TextEncoder().encode('{"jsonrpc":"2.0","id":1,"method":"tools/call"'),
+        ),
+    });
+    const request = HttpServerRequest.fromWeb(
+      new Request("http://127.0.0.1/mcp", {
+        method: "POST",
+        body,
+        duplex: "half",
+        headers: { "content-type": "application/json" },
+      } as RequestInit),
+    );
+    const read = yield* McpHttpServer.__testing
+      .refusedToolCallId(request)
+      .pipe(Effect.forkChild({ startImmediately: true }));
+    yield* TestClock.adjust("5 seconds");
+    expect(yield* Fiber.join(read)).toBeUndefined();
+  }),
 );
