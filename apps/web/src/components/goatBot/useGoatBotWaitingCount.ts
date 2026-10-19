@@ -5,7 +5,7 @@ import {
   squashAtomCommandFailure,
 } from "@goat/client-runtime/state/runtime";
 import type { ChannelBotRef, EnvironmentId } from "@goat/contracts";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { create } from "zustand";
 
 import { useGlobalAgentStore } from "~/globalAgentStore";
@@ -186,10 +186,7 @@ export function refreshGoatBotWaitingCount(environmentId: EnvironmentId, chipRev
 
 function useBotThreadRef() {
   const botRef = useGlobalAgentStore((state) => state.botRef);
-  return useMemo(
-    () => (botRef === null ? null : scopeThreadRef(botRef.environmentId, botRef.threadId)),
-    [botRef],
-  );
+  return botRef === null ? null : scopeThreadRef(botRef.environmentId, botRef.threadId);
 }
 
 /**
@@ -223,7 +220,7 @@ export function useMarkGoatBotRead(): (() => Promise<void>) | null {
       : serverConfigs.get(botThreadRef.environmentId)?.environment.capabilities;
   const supported =
     capabilities?.goatBotWaitingRead === true && capabilities.threadVisitedTracking === true;
-  const markRead = useCallback(async () => {
+  const markRead = async () => {
     if (botThreadRef === null) return;
     const result = await visit({
       environmentId: botThreadRef.environmentId,
@@ -242,6 +239,6 @@ export function useMarkGoatBotRead(): (() => Promise<void>) | null {
         description: error instanceof Error ? error.message : "An error occurred.",
       }),
     );
-  }, [botThreadRef, statusEnvironmentId, visit]);
+  };
   return supported ? markRead : null;
 }
