@@ -85,6 +85,16 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.scheduledTasksRunNow]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksRotateWebhookToken]: AuthOrchestrationOperateScope,
 
+  [WS_METHODS.notesList]: AuthOrchestrationReadScope,
+  [WS_METHODS.notesRead]: AuthOrchestrationReadScope,
+  [WS_METHODS.notesSubscribe]: AuthOrchestrationReadScope,
+  [WS_METHODS.notesWorkTargets]: AuthOrchestrationReadScope,
+  [WS_METHODS.notesWorkTargetProjects]: AuthOrchestrationReadScope,
+  [WS_METHODS.notesWrite]: AuthOrchestrationOperateScope,
+  [WS_METHODS.notesMove]: AuthOrchestrationOperateScope,
+  [WS_METHODS.notesDelete]: AuthOrchestrationOperateScope,
+  [WS_METHODS.notesStartWork]: AuthOrchestrationOperateScope,
+
   [CHANNEL_GATEWAY_WS_METHODS.ensureBot]: AuthOrchestrationOperateScope,
   [CHANNEL_GATEWAY_WS_METHODS.ingest]: AuthOrchestrationOperateScope,
   [CHANNEL_GATEWAY_WS_METHODS.createIdentityLink]: AuthSettingsWriteScope,

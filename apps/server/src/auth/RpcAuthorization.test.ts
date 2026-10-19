@@ -19,6 +19,10 @@ import {
   AuthTerminalReadScope,
   AuthTerminalOperateScope,
   WS_METHODS,
+  WsNotesRpcGroup,
+  type NoteError,
+  type NoteConflictError,
+  type EnvironmentAuthorizationError,
 } from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -709,4 +713,77 @@ it.each([
 ] as const)("registers %s with its destination authority", (method, scope) => {
   expect(WsRpcGroup.requests.has(method)).toBe(true);
   expect(requiredScopeForRpcMethod(method)).toBe(scope);
+});
+
+describe("notes permissions", () => {
+  it("separates note observation from mutations", () => {
+    for (const method of [
+      WS_METHODS.notesList,
+      WS_METHODS.notesRead,
+      WS_METHODS.notesSubscribe,
+      WS_METHODS.notesWorkTargets,
+      WS_METHODS.notesWorkTargetProjects,
+    ])
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+    for (const method of [
+      WS_METHODS.notesWrite,
+      WS_METHODS.notesMove,
+      WS_METHODS.notesDelete,
+      WS_METHODS.notesStartWork,
+    ])
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+  });
+  it.effect("rejects every notes mutation before its handler on a read-only connection", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const group = WsNotesRpcGroup.omit(
+        WS_METHODS.notesList,
+        WS_METHODS.notesRead,
+        WS_METHODS.notesSubscribe,
+        WS_METHODS.notesWorkTargets,
+        WS_METHODS.notesWorkTargetProjects,
+      );
+      const invoked = Effect.sync(() => {
+        calls++;
+      }).pipe(Effect.andThen(Effect.never));
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayer({
+              [WS_METHODS.notesWrite]: () => invoked,
+              [WS_METHODS.notesMove]: () => invoked,
+              [WS_METHODS.notesDelete]: () => invoked,
+              [WS_METHODS.notesStartWork]: () => invoked,
+            }),
+            RpcAuthorization.layer([AuthOrchestrationReadScope]),
+          ),
+        ),
+      );
+      const revision = "a".repeat(64);
+      const denied: ReadonlyArray<
+        Effect.Effect<void, NoteError | NoteConflictError | EnvironmentAuthorizationError>
+      > = [
+        client[WS_METHODS.notesWrite]({ path: "a.md", body: "changed", baseRevision: null }).pipe(
+          Effect.asVoid,
+        ),
+        client[WS_METHODS.notesMove]({ from: "a.md", to: "b.md", baseRevision: revision }).pipe(
+          Effect.asVoid,
+        ),
+        client[WS_METHODS.notesDelete]({ path: "a.md", baseRevision: revision }).pipe(
+          Effect.asVoid,
+        ),
+        client[WS_METHODS.notesStartWork]({
+          path: "a.md",
+          requestId: "attempt",
+          target: { type: "host", host: "host", projectPath: "/project" },
+        }).pipe(Effect.asVoid),
+      ];
+      for (const request of denied)
+        expect(yield* request.pipe(Effect.flip)).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthOrchestrationOperateScope,
+        });
+      expect(calls).toBe(0);
+    }),
+  );
 });

@@ -167,6 +167,11 @@ export function ThreadListToolbar(props: {
                 />
               )}
               <AndroidHeaderIconButton
+                accessibilityLabel="Open notes"
+                icon="doc.text"
+                onPress={() => navigation.navigate("Notes")}
+              />
+              <AndroidHeaderIconButton
                 accessibilityLabel="Open settings"
                 icon="gearshape"
                 onPress={props.onOpenSettings}

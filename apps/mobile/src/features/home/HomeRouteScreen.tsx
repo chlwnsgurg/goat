@@ -185,6 +185,11 @@ export function HomeRouteScreen() {
         />
         {Platform.OS === "ios" ? (
           <Toolbar placement="left">
+            <Toolbar.Button
+              accessibilityLabel="Open notes"
+              icon="doc.text"
+              onPress={() => navigation.navigate("Notes")}
+            />
             {botHome.known ? (
               <Toolbar.Button
                 accessibilityLabel={botHome.mode === "bot" ? "Show threads" : "Show GOAT Bot"}

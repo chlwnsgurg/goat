@@ -24,6 +24,7 @@ Connection state, RPC session setup, and environment-scoped commands stay here.
 | `voice-input/`   | Voice input controller                                                                                      |
 | `work-log/`      | Work-log presentation helpers                                                                               |
 | `mcpApps/`       | MCP Apps host surface                                                                                       |
+| `notes/`         | Offline note outbox rules, checkbox toggling, and the compare line diff; `notes/rpc` subscribes to notes    |
 
 `packages/client-runtime/src/goatBot/index.ts` re-exports rows, readers, ensure, and the send
 queue. Home resolution stays on its own export, `packages/client-runtime/src/goatBot/home.ts`

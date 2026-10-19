@@ -1,3 +1,5 @@
+import { NoteToolkit } from "./toolkits/note/tools.ts";
+import * as NoteHandlers from "./toolkits/note/handlers.ts";
 import { MemoryToolkit } from "./toolkits/memory/tools.ts";
 import * as MemoryHandlers from "./toolkits/memory/handlers.ts";
 import { MemoryAdministrationToolkit } from "./toolkits/memoryAdministration/tools.ts";
@@ -922,6 +924,7 @@ export const catalogRegistrations = {
   remoteReport: toolkitRegistration(RemoteReportToolkit, RemoteReportHandlers.layer),
   ssh: toolkitRegistration(SshToolkit, SshHandlers.layer),
   attachment: toolkitRegistration(AttachmentToolkit, AttachmentHandlers.layer),
+  note: toolkitRegistration(NoteToolkit, NoteHandlers.layer),
   channel: toolkitRegistration(ChannelToolkit, ChannelHandlers.layer),
   pullRequests: toolkitRegistration(PullRequestsToolkit, PullRequestsHandlers.layer),
   deviceStandard: toolkitRegistration(DeviceStandardToolkit, DeviceHandlers.layerStandard),
@@ -1040,6 +1043,7 @@ export const layer = Layer.mergeAll(
   layerThreadToolkit,
   layerAttachmentToolkit,
   layerChannelToolkit,
+  catalogRegistrations.note,
   layerProjectRegistration,
   layerEnvironmentToolkit,
   layerHostStatusToolkit,

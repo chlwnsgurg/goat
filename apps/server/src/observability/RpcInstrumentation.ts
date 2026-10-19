@@ -20,6 +20,16 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  * even where they differ from the method prefix.
  */
 const RPC_AGGREGATES = {
+  [WS_METHODS.notesList]: "notes",
+  [WS_METHODS.notesRead]: "notes",
+  [WS_METHODS.notesWrite]: "notes",
+  [WS_METHODS.notesMove]: "notes",
+  [WS_METHODS.notesDelete]: "notes",
+  [WS_METHODS.notesSubscribe]: "notes",
+  [WS_METHODS.notesStartWork]: "notes",
+  [WS_METHODS.notesWorkTargets]: "notes",
+  [WS_METHODS.notesWorkTargetProjects]: "notes",
+
   [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: "orchestrationV2",
   [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: "orchestration",

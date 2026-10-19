@@ -252,6 +252,23 @@
       ]
     },
     {
+      "path": "notes.md",
+      "tier": 3,
+      "title": "Notes",
+      "scope": "Markdown notes on disk, revision conflicts, git commits, start-work and automatic done, and the clients that edit them.",
+      "documents": [
+        "packages/contracts/src/notes.ts",
+        "apps/server/src/notes/",
+        "apps/server/src/mcp/toolkits/note/",
+        "apps/server/src/config.ts",
+        "apps/server/src/ws.ts",
+        "apps/web/src/notes/",
+        "apps/mobile/src/features/notes/",
+        "apps/mobile/src/persistence/mobile-database.ts",
+        "packages/client-runtime/src/notes/"
+      ]
+    },
+    {
       "path": "ssh.md",
       "tier": 3,
       "title": "SSH",

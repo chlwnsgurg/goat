@@ -506,6 +506,14 @@
     "./pull-request-query": {
       "types": "./src/pullRequestQuery.ts",
       "default": "./src/pullRequestQuery.ts"
+    },
+    "./notes": {
+      "types": "./src/notes/index.ts",
+      "default": "./src/notes/index.ts"
+    },
+    "./notes/rpc": {
+      "types": "./src/notes/rpc/index.ts",
+      "default": "./src/notes/rpc/index.ts"
     }
   },
   "scripts": {

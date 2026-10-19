@@ -1,3 +1,8 @@
+import { NotesRouteScreen } from "./features/notes/NotesRouteScreen";
+import { NoteRouteScreen } from "./features/notes/NoteRouteScreen";
+import { NoteConflictRouteScreen } from "./features/notes/NoteConflictRouteScreen";
+import { NoteStartWorkRouteScreen } from "./features/notes/NoteStartWorkRouteScreen";
+import { useNotesOutboxWorker } from "./features/notes/notes-state";
 import { ComponentCatalogScreen } from "./features/development/ComponentCatalogScreen";
 import { PullRequestGuideStopScreen } from "./features/pull-requests/guide/PullRequestGuideScreen";
 import { PullRequestInlineCommentScreen } from "./features/pull-requests/PullRequestInlineCommentScreen";
@@ -592,6 +597,7 @@ function workspaceLocationFromState(state: NavigationState) {
 // each enqueue, shell change, or reconnect.
 function ThreadOutboxDrainWorker() {
   useThreadOutboxDrain();
+  useNotesOutboxWorker();
   useComposerAttachmentUploadWorker();
   return null;
 }
@@ -711,6 +717,30 @@ const RootStackConfig = createWorkspaceStackNavigator({
         contentStyle: { backgroundColor: "transparent" },
         headerBackVisible: false,
         ...getCompactBrandHeaderOptions(),
+      },
+    }),
+    Notes: createNativeStackScreen({
+      screen: NotesRouteScreen,
+      linking: "notes",
+      options: { ...SOLID_HEADER_OPTIONS, title: "Notes" },
+    }),
+    Note: createNativeStackScreen({
+      screen: NoteRouteScreen,
+      linking: "notes/:environmentId/:path",
+      options: { ...SOLID_HEADER_OPTIONS, title: "Note" },
+    }),
+    NoteConflict: createNativeStackScreen({
+      screen: NoteConflictRouteScreen,
+      options: { ...SOLID_HEADER_OPTIONS, title: "Compare versions" },
+    }),
+    NoteStartWork: createNativeStackScreen({
+      screen: NoteStartWorkRouteScreen,
+      options: {
+        ...SHEET_SOLID_HEADER_OPTIONS,
+        title: "Start work",
+        ...FORM_SHEET_PRESENTATION_OPTIONS,
+        sheetAllowedDetents: [0.92],
+        sheetGrabberVisible: true,
       },
     }),
     Decisions: createNativeStackScreen({

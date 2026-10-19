@@ -1,4 +1,6 @@
 import { installRelayClient } from "./cloud/installRelayClient.ts";
+import * as NotesService from "./notes/NotesService.ts";
+import * as NoteWorkService from "./notes/NoteWorkService.ts";
 import * as CodexRoutes from "./provider/CodexRouteService.ts";
 import * as SshHostSetup from "./sshRemote/SshHostSetup.ts";
 import * as Handoffs from "./handoffs/Handoffs.ts";
@@ -115,6 +117,7 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsChannelRpcGroup,
+  WsNotesRpcGroup,
   WsCoreRpcGroup,
   WsCoreServerRpcGroup,
   WsCoreWorkspaceRpcGroup,
@@ -627,6 +630,7 @@ const ServerWsRpcGroup = RpcAuthorization.AuthorizedWsRpcGroup.middleware(RpcIns
 const ServerWsCoreRpcGroup = WsCoreRpcGroup.middleware(RpcInstrumentation);
 const ServerWsCoreServerRpcGroup = WsCoreServerRpcGroup.middleware(RpcInstrumentation);
 const ServerWsCoreWorkspaceRpcGroup = WsCoreWorkspaceRpcGroup.middleware(RpcInstrumentation);
+const ServerWsNotesRpcGroup = WsNotesRpcGroup.middleware(RpcInstrumentation);
 const ServerWsChannelRpcGroup = WsChannelRpcGroup.middleware(RpcInstrumentation);
 // When a resuming client's cursor is more than this many events behind the
 // current head, skip the per-event catch-up replay and send a fresh shell
@@ -1993,6 +1997,20 @@ const layerWsRpc = (
         return result;
       });
 
+      const notes = yield* NotesService.NotesService;
+      const noteWork = yield* NoteWorkService.NoteWorkService;
+      const noteHandlers = ServerWsNotesRpcGroup.of({
+        [WS_METHODS.notesList]: (input) => notes.list(input),
+        [WS_METHODS.notesRead]: (input) => notes.read(input),
+        [WS_METHODS.notesWrite]: (input) => notes.write(input, "user"),
+        [WS_METHODS.notesMove]: (input) => notes.move(input, "user"),
+        [WS_METHODS.notesDelete]: (input) => notes.delete(input),
+        [WS_METHODS.notesSubscribe]: () => notes.subscribe,
+        [WS_METHODS.notesStartWork]: (input) =>
+          noteWork.startWork(input, clientOrigin.surface === "mobile" ? "mobile" : "web"),
+        [WS_METHODS.notesWorkTargets]: () => noteWork.workTargets,
+        [WS_METHODS.notesWorkTargetProjects]: (input) => noteWork.workTargetProjects(input),
+      });
       const channelHandlers = ServerWsChannelRpcGroup.of({
         [CHANNEL_GATEWAY_WS_METHODS.ensureBot]: (input) => channelBots.ensure(input, channelOwner),
         [CHANNEL_GATEWAY_WS_METHODS.getBotStatus]: () => channelBots.status(channelOwner),
@@ -3402,6 +3420,7 @@ const layerWsRpc = (
           Pick<typeof handlers, RpcGroup.Rpcs<typeof ServerWsCoreWorkspaceRpcGroup>["_tag"]>
         >(handlers),
         ServerWsChannelRpcGroup.toLayer(channelHandlers),
+        ServerWsNotesRpcGroup.toLayer(noteHandlers),
       );
     }),
   );
@@ -3424,6 +3443,8 @@ export const layer = Layer.unwrap(
     const codexRoutes = yield* CodexRoutes.CodexRouteService;
     const sshWorkspace = yield* SshWorkspaceSync.SshWorkspaceSync;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
+    const notes = yield* NotesService.NotesService;
+    const noteWork = yield* NoteWorkService.NoteWorkService;
     const hostStatus = yield* HostStatusMcpService.HostStatusMcpService;
     const remoteLaunches = yield* RemoteLaunchCatalog.RemoteLaunchCatalog;
     const sql = yield* SqlClient.SqlClient;
@@ -3503,6 +3524,8 @@ export const layer = Layer.unwrap(
                   reviewGuides,
                 ),
               ),
+              Layer.provide(Layer.succeed(NotesService.NotesService, notes)),
+              Layer.provide(Layer.succeed(NoteWorkService.NoteWorkService, noteWork)),
               // The goat_host_status tool's instance, so both share last-known samples.
               Layer.provide(Layer.succeed(HostStatusMcpService.HostStatusMcpService, hostStatus)),
               Layer.provide(Layer.succeed(RemoteLaunchCatalog.RemoteLaunchCatalog, remoteLaunches)),

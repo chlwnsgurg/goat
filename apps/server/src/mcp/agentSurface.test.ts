@@ -1,3 +1,5 @@
+import { NoteToolkit } from "./toolkits/note/tools.ts";
+import * as NotesService from "../notes/NotesService.ts";
 import * as HomeRequests from "../provider/CodexHomeRequests.ts";
 import * as ProviderDiagnosisRouting from "../provider/ProviderDiagnosisRouting.ts";
 import { ProviderToolkit } from "./toolkits/provider/tools.ts";
@@ -76,6 +78,7 @@ import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 const toolkits = {
   attachment: AttachmentToolkit,
   channel: ChannelToolkit,
+  note: NoteToolkit,
   connection: ConnectionToolkit,
   device: DeviceToolkit,
   environment: EnvironmentToolkit,
@@ -101,6 +104,7 @@ const catalog = Layer.mergeAll(htmlRender, ...Object.values(otherRegistrations))
 // Only registration and early argument refusal run. No domain handler may touch live state.
 const unusedImport = () => Effect.die("Catalog registration must not import memory");
 const dependencies = Layer.mergeAll(
+  Layer.mock(NotesService.NotesService)({}),
   Layer.mock(PullRequestReviewGuideService.PullRequestReviewGuideService)({}),
   Layer.mock(WorktreeInventoryService.WorktreeInventoryService)({}),
   Layer.mock(ThreadMetadataMcpService.ThreadMetadataMcpService)({}),
@@ -187,7 +191,7 @@ const client = McpSchema.McpServerClient.of({
 });
 
 it("gives every entry a unique path, legacy name and resolvable schema reference", () => {
-  expect(entries).toHaveLength(141); // Includes current memory, browser, provider and SSH runtime tools.
+  expect(entries).toHaveLength(145); // Includes current memory, browser, provider and SSH runtime tools.
   expect(new Set(entries.map((entry) => entry.name)).size).toBe(entries.length);
   for (const [path, entry] of Object.entries(agentSurfaceRegistry)) {
     expect(path).toBe(entry.path);

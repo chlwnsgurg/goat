@@ -100,6 +100,7 @@ import {
   type ReactNode,
 } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
+import { notesRpc } from "../rpc/notes/atoms";
 import { useAtomValue } from "@effect/atom-react";
 
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
@@ -760,6 +761,7 @@ function OpenCommandPaletteDialog(props: {
   const { environments } = useEnvironments();
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const canCreateNote = useAtomValue(notesRpc.write.permissionAtom(primaryEnvironmentId));
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
@@ -2099,6 +2101,29 @@ function OpenCommandPaletteDialog(props: {
       await navigate({ to: "/fleet" });
     },
   });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:notes",
+    searchTerms: ["notes", "markdown", "ideas", "notebook"],
+    title: "Open notes",
+    icon: <MessageCircleQuestionIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/notes", search: {} });
+    },
+  });
+  if (canCreateNote) {
+    actionItems.push({
+      kind: "action",
+      value: "action:new-note",
+      searchTerms: ["new note", "create note", "idea", "markdown"],
+      title: "New note",
+      icon: <MessageCircleQuestionIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await navigate({ to: "/notes", search: { create: true } });
+      },
+    });
+  }
 
   actionItems.push({
     kind: "action",

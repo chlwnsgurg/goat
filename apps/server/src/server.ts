@@ -1,5 +1,6 @@
 import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { desiredLinkReconcileStartup } from "./cloud/DesiredLinkReconcile.ts";
+import * as NotesLayers from "./notes/NotesLayers.ts";
 import * as HomeRoute from "./provider/OpenCodexRoute.ts";
 import * as CodexRoutes from "./provider/CodexRouteService.ts";
 import * as HomeRequests from "./provider/CodexHomeRequests.ts";
@@ -1205,6 +1206,21 @@ const layerSshWorkspace = SshWorkspaceSync.layer.pipe(
   Layer.provide(RuntimeLayer.layerProjectService),
 );
 
+const layerNotes = NotesLayers.layer.pipe(
+  Layer.provide(RuntimeLayer.layerEventSink),
+  Layer.provide(
+    HostThreadsMcpService.layer.pipe(
+      Layer.provide(
+        OrchestratorMcpService.layer.pipe(
+          Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+        ),
+      ),
+      Layer.provide(ThreadResultService.layer),
+    ),
+  ),
+  Layer.provide(ThreadResultService.layer),
+);
+
 const layerMakeRoutes = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
@@ -1239,8 +1255,11 @@ const layerMakeRoutes = Layer.mergeAll(
 ).pipe(
   // One instance for the goat_host_status tool and the server.getHostStatus RPC.
   Layer.provide(
-    McpHttpServer.layerHostStatusService.pipe(
-      Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+    Layer.merge(
+      layerNotes,
+      McpHttpServer.layerHostStatusService.pipe(
+        Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+      ),
     ),
   ),
   Layer.provide(CloudTaskSource.layer.pipe(Layer.provide(GitVcsDriver.layer))),
