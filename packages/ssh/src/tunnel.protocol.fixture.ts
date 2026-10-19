@@ -223,6 +223,7 @@ export const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* 
   liveTokens?: string;
   descriptor404?: boolean;
   nodeMode?: boolean;
+  homePrefix?: string;
   /** The live server drains for a replacement (servers before #119 do not). */
   drain?: boolean;
   /** Commit time of the installed old build; unstamped when absent. */
@@ -233,7 +234,7 @@ export const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* 
 }) {
   const fs = yield* FileSystem.FileSystem;
   const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-protocol-" });
+  const home = yield* fs.makeTempDirectoryScoped({ prefix: input.homePrefix ?? "goat-protocol-" });
   const key = REMOTE_RUNTIME_STATE_KEY;
   const state = `${home}/.goat/ssh-launch/${key}`;
   const test = `${home}/.test`;

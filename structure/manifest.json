@@ -250,7 +250,7 @@
       "path": "ssh.md",
       "tier": 3,
       "title": "SSH",
-      "scope": "SSH host trust, runtime ownership and updates, provider diagnosis routing, agent dispatch, and Boat managed aliases.",
+      "scope": "SSH host trust, runtime ownership, updates and deferred refresh, provider diagnosis routing, agent dispatch, and Boat managed aliases.",
       "documents": [
         "packages/ssh",
         "packages/ssh/package.json",

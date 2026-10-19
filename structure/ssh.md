@@ -166,9 +166,12 @@ desktop and the server's SSH dispatch (`resolveSshCliRunner` in
   an older compatible release that is still installed. It keeps the retained release when that
   one is newer or cannot be ordered. If its exact archive cannot be acquired, recovery may select
   a newer compatible installed build, including one newer than the client, only with a proven
-  build order and an installer record whose executable digest matches before any helper runs.
-  Legacy directories without records remain eligible only through the retained runner.
-  `ssh.runtime.upgrade.skipped` logs the selected version and reason.
+  build order within bounded discovery. Recorded installs must match their executable digest
+  before any helper runs. Marker-only installs qualify when their own binary proves its exact
+  version and both protocols; launch verifies the executable digest captured by the probe.
+  The usable connection reports its actual version as ready (or providers_not_ready) with
+  `refreshDeferred`, preserves provider diagnosis, and retries the requested release every
+  10 minutes. `ssh.runtime.upgrade.skipped` logs the selected version and reason.
 - With an older compatible server running, the first connection of each manager drains it once it
   answers `idle` (see [Replacement](#replacement)). While it is busy, the client attaches to it,
   logs `ssh.runtime.refresh.deferred` with the reason, and retries every 10 minutes.
@@ -191,6 +194,8 @@ Public archives belong to `goat-si/goat-releases` and are checksum-checked. Enab
 release publication does not prove an archive exists: fresh-host verification needs
 the matching published asset or an explicitly supplied mirror/cache archive.
 A manually published nightly is evidence only for that exact version and platform.
+Older cached archives are not selected automatically when no compatible installation exists:
+archive integrity does not prove protocol support or authorize a userdata downgrade.
 
 Manual updates target the owning manager's version too. An idle update waits for running work;
 a confirmed immediate update allows the drain to finish at its deadline. A newer runtime, a
