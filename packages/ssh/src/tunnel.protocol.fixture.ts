@@ -174,6 +174,10 @@ if (req.method === "POST" && req.url === "/.well-known/goat/runtime/drain" && dr
     if (request.expectedInstanceId !== instanceId) { res.end(JSON.stringify({status: "instance-changed", instanceId, forced: false})); return; }
     const file = path.join(test, "drain");
     const mode = fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : "drained";
+    if (mode === "response-lost") {
+      event("drain", { status: "response-lost" });
+      res.destroy(); return;
+    }
     const status = mode === "cancelled" && request.force !== true ? "cancelled" : "drained";
     event("drain", { status, targetVersion: request.targetVersion, force: request.force === true, grace: request.graceSeconds });
     res.end(JSON.stringify({status, instanceId, forced: status === "drained" && mode === "cancelled"}), () => { if (status === "drained") { event("self-stop"); stopSelf(); } });

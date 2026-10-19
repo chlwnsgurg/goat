@@ -81,12 +81,28 @@ asked again, so the rechecks still guard every step. The probe prunes facts only
 version path is absent, preserving installed versions and symlinks. Windows hosts record nothing.
 
 A stale forward can fold the full probe into the launch command for a previously selected
-owned runtime, with no deferred replacement, blocked update or acquisition failure.
+owned runtime, including a deferred replacement, with no blocked update or acquisition failure.
 The probe's answer and a fingerprint of the executable, live process records, runner and
-ownership must match the last launch. A mismatch returns the observed probe to the normal
-selection path before launching anything. Explicit refreshes and confirmations, first-connection
+ownership must match the last launch. The folded command holds the replacement mutex across
+probe and attachment when a replacement is pending; a competing local owner gets a bounded wait
+within that command. With no upgrade needed, unresolved lock contention can still attach after
+revalidating the live server, retained runner, ownership and drain fence. If the owner
+finished installing this client's requested version, the same command can verify and attach
+that version. Other changes return the observed probe to normal selection. A deferred attach
+keeps the original ten-minute retry deadline. Explicit refreshes and confirmations, first-connection
 refreshes, and Windows hosts keep the separate probe. The cost log names the folded attempt
 `runtime-probe-folded`; the launch still rechecks its selection before use.
+
+HTTP readiness does not prove a runtime is accepting work during a drain. Attachment while an
+upgrade is needed requires replacement-lock ownership. Lock-only contention can attach without
+pending replacement metadata, but an instance-bound fence still blocks attachment after a lost
+drain response or dead SSH owner. Under replacement ownership, the live helper retires the fence
+when its instance is gone.
+For the same live instance, an authenticated drain retry joins the active drain: cancellation
+allows attachment again, a confirmed drain goes through the supervisor, and an unknown answer
+keeps attachment blocked. An attach-only folded launch leaves this recovery to the scheduled
+or explicit refresh. Recovering the mutex or waiting ten minutes alone does not clear the fence.
+Clients predating this fence cannot enforce it.
 
 The runner keeps `run-t3.sh` because independently updated clients and retained supervisors
 use that path for reuse, replacement, and rollback. Its shell variables use `GOAT_*`;
@@ -146,9 +162,10 @@ at most 300 s. What happens next depends on the user's confirmation:
 - On completion the server answers `drained` and sends itself `SIGTERM`. Normal shutdown
   persists restart continuations, and the successor's startup recovery restores those threads.
 
-An automatic refresh of an older compatible runtime drains only a server that answered `idle`, so
-its retries never hold up new turns. An incompatible runtime, which the client cannot use at all,
-drains for the full window.
+An automatic refresh of an older compatible runtime normally drains only a server that answered
+`idle`. Recovering an uncertain drain is the exception: the authenticated reconciliation can start
+a new drain if the earlier one cancelled, closing admission for the grace period even on a busy server. An
+incompatible runtime, which the client cannot use at all, drains for the full window.
 
 After `drained`, the script runs `__ssh-helper supervise` under `nohup` so a dropped SSH
 session cannot strand the host. The supervisor:

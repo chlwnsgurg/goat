@@ -63,8 +63,17 @@ const fixture = Effect.gen(function* () {
   const launchEntered = yield* Deferred.make<void>();
   const releaseLaunch = yield* Deferred.make<void>();
   const count = { launches: 0, forwards: 0, pairings: 0, stops: 0, kills: 0, prompts: 0 };
-  let mode: "pending" | "ready-pending" | "ready" | "blocked" | "timeout" | "failure" | "archive" =
-    "pending";
+  let mode:
+    | "pending"
+    | "ready-pending"
+    | "ready"
+    | "ready-reused"
+    | "older-attached"
+    | "blocked"
+    | "timeout"
+    | "failure"
+    | "archive"
+    | "attached" = "pending";
   let stale = false;
   let resolutionFails = false;
   let pairingFails = false;
@@ -142,6 +151,7 @@ const fixture = Effect.gen(function* () {
               ? {
                   liveStatus: "live",
                   liveVersion: "1.2.2",
+                  livePort: 3773,
                   liveOwned: true,
                   liveDrain: true,
                   liveSignals: {
@@ -158,6 +168,8 @@ const fixture = Effect.gen(function* () {
               : {}),
           }),
         );
+      if (script.includes("\nset -- auth session issue --base-dir "))
+        return makeSuccessfulProcess('{"token":"agent-session","expiresAt":null}');
       if (script.includes("auth pairing create")) {
         count.pairings++;
         return pairingFails
@@ -203,13 +215,22 @@ const fixture = Effect.gen(function* () {
       }
       return makeSuccessfulProcess(
         JSON.stringify(
-          mode === "pending"
-            ? { status: "pending", pending }
-            : mode === "ready-pending"
-              ? { ...ready, selectedVersion: "1.2.2", refresh: undefined, pending }
-              : mode === "archive"
-                ? { ...ready, selectedVersion: "1.2.2", refresh: undefined }
-                : ready,
+          mode === "ready-reused"
+            ? { ...ready, refresh: undefined }
+            : mode === "older-attached"
+              ? {
+                  ...ready,
+                  selectedVersion: "1.2.2",
+                  refresh: undefined,
+                  pending: { ...pending, replacement: "older" },
+                }
+              : mode === "pending"
+                ? { status: "pending", pending }
+                : mode === "ready-pending"
+                  ? { ...ready, selectedVersion: "1.2.2", refresh: undefined, pending }
+                  : mode === "archive" || mode === "attached"
+                    ? { ...ready, selectedVersion: "1.2.2", refresh: undefined }
+                    : ready,
         ),
       );
     }),
@@ -299,6 +320,58 @@ const fixture = Effect.gen(function* () {
 }).pipe(Effect.provide(NodeServices.layer));
 
 describe("SSH pending replacement reconciliation", () => {
+  it.effect("cold contention keeps its retry deadline when the older runtime is attached", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.useLiveProbe();
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        const first = yield* manager.ensureEnvironment(uploadTarget);
+        assert.isTrue("type" in first);
+        yield* TestClock.adjust("9 minutes");
+        f.setMode("attached");
+        const attached = yield* manager.ensureEnvironment(uploadTarget);
+        if ("type" in attached) throw new Error("Expected attached older runtime");
+        assert.deepEqual(attached.pendingReplacement, pending);
+        f.setMode("ready");
+        yield* TestClock.adjust("1 minute");
+        yield* Deferred.await(f.completed[2]!);
+        assert.equal(f.count.launches, 3);
+      }).pipe(
+        Effect.provide(f.layer),
+        Effect.provideService(Tracer.Tracer, f.tracer),
+        Effect.scoped,
+      );
+    }),
+  );
+
+  it.effect.each(["pending", "failure"] as const)(
+    "%s after attachment requires revalidation before any cached reuse",
+    (outcome) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        f.setMode("ready-pending");
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          yield* manager.ensureEnvironment(uploadTarget);
+          f.setMode(outcome);
+          yield* TestClock.adjust("10 minutes");
+          yield* Deferred.await(f.completed[1]!);
+          f.setMode("pending");
+          const result = yield* manager.ensureEnvironment(uploadTarget, {
+            reuseWhileRefreshPending: true,
+          });
+          assert.isTrue("type" in result);
+          assert.equal(f.count.launches, 3);
+          assert.equal(f.count.forwards, 1);
+        }).pipe(
+          Effect.provide(f.layer),
+          Effect.provideService(Tracer.Tracer, f.tracer),
+          Effect.scoped,
+        );
+      }),
+  );
+
   it.effect("forget still closes its tunnel and reports an unconfirmed remote stop", () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -491,6 +564,60 @@ describe("SSH pending replacement reconciliation", () => {
       }),
   );
 
+  it.effect.each(["ready", "older-attached"] as const)(
+    "status cannot revive a tunnel after a failed refresh (initial=%s)",
+    (initial) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        f.setMode(initial);
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          yield* manager.ensureEnvironment(uploadTarget);
+          f.useLiveProbe();
+          f.setMode("failure");
+          assert.isTrue(
+            Result.isFailure(
+              yield* Effect.result(
+                manager.ensureEnvironment(uploadTarget, { refreshRuntime: true }),
+              ),
+            ),
+          );
+          assert.isTrue(
+            Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+          );
+          assert.equal((yield* manager.status(uploadTarget)).status?.state, "ready");
+          assert.isTrue(
+            Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+          );
+          assert.isTrue(
+            Result.isFailure(
+              yield* Effect.result(
+                manager.issueMcpClientSession(uploadTarget, {
+                  requireReady: true,
+                  label: "fixture",
+                  ttl: "1h",
+                  runtimeModeCeiling: null,
+                }),
+              ),
+            ),
+          );
+          const attempts = f.count.launches;
+          f.setMode("ready-reused");
+          yield* manager.ensureEnvironment(uploadTarget);
+          assert.equal(f.count.launches, attempts + 1);
+          if (initial === "ready") assert.equal(f.count.forwards, 1);
+          assert.equal((yield* manager.status(uploadTarget)).status?.state, "ready");
+          yield* manager.readyEnvironment(uploadTarget);
+          yield* manager.issueMcpClientSession(uploadTarget, {
+            requireReady: true,
+            label: "fixture",
+            ttl: "1h",
+            runtimeModeCeiling: null,
+          });
+        }).pipe(Effect.provide(f.layer), Effect.scoped);
+      }),
+  );
+
   it.effect(
     "manual updates serialize per target while status reads preparing without waiting",
     () =>
@@ -630,7 +757,9 @@ describe("SSH pending replacement reconciliation", () => {
             interrupt = () => fiber.interruptUnsafe();
             return action === "disconnect"
               ? manager.disconnectEnvironment(uploadTarget)
-              : manager.ensureEnvironment(uploadTarget);
+              : manager.ensureEnvironment(uploadTarget, {
+                  refreshRuntime: action === "replacement",
+                });
           }).pipe(Effect.provideService(Tracer.Tracer, tracer), Effect.forkChild);
           if (action === "stale") {
             // ssh -G and managed-pin checks now await real file I/O before the probe starts.
@@ -787,11 +916,19 @@ describe("SSH pending replacement reconciliation", () => {
           assert.isFalse("type" in again);
           assert.equal(f.count.launches, 1);
           assert.equal(f.count.forwards, 1);
-          // A plain connect still retries the deferred refresh at once.
+          // Foreground connections leave the original ten-minute refresh deadline intact.
+          yield* TestClock.adjust("9 minutes");
           f.setMode("ready");
           yield* manager.ensureEnvironment(uploadTarget);
+          assert.equal(f.count.launches, 1);
+          yield* TestClock.adjust("1 minute");
+          yield* Deferred.await(f.completed[3]!);
           assert.equal(f.count.launches, 2);
-        }).pipe(Effect.provide(f.layer), Effect.scoped);
+        }).pipe(
+          Effect.provide(f.layer),
+          Effect.provideService(Tracer.Tracer, f.tracer),
+          Effect.scoped,
+        );
       }),
   );
 
@@ -828,6 +965,7 @@ describe("SSH pending replacement reconciliation", () => {
         f.setMode("ready");
         const replaced = yield* manager.ensureEnvironment(uploadTarget, {
           issuePairingToken: true,
+          refreshRuntime: true,
         });
         if ("type" in replaced) throw new Error("Expected ready");
         assert.notProperty(replaced, "pendingReplacement");
@@ -853,6 +991,7 @@ describe("SSH pending replacement reconciliation", () => {
           f.setMode("ready");
           const replaced = yield* manager.ensureEnvironment(uploadTarget, {
             issuePairingToken: true,
+            refreshRuntime: true,
           });
           if ("type" in replaced) throw new Error("Expected ready");
           assert.equal(replaced.httpBaseUrl, "http://127.0.0.1:41773/");

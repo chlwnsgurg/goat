@@ -101,6 +101,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           assert.equal(result.remoteServerKind, kind);
           assert.isUndefined(result.pending);
           assert.isUndefined(result.refresh);
+          assert.equal(f.remoteCommands.length, 2);
           assert.deepEqual(yield* f.snapshot, before);
           assert.equal(yield* f.fs.readLink(lock), liveOwner());
           assert.isFalse(yield* f.fs.exists(`${f.test}/activity-requests`));
@@ -109,6 +110,148 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             assert.notInclude(events, `"type":"${type}"`);
           yield* Effect.sync(() => process.kill(f.pid, 0));
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(
+      (["external", "managed"] as const).flatMap((kind) =>
+        ["before", "readiness"].map((fence) => ({ kind, fence })),
+      ),
+    )("lock-only $kind contention stays pending when fenced at $fence", ({ kind, fence }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind,
+          oldVersion: ARCHIVE.archiveVersion,
+          drain: true,
+          ...current,
+        });
+        if (kind === "external") yield* f.fs.remove(`${f.state}/pid`);
+        const runtime = JSON.parse(
+          yield* f.fs.readFileString(`${f.home}/.goat/userdata/server-runtime.json`),
+        ) as { instanceId: string };
+        if (fence === "before") {
+          yield* f.fs.writeFileString(`${f.state}/draining`, runtime.instanceId);
+        } else {
+          const executable = `${f.old}/goat`;
+          const code = yield* f.fs.readFileString(executable);
+          const seam = 'args[1] === "wait-ready") {';
+          assert.include(code, seam);
+          yield* f.fs.writeFileString(
+            executable,
+            code.replace(
+              seam,
+              seam +
+                `
+  fs.writeFileSync(${JSON.stringify(`${f.state}/draining`)}, ${JSON.stringify(runtime.instanceId)});`,
+            ),
+          );
+        }
+        const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
+        yield* f.fs.symlink(liveOwner(), lock);
+        const before = yield* f.snapshot;
+        const result = yield* f.run("launch", false, {
+          refreshOwnedRuntimeOnFirstConnection: true,
+        });
+        if (Result.isFailure(result)) throw result.failure;
+        assert.equal(result.success.status, "pending");
+        assert.equal(result.success.pending?.reason, "contended");
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.equal(yield* f.fs.readFileString(`${f.state}/draining`), runtime.instanceId);
+        assert.equal(yield* f.fs.readLink(lock), liveOwner());
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        for (const type of ["stop", "drain", "self-stop", "supervise"])
+          assert.notInclude(events, `"type":"${type}"`);
+        yield* Effect.sync(() => process.kill(f.pid, 0));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["deferred", "replaced", "cold"])(
+      "a second client waits in-command before attaching (%s)",
+      (mode) =>
+        Effect.gen(function* () {
+          const replace = mode !== "deferred";
+          const commands = mode === "cold" ? 2 : 1;
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            drain: true,
+            ...current,
+            candidateSignals: { ...current, drain: true },
+          });
+          const launch = (refresh: boolean, previous?: SshTunnel.PreparedRemoteRuntime) =>
+            SshTunnel.launchOrReuseRemoteServer(
+              uploadTarget,
+              {},
+              {
+                ...f.runner,
+                refreshOwnedRuntimeOnFirstConnection: refresh,
+              },
+              undefined,
+              previous,
+            ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport));
+          yield* f.shiftHostClock(60);
+          yield* f.fs.writeFileString(`${f.test}/activity`, "busy");
+          const baseline = yield* launch(true);
+          assert.equal(baseline.status, "ready");
+          if (baseline.status !== "ready") return;
+          assert.isString(baseline.selectedRuntime.reconnectProbe);
+          if (replace) yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
+          yield* pauseFirstLock(f, "replacement.lock");
+          const fifo = yield* f.realSpawner.spawn(
+            ChildProcess.make("mkfifo", [`${f.test}/wait-release`]),
+          );
+          assert.equal(Number(yield* fifo.exitCode), 0);
+          f.setScriptPrefix(`sleep() {
+  printf waiting > "$HOME/.test/waiting"
+  read -r release < "$HOME/.test/wait-release"
+}
+`);
+          yield* f.fs.writeFileString(
+            `${f.test}/lock-barrier-bin/sleep`,
+            `#!/bin/sh
+printf waiting > "$HOME/.test/waiting"
+read -r release < "$HOME/.test/wait-release"
+`,
+          );
+          yield* f.fs.chmod(`${f.test}/lock-barrier-bin/sleep`, 0o700);
+          const first = yield* Effect.forkChild(launch(true));
+          yield* fileMilestone(`${f.test}/lock-acquired`);
+          const before = f.remoteCommands.length;
+          const second = yield* Effect.forkChild(
+            launch(mode === "cold", mode === "cold" ? undefined : baseline.selectedRuntime),
+          );
+          yield* fileMilestone(`${f.test}/waiting`);
+          assert.equal(f.remoteCommands.length - before, commands);
+          yield* f.fs.writeFileString(`${f.test}/lock-release`, "release\n");
+          const firstResult = yield* Fiber.join(first);
+          assert.equal(firstResult.status, "ready");
+          if (firstResult.status !== "ready") return;
+          assert.equal(firstResult.refresh, replace ? "replaced" : undefined);
+          if (replace) {
+            const runtime = JSON.parse(
+              yield* f.fs.readFileString(`${f.home}/.goat/userdata/server-runtime.json`),
+            ) as { pid: number; port: number };
+            yield* installArchivePsDouble(
+              f.home,
+              runtime.pid,
+              runtime.port,
+              ARCHIVE.archiveVersion,
+            );
+          }
+          yield* f.fs.writeFileString(`${f.test}/wait-release`, "release\n");
+          const attached = yield* Fiber.join(second);
+          assert.equal(attached.status, "ready");
+          if (attached.status !== "ready") return;
+          assert.equal(
+            attached.selectedRuntime.version,
+            replace ? ARCHIVE.archiveVersion : "1.2.2",
+          );
+          assert.deepEqual(attached.pending, replace ? undefined : baseline.pending);
+          assert.equal(f.remoteCommands.length - before, commands);
+          assert.isString(attached.selectedRuntime.reconnectProbe);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
     );
 
     it.live("cancelled legacy drain rolls back identity while holding the replacement lock", () =>

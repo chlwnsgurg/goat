@@ -1,9 +1,13 @@
+// @effect-diagnostics nodeBuiltinImport:off - host identity is fixture data for POSIX lock owners.
+import * as NodeOS from "node:os";
+import * as NodeChildProcess from "node:child_process";
 import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
 import * as HostProcess from "@goat/shared/HostProcess";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as NetService from "@goat/shared/Net";
@@ -42,11 +46,11 @@ const fixture = makeProtocolFixture({
   },
 });
 type Fixture = Effect.Success<typeof fixture>;
-const launch = (f: Fixture, previous?: PreparedRemoteRuntime) =>
+const launch = (f: Fixture, previous?: PreparedRemoteRuntime, refresh = false) =>
   launchOrReuseRemoteServer(
     uploadTarget,
     {},
-    { ...f.runner, cleanupTimeoutMs: 60_000 },
+    { ...f.runner, cleanupTimeoutMs: 60_000, refreshOwnedRuntimeOnFirstConnection: refresh },
     undefined,
     previous,
   ).pipe(
@@ -99,6 +103,93 @@ const replaceLive = (f: Fixture, compatible: boolean) =>
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "SSH folded reconnect probe",
   () => {
+    it.live.each(["same", "unreadable", "different"])(
+      "a folded attach fences an uncertain drain for the %s instance",
+      (instance) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: ARCHIVE.archiveVersion,
+            drain: true,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+          });
+          yield* f.shiftHostClock(60);
+          const first = yield* launch(f);
+          assert.equal(first.status, "ready");
+          assert.equal(f.remoteCommands.length, 2);
+          if (first.status !== "ready") return;
+          const runtime = JSON.parse(
+            yield* f.fs.readFileString(`${f.home}/.goat/userdata/server-runtime.json`),
+          ) as { instanceId: string };
+          yield* f.fs.writeFileString(
+            `${f.state}/draining`,
+            instance === "same"
+              ? runtime.instanceId
+              : instance === "unreadable"
+                ? ""
+                : "previous-instance",
+          );
+          const before = f.remoteCommands.length;
+          const result = yield* launch(f, first.selectedRuntime);
+          assert.equal(result.status, instance === "different" ? "ready" : "pending");
+          assert.equal(f.remoteCommands.length - before, 1);
+          assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"drain"');
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+
+    it.live.each(["busy", "unknown", "cancelled"])(
+      "keeps the one-command attach and deferred intent after %s refresh",
+      (reason) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            drain: true,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+          });
+          yield* f.fs.writeFileString(
+            `${f.test}/activity`,
+            reason === "cancelled" ? "idle" : reason,
+          );
+          if (reason === "cancelled") yield* f.fs.writeFileString(`${f.test}/drain`, reason);
+          yield* f.shiftHostClock(60);
+          const first = yield* launch(f, undefined, true);
+          assert.equal(first.status, "ready");
+          if (first.status !== "ready") return;
+          assert.equal(first.pending?.reason, reason === "cancelled" ? "busy" : reason);
+          assert.isString(first.selectedRuntime.reconnectProbe);
+          // Becoming idle must not turn a transport reconnect into an early replacement.
+          yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
+          const snapshot = yield* f.snapshot;
+          const before = f.remoteCommands.length;
+          const second = yield* launch(f, first.selectedRuntime);
+          assert.equal(f.remoteCommands.length - before, 1);
+          assert.equal(second.status, "ready");
+          if (second.status !== "ready") return;
+          assert.deepEqual(second.pending, first.pending);
+          assert.equal(second.selectedRuntime.version, "1.2.2");
+          assert.isString(second.selectedRuntime.reconnectProbe);
+          assert.deepEqual(yield* f.snapshot, snapshot);
+          assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"self-stop"');
+          const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
+          const owner = "other-host|0|1|old|fixture";
+          yield* f.fs.symlink(owner, lock);
+          const beforeContended = f.remoteCommands.length;
+          const contended = yield* launch(f, second.selectedRuntime);
+          assert.equal(contended.status, "pending");
+          assert.equal(contended.pending?.reason, "contended");
+          assert.equal(f.remoteCommands.length - beforeContended, 1);
+          assert.equal(yield* f.fs.readLink(lock), owner);
+          assert.deepEqual(yield* f.snapshot, snapshot);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+
     it.live.each([ARCHIVE.archiveVersion, "1.2.2"])(
       "folds probe and launch into one command and reuses host facts for %s",
       (version) =>
@@ -112,19 +203,11 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             ssh: SSH_RUNTIME_PROTOCOL_VERSION,
             orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
-          f.setScriptPrefix(`sh() {
-  if [ "\${3:-}" != runtime ]; then
-    printf 'probe\\n' >> "$HOME/.test/probe-invocations"
-  fi
-  command sh "$@"
-}
-`);
           yield* f.shiftHostClock(60);
           const first = yield* launch(f);
           assert.equal(first.status, "ready");
           if (first.status !== "ready") return;
           assert.isString(first.selectedRuntime.reconnectProbe);
-          assert.equal(yield* f.fs.readFileString(`${f.test}/probe-invocations`), "probe\n");
           const commands = f.remoteCommands.length;
           const events = yield* f.fs.readFileString(`${f.test}/events`);
           const readinessEvent =
@@ -152,16 +235,11 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           assert.equal(f.remoteCommands.length - commands, 1);
           assert.equal(yield* reconnectEvents, readinessEvent);
           assert.property(cost.steps, "runtime-probe-folded");
-          assert.equal(yield* f.fs.readFileString(`${f.test}/probe-invocations`), "probe\nprobe\n");
           if (second.status !== "ready") return;
           const beforeThird = f.remoteCommands.length;
           const third = yield* launch(f, second.selectedRuntime);
           assert.equal(third.status, "ready");
           assert.equal(f.remoteCommands.length - beforeThird, 1);
-          assert.equal(
-            yield* f.fs.readFileString(`${f.test}/probe-invocations`),
-            "probe\nprobe\nprobe\n",
-          );
           assert.equal(yield* reconnectEvents, readinessEvent + readinessEvent);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
       180_000,
@@ -339,7 +417,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       180_000,
     );
 
-    it.live.each([false, true])(
+    it.live.each(["none", "foreign", "live"] as const)(
       "a stale manager entry reconnects and creates a forward (replacement lock held=%s)",
       (contended) =>
         Effect.gen(function* () {
@@ -374,15 +452,28 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             const manager = yield* SshEnvironmentManager;
             yield* manager.ensureEnvironment(uploadTarget);
             const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
-            const owner = "other-client|0|1|old|fixture";
-            if (contended) yield* f.fs.symlink(owner, lock);
-            const ordinary = contended ? yield* launch(f) : undefined;
+            const owner =
+              contended === "live"
+                ? `${NodeOS.hostname()}|${process.getuid!()}|${process.pid}|${NodeChildProcess.execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } }).replace(/\n$/, "")}|fixture`
+                : "other-client|0|1|old|fixture";
+            if (contended !== "none") yield* f.fs.symlink(owner, lock);
+            if (contended === "live") {
+              // Account for the production waits without sleeping in the test. An executable
+              // double is inherited by both shells, so a repeated nested wait is observable.
+              yield* f.fs.writeFileString(
+                `${f.test}/identity-bin/sleep`,
+                '#!/bin/sh\nprintf "%s\\n" "$1" >> "$HOME/.test/lock-waits"\n',
+              );
+              yield* f.fs.chmod(`${f.test}/identity-bin/sleep`, 0o700);
+            }
+            const ordinary = contended !== "none" ? yield* launch(f) : undefined;
             if (ordinary !== undefined) {
               assert.equal(ordinary.status, "ready");
               assert.isUndefined(ordinary.pending);
             }
             const snapshot = yield* f.snapshot;
             const commands = f.remoteCommands.length;
+            if (contended === "live") yield* f.fs.writeFileString(`${f.test}/lock-waits`, "");
             forwardAlive = false;
             const cost = {
               active: true,
@@ -390,18 +481,33 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               authentications: 0,
               steps: {} as Record<string, number>,
             };
+            const startedAt = yield* Clock.currentTimeMillis;
             const result = yield* manager
               .ensureEnvironment(uploadTarget)
               .pipe(Effect.provideService(SshReconnectCost, cost));
             assert.isFalse("type" in result);
             if ("type" in result) return;
-            assert.deepEqual(result.pendingReplacement, ordinary?.pending);
             assert.equal(result.remotePort, f.port);
+            assert.isUndefined(result.pendingReplacement);
             assert.equal(forwards, 2);
-            assert.equal(f.remoteCommands.length - commands, contended ? 3 : 1);
+            assert.equal(f.remoteCommands.length - commands, 1);
             assert.property(cost.steps, "runtime-probe-folded");
             assert.deepEqual(yield* f.snapshot, snapshot);
-            if (contended) {
+            if (contended === "live") {
+              const waits = (yield* f.fs.readFileString(`${f.test}/lock-waits`))
+                .trim()
+                .split("\n")
+                .map(Number);
+              assert.lengthOf(waits, 50, "the folded command shares one lock wait budget");
+              const transportMs = (f.remoteCommands.length - commands) * 2_000;
+              const elapsedMs =
+                (yield* Clock.currentTimeMillis) -
+                startedAt +
+                waits.reduce((sum, seconds) => sum + seconds * 1_000, 0) +
+                transportMs;
+              assert.isAtMost(elapsedMs, 15_000, "fits initial setup with 2 s per command latency");
+            }
+            if (contended !== "none") {
               assert.equal(yield* f.fs.readLink(lock), owner);
               yield* f.fs.remove(lock);
             }
@@ -411,6 +517,67 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               yield* manager.ensureEnvironment(uploadTarget, options);
               assert.equal(f.remoteCommands.length - before, 2);
             }
+          }).pipe(Effect.provide(layer), Effect.scoped);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+
+    it.live(
+      "a stale manager reconnect folds a deferred refresh without clearing its intent",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            drain: true,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+          });
+          yield* f.fs.writeFileString(`${f.test}/activity`, "busy");
+          yield* f.shiftHostClock(60);
+          let alive = true;
+          let forwards = 0;
+          const transport = ChildProcessSpawner.make((command) => {
+            if (command._tag === "StandardCommand" && command.args.includes("-N")) {
+              alive = true;
+              forwards++;
+              return Effect.succeed({
+                ...makeRunningProcess(() => undefined),
+                isRunning: Effect.sync(() => alive),
+              });
+            }
+            return f.transport.spawn(command);
+          });
+          const layer = Layer.mergeAll(
+            NodeServices.layer,
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, transport),
+            Layer.succeed(FileSystem.FileSystem, f.observedFs),
+            Layer.succeed(HttpClient.HttpClient, testHttpClient),
+            Layer.succeed(NetService.NetService, testNetService),
+            SshAuth.SshPasswordPrompt.disabledLayer,
+            SshEnvironmentManager.layer({
+              resolveCliRunner: Effect.succeed({
+                ...f.runner,
+                refreshOwnedRuntimeOnFirstConnection: true,
+              }),
+              leaveRemoteServerRunning: true,
+            }),
+          );
+          yield* Effect.gen(function* () {
+            const manager = yield* SshEnvironmentManager;
+            const first = yield* manager.ensureEnvironment(uploadTarget);
+            if ("type" in first) throw new Error("Expected attached deferred refresh");
+            assert.equal(first.pendingReplacement?.reason, "busy");
+            const before = f.remoteCommands.length;
+            alive = false;
+            yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
+            const second = yield* manager.ensureEnvironment(uploadTarget);
+            if ("type" in second) throw new Error("Expected reattached deferred refresh");
+            assert.deepEqual(second.pendingReplacement, first.pendingReplacement);
+            assert.equal(second.remoteServerVersion, "1.2.2");
+            assert.equal(forwards, 2);
+            assert.equal(f.remoteCommands.length - before, 1);
           }).pipe(Effect.provide(layer), Effect.scoped);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
       180_000,
