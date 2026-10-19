@@ -2293,9 +2293,12 @@ const make = Effect.gen(function* () {
           selected === null
             ? Option.none<M.MemoryModelSelection>()
             : yield* decodeMemorySelection(selected).pipe(Effect.option);
-        const generationHold = Option.isSome(memoryModel)
-          ? yield* hold.status(yield* hold.keyFor(memoryModel.value))
-          : undefined;
+        const generationHold =
+          "includeGenerationHold" in input &&
+          input.includeGenerationHold &&
+          Option.isSome(memoryModel)
+            ? yield* hold.status(yield* hold.keyFor(memoryModel.value))
+            : undefined;
         return {
           memorySpaceId: space,
           ...(includeRetained

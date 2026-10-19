@@ -1,4 +1,5 @@
 import { legacySyncStatusRpc } from "./MemorySyncStatusLegacy.testkit.ts";
+import * as Hold from "./MemoryGenerationHold.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as Exit from "effect/Exit";
 import { McpServer } from "effect/ai";
@@ -7245,6 +7246,48 @@ it.effect("legacy syncStatus request and response decode through the base JSON R
       Exit.succeed(response),
     );
   }).pipe(Effect.provide(fixture())),
+);
+
+const encodeStatusExit = Schema.encodeEffect(
+  Schema.toCodecJson(Rpc.exitSchema(M.WsMemorySyncStatusRpc)),
+);
+const decodeLegacyStatusExit = Schema.decodeUnknownEffect(
+  Schema.toCodecJson(Rpc.exitSchema(legacySyncStatusRpc)),
+);
+it.effect("reports a paused memory model only to a request that opts in", () =>
+  Effect.gen(function* () {
+    const sync = yield* Sync.MemorySyncService;
+    const hold = yield* Hold.MemoryGenerationHold;
+    const memoryModel = M.MemoryModelSelection.make({
+      instanceId: M.ProviderInstanceId.make("codex"),
+      model: "held",
+    });
+    yield* (yield* Settings.ServerSettingsService).updateSettings({
+      memoryModelSelection: memoryModel,
+    });
+    yield* hold
+      .guard(
+        yield* hold.keyFor(memoryModel),
+        Effect.fail(
+          new M.TextGenerationError({
+            operation: "generateMemorySummary",
+            detail: 'Codex CLI command failed: {"code":"invalid_json_schema","status":400}',
+          }),
+        ),
+      )
+      .pipe(Effect.flip);
+    const opted = yield* sync.syncStatus({ includeGenerationHold: true }, Effect.void);
+    assert.strictEqual(opted.generationHold?.reason, "schema_rejected");
+    // A client that did not opt in decodes strictly and must never see the field.
+    const legacy = yield* sync.syncStatus({}, Effect.void);
+    assert.notProperty(legacy, "generationHold");
+    const encoded = yield* encodeStatusExit(Exit.succeed(legacy));
+    assert.isTrue(
+      Exit.isSuccess(
+        yield* Effect.exit(decodeLegacyStatusExit(JSON.parse(JSON.stringify(encoded)))),
+      ),
+    );
+  }).pipe(Effect.provide(fixture().pipe(Layer.provideMerge(Hold.layer)))),
 );
 
 it.effect.each(["expiry", "permission", "epoch", "publication"] as const)(

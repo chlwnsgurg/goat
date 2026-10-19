@@ -1161,6 +1161,7 @@ export const MemorySyncStatus = struct({
   failureCode: Schema.optionalKey(MemoryFailureCode),
   storage: MemoryStorageStatus,
   processing: MemoryProcessingStatus,
+  /** Present only when the request opted in with includeGenerationHold. */
   generationHold: Schema.optionalKey(MemoryGenerationHold),
 }).check(Schema.makeFilter((v) => v.lastHubSequence === v.processing.lastReceivedHubSequence));
 export type MemorySyncStatus = typeof MemorySyncStatus.Type;
@@ -1613,10 +1614,19 @@ export const MemoryHistoryInput = struct({
 });
 export type MemoryHistoryInput = typeof MemoryHistoryInput.Type;
 
-/** Opt in only when memory.retainedLocalSpace is advertised; legacy requests remain empty. */
+/**
+ * Each opt-in is sent only when its capability (memory.retainedLocalSpace,
+ * memory.generationHold) is advertised: a strict legacy decoder rejects fields it does not know,
+ * so legacy requests remain empty.
+ */
 export const MemorySyncStatusInput = Schema.Union([
   struct({}),
   struct({ includeRetainedLocalSpaceId: Schema.Literal(true) }),
+  struct({ includeGenerationHold: Schema.Literal(true) }),
+  struct({
+    includeRetainedLocalSpaceId: Schema.Literal(true),
+    includeGenerationHold: Schema.Literal(true),
+  }),
 ]);
 export type MemorySyncStatusInput = typeof MemorySyncStatusInput.Type;
 
