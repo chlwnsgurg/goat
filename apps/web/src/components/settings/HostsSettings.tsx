@@ -15,12 +15,15 @@ import { Badge } from "../ui/badge";
 import { LimitWindows } from "../usage/UsageLimits";
 import { EnvironmentRow } from "./EnvironmentRow";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
-import { type HostCardView, type HostMeterView, hostCards, NOT_AVAILABLE } from "./hostStatusView";
+import {
+  HOST_STATUS_REFRESH_MS,
+  type HostCardView,
+  type HostMeterView,
+  hostCards,
+  NOT_AVAILABLE,
+} from "./hostStatusView";
 import { providerClients } from "./providerDriverMeta";
 import { searchableSetting } from "./settingsSearch";
-
-/** Each read samples CPU for 200ms and asks every SSH host; quota refresh is capped server-side. */
-const HOST_STATUS_REFRESH_MS = 15_000;
 
 const TONE_BADGE = {
   ok: "success",

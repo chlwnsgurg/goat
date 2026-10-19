@@ -5,6 +5,9 @@ import { formatElapsedDurationLabel } from "~/timestampFormat";
 
 export const NOT_AVAILABLE = "Not available";
 
+/** Each read samples CPU for 200ms and asks every SSH host; quota refresh is capped server-side. */
+export const HOST_STATUS_REFRESH_MS = 15_000;
+
 /** One bar: share in use from 0 to 100, or null when the host did not report it. */
 export interface HostMeterView {
   readonly label: string;

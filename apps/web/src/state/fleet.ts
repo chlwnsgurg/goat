@@ -88,7 +88,7 @@ export const fleetEnvironmentsAtom = Atom.make((get) => fleetEnvironments(get, f
 );
 
 /** Every switched-on environment, so the graph shows hosts that are away or blocked. */
-const fleetPageEnvironmentsAtom = Atom.make((get) => fleetEnvironments(get, true)).pipe(
+export const fleetPageEnvironmentsAtom = Atom.make((get) => fleetEnvironments(get, true)).pipe(
   Atom.withLabel("fleet-page-environments"),
 );
 
