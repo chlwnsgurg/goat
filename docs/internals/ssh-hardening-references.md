@@ -215,6 +215,10 @@ Through the stall relay, the Connections row left `Connected` a median 20.5 s
 after the stall (15.4–20.7 s) and was back a median 34 s after the relay
 resumed (26–47 s).
 
+With one owned SSH master per target, a reconnect authenticates once and took
+a median 25.0 s on `mac-studio` and 36.8 s on `macmini-cf`. What remains is
+mostly the remote probe below.
+
 ### P0
 
 **P0-3. Keep one reconnect inside the setup deadline.**
@@ -240,4 +244,4 @@ Each remaining bundle is one PR. Use the loopback stall fixture and
 `ssh.reconnect.cost` logs to collect real-host baseline numbers before
 changing reconnect policy or connection sharing.
 
-4. **Probe cost** (P0-3). The `packages/ssh` runtime probe; rerun the baseline.
+1. **Probe cost** (P0-3). The `packages/ssh` runtime probe; rerun the baseline.
