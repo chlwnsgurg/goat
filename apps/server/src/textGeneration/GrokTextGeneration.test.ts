@@ -8,7 +8,10 @@ import * as NodeFS from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
+import * as Duration from "effect/Duration";
 import * as Fiber from "effect/Fiber";
+import * as Latch from "effect/Latch";
 import * as Deferred from "effect/Deferred";
 import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
@@ -135,6 +138,29 @@ interface RequestFeed {
   /** Resolves once the fake agent has received a request with this method. */
   readonly received: (method: string) => Effect.Effect<void>;
 }
+
+/**
+ * The test clock, except that each sleep's deadline is fixed when the code under
+ * test asks for it, which is also when `onSleep` reports it. TestClock registers
+ * a sleep only once its fiber runs, so an adjust that ran first would skip it.
+ */
+const makeDeadlineClock = (
+  testClock: TestClock.TestClock,
+  onSleep: (millis: number) => void,
+): TestClock.TestClock => ({
+  ...testClock,
+  sleep: (duration) =>
+    Effect.suspend(() => {
+      const millis = Duration.toMillis(duration);
+      const deadline = testClock.currentTimeMillisUnsafe() + millis;
+      onSleep(millis);
+      return Effect.suspend(() =>
+        testClock.sleep(
+          Duration.millis(Math.max(0, deadline - testClock.currentTimeMillisUnsafe())),
+        ),
+      );
+    }),
+});
 
 /**
  * The fake agent sends each request line over a Unix socket after logging it.
@@ -520,6 +546,8 @@ it.layer(layerGrokTextGenerationTest)("Grok memory generation", (it) => {
     "$operation times out and cleans up ACP and its workspace (ignoreCancel=$ignoreCancel)",
     ({ operation, ignoreCancel }) =>
       Effect.gen(function* () {
+        const testClock = yield* TestClock.testClockWith(Effect.succeed);
+        const timeoutArmed = Latch.makeUnsafe();
         const removedTempDir = yield* withFakeAcpGrok(
           { GOAT_MEMORY_STALL: "1", ...(ignoreCancel ? { GOAT_MEMORY_IGNORE_CANCEL: "1" } : {}) },
           (generation, tempDir, feed) =>
@@ -535,6 +563,7 @@ it.layer(layerGrokTextGenerationTest)("Grok memory generation", (it) => {
                   : generation.generateMemorySummary!(memorySummary)
               ).pipe(Effect.flip, Effect.forkChild);
               yield* Deferred.await(ready);
+              yield* timeoutArmed.await;
               yield* TestClock.adjust(180_000);
               yield* feed.received("session/cancel");
               // The request timeout starts a separate bounded cancellation wait.
@@ -554,6 +583,14 @@ it.layer(layerGrokTextGenerationTest)("Grok memory generation", (it) => {
               return tempDir;
             }),
           memoryContext,
+        ).pipe(
+          Effect.provideService(
+            Clock.Clock,
+            makeDeadlineClock(testClock, (millis) => {
+              // Grok's request timeout; the test may only advance past it once it exists.
+              if (millis === 180_000) timeoutArmed.openUnsafe();
+            }),
+          ),
         );
         expect(NodeFS.existsSync(removedTempDir)).toBe(false);
       }).pipe(Effect.provide(TestClock.layer())),
