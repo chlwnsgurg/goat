@@ -15,6 +15,7 @@ case "$1" in
   --version) echo "goat v1.2.3" ;;
   service) ;;
   pair)
+    if [ -n "$FAKE_NO_SERVER" ]; then echo "No running GOAT server found." >&2; exit 1; fi
     n=$(wc -l < "$FAKE_GOAT_LOG" | tr -d ' ')
     echo "Pairing with test (http://box.test:3773)."
     echo "Pairing URL: http://box.test:3773/pair#token=CODE$n"
@@ -51,6 +52,8 @@ const run = async (
     readonly userHome?: (home: string) => Promise<void>;
     /** Writes a SHA256SUMS next to the archive. */
     readonly sums?: (archive: string) => string;
+    /** goat pair fails as it does when no server is running. */
+    readonly noServer?: boolean;
   } = {},
 ) => {
   const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-server-install-"));
@@ -70,6 +73,7 @@ const run = async (
       : { HOME: userHome }),
     GOAT_INSTALL_BIN_DIR: NodePath.join(root, "bin"),
     FAKE_GOAT_LOG: log,
+    FAKE_NO_SERVER: options.noServer === true ? "1" : "",
     // Never reach a real installer from a test.
     GOAT_INSTALLER_URL: "http://127.0.0.1:9/install.sh",
   };
@@ -129,6 +133,13 @@ describe("install-goat-server.sh", () => {
       "pair --tailscale --label Agent link --scope orchestration:read --scope orchestration:operate",
     ]);
     expect(result.stderr).toContain("goat serve");
+  });
+
+  it("finishes with instructions when the service is skipped and no server runs", async () => {
+    const result = await run([`archive:${platformKey}`, "--no-service"], { noServer: true });
+    expect(result.status).toBe(0);
+    expect(result.calls).toEqual(["--version", "pair --label GOAT app"]);
+    expect(result.stderr).toContain("then run goat pair");
   });
 
   it("refuses an archive built for another platform and installs nothing", async () => {

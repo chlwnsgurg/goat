@@ -144,11 +144,18 @@ fi
 pair_flags=
 if "$tailscale"; then pair_flags="--tailscale"; fi
 
-# The service needs a few seconds before goat pair can find it.
+# The service needs a few seconds before goat pair can find it. Without the service, pair
+# only when a server is already running.
+max_attempts=30
+if ! "$service"; then max_attempts=1; fi
 attempt=0
 until app_pairing="$("$goat" pair $pair_flags --label "GOAT app" 2>&1)"; do
   attempt=$((attempt + 1))
-  if [ "$attempt" -ge 30 ]; then
+  if ! "$service"; then
+    say "No GOAT server is running yet. Start one with goat serve, then run goat pair for the pairing links."
+    exit 0
+  fi
+  if [ "$attempt" -ge "$max_attempts" ]; then
     printf '%s\n' "$app_pairing" >&2
     fail "no running GOAT server answered; start one, then run: goat pair"
   fi
