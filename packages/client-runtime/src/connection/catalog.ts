@@ -63,10 +63,17 @@ export interface ConnectionCatalogEntry {
   readonly serverUpdateRequired?: boolean;
 }
 
+export const SshPairingGrant = Schema.Struct({
+  key: Schema.String,
+  scopes: Schema.Array(Schema.String),
+});
+export type SshPairingGrant = typeof SshPairingGrant.Type;
+
 export class BearerConnectionCredential extends Schema.TaggedClass<BearerConnectionCredential>()(
   "BearerConnectionCredential",
   {
     token: Schema.String,
+    sshPairingGrant: Schema.optionalKey(SshPairingGrant),
   },
 ) {}
 

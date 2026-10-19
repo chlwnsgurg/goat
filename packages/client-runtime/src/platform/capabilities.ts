@@ -12,12 +12,14 @@ import type * as Option from "effect/Option";
 import type { ConnectionAttemptError } from "../connection/model.ts";
 import type { AuthorizedRemoteEnvironment } from "../authorization/service.ts";
 import type { VerifiedSshEndpoint } from "../environment/descriptor.ts";
+import type { SshPairingGrant } from "../connection/catalog.ts";
 
 export interface PreparedSshEnvironment {
   readonly bootstrap: DesktopSshEnvironmentBootstrap;
   readonly bearerToken: string;
   readonly verifiedEndpoint?: VerifiedSshEndpoint;
   readonly authorization?: AuthorizedRemoteEnvironment;
+  readonly sshPairingGrant?: SshPairingGrant;
 }
 
 export interface ProvisionedSshEnvironment extends PreparedSshEnvironment {

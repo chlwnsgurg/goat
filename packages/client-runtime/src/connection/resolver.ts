@@ -71,6 +71,7 @@ export class ConnectionResolver extends Context.Service<
 
 const isBearerProfile = Schema.is(BearerConnectionProfile);
 const isSshProfile = Schema.is(SshConnectionProfile);
+const sameBearerCredential = Schema.toEquivalence(BearerConnectionCredential);
 const isBearerCredential = Schema.is(BearerConnectionCredential);
 
 function primarySocketUrl(
@@ -256,11 +257,14 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
       ...(onHostAnswered === undefined ? {} : { onHostAnswered }),
       authorize,
     });
-    if (prepared.bearerToken !== savedToken) {
-      yield* credentials.put(
-        target.connectionId,
-        new BearerConnectionCredential({ token: prepared.bearerToken }),
-      );
+    const preparedCredential = new BearerConnectionCredential({
+      token: prepared.bearerToken,
+      ...(prepared.sshPairingGrant === undefined
+        ? {}
+        : { sshPairingGrant: prepared.sshPairingGrant }),
+    });
+    if (saved === undefined || !sameBearerCredential(preparedCredential, saved)) {
+      yield* credentials.put(target.connectionId, preparedCredential, savedToken ?? null);
     }
     const preparedProfile = new SshConnectionProfile({
       connectionId: profile.connectionId,

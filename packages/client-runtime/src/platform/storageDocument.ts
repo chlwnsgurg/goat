@@ -56,6 +56,32 @@ export function removeCatalogValue<A>(
   return values.filter((value) => key(value) !== removedKey);
 }
 
+export function putConnectionCredentialInCatalog(
+  document: ConnectionCatalogDocument,
+  connectionId: string,
+  credential: StoredConnectionCredential["credential"],
+  expectedToken?: string | null,
+): ConnectionCatalogDocument {
+  const current = document.credentials.find((value) => value.connectionId === connectionId);
+  if (expectedToken !== undefined && (current?.credential.token ?? null) !== expectedToken)
+    return document;
+  // A reconnect can finish after another window forgot this SSH route.
+  if (
+    connectionId.startsWith("ssh:") &&
+    !document.targets.some(
+      (target) => target._tag === "SshConnectionTarget" && target.connectionId === connectionId,
+    )
+  )
+    return document;
+  return {
+    ...document,
+    credentials: replaceCatalogValue(document.credentials, (value) => value.connectionId, {
+      connectionId,
+      credential,
+    }),
+  };
+}
+
 function connectionIdOf(target: ConnectionTarget): string | null {
   switch (target._tag) {
     case "PrimaryConnectionTarget":

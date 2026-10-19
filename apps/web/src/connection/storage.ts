@@ -11,6 +11,7 @@ import {
   StoredOrchestrationThreadSnapshot,
   decodeOrDiscardOrchestrationCache,
   putRemoteDpopTokenInCatalog,
+  putConnectionCredentialInCatalog,
   registerConnectionInCatalog,
   removeCatalogValue,
   removeConnectionFromCatalog,
@@ -31,7 +32,13 @@ import {
   gitHubRoutingConnectionKey,
   gitHubRoutingPermissionFor,
 } from "@goat/client-runtime/connection";
-import { EnvironmentId, ServerConfig, ThreadId, VcsListRefsResult } from "@goat/contracts";
+import {
+  EnvironmentId,
+  ServerConfig,
+  ThreadId,
+  VcsListRefsResult,
+  type DesktopBridge,
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -377,8 +384,9 @@ export interface CatalogBackend {
   readonly quarantine?: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
 }
 
-export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
-  const bridge = window.desktopBridge;
+export function makeDesktopCatalogBackend(
+  bridge: DesktopBridge | undefined,
+): CatalogBackend | undefined {
   if (bridge?.getConnectionCatalog !== undefined && bridge.setConnectionCatalog !== undefined) {
     return {
       read: Effect.tryPromise({
@@ -420,14 +428,25 @@ export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
     };
   }
 
-  return {
-    read: readDatabaseValue(database, CATALOG_STORE_NAME, CATALOG_KEY).pipe(
-      Effect.map((value) => (typeof value === "string" ? value : null)),
-    ),
-    write: (raw) => writeDatabaseValue(database, CATALOG_STORE_NAME, CATALOG_KEY, raw),
-    quarantine: (raw) =>
-      writeDatabaseValue(database, CATALOG_STORE_NAME, `${CATALOG_KEY}:corrupt:${Date.now()}`, raw),
-  };
+  return undefined;
+}
+
+export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
+  return (
+    makeDesktopCatalogBackend(window.desktopBridge) ?? {
+      read: readDatabaseValue(database, CATALOG_STORE_NAME, CATALOG_KEY).pipe(
+        Effect.map((value) => (typeof value === "string" ? value : null)),
+      ),
+      write: (raw) => writeDatabaseValue(database, CATALOG_STORE_NAME, CATALOG_KEY, raw),
+      quarantine: (raw) =>
+        writeDatabaseValue(
+          database,
+          CATALOG_STORE_NAME,
+          `${CATALOG_KEY}:corrupt:${Date.now()}`,
+          raw,
+        ),
+    }
+  );
 }
 
 interface CatalogStore {
@@ -731,14 +750,10 @@ export const layer = Layer.effectContext(
             ),
           ),
         ),
-      put: (connectionId, credential) =>
-        catalog.update((document) => ({
-          ...document,
-          credentials: replaceCatalogValue(document.credentials, (value) => value.connectionId, {
-            connectionId,
-            credential,
-          }),
-        })),
+      put: (connectionId, credential, expectedToken) =>
+        catalog.update((document) =>
+          putConnectionCredentialInCatalog(document, connectionId, credential, expectedToken),
+        ),
       remove: (connectionId) =>
         catalog.update((document) => ({
           ...document,
