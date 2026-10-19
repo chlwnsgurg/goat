@@ -130,9 +130,6 @@ const REMOTE_ARCHIVE_CHECKSUMS_SECONDS = 30;
 const REMOTE_ARCHIVE_DOWNLOAD_SECONDS = 240;
 const REMOTE_ARCHIVE_LOCK_WAIT_SECONDS = 360;
 const REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS = 900_000;
-// A host download waits on the install lock at most as long as a launch would, then
-// fetches with retries; past this the client stops waiting and uploads instead.
-const REMOTE_HOST_DOWNLOAD_TIMEOUT_MS = 600_000;
 const REMOTE_REUSE_READY_TIMEOUT_MS = 2_000;
 // Reserved by the folded launch protocol for re-entering preparation, never a launch failure.
 const REMOTE_RECONNECT_REPROBE_EXIT_CODE = 76;
@@ -2973,8 +2970,9 @@ const archiveSupplyError = (cause: unknown) => {
 
 /**
  * Succeeds with false when the host could not install the release itself (no network,
- * a proxy, a pruned release, a checksum mismatch), so the caller uploads instead. A
- * dropped SSH connection (exit 255) fails: an upload over it would fail too.
+ * a proxy, a pruned release, a checksum mismatch), so the caller uploads instead. Only a
+ * definite exit falls back: after a dropped connection (255) or a timeout (no exit code)
+ * the host installer may still hold the install lock, so an upload would race it.
  */
 const installOnHost = Effect.fn("ssh/tunnel.installOnHost")(function* (
   target: DesktopSshEnvironmentTarget,
@@ -2993,12 +2991,12 @@ const installOnHost = Effect.fn("ssh/tunnel.installOnHost")(function* (
     remoteCommandArgs: ["sh", "-l", "-s"],
     stdin: script,
     timeoutStage: "runtime-install",
-    timeoutMs: REMOTE_HOST_DOWNLOAD_TIMEOUT_MS,
+    timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
   }).pipe(
     Effect.as(true),
     Effect.catchTags({
       SshCommandError: (error) =>
-        error.exitCode === 255
+        error.exitCode === null || error.exitCode === 255
           ? Effect.fail(error)
           : Effect.logWarning("ssh.runtime.host-download.failed", {
               ...sshTargetLogFields(target),

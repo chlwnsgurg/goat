@@ -178,8 +178,10 @@ The raw transfer takes about 3 s either way on that link; extraction and
 verification on the host take most of the rest. A blocked host costs about 3 s
 before the upload starts, because curl and wget retry only transient failures
 (timeouts, 408, 429, 5xx) and a refused connection, missing DNS or a 404 fails at
-once. A blackholed route waits out three 10 s connect attempts. Proxies come from
-the user's login shell (`https_proxy`), which the download runs under.
+once. With curl, a blackholed route waits out three 10 s connect attempts; wget
+uses 30 s timeouts. A host download that times out or loses its connection fails
+the attempt instead of uploading, because the host may still be installing. Proxies
+come from the user's login shell (`https_proxy`), which the download runs under.
 
 Archive sizes for that nightly, which also decide what the desktop bundles:
 
