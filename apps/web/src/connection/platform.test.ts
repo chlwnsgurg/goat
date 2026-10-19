@@ -46,7 +46,7 @@ function makeBridge(
     readonly failDescriptor?: boolean;
     readonly savedTokenRejected?: boolean;
     readonly savedTokenPermissions?: ReadonlyArray<string>;
-    readonly remoteServerVersion?: string;
+    readonly instanceId?: string;
     readonly pairedScopes?: ReadonlyArray<string>;
   },
 ): DesktopBridge {
@@ -61,9 +61,6 @@ function makeBridge(
         httpBaseUrl: "http://127.0.0.1:3201/",
         wsBaseUrl: "ws://127.0.0.1:3201/",
         pairingToken: ensureOptions?.issuePairingToken === true ? "pairing-token" : null,
-        ...(options?.remoteServerVersion === undefined
-          ? {}
-          : { remoteServerVersion: options.remoteServerVersion }),
       };
     },
     fetchSshSessionState: async () => {
@@ -86,6 +83,7 @@ function makeBridge(
           arch: "x64",
         },
         serverVersion: "0.0.0-test",
+        ...(options?.instanceId === undefined ? {} : { instanceId: options.instanceId }),
         capabilities: {
           repositoryIdentity: true,
         },
@@ -298,20 +296,23 @@ describe("desktop SSH pairing", () => {
       grants: SshPairingGrants,
       bridge: Parameters<typeof makeBridge>[1],
       bearerToken: string,
-      calls: string[] = [],
+      target: DesktopSshEnvironmentTarget = TARGET,
     ) =>
-      prepareDesktopSshEnvironment(
-        makeBridge(calls, bridge),
-        {
-          target: TARGET,
-          expectedEnvironmentId: EnvironmentId.make("environment-ssh"),
-          bearerToken,
-        },
-        undefined,
-        grants,
-      ).pipe(Effect.map((prepared) => ({ ...prepared, calls })));
+      Effect.suspend(() => {
+        const calls: string[] = [];
+        return prepareDesktopSshEnvironment(
+          makeBridge(calls, bridge),
+          {
+            target,
+            expectedEnvironmentId: EnvironmentId.make("environment-ssh"),
+            bearerToken,
+          },
+          undefined,
+          grants,
+        ).pipe(Effect.map((prepared) => ({ ...prepared, calls })));
+      });
     const older = {
-      remoteServerVersion: "0.1.0-older",
+      instanceId: "server-start-1",
       pairedScopes: OLDER_RUNTIME_SCOPES,
       savedTokenPermissions: OLDER_RUNTIME_SCOPES,
     };
@@ -330,17 +331,31 @@ describe("desktop SSH pairing", () => {
       }),
     );
 
-    it.effect("pairs again once the host runs another runtime version", () =>
+    it.effect("pairs again once the host's server restarted or was upgraded", () =>
       Effect.gen(function* () {
         const grants: SshPairingGrants = new Map();
         yield* reconnect(grants, older, "token-from-an-earlier-launch");
 
         const upgraded = yield* reconnect(
           grants,
-          { ...older, remoteServerVersion: "0.1.0-newer" },
+          { ...older, instanceId: "server-start-2" },
           "bearer-token",
         );
         expect(upgraded.calls).toContain("token");
+      }),
+    );
+
+    it.effect("keeps another SSH host claiming this environment from lowering the bar", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        yield* reconnect(grants, older, "token-from-an-earlier-launch", {
+          ...TARGET,
+          alias: "impostor",
+          hostname: "impostor.example.test",
+        });
+
+        const genuine = yield* reconnect(grants, older, "bearer-token");
+        expect(genuine.calls).toContain("token");
       }),
     );
 
@@ -372,16 +387,16 @@ describe("desktop SSH pairing", () => {
       }),
     );
 
-    it.effect("requires every standard scope when the runtime reports no version", () =>
+    it.effect("requires every standard scope when the server names no instance", () =>
       Effect.gen(function* () {
         const grants: SshPairingGrants = new Map();
-        const unversioned = {
+        const unnamed = {
           pairedScopes: OLDER_RUNTIME_SCOPES,
           savedTokenPermissions: OLDER_RUNTIME_SCOPES,
         };
-        yield* reconnect(grants, unversioned, "token-from-an-earlier-launch");
+        yield* reconnect(grants, unnamed, "token-from-an-earlier-launch");
 
-        const again = yield* reconnect(grants, unversioned, "bearer-token");
+        const again = yield* reconnect(grants, unnamed, "bearer-token");
         expect(again.calls).toContain("token");
         expect(grants.size).toBe(0);
       }),

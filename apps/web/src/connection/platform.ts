@@ -34,6 +34,7 @@ import {
   type DesktopEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
   type EnvironmentId,
+  type ExecutionEnvironmentDescriptor,
   isCloudMachineAlias,
   isCloudMachineError,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
@@ -274,27 +275,41 @@ const preflightCloudMachine = (alias: string, ready: CloudMachinePreflight) =>
   isCloudMachineAlias(alias) ? ready(alias) : Effect.void;
 
 /**
- * Scopes a fresh pairing was granted, per environment and remote runtime version. A runtime
- * older than this app's standard scopes grants the same narrower set to every pairing, so
- * requiring the full standard set there would mint a token, and add a session on the host, on
- * every reconnect without ever gaining a scope. A different runtime version may grant more,
- * so it misses and the full set is required again.
+ * Scopes a fresh pairing was granted by one server instance reached through one SSH target. A
+ * runtime older than this app's standard scopes grants the same narrower set to every pairing,
+ * so requiring the full standard set there would mint a token, and add a session on the host,
+ * on every reconnect without ever gaining a scope. The key names the live server's instance
+ * (new on every start, so an upgrade or restart misses) and the SSH target, so another host
+ * claiming the same environment cannot lower what this one is asked for.
  */
 export type SshPairingGrants = Map<string, ReadonlyArray<string>>;
 const sshPairingGrants: SshPairingGrants = new Map();
 
-const pairingGrantKey = (environmentId: EnvironmentId, serverVersion: string | undefined) =>
-  serverVersion === undefined || serverVersion.length === 0
+type PairingGrantServer = Pick<
+  ExecutionEnvironmentDescriptor,
+  "environmentId" | "serverVersion" | "instanceId"
+>;
+
+const pairingGrantKey = (server: PairingGrantServer, target: DesktopSshEnvironmentTarget) =>
+  server.instanceId === undefined
     ? undefined
-    : `${environmentId}\n${serverVersion}`;
+    : JSON.stringify([
+        server.environmentId,
+        server.instanceId,
+        server.serverVersion,
+        target.alias,
+        target.hostname,
+        target.username,
+        target.port,
+      ]);
 
 /** The standard scopes a saved SSH token must still hold to be reused instead of re-paired. */
 export function requiredSshTokenScopes(
   grants: SshPairingGrants,
-  environmentId: EnvironmentId,
-  serverVersion: string | undefined,
+  server: PairingGrantServer,
+  target: DesktopSshEnvironmentTarget,
 ) {
-  const key = pairingGrantKey(environmentId, serverVersion);
+  const key = pairingGrantKey(server, target);
   const granted = key === undefined ? undefined : grants.get(key);
   return granted === undefined
     ? AuthStandardClientScopes
@@ -343,7 +358,7 @@ export const provisionDesktopSshEnvironment = Effect.fn(
     try: () => bridge.bootstrapSshBearerSession(bootstrap.httpBaseUrl, pairingToken),
     catch: sshPreparationFailure,
   });
-  const grantKey = pairingGrantKey(descriptor.environmentId, bootstrap.remoteServerVersion);
+  const grantKey = pairingGrantKey(descriptor, target);
   const granted = parseOAuthScope(access.scope);
   if (grantKey !== undefined && granted !== null) grants.set(grantKey, granted);
   return {
@@ -415,11 +430,9 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       const granted = session.permissions ?? session.scopes ?? [];
       if (
         session.authenticated &&
-        requiredSshTokenScopes(
-          grants,
-          input.expectedEnvironmentId,
-          bootstrap.remoteServerVersion,
-        ).every((scope) => granted.includes(scope))
+        requiredSshTokenScopes(grants, descriptor, input.target).every((scope) =>
+          granted.includes(scope),
+        )
       ) {
         return { bootstrap, bearerToken };
       }
