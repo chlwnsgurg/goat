@@ -22,7 +22,7 @@ const CANCELLED_RE =
 // updates this app or stops the remote server (see the launch script in
 // @goat/ssh/tunnel). Retrying on a timer cannot fix it.
 const RUNTIME_REFUSAL_RE =
-  /runs a newer GOAT|Remote runtime is newer than this app|is incompatible; it was left running|cannot be ordered against this app|cannot drain for a replacement|can only be replaced by a GOAT release|Cannot verify remote version ordering/u;
+  /runs a newer GOAT|Remote runtime is newer than this app|is incompatible; it was left running|cannot be ordered against this app|was started by an older app that cannot hand over ownership without draining|can only be replaced by a GOAT release|Cannot verify remote version ordering/u;
 
 function cleanMessage(cause: unknown): string {
   const raw = cause instanceof Error ? cause.message : String(cause);

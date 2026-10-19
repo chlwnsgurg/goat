@@ -36,6 +36,12 @@ const pending = {
   requestedVersion: ARCHIVE.archiveVersion,
   liveVersion: "1.2.2",
 } as const;
+const drainPending = {
+  ...pending,
+  reason: "unknown",
+  replacement: "older",
+  refreshCause: "drain_unavailable",
+} as const;
 const ready = {
   status: "ready",
   selectedVersion: ARCHIVE.archiveVersion,
@@ -66,6 +72,8 @@ const fixture = Effect.gen(function* () {
   let mode:
     | "pending"
     | "ready-pending"
+    | "drain-attached"
+    | "drain-pending"
     | "ready"
     | "ready-reused"
     | "older-attached"
@@ -81,15 +89,28 @@ const fixture = Effect.gen(function* () {
   let forwardFails = false;
   let versionNewer = false;
   let liveProbe = false;
+  let probeOverrides: Record<string, unknown> = {};
+  let forwardRunning = true;
+  let forwardStateGate:
+    | { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> }
+    | undefined;
+  let probeGate: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> } | undefined;
   let archiveUnavailable = false;
+  let requestedVersion: string = ARCHIVE.archiveVersion;
   const completed = Array.from({ length: 8 }, () => Deferred.makeUnsafe<void>());
   let completedCount = 0;
+  const published = Array.from({ length: 16 }, () => Deferred.makeUnsafe<void>());
+  let publishedCount = 0;
   const tracer = Tracer.make({
     span(options) {
       const span = new Tracer.NativeSpan(options);
       const end = span.end.bind(span);
       span.end = (at, exit) => {
         end(at, exit);
+        if (options.name === "ssh/tunnel.publishResult") {
+          const milestone = published[publishedCount++];
+          if (milestone) Deferred.doneUnsafe(milestone, Effect.void);
+        }
         if (options.name === "ssh/tunnel.ensureTunnelEntry") {
           const milestone = completed[completedCount++];
           if (milestone) Deferred.doneUnsafe(milestone, Effect.void);
@@ -131,7 +152,18 @@ const fixture = Effect.gen(function* () {
       if (command.args.includes("-N")) {
         count.forwards++;
         yield* Deferred.succeed(forwarded, undefined);
-        return makeRunningProcess(() => count.kills++);
+        return {
+          ...makeRunningProcess(() => count.kills++),
+          isRunning: Effect.gen(function* () {
+            const gate = forwardStateGate;
+            forwardStateGate = undefined;
+            if (gate !== undefined) {
+              yield* Deferred.succeed(gate.entered, undefined);
+              yield* Deferred.await(gate.release);
+            }
+            return forwardRunning;
+          }),
+        };
       }
       const input = command.options.stdin;
       const script =
@@ -141,7 +173,14 @@ const fixture = Effect.gen(function* () {
         Stream.isStream(input.stream)
           ? yield* input.stream.pipe(Stream.decodeText(), Stream.mkString)
           : "";
-      if (script.includes("ready=false") && !isRemoteLaunch(command.args))
+      if (script.includes("ready=false") && !isRemoteLaunch(command.args)) {
+        const gate = probeGate;
+        probeGate = undefined;
+        const capturedOverrides = { ...probeOverrides };
+        if (gate !== undefined) {
+          yield* Deferred.succeed(gate.entered, undefined);
+          yield* Deferred.await(gate.release);
+        }
         return makeSuccessfulProcess(
           JSON.stringify({
             platform: "linux",
@@ -166,8 +205,10 @@ const fixture = Effect.gen(function* () {
                   },
                 }
               : {}),
+            ...capturedOverrides,
           }),
         );
+      }
       if (script.includes("\nset -- auth session issue --base-dir "))
         return makeSuccessfulProcess('{"token":"agent-session","expiresAt":null}');
       if (script.includes("auth pairing create")) {
@@ -215,22 +256,26 @@ const fixture = Effect.gen(function* () {
       }
       return makeSuccessfulProcess(
         JSON.stringify(
-          mode === "ready-reused"
-            ? { ...ready, refresh: undefined }
-            : mode === "older-attached"
-              ? {
-                  ...ready,
-                  selectedVersion: "1.2.2",
-                  refresh: undefined,
-                  pending: { ...pending, replacement: "older" },
-                }
-              : mode === "pending"
-                ? { status: "pending", pending }
-                : mode === "ready-pending"
-                  ? { ...ready, selectedVersion: "1.2.2", refresh: undefined, pending }
-                  : mode === "archive" || mode === "attached"
-                    ? { ...ready, selectedVersion: "1.2.2", refresh: undefined }
-                    : ready,
+          mode === "drain-pending"
+            ? { status: "pending", pending: drainPending }
+            : mode === "drain-attached"
+              ? { ...ready, selectedVersion: "1.2.2", refresh: undefined, pending: drainPending }
+              : mode === "ready-reused"
+                ? { ...ready, refresh: undefined }
+                : mode === "older-attached"
+                  ? {
+                      ...ready,
+                      selectedVersion: "1.2.2",
+                      refresh: undefined,
+                      pending: { ...pending, replacement: "older" },
+                    }
+                  : mode === "pending"
+                    ? { status: "pending", pending }
+                    : mode === "ready-pending"
+                      ? { ...ready, selectedVersion: "1.2.2", refresh: undefined, pending }
+                      : mode === "archive" || mode === "attached"
+                        ? { ...ready, selectedVersion: "1.2.2", refresh: undefined }
+                        : ready,
         ),
       );
     }),
@@ -263,11 +308,12 @@ const fixture = Effect.gen(function* () {
         }),
     }),
     SshTunnel.SshEnvironmentManager.layer({
-      resolveCliRunner: Effect.succeed({
+      resolveCliRunner: Effect.sync(() => ({
         ...ARCHIVE,
+        archiveVersion: requestedVersion,
         archiveDirectory: "",
         refreshOwnedRuntimeOnFirstConnection: true,
-      }),
+      })),
     }),
   );
   return {
@@ -278,9 +324,29 @@ const fixture = Effect.gen(function* () {
     installPin,
     count,
     completed,
+    published,
     tracer,
     launchScripts,
     sshCalls,
+    setRequestedVersion: (value: string) => {
+      requestedVersion = value;
+    },
+    setProbe: (value: Record<string, unknown>) => {
+      probeOverrides = value;
+    },
+    setForwardRunning: (value: boolean) => {
+      forwardRunning = value;
+    },
+    holdNextForwardState: Effect.gen(function* () {
+      const gate = { entered: yield* Deferred.make<void>(), release: yield* Deferred.make<void>() };
+      forwardStateGate = gate;
+      return gate;
+    }),
+    holdNextProbe: Effect.gen(function* () {
+      const gate = { entered: yield* Deferred.make<void>(), release: yield* Deferred.make<void>() };
+      probeGate = gate;
+      return gate;
+    }),
     useLiveProbe: () => {
       liveProbe = true;
     },
@@ -291,7 +357,7 @@ const fixture = Effect.gen(function* () {
     setMode: (value: typeof mode) => {
       mode = value;
       archiveUnavailable = value === "archive";
-      if (archiveUnavailable) liveProbe = true;
+      if (archiveUnavailable || value.startsWith("drain-")) liveProbe = true;
     },
     setStale: (value: boolean) => {
       stale = value;
@@ -564,7 +630,7 @@ describe("SSH pending replacement reconciliation", () => {
       }),
   );
 
-  it.effect.each(["ready", "older-attached"] as const)(
+  it.effect.each(["ready", "older-attached", "drain-attached"] as const)(
     "status cannot revive a tunnel after a failed refresh (initial=%s)",
     (initial) =>
       Effect.gen(function* () {
@@ -573,6 +639,11 @@ describe("SSH pending replacement reconciliation", () => {
         yield* Effect.gen(function* () {
           const manager = yield* SshTunnel.SshEnvironmentManager;
           yield* manager.ensureEnvironment(uploadTarget);
+          if (initial === "drain-attached")
+            assert.equal(
+              (yield* manager.status(uploadTarget)).status?.refreshDeferred?.refreshCause,
+              "drain_unavailable",
+            );
           f.useLiveProbe();
           f.setMode("failure");
           assert.isTrue(
@@ -1321,4 +1392,461 @@ it.effect("archive recovery follows normal busy and idle replacement retries", (
       for (const script of f.launchScripts) assert.include(script, "DRAIN_FORCE=0");
     }).pipe(Effect.provide(f.layer), Effect.provideService(Tracer.Tracer, f.tracer), Effect.scoped);
   }).pipe(Effect.scoped),
+);
+
+describe("SSH drain-unavailable attachment", () => {
+  it.effect.each([false, true])(
+    "retries at ten minutes on the same forward; provider unhealthy=%s",
+    (unhealthy) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        f.setMode("drain-attached");
+        f.setProbe({ liveDrain: false });
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          const operation = yield* manager.beginSetupOperation(uploadTarget, "drain-setup");
+          const agent = { keyOnly: true, reuseWhileRefreshPending: true } as const;
+          const first = yield* manager.ensureEnvironment(uploadTarget, agent);
+          if ("type" in first) throw new Error("Expected attachment");
+          assert.deepEqual(first.pendingReplacement, drainPending);
+          const initial = yield* manager.status(uploadTarget);
+          yield* decodeHostResult(initial);
+          assert.equal(initial.status?.state, "ready");
+          assert.equal(initial.status?.runtimeVersion, "1.2.2");
+          assert.equal(initial.status?.refreshDeferred?.refreshCause, "drain_unavailable");
+          yield* manager.publishProviderDiagnosis(uploadTarget, operation, {
+            checkedAt: operationDate,
+            ready: !unhealthy,
+            fixes: unhealthy ? [{ actor: "human", instruction: "Sign in" }] : [],
+          });
+          const afterDiagnosis = yield* manager.status(uploadTarget);
+          assert.equal(afterDiagnosis.status?.state, unhealthy ? "providers_not_ready" : "ready");
+          assert.equal(afterDiagnosis.status?.refreshDeferred?.refreshCause, "drain_unavailable");
+          if (unhealthy)
+            assert.equal(afterDiagnosis.status?.providers?.fixes[0]?.instruction, "Sign in");
+          yield* manager.readyEnvironment(uploadTarget);
+          const session = yield* manager.issueMcpClientSession(uploadTarget, {
+            requireReady: true,
+            label: "diagnosis",
+            ttl: "1h",
+            runtimeModeCeiling: null,
+          });
+          assert.equal(session.token, "agent-session");
+          yield* TestClock.adjust("9 minutes");
+          assert.equal(f.count.launches, 1);
+          yield* TestClock.adjust("1 minute");
+          yield* Deferred.await(f.published[1]!);
+          const repeated = yield* manager.ensureEnvironment(uploadTarget, agent);
+          assert.deepEqual(repeated, first);
+          assert.equal(f.count.launches, 2);
+          assert.equal(f.count.forwards, 1);
+          assert.equal(f.count.kills, 0);
+          assert.equal(f.count.stops, 0);
+          f.setProbe({ liveDrain: true });
+          const positive = yield* manager.status(uploadTarget);
+          assert.equal(positive.status?.refreshDeferred?.refreshCause, "drain_unavailable");
+          assert.equal(positive.status?.state, unhealthy ? "providers_not_ready" : "ready");
+          yield* TestClock.adjust("9 minutes");
+          assert.equal(f.count.launches, 2);
+          f.setMode("ready");
+          yield* TestClock.adjust("1 minute");
+          yield* Deferred.await(f.published[3]!);
+          f.setProbe({
+            liveVersion: ARCHIVE.archiveVersion,
+            liveSignals: {
+              serverVersion: ARCHIVE.archiveVersion,
+              sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
+              orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+            },
+            liveBinarySignals: {
+              serverVersion: ARCHIVE.archiveVersion,
+              sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
+              orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+            },
+          });
+          const exact = yield* manager.status(uploadTarget);
+          yield* decodeHostResult(exact);
+          assert.isUndefined(exact.status?.refreshDeferred);
+          const settled = yield* manager.ensureEnvironment(uploadTarget, agent);
+          if ("type" in settled) throw new Error("Expected exact attachment");
+          assert.isUndefined(settled.pendingReplacement);
+          assert.equal(f.count.launches, 3);
+          yield* TestClock.adjust("20 minutes");
+          assert.equal(f.count.launches, 3);
+          assert.equal(f.count.prompts, 0);
+          for (const script of f.launchScripts) assert.include(script, "DRAIN_FORCE=0");
+        }).pipe(
+          Effect.provide(f.layer),
+          Effect.provideService(Tracer.Tracer, f.tracer),
+          Effect.scoped,
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.each(["drain-pending", "forward-failure"] as const)(
+    "%s never claims a usable attachment and retries",
+    (mode) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        f.setMode(mode === "drain-pending" ? mode : "drain-attached");
+        f.failForward(mode === "forward-failure");
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          const result = yield* Effect.result(
+            manager.ensureEnvironment(uploadTarget, { issuePairingToken: true }),
+          );
+          if (mode === "drain-pending") {
+            if (Result.isFailure(result)) throw result.failure;
+            assert.property(result.success, "type");
+            assert.equal((yield* manager.status(uploadTarget)).status?.state, "update_waiting");
+          } else assert.isTrue(Result.isFailure(result));
+          assert.isUndefined((yield* manager.status(uploadTarget)).status?.refreshDeferred);
+          assert.equal(f.count.forwards, 0);
+          assert.equal(f.count.pairings, 0);
+          assert.isTrue(
+            Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+          );
+          f.failForward(false);
+          f.setMode("drain-attached");
+          yield* TestClock.adjust("10 minutes");
+          yield* Deferred.await(f.forwarded);
+          yield* Deferred.await(f.published[mode === "drain-pending" ? 1 : 0]!);
+          assert.equal(
+            (yield* manager.status(uploadTarget)).status?.refreshDeferred?.refreshCause,
+            "drain_unavailable",
+          );
+          assert.equal(f.count.launches, 2);
+        }).pipe(
+          Effect.provide(f.layer),
+          Effect.provideService(Tracer.Tracer, f.tracer),
+          Effect.scoped,
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.each(
+    [false, true].flatMap((liveDrain) =>
+      [
+        { name: "foreign owner", probe: { liveOwned: false } },
+        { name: "identity absent", probe: { identityAbsent: true } },
+        { name: "missing port", probe: { livePort: undefined } },
+        { name: "changed port", probe: { livePort: 4444 } },
+        { name: "changed version", probe: { liveVersion: "1.2.1" } },
+        { name: "missing live binary", probe: { liveBinarySignals: undefined } },
+        {
+          name: "incompatible live binary",
+          probe: {
+            liveBinarySignals: {
+              serverVersion: "1.2.2",
+              sshRuntimeProtocolVersion: 999,
+              orchestrationProtocolVersion: 999,
+            },
+          },
+        },
+        { name: "unknown runtime", probe: { liveStatus: "unknown" } },
+        { name: "dead forward", probe: {} },
+        { name: "changed requested version", probe: {} },
+      ].map((scenario) => ({ ...scenario, liveDrain })),
+    ),
+  )("fresh status cannot promote $name (drain=$liveDrain)", ({ name, probe, liveDrain }) =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.setMode("drain-attached");
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        yield* manager.ensureEnvironment(uploadTarget);
+        if (name === "dead forward") f.setForwardRunning(false);
+        if (name === "changed requested version") {
+          f.setRequestedVersion("1.2.4");
+        }
+        f.setProbe({ ...probe, liveDrain });
+        const result = yield* manager.status(uploadTarget);
+        assert.isUndefined(result.status?.refreshDeferred);
+        assert.notEqual(result.status?.state, "ready");
+        assert.equal(f.count.launches, 1);
+        assert.isTrue(
+          Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+        );
+      }).pipe(Effect.provide(f.layer), Effect.scoped);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect.each(["disconnect", "forget", "generation", "terminal"] as const)(
+    "%s cancels intent and fences a stale fresh probe",
+    (action) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        f.setMode("drain-attached");
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          const operation = yield* manager.beginSetupOperation(uploadTarget, "drain-cancel");
+          yield* manager.ensureEnvironment(uploadTarget);
+          const gate = yield* f.holdNextProbe;
+          const status = yield* manager.status(uploadTarget).pipe(Effect.forkChild);
+          yield* Deferred.await(gate.entered);
+          if (action === "disconnect") yield* manager.disconnectEnvironment(uploadTarget);
+          if (action === "forget")
+            yield* manager.forgetEnvironment(uploadTarget, { stopRuntime: "no" });
+          if (action === "generation")
+            yield* manager.beginSetupOperation(uploadTarget, "new-generation");
+          if (action === "terminal")
+            yield* manager.publishSetupOutcome(uploadTarget, operation, {
+              kind: "error",
+              reason: "diagnosis_failed",
+              message: "Diagnosis failed",
+              fix: { actor: "human", instruction: "Try again" },
+            });
+          yield* Deferred.succeed(gate.release, undefined);
+          const result = yield* Fiber.join(status);
+          assert.isUndefined(result.status?.refreshDeferred);
+          yield* TestClock.adjust("20 minutes");
+          assert.equal(f.count.launches, 1);
+        }).pipe(Effect.provide(f.layer), Effect.scoped);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("archive recovery becomes drain deferral and clears obsolete archive state", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.setMode("archive");
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        const operation = yield* manager.beginSetupOperation(uploadTarget, "archive-to-drain");
+        yield* manager.ensureEnvironment(uploadTarget);
+        yield* manager.publishProviderDiagnosis(uploadTarget, operation, {
+          checkedAt: operationDate,
+          ready: false,
+          fixes: [{ actor: "human", instruction: "Sign in" }],
+        });
+        assert.equal(
+          (yield* manager.status(uploadTarget)).status?.refreshDeferred?.reason,
+          "archive_unavailable",
+        );
+        f.setMode("drain-attached");
+        f.setProbe({ liveDrain: false });
+        yield* TestClock.adjust("10 minutes");
+        yield* Deferred.await(f.published[1]!);
+        for (let i = 0; i < 2; i++) {
+          const result = yield* manager.status(uploadTarget);
+          yield* decodeHostResult(result);
+          assert.equal(result.status?.refreshDeferred?.refreshCause, "drain_unavailable");
+          assert.equal(result.status?.state, "providers_not_ready");
+        }
+        f.setMode("ready");
+        yield* TestClock.adjust("10 minutes");
+        yield* Deferred.await(f.published[2]!);
+        f.setProbe({ liveDrain: false });
+        const result = yield* manager.status(uploadTarget);
+        assert.isUndefined(result.status?.refreshDeferred);
+        assert.isUndefined(result.status?.failure);
+        assert.equal(f.count.launches, 3);
+      }).pipe(
+        Effect.provide(f.layer),
+        Effect.provideService(Tracer.Tracer, f.tracer),
+        Effect.scoped,
+      );
+    }).pipe(Effect.scoped),
+  );
+});
+
+it.effect.each([false, true])(
+  "failed HTTP readiness with drain=%s removes readiness without closing the forward or consuming intent",
+  (liveDrain) =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.setMode("drain-attached");
+      f.setProbe({ liveDrain });
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        yield* manager.ensureEnvironment(uploadTarget);
+        f.setStale(true);
+        const status = yield* manager.status(uploadTarget).pipe(Effect.forkChild);
+        yield* Deferred.await(f.staleProbeEntered);
+        yield* TestClock.adjust("10 seconds");
+        const failed = yield* Fiber.join(status);
+        assert.isUndefined(failed.status?.refreshDeferred);
+        assert.equal(failed.status?.state, "update_blocked");
+        assert.isTrue(
+          Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+        );
+        assert.equal(f.count.kills, 0);
+        assert.equal(f.count.stops, 0);
+        f.setStale(false);
+        assert.equal(
+          (yield* manager.status(uploadTarget)).status?.refreshDeferred?.refreshCause,
+          "drain_unavailable",
+        );
+        yield* TestClock.adjust("10 minutes");
+        yield* Deferred.await(f.published[1]!);
+        assert.equal(f.count.launches, 2);
+      }).pipe(
+        Effect.provide(f.layer),
+        Effect.provideService(Tracer.Tracer, f.tracer),
+        Effect.scoped,
+      );
+    }).pipe(Effect.scoped),
+);
+
+it.effect("a changed managed pin cannot reconstruct drain readiness", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    yield* f.installPin();
+    f.setMode("drain-attached");
+    yield* Effect.gen(function* () {
+      const manager = yield* SshTunnel.SshEnvironmentManager;
+      yield* manager.ensureEnvironment(uploadTarget);
+      const gate = yield* f.holdNextProbe;
+      const status = yield* manager.status(uploadTarget).pipe(Effect.forkChild);
+      yield* Deferred.await(gate.entered);
+      yield* f.installPin("BBBB");
+      yield* Deferred.succeed(gate.release, undefined);
+      const result = yield* Fiber.join(status);
+      assert.isUndefined(result.status?.refreshDeferred);
+      assert.notEqual(result.status?.state, "ready");
+      assert.equal(f.count.launches, 1);
+    }).pipe(Effect.provide(f.layer), Effect.scoped);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("terminal setup failure fences drain publication across the forward-state read", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    f.setMode("drain-attached");
+    yield* Effect.gen(function* () {
+      const manager = yield* SshTunnel.SshEnvironmentManager;
+      const operation = yield* manager.beginSetupOperation(uploadTarget, "drain-publication");
+      const gate = yield* f.holdNextForwardState;
+      const launch = yield* manager.ensureEnvironment(uploadTarget).pipe(Effect.forkChild);
+      yield* Deferred.await(gate.entered);
+      yield* manager.publishSetupOutcome(uploadTarget, operation, {
+        kind: "error",
+        reason: "authorization_revoked",
+        message: "Authorization revoked",
+        fix: { actor: "human", instruction: "Authorize setup again" },
+      });
+      yield* Deferred.succeed(gate.release, undefined);
+      yield* Fiber.join(launch);
+      const result = yield* manager.status(uploadTarget);
+      assert.equal(result.status?.state, "failed");
+      assert.equal(result.status?.failure?.reason, "authorization_revoked");
+      assert.isUndefined(result.status?.refreshDeferred);
+      assert.isTrue(Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))));
+      yield* TestClock.adjust("20 minutes");
+      assert.equal(f.count.launches, 1);
+    }).pipe(Effect.provide(f.layer), Effect.scoped);
+  }).pipe(Effect.scoped),
+);
+
+it.effect.each([
+  { name: "foreign owner", probe: { liveOwned: false } },
+  { name: "identity absent", probe: { identityAbsent: true } },
+])(
+  "status invalidation of $name fences drain publication across the forward-state read",
+  ({ probe }) =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.setMode("drain-attached");
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        yield* manager.ensureEnvironment(uploadTarget);
+        const publicationGate = yield* f.holdNextForwardState;
+        const retry = yield* TestClock.adjust("10 minutes").pipe(Effect.forkChild);
+        yield* Deferred.await(publicationGate.entered);
+        f.setProbe(probe);
+        assert.equal((yield* manager.status(uploadTarget)).status?.state, "update_blocked");
+
+        // Observe the blocked snapshot before publication resumes, so a new probe cannot mask an overwrite.
+        const probeGate = yield* f.holdNextProbe;
+        const status = yield* manager.status(uploadTarget).pipe(Effect.forkChild);
+        yield* Deferred.await(probeGate.entered);
+        yield* Deferred.succeed(publicationGate.release, undefined);
+        yield* Deferred.await(f.published[1]!);
+        yield* Fiber.join(retry);
+        yield* Deferred.succeed(probeGate.release, undefined);
+        const result = yield* Fiber.join(status);
+        assert.equal(result.status?.state, "update_blocked");
+        assert.isUndefined(result.status?.refreshDeferred);
+        assert.isTrue(
+          Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+        );
+        assert.isTrue(
+          Result.isFailure(
+            yield* Effect.result(
+              manager.issueMcpClientSession(uploadTarget, {
+                requireReady: true,
+                label: "invalidated-publication",
+                ttl: "1h",
+                runtimeModeCeiling: null,
+              }),
+            ),
+          ),
+        );
+        assert.equal(f.count.launches, 2);
+        assert.equal(f.count.forwards, 1);
+      }).pipe(
+        Effect.provide(f.layer),
+        Effect.provideService(Tracer.Tracer, f.tracer),
+        Effect.scoped,
+      );
+    }).pipe(Effect.scoped),
+);
+
+it.effect.each(
+  [false, true].flatMap((liveDrain) => [
+    { name: "foreign owner", probe: { liveOwned: false }, liveDrain },
+    { name: "identity absent", probe: { identityAbsent: true }, liveDrain },
+  ]),
+)(
+  "status invalidation of $name (drain=$liveDrain) prevents pending reuse and session admission",
+  ({ probe, liveDrain }) =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.setMode("drain-attached");
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        yield* manager.ensureEnvironment(uploadTarget);
+        f.setProbe({ ...probe, liveDrain });
+        assert.equal((yield* manager.status(uploadTarget)).status?.state, "update_blocked");
+        f.setMode("drain-pending");
+        const result = yield* manager.ensureEnvironment(uploadTarget, {
+          reuseWhileRefreshPending: true,
+        });
+        assert.property(result, "type");
+        assert.equal(f.count.launches, 2);
+        assert.equal(f.count.forwards, 1);
+        assert.equal(f.count.stops, 0);
+        const waiting = yield* manager.status(uploadTarget);
+        assert.equal(waiting.status?.state, "update_waiting");
+        assert.isUndefined(waiting.status?.refreshDeferred);
+        assert.isTrue(
+          Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+        );
+        assert.isTrue(
+          Result.isFailure(
+            yield* Effect.result(
+              manager.issueMcpClientSession(uploadTarget, {
+                requireReady: true,
+                label: "invalidated",
+                ttl: "1h",
+                runtimeModeCeiling: null,
+              }),
+            ),
+          ),
+        );
+        f.setMode("drain-attached");
+        f.setProbe({ liveDrain });
+        yield* TestClock.adjust("10 minutes");
+        yield* Deferred.await(f.published[2]!);
+        const recovered = yield* manager.ensureEnvironment(uploadTarget, {
+          reuseWhileRefreshPending: true,
+        });
+        assert.notProperty(recovered, "type");
+        yield* manager.readyEnvironment(uploadTarget);
+        assert.equal(f.count.launches, 3);
+      }).pipe(
+        Effect.provide(f.layer),
+        Effect.provideService(Tracer.Tracer, f.tracer),
+        Effect.scoped,
+      );
+    }).pipe(Effect.scoped),
 );

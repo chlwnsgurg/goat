@@ -87,6 +87,7 @@ it.effect(
         [82, "MemoryLastReadySpace"],
         [83, "MemoryHubAdministered"],
         [84, "MemoryCheckpointLifecycle"],
+        [85, "HubNodes"],
       ]);
       assert.deepStrictEqual(
         yield* sql`SELECT resolution_id,revert_operation_id,json_extract(revert_result_json,'$.status') AS status FROM memory_resolutions ORDER BY resolution_id`,

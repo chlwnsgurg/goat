@@ -201,8 +201,10 @@ desktop and the server's SSH dispatch (`resolveSshCliRunner` in
   `refreshDeferred`, preserves provider diagnosis, and retries the requested release every
   10 minutes. `ssh.runtime.upgrade.skipped` logs the selected version and reason.
 - With an older compatible server running, the first connection of each manager drains it once it
-  answers `idle` (see [Replacement](#replacement)). While it is busy, the client attaches to it,
-  logs `ssh.runtime.refresh.deferred` with the reason, and retries every 10 minutes.
+  answers `idle` (see [Replacement](#replacement)). While it is busy or cannot drain, the client
+  attaches to the verified compatible runtime, logs `ssh.runtime.refresh.deferred` with the reason,
+  and retries every 10 minutes. A drain deferral stays usable with `refreshDeferred`; retries ask
+  for drain support again rather than retaining negative compatibility answers.
 
 After a launch that installed a runtime, cleanup runs under the host replacement lock, never
 on a drain/replacement or rollback connection, and excludes concurrent installs. It uses the

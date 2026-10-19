@@ -1090,6 +1090,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     ChannelLayers.layer.pipe(
       Layer.provide(RuntimeLayer.layerEventSink),
       Layer.provide(SshRemoteDispatch.layer),
+      // GOAT Bot searches memory when it answers; same references, so one memory instance.
+      Layer.provide(Layer.merge(layerMemoryService, layerMemorySync)),
     ),
   ),
   Layer.provideMerge(

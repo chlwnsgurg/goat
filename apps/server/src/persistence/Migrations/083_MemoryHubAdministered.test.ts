@@ -34,6 +34,7 @@ it.effect("082 participates in the migration ledger and preserves its flag on re
     assert.deepStrictEqual(yield* runMigrations(), [
       [83, "MemoryHubAdministered"],
       [84, "MemoryCheckpointLifecycle"],
+      [85, "HubNodes"],
     ]);
     yield* sql`INSERT INTO memory_hub_administration_state VALUES(1,1)`;
     assert.deepStrictEqual(yield* runMigrations(), []);

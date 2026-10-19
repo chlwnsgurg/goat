@@ -316,9 +316,9 @@ fact_valid() {
     compat)
       (set -f; set -- $2
         [ "$#" = 3 ] || exit 1
-        case "$1" in compatible|update-required|client-too-old|unknown) ;; *) exit 1 ;; esac
-        case "$2" in 0|1) ;; *) exit 1 ;; esac
-        case "$3" in -|*[!A-Za-z0-9-]*) [ "$3" = - ] ;; *) ;; esac) ;;
+        case "$1" in compatible|update-required|client-too-old) ;; *) exit 1 ;; esac
+        [ "$2" = 1 ] || exit 1
+        case "$3" in ''|-|*[!A-Za-z0-9-]*) exit 1 ;; *) ;; esac) ;;
     *) return 1 ;;
   esac
 }
@@ -1328,7 +1328,7 @@ check_candidate_protocol() {
 check_live_protocol() {
   LIVE_STATUS=none; LIVE_PID=0; LIVE_PORT=0; LIVE_VERSION=unknown
   LIVE_COMPATIBLE=0; LIVE_OWNED=0; NEEDS_OWNED_UPGRADE=0; REPLACEMENT_REASON=incompatible; comparison=
-  LIVE_DRAIN=0; LIVE_INSTANCE_ID=
+  LIVE_DRAIN=0; LIVE_INSTANCE_ID=; DEFER_NO_DRAIN=0
   if live="$(live_fact "$CHECK_RUNNER" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" 2>/dev/null)"; then
     set -f; set -- $live
     if ! valid_live_tokens "$@"; then printf 'Malformed live protocol output.\n' >&2; exit 1; fi
@@ -1430,8 +1430,14 @@ check_live_protocol() {
     printf 'Secondary preparation cannot replace a live runtime.\n' >&2; exit 1
   fi
   if [ "$NEEDS_OWNED_UPGRADE" = 1 ] && [ "$LIVE_DRAIN" != 1 ]; then
-    # A server that cannot drain for its replacement is attach-only: never replaced or signalled.
-    printf 'Live GOAT PID=%s port=%s cannot drain for a replacement and this app cannot attach to it; it was left running. Stop it on the remote host when its work is done, then reconnect.\n' "$LIVE_PID" "$LIVE_PORT" >&2; exit 1
+    if [ "$REFRESH_IF_IDLE" = 1 ] && [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_OWNED" = 1 ] &&
+       { [ "$REPLACEMENT_REASON" = older ] || [ "$REPLACEMENT_REASON" = capability ]; }; then
+      DEFER_NO_DRAIN=1
+    elif [ "$REPLACEMENT_REASON" = legacy ]; then
+      printf 'Live GOAT PID=%s port=%s was started by an older app that cannot hand over ownership without draining; it was left running. Stop it on the remote host when its work is done, then reconnect.\n' "$LIVE_PID" "$LIVE_PORT" >&2; exit 1
+    else
+      printf 'Live GOAT PID=%s port=%s is incompatible; it was left running because it cannot drain for a replacement and this app cannot attach to it. Stop it on the remote host when its work is done, then reconnect.\n' "$LIVE_PID" "$LIVE_PORT" >&2; exit 1
+    fi
   fi
 }
 read_live_compat() {
@@ -1612,9 +1618,13 @@ emit_pending_only() {
   exit 0
 }
 emit_pending() {
-  reason="$1"
+  reason="$1"; pending_detail="\${2:-}"
+  [ -n "$pending_detail" ] || pending_detail="$LOCK_DETAIL"
   pending_fields="$(printf '"reason":"%s","replacement":"%s","requestedVersion":"%s","liveVersion":"%s"' "$reason" "$REPLACEMENT_REASON" "$REQUESTED_VERSION" "$LIVE_VERSION")"
-  if [ "$LOCK_DETAIL" = recovery-stale ]; then pending_fields="$pending_fields,"'"detail":"recovery-stale"'; fi
+  case "$pending_detail" in
+    recovery-stale) pending_fields="$pending_fields,"'"detail":"recovery-stale"' ;;
+    drain-unavailable) pending_fields="$pending_fields,"'"refreshCause":"drain_unavailable"' ;;
+  esac
   # Reuse is independently proven using the retained runner, never the incompatible candidate.
   pending_attachment_safe || emit_pending_only
   if [ "$reason" = contended ] && [ "$NEEDS_OWNED_UPGRADE" = 0 ] && [ ! -f "$RETAINED_SNAPSHOT_FILE" ]; then
@@ -1633,7 +1643,8 @@ emit_pending() {
       check_retained_runner
       check_live_protocol
       pending_attachment_safe || emit_pending_only
-      if [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_PID" = "$pending_pid" ] && [ "$LIVE_PORT" = "$pending_port" ] && [ "$LIVE_VERSION" = "$pending_version" ]; then
+      if [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_PID" = "$pending_pid" ] && [ "$LIVE_PORT" = "$pending_port" ] && [ "$LIVE_VERSION" = "$pending_version" ] &&
+         { [ "$pending_detail" != drain-unavailable ] || { [ "$LIVE_OWNED" = 1 ] && verify_owned_identity "$LIVE_PID" "$LIVE_PORT"; }; }; then
         pending_kind=external; [ "$LIVE_OWNED" != 1 ] || pending_kind=managed
         # Lock contention does not imply a replacement; compatible attach-only servers stay ready.
         pending_suffix=
@@ -1684,6 +1695,7 @@ if [ "$OWNING_LAUNCH" = 1 ]; then
   check_live_protocol
   [ "$RECONCILING_DRAIN" != 1 ] || NEEDS_OWNED_UPGRADE=1
 @@GOAT_VERIFY_OWNED_BEFORE_PUBLICATION@@
+  [ "$DEFER_NO_DRAIN" != 1 ] || emit_pending unknown drain-unavailable
   if [ "$NEEDS_OWNED_UPGRADE" = 1 ] && [ "$RECONCILING_DRAIN" != 1 ] && [ "$REPLACEMENT_REASON" != incompatible ] && [ "$DRAIN_FORCE" != 1 ]; then
     # An optional refresh waits for idle; launch probes again last, then the server drains.
     activity="$(read_refresh_activity)"
@@ -2143,6 +2155,7 @@ reuse_live_server() {
 }
 recheck_selected_before_use
 [ "\${RECONCILING_DRAIN:-0}" != 1 ] || NEEDS_OWNED_UPGRADE=1
+[ "$DEFER_NO_DRAIN" != 1 ] || emit_pending unknown drain-unavailable
 REMOTE_PID=""
 REMOTE_PORT=""
 REMOTE_MANAGED=""
@@ -3006,6 +3019,7 @@ probe_live() {
      [ "$(cat "$state/port" 2>/dev/null || true)" = "$6" ]; then live_owned=true; fi
   if [ "$1" = live ] && valid_version "$2"; then
     live_version="$2"
+    live_fields="$live_fields$(printf ',"livePort":%s' "$6")"
     live_signals="$(signals_json "$2" "$3" "$4" || true)"
     live_binary="$(binary_json "$live_version" || true)"
     if [ -n "$live_signals" ]; then
@@ -3100,6 +3114,9 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
       liveOwned: Schema.optionalKey(Schema.Boolean),
       identityAbsent: Schema.optionalKey(Schema.Boolean),
       liveVersion: Schema.optionalKey(Schema.String),
+      livePort: Schema.optionalKey(
+        Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 })),
+      ),
       liveSignals: Schema.optionalKey(RuntimeSignals),
       liveBinarySignals: Schema.optionalKey(RuntimeSignals),
       liveCommitTime: Schema.optionalKey(Schema.Int),
@@ -3317,7 +3334,6 @@ export const prepareRemoteRuntime = (
       owningLaunch &&
       exact.mayUpgradeOwnedServer &&
       runner?.refreshOwnedRuntimeOnFirstConnection === true &&
-      probe.liveDrain === true &&
       liveCompatible &&
       probe.liveOwned === true &&
       probe.identityAbsent !== true &&
@@ -5196,21 +5212,55 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     requestedVersion,
     detail: `Refresh deferred: archive for ${requestedVersion} unavailable`,
   });
-  const publishResult = (
+  const deferredDrainRefresh = (requestedVersion: string) => ({
+    reason: "archive_unavailable" as const,
+    refreshCause: "drain_unavailable" as const,
+    requestedVersion,
+    detail: "Refresh deferred: this runtime could not drain for the refresh",
+  });
+  const publishResult = Effect.fn("ssh/tunnel.publishResult")(function* (
     key: string,
     target: DesktopSshEnvironmentTarget,
     result: SshTunnelEntry | DesktopSshRuntimePendingResult,
     runner?: RemoteGoatRunnerOptions,
-  ) => {
-    if (setupTerminalFailure(key)) return;
-    const pending = "type" in result ? result.pending : pendingReplacements.get(key)?.pending;
+  ) {
+    if (closed || setupTerminalFailure(key)) return;
+    const generation = generations.get(key) ?? 0;
+    const intent = pendingReplacements.get(key);
+    const pending = "type" in result ? result.pending : intent?.pending;
     const host = target.alias || target.hostname;
     const runtimeVersion =
       "type" in result ? result.pending.liveVersion : result.selectedRuntime.version;
     const requestedVersion = pending?.requestedVersion ?? runner?.archiveVersion?.trim() ?? "";
     const base = { host, runtimeVersion, requestedVersion };
+    const observed = statuses.get(key);
+    const drainAttached =
+      !("type" in result) &&
+      result.attachmentInvalidated !== true &&
+      pending?.refreshCause === "drain_unavailable" &&
+      (pending.replacement === "older" || pending.replacement === "capability") &&
+      pending.liveVersion === runtimeVersion &&
+      result.selectedRuntime.requestedVersion === requestedVersion &&
+      intent?.requestedRunner.archiveVersion?.trim() === requestedVersion &&
+      intent.generation === generation &&
+      tunnels.get(key) === result &&
+      (yield* result.process.isRunning.pipe(Effect.orElseSucceed(() => false)));
+    if (
+      closed ||
+      (generations.get(key) ?? 0) !== generation ||
+      pendingReplacements.get(key) !== intent ||
+      (!("type" in result) && tunnels.get(key) !== result) ||
+      (drainAttached &&
+        (result.attachmentInvalidated === true || statuses.get(key) !== observed)) ||
+      setupTerminalFailure(key)
+    )
+      return;
     let snapshot: SshHostStatus;
-    if (pending !== undefined) {
+    if (drainAttached) {
+      const refreshDeferred = deferredDrainRefresh(requestedVersion);
+      snapshot = { ...base, state: "ready", refreshDeferred, detail: refreshDeferred.detail };
+      acquisitionFailures.delete(key);
+    } else if (pending !== undefined) {
       const detail =
         pending.detail === "recovery-stale"
           ? "Check that no other GOAT client is updating this host before clearing the stale lock."
@@ -5250,7 +5300,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       ),
     };
     statuses.set(key, { kind: "ok", status: snapshot });
-  };
+  });
   const publishFailure = Effect.fn("ssh/tunnel.publishFailure")(function* (
     key: string,
     target: DesktopSshEnvironmentTarget,
@@ -5705,6 +5755,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           requestedVersion: remoteLaunch.pending.requestedVersion,
           reason: remoteLaunch.pending.reason,
           replacement: remoteLaunch.pending.replacement,
+          detail: remoteLaunch.pending.detail,
           retryInMinutes: 10,
         });
         pendingReplacements.set(input.key, { ...intent, pending: remoteLaunch.pending });
@@ -6095,7 +6146,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
                 true,
               );
               if (closed || (generations.get(key) ?? 0) !== intent.generation) return;
-              publishResult(key, intent.target, result, intent.requestedRunner);
+              yield* publishResult(key, intent.target, result, intent.requestedRunner);
               if (!("type" in result) && !pendingReplacements.has(key)) {
                 firstConnectionDecisions.add(
                   `${key}:${intent.requestedRunner.archiveVersion ?? intent.requestedRunner.nodeScriptPath ?? ""}`,
@@ -6142,7 +6193,13 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     if (ensureSuperseded(ticket) || (generations.get(knownKey) ?? 0) !== requestGeneration)
       return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
     forgotten.delete(knownKey);
-    const announcedConnecting = statuses.get(knownKey)?.status?.state !== "preparing";
+    const reusingPending = (key: string) =>
+      requestOptions?.reuseWhileRefreshPending === true &&
+      requestOptions.refreshRuntime !== true &&
+      pendingReplacements.has(key) &&
+      tunnels.has(key);
+    const announcedConnecting =
+      !reusingPending(knownKey) && statuses.get(knownKey)?.status?.state !== "preparing";
     if (announcedConnecting) {
       publishPhase(
         knownKey,
@@ -6209,13 +6266,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         const ensureGeneration = generations.get(key) ?? 0;
         const decisionKey = `${key}:${runner?.archiveVersion ?? runner?.nodeScriptPath ?? ""}`;
         if (requestOptions?.refreshRuntime === true) acquisitionFailures.delete(key);
-        publishPhase(
-          key,
-          resolvedTarget,
-          runner?.archiveVersion?.trim() ?? "",
-          "connecting",
-          announcedConnecting ? undefined : requestOptions?.onPhase,
-        );
+        if (!reusingPending(key))
+          publishPhase(
+            key,
+            resolvedTarget,
+            runner?.archiveVersion?.trim() ?? "",
+            "connecting",
+            announcedConnecting ? undefined : requestOptions?.onPhase,
+          );
         const connectionRunner =
           runner === undefined
             ? undefined
@@ -6246,7 +6304,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
             stdout: "",
           });
         if ("type" in entry) {
-          publishResult(key, resolvedTarget, entry, runner);
+          yield* publishResult(key, resolvedTarget, entry, runner);
           return entry;
         }
 
@@ -6282,7 +6340,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           });
         // A busy runtime that still answers is used now and replaced when idle; say so.
         const pendingReplacement = pendingReplacements.get(key)?.pending;
-        publishResult(key, resolvedTarget, entry, runner);
+        yield* publishResult(key, resolvedTarget, entry, runner);
         return {
           target: entry.target,
           httpBaseUrl: entry.httpBaseUrl,
@@ -6445,6 +6503,12 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     let clearArchiveDeferral:
       | { readonly failure: SshHostFailure | undefined; readonly intent: unknown }
       | undefined;
+    let drainAttachment:
+      | { entry: SshTunnelEntry; intent: NonNullable<ReturnType<typeof pendingReplacements.get>> }
+      | undefined;
+    let verifiedDrainDeferral:
+      | { entry: SshTunnelEntry; intent: NonNullable<ReturnType<typeof pendingReplacements.get>> }
+      | undefined;
     const result = yield* Effect.gen(function* () {
       const { resolvedTarget } = yield* resolveManagedTarget(target);
       key = targetConnectionKey(resolvedTarget);
@@ -6466,6 +6530,10 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       generation = generations.get(key) ?? 0;
       resolvedTargets.set(requestKey, resolvedTarget);
       observed = statuses.get(key);
+      const entry = tunnels.get(key);
+      const intent = pendingReplacements.get(key);
+      if (entry !== undefined && intent?.pending?.refreshCause === "drain_unavailable")
+        drainAttachment = { entry, intent };
       yield* validateManagedPin(resolvedTarget);
       if (observed?.status?.state === "preparing" || observed?.status?.state === "update_waiting")
         return observed;
@@ -6561,8 +6629,61 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         };
       }
       // A successful probe observes liveness; it does not retry a failed acquisition.
+      const pending = intent?.pending;
+      if (
+        compatibleLive &&
+        probe.liveStatus === "live" &&
+        probe.liveOwned === true &&
+        entry !== undefined &&
+        intent !== undefined &&
+        intent.generation === generation &&
+        intent.requestedRunner.archiveVersion?.trim() === requestedVersion &&
+        pending?.refreshCause === "drain_unavailable" &&
+        (pending.replacement === "older" || pending.replacement === "capability") &&
+        pending.requestedVersion === requestedVersion &&
+        pending.liveVersion === probe.liveVersion &&
+        entry.selectedRuntime.version === probe.liveVersion &&
+        entry.selectedRuntime.requestedVersion === requestedVersion &&
+        entry.remotePort === probe.livePort &&
+        !setupTerminalFailure(key) &&
+        (yield* entry.process.isRunning.pipe(Effect.orElseSucceed(() => false))) &&
+        (yield* waitForHttpReady(existingTunnelCheck(entry, EXISTING_TUNNEL_CHECK_TIMEOUT_MS)).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        ))
+      ) {
+        const pin = yield* validateManagedPin(resolvedTarget);
+        if (
+          !closed &&
+          (generations.get(key) ?? 0) === generation &&
+          tunnels.get(key) === entry &&
+          pendingReplacements.get(key) === intent &&
+          !setupTerminalFailure(key) &&
+          samePin(intent.managedPin, pin)
+        )
+          verifiedDrainDeferral = { entry, intent };
+      }
       const previousFailure = acquisitionFailures.get(key);
-      if (compatibleLive && snapshot.runtimeVersion === requestedVersion) {
+      if (verifiedDrainDeferral !== undefined) {
+        const refreshDeferred = deferredDrainRefresh(requestedVersion);
+        snapshot = {
+          ...base,
+          runtimeVersion: probe.liveVersion!,
+          state: snapshot.providers?.ready === false ? "providers_not_ready" : "ready",
+          ...(snapshot.providers === undefined ? {} : { providers: snapshot.providers }),
+          refreshDeferred,
+          detail: refreshDeferred.detail,
+        };
+      } else if (pending?.refreshCause === "drain_unavailable") {
+        snapshot = {
+          ...base,
+          runtimeVersion: snapshot.runtimeVersion,
+          state: "update_blocked",
+          detail:
+            snapshot.detail ??
+            `${host}: The deferred runtime attachment could not be verified. Try reconnecting.`,
+        };
+      } else if (compatibleLive && snapshot.runtimeVersion === requestedVersion) {
         clearArchiveDeferral = { failure: previousFailure, intent: pendingReplacements.get(key) };
       } else if (
         compatibleLive &&
@@ -6624,6 +6745,16 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     if (latest !== observed && latest !== undefined) return latest;
     const enriched = yield* enrichFailure(target, result);
     if (closed || (generations.get(key) ?? 0) !== generation) return statuses.get(key) ?? enriched;
+    if (statuses.get(key) !== observed && statuses.has(key)) return statuses.get(key)!;
+    if (verifiedDrainDeferral !== undefined) {
+      if (
+        tunnels.get(key) !== verifiedDrainDeferral.entry ||
+        pendingReplacements.get(key) !== verifiedDrainDeferral.intent ||
+        setupTerminalFailure(key)
+      )
+        return statuses.get(key) ?? enriched;
+      acquisitionFailures.delete(key);
+    }
     if (clearArchiveDeferral !== undefined) {
       if (acquisitionFailures.get(key) === clearArchiveDeferral.failure)
         acquisitionFailures.delete(key);
@@ -6634,6 +6765,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         intent.archiveFailure !== undefined
       )
         pendingReplacements.delete(key);
+    }
+    if (
+      drainAttachment !== undefined &&
+      tunnels.get(key) === drainAttachment.entry &&
+      pendingReplacements.get(key) === drainAttachment.intent
+    ) {
+      // Historical launch proof cannot readmit an attachment rejected by a fresh probe.
+      drainAttachment.entry.attachmentInvalidated = verifiedDrainDeferral === undefined;
     }
     statuses.set(key, enriched);
     return enriched;
