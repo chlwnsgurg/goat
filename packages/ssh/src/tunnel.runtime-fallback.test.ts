@@ -100,6 +100,80 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
+    it.live(
+      "attaches to a same-core 0.1.0-dev.<sha> runtime when unpublished v0.1.0 cannot be acquired",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "0.1.0-dev.637a98351",
+            commitTime: 1_792_000_000,
+            drain: true,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+          });
+          const before = yield* f.snapshot;
+          let httpsRequests = 0;
+          let ghRequests = 0;
+          vi.stubGlobal("fetch", async () => {
+            httpsRequests++;
+            return new Response(null, { status: 404 });
+          });
+          const transport = ChildProcessSpawner.make((command) => {
+            if (command._tag === "StandardCommand" && command.command === "gh") {
+              ghRequests++;
+              return Effect.succeed({
+                ...makeSuccessfulProcess("release not found"),
+                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+              });
+            }
+            return f.transport.spawn(command);
+          });
+          const layer = Layer.mergeAll(
+            NodeServices.layer,
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, transport),
+            Layer.succeed(HttpClient.HttpClient, testHttpClient),
+            Layer.succeed(NetService.NetService, testNetService),
+            SshAuth.SshPasswordPrompt.disabledLayer,
+            SshTunnel.SshEnvironmentManager.layer({
+              resolveCliRunner: Effect.succeed({
+                ...f.runner,
+                archiveVersion: "0.1.0",
+                archiveCommitTime: 1_792_000_100,
+                archiveDirectory: `${f.home}/missing-archives`,
+                refreshOwnedRuntimeOnFirstConnection: true,
+              }),
+              leaveRemoteServerRunning: true,
+            }),
+          );
+          yield* Effect.gen(function* () {
+            const manager = yield* SshTunnel.SshEnvironmentManager;
+            const ensured = yield* manager.ensureEnvironment(uploadTarget, {
+              issuePairingToken: true,
+              keyOnly: true,
+            });
+            assert.equal(httpsRequests, 1);
+            assert.equal(ghRequests, 1);
+            assert.notProperty(ensured, "type");
+            if (!("type" in ensured)) {
+              assert.equal(ensured.remotePort, f.port);
+              assert.equal(ensured.remoteServerVersion, "0.1.0-dev.637a98351");
+            }
+            const status = (yield* manager.status(uploadTarget)).status;
+            assert.equal(status?.requestedVersion, "0.1.0");
+            assert.equal(status?.runtimeVersion, "0.1.0-dev.637a98351");
+            assert.equal(status?.failure?.reason, "archive_unavailable");
+            assert.equal(status?.failure?.archive?.requestedVersion, "0.1.0");
+            assert.include(
+              status?.failure?.fix.instruction ?? "",
+              "Using compatible GOAT 0.1.0-dev.637a98351. GOAT 0.1.0 runtime archive is unavailable.",
+            );
+          }).pipe(Effect.provide(layer), Effect.scoped);
+          assert.deepEqual(yield* f.snapshot, before);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
     it.live.each([
       "live-compatible",
       "live-incompatible",
