@@ -121,6 +121,10 @@ vi.mock(import("../settings/ChatGptWelcomeCoordinator"), async (original) => ({
   ...(await original()),
   ChatGptWelcomeCoordinator: () => <></>,
 }));
+vi.mock(import("../settings/MemoryGenerationSettings"), () => ({
+  MemoryGenerationSettings: () => <></>,
+}));
+vi.mock(import("./MemorySharingChoice"), () => ({ MemorySharingChoice: () => null }));
 // The real viewport mounts a Ghostty terminal against the PTY; these tests only need to
 // see whether the wizard shows it.
 vi.mock(import("../ThreadTerminalDrawer"), async (original) => ({
@@ -302,6 +306,7 @@ describe("welcome agent terminal setup", () => {
     expect(state.write).not.toHaveBeenCalled();
     expect(state.close).not.toHaveBeenCalled();
     await click("Continue");
+    await click("Continue");
     await click("Do not import projects");
     expect(state.complete).toHaveBeenCalledOnce();
     expect(state.done).toHaveBeenCalledExactlyOnceWith(undefined);
@@ -418,6 +423,7 @@ describe("welcome agent terminal setup", () => {
     await click("Close");
     expect(hasViewport()).toBe(false);
     expect(state.close).not.toHaveBeenCalled();
+    await click("Continue");
     await click("Continue");
     expect(pageText()).toContain("Import your projects");
   });

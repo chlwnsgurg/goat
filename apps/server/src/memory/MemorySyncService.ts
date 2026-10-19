@@ -1,6 +1,7 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- stable server-owned submission IDs.
 import * as NodeCrypto from "node:crypto";
 import * as M from "@goat/contracts";
+import { resolveMemoryModelSelection } from "@goat/shared/serverSettings";
 import * as Clock from "effect/Clock";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -138,6 +139,9 @@ const stableId = (attempt: string, kind: string) => {
 const sameHeads = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && [...a].sort().every((h, i) => h === [...b].sort()[i]);
 const selectionKey = Schema.encodeSync(Schema.fromJsonString(M.MemoryModelSelection));
+// New conflict claims freeze the memory model; frozen tickets keep theirs across devices.
+const memorySelection = (s: M.ServerSettings) =>
+  s.memoryEnabled ? resolveMemoryModelSelection(s, undefined) : null;
 const decodePull = Schema.decodeUnknownEffect(M.MemoryHubPullResult);
 const decodeSource = Schema.decodeUnknownEffect(M.MemorySourceReadOutcome);
 const decodeGenerated = Schema.decodeUnknownEffect(M.ResolveMemoryConflictExecutionResult);
@@ -220,7 +224,7 @@ const make = Effect.gen(function* () {
     hub: s.memoryHub.mode === "member" ? s.memoryHub.hubEnvironmentId : local,
     endpoint: s.memoryHub.mode === "member" ? s.memoryHub.endpoint : null,
     credential: s.memoryHub.mode === "member" ? s.memoryHub.secretName : null,
-    model: s.defaultModelSelection ? selectionKey(s.defaultModelSelection) : null,
+    model: memorySelection(s) ? selectionKey(memorySelection(s)!) : null,
     epoch: s.memoryHubVersion,
   });
   let previousBinding = bindingKey(initialSettings);
@@ -1063,7 +1067,7 @@ const make = Effect.gen(function* () {
           Effect.gen(function* () {
             let frozen = yield* store.transact(store.prepareClaimAttemptTx(prepare));
             if (!frozen) {
-              const selection = (yield* readSettings).defaultModelSelection;
+              const selection = memorySelection(yield* readSettings);
               if (!selection) return yield* new M.MemoryHubError({ code: "route_unavailable" });
               yield* runtime.available(selection);
               frozen = yield* store.transact(

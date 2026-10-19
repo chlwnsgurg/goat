@@ -32,6 +32,7 @@ import * as MemoryQuota from "./memory/MemoryQuotaService.ts";
 import * as MemoryService from "./memory/MemoryService.ts";
 import * as MemoryMaintenance from "./memory/MemoryFtsMaintenance.ts";
 import * as MemorySync from "./memory/MemorySyncService.ts";
+import * as MemorySettings from "./memory/MemorySettingsService.ts";
 import * as MemoryOwnerSourceReadPolicyBinding from "./memory/MemoryOwnerSourceReadPolicyBinding.ts";
 import * as MemorySyncRuntimeLive from "./memory/MemorySyncRuntimeLive.ts";
 import * as MemoryReportWorker from "./memory/MemoryReportWorker.ts";
@@ -81,6 +82,7 @@ import {
   EnvironmentHttpApi,
   MemoryHubError,
   MemoryHubDisableInput,
+  MemorySettingsUpdateInput,
   MemoryHubDisableResult,
   type RepositoryIdentity,
 } from "@goat/contracts";
@@ -882,14 +884,28 @@ export const layerMemoryHubAdministration = Layer.effect(
   }),
 );
 
-// The application supplies the disable-only service; the toolkit cannot install credentials.
+// The application supplies settings administration without exposing hub credentials.
 const layerMemoryAdministrationToolkit = McpHttpServer.toolkitRegistration(
   MemoryAdministrationToolkit,
   McpToolAccess.toLayer(
     MemoryAdministrationToolkit,
     Effect.gen(function* () {
       const service = yield* ServerSettings.MemoryHubAdministration;
+      const memorySettings = yield* MemorySettings.MemorySettingsService;
       return {
+        memory_settings_get: McpToolAccess.reads(() =>
+          Effect.gen(function* () {
+            return yield* memorySettings.get(yield* invocationPermit("read"));
+          }).pipe(Effect.mapError(memoryError)),
+        ),
+        memory_settings_update: McpToolAccess.writesWithCapability((input) =>
+          Effect.gen(function* () {
+            return yield* memorySettings.update(
+              yield* Schema.decodeUnknownEffect(MemorySettingsUpdateInput)(input),
+              yield* invocationPermit("settings"),
+            );
+          }).pipe(Effect.mapError(memoryError)),
+        ),
         memory_hub_disable: McpToolAccess.writesWithCapability((input) =>
           Effect.gen(function* () {
             return yield* service.disableHub(
@@ -901,7 +917,7 @@ const layerMemoryAdministrationToolkit = McpHttpServer.toolkitRegistration(
       };
     }),
   ),
-).pipe(Layer.provide(layerMemoryHubAdministration));
+).pipe(Layer.provide(layerMemoryHubAdministration), Layer.provide(MemorySettings.layer));
 
 export const layerMemoryToolkits = Layer.mergeAll(
   McpHttpServer.layerMemoryToolkit,

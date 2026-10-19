@@ -15,6 +15,7 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as RuntimeIdentity from "../runtimeIdentity.ts";
+import { resolveMemoryModelSelection } from "@goat/shared/serverSettings";
 import * as Settings from "../serverSettings.ts";
 import * as Generation from "../textGeneration/TextGeneration.ts";
 import * as Events from "../orchestration-v2/EventSink.ts";
@@ -59,6 +60,7 @@ const decodeMessage = Schema.decodeUnknownEffect(
 );
 const decodeRun = Schema.decodeUnknownEffect(Schema.fromJsonString(M.OrchestrationV2RunJson));
 const decodeSelection = Schema.decodeUnknownEffect(M.MemoryModelSelection);
+const encodeSelection = Schema.encodeSync(Schema.fromJsonString(M.MemoryModelSelection));
 const decodeInput = Schema.decodeUnknownEffect(M.GenerateMemorySummaryInput);
 const decodePayload = Schema.decodeEffect(M.MemoryPayload);
 const encodeIds = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(M.MessageId)));
@@ -118,6 +120,11 @@ const make = Effect.gen(function* () {
   let nextReportPassAt = 0;
   const started = yield* Ref.make(false);
   const query = <A, E>(effect: Effect.Effect<A, E>) => effect.pipe(Effect.mapError(workerError));
+  // Memory runs on its own cheap model; the new-thread default may be unsupported here.
+  const memoryModel = (snapshot: M.ServerSettings) =>
+    snapshot.memoryEnabled
+      ? query(decodeSelection(resolveMemoryModelSelection(snapshot, undefined), strict))
+      : Effect.succeed(null);
   const readSource = Effect.fn("MemoryWorker.readSource")(function* (work: Store.MemoryWork) {
     if (
       work.metadata.kind !== "summary" ||
@@ -289,10 +296,7 @@ const make = Effect.gen(function* () {
       ORDER BY e.sequence LIMIT 100`);
     if (!rows.length && !continuations.length) return;
     const snapshot = yield* query(settings.getSettings);
-    const modelSelection =
-      snapshot.defaultModelSelection === null
-        ? null
-        : yield* query(decodeSelection(snapshot.defaultModelSelection, strict));
+    const modelSelection = yield* memoryModel(snapshot);
     const space = snapshot.memoryHub.mode === "disabled" ? null : snapshot.memoryHub.memorySpaceId;
     const work: Store.MemoryWork[] = [];
     yield* store
@@ -325,8 +329,8 @@ const make = Effect.gen(function* () {
               continue;
             }
             if (!terminal.has(run.status)) continue;
-            // A fresh install has no default model. Still process deletion/rollback and
-            // advance the hook; continuations recover these summaries once a model is set.
+            // Memory is off. Still process deletion/rollback and advance the hook;
+            // continuations recover these summaries once memory is turned back on.
             if (modelSelection === null) continue;
             const source = yield* query(
               sql<{
@@ -428,7 +432,8 @@ const make = Effect.gen(function* () {
       )
       .pipe(Effect.mapError(workerError));
   });
-  const execute = Effect.fn("MemoryWorker.execute")(function* (work: Store.MemoryWork) {
+  const execute = Effect.fn("MemoryWorker.execute")(function* (claimed: Store.MemoryWork) {
+    let work = claimed;
     if (
       !["summary", "consolidate", "rebuild"].includes(work.kind) ||
       work.metadata.kind === "threadHook"
@@ -484,6 +489,20 @@ const make = Effect.gen(function* () {
           }),
         );
         return;
+      }
+      if (work.metadata.kind !== "summary" || !work.memoryId)
+        return yield* new MemoryWorkerError({ code: "unsupported_operation" });
+      // Work keeps the model it was queued with. When that model changed, retry on the
+      // current one so rows queued with an unusable model recover.
+      const currentModel = yield* memoryModel(yield* query(settings.getSettings));
+      if (
+        currentModel !== null &&
+        encodeSelection(currentModel) !== encodeSelection(work.metadata.modelSelection)
+      ) {
+        const rebound = yield* query(store.rebindWorkModel(owned, currentModel));
+        if (!rebound) return yield* new MemoryWorkerError({ code: "attempt_expired" });
+        work = rebound;
+        owned = rebound;
       }
       if (work.metadata.kind !== "summary" || !work.memoryId)
         return yield* new MemoryWorkerError({ code: "unsupported_operation" });
@@ -839,7 +858,10 @@ const make = Effect.gen(function* () {
       yield* sweepStage("catch-up", catchUp());
       yield* sweepStage("deferred", deferred());
       const now = yield* Clock.currentTimeMillis;
-      for (const candidate of yield* sweepStage("due-work", store.dueWork(now, 100))) {
+      const enabled = (yield* sweepStage("due-work", settings.getSettings)).memoryEnabled;
+      // Off leaves queued summaries untouched so they resume when memory is turned back on.
+      const kinds = enabled ? undefined : (["rebuild"] as const);
+      for (const candidate of yield* sweepStage("due-work", store.dueWork(now, 100, kinds))) {
         if (!["summary", "consolidate", "rebuild"].includes(candidate.kind)) continue;
         if (
           !(yield* sweepStage(

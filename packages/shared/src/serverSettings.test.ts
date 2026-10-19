@@ -19,6 +19,7 @@ import {
   resolveModelPreferences,
   isModelSelectionProviderEnabled,
   parsePersistedServerObservabilitySettings,
+  resolveMemoryModelSelection,
   resolveSourceControlWriterModelSelection,
   resolveProjectAgentBrowserAccess,
   resolveProjectAutoPull,
@@ -511,6 +512,29 @@ describe("serverSettings helpers", () => {
       settings.textGenerationModelSelection,
     );
     expect(settings.sourceControlWriterModelSelection).toBe(sourceControlWriterModelSelection);
+  });
+
+  it("runs memory on the cheap text generation model and ignores the thread default", () => {
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      defaultModelSelection: createModelSelection(
+        ProviderInstanceId.make("codex"),
+        "anthropic/claude-opus-5-5",
+      ),
+    };
+    expect(resolveMemoryModelSelection(settings, undefined)).toEqual({
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-6-luna",
+      options: [{ id: "reasoningEffort", value: "low" }],
+    });
+    const dedicated = createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-sol");
+    expect(
+      resolveMemoryModelSelection({ ...settings, memoryModelSelection: dedicated }, undefined),
+    ).toBe(dedicated);
+    const disabled = createModelSelection(ProviderInstanceId.make("off_instance"), "x");
+    expect(
+      resolveMemoryModelSelection({ ...settings, memoryModelSelection: disabled }, undefined),
+    ).toBe(settings.textGenerationModelSelection);
   });
 
   it("falls back from an unavailable source control writer provider", () => {

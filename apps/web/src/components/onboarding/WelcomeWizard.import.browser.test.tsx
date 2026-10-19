@@ -129,6 +129,10 @@ vi.mock(import("../settings/ChatGptWelcomeCoordinator"), async (original) => ({
   ...(await original()),
   ChatGptWelcomeCoordinator: () => <></>,
 }));
+vi.mock(import("../settings/MemoryGenerationSettings"), () => ({
+  MemoryGenerationSettings: () => <></>,
+}));
+vi.mock(import("./MemorySharingChoice"), () => ({ MemorySharingChoice: () => null }));
 
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { WelcomeWizard } from "./WelcomeWizard";
@@ -228,6 +232,7 @@ async function mountImport(remote = false) {
       </RegistryContext.Provider>,
     ),
   );
+  await click("Continue");
   await click("Continue");
   await click("Continue");
   expect(pageText()).toContain("Import your projects");

@@ -23,6 +23,7 @@ import * as Store from "../../../memory/MemoryStore.ts";
 import * as Quota from "../../../memory/MemoryQuotaService.ts";
 import * as Service from "../../../memory/MemoryService.ts";
 import * as Sync from "../../../memory/MemorySyncService.ts";
+import * as MemorySettings from "../../../memory/MemorySettingsService.ts";
 import * as Hub from "../../../memory/MemoryHubService.ts";
 import * as Settings from "../../../serverSettings.ts";
 import * as Config from "../../../config.ts";
@@ -80,7 +81,6 @@ const settings = Settings.layerTest({}, "memoryHub");
 const admin = Layer.effect(Hub.MemoryHubAdministrator, Hub.makeAdministrator).pipe(
   Layer.provideMerge(storage),
   Layer.provide(identity),
-  Layer.provide(settings),
   Layer.provide(
     Secrets.layer.pipe(
       Layer.provide(Config.layerTest(process.cwd(), { prefix: "goat-memory-mcp-test-" })),
@@ -109,7 +109,9 @@ const makeLayer = <E, R>(serviceCore: Layer.Layer<Layer.Success<typeof core>, E,
     McpHttpServer.layerMemoryAdministrationToolkit,
   ).pipe(
     Layer.provideMerge(serviceCore),
-    Layer.provideMerge(sync),
+    Layer.provideMerge(
+      MemorySettings.layer.pipe(Layer.provideMerge(sync), Layer.provideMerge(settings)),
+    ),
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
     Layer.provide(NodeServices.layer),

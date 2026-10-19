@@ -403,7 +403,7 @@ export function MemoryAdministration({
                 ? "This device is the hub"
                 : hub?.settings.mode === "member"
                   ? "Memory sharing"
-                  : "Memory off"
+                  : "Sharing off"
           }
           description={
             !hub
@@ -412,7 +412,7 @@ export function MemoryAdministration({
                 ? "Memory is on. Devices you add here share memory with it."
                 : hub?.settings.mode === "member"
                   ? `Shares memory with ${name(hub.settings.hubEnvironmentId)}.`
-                  : "Memory is off on this device. Make this device the hub, or add it from the hub's Memory settings."
+                  : "Sharing is off. Memory stays on this device. Make this device the hub, or add it from the hub's Memory settings."
           }
           status={
             sync && hub?.settings.mode !== "disabled" ? presentMemorySync(sync).label : undefined
