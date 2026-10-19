@@ -7,11 +7,10 @@ vi.mock("@napi-rs/keyring", () => {
   throw new Error("Cannot find native binding");
 });
 
+import { ChromiumKeyError, resolveChromiumKeys } from "./ChromiumKeys.ts";
+
 it.effect("reports an unavailable keychain when the macOS binding cannot load", () =>
   Effect.gen(function* () {
-    const { ChromiumKeyError, resolveChromiumKeys } = yield* Effect.promise(
-      () => import("./ChromiumKeys.ts"),
-    );
     const error = yield* resolveChromiumKeys({
       platform: "darwin",
       keychainService: "Chrome Safe Storage",

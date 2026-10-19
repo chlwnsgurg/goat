@@ -105,6 +105,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   state.canManage = true;
   state.result = null;
   state.error = null;
@@ -125,6 +126,7 @@ afterEach(async () => {
   vi.useRealTimers();
   for (const mounted of roots.splice(0)) await act(async () => mounted.unmount());
   document.body.replaceChildren();
+  vi.unstubAllGlobals();
 });
 
 it("loads the catalog immediately and searches only after typing settles", async () => {
@@ -163,9 +165,12 @@ it("shows the loading, error, and empty states", async () => {
 
 it("submits a typed query at once and refreshes when the same query is submitted again", async () => {
   await render();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   await userEvent.fill(searchBox(), "Codex");
   await userEvent.keyboard("{Enter}");
   expect(lastQuery()).toBe("Codex");
+  expect(state.refresh).not.toHaveBeenCalled();
+  await act(async () => vi.advanceTimersByTime(300));
   expect(state.refresh).not.toHaveBeenCalled();
 
   state.result = { agents: [gemini] };

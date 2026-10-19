@@ -1,7 +1,7 @@
 import { EnvironmentId } from "@goat/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const { refresh } = vi.hoisted(() => ({ refresh: vi.fn<() => Promise<string | null>>() }));
 
@@ -10,8 +10,7 @@ vi.mock(import("~/assets/assetUrls"), async (original) => ({
   useAssetUrlRefresh: () => refresh,
 }));
 // The real source view highlights through a worker pool; the text it receives is what matters here.
-vi.mock(import("./ReadOnlySourcePreview"), async (original) => ({
-  ...(await original()),
+vi.mock(import("./ReadOnlySourcePreview"), () => ({
   default: ({ text }: { text: string }) => <pre>{text}</pre>,
 }));
 
@@ -23,6 +22,8 @@ describe("attachment HTML preview recovery", () => {
   let now = 0;
   let root: Root;
   let container: HTMLDivElement;
+
+  beforeAll(() => import("./ReadOnlySourcePreview"));
 
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -62,6 +63,11 @@ describe("attachment HTML preview recovery", () => {
     expect(button, label).not.toBeNull();
     await act(async () => button!.click());
   };
+  const expectSource = (expected: string) =>
+    vi.waitFor(async () => {
+      await act(async () => {});
+      expect(container.querySelector("pre")?.textContent).toBe(expected);
+    });
   const alert = () => container.querySelector('[role="alert"]');
 
   it("keeps a renewed URL for subsequent rendered and source views", async () => {
@@ -70,15 +76,14 @@ describe("attachment HTML preview recovery", () => {
     now = 61 * 60_000;
     await toggleMode("Show HTML source");
     expect(fetch).toHaveBeenCalledExactlyOnceWith(renewedUrl, expect.any(Object));
-    await vi.waitFor(() =>
-      expect(container.querySelector("pre")?.textContent).toBe("<p>Captured HTML</p>"),
-    );
+    await expectSource("<p>Captured HTML</p>");
 
     await toggleMode("Show rendered page");
     expect(container.querySelector("iframe")?.getAttribute("src")).toBe(renewedUrl);
     await toggleMode("Show HTML source");
     expect(refresh).toHaveBeenCalledTimes(2);
     expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).toEqual([renewedUrl, renewedUrl]);
+    await expectSource("<p>Captured HTML</p>");
   });
 
   it("does not fetch or mark an expired URL fresh when reauthorization is unavailable", async () => {
@@ -108,7 +113,10 @@ describe("attachment HTML preview recovery", () => {
       ),
     );
     await toggleMode("Show HTML source");
-    await vi.waitFor(() => expect(alert()?.textContent).toContain("not UTF-8"));
+    await vi.waitFor(async () => {
+      await act(async () => {});
+      expect(alert()?.textContent).toContain("not UTF-8");
+    });
 
     await toggleMode("Show rendered page");
     expect(alert()).toBeNull();
