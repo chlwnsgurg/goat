@@ -159,6 +159,26 @@ describe("desktop wakeups", () => {
     }),
   );
 
+  it.effect("probes on the first focus after a suspend whose resume never arrives", () =>
+    Effect.gen(function* () {
+      const shell = makeDesktopShell();
+      const seen: Array<DesktopWakeup> = [];
+      const fiber = yield* desktopWakeups(shell.sources).pipe(
+        Stream.runForEach((wakeup) => Effect.sync(() => seen.push(wakeup))),
+        Effect.forkChild,
+      );
+      yield* settle;
+      shell.dispatch("online");
+      shell.wake({ reason: "suspend", asleepMs: null });
+      shell.advance(5_000);
+      shell.dispatch("focus");
+      shell.dispatch("focus");
+      yield* settle;
+      expect(seen).toEqual(["application-active-probe", "suspend", "application-active-probe"]);
+      yield* Fiber.interrupt(fiber);
+    }),
+  );
+
   it.effect("still reports a second real sleep that starts right after a wake", () =>
     Effect.gen(function* () {
       const shell = makeDesktopShell();

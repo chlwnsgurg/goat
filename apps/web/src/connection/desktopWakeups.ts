@@ -63,7 +63,9 @@ export function desktopWakeups(sources: DesktopWakeupSources): Stream.Stream<Des
           if (wakeup === "suspend") {
             lastSystemWakeAtMs = Number.NEGATIVE_INFINITY;
             lastSystemWakeup = null;
-            emit(wakeup);
+            // Suspend checks nothing, so the next focus must still probe in case resume never arrives.
+            lastWakeupAtMs = Number.NEGATIVE_INFINITY;
+            Queue.offerUnsafe(queue, wakeup);
             return;
           }
           // A resume whose suspend came after the last wake is a new sleep, never a duplicate.
