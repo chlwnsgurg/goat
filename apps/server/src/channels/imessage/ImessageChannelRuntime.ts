@@ -49,7 +49,7 @@ interface RuntimeInput {
   readonly dbPath: string;
   readonly ledger: ChannelLedger.ChannelLedger["Service"];
   readonly gateway: ChannelGateway.ChannelGateway["Service"];
-  readonly home: ChannelBotHome.ChannelBotHome["Service"];
+  readonly home: Pick<ChannelBotHome.ChannelBotHome["Service"], "requireHome">;
   readonly registry: ChannelTransport.ChannelTransportRegistry["Service"];
   readonly scope: Scope.Scope;
   readonly openDb?: (path: string) => ImessageChatDb;

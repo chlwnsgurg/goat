@@ -33,6 +33,10 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@goat/contracts";
 import * as HostProcess from "@goat/shared/HostProcess";
+import {
+  classifyTextGenerationFailure,
+  type TextGenerationFailureKind,
+} from "@goat/provider-core/server/textGenerationUtils";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -57,6 +61,7 @@ import { lowerRuntimeMode, mayAnswerFor } from "./ChannelGateway.ts";
 import * as ChannelBotHome from "./ChannelBotHome.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRemoteWorkers from "./ChannelRemoteWorkers.ts";
+import { makeChannelProjectChoices } from "./channelProjectChoices.ts";
 import * as ChannelWake from "./ChannelWake.ts";
 import {
   appendChannelBotNote,
@@ -80,6 +85,8 @@ import {
   threadDigest,
 } from "./channelBotRecall.ts";
 import { CHANNEL_COPY } from "./channelCopy.ts";
+import { isOpenItem, pendingDigest, workItemState } from "./channelWorkQueue.ts";
+import { WORKERS_PER_REQUESTER } from "./ChannelDispatcher.ts";
 import {
   answerForwardIdsFor,
   deliveryIdFor,
@@ -91,6 +98,14 @@ import { botAddress, chipDelivery, makeTaskEvent, prepareTransition } from "./ch
 
 /** How long a reception pass may take before the sender gets a failure note instead. */
 const CHANNEL_RECEPTION_TIMEOUT_MS = 45_000;
+
+type ReceptionOutcome =
+  | { readonly ok: true; readonly result: ChannelReceptionResult }
+  | { readonly ok: false; readonly failure: TextGenerationFailureKind };
+const receptionFailure = (failure: TextGenerationFailureKind): ReceptionOutcome => ({
+  ok: false,
+  failure,
+});
 /** How many recently active threads a reception pass sees by title. */
 const CHANNEL_RECEPTION_RECENT_THREADS = 20;
 /** How long one read may take before the answer says so and goes on without it. */
@@ -299,6 +314,8 @@ const make = Effect.gen(function* () {
       }));
     });
 
+  const projectChoices = (yield* makeChannelProjectChoices).question;
+
   const listThreads = threads
     .listProjectThreads({ projectId: undefined, includeSubagents: false })
     .pipe(Effect.orElseSucceed((): ReadonlyArray<OrchestrationV2ThreadShell> => []));
@@ -326,12 +343,13 @@ const make = Effect.gen(function* () {
       });
   };
 
-  const generate = (input: ChannelReceptionInput) =>
+  const generateOutcome = (input: ChannelReceptionInput) =>
     Effect.gen(function* () {
       const settings = yield* serverSettings.getSettings.pipe(Effect.option);
       const generateReception = textGeneration.generateChannelReception;
       if (Option.isNone(settings) || generateReception === undefined) {
-        return Option.none<ChannelReceptionResult>();
+        yield* Effect.logWarning("channel reception failed", { kind: "unavailable" });
+        return receptionFailure("unavailable");
       }
       return yield* generateReception({
         cwd: serverConfig.stateDir,
@@ -339,9 +357,55 @@ const make = Effect.gen(function* () {
         modelSelection: settings.value.textGenerationModelSelection,
       }).pipe(
         Effect.timeoutOption(CHANNEL_RECEPTION_TIMEOUT_MS),
-        Effect.tapError((cause) => Effect.logWarning("channel reception failed", { cause })),
-        Effect.orElseSucceed(() => Option.none<ChannelReceptionResult>()),
+        Effect.flatMap(
+          Option.match({
+            onNone: () =>
+              Effect.logWarning("channel reception failed", { kind: "timeout" }).pipe(
+                Effect.as(receptionFailure("timeout")),
+              ),
+            onSome: (result): Effect.Effect<ReceptionOutcome> =>
+              Effect.succeed({ ok: true, result }),
+          }),
+        ),
+        Effect.catch((cause) => {
+          const kind = classifyTextGenerationFailure(cause);
+          return Effect.logWarning("channel reception failed", { kind, cause }).pipe(
+            Effect.as(receptionFailure(kind)),
+          );
+        }),
       );
+    });
+  // Narration falls back to the worker's own words when the model cannot phrase them.
+  const generate = (input: ChannelReceptionInput) =>
+    generateOutcome(input).pipe(
+      Effect.map((outcome) => (outcome.ok ? Option.some(outcome.result) : Option.none())),
+    );
+
+  /**
+   * Every open task this requester may see, however old: unfinished ones, finished ones whose
+   * outcome has not reached the person, and the newest visible ones.
+   */
+  const openAndRecentTasks = (viewer: ChannelRequester, conversationId: ChannelConversationId) =>
+    Effect.gen(function* () {
+      const open = (yield* ledger.listTasksByStatus([
+        "received",
+        "dispatching",
+        "running",
+        "waiting_input",
+      ]))
+        .map((stored) => stored.task)
+        .filter((task) => canSeeTask(viewer, task, conversationId));
+      const undelivered = (yield* ledger.listUndeliveredOutcomes(viewer.ownerId)).filter((task) =>
+        canSeeTask(viewer, task, conversationId),
+      );
+      const recent = yield* visibleTasks(viewer, conversationId);
+      const all = [...open, ...undelivered, ...recent];
+      const seen = new Set<string>();
+      return all.filter((task) => {
+        if (seen.has(task.taskId)) return false;
+        seen.add(task.taskId);
+        return true;
+      });
     });
 
   /** The owner's newest tasks this requester may see. */
@@ -515,6 +579,48 @@ const make = Effect.gen(function* () {
             )
           );
         }
+        case "pending": {
+          const visible = yield* openAndRecentTasks(viewer, conversationId);
+          const deliveries = yield* ledger.outcomeDeliveries(visible.map((task) => task.taskId));
+          const items = visible.map((task) => ({
+            task,
+            state: workItemState(task, deliveries.get(task.taskId)),
+          }));
+          const open = items.filter((item) => isOpenItem(item.state));
+          const runs = yield* ledger.listWorkerRuns(open.map((item) => item.task.taskId));
+          const busy = new Map<string, number>();
+          for (const item of open) {
+            const key = item.task.requester.ownerId + "\u0000" + item.task.requester.principalId;
+            if (!busy.has(key)) {
+              busy.set(
+                key,
+                yield* ledger.countBusyTasks({
+                  ownerId: item.task.requester.ownerId,
+                  principalId: item.task.requester.principalId,
+                }),
+              );
+            }
+          }
+          return pendingDigest(
+            open.map((item) => ({
+              ...item,
+              runs: runs.filter((run) => run.taskId === item.task.taskId),
+              ...(item.state === "queued" &&
+              (busy.get(item.task.requester.ownerId + "\u0000" + item.task.requester.principalId) ??
+                0) >= WORKERS_PER_REQUESTER
+                ? {
+                    note:
+                      "waiting for one of the " +
+                      WORKERS_PER_REQUESTER +
+                      " running for " +
+                      item.task.requester.displayName +
+                      " to finish",
+                  }
+                : {}),
+            })),
+            DateTime.toEpochMillis(yield* DateTime.now),
+          );
+        }
         case "conversation": {
           const found = yield* ledger.searchConversation(conversationId, read.query, 5, inputId);
           return found.length === 0
@@ -640,143 +746,149 @@ const make = Effect.gen(function* () {
       const hosts = yield* remoteWorkers.knownHosts;
       const bot = (yield* ledger.getBot(stored.ownerId))?.bot;
       const targets = yield* allowedTargets(bot?.projectId);
-      const decision: ChannelReceptionResult | undefined =
+      const outcome: ReceptionOutcome =
         message.intent === "answer" &&
         message.taskId !== undefined &&
         message.questionId !== undefined
           ? {
-              replyText: CHANNEL_COPY.answerForwarded,
-              action: {
-                type: "answer_question",
-                taskId: message.taskId,
-                questionId: message.questionId,
-                answer: message.text.trim() === "" ? "(no answer)" : message.text,
+              ok: true,
+              result: {
+                replyText: CHANNEL_COPY.answerForwarded,
+                action: {
+                  type: "answer_question",
+                  taskId: message.taskId,
+                  questionId: message.questionId,
+                  answer: message.text.trim() === "" ? "(no answer)" : message.text,
+                },
               },
             }
-          : Option.getOrUndefined(
-              yield* Effect.gen(function* () {
-                const tail = yield* ledger.readConversationTail(
-                  conversationId,
-                  CHANNEL_RECEPTION_TAIL_LIMITS.messages,
-                );
-                const shells = yield* listThreads;
-                const recent = recentThreads(shells, targets, bot?.threadId);
-                const facts = yield* hostFacts(shells);
-                const notes = yield* readChannelBotNotes(fileSystem, botFiles);
-                // Everything this pass sees about other work is judged with the link as it is now.
-                const viewer = yield* viewerNow(requester, message.connectionId);
-                const journal = journalFor(
-                  yield* visibleTasks(viewer, conversationId).pipe(
-                    Effect.orElseSucceed((): ReadonlyArray<ChannelTask> => []),
+          : yield* Effect.gen(function* () {
+              const tail = yield* ledger.readConversationTail(
+                conversationId,
+                CHANNEL_RECEPTION_TAIL_LIMITS.messages,
+              );
+              const shells = yield* listThreads;
+              const recent = recentThreads(shells, targets, bot?.threadId);
+              const facts = yield* hostFacts(shells);
+              const notes = yield* readChannelBotNotes(fileSystem, botFiles);
+              // Everything this pass sees about other work is judged with the link as it is now.
+              const viewer = yield* viewerNow(requester, message.connectionId);
+              const journal = journalFor(
+                yield* visibleTasks(viewer, conversationId).pipe(
+                  Effect.orElseSucceed((): ReadonlyArray<ChannelTask> => []),
+                ),
+              );
+              const skills = yield* listChannelBotSkills(fileSystem, path, botFiles);
+              const base: ChannelReceptionInput = {
+                mode: "input",
+                conversationId,
+                originKind: message.kind,
+                inputText: message.text,
+                tail: boundTail(
+                  tail.flatMap((entry) =>
+                    entry.inputId === inputId
+                      ? []
+                      : [
+                          { role: "user" as const, text: entry.text, at: entry.receivedAt },
+                          ...(entry.replyText === undefined
+                            ? []
+                            : [
+                                {
+                                  role: "assistant" as const,
+                                  text: entry.replyText,
+                                  at: entry.receivedAt,
+                                },
+                              ]),
+                        ],
                   ),
-                );
-                const skills = yield* listChannelBotSkills(fileSystem, path, botFiles);
-                const base: ChannelReceptionInput = {
-                  mode: "input",
-                  conversationId,
-                  originKind: message.kind,
-                  inputText: message.text,
-                  tail: boundTail(
-                    tail.flatMap((entry) =>
-                      entry.inputId === inputId
-                        ? []
-                        : [
-                            { role: "user" as const, text: entry.text, at: entry.receivedAt },
-                            ...(entry.replyText === undefined
-                              ? []
-                              : [
-                                  {
-                                    role: "assistant" as const,
-                                    text: entry.replyText,
-                                    at: entry.receivedAt,
-                                  },
-                                ]),
-                          ],
-                    ),
-                  ),
-                  tasks: tasks.map((task) => ({
-                    taskId: task.taskId,
-                    ...(task.kind === undefined ? {} : { kind: task.kind }),
-                    title: task.title,
-                    status: task.status,
-                    ...(task.resultSummary === undefined
-                      ? {}
-                      : { resultSummary: task.resultSummary }),
-                    ...((task.worker?.host ?? task.host) === undefined
-                      ? {}
-                      : { host: task.worker?.host ?? task.host }),
-                    ...((task.observed?.pullRequests ?? []).length === 0
-                      ? {}
-                      : { pullRequests: task.observed!.pullRequests.map(pullRequestLabel) }),
-                    openQuestions: task.openQuestions.map((question) => ({
-                      questionId: question.questionId,
-                      text: question.text,
-                    })),
+                ),
+                tasks: tasks.map((task) => ({
+                  taskId: task.taskId,
+                  ...(task.kind === undefined ? {} : { kind: task.kind }),
+                  title: task.title,
+                  status: task.status,
+                  ...(task.resultSummary === undefined
+                    ? {}
+                    : { resultSummary: task.resultSummary }),
+                  ...((task.worker?.host ?? task.host) === undefined
+                    ? {}
+                    : { host: task.worker?.host ?? task.host }),
+                  ...((task.observed?.pullRequests ?? []).length === 0
+                    ? {}
+                    : { pullRequests: task.observed!.pullRequests.map(pullRequestLabel) }),
+                  openQuestions: task.openQuestions.map((question) => ({
+                    questionId: question.questionId,
+                    text: question.text,
                   })),
-                  allowedTargets: targets,
-                  ...(hosts.length === 0 ? {} : { allowedHosts: hosts }),
-                  ...(recent.length === 0 ? {} : { recentThreads: recent }),
-                  ...(facts.length === 0 ? {} : { hostFacts: facts }),
-                  ...(notes === "" ? {} : { notes }),
-                  ...(journal === "" ? {} : { journal }),
-                  ...(skills.length === 0 ? {} : { skills }),
-                  requester,
-                };
-                const first = yield* generate({ ...base, readsAllowed: true });
-                if (Option.isNone(first) || first.value.action.type !== "read") return first;
-                // One round of reads, then the answer. Reads run within what this requester
-                // may see; a second request to read is answered with what the pass wrote.
-                // The first pass can take most of a minute; judge the link again before reading.
-                const reader = yield* viewerNow(requester, message.connectionId);
-                const results = yield* runReads(
-                  first.value.action.reads,
-                  reader,
-                  conversationId,
-                  message.connectionId,
-                  inputId,
-                );
-                // The first pass wrote its queries from what it could see then. When the link
-                // narrowed since, a query may quote work the person can no longer see.
-                const narrowed =
-                  reader.principalId !== viewer.principalId ||
-                  viewer.grantedScopes.some((scope) => !reader.grantedScopes.includes(scope));
-                const readResults = narrowed
-                  ? results.map((result) => ({ ...result, query: "(withheld)" }))
-                  : results;
-                const journalNow = journalFor(
-                  yield* visibleTasks(reader, conversationId).pipe(
-                    Effect.orElseSucceed((): ReadonlyArray<ChannelTask> => []),
-                  ),
-                );
-                const { journal: _journal, ...rest } = base;
-                const second = yield* generate({
-                  ...rest,
-                  ...(journalNow === "" ? {} : { journal: journalNow }),
-                  readsAllowed: false,
-                  readResults,
-                });
-                // A pass that asks to read again found nothing to answer from; say so plainly.
-                return Option.map(second, (result): ChannelReceptionResult =>
-                  result.action.type === "read"
-                    ? { replyText: CHANNEL_COPY.readFoundNothing, action: { type: "report_only" } }
-                    : result,
-                );
-              }),
-            );
+                })),
+                allowedTargets: targets,
+                ...(hosts.length === 0 ? {} : { allowedHosts: hosts }),
+                ...(recent.length === 0 ? {} : { recentThreads: recent }),
+                ...(facts.length === 0 ? {} : { hostFacts: facts }),
+                ...(notes === "" ? {} : { notes }),
+                ...(journal === "" ? {} : { journal }),
+                ...(skills.length === 0 ? {} : { skills }),
+                requester,
+              };
+              const first = yield* generateOutcome({ ...base, readsAllowed: true });
+              if (!first.ok || first.result.action.type !== "read") return first;
+              // One round of reads, then the answer. Reads run within what this requester
+              // may see; a second request to read is answered with what the pass wrote.
+              // The first pass can take most of a minute; judge the link again before reading.
+              const reader = yield* viewerNow(requester, message.connectionId);
+              const results = yield* runReads(
+                first.result.action.reads,
+                reader,
+                conversationId,
+                message.connectionId,
+                inputId,
+              );
+              // The first pass wrote its queries from what it could see then. When the link
+              // narrowed since, a query may quote work the person can no longer see.
+              const narrowed =
+                reader.principalId !== viewer.principalId ||
+                viewer.grantedScopes.some((scope) => !reader.grantedScopes.includes(scope));
+              const readResults = narrowed
+                ? results.map((result) => ({ ...result, query: "(withheld)" }))
+                : results;
+              const journalNow = journalFor(
+                yield* visibleTasks(reader, conversationId).pipe(
+                  Effect.orElseSucceed((): ReadonlyArray<ChannelTask> => []),
+                ),
+              );
+              const { journal: _journal, ...rest } = base;
+              const second = yield* generateOutcome({
+                ...rest,
+                ...(journalNow === "" ? {} : { journal: journalNow }),
+                readsAllowed: false,
+                readResults,
+              });
+              // A pass that asks to read again found nothing to answer from; say so plainly.
+              if (!second.ok || second.result.action.type !== "read") return second;
+              const foundNothing: ReceptionOutcome = {
+                ok: true,
+                result: {
+                  replyText: CHANNEL_COPY.readFoundNothing,
+                  action: { type: "report_only" },
+                },
+              };
+              return foundNothing;
+            });
 
       const now = DateTime.formatIso(yield* DateTime.now);
-      if (decision === undefined) {
+      if (!outcome.ok) {
+        const reply = CHANNEL_COPY.receptionFailedBecause[outcome.failure];
         yield* ledger.failReception({
           owner,
           inputId,
           receptionId,
-          failure: { reason: "reception_failed", message: CHANNEL_COPY.receptionFailed },
+          failure: { reason: "reception_failed", message: reply },
           deliveries: [
             replyDelivery({
               causeKey: "reply:" + inputId,
               destination: origin,
               kind: "failure",
-              text: CHANNEL_COPY.receptionFailed,
+              text: reply,
               inputId,
               mentionActorId: mention,
             }),
@@ -786,6 +898,7 @@ const make = Effect.gen(function* () {
         yield* wake.wake;
         return;
       }
+      const decision = outcome.result;
 
       // Notes shape every later reply, so a note is kept only when a person asked for it in this
       // input: the quote the model returns must occur in the message itself, never in the tail.
@@ -819,6 +932,28 @@ const make = Effect.gen(function* () {
       const taskEvents: Array<ChannelLedger.ChannelTaskEventWrite> = [];
       const deliveries: Array<ChannelLedger.ChannelOutboxInsert> = [];
       const action = decision.action;
+
+      // A project question is worded by the server from the projects it would offer, so the
+      // person sees the same real projects the dispatcher would ask about.
+      if (action.type === "clarify" && action.about === "project") {
+        const shells = yield* projects.listShells().pipe(Effect.orElseSucceed(() => []));
+        const real = shells.filter((shell) => shell.id !== bot?.projectId);
+        const asked = yield* projectChoices(
+          real.length > 0 ? real : shells,
+          shells.some((shell) => shell.id === bot?.projectId),
+        );
+        replyText = asked.text;
+        finalDecision = {
+          ...decision,
+          replyText,
+          action: {
+            type: "clarify",
+            question: asked.text,
+            options: asked.choices,
+            about: "project",
+          },
+        };
+      }
 
       let joining: ChannelTask | undefined;
       if (action.type === "create_task" || action.type === "run_turn") {
@@ -887,6 +1022,16 @@ const make = Effect.gen(function* () {
             ),
           };
           if (bot !== undefined) deliveries.push(chipDelivery(task, bot));
+          const running = yield* ledger.countBusyTasks({
+            ownerId: requester.ownerId,
+            principalId: requester.principalId,
+          });
+          if (running >= WORKERS_PER_REQUESTER) {
+            replyText +=
+              " It's queued: " +
+              running +
+              " of your things are running, and it starts when one finishes.";
+          }
         }
       }
 
@@ -972,6 +1117,61 @@ const make = Effect.gen(function* () {
             finalDecision = { replyText, action: { type: "report_only" } };
           }
         }
+      }
+
+      // Stopping records each stop with the reply; the dispatcher then stops the worker and its
+      // subagents from the ledger, so a crash after the reply still stops them.
+      if (action.type === "stop_work") {
+        const sender = requester.originKind === "mcp" ? undefined : yield* judgedNow;
+        const viewer = yield* viewerNow(requester, message.connectionId);
+        const named =
+          action.taskId === undefined ? undefined : yield* ledger.getTask(action.taskId);
+        const candidates =
+          action.taskId === undefined
+            ? yield* openAndRecentTasks(viewer, conversationId)
+            : named !== undefined && canSeeTask(viewer, named.task, conversationId)
+              ? [named.task]
+              : [];
+        const stoppable = candidates.filter(
+          (task) =>
+            (task.status === "received" ||
+              task.status === "dispatching" ||
+              task.status === "running" ||
+              task.status === "waiting_input") &&
+            sender !== undefined &&
+            mayAnswerFor(sender, task.requester),
+        );
+        const stopped: Array<string> = [];
+        for (const task of stoppable) {
+          const storedTask = yield* ledger.getTask(task.taskId);
+          if (storedTask === undefined) continue;
+          const prepared = prepareTransition(
+            storedTask,
+            {
+              type: "task.cancelled",
+              payload: { reason: "Stopped by " + sender!.displayName + "." },
+            },
+            now,
+            bot,
+            {
+              actor: "user",
+              eventId: taskEventIdFor(storedTask.task.taskId, storedTask.task.version + 1),
+              narrate: true,
+              forward: true,
+            },
+          );
+          if (!prepared.ok) continue;
+          taskEvents.push(prepared.write);
+          deliveries.push(...prepared.deliveries);
+          stopped.push(storedTask.task.title);
+        }
+        replyText =
+          sender === undefined
+            ? CHANNEL_COPY.agentCannotStopWork
+            : stopped.length === 0
+              ? "There's nothing running that you can stop."
+              : "Stopping " + stopped.join(", ") + ".";
+        finalDecision = { replyText, action };
       }
 
       if (action.type === "move_task") {

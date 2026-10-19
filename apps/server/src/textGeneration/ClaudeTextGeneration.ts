@@ -20,7 +20,7 @@ import { resolveSpawnCommand } from "@goat/shared/shell";
 import * as TextGenerationOperations from "@goat/provider-core/server/textGenerationOperations";
 import {
   normalizeCliError,
-  toJsonSchemaObject,
+  toStrictJsonSchemaObject,
 } from "@goat/provider-core/server/textGenerationUtils";
 import {
   getModelSelectionStringOptionValue,
@@ -219,7 +219,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     };
     const jsonSchemaStr = yield* encodeJsonForOperation(
       operation,
-      toJsonSchemaObject(outputSchemaJson),
+      yield* toStrictJsonSchemaObject(operation, outputSchemaJson),
       "Failed to encode structured output schema.",
     );
     const effectiveModel = resolveClaudeCatalogApiModelId(catalog, resolvedModelSelection);
@@ -401,8 +401,10 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       ? output
       : output.findLast((message) => message.type === "result");
 
-    const decodeOutput = Schema.decodeEffect(outputSchemaJson);
-    const result = yield* decodeOutput(envelope?.structured_output).pipe(
+    const result = yield* Schema.decodeEffect(outputSchemaJson)(
+      envelope?.structured_output,
+      TextGenerationOperations.outputDecodeOptions(operation),
+    ).pipe(
       Effect.catchTags({
         SchemaError: (cause) =>
           Effect.fail(

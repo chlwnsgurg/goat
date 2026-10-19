@@ -59,7 +59,7 @@ const conflict = M.ResolveMemoryConflictInput.make({
 });
 const result = { text: "Synthetic result", assertionKind: "inference" as const, evidence: [] };
 
-import { fromRunner, type Runner } from "./textGenerationOperations.ts";
+import { fromRunner, outputDecodeOptions, type Runner } from "./textGenerationOperations.ts";
 import { withMemoryExecution, type MemorySelectedRunner } from "./memoryGenerationRunner.ts";
 describe("memory shared operations", () => {
   const legacy: Runner = (request) =>
@@ -120,11 +120,10 @@ describe("memory shared operations", () => {
   it.effect("decodes both memory result schemas", () =>
     Effect.gen(function* () {
       const selected: MemorySelectedRunner = (request) =>
-        Schema.decodeUnknownEffect(request.outputSchema)({
-          ...result,
-          judgment: "Synthetic judgment",
-          authority: "forged",
-        }).pipe(
+        Schema.decodeUnknownEffect(request.outputSchema)(
+          { ...result, judgment: "Synthetic judgment", authority: "forged" },
+          outputDecodeOptions(request.operation),
+        ).pipe(
           Effect.map((result) => ({ result, effectiveModel: "effective" })),
           Effect.mapError(
             (cause) =>
@@ -147,6 +146,72 @@ describe("memory shared operations", () => {
       });
       expect((yield* Effect.exit(provider.resolveMemoryConflict!(conflict)))._tag).toBe("Failure");
       expect((yield* Effect.exit(provider.generateMemorySummary!(summary)))._tag).toBe("Failure");
+    }),
+  );
+  it.effect("turns the model's null references into contract evidence", () =>
+    Effect.gen(function* () {
+      const importSourceId = M.MemoryImportSourceId.make(id(9));
+      const input = M.GenerateMemorySummaryInput.make({
+        ...summary,
+        previousSummary: M.MemoryPayload.make({
+          text: "Earlier",
+          evidence: [{ origin: "import", importSourceId, messageIds: [] }],
+          derivedFromMemoryRevisions: [],
+        }),
+      });
+      const raw = JSON.stringify({
+        text: "Durable fact",
+        assertionKind: "fact",
+        evidence: [
+          {
+            origin: "thread",
+            sourceThread: summary.sourceThread,
+            watermark: summary.sourceWatermark,
+            messageIds: ["m1"],
+            importSourceId: null,
+          },
+          { origin: "import", sourceThread: null, watermark: null, messageIds: [], importSourceId },
+          {
+            origin: "model",
+            sourceThread: null,
+            watermark: null,
+            messageIds: [],
+            importSourceId: null,
+          },
+        ],
+      });
+      const selected: MemorySelectedRunner = (request) =>
+        Schema.decodeEffect(Schema.fromJsonString(request.outputSchema))(
+          raw,
+          outputDecodeOptions(request.operation),
+        ).pipe(
+          Effect.map((result) => ({ result, effectiveModel: "effective" })),
+          Effect.mapError(
+            (cause) =>
+              new M.TextGenerationError({ operation: request.operation, detail: "decode", cause }),
+          ),
+        );
+      const provider = fromRunner("fixture", legacy, {
+        memoryRunner: withMemoryExecution(
+          {
+            providerInstanceId: selection.instanceId,
+            environmentId: M.EnvironmentId.make("owner"),
+          },
+          M.ProviderDriverKind.make("codex"),
+          selected,
+        ),
+      });
+      const generated = yield* provider.generateMemorySummary!(input);
+      expect(generated.result.evidence).toEqual([
+        {
+          origin: "thread",
+          sourceThread: summary.sourceThread,
+          watermark: summary.sourceWatermark,
+          messageIds: ["m1"],
+        },
+        { origin: "import", messageIds: [], importSourceId },
+        { origin: "model", messageIds: [] },
+      ]);
     }),
   );
   it.effect("absent memoryRunner never invokes the legacy runner", () =>
