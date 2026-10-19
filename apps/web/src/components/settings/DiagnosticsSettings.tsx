@@ -669,11 +669,19 @@ function DiagnosticsLastChecked({ checkedAt }: { checkedAt: DateTime.Utc | null 
   const relative = useRelativeTimeState(checkedAt ? DateTime.formatIso(checkedAt) : null);
 
   if (relative.status === "missing") {
-    return <span className="text-2xs text-muted-foreground/50">Checking</span>;
+    return (
+      <span className="text-2xs text-muted-foreground/50 dark:text-muted-foreground/60">
+        Checking
+      </span>
+    );
   }
 
   if (relative.status === "invalid") {
-    return <span className="text-2xs text-muted-foreground/50">Checked unavailable</span>;
+    return (
+      <span className="text-2xs text-muted-foreground/50 dark:text-muted-foreground/60">
+        Checked unavailable
+      </span>
+    );
   }
 
   return (

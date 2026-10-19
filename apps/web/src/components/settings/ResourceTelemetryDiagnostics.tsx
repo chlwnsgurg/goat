@@ -209,7 +209,11 @@ function SourceStatusBadge({
 function LastSampleLabel({ sampledAt }: { sampledAt: DateTime.Utc | null }) {
   const relative = useRelativeTimeState(sampledAt ? DateTime.formatIso(sampledAt) : null);
   if (relative.status !== "relative") {
-    return <span className="text-2xs text-muted-foreground/55">Waiting for sample</span>;
+    return (
+      <span className="text-2xs text-muted-foreground/55 dark:text-muted-foreground/60">
+        Waiting for sample
+      </span>
+    );
   }
   return (
     <span className="text-2xs text-muted-foreground/60">
@@ -289,7 +293,7 @@ function AggregateCard({
 function MetricPair({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
-      <div className="text-3xs font-semibold uppercase tracking-widest text-muted-foreground/45">
+      <div className="text-3xs font-semibold uppercase tracking-widest text-muted-foreground/45 dark:text-muted-foreground/60">
         {label}
       </div>
       <div className="truncate font-mono text-xs font-medium tabular-nums text-foreground/90">
@@ -1247,7 +1251,7 @@ export function ResourceTelemetryDiagnostics({
         icon={<CpuIcon className="size-4 text-muted-foreground" />}
         headerAction={
           snapshot ? (
-            <span className="text-3xs text-muted-foreground/55">
+            <span className="text-3xs text-muted-foreground/55 dark:text-muted-foreground/60">
               Identity: <span className="font-mono">PID + start time</span>
             </span>
           ) : null
@@ -1267,7 +1271,9 @@ export function ResourceTelemetryDiagnostics({
         title="Instrumented application I/O"
         icon={<DatabaseIcon className="size-4 text-muted-foreground" />}
         headerAction={
-          <span className="text-3xs text-muted-foreground/55">Logical bytes by operation</span>
+          <span className="text-3xs text-muted-foreground/55 dark:text-muted-foreground/60">
+            Logical bytes by operation
+          </span>
         }
       >
         <div className="overflow-hidden rounded-2xl border border-border/70 bg-card shadow-xs/5">
