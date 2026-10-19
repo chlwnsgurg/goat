@@ -52,7 +52,7 @@ export function releaseClaimedRoles(
     ...script,
     ...(releaseSetup ? { runOnWorktreeCreate: false } : {}),
     ...(releaseSettle ? { runOnSettle: false } : {}),
-    ...(releaseCheck ? { runAsCheck: false } : {}),
+    ...(releaseCheck ? { runAsCheck: false, checkInSharedCheckout: false } : {}),
   };
 }
 

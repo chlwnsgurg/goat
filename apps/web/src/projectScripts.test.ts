@@ -180,6 +180,7 @@ describe("projectScripts helpers", () => {
       runOnWorktreeCreate: true,
       runOnSettle: true,
       runAsCheck: true,
+      checkInSharedCheckout: true,
     };
 
     expect(
@@ -198,7 +199,12 @@ describe("projectScripts helpers", () => {
         runOnSettle: false,
         runAsCheck: true,
       }),
-    ).toMatchObject({ runOnWorktreeCreate: true, runOnSettle: true, runAsCheck: false });
+    ).toMatchObject({
+      runOnWorktreeCreate: true,
+      runOnSettle: true,
+      runAsCheck: false,
+      checkInSharedCheckout: false,
+    });
   });
 
   it("builds default runtime env for scripts", () => {

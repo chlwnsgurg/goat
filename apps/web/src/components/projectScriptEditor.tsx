@@ -133,7 +133,7 @@ export function editorRequestForScript(
       waitForSetup: script.runOnWorktreeCreate && script.async === false,
       runOnSettle: script.runOnSettle ?? false,
       runAsCheck: script.runAsCheck ?? false,
-      checkInSharedCheckout: script.checkInSharedCheckout ?? false,
+      checkInSharedCheckout: script.runAsCheck === true && script.checkInSharedCheckout === true,
       keybinding: keybindingValueForCommand(keybindings, commandForProjectScript(script.id)),
       previewUrl: script.previewUrl ?? null,
       autoOpenPreview: script.autoOpenPreview ?? false,
@@ -557,7 +557,7 @@ function ProjectScriptEditorForm({
             >
               <span>Also check threads in the shared checkout</span>
               <Switch
-                checked={checkInSharedCheckout}
+                checked={runAsCheck && checkInSharedCheckout}
                 disabled={!runAsCheck}
                 onCheckedChange={(checked) => setCheckInSharedCheckout(Boolean(checked))}
               />
