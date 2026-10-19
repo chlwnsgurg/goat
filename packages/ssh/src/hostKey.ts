@@ -3,6 +3,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
+import { readOnlySshArgs, readOnlyProxyJumpArgs } from "./probeOptions.ts";
 import { resolveSshCommand } from "./command.ts";
 import { collectPreflightOutput } from "./preflightProcess.ts";
 import { SshHostKeyProbeError } from "./errors.ts";
@@ -75,22 +76,12 @@ export const probeHostKey = Effect.fn("ssh/hostKey.probeHostKey")(function* (inp
       yield* fs.chmod(knownHosts, 0o600);
       const probe = yield* run(ssh, [
         ...args,
-        "-o",
-        "ControlMaster=no",
-        "-o",
-        "ControlPath=none",
-        "-o",
-        "LogLevel=VERBOSE",
-        "-o",
-        "BatchMode=yes",
+        ...readOnlySshArgs,
+        ...readOnlyProxyJumpArgs(ssh, settings),
         "-o",
         "PreferredAuthentications=none",
         "-o",
         "StrictHostKeyChecking=accept-new",
-        "-o",
-        "UpdateHostKeys=no",
-        "-o",
-        "PermitLocalCommand=no",
         "-o",
         `UserKnownHostsFile="${knownHosts.replaceAll("\\", "/").replaceAll('"', '\\"')}"`,
         "-o",
@@ -99,9 +90,9 @@ export const probeHostKey = Effect.fn("ssh/hostKey.probeHostKey")(function* (inp
         "HashKnownHosts=no",
         "-o",
         "CheckHostIP=no",
-        "-o",
-        "ConnectTimeout=10",
         input.target,
+        "exit",
+        "0",
       ]);
       if (probe.code !== 0 && probe.code !== 255)
         return yield* new SshHostKeyProbeError({ message: "SSH host key exchange failed." });

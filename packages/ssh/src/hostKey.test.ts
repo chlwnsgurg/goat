@@ -99,6 +99,10 @@ describe("negotiated SSH host keys", () => {
       assert.equal(f.calls[1]!.command, "ssh.exe");
       assert.equal(f.calls[2]!.command, "ssh-keygen.exe");
       assert.include(f.calls[1]!.args, "GlobalKnownHostsFile=/dev/null");
+      const proxy = f.calls[1]!.args.find((arg) => arg.startsWith("ProxyCommand="));
+      assert.include(proxy, 'ProxyCommand="ssh.exe"');
+      assert.include(proxy, '"UpdateHostKeys=no"');
+      assert.include(proxy, '-W "[%h]:%p" -- "trusted-jump"');
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -120,8 +124,12 @@ describe("negotiated SSH host keys", () => {
           "GlobalKnownHostsFile=/dev/null",
         ])
           assert.include(args, option);
-        assert.equal(args.at(-1), "private-alias");
+        assert.deepEqual(args.slice(-3), ["private-alias", "exit", "0"]);
         assert.notInclude(args, "endpoint.example");
+        const proxy = args.find((arg) => arg.startsWith("ProxyCommand="));
+        assert.include(proxy, "trusted-jump");
+        assert.include(proxy, "UpdateHostKeys=no");
+        assert.include(proxy, "PermitLocalCommand=no");
         assert.deepEqual(f.calls[2]!.args.slice(0, 3), ["-E", "sha256", "-lf"]);
         const fs = yield* FileSystem.FileSystem;
         assert.isFalse(yield* fs.exists(f.temporaryFile()));

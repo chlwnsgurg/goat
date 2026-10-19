@@ -29,6 +29,8 @@ const fixture = (
     alias?: boolean;
     host?: string;
     runner?: RemoteGoatRunnerOptions;
+    settings?: string;
+    missingFingerprint?: boolean;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -40,14 +42,15 @@ const fixture = (
         calls.push(command.args);
         if (command.args.includes("-G"))
           return makeSuccessfulProcess(
-            `hostname ${input.host ?? "build.example"}\nuser deploy\nport 22\nidentityfile /keys/id_ed25519\nproxyjump bastion\n`,
+            `hostname ${input.host ?? "build.example"}\nuser deploy\nport 22\nidentityfile /keys/id_ed25519\nproxyjump bastion\n${input.settings ?? ""}`,
           );
         if (command.args.includes("-lf"))
           return makeSuccessfulProcess(`256 SHA256:${"a".repeat(43)} build.example (ED25519)\n`);
         const knownHosts = command.args.find((arg) => arg.startsWith("UserKnownHostsFile="));
         if (knownHosts) {
           const file = knownHosts.slice("UserKnownHostsFile=".length).replace(/^"|"$/gu, "");
-          yield* fs.writeFileString(file, "build.example ssh-ed25519 AAAA\n");
+          if (!input.missingFingerprint)
+            yield* fs.writeFileString(file, "build.example ssh-ed25519 AAAA\n");
           return makeSuccessfulProcess("");
         }
         const auth = command.args.some(
@@ -98,6 +101,11 @@ it.effect(
         expect(args.filter((arg) => arg.startsWith("LogLevel="))).toEqual(["LogLevel=VERBOSE"]);
       }
       expect(calls[2]).toContain("PreferredAuthentications=publickey");
+      const proxies = calls
+        .slice(1)
+        .map((args) => args.find((arg) => arg.startsWith("ProxyCommand=")));
+      expect(proxies[0]).toContain("bastion");
+      expect(proxies[1]).toBe(proxies[0]);
       expect(report.steps[5]?.summary).toContain("already installed");
     }).pipe(Effect.provide(NodeServices.layer)),
 );
@@ -113,7 +121,10 @@ it.effect.each(["refused", "dns", "proxy", "jumpDenied"] as const)(
       expect(
         report.steps
           .slice(1)
-          .every((step) => step.state === "skipped" && step.summary.includes("reachability")),
+          .every(
+            (step) =>
+              step.state === "skipped" && step.summary === "Waits for the connection check.",
+          ),
       ).toBe(true);
       if (kind === "refused") expect(report.steps[0]?.fix?.instruction).toContain("Remote Login");
       if (kind === "proxy") expect(report.steps[0]?.fix?.instruction).toContain("Tailscale");
@@ -142,7 +153,11 @@ it.effect("requires a managed pin even when known_hosts already matches", () =>
   Effect.gen(function* () {
     const { report, calls } = yield* fixture({ alias: false });
     expect(report.steps[1]?.state).toBe("needs_review");
-    expect(report.steps[1]?.detail).toContain("already matches");
+    expect(report.steps[1]?.detail).toBe(
+      "This address is already in known_hosts. Approve it once so GOAT can pin it.",
+    );
+    expect(report.steps[1]?.fingerprint).toContain("SHA256:");
+    expect(report.steps[2]?.summary).toBe("Waits for the host key check.");
     expect(calls.filter((args) => args.includes("-G"))).toHaveLength(1);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
@@ -154,6 +169,7 @@ it.effect.each(["keyAndPassword", "passwordOnly", "partial"] as const)(
         auth: `Offering public key: /keys/id_ed25519 SHA256:key\n${stderr[kind]}`,
       });
       expect(report.steps[2]?.state).toBe("failed");
+      expect(report.steps[3]?.summary).toBe("Waits for SSH sign-in.");
       if (kind === "keyAndPassword") {
         expect(report.steps[2]?.summary).toContain("Origin's SSH keys");
         expect(report.steps[2]?.fix?.command).toContain("ssh-copy-id");
@@ -184,6 +200,7 @@ it.effect.each([
     const { report } = yield* fixture({ facts });
     expect(report.steps[3]?.state).toBe("failed");
     expect(report.steps[3]?.summary).toContain(message);
+    expect(report.steps[5]?.summary).toBe("Waits for the platform check.");
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 it.effect("bounds a stalled handshake with TestClock", () =>
@@ -268,7 +285,7 @@ it.effect.each(["2001:db8::2", "[2001:db8::2]"])("attributes IPv6 jump-hop %s", 
     expect(calls).toHaveLength(2);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
-it.effect.each(["clisu-oracle", "oracle.tail.ts.net", "100.64.0.1", "100.127.255.254"])(
+it.effect.each(["oracle.tail.ts.net", "100.64.0.1", "100.127.255.254"])(
   "explains no-key Tailscale sign-in for %s",
   (host) =>
     Effect.gen(function* () {
@@ -281,7 +298,7 @@ it.effect.each(["clisu-oracle", "oracle.tail.ts.net", "100.64.0.1", "100.127.255
       expect(report.steps[2]?.summary).toBe("Signed in through Tailscale SSH; no key needed.");
     }).pipe(Effect.provide(NodeServices.layer)),
 );
-it.effect.each(["100.63.255.255", "100.128.0.0", "public.example"])(
+it.effect.each(["clisu-oracle", "100.63.255.255", "100.128.0.0", "public.example"])(
   "does not call non-Tailscale none authentication Tailscale for %s",
   (host) =>
     Effect.gen(function* () {
@@ -317,5 +334,60 @@ it.effect("fingerprint review keeps every SSH stage read-only", () =>
       expect(args).toContain("ControlMaster=no");
       expect(args).toContain("ControlPath=none");
     }
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "none authentication overrides configured commands, forwarding and TTY on every probe",
+  () =>
+    Effect.gen(function* () {
+      const { report, calls } = yield* fixture({
+        none: true,
+        handshake: "Authenticated to build.example using none.",
+        settings: "remotecommand touch /mutated\nrequesttty force\nlocalforward 8080 target:80\n",
+      });
+      expect(report.ready).toBe(true);
+      expect(calls[1]?.slice(-3)).toEqual(["build", "exit", "0"]);
+      for (const args of calls.slice(1)) {
+        for (const option of [
+          "-T",
+          "RemoteCommand=none",
+          "RequestTTY=no",
+          "ClearAllForwardings=yes",
+          "ForwardAgent=no",
+          "ForwardX11=no",
+        ])
+          expect(args).toContain(option);
+      }
+      expect(calls[2]).toContain("sh");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect("fingerprint collection failure gives actionable guidance instead of review", () =>
+  Effect.gen(function* () {
+    const { report } = yield* fixture({ alias: false, missingFingerprint: true });
+    expect(report.steps[1]?.state).toBe("failed");
+    expect(report.steps[1]?.fingerprint).toBeUndefined();
+    expect(report.steps[1]?.fix?.instruction).toContain("negotiated destination host key");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect("fingerprint probes also terminate none-auth sessions and override remote commands", () =>
+  Effect.gen(function* () {
+    const { report, calls } = yield* fixture({
+      alias: false,
+      none: true,
+      settings: "remotecommand touch /mutated\n",
+    });
+    expect(report.steps[1]?.state).toBe("needs_review");
+    const probe = calls.find((args) => args.includes("StrictHostKeyChecking=accept-new"))!;
+    expect(probe.slice(-3)).toEqual(["build", "exit", "0"]);
+    for (const option of [
+      "-T",
+      "RemoteCommand=none",
+      "RequestTTY=no",
+      "ClearAllForwardings=yes",
+      "ForwardAgent=no",
+      "ForwardX11=no",
+    ])
+      expect(probe).toContain(option);
   }).pipe(Effect.provide(NodeServices.layer)),
 );

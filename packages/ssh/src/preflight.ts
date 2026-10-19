@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as HostProcess from "@goat/shared/HostProcess";
 import { resolveSshCommand } from "./command.ts";
+import { readOnlySshArgs, readOnlyProxyJumpArgs } from "./probeOptions.ts";
 import { probeHostKey } from "./hostKey.ts";
 import { runPreflightProcess } from "./preflightProcess.ts";
 import { checkRuntimeAvailability } from "./runtimeAvailability.ts";
@@ -33,22 +34,7 @@ case "$(uname -s)" in
 esac
 printf 'GOAT_FACTS_DONE=yes\n'
 `;
-const commonArgs = [
-  "-o",
-  "ControlMaster=no",
-  "-o",
-  "ControlPath=none",
-  "-o",
-  "UpdateHostKeys=no",
-  "-o",
-  "PermitLocalCommand=no",
-  "-o",
-  "BatchMode=yes",
-  "-o",
-  "LogLevel=VERBOSE",
-  "-o",
-  "ConnectTimeout=10",
-];
+const commonArgs = readOnlySshArgs;
 const methodList = (stderr: string) => {
   const denied = [...stderr.matchAll(/Permission denied\s*\(([^)]+)\)/giu)].at(-1)?.[1];
   return (
@@ -66,9 +52,7 @@ const safeLine = (text: string) =>
     .find((line) => line.trim())
     ?.slice(0, 1000) ?? "SSH command failed.";
 const tailscaleHost = (hostname: string) =>
-  /\.ts\.net$/iu.test(hostname) ||
-  (!hostname.includes(".") && !hostname.includes(":")) ||
-  /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./u.test(hostname);
+  /\.ts\.net$/iu.test(hostname) || /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./u.test(hostname);
 
 const diagnosticHost = (stderr: string) => /(?:^|\n)[^\s@]+@(\S+):\s+/u.exec(stderr)?.[1];
 const normalizedHost = (hostname: string) => {
@@ -146,7 +130,16 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
         steps.find((step) => step.id === id) ?? {
           id,
           state: "skipped" as const,
-          summary: `Waiting on ${blocker?.id ?? "SSH checks"}.`,
+          summary: blocker
+            ? {
+                reachability: "Waits for the connection check.",
+                host_key: "Waits for the host key check.",
+                key_auth: "Waits for SSH sign-in.",
+                platform: "Waits for the platform check.",
+                disk: "Waits for the disk space check.",
+                runtime: "Waits for the runtime check.",
+              }[blocker.id]
+            : "Waits for SSH checks.",
         },
     );
     return {
@@ -169,7 +162,9 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
       proxy?.fix ??
       (/connection refused/iu.test(stderr)
         ? "Enable Remote Login (macOS) or start sshd on the host, then check again."
-        : tailscaleHost(destination.hostname) || /tailscale/iu.test(stderr)
+        : tailscaleHost(destination.hostname) ||
+            (!destination.hostname.includes(".") && !destination.hostname.includes(":")) ||
+            /tailscale/iu.test(stderr)
           ? "Check that Tailscale is running and signed in on both machines, then check the host name and SSH access."
           : "Check the host name, network and SSH port, then check again.");
     steps.push({
@@ -183,9 +178,10 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
     reachabilityFailure(resolved.stderr);
     return finish();
   }
-  const run = (authentication: string, command: ReadonlyArray<string> = []) =>
+  const run = (authentication: string, command: ReadonlyArray<string> = ["exit", "0"]) =>
     runPreflightProcess(ssh, [
       ...commonArgs,
+      ...readOnlyProxyJumpArgs(ssh, settings),
       ...overrides,
       "-o",
       `PreferredAuthentications=${authentication}`,
@@ -229,18 +225,29 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
       ...(target.user ? { user: target.user } : {}),
       ...(target.port ? { port: target.port } : {}),
       resolvedSettings: settings,
-    }).pipe(Effect.option);
+    }).pipe(Effect.result);
     steps.push({
       id: "host_key",
-      state: key._tag === "Some" ? "needs_review" : "failed",
+      state: key._tag === "Success" ? "needs_review" : "failed",
       summary:
-        key._tag === "Some"
+        key._tag === "Success"
           ? "Review and pin this host's SSH fingerprint."
           : "Could not collect this host's negotiated SSH fingerprint. Check again.",
-      detail: unknownKey
-        ? "This key is not trusted by known_hosts."
-        : "known_hosts already matches; GOAT still needs a managed alias and pin for this address.",
-      ...(key._tag === "Some" ? { fingerprint: key.value.fingerprint } : {}),
+      detail:
+        key._tag === "Failure"
+          ? key.failure.message
+          : unknownKey
+            ? "This key is not trusted by known_hosts."
+            : "This address is already in known_hosts. Approve it once so GOAT can pin it.",
+      ...(key._tag === "Failure"
+        ? {
+            fix: {
+              actor: "human" as const,
+              instruction: `${key.failure.message} Check the host's SSH settings and try again.`,
+            },
+          }
+        : {}),
+      ...(key._tag === "Success" ? { fingerprint: key.success.fingerprint } : {}),
     });
     return finish();
   }
