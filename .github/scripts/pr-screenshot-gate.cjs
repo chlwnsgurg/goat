@@ -23,14 +23,20 @@ const NON_UI_FILE_RE =
 const HTML_COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
 /** Fenced code blocks (backtick or tilde fences) whose content GitHub does not render. */
 const FENCED_CODE_RE = /(?:^|\n)[ \t]*(\x60{3,}|~{3,})[^\n]*\n[\s\S]*?^[ \t]*\1[ \t]*(?=\n|$)/gm;
-/** Inline markdown image, as GitHub writes for a dropped attachment. */
-const MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\([^)]+\)/;
+/** Inline markdown image, as GitHub writes for a dropped attachment; the URL may be <wrapped> and titled. */
+const MARKDOWN_IMAGE_RE =
+  /!\[[^\]]*\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/dg;
 /** Reference-style markdown image (full or collapsed). */
 const MARKDOWN_REFERENCE_IMAGE_RE = /!\[([^\]]*)\]\[([^\]]*)\]/g;
 /** Link definitions that reference-style images depend on. */
-const MARKDOWN_REFERENCE_DEF_RE = /^\s*\[([^\]]+)\]:\s*\S+/gm;
+const MARKDOWN_REFERENCE_DEF_RE = /^[ \t]*\[([^\]]+)\]:[ \t]*(?:<([^>\n]+)>|(\S+))/dgm;
 /** HTML image with a non-empty src. */
-const HTML_IMAGE_RE = /<img\b[^>]*\bsrc\s*=\s*(?:"[^"]+"|'[^']+'|[^\s>"']+)[^>]*>/i;
+const HTML_IMAGE_RE = /<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>"']+))[^>]*>/dgi;
+
+const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
+const IMAGE_CHECK_TIMEOUT_MS = 5000;
+const MAX_CHECKED_EMBEDS = 40;
+const UPLOAD_HINT = "node scripts/pr-assets.ts upload <pr> <files...> --patch-body";
 
 function resolveMode(raw) {
   const mode = typeof raw === "string" ? raw.trim().toLowerCase() : "";
@@ -55,40 +61,227 @@ function isChangedFileListTruncated(changedFilesCount, listedLength) {
 }
 
 /**
- * Drop the regions GitHub does not render: fenced code first (a literal
- * "<!--" inside a fence must not open a comment and swallow the rest), then
- * HTML comments. Image syntax in either region is text, not evidence. The PR
- * template's instructions live in comments, so an untouched template never
- * counts as a screenshot.
+ * Blank out the regions GitHub does not render, keeping every offset so an
+ * embed found in the result can be rewritten in the original body. Fenced
+ * code goes first (a literal "<!--" inside a fence must not open a comment and
+ * swallow the rest), then HTML comments. The PR template's instructions live
+ * in comments, so an untouched template never counts as a screenshot.
  */
-function stripNonRenderedRegions(body) {
-  return body.replace(FENCED_CODE_RE, "").replace(HTML_COMMENT_RE, "");
+function maskNonRenderedRegions(body) {
+  const blank = (region) => region.replace(/[^\n]/g, " ");
+  return body.replace(FENCED_CODE_RE, blank).replace(HTML_COMMENT_RE, blank);
 }
 
-function hasRenderableReferenceImage(visible) {
-  const definitions = new Set();
-  for (const match of visible.matchAll(MARKDOWN_REFERENCE_DEF_RE)) {
-    definitions.add(match[1].trim().toLowerCase());
+/** First participating capture group and its [start, end) span. */
+function capture(match, groups) {
+  for (const group of groups) {
+    if (match[group] !== undefined) {
+      const [start, end] = match.indices[group];
+      return { text: match[group], start, end };
+    }
   }
-  if (definitions.size === 0) return false;
+  return null;
+}
+
+/**
+ * Every image the rendered description embeds, in body order: inline markdown
+ * images, <img> tags with a src, and reference images whose definition
+ * exists. start/end locate the URL text in the original body. A reference
+ * definition shared by several images is listed once.
+ */
+function extractImageEmbeds(body) {
+  if (typeof body !== "string") return [];
+  const visible = maskNonRenderedRegions(body);
+  const embeds = [];
+  for (const match of visible.matchAll(MARKDOWN_IMAGE_RE)) {
+    const url = capture(match, [1, 2]);
+    embeds.push({
+      kind: "markdown",
+      source: match[0],
+      url: url.text,
+      start: url.start,
+      end: url.end,
+    });
+  }
+  for (const match of visible.matchAll(HTML_IMAGE_RE)) {
+    const url = capture(match, [1, 2, 3]);
+    embeds.push({
+      kind: "html",
+      source: match[0],
+      url: url.text.replace(/&amp;/g, "&"),
+      start: url.start,
+      end: url.end,
+    });
+  }
+  const definitions = new Map();
+  for (const match of visible.matchAll(MARKDOWN_REFERENCE_DEF_RE)) {
+    const id = match[1].trim().toLowerCase();
+    if (!definitions.has(id)) definitions.set(id, capture(match, [2, 3]));
+  }
+  const usedDefinitions = new Set();
   for (const match of visible.matchAll(MARKDOWN_REFERENCE_IMAGE_RE)) {
     const id = (match[2] || match[1]).trim().toLowerCase();
-    if (id && definitions.has(id)) return true;
+    const url = id ? definitions.get(id) : undefined;
+    if (!url || usedDefinitions.has(id)) continue;
+    usedDefinitions.add(id);
+    embeds.push({
+      kind: "reference",
+      source: match[0],
+      url: url.text,
+      start: url.start,
+      end: url.end,
+    });
   }
-  return false;
+  return embeds.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * Owner, repo, ref, and file path of a link into GitHub repository contents
+ * (raw.githubusercontent.com, or github.com raw/blob pages), or null.
+ */
+function parseGithubContentUrl(raw) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  const parts = url.pathname
+    .split("/")
+    .filter(Boolean)
+    .map((part) => {
+      try {
+        return decodeURIComponent(part);
+      } catch {
+        return part;
+      }
+    });
+  let view;
+  let rest;
+  if (url.hostname === "raw.githubusercontent.com" && parts.length >= 4) {
+    view = "raw";
+    rest = parts.slice(2);
+  } else if (
+    url.hostname === "github.com" &&
+    parts.length >= 5 &&
+    (parts[2] === "raw" || parts[2] === "blob")
+  ) {
+    view = parts[2];
+    rest = parts.slice(3);
+  } else {
+    return null;
+  }
+  const refLength = rest[0] === "refs" && rest[1] === "heads" ? 3 : 1;
+  return {
+    owner: parts[0],
+    repo: parts[1],
+    view,
+    ref: rest.slice(0, refLength).join("/"),
+    path: rest.slice(refLength).join("/"),
+    rawQuery: url.searchParams.get("raw") === "true",
+  };
+}
+
+/**
+ * Problems visible from the URL alone, or null when only a fetch can tell.
+ * A relative path resolves against the PR page and never loads. A branch name
+ * moves or disappears, so a GitHub link must pin a full commit SHA. A blob link
+ * without ?raw=true serves the HTML file viewer.
+ */
+function staticEmbedProblem(raw) {
+  if (!/^https?:\/\//i.test(raw)) return "relative path; GitHub resolves it against the PR page";
+  const github = parseGithubContentUrl(raw);
+  if (!github) return null;
+  if (!FULL_SHA_RE.test(github.ref)) {
+    return "links the branch name '" + github.ref + "' instead of a commit SHA";
+  }
+  if (github.view === "blob" && !github.rawQuery)
+    return "links the file viewer page, not the image";
+  return null;
+}
+
+function isTransientStatus(status) {
+  return status === 408 || status === 429 || (status >= 500 && status < 600);
+}
+
+/** One request; resolves to { status, contentType } or rejects on transport failure. */
+async function probeImage(url, method) {
+  const response = await fetch(url, {
+    method,
+    redirect: "follow",
+    signal: AbortSignal.timeout(IMAGE_CHECK_TIMEOUT_MS),
+  });
+  // Only the headers matter; release the connection without reading the image.
+  await response.body?.cancel?.().catch(() => {});
+  return { status: response.status, contentType: response.headers?.get?.("content-type") ?? "" };
+}
+
+/**
+ * Whether an absolute image URL loads for an anonymous viewer, as the GitHub
+ * web and mobile clients fetch it: "ok", "broken" with a reason, or
+ * "unverified" when network errors, timeouts, or 408/429/5xx persist. HEAD is
+ * tried first; a host that rejects or mislabels HEAD gets a GET.
+ */
+async function verifyImageUrl(url, { attempts = 3, sleep: wait = sleep } = {}) {
+  let lastFailure = "no response";
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (attempt > 1) await wait(250 * (attempt - 1));
+    let result;
+    try {
+      result = await probeImage(url, "HEAD");
+      if (result.status !== 200 || !/^image\//i.test(result.contentType)) {
+        result = await probeImage(url, "GET");
+      }
+    } catch (error) {
+      lastFailure =
+        error?.name === "TimeoutError" ? "timed out" : (error?.message ?? String(error));
+      continue;
+    }
+    if (result.status === 200) {
+      return /^image\//i.test(result.contentType)
+        ? { status: "ok" }
+        : {
+            status: "broken",
+            reason: "serves " + (result.contentType || "no content type") + ", not an image",
+          };
+    }
+    if (!isTransientStatus(result.status)) {
+      return { status: "broken", reason: "returns HTTP " + result.status };
+    }
+    lastFailure = "HTTP " + result.status;
+  }
+  return { status: "unverified", reason: lastFailure };
+}
+
+/**
+ * Check each embed: URL rules first, then a fetch for the rest. Returns the
+ * embeds annotated with status "ok", "broken", or "unverified".
+ */
+async function checkEmbeds(embeds, options = {}) {
+  const checked = embeds.slice(0, MAX_CHECKED_EMBEDS);
+  const byUrl = new Map();
+  return Promise.all(
+    checked.map(async (embed) => {
+      const problem = staticEmbedProblem(embed.url);
+      if (problem) return { ...embed, status: "broken", reason: problem };
+      if (!byUrl.has(embed.url)) byUrl.set(embed.url, verifyImageUrl(embed.url, options));
+      return { ...embed, ...(await byUrl.get(embed.url)) };
+    }),
+  );
 }
 
 /**
  * True when the rendered description embeds an image: an inline markdown
  * image, a defined reference image, or an <img> with a src. A plain link to an
- * image is not visual evidence.
+ * image is not visual evidence. Whether the image loads is checkEmbeds' job.
  */
 function hasScreenshotEvidence(body) {
-  if (typeof body !== "string") return false;
-  const visible = stripNonRenderedRegions(body);
-  if (MARKDOWN_IMAGE_RE.test(visible)) return true;
-  if (HTML_IMAGE_RE.test(visible)) return true;
-  return hasRenderableReferenceImage(visible);
+  return extractImageEmbeds(body).length > 0;
+}
+
+function describeEmbed(embed) {
+  const url = embed.url.length > 120 ? embed.url.slice(0, 117) + "..." : embed.url;
+  return url + " (" + embed.reason + ")";
 }
 
 /** Admin or maintain role on the repository, the only roles that may waive. */
@@ -113,25 +306,65 @@ function latestLabelActor(events, label = WAIVER_LABEL) {
 
 /**
  * Decide the gate from facts already fetched. Outcomes: "skip" (not
- * applicable), "pass", or "missing" (UI changed, no screenshot, not waived).
- * The caller maps "missing" to a warning or a failure by mode.
+ * applicable), "pass", "missing" (UI changed, no screenshot that loads, not
+ * waived), or "inconclusive" (an embed could not be fetched). The caller maps
+ * "missing" to a warning or a failure by mode. embeds are checkEmbeds results;
+ * without them only the URL rules apply.
  */
-function decideGate({ draft, files, filesTruncated, body, waived }) {
-  if (draft) return { outcome: "skip", reason: "draft pull request", uiFiles: [] };
+function decideGate({ draft, files, filesTruncated, body, waived, embeds }) {
+  if (draft)
+    return { outcome: "skip", reason: "draft pull request", uiFiles: [], brokenEmbeds: [] };
   const uiFiles = files.filter(isUiPath);
   if (uiFiles.length === 0 && !filesTruncated) {
-    return { outcome: "skip", reason: "no UI paths changed", uiFiles };
+    return { outcome: "skip", reason: "no UI paths changed", uiFiles, brokenEmbeds: [] };
   }
-  if (hasScreenshotEvidence(body)) {
-    return { outcome: "pass", reason: "description embeds a screenshot", uiFiles };
+  const checked =
+    embeds ??
+    extractImageEmbeds(body).map((embed) => {
+      const problem = staticEmbedProblem(embed.url);
+      return problem ? { ...embed, status: "broken", reason: problem } : { ...embed, status: "ok" };
+    });
+  const brokenEmbeds = checked.filter((embed) => embed.status === "broken");
+  const unverified = checked.filter((embed) => embed.status === "unverified");
+  if (checked.length > 0 && brokenEmbeds.length === 0 && unverified.length === 0) {
+    return { outcome: "pass", reason: "description embeds a screenshot", uiFiles, brokenEmbeds };
   }
   if (waived) {
-    return { outcome: "pass", reason: "waived by the " + WAIVER_LABEL + " label", uiFiles };
+    return {
+      outcome: "pass",
+      reason: "waived by the " + WAIVER_LABEL + " label",
+      uiFiles,
+      brokenEmbeds,
+    };
+  }
+  // One broken image is enough to fail: reviewers open the PR and see a hole.
+  if (brokenEmbeds.length > 0) {
+    return {
+      outcome: "missing",
+      reason:
+        brokenEmbeds.length +
+        " of " +
+        checked.length +
+        " screenshot embeds in the description do not load: " +
+        brokenEmbeds.map(describeEmbed).join("; "),
+      uiFiles,
+      brokenEmbeds,
+    };
+  }
+  if (unverified.length > 0) {
+    return {
+      outcome: "inconclusive",
+      reason:
+        "could not confirm that the screenshot embeds load: " +
+        unverified.map(describeEmbed).join("; "),
+      uiFiles,
+      brokenEmbeds,
+    };
   }
   const reason = filesTruncated
     ? "the changed-file list is incomplete and the description has no screenshot"
     : "UI paths changed and the description has no screenshot";
-  return { outcome: "missing", reason, uiFiles };
+  return { outcome: "missing", reason, uiFiles, brokenEmbeds };
 }
 
 async function api(
@@ -249,11 +482,16 @@ function summaryMarkdown({ number, mode, decision }) {
       ".",
   ];
   if (decision.outcome === "missing") {
+    if (decision.brokenEmbeds?.length > 0) {
+      lines.push("", "These embeds do not load for a reader of the PR:", "");
+      for (const embed of decision.brokenEmbeds) lines.push("- `" + describeEmbed(embed) + "`");
+    }
     lines.push(
       "",
       "Embed a screenshot of the UI change in the PR description, then re-run the goat-screenshot-gate job.",
-      "Drag the image into the description editor, or commit it to the pr-assets branch and link it by commit SHA:",
-      "https://raw.githubusercontent.com/goat-si/goat/<sha>/<pr>/<name>.png",
+      "Drag the image into the description editor, or upload it to the pr-assets branch and fix the description with:",
+      "`" + UPLOAD_HINT + "`",
+      "That links each image by commit SHA: https://raw.githubusercontent.com/goat-si/goat/<sha>/<pr>/<name>.png",
       "A maintainer can waive the screenshot with the " + WAIVER_LABEL + " label.",
     );
   }
@@ -296,15 +534,20 @@ async function main(env = process.env, { sleep: wait = sleep } = {}) {
           (file) => file.filename,
         );
     const labels = (pr.labels ?? []).map((label) => label.name);
+    const filesTruncated = !pr.draft && isChangedFileListTruncated(pr.changed_files, files.length);
+    const body = pr.body ?? "";
+    // Fetch images only when the gate applies; drafts and non-UI PRs skip anyway.
+    const gated = !pr.draft && (filesTruncated || files.some(isUiPath));
     const preliminary = decideGate({
       draft: pr.draft,
       files,
-      filesTruncated: !pr.draft && isChangedFileListTruncated(pr.changed_files, files.length),
-      body: pr.body ?? "",
+      filesTruncated,
+      body,
       waived: false,
+      embeds: gated ? await checkEmbeds(extractImageEmbeds(body), { sleep: wait }) : undefined,
     });
     decision =
-      preliminary.outcome === "missing" &&
+      (preliminary.outcome === "missing" || preliminary.outcome === "inconclusive") &&
       (await labelWaiver({ repoPath, number, labels, options, log }))
         ? { ...preliminary, outcome: "pass", reason: "waived by the " + WAIVER_LABEL + " label" }
         : preliminary;
@@ -313,6 +556,7 @@ async function main(env = process.env, { sleep: wait = sleep } = {}) {
       outcome: "inconclusive",
       reason: "could not inspect PR #" + number + ": " + error.message,
       uiFiles: [],
+      brokenEmbeds: [],
     };
   }
 
@@ -340,7 +584,13 @@ async function main(env = process.env, { sleep: wait = sleep } = {}) {
   }
   if (decision.outcome !== "missing") return 0;
   const message =
-    "UI paths changed but the PR description has no screenshot. Embed one, or ask a maintainer for the " +
+    (decision.brokenEmbeds.length > 0
+      ? "Screenshots in the PR description do not load: " +
+        decision.brokenEmbeds.map(describeEmbed).join("; ") +
+        ". Re-upload them with " +
+        UPLOAD_HINT +
+        ", or ask a maintainer for the "
+      : "UI paths changed but the PR description has no screenshot. Embed one, or ask a maintainer for the ") +
     WAIVER_LABEL +
     " label, then re-run this job.";
   if (mode === "enforce") {
@@ -356,8 +606,12 @@ module.exports = {
   resolveMode,
   isUiPath,
   isChangedFileListTruncated,
-  stripNonRenderedRegions,
   hasScreenshotEvidence,
+  extractImageEmbeds,
+  parseGithubContentUrl,
+  staticEmbedProblem,
+  verifyImageUrl,
+  checkEmbeds,
   isMaintainerPermission,
   latestLabelActor,
   decideGate,
