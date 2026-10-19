@@ -606,11 +606,27 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("read-only stat
           .trim()
           .split("\n")
           .filter(Boolean);
-        assert.isTrue(
-          log.every((line) =>
-            ["version", "protocol"].includes((JSON.parse(line) as { type: string }).type),
-          ),
+        const events = log.map(
+          (line) => JSON.parse(line) as { type: string; args?: ReadonlyArray<string> },
         );
+        // Every invocation is recorded as "exec"; status may only ask read-only questions.
+        const readOnlyCalls = [
+          ["--version"],
+          ["__ssh-helper", "protocol"],
+          ["__ssh-helper", "commit-time"],
+          ["auth", "session", "issue", "--help"],
+        ];
+        for (const event of events) {
+          if (event.type === "exec") {
+            const args = event.args ?? [];
+            assert.isTrue(
+              readOnlyCalls.some((call) => call.every((arg, index) => args[index] === arg)),
+              `unexpected status call: ${args.join(" ")}`,
+            );
+          } else {
+            assert.include(["version", "protocol"], event.type);
+          }
+        }
         assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
