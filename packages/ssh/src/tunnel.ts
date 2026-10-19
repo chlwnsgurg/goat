@@ -3402,6 +3402,8 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
   const child = yield* spawner
     .spawn(
       ChildProcess.make(sshCommand, args, {
+        // Spawn can be interrupted before the handle's explicit kill finalizer is installed.
+        forceKillAfter: TUNNEL_SHUTDOWN_TIMEOUT_MS,
         env: childEnvironment,
         extendEnv: true,
         stdin: {
@@ -4479,7 +4481,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       localPort,
       remotePort,
     });
-    const entryScope = yield* Scope.make("sequential");
+    // Shutdown also owns forwards still awaiting readiness, before they enter the tunnel map.
+    const entryScope = yield* Scope.fork(managerScope, "sequential");
     const start = (authOptions: SshAuth.SshAuthOptions) =>
       startSshTunnel({
         key: input.key,

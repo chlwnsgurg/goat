@@ -13,6 +13,7 @@ import { buildSshChildEnvironment, type SshAuthOptions } from "./auth.ts";
 import { SshCommandError, SshInvalidTargetError } from "./errors.ts";
 
 const DEFAULT_SSH_COMMAND_TIMEOUT_MS = 60_000;
+const SSH_COMMAND_SHUTDOWN_TIMEOUT_MS = 2_000;
 const MAX_SSH_ERROR_OUTPUT_LENGTH = 4_000;
 
 /**
@@ -274,6 +275,8 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
   const child = yield* spawner
     .spawn(
       ChildProcess.make(sshCommand, args, {
+        // Scope interruption must reap ssh even if it or an auth helper ignores SIGTERM.
+        forceKillAfter: SSH_COMMAND_SHUTDOWN_TIMEOUT_MS,
         env: environment,
         extendEnv: true,
         stdin: {
