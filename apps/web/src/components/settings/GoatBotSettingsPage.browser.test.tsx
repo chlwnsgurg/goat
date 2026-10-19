@@ -109,7 +109,7 @@ it("shows where GOAT Bot runs and every channel, and saves a new home to each co
 
   expect(container.querySelector("section#goat-bot")).not.toBeNull();
   expect(container.querySelector("section#slack-channel")).not.toBeNull();
-  expect(container.querySelector("section#imessage-channel")).not.toBeNull();
+  expect(container.querySelector("section#imessage")).not.toBeNull();
   const trigger = page.getByRole("combobox", { name: "GOAT Bot runs on" });
   await expect.element(trigger).toHaveTextContent("Mac Studio");
 

@@ -9,21 +9,21 @@ export function GoatBotSettingsPanel() {
     <SettingsPageContainer>
       <GoatBotSettings />
       <SlackChannelSettings />
-      <SettingsSection id="imessage-channel" title="iMessage">
+      <SettingsSection id="imessage" title="iMessage">
         <SettingsRow
           {...searchableSetting("imessage-channel")}
           title="Set up in Terminal"
           description={
             <>
-              On the Mac that runs GOAT Bot, run{" "}
+              On the Mac that runs GOAT Bot, give GOAT Full Disk Access, run{" "}
               <code className="rounded bg-muted px-1 py-px text-2xs whitespace-nowrap">
-                goat imessage enable
+                goat imessage enable --allow &lt;phone or email&gt;
               </code>
-              , then{" "}
+              , and restart GOAT. Then text the code from{" "}
               <code className="rounded bg-muted px-1 py-px text-2xs whitespace-nowrap">
                 goat imessage link-code
-              </code>
-              .
+              </code>{" "}
+              from that phone.
             </>
           }
         />
