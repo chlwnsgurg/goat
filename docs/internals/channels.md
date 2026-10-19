@@ -5,6 +5,8 @@ Input from the GOAT bot, Slack, local Mac iMessage, and agents over MCP goes thr
 and who asked; coding threads own the work and its history. Code lives in
 [`apps/server/src/channels/`](../../apps/server/src/channels/); the wire types are in
 [`packages/contracts/src/channel*.ts`](../../packages/contracts/src/).
+What the bot must do for a person, and how it compares with other chat bots, is in
+[goat-bot-behavior-spec.md](goat-bot-behavior-spec.md).
 
 ## The bot never runs a provider
 
