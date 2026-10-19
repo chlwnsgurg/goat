@@ -87,3 +87,88 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(FleetHostStates, make);
+
+/**
+ * A launch this machine started for one reschedule request, written before the remote launch so a
+ * lost answer or a restart never starts the same attempt twice. threadId is set once the launch is
+ * known; until then the attempt may only be retried on target, after its absence is confirmed.
+ */
+export interface RescheduleClaim {
+  readonly clientRequestId: string;
+  readonly ownerKey: string;
+  readonly targetHost: string;
+  readonly title: string;
+  readonly branch: string;
+  readonly threadId: string | null;
+  readonly claimedAt: string;
+}
+
+export interface FleetRescheduleClaimsShape {
+  readonly get: (clientRequestId: string) => Effect.Effect<RescheduleClaim | null>;
+  /** Records the launch target; a retry on the same target keeps the claim. */
+  readonly claim: (claim: Omit<RescheduleClaim, "threadId" | "claimedAt">) => Effect.Effect<void>;
+  readonly settle: (clientRequestId: string, threadId: string) => Effect.Effect<void>;
+  /** The launch provably never started; the request may place again anywhere. */
+  readonly release: (clientRequestId: string) => Effect.Effect<void>;
+}
+
+export class FleetRescheduleClaims extends Context.Service<
+  FleetRescheduleClaims,
+  FleetRescheduleClaimsShape
+>()("goat/fleet/health/FleetHostStates/FleetRescheduleClaims") {}
+
+interface ClaimRow {
+  readonly client_request_id: string;
+  readonly owner_key: string;
+  readonly target_host: string;
+  readonly title: string;
+  readonly branch: string;
+  readonly thread_id: string | null;
+  readonly claimed_at: string;
+}
+
+export const makeClaims = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return FleetRescheduleClaims.of({
+    get: (id) =>
+      sql<ClaimRow>`SELECT * FROM fleet_reschedule_claims WHERE client_request_id = ${id}`.pipe(
+        Effect.orDie,
+        Effect.map((rows) => {
+          const row = rows[0];
+          return row === undefined
+            ? null
+            : {
+                clientRequestId: row.client_request_id,
+                ownerKey: row.owner_key,
+                targetHost: row.target_host,
+                title: row.title,
+                branch: row.branch,
+                threadId: row.thread_id,
+                claimedAt: row.claimed_at,
+              };
+        }),
+      ),
+    claim: (input) =>
+      Effect.gen(function* () {
+        const at = DateTime.formatIso(yield* DateTime.now);
+        yield* sql`
+          INSERT INTO fleet_reschedule_claims (client_request_id, owner_key, target_host, title, branch, thread_id, claimed_at)
+          VALUES (${input.clientRequestId}, ${input.ownerKey}, ${input.targetHost}, ${input.title}, ${input.branch}, NULL, ${at})
+          ON CONFLICT(client_request_id) DO UPDATE SET target_host = excluded.target_host, claimed_at = excluded.claimed_at
+          WHERE fleet_reschedule_claims.thread_id IS NULL
+        `.pipe(Effect.orDie);
+      }),
+    settle: (id, threadId) =>
+      sql`UPDATE fleet_reschedule_claims SET thread_id = ${threadId} WHERE client_request_id = ${id}`.pipe(
+        Effect.orDie,
+        Effect.asVoid,
+      ),
+    release: (id) =>
+      sql`DELETE FROM fleet_reschedule_claims WHERE client_request_id = ${id} AND thread_id IS NULL`.pipe(
+        Effect.orDie,
+        Effect.asVoid,
+      ),
+  });
+});
+
+export const layerClaims = Layer.effect(FleetRescheduleClaims, makeClaims);

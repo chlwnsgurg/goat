@@ -1,4 +1,5 @@
 import {
+  OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadStatusResult,
   type RuntimeMode,
   type ThreadId,
@@ -10,7 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
-import { isTerminalPhase, threadPhase } from "../../mcp/threadStatus.ts";
+import { isTerminalPhase, statusFromRead, threadPhase } from "../../mcp/threadStatus.ts";
 import * as ThreadManagementService from "../../orchestration-v2/ThreadManagementService.ts";
 import * as SshRemoteDispatch from "../../sshRemote/SshRemoteDispatch.ts";
 import { HostHealthMonitor, type HostConditionSet } from "./HostHealthMonitor.ts";
@@ -35,46 +36,57 @@ export interface HealthShape {
 }
 
 /** The goal controller's view of hosts and attempts (agentic-k8s.md "Interfaces"). */
-export class Health extends Context.Service<Health, HealthShape>()("goat/fleet/health/Health") {}
+export class Health extends Context.Service<Health, HealthShape>()(
+  // @effect-diagnostics-next-line deterministicKeys:off -- the key is the T1/T2/T3 agreement in docs/internals/agentic-k8s.md.
+  "goat/fleet/Health",
+) {}
 
 const REMOTE_TIMEOUT_MS = 15_000;
 const decodeStatus = Schema.decodeUnknownEffect(OrchestratorMcpThreadStatusResult);
+const decodeRead = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
+
+const unreachable = (error: SshRemoteDispatch.SshRemoteDispatchError) =>
+  error.reason === "host_unavailable" || error.reason === "ssh_failed";
+
+/** An older GOAT has no goat_thread_status; HostThreadsMcpService falls back the same way. */
+const statusUnsupported = (error: SshRemoteDispatch.SshRemoteDispatchError) =>
+  error.message.includes(SshRemoteDispatch.REMOTE_THREAD_STATUS_UNSUPPORTED);
 
 /**
  * A thread's status on another host, at most at ceiling, and whether the host answered at all.
- * status is null when the host did not answer, refused, or predates goat_thread_status. Every
- * call is recorded as a host contact, so a host that comes back clears its outage here.
+ * callHostTool already returns the tool's payload and turns a refusal into remote_refused. status
+ * is null when the host did not answer or refused. Every call is recorded as a host contact, so a
+ * host that came back clears its outage here.
  */
 export const probeRemoteStatus = (host: string, threadId: ThreadId, ceiling: RuntimeMode) =>
   Effect.gen(function* () {
     const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
     const monitor = yield* HostHealthMonitor;
-    const raw = yield* dispatch
-      .callHostTool(
-        {
-          host,
-          tool: "goat_thread_status",
-          arguments: { threadId },
-          writes: false,
-          timeoutMs: REMOTE_TIMEOUT_MS,
-        },
-        Effect.succeed(ceiling),
-      )
-      .pipe(Effect.result);
-    if (raw._tag === "Failure") {
-      const unreachable =
-        raw.failure.reason === "host_unavailable" || raw.failure.reason === "ssh_failed";
-      if (unreachable) {
-        yield* monitor.recordContact(host, raw.failure.message);
-      } else {
-        yield* monitor.recordContact(host, null);
-      }
-      return { answered: !unreachable, status: null };
+    const read = (tool: string, args: Record<string, unknown>) =>
+      dispatch
+        .callHostTool(
+          { host, tool, arguments: args, writes: false, timeoutMs: REMOTE_TIMEOUT_MS },
+          Effect.succeed(ceiling),
+        )
+        .pipe(Effect.result);
+    let answer = yield* read("goat_thread_status", { threadId });
+    let fromRead = false;
+    if (answer._tag === "Failure" && statusUnsupported(answer.failure)) {
+      answer = yield* read("goat_thread_read", { threadId, limit: 1, runLimit: 2 });
+      fromRead = true;
+    }
+    if (answer._tag === "Failure") {
+      const down = unreachable(answer.failure);
+      yield* monitor.recordContact(host, down ? answer.failure.message : null);
+      return { answered: !down, status: null };
     }
     yield* monitor.recordContact(host, null);
-    const result = SshRemoteDispatch.readRemoteToolResult("goat_thread_status", raw.success);
-    if (!result.ok) return { answered: true, status: null };
-    const status = yield* decodeStatus(result.value).pipe(Effect.orElseSucceed(() => null));
+    const status = fromRead
+      ? yield* decodeRead(answer.success).pipe(
+          Effect.map(statusFromRead),
+          Effect.orElseSucceed(() => null),
+        )
+      : yield* decodeStatus(answer.success).pipe(Effect.orElseSucceed(() => null));
     return { answered: true, status };
   });
 
@@ -94,7 +106,13 @@ export const readLocalStatus = (threadId: ThreadId) =>
       phase,
       run: runId === null ? null : { runId },
       pendingRequest: pending,
-      queuedRunId: null,
+      // A newer run behind the active one is queued work, as statusFromRead reads it.
+      queuedRunId:
+        shell.activeRunId !== null &&
+        shell.latestRunId !== null &&
+        shell.latestRunId !== shell.activeRunId
+          ? shell.latestRunId
+          : null,
       lastActivityAt: DateTime.formatIso(shell.updatedAt),
       lastErrorClass: shell.lastErrorClass ?? null,
       terminal: isTerminalPhase(phase),

@@ -13,7 +13,9 @@ import type {
 export const STALL_AFTER_MS = 20 * 60_000;
 
 export type ThreadHealth =
-  | { readonly _tag: "healthy" | "waiting" | "unknown" }
+  | { readonly _tag: "waiting" | "unknown" }
+  /** idle: no run is active, so drain may move it without interrupting a turn. */
+  | { readonly _tag: "healthy"; readonly idle: boolean }
   | { readonly _tag: "stalled"; readonly idleMs: number }
   | { readonly _tag: "host_lost"; readonly since: string }
   | {
@@ -66,9 +68,10 @@ export function classifyThread(input: {
       const idleMs = input.now - last;
       return idleMs >= (input.stallAfterMs ?? STALL_AFTER_MS)
         ? { _tag: "stalled", idleMs }
-        : { _tag: "healthy" };
+        : { _tag: "healthy", idle: false };
     }
     default:
-      return { _tag: "healthy" };
+      // idle and the terminal phases other than failed: nothing is running.
+      return { _tag: "healthy", idle: true };
   }
 }

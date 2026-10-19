@@ -58,9 +58,15 @@ describe("reschedule decision table", () => {
     ["an unknown failure reschedules", failed("unknown"), {}, "reschedule:failed"],
     [
       "drain moves an idle attempt",
-      { _tag: "healthy" },
+      { _tag: "healthy", idle: true },
       { hostDraining: true },
       "reschedule:drain",
+    ],
+    [
+      "drain lets a running turn finish",
+      { _tag: "healthy", idle: false },
+      { hostDraining: true },
+      "none",
     ],
     [
       "a waiting attempt is never a stall, even on a draining host",

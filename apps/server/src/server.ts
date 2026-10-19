@@ -1241,7 +1241,12 @@ const layerMakeRoutes = Layer.mergeAll(
   ),
   Layer.mergeAll(
     // Self-healing serves only the MCP tools; its host status and SSH needs come from below.
-    McpHttpServer.layer.pipe(Layer.provide(FleetHealth.layer)),
+    McpHttpServer.layer.pipe(
+      Layer.provide(
+        // The same power monitor instance as background policy, so suspend and resume reach it.
+        FleetHealth.layer.pipe(Layer.provide(layerHostPowerMonitor)),
+      ),
+    ),
     layerMemoryToolkits,
     McpHttpServer.layerProviderToolkit,
     HandoffExpiry.layer,

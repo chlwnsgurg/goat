@@ -82,6 +82,16 @@ export const layer = McpToolAccess.toLayer(FleetHealthToolkit, {
         });
       }
       const rescheduler = yield* Rescheduler.Rescheduler;
+      // The caller is checked again after the move waits for its lock and before each remote write,
+      // so a caller that ended or lost its modes meanwhile changes nothing.
+      const services = yield* Effect.context<Effect.Services<typeof check>>();
+      const authorize = check.pipe(
+        Effect.map((current) => current.limits.runtimeMode),
+        Effect.mapError(
+          (error) => new Rescheduler.RescheduleNotAllowed({ message: error.message }),
+        ),
+        Effect.provideContext(services),
+      );
       const attempt = attemptOfBranch(input.branch);
       const branch = nextAttemptBranch(input.branch);
       const result = yield* rescheduler.reschedule({
@@ -101,6 +111,7 @@ export const layer = McpToolAccess.toLayer(FleetHealthToolkit, {
         project: { cwd: input.cwd, canonicalKey: null },
         targetHost: input.targetHost === undefined ? null : asHost(input.targetHost),
         force: input.force === true,
+        authorize,
       });
       return result._tag === "Rescheduled"
         ? {

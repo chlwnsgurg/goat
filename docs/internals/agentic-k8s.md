@@ -327,8 +327,6 @@ for replica capture of goal attempts (#525); `fleet_replicas` already exists for
 
 Where the code departs from the text below, and why:
 
-- Tag keys are `goat/fleet/health/Health` and `goat/fleet/health/Rescheduler`, because the
-  `deterministicKeys` lint derives keys from the file path.
 - Sleep on this machine never counts against a host. A gap of two minutes or more in the shared
   Scheduler's ticks, or a suspended power snapshot, drops the failures counted so far and ignores
   failures for the next five minutes, so a Mac waking from sleep makes no host Lost.

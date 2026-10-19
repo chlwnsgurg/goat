@@ -58,8 +58,10 @@ export function nextHealingStep(
       }
       return { _tag: "none" };
     case "healthy":
-      // Drain moves an attempt only between runs: a finished or idle thread reads healthy.
-      return context.hostDraining ? { _tag: "reschedule", reason: "drain" } : { _tag: "none" };
+      // Drain moves an attempt only between runs; a running turn is left to finish.
+      return context.hostDraining && health.idle
+        ? { _tag: "reschedule", reason: "drain" }
+        : { _tag: "none" };
     case "waiting":
     case "unknown":
       return { _tag: "none" };

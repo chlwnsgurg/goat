@@ -5,6 +5,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as Stream from "effect/Stream";
 
 import * as HostPowerMonitor from "../../background/HostPowerMonitor.ts";
 import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
@@ -75,6 +76,34 @@ export const make = (
     const contacts = yield* Ref.make(new Map<string, HostContact>());
     const clock = yield* Ref.make<MonitorClock>(initialClock);
     const lastProbe = new Map<string, number>();
+    // This machine's own goat_host_status answer, for its quota conditions.
+    const localSample = yield* Ref.make<HostStatusEntry | null>(null);
+
+    /** Suspend and resume both start a fresh grace window and drop failures counted so far. */
+    const markWake = Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      yield* Ref.set(clock, {
+        lastTickAt: now,
+        quietUntil: now + thresholds.wakeGraceMs,
+        wokeAt: now,
+      });
+      yield* Ref.update(
+        contacts,
+        (all) => new Map([...all].map(([host, contact]) => [host, forgetFailures(contact)])),
+      );
+    });
+    if (power._tag === "Some") {
+      // A sleep shorter than the tick gap leaves no gap to notice; the power monitor says so.
+      let suspended = (yield* power.value.snapshot).suspended;
+      yield* power.value.streamChanges.pipe(
+        Stream.runForEach((snapshot) => {
+          const changed = snapshot.suspended !== suspended;
+          suspended = snapshot.suspended;
+          return changed ? markWake : Effect.void;
+        }),
+        Effect.forkScoped,
+      );
+    }
 
     const update = (
       host: string,
@@ -112,7 +141,7 @@ export const make = (
         // This machine always answers itself.
         const contact =
           host === null
-            ? recordAnswer(emptyContact, now)
+            ? recordAnswer(emptyContact, now, (yield* Ref.get(localSample)) ?? undefined)
             : ((yield* Ref.get(contacts)).get(host) ?? emptyContact);
         return {
           host,
@@ -142,7 +171,10 @@ export const make = (
       Effect.gen(function* () {
         yield* mergeOutages;
         for (const entry of result.hosts) {
-          if (entry.host === null) continue;
+          if (entry.host === null) {
+            if (entry.reachability === "ok") yield* Ref.set(localSample, entry);
+            continue;
+          }
           const host = entry.host;
           yield* update(host, (contact, now, current) =>
             recordSample(contact, entry, now, current),

@@ -8,5 +8,5 @@ import * as Rescheduler from "./Rescheduler.ts";
 /** Health and Rescheduler for the goal controller and the fleet tools, over one monitor. */
 export const layer = Layer.mergeAll(Health.layer, Rescheduler.layer).pipe(
   Layer.provideMerge(HostHealthMonitor.layer),
-  Layer.provideMerge(FleetHostStates.layer),
+  Layer.provideMerge(Layer.mergeAll(FleetHostStates.layer, FleetHostStates.layerClaims)),
 );

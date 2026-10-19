@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import { type HostStatusEntry, ThreadId } from "@goat/contracts";
+import { type HostStatusEntry, type RuntimeMode, ThreadId } from "@goat/contracts";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -10,6 +10,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as HostPowerMonitor from "../../background/HostPowerMonitor.ts";
 import * as ThreadManagementService from "../../orchestration-v2/ThreadManagementService.ts";
 import Migration0085 from "../../persistence/Migrations/085_FleetHealth.ts";
 import * as SshRemoteDispatch from "../../sshRemote/SshRemoteDispatch.ts";
@@ -36,6 +37,10 @@ interface World {
   }>;
   /** Interrupts the remote applied, by clientRequestId, as a GOAT server dedupes them. */
   readonly appliedInterrupts: Set<string>;
+  /** Hosts whose GOAT predates goat_thread_status. */
+  readonly oldHosts: Set<string>;
+  /** Tools that fail on a host although it answers other calls. */
+  readonly failing: Set<string>;
   /** The next launch creates its thread, then the answer is lost (SSH dropped mid-call). */
   loseNextLaunchResponse: boolean;
 }
@@ -46,6 +51,8 @@ const newWorld = (): World => ({
   launches: [],
   calls: [],
   appliedInterrupts: new Set(),
+  oldHosts: new Set(),
+  failing: new Set(),
   loseNextLaunchResponse: false,
 });
 
@@ -55,13 +62,25 @@ const unavailable = (host: string) =>
     message: host + " did not answer",
   });
 
+const refusedBy = (message: string) =>
+  new SshRemoteDispatch.SshRemoteDispatchError({ reason: "remote_refused", message });
+
+/**
+ * Answers the way SshRemoteDispatch.callHostTool does: the tool's payload itself, and a refusal
+ * (including an older GOAT's missing tool) as a remote_refused error.
+ */
 const fakeDispatch = (world: World) =>
   ({
-    connectedHosts: Effect.succeed(Object.keys(world.reachable)),
-    callHostTool: (call: SshRemoteDispatch.SshHostToolCall) =>
+    connectedHosts: Effect.sync(() => Object.keys(world.reachable)),
+    callHostTool: (
+      call: SshRemoteDispatch.SshHostToolCall,
+      authorize: Effect.Effect<RuntimeMode, Rescheduler.RescheduleNotAllowed>,
+    ) =>
       Effect.gen(function* () {
+        yield* authorize;
         world.calls.push({ host: call.host, tool: call.tool, args: { ...call.arguments } });
         if (world.reachable[call.host] !== true) return yield* unavailable(call.host);
+        if (world.failing.has(call.host + "/" + call.tool)) return yield* unavailable(call.host);
         const thread = world.threads.find(
           (candidate) =>
             candidate.host === call.host && candidate.threadId === call.arguments.threadId,
@@ -69,26 +88,84 @@ const fakeDispatch = (world: World) =>
         const now = DateTime.formatIso(yield* DateTime.now);
         switch (call.tool) {
           case "goat_thread_status":
+            if (world.oldHosts.has(call.host)) {
+              return yield* refusedBy(
+                "GOAT on " +
+                  call.host +
+                  " " +
+                  SshRemoteDispatch.REMOTE_THREAD_STATUS_UNSUPPORTED +
+                  ".",
+              );
+            }
+            if (thread === undefined) return yield* refusedBy("thread_not_found");
             return {
-              structuredContent: {
-                threadId: call.arguments.threadId,
-                title: thread?.title ?? "gone",
-                phase: thread?.phase ?? "completed",
-                terminal: thread?.phase !== "running",
-                run: {
+              threadId: thread.threadId,
+              title: thread.title,
+              phase: thread.phase,
+              terminal: thread.phase !== "running",
+              run: {
+                runId: "run:1",
+                status: thread.phase,
+                requestedAt: now,
+                startedAt: now,
+                completedAt: null,
+              },
+              queuedRunId: null,
+              pendingRequest: null,
+              lastActivityAt: now,
+              lastMessage: null,
+              lastError: null,
+              watch: null,
+            };
+          case "goat_thread_read":
+            if (thread === undefined) return yield* refusedBy("thread_not_found");
+            return {
+              thread: {
+                threadId: thread.threadId,
+                projectId: "project",
+                title: thread.title,
+                createdBy: "agent",
+                creationSource: "mcp",
+                status: thread.phase,
+                latestRunId: "run:1",
+                activeRunId: thread.phase === "running" ? "run:1" : null,
+                providerInstanceId: "codex",
+                model: "gpt-6.1-sol",
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                linkedPullRequest: null,
+                pullRequests: [],
+                titleRegeneration: null,
+                branch: "goal-g1-s0-a1",
+                worktreePath: "/repo",
+                parentThreadId: null,
+                relationshipToParent: null,
+                runCount: 1,
+                itemCount: 0,
+                pendingRequestCount: 0,
+                archived: false,
+                settled: false,
+                settledAt: null,
+                snoozed: false,
+                snoozedUntil: null,
+                createdAt: now,
+                updatedAt: now,
+              },
+              recentRuns: [
+                {
                   runId: "run:1",
-                  status: thread?.phase ?? "completed",
+                  ordinal: 1,
+                  status: thread.phase,
+                  providerInstanceId: "codex",
+                  model: "gpt-6.1-sol",
                   requestedAt: now,
                   startedAt: now,
-                  completedAt: null,
+                  completedAt: thread.phase === "running" ? null : now,
                 },
-                queuedRunId: null,
-                pendingRequest: null,
-                lastActivityAt: now,
-                lastMessage: null,
-                lastError: null,
-                watch: null,
-              },
+              ],
+              items: [],
+              nextPosition: null,
+              hasMore: false,
             };
           case "goat_thread_interrupt": {
             const id = String(call.arguments.clientRequestId);
@@ -96,31 +173,31 @@ const fakeDispatch = (world: World) =>
               thread.phase = "interrupted";
             world.appliedInterrupts.add(id);
             return {
-              structuredContent: {
-                threadId: call.arguments.threadId,
-                runId: null,
-                status: "interrupt_requested",
-              },
+              threadId: call.arguments.threadId,
+              runId: null,
+              status: "interrupt_requested",
             };
           }
           case "goat_thread_list":
             return {
-              structuredContent: {
-                threads: world.threads
-                  .filter(
-                    (entry) =>
-                      entry.host === call.host &&
-                      entry.title.includes(String(call.arguments.titleContains)),
-                  )
-                  .map((entry) => ({ threadId: entry.threadId, title: entry.title })),
-              },
+              threads: world.threads
+                .filter(
+                  (entry) =>
+                    entry.host === call.host &&
+                    entry.title.includes(String(call.arguments.titleContains)),
+                )
+                .map((entry) => ({ threadId: entry.threadId, title: entry.title })),
             };
           default:
-            return { structuredContent: {} };
+            return {};
         }
       }),
-    launchThread: (input: SshRemoteDispatch.SshLaunchInput) =>
+    launchThread: (
+      input: SshRemoteDispatch.SshLaunchInput,
+      beforeLaunch: Effect.Effect<void, Rescheduler.RescheduleNotAllowed>,
+    ) =>
       Effect.gen(function* () {
+        yield* beforeLaunch;
         const host = input.host ?? "local";
         if (world.reachable[host] !== true) return yield* unavailable(host);
         world.launches.push(input);
@@ -157,8 +234,12 @@ const probeOf = (world: World) => (host: string) =>
       : { host, reachability: "unreachable", message: host + " timed out" },
   );
 
-/** A fresh server over one database file: host contacts start empty, cordons persist. */
-const layerFor = (world: World, filename: string) =>
+/** A fresh server over one database file: host contacts start empty, cordons and claims persist. */
+const layerFor = (
+  world: World,
+  filename: string,
+  power?: Layer.Layer<HostPowerMonitor.HostPowerMonitor>,
+) =>
   Layer.mergeAll(Health.layer, Rescheduler.layer).pipe(
     Layer.provideMerge(
       Layer.effect(
@@ -166,7 +247,7 @@ const layerFor = (world: World, filename: string) =>
         HostHealthMonitor.make({ probe: probeOf(world) }),
       ),
     ),
-    Layer.provideMerge(FleetHostStates.layer),
+    Layer.provideMerge(Layer.mergeAll(FleetHostStates.layer, FleetHostStates.layerClaims)),
     Layer.provideMerge(
       // A restart reopens the same file; the tables already exist then.
       Layer.effectDiscard(Effect.ignore(Migration0085)).pipe(
@@ -177,13 +258,18 @@ const layerFor = (world: World, filename: string) =>
       Layer.mergeAll(
         Layer.succeed(SshRemoteDispatch.SshRemoteDispatch, fakeDispatch(world)),
         Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+        power ?? Layer.empty,
       ),
     ),
   );
 
 type Services = Layer.Success<ReturnType<typeof layerFor>>;
-const withServer = <A, E>(world: World, filename: string, body: Effect.Effect<A, E, Services>) =>
-  body.pipe(Effect.provide(layerFor(world, filename)));
+const withServer = <A, E>(
+  world: World,
+  filename: string,
+  body: Effect.Effect<A, E, Services>,
+  power?: Layer.Layer<HostPowerMonitor.HostPowerMonitor>,
+) => body.pipe(Effect.provide(layerFor(world, filename, power)));
 
 const databaseFile = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -215,16 +301,36 @@ const request = (
 });
 
 /** Thread health reads, a minute apart, as the controller makes them; each is a host contact. */
-const observe = (minutes: number) =>
+const observe = (minutes: number, target = ref) =>
   Effect.gen(function* () {
     const health = yield* Health.Health;
-    let last = yield* health.threadHealth(ref);
+    let last = yield* health.threadHealth(target);
     for (let minute = 0; minute < minutes; minute += 1) {
       yield* TestClock.adjust(Duration.minutes(1));
-      last = yield* health.threadHealth(ref);
+      last = yield* health.threadHealth(target);
     }
     return last;
   });
+
+const loseA = (world: World) =>
+  Effect.gen(function* () {
+    world.reachable.A = false;
+    expect((yield* observe(9))._tag).toBe("host_lost");
+  });
+
+const testScoped = <A, E>(
+  name: string,
+  body: (world: World, filename: string) => Effect.Effect<A, E, Services>,
+) =>
+  it.effect(name, () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const world = newWorld();
+        const filename = yield* databaseFile;
+        yield* withServer(world, filename, body(world, filename));
+      }),
+    ),
+  );
 
 describe("Rescheduler", () => {
   it.effect(
@@ -234,18 +340,16 @@ describe("Rescheduler", () => {
         Effect.gen(function* () {
           const world = newWorld();
           const filename = yield* databaseFile;
-
           yield* withServer(
             world,
             filename,
             Effect.gen(function* () {
               const rescheduler = yield* Rescheduler.Rescheduler;
-              expect((yield* observe(0))._tag).toBe("healthy");
+              // The fake answers with real payloads, so a running attempt reads healthy.
+              expect(yield* observe(0)).toEqual({ _tag: "healthy", idle: false });
               world.reachable.A = false;
               expect((yield* observe(3))._tag).toBe("unknown");
-              // Unreachable but not Lost: nothing moves yet.
               expect(yield* rescheduler.reschedule(request())).toMatchObject({
-                _tag: "Refused",
                 reason: "host_still_answers",
               });
               expect((yield* observe(5))._tag).toBe("host_lost");
@@ -257,8 +361,7 @@ describe("Rescheduler", () => {
               expect(world.launches).toHaveLength(1);
             }),
           );
-
-          // After a restart the retry finds the launched thread instead of starting a second one.
+          // After a restart the claim points at B, and the retry adopts the thread found there.
           yield* withServer(
             world,
             filename,
@@ -277,12 +380,11 @@ describe("Rescheduler", () => {
               expect(world.launches).toHaveLength(1);
             }),
           );
-
           const launch = world.launches[0]!;
           expect(launch).toMatchObject({
             host: "B",
             cwd: "/repo",
-            title: Rescheduler.attemptTitle("goal-g1-s0-a2", "goal:g1:s0:a2:launch"),
+            title: Rescheduler.attemptTitle("goal:g1", "goal:g1:s0:a2:launch", "goal-g1-s0-a2"),
             runtimeMode: "full-access",
             workspace: {
               type: "worktree",
@@ -297,87 +399,174 @@ describe("Rescheduler", () => {
       ),
   );
 
-  it.effect(
-    "never moves work off a host that answers before its attempt is interrupted, and respects cordons",
-    () =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const world = newWorld();
-          const filename = yield* databaseFile;
-          yield* withServer(
-            world,
-            filename,
-            Effect.gen(function* () {
-              const rescheduler = yield* Rescheduler.Rescheduler;
-              const monitor = yield* HostHealthMonitor.HostHealthMonitor;
-              const states = yield* FleetHostStates.FleetHostStates;
-              yield* monitor.annotate({
-                hosts: [{ host: "B", reachability: "ok", serverVersion: "1" }],
-              });
+  testScoped("never launches elsewhere while an earlier launch's host cannot be checked", (world) =>
+    Effect.gen(function* () {
+      const rescheduler = yield* Rescheduler.Rescheduler;
+      world.reachable.C = true;
+      yield* loseA(world);
+      world.loseNextLaunchResponse = true;
+      const first = yield* rescheduler.reschedule(request({ targetHost: "B" }));
+      expect(first).toMatchObject({ reason: "no_capacity" });
+      // B now fails its thread list: the outcome there is unknown, so C gets nothing.
+      world.failing.add("B/goat_thread_list");
+      expect(yield* rescheduler.reschedule(request())).toMatchObject({ reason: "no_capacity" });
+      expect(world.launches.map((launch) => launch.host)).toEqual(["B"]);
+      world.failing.delete("B/goat_thread_list");
+      expect(yield* rescheduler.reschedule(request())).toMatchObject({
+        _tag: "Rescheduled",
+        host: "B",
+        threadId: "thread:B1",
+      });
+      expect(world.launches).toHaveLength(1);
+    }),
+  );
 
-              expect(
-                yield* rescheduler.reschedule(request({ reason: "host_unreachable" })),
-              ).toMatchObject({
-                reason: "host_still_answers",
-              });
-              const stalled = request({ reason: "stalled" });
-              expect(yield* rescheduler.reschedule(stalled)).toMatchObject({
-                reason: "host_still_answers",
-              });
-              expect(world.launches).toHaveLength(0);
-              expect(
-                world.calls.filter((call) => call.tool === "goat_thread_interrupt"),
-              ).toHaveLength(1);
+  testScoped("never adopts another owner's thread on the same branch name", (world) =>
+    Effect.gen(function* () {
+      const rescheduler = yield* Rescheduler.Rescheduler;
+      world.threads.push({
+        host: "B",
+        threadId: ThreadId.make("thread:other"),
+        title: Rescheduler.attemptTitle("goal:other", "goal:g1:s0:a2:launch", "goal-g1-s0-a2"),
+        phase: "running",
+      });
+      yield* loseA(world);
+      const moved = yield* rescheduler.reschedule(request());
+      expect(moved).toMatchObject({ _tag: "Rescheduled", host: "B", threadId: "thread:B1" });
+      expect(world.launches).toHaveLength(1);
+    }),
+  );
 
-              yield* states.cordon({
-                host: "B",
-                draining: false,
-                reason: "maintenance",
-                changedBy: "test",
-              });
-              expect(yield* rescheduler.reschedule(stalled)).toMatchObject({
-                reason: "no_capacity",
-              });
-              yield* states.uncordon("B");
+  testScoped(
+    "asks a host remembered as Lost again before moving, and interrupts it when it answers",
+    (world) =>
+      Effect.gen(function* () {
+        const rescheduler = yield* Rescheduler.Rescheduler;
+        yield* loseA(world);
+        world.reachable.A = true;
+        expect(
+          yield* rescheduler.reschedule(request({ reason: "stalled", force: true })),
+        ).toMatchObject({
+          reason: "host_still_answers",
+        });
+        expect(world.launches).toHaveLength(0);
+        expect(world.threads[0]!.phase).toBe("interrupted");
+        // Confirmed stopped: now it moves.
+        expect(yield* rescheduler.reschedule(request({ reason: "stalled" }))).toMatchObject({
+          _tag: "Rescheduled",
+        });
+      }),
+  );
 
-              expect(yield* rescheduler.reschedule(stalled)).toMatchObject({
-                _tag: "Rescheduled",
-                host: "B",
-              });
-              expect(world.launches).toHaveLength(1);
+  testScoped("stops when the caller loses its authority while the move waits", (world) =>
+    Effect.gen(function* () {
+      const rescheduler = yield* Rescheduler.Rescheduler;
+      yield* loseA(world);
+      let mode: RuntimeMode = "full-access";
+      const authorize = Effect.sync(() => mode);
+      mode = "approval-required";
+      expect(yield* rescheduler.reschedule(request({ authorize }))).toMatchObject({
+        reason: "not_allowed",
+      });
+      const gone = Effect.fail(
+        new Rescheduler.RescheduleNotAllowed({ message: "The launcher thread was archived." }),
+      );
+      expect(yield* rescheduler.reschedule(request({ authorize: gone }))).toEqual({
+        _tag: "Refused",
+        reason: "not_allowed",
+        message: "The launcher thread was archived.",
+      });
+      expect(world.launches).toHaveLength(0);
+      expect(world.calls.filter((call) => call.tool === "goat_thread_interrupt")).toHaveLength(0);
+    }),
+  );
 
-              // A host remembered as Lost that answers again is asked first and keeps its work.
-              const second = {
-                host: "A",
-                threadId: ThreadId.make("thread:a2"),
-                title: "Worker 2",
-                phase: "running",
-              };
-              world.threads.push(second);
-              world.reachable.A = false;
-              const ref2 = { ...ref, threadId: second.threadId };
-              const health = yield* Health.Health;
-              for (let minute = 0; minute < 9; minute += 1) {
-                yield* TestClock.adjust(Duration.minutes(1));
-                yield* health.threadHealth(ref2);
-              }
-              expect((yield* health.threadHealth(ref2))._tag).toBe("host_lost");
-              world.reachable.A = true;
-              const back = request({
-                ref: ref2,
-                reason: "stalled",
-                workspace: { baseRef: "dev", branch: "goal-g1-s1-a2", startFromOrigin: true },
-                clientRequestId: "goal:g1:s1:a2:launch",
-              });
-              expect(yield* rescheduler.reschedule(back)).toMatchObject({
-                reason: "host_still_answers",
-              });
-              expect(world.launches).toHaveLength(1);
-              expect(second.phase).toBe("interrupted");
-            }),
-          );
-        }),
-      ),
+  testScoped("drains between runs and never interrupts a running turn", (world) =>
+    Effect.gen(function* () {
+      const rescheduler = yield* Rescheduler.Rescheduler;
+      expect(yield* rescheduler.reschedule(request({ reason: "drain" }))).toMatchObject({
+        reason: "host_still_answers",
+      });
+      expect(world.calls.filter((call) => call.tool === "goat_thread_interrupt")).toHaveLength(0);
+      world.threads[0]!.phase = "completed";
+      expect(yield* rescheduler.reschedule(request({ reason: "drain" }))).toMatchObject({
+        _tag: "Rescheduled",
+        host: "B",
+      });
+    }),
+  );
+
+  testScoped("reads an older host's thread through goat_thread_read", (world) =>
+    Effect.gen(function* () {
+      const rescheduler = yield* Rescheduler.Rescheduler;
+      world.oldHosts.add("A");
+      world.threads[0]!.phase = "completed";
+      expect(yield* observe(0)).toEqual({ _tag: "healthy", idle: true });
+      expect(yield* rescheduler.reschedule(request({ reason: "manual" }))).toMatchObject({
+        _tag: "Rescheduled",
+      });
+      expect(
+        world.calls.some((call) => call.host === "A" && call.tool === "goat_thread_read"),
+      ).toBe(true);
+    }),
+  );
+
+  testScoped("respects cordons when placing", (world) =>
+    Effect.gen(function* () {
+      const rescheduler = yield* Rescheduler.Rescheduler;
+      const states = yield* FleetHostStates.FleetHostStates;
+      world.threads[0]!.phase = "completed";
+      yield* states.cordon({
+        host: "B",
+        draining: false,
+        reason: "maintenance",
+        changedBy: "test",
+      });
+      expect(yield* rescheduler.reschedule(request({ reason: "manual" }))).toMatchObject({
+        reason: "no_capacity",
+      });
+      yield* states.uncordon("B");
+      expect(yield* rescheduler.reschedule(request({ reason: "manual" }))).toMatchObject({
+        _tag: "Rescheduled",
+        host: "B",
+      });
+    }),
+  );
+
+  testScoped("reports this machine's own quota limits", () =>
+    Effect.gen(function* () {
+      const monitor = yield* HostHealthMonitor.HostHealthMonitor;
+      const local = {
+        host: null,
+        reachability: "ok",
+        metrics: {
+          quotas: [
+            {
+              instanceId: "codex",
+              driver: "codex",
+              fromCache: false,
+              limits: {
+                checkedAt: "2026-10-20T00:00:00.000Z",
+                windows: [
+                  {
+                    id: "primary",
+                    kind: "weekly",
+                    label: "Weekly",
+                    usedPercent: 100,
+                    resetsAt: "2099-01-01T00:00:00.000Z",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      } as unknown as HostStatusEntry;
+      const annotated = yield* monitor.annotate({ hosts: [local] });
+      expect(annotated.hosts[0]!.conditions?.map((condition) => condition.type)).toEqual([
+        "Ready",
+        "QuotaExhausted",
+      ]);
+    }),
   );
 
   it.effect("does not count a host as Lost when this machine wakes from an hour of sleep", () =>
@@ -393,15 +582,12 @@ describe("Rescheduler", () => {
             const rescheduler = yield* Rescheduler.Rescheduler;
             yield* monitor.tick;
             world.reachable.A = false;
-            // The lid closes: two contacts fail, then the machine sleeps for an hour.
             yield* observe(2);
             yield* TestClock.adjust(Duration.minutes(60));
             // The first call after waking can beat the clock source; it must still see the wake.
             expect((yield* (yield* Health.Health).threadHealth(ref))._tag).toBe("unknown");
-            // Tunnels take a few minutes to come back after waking.
             for (let minute = 0; minute < 4; minute += 1) {
               yield* TestClock.adjust(Duration.minutes(1));
-              yield* monitor.tick;
               expect((yield* (yield* Health.Health).threadHealth(ref))._tag).toBe("unknown");
             }
             expect(yield* rescheduler.reschedule(request())).toMatchObject({
@@ -416,45 +602,76 @@ describe("Rescheduler", () => {
     ),
   );
 
-  it.effect("stops a superseded attempt once when its host returns", () =>
-    Effect.scoped(
+  it.effect(
+    "drops failures when the power monitor reports a suspend shorter than the tick gap",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const world = newWorld();
+          const filename = yield* databaseFile;
+          const power = yield* HostPowerMonitor.make();
+          const powerLayer = Layer.succeed(HostPowerMonitor.HostPowerMonitor, power);
+          yield* withServer(
+            world,
+            filename,
+            Effect.gen(function* () {
+              const health = yield* Health.Health;
+              world.reachable.A = false;
+              // Three failures 30 s apart: Unreachable, with no tick gap long enough to look like sleep.
+              for (let step = 0; step < 3; step += 1) {
+                yield* TestClock.adjust(Duration.seconds(30));
+                yield* health.threadHealth(ref);
+              }
+              expect(
+                (yield* health.hostCondition("A")).conditions.map((condition) => condition.type),
+              ).toContain("Unreachable");
+              const snapshot = yield* power.snapshot;
+              const at = yield* DateTime.now;
+              // The power PubSub keeps only the newest change, so let the consumer see each one.
+              const settle = Effect.forEach([1, 2, 3, 4], () => Effect.yieldNow, { discard: true });
+              yield* power.report({ ...snapshot, suspended: true, stale: false, updatedAt: at });
+              yield* settle;
+              yield* power.report({ ...snapshot, suspended: false, stale: false, updatedAt: at });
+              yield* settle;
+              expect(
+                (yield* health.hostCondition("A")).conditions.map((condition) => condition.type),
+              ).not.toContain("Unreachable");
+            }),
+            powerLayer,
+          );
+        }),
+      ),
+  );
+
+  testScoped(
+    "stops a superseded attempt once when its host returns, and fails on a refusal",
+    (world) =>
       Effect.gen(function* () {
-        const world = newWorld();
-        const filename = yield* databaseFile;
-        yield* withServer(
-          world,
-          filename,
-          Effect.gen(function* () {
-            const fence = Rescheduler.fenceStaleAttempt({
-              ref,
-              successorHost: "B",
-              successorBranch: "goal-g1-s0-a2",
-              clientRequestId: "goal:g1:s0:a1:interrupt",
-              ceiling: "full-access",
-            });
-            world.reachable.A = false;
-            expect((yield* Effect.result(fence))._tag).toBe("Failure");
-            world.reachable.A = true;
-            yield* fence;
-            yield* fence;
-            const interrupts = world.calls.filter(
-              (call) => call.host === "A" && call.tool === "goat_thread_interrupt",
-            );
-            expect(interrupts.map((call) => call.args.clientRequestId)).toEqual([
-              "goal:g1:s0:a1:interrupt",
-              "goal:g1:s0:a1:interrupt",
-              "goal:g1:s0:a1:interrupt",
-            ]);
-            expect(String(interrupts[1]!.args.reason)).toContain(
-              "continues on B on branch goal-g1-s0-a2",
-            );
-            expect(world.appliedInterrupts.size).toBe(1);
-            expect(
-              world.calls.some((call) => call.host === "A" && call.tool === "goat_thread_send"),
-            ).toBe(false);
-          }),
+        const fence = Rescheduler.fenceStaleAttempt({
+          ref,
+          successorHost: "B",
+          successorBranch: "goal-g1-s0-a2",
+          clientRequestId: "goal:g1:s0:a1:interrupt",
+          authorize: Effect.succeed<RuntimeMode>("full-access"),
+        });
+        world.reachable.A = false;
+        expect((yield* Effect.result(fence))._tag).toBe("Failure");
+        world.reachable.A = true;
+        yield* fence;
+        yield* fence;
+        const interrupts = world.calls.filter(
+          (call) => call.host === "A" && call.tool === "goat_thread_interrupt",
         );
+        expect(new Set(interrupts.map((call) => call.args.clientRequestId))).toEqual(
+          new Set(["goal:g1:s0:a1:interrupt"]),
+        );
+        expect(String(interrupts[1]!.args.reason)).toContain(
+          "continues on B on branch goal-g1-s0-a2",
+        );
+        expect(world.appliedInterrupts.size).toBe(1);
+        expect(
+          world.calls.some((call) => call.host === "A" && call.tool === "goat_thread_send"),
+        ).toBe(false);
       }),
-    ),
   );
 });

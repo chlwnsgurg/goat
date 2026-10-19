@@ -103,6 +103,7 @@ export const GoatThreadRescheduleResult = Schema.Union([
       "budget",
       "no_resume_point",
       "unsupported_remote",
+      "not_allowed",
     ]),
     message: Schema.String,
   }),

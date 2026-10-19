@@ -1,7 +1,10 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
-/** Self-healing state (docs/internals/agentic-k8s.md "Persistence"): host cordons and replicas. */
+/**
+ * Self-healing state (docs/internals/agentic-k8s.md "Persistence"): host cordons, replicas, and the
+ * launch claims that keep a reschedule from starting the same attempt twice.
+ */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`CREATE TABLE fleet_host_states (
@@ -20,5 +23,14 @@ export default Effect.gen(function* () {
     commit_oid TEXT NOT NULL,
     captured_at TEXT NOT NULL,
     PRIMARY KEY (owner_key, generation)
+  )`;
+  yield* sql`CREATE TABLE fleet_reschedule_claims (
+    client_request_id TEXT PRIMARY KEY,
+    owner_key TEXT NOT NULL,
+    target_host TEXT NOT NULL,
+    title TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    thread_id TEXT,
+    claimed_at TEXT NOT NULL
   )`;
 });
