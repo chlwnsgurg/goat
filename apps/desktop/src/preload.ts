@@ -241,7 +241,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   onSystemWake: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, wake: unknown) => {
       if (typeof wake !== "object" || wake === null || !("reason" in wake)) return;
-      if (wake.reason !== "resume" && wake.reason !== "unlock-screen") return;
+      if (wake.reason !== "suspend" && wake.reason !== "resume" && wake.reason !== "unlock-screen")
+        return;
       const asleepMs = "asleepMs" in wake ? wake.asleepMs : null;
       listener({
         reason: wake.reason,

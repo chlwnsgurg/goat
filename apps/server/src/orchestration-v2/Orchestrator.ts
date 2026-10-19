@@ -13057,7 +13057,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandThreadId(command),
         Effect.suspend(() => {
           const effect = dispatchWithReceiptEffect(command);
-          if (command.type === "delegated_task.request" || command.type === "prepared-run.retry") {
+          // Resuming a held queue starts its next run, so it is new work like a message.
+          if (
+            command.type === "delegated_task.request" ||
+            command.type === "prepared-run.retry" ||
+            command.type === "queue.resume"
+          ) {
             return admission.admit(effect);
           }
           if (command.type !== "message.dispatch") return effect;
