@@ -316,6 +316,21 @@ export class ChannelLedger extends Context.Service<
     }) => Effect.Effect<void, ChannelLedgerError>;
     /** Which attempt a recorded stop is on; it starts at 0. */
     readonly stopAttempt: (eventId: string) => Effect.Effect<number, ChannelLedgerError>;
+    /**
+     * The code an approval card goes by in its conversation: "A1", "A2", … in the order cards were
+     * first issued there, never reused, so a code names one request for good. Asking again for the
+     * same request returns its code.
+     */
+    readonly issueApprovalCode: (input: {
+      readonly conversationId: ChannelConversationId;
+      readonly requestId: string;
+      readonly now: string;
+    }) => Effect.Effect<string, ChannelLedgerError>;
+    /** The request a code was issued for in this conversation, if any. */
+    readonly approvalRequestForCode: (input: {
+      readonly conversationId: ChannelConversationId;
+      readonly code: string;
+    }) => Effect.Effect<string | undefined, ChannelLedgerError>;
     /** Moves a stop to its next attempt after the orchestrator refused the current one. */
     readonly advanceStopAttempt: (input: {
       readonly eventId: string;
@@ -520,6 +535,15 @@ const decodeBot = Schema.decodeUnknownSync(Schema.fromJsonString(BotState));
 const encodeScopes = Schema.encodeSync(Schema.fromJsonString(AuthEnvironmentScopes));
 const decodeScopes = Schema.decodeUnknownSync(Schema.fromJsonString(AuthEnvironmentScopes));
 const encodeStrings = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
+const ApprovalCodeCount = Schema.fromJsonString(Schema.Struct({ n: Schema.Number }));
+const ApprovalCodeOf = Schema.fromJsonString(Schema.Struct({ code: Schema.String }));
+const ApprovalCodeTarget = Schema.fromJsonString(Schema.Struct({ requestId: Schema.String }));
+const encodeApprovalCount = Schema.encodeSync(ApprovalCodeCount);
+const decodeApprovalCount = Schema.decodeUnknownSync(ApprovalCodeCount);
+const encodeApprovalOf = Schema.encodeSync(ApprovalCodeOf);
+const decodeApprovalOf = Schema.decodeUnknownSync(ApprovalCodeOf);
+const encodeApprovalTarget = Schema.encodeSync(ApprovalCodeTarget);
+const decodeApprovalTarget = Schema.decodeUnknownSync(ApprovalCodeTarget);
 const decodeStrings = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 const encodeReply = Schema.encodeSync(Schema.fromJsonString(ReplyState));
 const decodeReply = Schema.decodeUnknownSync(Schema.fromJsonString(ReplyState));
@@ -1419,6 +1443,62 @@ const make = Effect.gen(function* () {
         VALUES (${"runs-final:" + input.taskId}, '{}', ${input.now})
         ON CONFLICT (key) DO NOTHING
       `.pipe(Effect.asVoid, Effect.mapError(toLedgerError("settleRunHistory"))),
+
+    issueApprovalCode: (input) =>
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const ofKey = "approval-code-of:" + input.requestId;
+            const issued = yield* sql<{ readonly value_json: string }>`
+              SELECT value_json FROM channel_runtime_state WHERE key = ${ofKey}
+            `;
+            if (issued[0] !== undefined) {
+              return decodeApprovalOf(issued[0].value_json).code;
+            }
+            const counterKey = "approval-codes:" + input.conversationId;
+            const counter = yield* sql<{ readonly value_json: string }>`
+              SELECT value_json FROM channel_runtime_state WHERE key = ${counterKey}
+            `;
+            const next =
+              (counter[0] === undefined ? 0 : decodeApprovalCount(counter[0].value_json).n) + 1;
+            const code = "A" + next;
+            yield* sql`
+              INSERT INTO channel_runtime_state (key, value_json, updated_at)
+              VALUES (${counterKey}, ${encodeApprovalCount({ n: next })}, ${input.now})
+              ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json,
+                updated_at = excluded.updated_at
+            `;
+            yield* sql`
+              INSERT INTO channel_runtime_state (key, value_json, updated_at)
+              VALUES (
+                ${"approval-code:" + code + ":" + input.conversationId},
+                ${encodeApprovalTarget({ requestId: input.requestId })},
+                ${input.now}
+              )
+            `;
+            yield* sql`
+              INSERT INTO channel_runtime_state (key, value_json, updated_at)
+              VALUES (
+                ${ofKey},
+                ${encodeApprovalOf({ code })},
+                ${input.now}
+              )
+            `;
+            return code;
+          }),
+        )
+        .pipe(Effect.mapError(toLedgerError("issueApprovalCode"))),
+
+    approvalRequestForCode: (input) =>
+      sql<{ readonly value_json: string }>`
+        SELECT value_json FROM channel_runtime_state
+        WHERE key = ${"approval-code:" + input.code + ":" + input.conversationId}
+      `.pipe(
+        Effect.map((rows) =>
+          rows[0] === undefined ? undefined : decodeApprovalTarget(rows[0].value_json).requestId,
+        ),
+        Effect.mapError(toLedgerError("approvalRequestForCode")),
+      ),
 
     stopAttempt: (eventId) =>
       sql<{ readonly value_json: string }>`

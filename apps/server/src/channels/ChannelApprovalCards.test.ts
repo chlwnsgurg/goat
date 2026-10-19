@@ -10,7 +10,6 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
 
-import { approvalCode } from "./channelApprovalCards.ts";
 import { CHANNEL_COPY } from "./channelCopy.ts";
 import * as ChannelGateway from "./ChannelGateway.ts";
 import * as ChannelIdentityService from "./ChannelIdentityService.ts";
@@ -90,7 +89,8 @@ describe("GOAT Bot approval cards", () => {
         cards[0]?.text,
         "clean the build cache: the agent wants to run a command.\nrm -rf build/",
       );
-      const code = approvalCode(request.id);
+      // Codes are issued in order per conversation and never reused.
+      const code = "A1";
       assert.deepStrictEqual(cards[0]?.channel?.options, ["Approve " + code, "Deny " + code]);
 
       // The button sends its label, which is answered without the model.
@@ -181,7 +181,16 @@ describe("GOAT Bot approval cards", () => {
         const ask = (yield* botMessages).messages.findLast(
           (message) => message.channel?.kind === "question",
         );
-        const depsCode = approvalCode("approval:deps");
+        // Asking again for an issued request returns the code its card already shows.
+        const codeOf = (requestId: string) =>
+          ledger.issueApprovalCode({
+            conversationId: deps.conversationId,
+            requestId,
+            now: "2026-10-12T00:02:00.000Z",
+          });
+        const depsCode = yield* codeOf("approval:deps");
+        const loginCode = yield* codeOf("approval:login");
+        assert.sameMembers([depsCode, loginCode], ["A1", "A2"]);
         assert.include(ask?.channel?.options ?? [], "Deny " + depsCode);
 
         yield* gateway.ingest(goatInput("Deny " + depsCode, "m4"), rpcContext);
@@ -193,10 +202,11 @@ describe("GOAT Bot approval cards", () => {
         yield* gateway.ingest(goatInput("approve the fix login PR", "m5"), rpcContext);
         yield* runtime.drain;
         assert.strictEqual(responses(harness).length, 1);
-        yield* gateway.ingest(
-          goatInput("approve " + approvalCode("approval:login").toLowerCase(), "m6"),
-          rpcContext,
-        );
+        // A code no card was issued under is conversation too.
+        yield* gateway.ingest(goatInput("approve A9", "m6"), rpcContext);
+        yield* runtime.drain;
+        assert.strictEqual(responses(harness).length, 1);
+        yield* gateway.ingest(goatInput("approve " + loginCode.toLowerCase(), "m7"), rpcContext);
         yield* runtime.drain;
         assert.strictEqual(responses(harness)[1]?.threadId, login.worker!.threadId);
       }).pipe(Effect.provide(harness.layer));
@@ -247,10 +257,7 @@ describe("GOAT Bot approval cards", () => {
       const card = resultsTo(harness.slackSent, "question")[0];
       assert.strictEqual(
         card?.message.text,
-        "deploy staging: the agent wants to run a command.\n• Approve " +
-          approvalCode("approval:deploy") +
-          "\n• Deny " +
-          approvalCode("approval:deploy"),
+        "deploy staging: the agent wants to run a command.\n• Approve A1\n• Deny A1",
       );
 
       yield* identities.unlink({ connectionId: "slack-1", externalActorId: "U1" });

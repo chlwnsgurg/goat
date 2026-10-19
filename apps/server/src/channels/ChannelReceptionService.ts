@@ -91,7 +91,6 @@ import { CHANNEL_COPY } from "./channelCopy.ts";
 import {
   approvalCard,
   type ApprovalReply,
-  matchApprovalCard,
   type OpenApprovalCard,
   openApprovalCards,
   parseApprovalReply,
@@ -764,8 +763,14 @@ const make = Effect.gen(function* () {
       for (const card of openApprovalCards([task])) {
         if (!wanted.has(card.approval.requestId)) continue;
         const detail = yield* approvalDetail(card.approval);
+        const code = yield* ledger.issueApprovalCode({
+          conversationId: task.conversationId,
+          requestId: card.approval.requestId,
+          now: DateTime.formatIso(yield* DateTime.now),
+        });
         const words = approvalCard({
           card,
+          code,
           bySubagent: card.approval.threadId !== task.worker?.threadId,
           kind: detail?.kind,
           prompt: detail?.prompt,
@@ -783,6 +788,47 @@ const make = Effect.gen(function* () {
         );
       }
       return deliveries;
+    });
+
+  /**
+   * What an approve or deny reply does: a bare verb answers the only open card (or asks which of
+   * several); a code answers the request it was issued for, or says it was already answered.
+   * Undefined means the message was not about a card and goes to the model as usual.
+   */
+  const decideApprovalReply = (
+    reply: ApprovalReply,
+    conversationId: ChannelConversationId,
+    inputId: ChannelInputId,
+    answerer: Effect.Effect<ChannelRequester | undefined, ChannelLedger.ChannelLedgerError>,
+    via: ChannelRequester["originKind"],
+  ) =>
+    Effect.gen(function* () {
+      const open = openApprovalCards(yield* ledger.listConversationNeedsYou(conversationId));
+      const answer = (card: OpenApprovalCard) =>
+        Effect.gen(function* () {
+          return {
+            text: yield* answerApproval(card, reply.decision, yield* answerer, inputId, via),
+            options: undefined,
+            task: card.task,
+          };
+        });
+      if (reply.code === undefined) {
+        if (open.length === 0) return undefined;
+        if (open.length === 1) return yield* answer(open[0]!);
+        const now = DateTime.formatIso(yield* DateTime.now);
+        const coded = yield* Effect.forEach(open, (card) =>
+          ledger
+            .issueApprovalCode({ conversationId, requestId: card.approval.requestId, now })
+            .pipe(Effect.map((code) => ({ card, code }))),
+        );
+        return { ...whichApproval(coded, reply.decision), task: undefined };
+      }
+      const requestId = yield* ledger.approvalRequestForCode({ conversationId, code: reply.code });
+      if (requestId === undefined) return undefined;
+      const card = open.find((candidate) => candidate.approval.requestId === requestId);
+      return card === undefined
+        ? { text: CHANNEL_COPY.approvalAlreadyAnswered, options: undefined, task: undefined }
+        : yield* answer(card);
     });
 
   const receive: ChannelReceptionService["Service"]["receive"] = (inputId, owner) =>
@@ -889,33 +935,17 @@ const make = Effect.gen(function* () {
         message.intent === "message" && requester.originKind !== "mcp"
           ? parseApprovalReply(message.text)
           : undefined;
-      const approvalMatch =
+      const answer =
         approvalReply === undefined
           ? undefined
-          : matchApprovalCard(
-              openApprovalCards(yield* ledger.listConversationNeedsYou(conversationId)),
-              approvalReply.target,
+          : yield* decideApprovalReply(
+              approvalReply,
+              conversationId,
+              inputId,
+              judgedNow,
+              message.kind,
             );
-      if (
-        approvalReply !== undefined &&
-        approvalMatch !== undefined &&
-        approvalMatch.type !== "none"
-      ) {
-        const answer =
-          approvalMatch.type === "several"
-            ? whichApproval(approvalMatch.cards, approvalReply.decision)
-            : approvalMatch.type === "gone"
-              ? { text: CHANNEL_COPY.approvalAlreadyAnswered, options: undefined }
-              : {
-                  text: yield* answerApproval(
-                    approvalMatch.card,
-                    approvalReply.decision,
-                    yield* judgedNow,
-                    inputId,
-                    message.kind,
-                  ),
-                  options: undefined,
-                };
+      if (answer !== undefined) {
         yield* ledger.completeReception({
           owner,
           inputId,
@@ -935,7 +965,7 @@ const make = Effect.gen(function* () {
               kind: answer.options === undefined ? "receipt" : "question",
               text: answer.text,
               inputId,
-              task: approvalMatch.type === "one" ? approvalMatch.card.task : undefined,
+              task: answer.task,
               mentionActorId: mention,
               options: answer.options,
             }),
