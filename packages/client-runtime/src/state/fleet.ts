@@ -207,6 +207,11 @@ export interface FleetMachine {
   readonly os: ExecutionEnvironmentPlatformOs | null;
   readonly machineKind: EnvironmentMachineKind | null;
   readonly environmentId: EnvironmentId | null;
+  /** The dispatcher and SSH alias that reach a host with no environment of its own. */
+  readonly reachedVia: {
+    readonly dispatcherEnvironmentId: EnvironmentId;
+    readonly alias: string;
+  } | null;
   readonly cloudState: CloudMachineState | null;
   readonly running: number;
   readonly attention: number;
@@ -294,6 +299,7 @@ export function buildFleet(input: {
       os: environment.os ?? null,
       machineKind: environment.machineKind ?? null,
       environmentId: environment.environmentId,
+      reachedVia: null,
       cloudState: null,
       running: 0,
       attention: 0,
@@ -383,6 +389,7 @@ export function buildFleet(input: {
         os: null,
         machineKind: null,
         environmentId: null,
+        reachedVia: { dispatcherEnvironmentId: dispatcher, alias },
         cloudState: null,
         running: 0,
         attention: 0,
