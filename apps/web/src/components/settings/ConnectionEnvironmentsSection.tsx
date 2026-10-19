@@ -10,6 +10,7 @@ import { SessionPermissions } from "./SessionPermissions";
 import {
   ChevronRightIcon,
   ChevronsLeftRightEllipsisIcon,
+  CopyIcon,
   EllipsisIcon,
   PlusIcon,
   RouteIcon,
@@ -672,12 +673,21 @@ function SavedBackendListRow({
             {routesOpen ? "Hide routes" : "Routes"}
           </MenuItem>
           {mcpUrl ? (
-            <MenuItem onClick={() => copyMcpUrl(mcpUrl, { url: mcpUrl })}>Copy MCP URL</MenuItem>
+            <MenuItem onClick={() => copyMcpUrl(mcpUrl, { url: mcpUrl })}>
+              <CopyIcon />
+              Copy MCP URL
+            </MenuItem>
           ) : null}
           {errorTraceId ? (
-            <MenuItem onClick={() => copyTraceId(errorTraceId)}>Copy trace ID</MenuItem>
+            <MenuItem onClick={() => copyTraceId(errorTraceId)}>
+              <CopyIcon />
+              Copy trace ID
+            </MenuItem>
           ) : null}
-          <MenuItem onClick={copyDiagnostic}>Copy diagnostic</MenuItem>
+          <MenuItem onClick={copyDiagnostic}>
+            <CopyIcon />
+            Copy diagnostic
+          </MenuItem>
           <MenuSeparator />
           {savedSshTarget && isSshHostAlias(savedSshTarget.alias) && onForget ? (
             <MenuItem variant="destructive" onClick={() => onForget(environment)}>
