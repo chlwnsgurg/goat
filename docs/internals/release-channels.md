@@ -6,6 +6,8 @@ GOAT ships two release channels from one workflow, `.github/workflows/goat-night
 
 goat-si/goat is private, so its releases are unreachable by an installed app or an SSH host without credentials. Every release is published to the public binary repository **goat-si/goat-releases** instead. The desktop feed (`DESKTOP_UPDATE_REPOSITORY`), the SSH runtime supply and `goat update` (`CLI_RELEASE_REPOSITORY` in `packages/shared/src/cliRelease.ts`), and the install scripts all read from that one repository, so one publication updates every consumer.
 
+goat-si/goat is going to become public. To prepare, the publish job also releases the runtime archives and their `SHA256SUMS` lines on goat-si/goat itself, tagged at the built commit, with nothing else attached and nothing committed. Once the repository is public and those releases download anonymously, moving the runtime supply and `goat update` there is one line: `CLI_RELEASE_REPOSITORY`. Versions published before that point already exist in both places, so no pinned runtime 404s. The desktop feed and install scripts stay in goat-releases until they move on their own.
+
 Each release carries the same set of files on both channels:
 
 - desktop installers: signed and notarized macOS DMG and ZIP (arm64, x64), Windows NSIS (x64, arm64), Linux AppImage and `.deb` (x64, arm64), with blockmaps;
