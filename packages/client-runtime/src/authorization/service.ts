@@ -1,3 +1,4 @@
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import {
   type ClientConnectionMethod,
   EnvironmentId,
@@ -84,6 +85,12 @@ export class RemoteEnvironmentAuthorization extends Context.Service<
     }) => Effect.Effect<AuthorizedRemoteHttpEnvironment, ConnectionAttemptError>;
   }
 >()("@goat/client-runtime/authorization/service/RemoteEnvironmentAuthorization") {}
+
+const connectDisabled = () =>
+  new ConnectionBlockedError({
+    reason: "configuration",
+    detail: `${GOAT_CONNECT_COMING_SOON.title} is coming soon. ${GOAT_CONNECT_COMING_SOON.description}`,
+  });
 
 const CACHED_ENDPOINT_SOCKET_TIMEOUT_MS = 3_000;
 const BEARER_DESCRIPTOR_CACHE_TTL_MS = 10_000;
@@ -360,6 +367,7 @@ export const make = Effect.gen(function* () {
   const getDpopToken = Effect.fn("clientRuntime.connection.remote.getDpopToken")(function* (
     input: Parameters<RemoteEnvironmentAuthorization["Service"]["authorizeDpopHttp"]>[0],
   ) {
+    if (!isGoatConnectEnabled()) return yield* connectDisabled();
     const session = yield* cloudSession.identity;
     if (Option.isNone(session)) {
       return yield* sessionChanged();
@@ -487,6 +495,7 @@ export const make = Effect.gen(function* () {
   const authorizeDpop = Effect.fn("clientRuntime.connection.remote.authorizeDpop")(function* (
     input: Parameters<RemoteEnvironmentAuthorization["Service"]["authorizeDpop"]>[0],
   ) {
+    if (!isGoatConnectEnabled()) return yield* connectDisabled();
     const endpoint = input.directEndpoint;
     if (endpoint !== undefined) {
       yield* verifyDirectEndpoint({
@@ -543,7 +552,10 @@ export const make = Effect.gen(function* () {
     authorizeDpop: (input) =>
       authorizeDpop(input).pipe(Effect.withSpan("environment.authorization")),
     authorizeDpopHttp: (input) =>
-      getDpopToken(input).pipe(
+      Effect.suspend(() => {
+        if (!isGoatConnectEnabled()) return Effect.fail(connectDisabled());
+        return getDpopToken(input);
+      }).pipe(
         Effect.map(({ token }) => httpAuthorization(token)),
         Effect.withSpan("environment.authorization.http"),
         withRelayClientTracing,

@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import type {
   ConnectionCatalogOperation,
   ConnectionCatalogResult,
@@ -141,7 +142,10 @@ export const handleConnectionCatalogOperation = <E>(
             reason: "refused",
             message: "Platform-managed local environments cannot be removed.",
           };
-        if (connectionRoutes(entry).some((route) => route.target._tag === "RelayConnectionTarget"))
+        if (
+          isGoatConnectEnabled() &&
+          connectionRoutes(entry).some((route) => route.target._tag === "RelayConnectionTarget")
+        )
           return {
             type: "failure",
             reason: "refused",
