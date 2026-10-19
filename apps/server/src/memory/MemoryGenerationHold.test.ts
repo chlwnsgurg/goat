@@ -85,6 +85,53 @@ describe("MemoryGenerationHold", () => {
     }),
   );
 
+  it.effect("probes a throttled model at least hourly", () =>
+    Effect.gen(function* () {
+      const hold = yield* Hold.make;
+      const throttled = new M.TextGenerationError({
+        operation: "generateMemorySummary",
+        detail: 'Codex CLI command failed: {"status":429}',
+      });
+      assert.strictEqual(Hold.deterministicFailure(throttled), "rate_limited");
+      const attempt = hold.guard("model", Effect.fail(throttled)).pipe(Effect.flip);
+      yield* attempt;
+      for (const wait of [60_000, 600_000, 3_600_000, 3_600_000]) {
+        yield* TestClock.adjust(wait);
+        yield* attempt;
+      }
+      // Throttling usually clears on its own: the fifth failure waits an hour, not a day.
+      assert.strictEqual(
+        Date.parse((yield* hold.status("model"))!.nextAttemptAt) -
+          Date.parse((yield* hold.status("model"))!.since),
+        60_000 + 600_000 + 3_600_000 + 3_600_000 + 3_600_000,
+      );
+    }),
+  );
+
+  it.effect("keys a selection by its typed, unordered options", () =>
+    Effect.gen(function* () {
+      const hold = yield* Hold.make;
+      const base = { instanceId: M.ProviderInstanceId.make("codex"), model: "luna" };
+      const key = (options?: M.MemoryModelSelection["options"]) =>
+        hold.keyFor(M.MemoryModelSelection.make({ ...base, ...(options ? { options } : {}) }));
+      assert.strictEqual(yield* key(), yield* key([]));
+      assert.strictEqual(
+        yield* key([
+          { id: "a", value: "1" },
+          { id: "b", value: true },
+        ]),
+        yield* key([
+          { id: "b", value: true },
+          { id: "a", value: "1" },
+        ]),
+      );
+      assert.notStrictEqual(
+        yield* key([{ id: "flag", value: true }]),
+        yield* key([{ id: "flag", value: "true" }]),
+      );
+    }),
+  );
+
   it("treats only rejections that repeat for every request as deterministic", () => {
     assert.strictEqual(Hold.deterministicFailure(rejected), "schema_rejected");
     assert.strictEqual(

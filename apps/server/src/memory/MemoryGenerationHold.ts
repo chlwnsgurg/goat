@@ -34,9 +34,15 @@ export const DETERMINISTIC_FAILURES: ReadonlySet<TextGenerationFailureKind> = ne
 ]);
 export type MemoryGenerationHoldReason = M.MemoryGenerationHold["reason"];
 
-/** Waits before each probe after consecutive failures; then one probe per day. */
+/** Waits before each probe after consecutive failures; then one probe per cycle. */
 export const MEMORY_HOLD_PROBE_DELAYS_MS = [60_000, 600_000, 3_600_000] as const;
 export const MEMORY_HOLD_CYCLE_MS = 86_400_000;
+/** Throttling and outages usually clear on their own, so they never wait more than an hour. */
+const TRANSIENT_HOLD_CYCLE_MS = 3_600_000;
+const cycleFor = (reason: MemoryGenerationHoldReason) =>
+  reason === "rate_limited" || reason === "unavailable"
+    ? TRANSIENT_HOLD_CYCLE_MS
+    : MEMORY_HOLD_CYCLE_MS;
 
 export interface HoldState {
   readonly reason: MemoryGenerationHoldReason;
@@ -56,7 +62,7 @@ export function nextHold(
     reason,
     since: previous?.since ?? now,
     failures,
-    retryAt: now + (MEMORY_HOLD_PROBE_DELAYS_MS[failures - 1] ?? MEMORY_HOLD_CYCLE_MS),
+    retryAt: now + (MEMORY_HOLD_PROBE_DELAYS_MS[failures - 1] ?? cycleFor(reason)),
   };
 }
 
@@ -73,7 +79,12 @@ export class MemoryGenerationHeld extends Schema.TaggedError<MemoryGenerationHel
 const isTextGenerationError = Schema.is(M.TextGenerationError);
 const encodeKey = Schema.encodeSync(
   Schema.fromJsonString(
-    Schema.Tuple([Schema.String, Schema.String, Schema.Array(Schema.String), Schema.String]),
+    Schema.Tuple([
+      Schema.String,
+      Schema.String,
+      Schema.Array(Schema.Tuple([Schema.String, Schema.Union([Schema.String, Schema.Boolean])])),
+      Schema.String,
+    ]),
   ),
 );
 
@@ -134,9 +145,9 @@ export const make = Effect.gen(function* () {
       return encodeKey([
         selection.instanceId,
         selection.model,
-        [...(selection.options ?? [])]
-          .map((option) => option.id + "=" + String(option.value))
-          .toSorted(),
+        (selection.options ?? [])
+          .map((option) => [option.id, option.value] as const)
+          .toSorted(([a], [b]) => a.localeCompare(b)),
         version ?? "unknown",
       ]);
     });
