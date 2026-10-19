@@ -99,7 +99,6 @@ import {
   readFileAsDataUrl,
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
-  threadShellHasStarted,
 } from "../ChatView.logic";
 import {
   dataTransferHasComposerMention,
@@ -323,11 +322,10 @@ import {
   renderProviderTraitsMenuContent,
   renderProviderTraitsPicker,
 } from "./composerProviderState";
-import { ContextWindowMeter, ContextWindowMeterPlaceholder } from "./ContextWindowMeter";
+import { ContextWindowMeter } from "./ContextWindowMeter";
 import {
   providerSupportsManualCompaction,
   resolveContextWindowModelDisplayName,
-  shouldReserveContextWindowMeter,
 } from "./ContextWindowMeter.logic";
 import {
   attachVideoThumbnail,
@@ -1082,7 +1080,6 @@ import {
   type ChatMessage,
   type SessionPhase,
   type Thread,
-  type ThreadShell,
   videoMimeType,
 } from "../../types";
 import {
@@ -1503,7 +1500,6 @@ export interface ChatComposerProps {
   activeThreadId: ThreadId | null;
   activeThreadEnvironmentId: EnvironmentId | undefined;
   activeThread: Thread | undefined;
-  activeThreadShell: ThreadShell | null;
   promptHistoryMessages: ReadonlyArray<ChatMessage>;
   isServerThread: boolean;
   isLocalDraftThread: boolean;
@@ -2382,17 +2378,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadModelSelection,
     modelOptionsByInstance,
   );
-  const reserveContextWindowMeter = shouldReserveContextWindowMeter({
-    meterEnabled: settings.contextWindowMeterEnabled,
-    detailLoading: props.threadSyncPhase === "loading",
-    threadStarted: threadShellHasStarted(props.activeThreadShell),
-    providerReportsContextWindow: selectedProviderStatus
-      ? selectedProviderStatus.reportsContextWindow === true
-      : null,
-  });
-  const activeContextWindowForMeter = settings.contextWindowMeterEnabled
-    ? activeContextWindow
-    : null;
+  const contextWindowUnreportedMessage =
+    selectedProviderStatus?.reportsContextWindow === false
+      ? "This provider does not report usage"
+      : undefined;
 
   const [composerCursor, setComposerCursor] = useState(() => {
     const value = isLiteralPendingAnswer ? (activePendingProgress?.customAnswer ?? prompt) : prompt;
@@ -6302,21 +6291,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ) : null}
       <>
         <span aria-hidden="true" data-resting-controls-spacer className="-order-1 min-w-2 flex-1" />
-        {activeContextWindowForMeter ? (
+        {settings.contextWindowMeterHidden ? null : (
           <span data-resting-fixed-control className="flex shrink-0 items-center">
             <ContextWindowMeter
-              usage={activeContextWindowForMeter}
+              usage={activeContextWindow}
+              unreportedMessage={contextWindowUnreportedMessage}
               modelDisplayName={activeThreadModelDisplayName}
-              onCompact={compactCommandAvailable ? compactThreadContextStable : undefined}
+              onCompact={
+                compactCommandAvailable && activeContextWindow
+                  ? compactThreadContextStable
+                  : undefined
+              }
               compactDisabled={compactDisabled || noProviderAvailable || isSendBusy || isConnecting}
               compactDisabledReason={resolvedCompactDisabledReason}
             />
           </span>
-        ) : reserveContextWindowMeter ? (
-          <span data-resting-fixed-control className="flex shrink-0 items-center">
-            <ContextWindowMeterPlaceholder />
-          </span>
-        ) : null}
+        )}
       </>
       <ProviderModelPicker
         environmentId={environmentId}

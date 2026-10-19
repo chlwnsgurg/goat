@@ -125,20 +125,6 @@ export function formatContextWindowCompactionMessage(
     : "Context compacts automatically when needed.";
 }
 
-export function shouldReserveContextWindowMeter(input: {
-  readonly meterEnabled: boolean;
-  readonly detailLoading: boolean;
-  readonly threadStarted: boolean;
-  readonly providerReportsContextWindow: boolean | null;
-}): boolean {
-  return (
-    input.meterEnabled &&
-    input.detailLoading &&
-    input.threadStarted &&
-    input.providerReportsContextWindow !== false
-  );
-}
-
 export function formatContextWindowCost(cost: {
   readonly amount: number;
   readonly currency: string;
