@@ -16,6 +16,7 @@ import {
   type PlatformConnectionRegistration,
   PrimaryConnectionRegistration,
   PrimaryConnectionTarget,
+  sshPreparationFailure,
   Wakeups,
 } from "@goat/client-runtime/connection";
 import { bootstrapRemoteBearerSession } from "@goat/client-runtime/authorization";
@@ -184,29 +185,6 @@ function clientMetadata() {
   });
 }
 
-function sshPreparationError(cause: unknown) {
-  const message = cause instanceof Error ? cause.message : String(cause);
-  if (message.toLowerCase().includes("cancel")) {
-    return new ConnectionBlockedError({
-      reason: "authentication",
-      detail: message,
-    });
-  }
-  // The SSH tunnel opened but the server answered too late; say so instead of
-  // reading like a stopped server. The supervisor keeps retrying.
-  if (message.includes("(high latency)")) {
-    return new ConnectionTransientError({
-      reason: "network",
-      detail:
-        "The SSH host is reachable, but the network to it is too slow (high latency) for GOAT to finish connecting. Retrying.",
-    });
-  }
-  return new ConnectionTransientError({
-    reason: "remote-unavailable",
-    detail: `Could not prepare the SSH environment: ${message}`,
-  });
-}
-
 function sshRuntimePendingError(pending: {
   readonly reason: "busy" | "unknown" | "contended";
   readonly detail?: "recovery-stale";
@@ -289,7 +267,7 @@ export const provisionDesktopSshEnvironment = Effect.fn(
         ...(target.alias.startsWith("goat-") ? { keyOnly: true } : {}),
         issuePairingToken: true,
       }),
-    catch: sshPreparationError,
+    catch: sshPreparationFailure,
   });
   if ("type" in bootstrap) return yield* sshRuntimePendingError(bootstrap.pending);
   const pairingToken = bootstrap.pairingToken;
@@ -301,7 +279,7 @@ export const provisionDesktopSshEnvironment = Effect.fn(
   }
   const descriptor = yield* Effect.tryPromise({
     try: () => bridge.fetchSshEnvironmentDescriptor(bootstrap.httpBaseUrl),
-    catch: sshPreparationError,
+    catch: sshPreparationFailure,
   });
   if (expectedEnvironmentId !== undefined && descriptor.environmentId !== expectedEnvironmentId) {
     return yield* new ConnectionBlockedError({
@@ -311,7 +289,7 @@ export const provisionDesktopSshEnvironment = Effect.fn(
   }
   const access = yield* Effect.tryPromise({
     try: () => bridge.bootstrapSshBearerSession(bootstrap.httpBaseUrl, pairingToken),
-    catch: sshPreparationError,
+    catch: sshPreparationFailure,
   });
   return {
     environmentId: descriptor.environmentId,
@@ -345,14 +323,14 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
             ...(input.target.alias.startsWith("goat-") ? { keyOnly: true } : {}),
             issuePairingToken: false,
           }),
-        catch: sshPreparationError,
+        catch: sshPreparationFailure,
       });
       if ("type" in bootstrap) return yield* sshRuntimePendingError(bootstrap.pending);
       // Stop without sending the saved token, or pairing, when the forward
       // reaches a different environment.
       const descriptor = yield* Effect.tryPromise({
         try: () => bridge.fetchSshEnvironmentDescriptor(bootstrap.httpBaseUrl),
-        catch: sshPreparationError,
+        catch: sshPreparationFailure,
       });
       if (descriptor.environmentId !== input.expectedEnvironmentId) {
         return yield* new ConnectionBlockedError({
@@ -362,7 +340,7 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       }
       const session = yield* Effect.tryPromise({
         try: () => bridge.fetchSshSessionState(bootstrap.httpBaseUrl, bearerToken),
-        catch: sshPreparationError,
+        catch: sshPreparationFailure,
       });
       // Servers never widen a stored grant, so a token from before the standard
       // scopes grew is replaced by pairing again.
@@ -431,7 +409,7 @@ export const readDesktopSshRuntime = Effect.fn("web.connectionPlatform.ssh.runti
   return yield* Effect.tryPromise({
     try: () =>
       mode === undefined ? bridge.getSshHostStatus(target) : bridge.updateSshRuntime(target, mode),
-    catch: sshPreparationError,
+    catch: sshPreparationFailure,
   }).pipe(
     Effect.flatMap(decodeSshHostResult),
     Effect.catch(() =>

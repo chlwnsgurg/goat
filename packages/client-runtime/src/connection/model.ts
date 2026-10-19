@@ -64,6 +64,9 @@ export const ConnectionTransientReason = Schema.Literals([
   "endpoint-unavailable",
   "relay-unavailable",
   "remote-unavailable",
+  // The host itself could not be reached (asleep, off the network). Expected
+  // for laptops, so surfaces show it quietly instead of as a failure.
+  "host-unreachable",
 ]);
 export type ConnectionTransientReason = typeof ConnectionTransientReason.Type;
 

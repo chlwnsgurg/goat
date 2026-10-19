@@ -690,7 +690,7 @@ jobs:
         run: |
           set -euo pipefail
           cp LICENSE release/LICENSE-T3CODE.txt
-          cp scripts/install.sh scripts/install.ps1 release/
+          cp scripts/install.sh scripts/install.ps1 scripts/install-goat-server.sh release/
           node scripts/render-third-party-notices.ts \
             --input apps/server/dist/client/third-party-licenses.json --output release/THIRD_PARTY_NOTICES.md
 

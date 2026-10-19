@@ -26,6 +26,12 @@ export interface EnvironmentConnectionPresentation {
   readonly stage?: ConnectionAttemptStage | null;
   /** When the next automatic attempt starts (epoch ms), while waiting to retry. */
   readonly retryAt?: number | null;
+  /**
+   * Reconnecting because the host could not be reached at all, such as a
+   * laptop asleep in a bag. Surfaces show this quietly: it is expected, and
+   * retrying on its own is the right response.
+   */
+  readonly unreachable?: boolean;
 }
 
 /**
@@ -44,6 +50,7 @@ export interface EnvironmentPresentation {
 export function presentConnectionState(
   state: SupervisorConnectionState,
 ): EnvironmentConnectionPresentation {
+  const unreachable = state.lastFailure?.reason === "host-unreachable";
   switch (state.phase) {
     case "available":
       return { phase: "available", error: null, traceId: null };
@@ -55,6 +62,7 @@ export function presentConnectionState(
         error: state.lastFailure?.message ?? null,
         traceId: state.lastFailure?.traceId ?? null,
         stage: state.stage,
+        ...(unreachable ? { unreachable } : {}),
       };
     case "connected":
       return { phase: "connected", error: null, traceId: null };
@@ -64,6 +72,7 @@ export function presentConnectionState(
         error: state.lastFailure?.message ?? null,
         traceId: state.lastFailure?.traceId ?? null,
         retryAt: state.retryAt,
+        ...(unreachable ? { unreachable } : {}),
       };
     case "blocked":
       return {
@@ -83,6 +92,11 @@ export function connectionStatusText(connection: EnvironmentConnectionPresentati
     case "connecting":
       return "Connecting...";
     case "reconnecting":
+      if (connection.unreachable) {
+        return connection.error
+          ? `Host unreachable. Reconnecting... Reason: ${connection.error}`
+          : "Host unreachable. Reconnecting...";
+      }
       return connection.error
         ? `Failed to connect. Reconnecting... Reason: ${connection.error}`
         : "Reconnecting...";
@@ -98,6 +112,7 @@ export function connectionStatusText(connection: EnvironmentConnectionPresentati
 }
 
 export function connectionStatusTitle(connection: EnvironmentConnectionPresentation): string {
+  if (connection.phase === "reconnecting" && connection.unreachable) return "Host unreachable";
   if (connection.phase === "reconnecting" && connection.error) {
     return "Failed to connect. Reconnecting...";
   }
@@ -121,6 +136,13 @@ export function connectionProgressLabel(
   switch (connection.phase) {
     case "connecting":
     case "reconnecting": {
+      if (connection.unreachable) {
+        const seconds =
+          connection.retryAt == null ? 0 : Math.ceil((connection.retryAt - nowMs) / 1000);
+        return seconds > 0
+          ? `Unreachable, retrying in ${formatRetryDelay(seconds)}`
+          : "Unreachable, retrying";
+      }
       if (connection.retryAt != null) {
         const seconds = Math.ceil((connection.retryAt - nowMs) / 1000);
         return seconds > 0 ? `Retrying in ${formatRetryDelay(seconds)}` : "Retrying";

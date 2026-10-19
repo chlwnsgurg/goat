@@ -2390,7 +2390,14 @@ export default function ChatView(props: ChatViewProps) {
     if (activeEnvironmentUnavailableState && unavailableConnection && !suppressUnavailableBanner) {
       items.push({
         id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
-        variant: unavailableConnection.phase === "error" ? "error" : "warning",
+        // An unreachable host is usually a laptop asleep or off the network:
+        // expected, and retrying on its own, so it does not ask for attention.
+        variant:
+          unavailableConnection.phase === "error"
+            ? "error"
+            : unavailableConnection.unreachable
+              ? "default"
+              : "warning",
         icon: <WifiOffIcon />,
         title: (
           <>
@@ -2398,7 +2405,9 @@ export default function ChatView(props: ChatViewProps) {
             <EnvironmentConnectionProgressLabel connection={unavailableConnection} />
           </>
         ),
-        description: unavailableConnection.error ? (
+        description: unavailableConnection.unreachable ? (
+          "The host may be asleep or off the network. GOAT keeps trying."
+        ) : unavailableConnection.error ? (
           <span className="line-clamp-2">{unavailableConnection.error}</span>
         ) : undefined,
         actions: (

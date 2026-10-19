@@ -9,6 +9,7 @@ import { expect, it, vi } from "vite-plus/test";
 let sync: EnvironmentShellSync = "stale";
 vi.mock("../../state/presentation", () => ({
   useEnvironmentConnectionPhase: () => "connected",
+  useEnvironmentConnectionUnreachable: () => false,
   useEnvironmentShellSync: () => sync,
 }));
 vi.mock("../../state/environments", () => ({

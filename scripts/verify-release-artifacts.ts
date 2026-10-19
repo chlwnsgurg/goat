@@ -63,11 +63,14 @@ export const verifyMacPayload = Effect.fn("verifyMacPayload")(function* (
         ["-a", "-vv", "-t", "exec", entry.absolute],
         `app Gatekeeper ${entry.relative}`,
       );
-      yield* check(
-        "xcrun",
-        ["stapler", "validate", entry.absolute],
-        `app staple ${entry.relative}`,
-      );
+      // The notarization ticket is stapled to the outermost app; Electron's nested
+      // helper apps are covered by it and never carry their own.
+      if (!/\.app[\\/]/.test(entry.relative))
+        yield* check(
+          "xcrun",
+          ["stapler", "validate", entry.absolute],
+          `app staple ${entry.relative}`,
+        );
     }
   }
   const visitMachO = Effect.fn("verifyMacBinary")(function* (file: string, name: string) {

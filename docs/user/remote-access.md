@@ -186,6 +186,12 @@ checksums. If a public download fails, GOAT can try the GitHub CLI when signed i
 (`gh auth login`). It refuses a checksum mismatch and names the expected release
 when it cannot obtain an archive.
 
+When the host is asleep or off the network, its connection shows **Unreachable**
+and GOAT keeps retrying, sooner when this computer wakes or joins a network.
+Agent work on the host keeps running while you are away. A rejected SSH key, a
+changed host key, or a runtime that refuses this app stops retrying until you
+choose **Reconnect**; the connection's status says what to fix.
+
 On Linux and macOS hosts, provider CLIs must be on the `PATH` of a
 non-interactive login shell there; check with:
 
@@ -340,6 +346,36 @@ thread opens from there once this app is also connected to its machine. In the
 desktop app, **Connect** adds the host over SSH using the same host name. A
 thread started from another machine shows **Launched by** with that machine's
 name in its header, also when the launching thread is not open here.
+
+### Link a GOAT server for agents without SSH
+
+When the other machine already runs GOAT on its own, such as a headless server
+kept up with `goat service install`, and this machine reaches it over
+Tailscale, your LAN or T3 Connect, agents can use it without SSH. On that
+machine, create a pairing link that can only grant agent access:
+
+```sh
+goat pair --tailscale --scope orchestration:read --scope orchestration:operate
+```
+
+Leave out `--tailscale` when the server already listens on an address this
+machine reaches. Give an agent here the printed pairing URL, for example "link
+https://mini.tailnet.ts.net/pair#token=… as mini". The code works once and
+expires after five minutes. From then on agents use `mini` as the host for
+projects, threads, worktrees and host status, start threads there, and include
+it when they list threads across machines.
+
+A link can do at most what you allow when linking. It is Supervised by default;
+read-only links cannot start or change threads. Agents start threads only in
+folders that are already projects on that machine, so add the project there
+first, for example from the GOAT app connected to it. An agent whose own permission
+mode is lower than the link's cannot change anything through it. A link cannot
+answer approval requests, and folder browsing and runtime updates still need SSH.
+
+A link lasts 30 days; link again with a new code to renew it. Removing a link
+forgets it here. To end it on the other machine at once, revoke **GOAT on …** in
+that machine's **Settings → Connections**. To watch its threads yourself, add
+the machine under **Settings → Connections** with a pairing URL from `goat pair`.
 
 ### Cloud machines
 

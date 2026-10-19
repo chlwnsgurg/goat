@@ -54,6 +54,19 @@ export function useEnvironmentConnectionPhase(
   return useAtomValue(environmentConnectionPhaseAtom(environmentId));
 }
 
+const environmentConnectionUnreachableAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make(
+    (get): boolean =>
+      get(environmentPresentations.presentationAtom(environmentId))?.connection.unreachable ===
+      true,
+  ).pipe(Atom.withLabel(`web-environment-connection-unreachable:${environmentId}`)),
+);
+
+/** Whether the environment is retrying a host that could not be reached at all. */
+export function useEnvironmentConnectionUnreachable(environmentId: EnvironmentId): boolean {
+  return useAtomValue(environmentConnectionUnreachableAtom(environmentId));
+}
+
 export function useEnvironmentPresentation(environmentId: EnvironmentId | null) {
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const presentation = useAtomValue(

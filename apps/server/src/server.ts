@@ -56,6 +56,7 @@ import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
 import * as BoatClient from "./cloudMachines/BoatClient.ts";
 import * as CloudMachineService from "./cloudMachines/CloudMachineService.ts";
 import * as CloudMachineSsh from "./cloudMachines/sshConfig.ts";
+import * as LinkedHosts from "./linkedHosts/LinkedHosts.ts";
 import * as RemoteDispatchCoordinator from "./remoteReports/RemoteDispatchCoordinator.ts";
 import * as LaunchWatchService from "./mcp/LaunchWatchService.ts";
 import * as SshWorkspaceSync from "./sshRemote/SshWorkspaceSync.ts";
@@ -1086,6 +1087,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // One cloud machine service for WS, MCP and both SshRemoteDispatch builds, so the
   // per-alias readiness lock and SSH cache invalidation span every caller.
   Layer.provideMerge(layerCloudMachines),
+  // Hosts linked over HTTPS, for the same SshRemoteDispatch builds and the MCP link tools.
+  Layer.provideMerge(LinkedHosts.layer),
   Layer.provideMerge(layerOrchestrationApplication),
   Layer.provideMerge(
     RuntimeDrain.layer.pipe(

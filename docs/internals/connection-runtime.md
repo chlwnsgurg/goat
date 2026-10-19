@@ -29,6 +29,10 @@ keepalive window, so a resume also closes forwards that stop answering.
 Foregrounding also wakes a pending retry immediately and leaves an ordinary
 in-flight attempt alone.
 
+SSH connections classify their failures before they reach this loop, so a
+sleeping host retries quietly and a rejected key waits for the user. See
+[SSH reconnect](ssh-reconnect.md).
+
 The [registry](../../packages/client-runtime/src/connection/registry.ts) scopes
 connections by environment. An involuntary disconnect retains the registration
 and cached data. Explicit removal closes the scope and clears credentials,

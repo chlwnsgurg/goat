@@ -34,6 +34,7 @@ import {
 } from "./build-desktop-artifact.ts";
 import { selectCliRuntimeExternalDependencies } from "./lib/cli-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { isMachO } from "./lib/release-verify.ts";
 import { neutralizeBuildRoot } from "./lib/sea-build-path.ts";
 
 /** Copies cached helper outputs while emitting only the current binary name. */
@@ -351,7 +352,8 @@ export const signMacArchiveContents = Effect.fn("signMacArchiveContents")(functi
   }
 
   const entitlements = path.join(input.repoRoot, "apps/server/resources/cli-entitlements.plist");
-  const libraries = (yield* fs.readDirectory(input.contentDir, { recursive: true }))
+  const entries = yield* fs.readDirectory(input.contentDir, { recursive: true });
+  const libraries = entries
     .filter(
       (entry) =>
         entry.endsWith(".node") ||
@@ -360,6 +362,19 @@ export const signMacArchiveContents = Effect.fn("signMacArchiveContents")(functi
         entry.endsWith("goat-resource-monitor"),
     )
     .map((entry) => path.join(input.contentDir, entry));
+  // Vendor executables such as the Cursor SDK's cursorsandbox and rg carry their
+  // vendor's Developer ID. Every Mach-O in a GOAT archive carries GOAT's, which the
+  // desktop app's signature verification requires, so they are re-signed too.
+  for (const entry of entries) {
+    const target = path.join(input.contentDir, entry);
+    if (path.basename(entry).includes(".") || libraries.includes(target)) continue;
+    if (target === input.executablePath) continue;
+    const binary = yield* fs.readFile(target).pipe(
+      Effect.map(isMachO),
+      Effect.orElseSucceed(() => false),
+    );
+    if (binary) libraries.push(target);
+  }
 
   for (const target of [...libraries, input.executablePath]) {
     yield* runCommand(

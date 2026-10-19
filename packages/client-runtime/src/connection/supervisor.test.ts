@@ -39,6 +39,7 @@ import {
 import * as RpcSession from "../rpc/session.ts";
 import { presentConnectionState } from "./presentation.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
+import { sshPreparationFailure } from "./sshFailure.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
 import { connectionRouteId, entryWithRoutes, isLearned, mergeLearnedRoutes } from "./routes.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
@@ -2218,5 +2219,76 @@ describe("EnvironmentSupervisor routes", () => {
         `learned:${TARGET.environmentId}:http://192.168.1.10:3773`,
       ]);
     }),
+  );
+});
+
+describe("EnvironmentSupervisor with SSH failures", () => {
+  const unreachable = () =>
+    sshPreparationFailure(
+      new Error(
+        "Cannot reach mbp over SSH (192.168.1.20:22: Operation timed out). Check the network or VPN connection to that host.",
+      ),
+    );
+
+  it.effect("retries a sleeping host quietly, and at once when the network changes", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        prepare: (attempt) =>
+          attempt <= 3 ? Effect.fail(unreachable()) : Effect.succeed(PREPARED_CONNECTION),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      for (const [index, delay] of [2_000, 4_000].entries()) {
+        const waiting = yield* eventuallyState(
+          supervisor.state,
+          (state) => state.phase === "backoff" && state.attempt === index + 1,
+        );
+        expect(presentConnectionState(waiting)).toMatchObject({
+          phase: "reconnecting",
+          unreachable: true,
+          retryAt: (yield* Clock.currentTimeMillis) + delay,
+        });
+        yield* TestClock.adjust(delay);
+      }
+      yield* eventuallyState(
+        supervisor.state,
+        (state) => state.phase === "backoff" && state.attempt === 3,
+      );
+
+      // The laptop joins a network: no need to sit out the 8 second rung.
+      yield* harness.wake("network-changed");
+      const connected = yield* eventuallyState(
+        supervisor.state,
+        (state) => state.phase === "connected",
+      );
+      expect(yield* Ref.get(harness.prepareCount)).toBe(4);
+      expect(presentConnectionState(connected).unreachable).toBeUndefined();
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("waits for the user after the host rejects the login", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        prepare: (attempt) =>
+          attempt === 1
+            ? Effect.fail(
+                sshPreparationFailure(new Error("julius@mbp: Permission denied (publickey).")),
+              )
+            : Effect.succeed(PREPARED_CONNECTION),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* eventuallyState(supervisor.state, (state) => state.phase === "blocked");
+      yield* TestClock.adjust("10 minutes");
+      expect(yield* Ref.get(harness.prepareCount)).toBe(1);
+
+      yield* supervisor.retryNow;
+      yield* eventuallyState(supervisor.state, (state) => state.phase === "connected");
+      expect(yield* Ref.get(harness.prepareCount)).toBe(2);
+    }).pipe(Effect.provide(TestClock.layer())),
   );
 });
