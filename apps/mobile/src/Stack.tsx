@@ -1,3 +1,4 @@
+import { SettingsHubNodesRouteScreen } from "./features/settings/SettingsHubNodesRouteScreen";
 import { ComponentCatalogScreen } from "./features/development/ComponentCatalogScreen";
 import { PullRequestGuideStopScreen } from "./features/pull-requests/guide/PullRequestGuideScreen";
 import { PullRequestInlineCommentScreen } from "./features/pull-requests/PullRequestInlineCommentScreen";
@@ -345,6 +346,11 @@ const SettingsContentStack = createV5SheetStackNavigator({
       options: {
         title: "Follow-ups",
       },
+    }),
+    SettingsHubNodes: createNativeStackScreen({
+      screen: SettingsHubNodesRouteScreen,
+      linking: "hub-devices",
+      options: { title: "Devices on this hub" },
     }),
     SettingsScheduledTasks: createNativeStackScreen({
       screen: SettingsScheduledTasksRouteScreen,

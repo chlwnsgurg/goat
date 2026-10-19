@@ -1,5 +1,6 @@
 import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { ensureLocalApi } from "../../localApi";
+import { HubNodesSettings } from "./HubNodesSettings";
 import { settlePromise } from "@goat/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 import { SessionPermissions } from "./SessionPermissions";
@@ -2707,6 +2708,9 @@ export function ConnectionsSettings() {
         </SettingsSection>
       ) : null}
       <ConnectionEnvironmentsSection />
+      {primaryEnvironmentId !== null ? (
+        <HubNodesSettings environmentId={primaryEnvironmentId} />
+      ) : null}
       {primarySettings}
       <AdvancedSettingsDisclosure targetIds={ADVANCED_CONNECTION_SETTING_IDS}>
         {primaryEnvironmentId !== null ? (

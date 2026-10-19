@@ -83,6 +83,11 @@ function ConfiguredSettingsRouteScreen() {
       >
         <SettingsSection title="Connections">
           <SettingsRow
+            icon="desktopcomputer"
+            label="Devices on this hub"
+            target="SettingsHubNodes"
+          />
+          <SettingsRow
             icon="person.crop.circle"
             label="T3 Account"
             value={accountLabel}
@@ -135,6 +140,11 @@ function LocalSettingsRouteScreen() {
               }}
             />
           ) : null}
+          <SettingsRow
+            icon="desktopcomputer"
+            label="Devices on this hub"
+            target="SettingsHubNodes"
+          />
           <SettingsRow
             icon="desktopcomputer"
             label="Environments"

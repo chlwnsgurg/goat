@@ -1159,6 +1159,10 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:scheduled-task:webhook-delivery",
       tag: WS_METHODS.scheduledTasksGetWebhookDelivery,
     }),
+    hubNodesLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:hub-nodes:live",
+      tag: WS_METHODS.hubNodesSubscribe,
+    }),
     scheduledTasksLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:scheduled-tasks:live",
       tag: WS_METHODS.scheduledTasksSubscribe,
@@ -1373,6 +1377,18 @@ export function createServerEnvironmentAtoms<R, E>(
     importHubNodes: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:hub-nodes:import",
       tag: WS_METHODS.hubNodesImport,
+    }),
+    removeHubNode: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:hub-nodes:remove",
+      tag: WS_METHODS.hubNodesRemove,
+    }),
+    checkHubNodes: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:hub-nodes:check",
+      tag: WS_METHODS.hubNodesCheck,
+    }),
+    dismissHubNodeNotice: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:hub-nodes:dismiss-notice",
+      tag: WS_METHODS.hubNodesDismissNotice,
     }),
     upsertScheduledTask: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:scheduled-task:upsert",

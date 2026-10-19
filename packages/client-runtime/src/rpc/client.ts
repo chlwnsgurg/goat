@@ -73,6 +73,7 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.subscribeAuthAccess
   | typeof WS_METHODS.subscribeServerConfig
   | typeof WS_METHODS.subscribeServerLifecycle
+  | typeof WS_METHODS.hubNodesSubscribe
   | typeof WS_METHODS.scheduledTasksSubscribe
   | typeof WS_METHODS.serverGetStorageCleanupReport
   | typeof WS_METHODS.serverGetDatabaseStorage
@@ -431,6 +432,12 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                         : Effect.void,
                     ),
                     Stream.catchCause((cause) => {
+                      if (
+                        tag === WS_METHODS.hubNodesSubscribe &&
+                        isHubNodesUnsupportedError(cause)
+                      ) {
+                        return Stream.failCause(cause);
+                      }
                       const hasOnlyExpectedFailures =
                         cause.reasons.length > 0 &&
                         cause.reasons.every((reason) => reason._tag === "Fail");
