@@ -98,6 +98,9 @@ export const make = Effect.gen(function* () {
   // Orders cloud alias invalidation against check results, so a check that finishes after a
   // machine was forgotten cannot write its route state back.
   const routeStateLock = yield* Semaphore.make(1);
+  // Bumped on every cloud alias invalidation, so a check that read Boat before a stop or address
+  // change cannot report the machine as it was.
+  const cloudGenerations = new Map<string, number>();
   const publish = PubSub.publish(signals, undefined).pipe(Effect.asVoid);
   const now = Clock.currentTimeMillis.pipe(
     Effect.map((at) => DateTime.formatIso(DateTime.makeUnsafe(at))),
@@ -193,26 +196,33 @@ export const make = Effect.gen(function* () {
   yield* cloud.onAliasInvalidated((alias) =>
     Effect.suspend(() =>
       active
-        ? Effect.gen(function* () {
-            const routeId = `cloud:${alias}`;
-            const catalog = yield* cloud.catalog;
-            if (catalog.some((entry) => entry.alias === alias)) {
-              const previous = (yield* repository.listRouteState).find(
-                (row) => row.routeId === routeId,
-              );
-              yield* repository.upsertRouteState({
-                routeId,
-                environmentId: previous?.environmentId ?? null,
-                status: "unknown",
-                checkedAt: null,
-                lastSeenAt: previous?.lastSeenAt ?? null,
-                lastError: null,
-              });
-            } else {
-              yield* repository.deleteRouteState(routeId);
-            }
-            yield* publish;
-          }).pipe(routeStateLock.withPermits(1), Effect.ignore)
+        ? Effect.sync(() =>
+            cloudGenerations.set(alias, (cloudGenerations.get(alias) ?? 0) + 1),
+          ).pipe(
+            Effect.andThen(
+              Effect.gen(function* () {
+                const routeId = `cloud:${alias}`;
+                const catalog = yield* cloud.catalog;
+                if (catalog.some((entry) => entry.alias === alias)) {
+                  const previous = (yield* repository.listRouteState).find(
+                    (row) => row.routeId === routeId,
+                  );
+                  yield* repository.upsertRouteState({
+                    routeId,
+                    environmentId: previous?.environmentId ?? null,
+                    status: "unknown",
+                    checkedAt: null,
+                    lastSeenAt: previous?.lastSeenAt ?? null,
+                    lastError: null,
+                  });
+                } else {
+                  yield* repository.deleteRouteState(routeId);
+                }
+                yield* publish;
+              }).pipe(routeStateLock.withPermits(1)),
+            ),
+            Effect.ignore,
+          )
         : Effect.void,
     ),
   );
@@ -366,6 +376,7 @@ export const make = Effect.gen(function* () {
   const check: HubNodes["Service"]["check"] = (input) =>
     lock.withPermits(1)(
       Effect.gen(function* () {
+        const generations = new Map(cloudGenerations);
         const current = yield* snapshot;
         const nodes =
           input.nodeId === undefined ? current.nodes : [yield* requireNode(input.nodeId)];
@@ -442,9 +453,10 @@ export const make = Effect.gen(function* () {
               yield* Effect.gen(function* () {
                 if (
                   target.kind === "cloud" &&
-                  !(yield* cloud.catalog.pipe(
-                    Effect.orElseSucceed((): ReadonlyArray<{ readonly alias: string }> => []),
-                  )).some((entry) => entry.alias === target.alias)
+                  (cloudGenerations.get(target.alias) !== generations.get(target.alias) ||
+                    !(yield* cloud.catalog.pipe(
+                      Effect.orElseSucceed((): ReadonlyArray<{ readonly alias: string }> => []),
+                    )).some((entry) => entry.alias === target.alias))
                 )
                   return;
                 yield* repository.upsertRouteState({
