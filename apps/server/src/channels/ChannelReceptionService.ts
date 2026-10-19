@@ -438,7 +438,11 @@ const make = Effect.gen(function* () {
             RECALL_TASK_SCAN,
             Number.POSITIVE_INFINITY,
           );
-          const local = matchMemoryLines(notes + "\n" + journal, read.query);
+          // Oldest first, as the notes are, so the newest matches survive the limit.
+          const local = matchMemoryLines(
+            notes + "\n" + journal.split("\n").toReversed().join("\n"),
+            read.query,
+          );
           const goat = yield* searchGoatMemory(viewer, connectionId, read.query);
           if (local.length === 0 && goat.length === 0) return "Nothing in memory matches.";
           return [
@@ -699,14 +703,27 @@ const make = Effect.gen(function* () {
                 if (Option.isNone(first) || first.value.action.type !== "read") return first;
                 // One round of reads, then the answer. Reads run within what this requester
                 // may see; a second request to read is answered with what the pass wrote.
+                // The first pass can take most of a minute; judge the link again before reading.
+                const reader = yield* viewerNow(requester, message.connectionId);
                 const readResults = yield* runReads(
                   first.value.action.reads,
-                  viewer,
+                  reader,
                   conversationId,
                   message.connectionId,
                   inputId,
                 );
-                const second = yield* generate({ ...base, readsAllowed: false, readResults });
+                const journalNow = journalFor(
+                  yield* visibleTasks(reader, conversationId).pipe(
+                    Effect.orElseSucceed((): ReadonlyArray<ChannelTask> => []),
+                  ),
+                );
+                const { journal: _journal, ...rest } = base;
+                const second = yield* generate({
+                  ...rest,
+                  ...(journalNow === "" ? {} : { journal: journalNow }),
+                  readsAllowed: false,
+                  readResults,
+                });
                 // A pass that asks to read again found nothing to answer from; say so plainly.
                 return Option.map(second, (result): ChannelReceptionResult =>
                   result.action.type === "read"

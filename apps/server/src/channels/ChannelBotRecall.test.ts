@@ -11,6 +11,7 @@ import {
 } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as MemoryService from "../memory/MemoryService.ts";
 import * as MemorySyncService from "../memory/MemorySyncService.ts";
@@ -200,6 +201,38 @@ describe("GOAT Bot journal", () => {
     assert.notInclude(journalFor(many), "certificate");
     const found = matchMemoryLines(journalFor(many, 200, Number.POSITIVE_INFINITY), "certificate");
     assert.lengthOf(found, 1);
+  });
+
+  it.effect("keeps the newest matching journal entries when many match", () => {
+    const harness = makeHarness();
+    const results: Array<ReadonlyArray<ChannelReceptionReadResult>> = [];
+    harness.script.current = (input) => {
+      const text = input.inputText ?? "";
+      if (text.startsWith("do:")) return defaultScript(input);
+      if (input.readsAllowed === true) {
+        return Effect.succeed({
+          replyText: "",
+          action: { type: "read", reads: [{ kind: "memory", query: "deploy" }] },
+        });
+      }
+      if (input.readResults !== undefined) results.push(input.readResults);
+      return Effect.succeed({ replyText: "Okay.", action: { type: "report_only" } });
+    };
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      for (let index = 0; index < 20; index += 1) {
+        yield* TestClock.adjust("1 minute");
+        yield* gateway.ingest(goatInput("do: deploy service " + index, "d" + index), rpcContext);
+        yield* runtime.drain;
+      }
+      yield* gateway.ingest(goatInput("what did I deploy?", "d-ask"), rpcContext);
+      yield* runtime.drain;
+      const text = results[0]![0]!.text;
+      assert.include(text, "deploy service 19");
+      assert.notInclude(text, "deploy service 0 ");
+    }).pipe(Effect.provide(harness.layer));
   });
 });
 
@@ -606,6 +639,70 @@ describe("GOAT Bot judges visibility with the link as it is when it reads", () =
       yield* runtime.drain;
       assert.lengthOf(inputs, 2);
       for (const input of inputs) assert.notInclude(JSON.stringify(input), "payroll export");
+    }).pipe(Effect.provide(harness.layer));
+  });
+});
+
+describe("GOAT Bot judges the link again after its first pass", () => {
+  it.effect("reads nothing hidden when the link is removed while the first pass runs", () => {
+    const harness = makeHarness();
+    const inputs: Array<ChannelReceptionInput> = [];
+    const results: Array<ReadonlyArray<ChannelReceptionReadResult>> = [];
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const identities = yield* ChannelIdentityService.ChannelIdentityService;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      harness.script.current = (input) => {
+        if (!(input.inputText ?? "").startsWith("what happened")) return defaultScript(input);
+        inputs.push(input);
+        if (input.readsAllowed === true) {
+          // The link goes away while this pass is thinking.
+          return ledger.unlinkIdentity({ connectionId: "slack-1", externalActorId: "U4" }).pipe(
+            Effect.orDie,
+            Effect.as({
+              replyText: "",
+              action: {
+                type: "read" as const,
+                reads: [{ kind: "work" as const, query: "payroll" }],
+              },
+            }),
+          );
+        }
+        results.push(input.readResults ?? []);
+        return Effect.succeed({ replyText: "Okay.", action: { type: "report_only" as const } });
+      };
+      yield* gateway.ingest(goatInput("do: fix payroll export", "y1"), rpcContext);
+      yield* runtime.drain;
+      const { code } = yield* identities.createLink(
+        {
+          connectionId: "slack-1",
+          runtimeModeCeiling: "auto-accept-edits",
+          grantedScopes: ["orchestration:read", "orchestration:operate"],
+        },
+        { ...owner, principalId: "teammate", displayName: "Teammate" },
+      );
+      yield* gateway.linkIdentity(
+        {
+          connectionId: "slack-1",
+          externalActorId: "U4",
+          code,
+          idempotencyKey: "link-U4",
+          replyAddress: slackInput("", "unused").replyAddress,
+        },
+        slackContext,
+      );
+      yield* gateway.ingest(
+        slackInput("what happened with payroll?", "Ev-y2", "1760000000.000600", "U4"),
+        slackContext,
+      );
+      yield* runtime.drain;
+      assert.lengthOf(inputs, 2);
+      // Before the unlink the teammate could see it; after, neither the reads nor the journal do.
+      assert.include(inputs[0]!.journal ?? "", "payroll export");
+      assert.strictEqual(results[0]![0]!.text, "No work this person may see matches.");
+      assert.notInclude(JSON.stringify(inputs[1]), "payroll export");
     }).pipe(Effect.provide(harness.layer));
   });
 });
