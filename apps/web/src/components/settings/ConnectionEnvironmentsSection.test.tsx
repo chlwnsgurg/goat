@@ -5,6 +5,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
+  preflightSshHost: vi.fn(),
+  probeSshHost: vi.fn(),
+  trustSshHost: vi.fn(),
+  canWriteSsh: true,
   connectPairing: vi.fn(),
   connectSshEnvironment: vi.fn(),
   sshHosts: null as unknown,
@@ -38,8 +42,13 @@ vi.mock("../../state/server", async () => {
       ]),
     ),
     serverEnvironment: {
-      probeSshHost: vi.fn(),
-      trustSshHost: Object.assign(vi.fn(), { permissionAtom: () => Atom.make(false) }),
+      preflightSshHost: Object.assign(state.preflightSshHost, {
+        permissionAtom: () => Atom.make(state.canWriteSsh),
+      }),
+      probeSshHost: state.probeSshHost,
+      trustSshHost: Object.assign(state.trustSshHost, {
+        permissionAtom: () => Atom.make(state.canWriteSsh),
+      }),
       forgetSshHost: vi.fn(),
       updateStateAtom: () => Atom.make({ status: "idle" }),
     },
@@ -64,13 +73,30 @@ vi.mock("../ui/toast", () => ({
   stackedThreadToast: (toast: unknown) => toast,
 }));
 
+import { SSH_PREFLIGHT_STEP_ORDER, type SshPreflightReport } from "@goat/contracts";
 import { ConnectionEnvironmentsSection } from "./ConnectionEnvironmentsSection";
+
+const getLocalEnvironmentBootstraps = () => [
+  { id: "primary", bootstrapToken: "test", httpBaseUrl: "http://localhost:3773" },
+];
+
+const readyReport: SshPreflightReport = {
+  host: "devbox",
+  destination: { alias: "devbox", hostname: "devbox.local", user: "dev", port: 22 },
+  steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({ id, state: "passed", summary: "Passed" })),
+  ready: true,
+};
 
 let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  state.canWriteSsh = true;
+  state.preflightSshHost.mockReset();
+  state.probeSshHost.mockReset();
+  state.trustSshHost.mockReset();
+  state.preflightSshHost.mockResolvedValue({ _tag: "Success", value: readyReport });
   state.connectPairing.mockReset();
   state.connectSshEnvironment.mockReset();
   container = document.createElement("div");
@@ -169,7 +195,10 @@ it("keeps thread jump chords inside the SSH host suggestions", async () => {
     username: null,
     port: null,
   }));
-  (window as { desktopBridge?: unknown }).desktopBridge = { resolveSshHost };
+  (window as { desktopBridge?: unknown }).desktopBridge = {
+    resolveSshHost,
+    getLocalEnvironmentBootstraps,
+  };
   state.sshHosts = [{ alias: "devbox", hostname: "devbox.local", username: null, port: null }];
   const dialog = await openAddDialog();
   const sshMode = [...dialog.querySelectorAll("button")].find((element) =>
@@ -201,7 +230,12 @@ it("keeps thread jump chords inside the SSH host suggestions", async () => {
   await act(async () => {
     hostInput.dispatchEvent(chord("1"));
   });
-  expect(resolveSshHost).toHaveBeenCalledWith("devbox");
+  expect(state.preflightSshHost).toHaveBeenCalledWith({
+    environmentId: "primary",
+    input: { host: "devbox" },
+  });
+  expect(state.connectSshEnvironment).not.toHaveBeenCalled();
+  await act(async () => button("Connect", dialog).click());
   expect(state.connectSshEnvironment).toHaveBeenCalledWith(
     expect.objectContaining({ target: expect.objectContaining({ alias: "devbox" }) }),
   );
@@ -227,3 +261,145 @@ it("keeps Add device pending until the GOAT server pairing command settles", asy
   await act(async () => finish({ _tag: "Success", value: undefined }));
   expect(document.querySelector('[role="dialog"]')).toBeNull();
 });
+
+async function openSshDialog() {
+  (window as { desktopBridge?: unknown }).desktopBridge = {
+    resolveSshHost: vi.fn(),
+    getLocalEnvironmentBootstraps,
+  };
+  const dialog = await openAddDialog();
+  const mode = [...dialog.querySelectorAll("button")].find((element) =>
+    element.textContent?.startsWith("SSH"),
+  );
+  await act(async () => mode!.click());
+  return dialog;
+}
+
+it("shows failed preflight fixes and only enables Connect after checking again", async () => {
+  state.preflightSshHost.mockResolvedValueOnce({
+    _tag: "Success",
+    value: {
+      ...readyReport,
+      ready: false,
+      steps: readyReport.steps.map((step) =>
+        step.id === "key_auth"
+          ? {
+              ...step,
+              state: "failed",
+              summary: "Password sign-in required",
+              fix: {
+                actor: "user",
+                instruction: "Install your SSH public key.",
+                command: "ssh-copy-id dev@devbox",
+              },
+            }
+          : step,
+      ),
+    },
+  });
+  const dialog = await openSshDialog();
+  type(input("Search hosts or type devbox"), "devbox");
+  await act(async () => button("Check", dialog).click());
+  expect(dialog.textContent).toContain("Install your SSH public key.");
+  expect(dialog.textContent).toContain("ssh-copy-id dev@devbox");
+  expect(button("Connect", dialog).disabled).toBe(true);
+  expect(state.probeSshHost).not.toHaveBeenCalled();
+  expect(state.connectSshEnvironment).not.toHaveBeenCalled();
+  await act(async () => button("Check again", dialog).click());
+  expect(button("Connect", dialog).disabled).toBe(false);
+});
+
+it("discards a preflight response when the destination changes while checking", async () => {
+  let finish!: (result: unknown) => void;
+  state.preflightSshHost.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const dialog = await openSshDialog();
+  type(input("Search hosts or type devbox"), "devbox");
+  await act(async () => button("Check", dialog).click());
+  expect(dialog.querySelector('[aria-label="SSH preflight"]')?.getAttribute("aria-busy")).toBe(
+    "true",
+  );
+  type(input("Search hosts or type devbox"), "otherbox");
+  await act(async () => finish({ _tag: "Success", value: readyReport }));
+  expect(button("Check", dialog).disabled).toBe(false);
+  expect(dialog.querySelector('[aria-label="SSH preflight"]')).toBeNull();
+  expect(state.connectSshEnvironment).not.toHaveBeenCalled();
+});
+
+it("requires settings permission before a check", async () => {
+  state.canWriteSsh = false;
+  const dialog = await openSshDialog();
+  type(input("Search hosts or type devbox"), "devbox");
+  expect(button("Check", dialog).disabled).toBe(true);
+  expect(state.preflightSshHost).not.toHaveBeenCalled();
+});
+
+it("rechecks the alias returned by trust, without connecting on approval", async () => {
+  const reviewReport = {
+    ...readyReport,
+    ready: false,
+    destination: { hostname: "devbox.local", user: "dev", port: 2222 },
+    steps: readyReport.steps.map((step) =>
+      step.id === "host_key" ? { ...step, state: "needs_review" } : step,
+    ),
+  };
+  state.preflightSshHost.mockResolvedValueOnce({ _tag: "Success", value: reviewReport });
+  state.probeSshHost.mockResolvedValue({
+    _tag: "Success",
+    value: {
+      probeId: "probe",
+      host: "goat-probed",
+      human: { location: "Check this host key", fingerprint: "SHA256:test" },
+      includeRequired: false,
+    },
+  });
+  state.trustSshHost.mockResolvedValue({
+    _tag: "Success",
+    value: { kind: "ok", status: { host: "goat-pinned" } },
+  });
+  state.preflightSshHost.mockResolvedValueOnce({
+    _tag: "Success",
+    value: {
+      ...readyReport,
+      host: "goat-pinned",
+      destination: { ...readyReport.destination, alias: "goat-pinned" },
+    },
+  });
+  const dialog = await openSshDialog();
+  type(input("Search hosts or type devbox"), "dev@devbox.local:2222");
+  await act(async () => button("Check", dialog).click());
+  expect(state.probeSshHost).toHaveBeenCalledWith({
+    environmentId: "primary",
+    input: { address: "devbox.local", user: "dev", port: 2222 },
+  });
+  expect(button("Connect", dialog).disabled).toBe(true);
+  await act(async () => button("Approve", dialog).click());
+  expect(state.trustSshHost).toHaveBeenCalledWith({
+    environmentId: "primary",
+    input: { probeId: "probe", accepted: true },
+  });
+  expect(state.preflightSshHost).toHaveBeenLastCalledWith({
+    environmentId: "primary",
+    input: { host: "goat-pinned" },
+  });
+  expect(input("Search hosts or type devbox").value).toBe("goat-pinned");
+  expect(state.connectSshEnvironment).not.toHaveBeenCalled();
+  expect(button("Connect", dialog).disabled).toBe(false);
+});
+
+it.each(["root", "22"])(
+  "invalidates ready checks when the %s field changes",
+  async (placeholder) => {
+    const dialog = await openSshDialog();
+    type(input("Search hosts or type devbox"), "devbox");
+    await act(async () => button("Check", dialog).click());
+    expect(button("Connect", dialog).disabled).toBe(false);
+    type(input(placeholder), placeholder === "22" ? "2222" : "owner");
+    expect(button("Check", dialog).disabled).toBe(false);
+    expect(dialog.querySelector('[aria-label="SSH preflight"]')).toBeNull();
+  },
+);
