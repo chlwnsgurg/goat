@@ -22,7 +22,8 @@ import { parseWslDistroList, type WslDistro } from "./wslPathParsing.ts";
 
 const PROCESS_TERMINATE_GRACE = Duration.seconds(1);
 const LIST_TIMEOUT = Duration.seconds(8);
-const PRE_WARM_TIMEOUT = Duration.seconds(10);
+// Booting a stopped distro needs more time than converting paths in a running one.
+const PRE_WARM_TIMEOUT = Duration.seconds(30);
 const WSLPATH_TIMEOUT = Duration.seconds(10);
 const PROBE_TIMEOUT = Duration.seconds(10);
 const TOOLCHAIN_TIMEOUT = Duration.seconds(10);
@@ -290,7 +291,7 @@ export const buildWslRuntimeInstallScript = (
     `runtime_root="$runtime_parent/${safeRuntimeId}"`,
     `ready_marker="$runtime_root/${WSL_RUNTIME_READY_MARKER}"`,
     "runtime_entry_runs() {",
-    '  [ -x "$1/goat" ] && "$1/goat" --version >/dev/null 2>&1',
+    '  [ -x "$1/goat" ] && "$1/goat" --version >/dev/null',
     "}",
     // Hashing the entry is what tells a working cache from one whose `goat` was
     // swapped or half-written after install: the file is still there and may
@@ -305,7 +306,7 @@ export const buildWslRuntimeInstallScript = (
     `    ready_marker="$runtime_root/${LEGACY_WSL_RUNTIME_READY_MARKER}"`,
     '    [ -f "$ready_marker" ] || return 1',
     "  fi",
-    '    runtime_entry_runs "$runtime_root" &&',
+    '    runtime_entry_runs "$runtime_root" 2>/dev/null &&',
     `    recorded_entry_digest=$(tr -d '[:space:]' < "$ready_marker" 2>/dev/null) &&`,
     '    [ -n "$recorded_entry_digest" ] &&',
     '    [ "$recorded_entry_digest" = "$(runtime_server_entry_digest "$runtime_root")" ]',

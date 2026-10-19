@@ -10,7 +10,9 @@ import {
   type ComposerContextKind,
   type ComposerContextRecord,
   type ElementContextDetails,
+  type EnvironmentId,
   type KnownComposerContextRecord,
+  type ThreadContextRecord,
 } from "@goat/contracts";
 
 /**
@@ -346,6 +348,24 @@ export function projectComposerContextForProvider(input: {
   }
   if (entries.length === 0) return body;
   return `${body}\n\n<${CONTEXT_ENVELOPE_TAG} version="1">\n${entries.join("\n")}\n</${CONTEXT_ENVELOPE_TAG}>`;
+}
+
+// Thread reads are environment-local even when a draft moves between machines.
+export function threadContextsOutsideEnvironment(input: {
+  text: string;
+  records: ReadonlyArray<ComposerContextRecord>;
+  environmentId: EnvironmentId;
+}): ThreadContextRecord[] {
+  const referenced = new Set(
+    collectComposerContextReferences(input.text).map((occurrence) => occurrence.contextId),
+  );
+  return input.records.filter(
+    (record): record is ThreadContextRecord =>
+      record.kind === "thread" &&
+      "threadId" in record &&
+      referenced.has(record.contextId) &&
+      record.environmentId !== input.environmentId,
+  );
 }
 
 export function remapComposerContextAttachments(
