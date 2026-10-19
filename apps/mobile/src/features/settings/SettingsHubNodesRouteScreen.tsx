@@ -15,7 +15,8 @@ import {
 } from "@goat/client-runtime/state/runtime";
 import type { EnvironmentId } from "@goat/contracts";
 import { useEffect, useState } from "react";
-import { View } from "react-native";
+import { Pressable, View } from "react-native";
+import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
 import { AppText as Text } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
@@ -26,18 +27,70 @@ import { SettingsScreen } from "./components/SettingsScreen";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 
 export function SettingsHubNodesRouteScreen() {
-  const { availableTargets } = useSettingsEnvironmentFilter();
-  const hub =
-    availableTargets.find((target) => target.entry.target._tag === "PrimaryConnectionTarget") ??
-    availableTargets[0];
+  const { selectedTargets, selectedIds } = useSettingsEnvironmentFilter();
+  const { environments } = useEnvironments();
+  const targets = environments.filter(
+    (target) => selectedIds === null || selectedIds.has(target.environmentId),
+  );
   return (
     <SettingsScreen title="Devices on this hub">
+      <HubNodesSelection
+        key={JSON.stringify(selectedIds === null ? null : [...selectedIds].sort())}
+        targets={targets}
+        connectedTargets={selectedTargets}
+      />
+    </SettingsScreen>
+  );
+}
+
+function HubNodesSelection({
+  targets,
+  connectedTargets,
+}: {
+  readonly targets: readonly Pick<EnvironmentPresentation, "environmentId" | "label">[];
+  readonly connectedTargets: readonly Pick<EnvironmentPresentation, "environmentId" | "label">[];
+}) {
+  // Retain the choice across disconnects; only an explicit Settings filter change resets it.
+  const [choice, setChoice] = useState(() => (targets.length === 1 ? targets[0]! : null));
+  const hub = connectedTargets.find((target) => target.environmentId === choice?.environmentId);
+  const label =
+    targets.find((target) => target.environmentId === choice?.environmentId)?.label ??
+    choice?.label;
+  return (
+    <View className="flex-1">
+      {targets.length > 1 ||
+      (targets.length === 1 && targets[0]?.environmentId !== choice?.environmentId) ? (
+        <View className="gap-2 p-5">
+          <Text className="text-sm text-foreground-muted">Choose a hub</Text>
+          {targets.map((target) => (
+            <Pressable
+              key={target.environmentId}
+              accessibilityRole="radio"
+              accessibilityLabel={`Use hub ${target.label}`}
+              accessibilityState={{ checked: target.environmentId === choice?.environmentId }}
+              onPress={() => setChoice(target)}
+              className="min-h-12 justify-center rounded-xl bg-grouped-card px-4"
+            >
+              <Text className="text-foreground">{target.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
+      {choice ? (
+        <Text className="px-5 py-3 font-goat-medium text-foreground">Hub: {label}</Text>
+      ) : null}
       {hub ? (
         <HubNodesList key={hub.environmentId} environmentId={hub.environmentId} />
       ) : (
-        <Text className="p-5 text-foreground-muted">Connect to a hub to see its devices.</Text>
+        <Text className="p-5 text-foreground-muted">
+          {choice
+            ? `${label} is disconnected. Reconnect to manage its devices.`
+            : targets.length > 0
+              ? "Choose a hub to see its devices."
+              : "Select a connected hub in Settings to see its devices."}
+        </Text>
       )}
-    </SettingsScreen>
+    </View>
   );
 }
 
@@ -133,6 +186,7 @@ function HubNodesList({ environmentId }: { readonly environmentId: EnvironmentId
           <View className="flex-row flex-wrap gap-2">
             <Button
               label={busy === node.nodeId ? "Checking…" : "Check"}
+              accessibilityLabel={`Check ${node.label}`}
               disabled={!canCheck || busy !== null}
               onPress={() =>
                 void run(node.nodeId, () =>
@@ -143,6 +197,7 @@ function HubNodesList({ environmentId }: { readonly environmentId: EnvironmentId
             {canRemove && canRemoveHubNode(node) ? (
               <Button
                 label="Remove"
+                accessibilityLabel={`Remove ${node.label}`}
                 tone="danger"
                 disabled={busy !== null}
                 onPress={() =>

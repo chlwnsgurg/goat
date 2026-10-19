@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vite-plus/test";
+import {
+  SshConnectionProfile,
+  SshConnectionTarget,
+  type ConnectionCatalogEntry,
+} from "@goat/client-runtime/connection";
+import * as Option from "effect/Option";
+import { catalogToImportInput } from "../desktop/hubNodesImport.logic";
 import * as Cause from "effect/Cause";
 import { RpcClientDefect, RpcClientError } from "effect/rpc/RpcClientError";
 import { EnvironmentId, type HubNode, type HubNodeRoute } from "@goat/contracts";
 import {
+  savedHubNodeProfiles,
   canRemoveHubNode,
   hubNodeLastSeenLabel,
   hubNodeRemovalInput,
@@ -138,5 +146,36 @@ describe("unsupported hub RPC", () => {
     const error: { cause?: unknown } = {};
     error.cause = error;
     expect(isHubNodesUnsupportedError(error)).toBe(false);
+  });
+});
+
+describe("saved desktop profiles", () => {
+  it("lists unregistered profiles beyond the first 500 while capping only import payloads", () => {
+    const entries = Array.from({ length: 502 }, (_, index): ConnectionCatalogEntry => {
+      const environmentId = EnvironmentId.make(`env-${index}`);
+      const alias = `host-${index}`;
+      return {
+        target: new SshConnectionTarget({ environmentId, connectionId: alias, label: alias }),
+        profile: Option.some(
+          new SshConnectionProfile({
+            environmentId,
+            connectionId: alias,
+            label: alias,
+            target: { alias, hostname: "example.com", username: null, port: null },
+          }),
+        ),
+        enabled: true,
+      };
+    });
+    const registered = entries
+      .slice(0, 500)
+      .map((entry) => ({ ...node([ssh]), environmentId: entry.target.environmentId }));
+    expect(savedHubNodeProfiles(entries, registered).map((profile) => profile.ssh.alias)).toEqual([
+      "host-500",
+      "host-501",
+    ]);
+    const payload = catalogToImportInput(entries);
+    expect(payload.catalog.state === "readable" && payload.catalog.profiles.length).toBe(500);
+    expect(savedHubNodeProfiles([{ ...entries[500]!, enabled: false }], [])).toEqual([]);
   });
 });

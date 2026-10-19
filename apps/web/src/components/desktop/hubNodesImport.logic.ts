@@ -6,10 +6,9 @@ import {
 import type { HubNodeImportProfile, HubNodesImportInput } from "@goat/contracts";
 import * as Option from "effect/Option";
 
-export function catalogToImportInput(
+export function* eligibleHubNodeProfiles(
   catalog: Iterable<ConnectionCatalogEntry>,
-): HubNodesImportInput {
-  const profiles: HubNodeImportProfile[] = [];
+): Generator<HubNodeImportProfile> {
   for (const entry of catalog) {
     const routes = connectionRoutes(entry);
     if (
@@ -24,7 +23,7 @@ export function catalogToImportInput(
       const profile = Option.getOrNull(route.profile);
       if (profile?._tag !== "SshConnectionProfile" || profile.target.alias.startsWith("boat-"))
         continue;
-      profiles.push({
+      yield {
         environmentId: entry.target.environmentId,
         label: (entry.target.label.trim() || profile.target.alias).slice(0, 120),
         ssh: {
@@ -33,10 +32,18 @@ export function catalogToImportInput(
           username: profile.target.username,
           port: profile.target.port,
         },
-      });
-      if (profiles.length === 500)
-        return { source: "desktop-catalog", catalog: { state: "readable", profiles } };
+      };
     }
+  }
+}
+
+export function catalogToImportInput(
+  catalog: Iterable<ConnectionCatalogEntry>,
+): HubNodesImportInput {
+  const profiles: HubNodeImportProfile[] = [];
+  for (const profile of eligibleHubNodeProfiles(catalog)) {
+    profiles.push(profile);
+    if (profiles.length === 500) break;
   }
   return { source: "desktop-catalog", catalog: { state: "readable", profiles } };
 }

@@ -9,6 +9,7 @@ export interface ButtonProps {
   readonly icon?: AppSymbolName;
   readonly onPress: () => void;
   readonly disabled?: boolean;
+  readonly accessibilityLabel?: string;
   readonly accessibilityHint?: string;
   readonly loading?: boolean;
   readonly tone?: "primary" | "secondary" | "danger" | "text" | "contrast";
@@ -29,7 +30,7 @@ export function Button(props: ButtonProps) {
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={props.label}
+      accessibilityLabel={props.accessibilityLabel ?? props.label}
       accessibilityHint={props.accessibilityHint}
       accessibilityState={{ disabled, busy: Boolean(props.loading) }}
       disabled={disabled}

@@ -13,7 +13,6 @@ import { useEffect, useState } from "react";
 import { environmentCatalog } from "~/connection/catalog";
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
-import { catalogToImportInput } from "../desktop/hubNodesImport.logic";
 import { Alert, AlertAction, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -21,6 +20,7 @@ import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import {
+  savedHubNodeProfiles,
   canRemoveHubNode,
   hubNodeLastSeenLabel,
   hubNodeRemovalInput,
@@ -55,12 +55,9 @@ export function HubNodesSettings({ environmentId }: { readonly environmentId: En
     const timer = setInterval(() => setNow(Date.now()), 60_000);
     return () => clearInterval(timer);
   }, []);
-  const importInput = catalogToImportInput(catalog.entries.values());
   const saved =
-    window.desktopBridge && value && importInput.catalog.state === "readable"
-      ? importInput.catalog.profiles.filter(
-          (profile) => !value.nodes.some((node) => node.environmentId === profile.environmentId),
-        )
+    window.desktopBridge && value
+      ? savedHubNodeProfiles(catalog.entries.values(), value.nodes)
       : [];
   const run = async (key: string, action: () => Promise<AtomCommandResult<unknown, unknown>>) => {
     if (busy !== null) return false;
@@ -163,6 +160,7 @@ export function HubNodesSettings({ environmentId }: { readonly environmentId: En
               <Button
                 size="sm"
                 variant="outline"
+                aria-label={`Check ${node.label}`}
                 disabled={!canCheck || busy !== null}
                 onClick={() =>
                   void run(node.nodeId, () =>
@@ -176,6 +174,7 @@ export function HubNodesSettings({ environmentId }: { readonly environmentId: En
                 <Button
                   size="sm"
                   variant="ghost-destructive"
+                  aria-label={`Remove ${node.label}`}
                   disabled={!canRemove || !canRemoveHubNode(node) || busy !== null}
                   onClick={() =>
                     void run(`remove:${node.nodeId}`, () =>
@@ -336,6 +335,7 @@ export function HubNodesSettings({ environmentId }: { readonly environmentId: En
                 <Button
                   size="sm"
                   variant="outline"
+                  aria-label={`Add ${profile.label} to hub`}
                   disabled={!canAdd || busy !== null}
                   onClick={() =>
                     void run(`saved:${index}`, () =>
