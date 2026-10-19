@@ -8,6 +8,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
+import * as TestClock from "effect/testing/TestClock";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as NetService from "@goat/shared/Net";
@@ -425,17 +426,27 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           yield* f.shiftHostClock(60);
           let forwardAlive = true;
           let forwards = 0;
-          const transport = ChildProcessSpawner.make((command) => {
-            if (command._tag === "StandardCommand" && command.args.includes("-N")) {
-              forwardAlive = true;
-              forwards++;
-              return Effect.succeed({
-                ...makeRunningProcess(() => undefined),
-                isRunning: Effect.sync(() => forwardAlive),
-              });
-            }
-            return f.transport.spawn(command);
-          });
+          let measureReconnect = false;
+          const transport = ChildProcessSpawner.make((command) =>
+            Effect.gen(function* () {
+              if (
+                measureReconnect &&
+                command._tag === "StandardCommand" &&
+                (command.args.includes("sh") || command.args.includes("-N"))
+              ) {
+                yield* TestClock.adjust(2_000);
+              }
+              if (command._tag === "StandardCommand" && command.args.includes("-N")) {
+                forwardAlive = true;
+                forwards++;
+                return {
+                  ...makeRunningProcess(() => undefined),
+                  isRunning: Effect.sync(() => forwardAlive),
+                };
+              }
+              return yield* f.transport.spawn(command);
+            }),
+          );
           const layer = Layer.mergeAll(
             NodeServices.layer,
             Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, transport),
@@ -481,10 +492,38 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               authentications: 0,
               steps: {} as Record<string, number>,
             };
-            const startedAt = yield* Clock.currentTimeMillis;
-            const result = yield* manager
-              .ensureEnvironment(uploadTarget)
-              .pipe(Effect.provideService(SshReconnectCost, cost));
+            const result = yield* Effect.gen(function* () {
+              const startedAt = yield* Clock.currentTimeMillis;
+              measureReconnect = true;
+              const result = yield* manager.ensureEnvironment(uploadTarget).pipe(
+                Effect.provideService(SshReconnectCost, cost),
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    measureReconnect = false;
+                  }),
+                ),
+              );
+              if (contended === "live") {
+                const waits = (yield* f.fs.readFileString(`${f.test}/lock-waits`))
+                  .trim()
+                  .split("\n")
+                  .map(Number);
+                assert.deepEqual(
+                  waits,
+                  Array(50).fill(0.1),
+                  "the folded command shares one lock wait budget",
+                );
+                // Charge observed remote waits and SSH commands, excluding host process startup.
+                yield* TestClock.adjust(waits.reduce((ms, seconds) => ms + seconds * 1_000, 0));
+                const elapsedMs = (yield* Clock.currentTimeMillis) - startedAt;
+                assert.isAtMost(
+                  elapsedMs,
+                  15_000,
+                  "fits initial setup with 2 s per command latency",
+                );
+              }
+              return result;
+            }).pipe(Effect.provide(TestClock.layer()));
             assert.isFalse("type" in result);
             if ("type" in result) return;
             assert.equal(result.remotePort, f.port);
@@ -493,20 +532,6 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             assert.equal(f.remoteCommands.length - commands, 1);
             assert.property(cost.steps, "runtime-probe-folded");
             assert.deepEqual(yield* f.snapshot, snapshot);
-            if (contended === "live") {
-              const waits = (yield* f.fs.readFileString(`${f.test}/lock-waits`))
-                .trim()
-                .split("\n")
-                .map(Number);
-              assert.lengthOf(waits, 50, "the folded command shares one lock wait budget");
-              const transportMs = (f.remoteCommands.length - commands) * 2_000;
-              const elapsedMs =
-                (yield* Clock.currentTimeMillis) -
-                startedAt +
-                waits.reduce((sum, seconds) => sum + seconds * 1_000, 0) +
-                transportMs;
-              assert.isAtMost(elapsedMs, 15_000, "fits initial setup with 2 s per command latency");
-            }
             if (contended !== "none") {
               assert.equal(yield* f.fs.readLink(lock), owner);
               yield* f.fs.remove(lock);
