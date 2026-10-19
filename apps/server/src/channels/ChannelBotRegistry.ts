@@ -183,10 +183,25 @@ const make = Effect.gen(function* () {
       return yield* ensureCanonical({}, channelOwnerIdFor(owner));
     });
 
+  /**
+   * The bot thread's visit watermark. Visiting the bot thread (thread.visit, the sidebar's
+   * mark-read path) marks every task that was waiting by then as read.
+   */
+  const botReadThrough = (bot: ChannelBotRef | null) =>
+    Effect.gen(function* () {
+      if (bot === null || bot.environmentId !== (yield* environment.getEnvironmentId))
+        return undefined;
+      const records = yield* threads.getThreadRecords(bot.threadId, []);
+      const visitedAt = records.thread.lastVisitedAt;
+      return visitedAt === null ? undefined : DateTime.formatIso(visitedAt);
+    }).pipe(Effect.orElseSucceed(() => undefined));
+
   const status: ChannelBotRegistry["Service"]["status"] = (owner) =>
-    Effect.all({
-      bot: ledger.getBot(owner.ownerId).pipe(Effect.map((stored) => stored?.bot ?? null)),
-      waitingCount: ledger.countWaitingTasks(owner.ownerId),
+    Effect.gen(function* () {
+      const bot = (yield* ledger.getBot(owner.ownerId))?.bot ?? null;
+      const readThrough = yield* botReadThrough(bot);
+      const waitingCount = yield* ledger.countWaitingTasks(owner.ownerId, readThrough);
+      return { bot, waitingCount };
     }).pipe(Effect.mapError(persistence));
 
   return ChannelBotRegistry.of({ ensure, ensureForReport, status });

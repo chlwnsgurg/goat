@@ -1,8 +1,19 @@
+import { useAtomValue } from "@effect/atom-react";
+import { scopeThreadRef } from "@goat/client-runtime/environment";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@goat/client-runtime/state/runtime";
 import type { ChannelBotRef, EnvironmentId } from "@goat/contracts";
-import { useEffect } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { create } from "zustand";
 
 import { useGlobalAgentStore } from "~/globalAgentStore";
+import { useThreadShell } from "~/state/entities";
+import { environmentServerConfigsAtom } from "~/state/server";
+import { threadEnvironment } from "~/state/threads";
+import { useAtomCommand } from "~/state/use-atom-command";
+import { stackedThreadToast, toastManager } from "../ui/toast";
 import type { GoatBotChannelPort } from "./goatBotChannelPort";
 import { useGoatBotEnabled } from "./useGoatBotSession";
 
@@ -84,6 +95,7 @@ export function useGoatBotWaitingCount() {
   const count = useCounts((state) =>
     environmentId === null ? undefined : state.counts.get(environmentId),
   );
+  useRefreshOnBotVisit(environmentId);
   useEffect(() => {
     if (!enabled || !connected || !port || environmentId === null || generation === 0) return;
     let observer = observers.get(environmentId);
@@ -170,4 +182,66 @@ export function refreshGoatBotWaitingCount(environmentId: EnvironmentId, chipRev
   if (!observer || observer.chipRevision === chipRevision) return;
   observer.chipRevision = chipRevision;
   observer.refresh();
+}
+
+function useBotThreadRef() {
+  const botRef = useGlobalAgentStore((state) => state.botRef);
+  return useMemo(
+    () => (botRef === null ? null : scopeThreadRef(botRef.environmentId, botRef.threadId)),
+    [botRef],
+  );
+}
+
+/**
+ * The server counts only tasks that started waiting after the bot thread's last visit, so a
+ * visit from any client (synced through the thread shell) re-reads the count right away.
+ */
+function useRefreshOnBotVisit(environmentId: EnvironmentId | null) {
+  const botVisitedAt = useThreadShell(useBotThreadRef())?.lastVisitedAt ?? null;
+  const seen = useRef(botVisitedAt);
+  useEffect(() => {
+    if (seen.current === botVisitedAt) return;
+    seen.current = botVisitedAt;
+    if (environmentId !== null) observers.get(environmentId)?.refresh();
+  }, [botVisitedAt, environmentId]);
+}
+
+/**
+ * Marks every waiting GOAT Bot task read by visiting the bot thread: the same thread.visit the
+ * sidebar's mark-read uses, persisted on the server and synced to every client. Null when the
+ * bot's server predates read-aware counts.
+ */
+export function useMarkGoatBotRead(): (() => Promise<void>) | null {
+  const botThreadRef = useBotThreadRef();
+  const { environment } = useGoatBotEnabled();
+  const statusEnvironmentId = environment?.environmentId ?? null;
+  const serverConfigs = useAtomValue(environmentServerConfigsAtom);
+  const visit = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
+  const capabilities =
+    botThreadRef === null
+      ? undefined
+      : serverConfigs.get(botThreadRef.environmentId)?.environment.capabilities;
+  const supported =
+    capabilities?.goatBotWaitingRead === true && capabilities.threadVisitedTracking === true;
+  const markRead = useCallback(async () => {
+    if (botThreadRef === null) return;
+    const result = await visit({
+      environmentId: botThreadRef.environmentId,
+      input: { threadId: botThreadRef.threadId, visitedAt: new Date().toISOString() },
+    });
+    if (result._tag === "Success") {
+      if (statusEnvironmentId !== null) observers.get(statusEnvironmentId)?.refresh();
+      return;
+    }
+    if (isAtomCommandInterrupted(result)) return;
+    const error = squashAtomCommandFailure(result);
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Failed to mark GOAT Bot tasks as read",
+        description: error instanceof Error ? error.message : "An error occurred.",
+      }),
+    );
+  }, [botThreadRef, statusEnvironmentId, visit]);
+  return supported ? markRead : null;
 }
