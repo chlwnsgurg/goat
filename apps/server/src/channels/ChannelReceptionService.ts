@@ -382,8 +382,8 @@ const make = Effect.gen(function* () {
     );
 
   /**
-   * Every open task this requester may see, however old, plus the newest visible ones (which
-   * may have finished without their outcome reaching the person yet).
+   * Every open task this requester may see, however old: unfinished ones, finished ones whose
+   * outcome has not reached the person, and the newest visible ones.
    */
   const openAndRecentTasks = (viewer: ChannelRequester, conversationId: ChannelConversationId) =>
     Effect.gen(function* () {
@@ -395,9 +395,17 @@ const make = Effect.gen(function* () {
       ]))
         .map((stored) => stored.task)
         .filter((task) => canSeeTask(viewer, task, conversationId));
+      const undelivered = (yield* ledger.listUndeliveredOutcomes(viewer.ownerId)).filter((task) =>
+        canSeeTask(viewer, task, conversationId),
+      );
       const recent = yield* visibleTasks(viewer, conversationId);
-      const seen = new Set(open.map((task) => task.taskId as string));
-      return [...open, ...recent.filter((task) => !seen.has(task.taskId))];
+      const all = [...open, ...undelivered, ...recent];
+      const seen = new Set<string>();
+      return all.filter((task) => {
+        if (seen.has(task.taskId)) return false;
+        seen.add(task.taskId);
+        return true;
+      });
     });
 
   /** The owner's newest tasks this requester may see. */

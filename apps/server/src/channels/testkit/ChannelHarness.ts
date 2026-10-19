@@ -121,6 +121,8 @@ export class WorkerWorld {
   /** Interrupts and subagent stops sent to worker threads, by thread id. */
   readonly interrupts: Array<string> = [];
   readonly subagentStops: Array<string> = [];
+  /** Command ids the orchestrator refuses for good, as a persisted rejection would. */
+  readonly rejectedCommands = new Set<string>();
   /** Follow-ups that joined a running run, by message id, and the run they joined. */
   readonly steered = new Map<string, RunId>();
   /** Sends to fail, by message id, with the error the orchestrator would give. */
@@ -392,6 +394,9 @@ export function makeHarness(
                 commandType: command.type,
               }),
             );
+          }
+          if (world.rejectedCommands.has(command.commandId)) {
+            return Effect.fail({ _tag: "OrchestratorCommandPreviouslyRejectedError" } as never);
           }
           return Effect.sync(() => {
             world.commands.push(command);

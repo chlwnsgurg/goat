@@ -2183,13 +2183,22 @@ const make = Effect.gen(function* () {
           const state = yield* readState(pending.event.taskId);
           const done = ledger.completeForward({ owner, sequence: pending.sequence });
           if (stored === undefined || state === undefined) return yield* done;
-          // The launch may have been in flight when the stop was asked; its thread id is
-          // recorded here once the remote answers, so look again until a grace runs out.
-          const threadId = state.remoteThreadId ?? stored.task.worker?.threadId;
+          const authorize = authorityFor(stored.task.taskId, stored.task.generation, owner);
+          let threadId = state.remoteThreadId ?? stored.task.worker?.threadId;
           if (threadId === undefined) {
-            const age = (yield* Clock.currentTimeMillis) - Date.parse(pending.event.occurredAt);
-            if (age > 120_000) yield* done;
-            return;
+            // The launch may have been in flight when the stop was asked, and its binding never
+            // committed here. The remote stores the binding before it creates the thread, so
+            // ask it. Unreachable keeps the stop pending; a binding still missing after the
+            // grace means no launch landed.
+            const seen = yield* probe(state, authorize).pipe(Effect.result);
+            if (seen._tag === "Success") {
+              threadId = seen.success.threadId;
+            } else {
+              if (seen.failure instanceof Superseded || isUnreachable(seen.failure)) return;
+              const age = (yield* Clock.currentTimeMillis) - Date.parse(pending.event.occurredAt);
+              if (age > 120_000) yield* done;
+              return;
+            }
           }
           // The remote interrupt stops the running run there. Async subagents it started keep
           // running on that machine until they finish; GOAT has no remote thread stop yet.
@@ -2205,7 +2214,7 @@ const make = Effect.gen(function* () {
               writes: true,
               timeoutMs: SEND_TIMEOUT_MS,
             },
-            authorityFor(stored.task.taskId, stored.task.generation, owner),
+            authorize,
           ).pipe(Effect.result);
           if (stopped._tag === "Failure" && remoteCode(stopped.failure) !== "thread_not_found") {
             if (stopped.failure instanceof Superseded) return;

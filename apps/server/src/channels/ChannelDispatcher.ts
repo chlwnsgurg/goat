@@ -13,6 +13,7 @@
  */
 import {
   type ChannelDispatchTarget,
+  type CommandId,
   type ChannelRequester,
   type ChannelTask,
   type ChannelTaskId,
@@ -898,24 +899,28 @@ const make = Effect.gen(function* () {
         if (age > STOP_LAUNCH_GRACE_MS) yield* done;
         return;
       }
-      const stopped = yield* threads
-        .dispatch({
-          type: "thread.stop",
-          commandId: ids.interrupt,
-          threadId,
-          reason: "Stopped from GOAT Bot.",
-        })
-        .pipe(Effect.result);
+      const live = records.value.runs.findLast(
+        (run) => run.status === "running" || run.status === "queued",
+      );
+      const stopThread = (commandId: CommandId) =>
+        threads
+          .dispatch({ type: "thread.stop", commandId, threadId, reason: "Stopped from GOAT Bot." })
+          .pipe(Effect.result);
+      const refusedFor = (failure: unknown) => {
+        const tag = (failure as { readonly _tag?: string })._tag;
+        return (
+          tag === "OrchestratorCommandRejectedError" ||
+          tag === "OrchestratorCommandPreviouslyRejectedError"
+        );
+      };
+      let stopped = yield* stopThread(ids.interrupt);
+      // Refused, yet something still runs: a new command for the run that is alive now.
+      if (stopped._tag === "Failure" && refusedFor(stopped.failure) && live !== undefined) {
+        stopped = yield* stopThread(stopIdsFor(pending.event.eventId, live.id).interrupt);
+      }
       if (stopped._tag === "Failure") {
         // A refused stop is done only if nothing is left running there.
-        const live = records.value.runs.some(
-          (run) => run.status === "running" || run.status === "queued",
-        );
-        const tag = (stopped.failure as { readonly _tag?: string })._tag;
-        const refused =
-          tag === "OrchestratorCommandRejectedError" ||
-          tag === "OrchestratorCommandPreviouslyRejectedError";
-        if (!refused || live) {
+        if (!refusedFor(stopped.failure) || live !== undefined) {
           yield* Effect.logWarning("channel worker stop failed; retrying", {
             taskId: task.taskId,
             cause: stopped.failure,

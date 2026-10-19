@@ -98,13 +98,16 @@ yet" or "result not delivered" until that delivery is recorded delivered. Worker
 machines report through their host, so their runs are not recorded here.
 
 - **What's pending.** A `pending` read lists the open items the requester may see, newest
-  first, with their runs, open questions and age; every open task is read, however old. An item's
+  first, with their runs, open questions and age; every open task is read, however old,
+  including finished ones whose outcome has not reached the person. An item's
   outcome delivery is the narration of its newest terminal event, so a retried task is not
   closed by its earlier delivery. Runs still recorded as running after their item ended keep being
-  reconciled until they end.
+  reconciled until they end, and a task that ended within the last hour has its thread's runs
+  read into history even if none were recorded while it ran.
 - **At most four at once.** The dispatcher leaves a person's fifth item received while four of
-  their items hold a worker: dispatching, running, or waiting on them with a worker. Questions
-  asked before any worker exists hold none. Remote dispatches handed off but not yet claimed are
+  their items hold a worker: dispatching, running, or waiting on them with a worker. Stopped items
+  keep their slot until their stop has gone through. Questions asked before any worker exists
+  hold none. Remote dispatches handed off but not yet claimed are
   reserved in the dispatcher so they count too. The runtime dispatches received tasks oldest
   first by creation, so the queue drains in arrival order as items end. The reply to the queued request and "what's
   pending" both say it is waiting for a free worker.
@@ -112,11 +115,13 @@ machines report through their host, so their runs are not recorded here.
   `task.cancelled` per item in the same commit as the reply, with its narration and a pending
   forward. The forward sends the worker thread a `thread.stop`, which ends its run and holds anything
   queued behind it, then stops the subagents it started, with ids derived from the stop event, so
-  a crash after the reply still stops each once. A refused stop counts as done only when nothing
-  is left running there. A launch in flight when the stop came lands on the thread id the task's
+  a crash after the reply still stops each once. A refused stop is tried once more under ids keyed by
+  the run still alive, since a refused command id is refused for good, and counts as done only
+  when nothing is left running there. A launch in flight when the stop came lands on the thread id the task's
   generation derives, so the forward waits up to two minutes for that thread and stops it. Work
   never claimed for a launch is stopped by the ledger write alone. A worker on another machine is
-  interrupted there through `goat_thread_interrupt`; its async subagents run on until they end,
+  interrupted there through `goat_thread_interrupt`, found through its report binding when its
+  launch was still in flight; its async subagents run on until they end,
   since GOAT has no remote thread stop.
 
 An owner has one bot, in the Scratch project, and one bot conversation keyed by the owner rather

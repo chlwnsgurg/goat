@@ -287,14 +287,26 @@ export class ChannelLedger extends Context.Service<
     readonly listWorkerRuns: (
       taskIds: ReadonlyArray<ChannelTaskId>,
     ) => Effect.Effect<ReadonlyArray<ChannelWorkerRun>, ChannelLedgerError>;
+    /**
+     * An owner's finished tasks whose newest outcome has not been delivered to where the work
+     * came from: not written yet, still sending, given up, or unknown after a crash.
+     */
+    readonly listUndeliveredOutcomes: (
+      ownerId: string,
+    ) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
+    /** Local tasks that finished since `since`, for recording how their runs ended. */
+    readonly listRecentlyFinished: (
+      since: string,
+    ) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
     /** Recorded runs still running or waiting, across tasks, for reconciliation. */
     readonly listOpenWorkerRuns: () => Effect.Effect<
       ReadonlyArray<ChannelWorkerRun>,
       ChannelLedgerError
     >;
     /**
-     * How many of a person's tasks hold a worker now: dispatching, running, or waiting on a
-     * person with a worker. Questions asked before any worker exists hold none.
+     * How many of a person's tasks hold a worker now: dispatching, running, waiting on a person
+     * with a worker, or stopped while the stop has not gone through. Questions asked before any
+     * worker exists hold none.
      */
     readonly countBusyTasks: (input: {
       readonly ownerId: string;
@@ -1329,6 +1341,37 @@ const make = Effect.gen(function* () {
             Effect.mapError(toLedgerError("listWorkerRuns")),
           ),
 
+    listUndeliveredOutcomes: (ownerId) =>
+      sql<TaskRow>`
+        SELECT task.owner_id, task.task_json, task.pending_answer_message_id, task.completion_hold
+        FROM channel_tasks AS task
+        JOIN channel_task_events AS outcome ON outcome.task_id = task.task_id
+        LEFT JOIN channel_outbox AS delivery
+          ON delivery.cause_key = 'narration:' || outcome.event_id || ':origin'
+        WHERE task.owner_id = ${ownerId}
+          AND task.status IN ('completed', 'failed', 'cancelled')
+          AND outcome.sequence = (
+            SELECT MAX(latest.sequence) FROM channel_task_events AS latest
+            WHERE latest.task_id = task.task_id
+              AND latest.type IN ('task.completed', 'task.failed', 'task.cancelled')
+          )
+          AND (delivery.state IS NULL OR delivery.state != 'delivered')
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => storedTask(row).task)),
+        Effect.mapError(toLedgerError("listUndeliveredOutcomes")),
+      ),
+
+    listRecentlyFinished: (since) =>
+      sql<TaskRow>`
+        SELECT owner_id, task_json, pending_answer_message_id, completion_hold FROM channel_tasks
+        WHERE status IN ('completed', 'failed', 'cancelled') AND updated_at >= ${since}
+          AND worker_thread_id IS NOT NULL
+          AND json_extract(task_json, '$.worker.host') IS NULL
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => storedTask(row).task)),
+        Effect.mapError(toLedgerError("listRecentlyFinished")),
+      ),
+
     listOpenWorkerRuns: () =>
       sql<{ readonly value_json: string }>`
         SELECT value_json FROM channel_runtime_state
@@ -1345,7 +1388,13 @@ const make = Effect.gen(function* () {
         WHERE owner_id = ${input.ownerId}
           AND json_extract(task_json, '$.requester.principalId') = ${input.principalId}
           AND (status IN ('dispatching', 'running')
-            OR (status = 'waiting_input' AND json_extract(task_json, '$.worker') IS NOT NULL))
+            OR (status = 'waiting_input' AND json_extract(task_json, '$.worker') IS NOT NULL)
+            -- Stopped, but its worker may still run until the stop goes through.
+            OR (status = 'cancelled' AND EXISTS (
+              SELECT 1 FROM channel_task_events AS stop
+              WHERE stop.task_id = channel_tasks.task_id AND stop.type = 'task.cancelled'
+                AND stop.forward_state = 'pending'
+            )))
       `.pipe(
         Effect.map((rows) => rows[0]?.busy ?? 0),
         Effect.mapError(toLedgerError("countBusyTasks")),

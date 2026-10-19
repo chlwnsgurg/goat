@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 import * as ChannelDispatcher from "./ChannelDispatcher.ts";
 import * as ChannelGateway from "./ChannelGateway.ts";
 import * as ChannelReceptionService from "./ChannelReceptionService.ts";
-import { workerLaunchIdsFor } from "./channelIds.ts";
+import { stopIdsFor, workerLaunchIdsFor } from "./channelIds.ts";
 import { commitTransition } from "./channelTaskWrites.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRuntime from "./ChannelRuntime.ts";
@@ -295,6 +295,100 @@ describe("GOAT Bot worker slots", () => {
         0,
       );
       assert.lengthOf(harness.world.launches, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("tries a refused stop again under a new id while its run still runs", () => {
+    const { harness } = queueHarness();
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      yield* gateway.ingest(goatInput("do: job a", "j1"), rpcContext);
+      yield* runtime.drain;
+      const [task] = (yield* ledger.listTasks({ ownerId, limit: 10 })).tasks;
+      yield* gateway.ingest(goatInput("stop", "j2"), rpcContext);
+      // The first stop id was refused for good before (a persisted rejection).
+      const [input] = yield* ledger.listPendingInputs(10);
+      const reception = yield* ChannelReceptionService.ChannelReceptionService;
+      yield* reception.receive(input!, runtime.ownerToken);
+      const [stop] = yield* ledger.listPendingForwards(10);
+      harness.world.rejectedCommands.add(stopIdsFor(stop!.event.eventId).interrupt);
+      yield* runtime.drain;
+      assert.deepStrictEqual(harness.world.interrupts, [task!.worker!.threadId]);
+      assert.lengthOf(yield* ledger.listPendingForwards(10), 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("keeps a stopped item's slot until its stop went through", () => {
+    const { harness } = queueHarness();
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      for (let index = 0; index < WORKERS_PER_REQUESTER; index += 1) {
+        yield* gateway.ingest(goatInput("do: job " + index, "k" + index), rpcContext);
+        yield* runtime.drain;
+      }
+      const tasks = (yield* ledger.listTasks({ ownerId, limit: 10 })).tasks;
+      // The workers' threads cannot be reached, so the stops stay pending.
+      for (const task of tasks) harness.world.dispatchFailures.add(task.worker!.threadId);
+      yield* gateway.ingest(goatInput("stop", "k-stop"), rpcContext);
+      yield* runtime.drain;
+      yield* gateway.ingest(goatInput("do: next job", "k-next"), rpcContext);
+      yield* runtime.drain;
+      assert.lengthOf(harness.world.launches, WORKERS_PER_REQUESTER);
+      harness.world.dispatchFailures.clear();
+      yield* runtime.drain;
+      yield* runtime.drain;
+      assert.lengthOf(harness.world.launches, WORKERS_PER_REQUESTER + 1);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("records how the runs of stopped work ended", () => {
+    const { harness } = queueHarness();
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const reports = yield* ChannelWorkerReports.ChannelWorkerReports;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      yield* gateway.ingest(goatInput("do: job a", "h1"), rpcContext);
+      yield* runtime.drain;
+      const [task] = (yield* ledger.listTasks({ ownerId, limit: 10 })).tasks;
+      yield* gateway.ingest(goatInput("stop", "h2"), rpcContext);
+      yield* runtime.drain;
+      yield* reports.reconcile(runtime.ownerToken);
+      const runs = yield* ledger.listWorkerRuns([task!.taskId]);
+      assert.deepStrictEqual(
+        runs.map((run) => run.status),
+        ["stopped"],
+      );
+      assert.deepStrictEqual(harness.world.interrupts, [task!.worker!.threadId]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("keeps finished work open until its outcome reached the person", () => {
+    const { harness } = queueHarness();
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const reports = yield* ChannelWorkerReports.ChannelWorkerReports;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      yield* gateway.ingest(goatInput("do: job a", "u1"), rpcContext);
+      yield* runtime.drain;
+      const [task] = (yield* ledger.listTasks({ ownerId, limit: 10 })).tasks;
+      harness.world.setStatus(task!.worker!.threadId, 1, "completed", "Done.");
+      yield* reports.reconcile(runtime.ownerToken);
+      assert.deepStrictEqual(
+        (yield* ledger.listUndeliveredOutcomes(ownerId)).map((open) => open.taskId),
+        [task!.taskId],
+      );
+      yield* runtime.drain;
+      assert.lengthOf(yield* ledger.listUndeliveredOutcomes(ownerId), 0);
     }).pipe(Effect.provide(harness.layer));
   });
 });

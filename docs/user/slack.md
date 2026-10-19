@@ -52,7 +52,8 @@ GOAT Bot screen shows only a chip for the work and its final report.
 - Ask GOAT Bot "what's pending?" to see everything still open: queued,
   running, waiting on you, or finished but not yet reported to you. Say "stop
   everything" (or name one piece of work) to stop it, including anything it
-  handed to subagents.
+  handed to subagents. Work running on another machine stops its current turn
+  there; subagents it started there finish on their own.
 - GOAT Bot runs up to four pieces of your work at once. More wait in order and
   start as earlier ones finish; the reply says when something is queued.
 - Ask GOAT Bot to remember a standing rule ("always reply in Korean") and it

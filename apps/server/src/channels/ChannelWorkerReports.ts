@@ -69,6 +69,9 @@ const workerRunStatus = (
   }
 };
 
+/** How long after a task ends its runs are still read into history. */
+const RUN_HISTORY_HOURS = 1;
+
 const TERMINAL_RUN_STATUSES = new Set([
   "completed",
   "interrupted",
@@ -383,6 +386,25 @@ const make = Effect.gen(function* () {
       let changed = 0;
       for (const stored of active) {
         if (yield* reconcileTask(stored, owner)) changed += 1;
+      }
+      // A task that ended before its runs were ever recorded (stopped, or settled by the
+      // worker's own report first) still gets its runs into history, for an hour after.
+      const hourAgo = DateTime.formatIso(
+        DateTime.subtract(yield* DateTime.now, { hours: RUN_HISTORY_HOURS }),
+      );
+      for (const finished of yield* ledger.listRecentlyFinished(hourAgo)) {
+        const worker = finished.worker;
+        if (worker === undefined || worker.host !== undefined) continue;
+        const records = yield* threads
+          .getThreadRecords(worker.threadId, ["runs"])
+          .pipe(Effect.option);
+        if (records._tag === "None") continue;
+        const runs = records.value.runs.toSorted((left, right) => left.ordinal - right.ordinal);
+        const launched = runs.find(
+          (run) =>
+            run.userMessageId === workerLaunchIdsFor(finished.taskId, worker.generation).messageId,
+        );
+        yield* recordRuns(finished, runs, launched?.ordinal ?? 0, false);
       }
       // Runs recorded as running or waiting whose task has ended (stopped, or settled by the
       // worker's own report) still end on their own; record how.
