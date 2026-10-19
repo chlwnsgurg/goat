@@ -17,6 +17,8 @@ import { ConnectionCatalogUnreadableAlert } from "../desktop/ConnectionCatalogUn
 import { ConnectionEnvironmentsSection } from "../settings/ConnectionEnvironmentsSection";
 import { FleetGraph } from "./FleetGraph";
 import { describeMachine } from "./describeMachine";
+import { fleetConnectionLegend, UNKNOWN_FLEET_CONNECTION } from "./fleetConnection";
+import { FleetConnectionIcon } from "./FleetConnectionGlyph";
 
 const STATE_LABEL: Record<FleetThread["state"], string> = {
   running: "Running",
@@ -62,14 +64,22 @@ function groupThreadsByMachine(threads: ReadonlyArray<FleetThread>) {
 
 /** Everything running across connected machines, as a graph and a list grouped by machine. */
 export function FleetPage() {
-  const { snapshot, loading } = useFleetSnapshot();
+  const { snapshot, connections, currentMachineId, loading } = useFleetSnapshot();
   const [selected, setSelected] = useState<string | null>(null);
   const selectedMachine = snapshot.machines.find((machine) => machine.id === selected) ?? null;
   const toggleMachine = (machineId: string) =>
     setSelected((current) => (current === machineId ? null : machineId));
   const threadsByMachine = groupThreadsByMachine(snapshot.threads);
   const listed = (selectedMachine ? [selectedMachine] : snapshot.machines).filter(isBusy);
-  const idle = selectedMachine ? [] : snapshot.machines.filter((machine) => !isBusy(machine));
+  // A host that is away or blocked is not idle; its row in Connections says why.
+  const reachable = (machine: FleetMachine) => {
+    const { state } = connections.get(machine.id) ?? UNKNOWN_FLEET_CONNECTION;
+    return state === "connected" || state === "unknown";
+  };
+  const idle = selectedMachine
+    ? []
+    : snapshot.machines.filter((machine) => !isBusy(machine) && reachable(machine));
+  const connectionLegend = fleetConnectionLegend(connections.values());
   const { totals } = snapshot;
 
   return (
@@ -99,6 +109,8 @@ export function FleetPage() {
             <section aria-label="Fleet graph" className="overflow-hidden rounded-xl border bg-card">
               <FleetGraph
                 snapshot={snapshot}
+                connections={connections}
+                currentMachineId={currentMachineId}
                 selectedMachineId={selected}
                 onSelectMachine={toggleMachine}
               />
@@ -107,6 +119,15 @@ export function FleetPage() {
                   <span key={state} className="inline-flex items-center gap-1.5">
                     <span aria-hidden className={cn("size-2 rounded-full", STATE_DOT[state])} />
                     {STATE_LABEL[state]}
+                  </span>
+                ))}
+                {connectionLegend.length > 0 ? (
+                  <span aria-hidden className="hidden h-3 w-px bg-border sm:block" />
+                ) : null}
+                {connectionLegend.map((entry) => (
+                  <span key={entry.label} className="inline-flex items-center gap-1.5">
+                    <FleetConnectionIcon state={entry.state} />
+                    {entry.label}
                   </span>
                 ))}
                 <span className="sm:ml-auto">Select a machine to show only its threads.</span>

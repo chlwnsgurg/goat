@@ -167,6 +167,22 @@ describe("createFleetSummaryAtom", () => {
 });
 
 describe("buildFleet", () => {
+  it("draws a disconnected environment without counting its stale threads", () => {
+    const fleet = buildFleet({
+      environments: [env(local, "Mac"), { ...env(remote, "Box"), connected: false }],
+      primaryEnvironmentId: local,
+      shells: [shell(local, "a"), shell(remote, "stale", { question: true })],
+      remote: [],
+    });
+    expect(
+      fleet.machines.map((machine) => [machine.label, machine.running, machine.attention]),
+    ).toEqual([
+      ["Mac", 1, 0],
+      ["Box", 0, 0],
+    ]);
+    expect(fleet.threads.map((thread) => thread.title)).toEqual(["a"]);
+  });
+
   it("counts a launch whose thread is loaded here once, as that live thread", () => {
     const remoteThread = shell(remote, "t1", {
       status: "completed",

@@ -1,0 +1,166 @@
+import type { EnvironmentConnectionPresentation } from "@goat/client-runtime/connection";
+
+/**
+ * What the Fleet graph shows about a machine's connection from this client.
+ * It reads the same presentation as Settings > Connections, so the SSH
+ * classification (unreachable host, blocked login, host key, proxy) arrives
+ * already decided: an unreachable host is `reconnecting` with `unreachable`,
+ * and a failure only a person can fix is `error` with the fix in `error`.
+ */
+export type FleetConnectionState =
+  | "connected"
+  | "connecting"
+  | "reconnecting"
+  | "degraded"
+  | "unreachable"
+  | "offline"
+  | "attention"
+  /** Hosts this client has no connection to, such as an SSH host a dispatcher reported. */
+  | "unknown";
+
+export type FleetConnectionInput = Pick<
+  EnvironmentConnectionPresentation,
+  "phase" | "error" | "unreachable"
+>;
+
+export interface FleetConnection {
+  readonly state: FleetConnectionState;
+  /** The state's name, in the words Settings > Connections uses. */
+  readonly label: string;
+  /** The classified failure, when there is one. */
+  readonly reason: string | null;
+}
+
+export const UNKNOWN_FLEET_CONNECTION: FleetConnection = Object.freeze({
+  state: "unknown",
+  label: "Status unknown",
+  reason: null,
+});
+
+export function presentFleetConnection(connection: FleetConnectionInput | null): FleetConnection {
+  if (connection === null) return UNKNOWN_FLEET_CONNECTION;
+  const reason = connection.error || null;
+  switch (connection.phase) {
+    case "connected":
+      return { state: "connected", label: "Connected", reason: null };
+    case "connecting":
+      return { state: "connecting", label: "Connecting", reason };
+    case "reconnecting":
+      // A host that is away (asleep, off the network) is expected, not broken.
+      if (connection.unreachable) return { state: "unreachable", label: "Unreachable", reason };
+      // The host answered but the attempt failed; it keeps retrying.
+      if (reason !== null) return { state: "degraded", label: "Degraded", reason };
+      return { state: "reconnecting", label: "Reconnecting", reason: null };
+    case "error":
+      return { state: "attention", label: "Needs attention", reason };
+    case "unsupported":
+      return { state: "attention", label: "Client not supported", reason };
+    case "offline":
+      return { state: "offline", label: "Offline", reason: null };
+    case "available":
+      return { state: "offline", label: "Not connected", reason: null };
+    default:
+      return UNKNOWN_FLEET_CONNECTION;
+  }
+}
+
+export type FleetConnectionTone = "success" | "warning" | "destructive" | "muted";
+
+/** A shape that tells states apart without color. */
+export type FleetConnectionShape = "dot" | "arc" | "half" | "ring" | "alert";
+
+export interface FleetConnectionVisual {
+  /** Null leaves the node without a status mark. */
+  readonly glyph: FleetConnectionShape | null;
+  /** The semantic color token the glyph is drawn in. */
+  readonly tone: FleetConnectionTone;
+  /** Null keeps the edge's usual look, which follows the machine's work. */
+  readonly edge: {
+    readonly className: string;
+    readonly dash: string | undefined;
+    /** Marching dashes, only where motion is allowed. */
+    readonly animated: boolean;
+  } | null;
+  /** Draws the node muted, as Connections does for hosts that are away. */
+  readonly quiet: boolean;
+}
+
+const VISUALS: Record<FleetConnectionState, FleetConnectionVisual> = {
+  connected: {
+    glyph: "dot",
+    tone: "success",
+    edge: null,
+    quiet: false,
+  },
+  connecting: {
+    glyph: "arc",
+    tone: "warning",
+    edge: { className: "stroke-warning/60", dash: "4 4", animated: true },
+    quiet: false,
+  },
+  reconnecting: {
+    glyph: "arc",
+    tone: "warning",
+    edge: { className: "stroke-warning/60", dash: "4 4", animated: true },
+    quiet: false,
+  },
+  degraded: {
+    glyph: "half",
+    tone: "warning",
+    edge: { className: "stroke-warning/60", dash: "8 3", animated: false },
+    quiet: false,
+  },
+  unreachable: {
+    glyph: "ring",
+    tone: "muted",
+    edge: { className: "stroke-border", dash: "1 5", animated: false },
+    quiet: true,
+  },
+  offline: {
+    glyph: "ring",
+    tone: "muted",
+    edge: { className: "stroke-border", dash: "1 5", animated: false },
+    quiet: true,
+  },
+  attention: {
+    glyph: "alert",
+    tone: "destructive",
+    edge: { className: "stroke-destructive/50", dash: "3 5", animated: false },
+    quiet: false,
+  },
+  unknown: { glyph: null, tone: "muted", edge: null, quiet: false },
+};
+
+export function fleetConnectionVisual(state: FleetConnectionState): FleetConnectionVisual {
+  return VISUALS[state] ?? VISUALS.unknown;
+}
+
+const LEGEND_ORDER: ReadonlyArray<FleetConnectionState> = [
+  "connected",
+  "connecting",
+  "reconnecting",
+  "degraded",
+  "unreachable",
+  "offline",
+  "attention",
+];
+
+/**
+ * The legend entries for what the graph shows right now: one per distinct
+ * state name, healthy first, then in flight, then away or blocked.
+ */
+export function fleetConnectionLegend(
+  connections: Iterable<FleetConnection>,
+): ReadonlyArray<Pick<FleetConnection, "state" | "label">> {
+  const byLabel = new Map<string, FleetConnection>();
+  for (const connection of connections) {
+    if (connection.state !== "unknown") byLabel.set(connection.label, connection);
+  }
+  return [...byLabel.values()]
+    .map(({ state, label }) => ({ state, label }))
+    .sort(
+      (left, right) =>
+        LEGEND_ORDER.indexOf(left.state) - LEGEND_ORDER.indexOf(right.state) ||
+        left.label.localeCompare(right.label),
+    );
+}
