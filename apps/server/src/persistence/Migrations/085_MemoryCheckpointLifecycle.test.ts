@@ -7,7 +7,7 @@ import {
   refreshCheckpointAccounting,
 } from "../../memory/MemoryCheckpointAccounting.ts";
 import { runMigrations } from "../Migrations.ts";
-import migration from "./084_MemoryCheckpointLifecycle.ts";
+import migration from "./085_MemoryCheckpointLifecycle.ts";
 
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
 const space = "00000000-0000-4000-8000-000000000001";
@@ -105,9 +105,9 @@ it.effect("083 ignores ordinary total updates, unchanged markers and unrelated c
 it.effect("083 participates in the migration ledger and leaves healthy spaces unqueued", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    yield* runMigrations({ toMigrationInclusive: 83 });
+    yield* runMigrations({ toMigrationInclusive: 84 });
     yield* sql`INSERT INTO memory_quota_counters VALUES (${space},'checkpoint_initialized','',1),(${space},'hub_snapshot_bytes','',0),(${space},'hub_snapshot_rows','',0)`;
-    assert.deepStrictEqual(yield* runMigrations(), [[84, "MemoryCheckpointLifecycle"]]);
+    assert.deepStrictEqual(yield* runMigrations(), [[85, "MemoryCheckpointLifecycle"]]);
     assert.deepStrictEqual(yield* pending, []);
     yield* sql.withTransaction(refreshCheckpointAccounting());
     assert.deepStrictEqual(yield* runMigrations(), []);

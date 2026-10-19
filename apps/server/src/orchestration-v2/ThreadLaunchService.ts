@@ -989,6 +989,13 @@ const make = Effect.gen(function* () {
           },
         };
       }
+      // Scratch has no Git repository; resolve its own folder before allocating a workspace.
+      if (
+        input.workspaceStrategy.type === "worktree" &&
+        (yield* managedFolders.isScratchProject(input.projectId))
+      ) {
+        input = { ...input, workspaceStrategy: { type: "root" } };
+      }
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {
         type: "thread.create",
         projectId: input.projectId,

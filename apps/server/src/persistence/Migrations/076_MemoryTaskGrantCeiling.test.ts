@@ -38,20 +38,20 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 74 });
+      yield* runMigrations({ toMigrationInclusive: 75 });
       yield* insertTask;
       yield* insertDispatches;
       assert.deepStrictEqual(yield* runMigrations(), [
-        [75, "MemoryTaskGrantCeiling"],
-        [76, "MemoryImportLineage"],
-        [77, "MemoryCheckpointAccounting"],
-        [78, "MemoryReportLifecycle"],
-        [79, "MemoryUsageCounters"],
-        [80, "MemoryRevertResults"],
-        [81, "HandoffLookupIndex"],
-        [82, "MemoryLastReadySpace"],
-        [83, "MemoryHubAdministered"],
-        [84, "MemoryCheckpointLifecycle"],
+        [76, "MemoryTaskGrantCeiling"],
+        [77, "MemoryImportLineage"],
+        [78, "MemoryCheckpointAccounting"],
+        [79, "MemoryReportLifecycle"],
+        [80, "MemoryUsageCounters"],
+        [81, "MemoryRevertResults"],
+        [82, "HandoffLookupIndex"],
+        [83, "MemoryLastReadySpace"],
+        [84, "MemoryHubAdministered"],
+        [85, "MemoryCheckpointLifecycle"],
       ]);
       assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
         { memory_grant_ceiling: "none" },
@@ -114,7 +114,7 @@ it.effect("rejects an unreleased ceiling ledger without changing grants or its e
     yield* sql`UPDATE scheduled_tasks SET memory_grant_ceiling='read'`;
     yield* sql`UPDATE remote_dispatches SET memory_grant_ceiling='read'`;
     yield* sql`DELETE FROM effect_sql_migrations WHERE name='MemorySearchCounters'`;
-    yield* sql`UPDATE effect_sql_migrations SET migration_id=74 WHERE name='MemoryTaskGrantCeiling'`;
+    yield* sql`UPDATE effect_sql_migrations SET migration_id=75 WHERE name='MemoryTaskGrantCeiling'`;
     const before =
       yield* sql`SELECT migration_id,name FROM effect_sql_migrations ORDER BY migration_id`;
     const result = yield* Effect.flip(reconcileGoatMigrationIds(migrationEntries));

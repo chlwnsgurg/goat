@@ -4,14 +4,14 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
-import ProjectionTurnItemRequestIndex from "./071_ProjectionTurnItemRequestIndex.ts";
+import ProjectionTurnItemRequestIndex from "./072_ProjectionTurnItemRequestIndex.ts";
 
 it.effect(
   "indexes existing request bodies on upgrade from 69 and can run again after relocation",
   () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 70 });
+      yield* runMigrations({ toMigrationInclusive: 71 });
       yield* sql`
       INSERT INTO orchestration_v2_projection_turn_items
         (turn_item_id, thread_id, ordinal, type, status, updated_at, payload_json)
@@ -31,20 +31,20 @@ it.effect(
     `;
 
       assert.deepStrictEqual(yield* runMigrations(), [
-        [71, "ProjectionTurnItemRequestIndex"],
-        [72, "Memory"],
-        [73, "MemoryHubSync"],
-        [74, "MemorySearchCounters"],
-        [75, "MemoryTaskGrantCeiling"],
-        [76, "MemoryImportLineage"],
-        [77, "MemoryCheckpointAccounting"],
-        [78, "MemoryReportLifecycle"],
-        [79, "MemoryUsageCounters"],
-        [80, "MemoryRevertResults"],
-        [81, "HandoffLookupIndex"],
-        [82, "MemoryLastReadySpace"],
-        [83, "MemoryHubAdministered"],
-        [84, "MemoryCheckpointLifecycle"],
+        [72, "ProjectionTurnItemRequestIndex"],
+        [73, "Memory"],
+        [74, "MemoryHubSync"],
+        [75, "MemorySearchCounters"],
+        [76, "MemoryTaskGrantCeiling"],
+        [77, "MemoryImportLineage"],
+        [78, "MemoryCheckpointAccounting"],
+        [79, "MemoryReportLifecycle"],
+        [80, "MemoryUsageCounters"],
+        [81, "MemoryRevertResults"],
+        [82, "HandoffLookupIndex"],
+        [83, "MemoryLastReadySpace"],
+        [84, "MemoryHubAdministered"],
+        [85, "MemoryCheckpointLifecycle"],
       ]);
       yield* ProjectionTurnItemRequestIndex;
       assert.deepStrictEqual(yield* runMigrations(), []);

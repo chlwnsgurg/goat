@@ -560,6 +560,7 @@ export function makeHarness(
       ensureScratchProject: Effect.succeed({ projectId: scratchProjectId }),
       ensureBotProject: Effect.succeed({ projectId: scratchProjectId }),
       folderForThread: () => Effect.succeed(Option.none()),
+      isScratchProject: () => Effect.succeed(false),
     }),
     layerSettings,
   ).pipe(

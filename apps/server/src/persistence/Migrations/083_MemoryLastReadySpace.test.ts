@@ -4,12 +4,12 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as SqlClient from "effect/sql/SqlClient";
 import { runMigrations } from "../Migrations.ts";
-import migration from "./082_MemoryLastReadySpace.ts";
+import migration from "./083_MemoryLastReadySpace.ts";
 
 it.effect("081 rolls DDL back and preserves the retained destination across ledger reruns", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    yield* runMigrations({ toMigrationInclusive: 81 });
+    yield* runMigrations({ toMigrationInclusive: 82 });
     const space = "00000000-0000-4000-8000-000000000001";
     yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES (${space},'fixture',0,'ready')`;
     const rollback = yield* sql
@@ -18,9 +18,9 @@ it.effect("081 rolls DDL back and preserves the retained destination across ledg
     assert.deepStrictEqual(rollback, Exit.fail("rollback"));
     assert.isEmpty(yield* sql`SELECT name FROM sqlite_master WHERE name='memory_last_ready_space'`);
     assert.deepStrictEqual(yield* runMigrations(), [
-      [82, "MemoryLastReadySpace"],
-      [83, "MemoryHubAdministered"],
-      [84, "MemoryCheckpointLifecycle"],
+      [83, "MemoryLastReadySpace"],
+      [84, "MemoryHubAdministered"],
+      [85, "MemoryCheckpointLifecycle"],
     ]);
     yield* sql`INSERT INTO memory_last_ready_space(singleton,space) VALUES (1,${space})`;
     assert.deepStrictEqual(yield* runMigrations(), []);

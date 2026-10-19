@@ -26,7 +26,7 @@ import { AppText as Text } from "../../components/ui/AppText";
 import { useEnvironmentScope } from "../../state/session";
 import { serverEnvironment, sshHost } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { RequestActionButton } from "./RequestActionButton";
+import { Button } from "../../components/ui/Button";
 
 type HumanHandoffCardProps = {
   environmentId: EnvironmentId;
@@ -207,7 +207,8 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
       ) : (
         <>
           {human === null ? (
-            <RequestActionButton
+            <Button
+              tone="primary"
               label="Review request"
               disabled={busy || !canOpen || ((isSsh || isProviderHome) && !canTarget)}
               onPress={() => void act("opened")}
@@ -226,7 +227,8 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
                 </>
               ) : null}
               {human.url ? (
-                <RequestActionButton
+                <Button
+                  tone="primary"
                   label="Open sign-in page"
                   onPress={() =>
                     void Linking.openURL(human.url!).catch(() =>
@@ -254,7 +256,8 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
               <Text className="font-sans text-xs text-foreground-muted">
                 Only you see these details. The agent never does.
               </Text>
-              <RequestActionButton
+              <Button
+                tone="primary"
                 label={
                   isRuntimeUpdate
                     ? "Update now"
@@ -270,14 +273,16 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
             </>
           )}
           {!isRuntimeUpdate ? (
-            <RequestActionButton
+            <Button
+              tone="primary"
               label="Decline"
               disabled={busy || !allowed || ((isSsh || isProviderHome) && !canTarget)}
               onPress={() => void act("declined")}
             />
           ) : null}
           {canCancel ? (
-            <RequestActionButton
+            <Button
+              tone="primary"
               label={isRuntimeUpdate ? "Cancel" : "Cancel request"}
               disabled={busy || !allowed || ((isSsh || isProviderHome) && !canTarget)}
               onPress={() => void act("cancelled")}
@@ -292,7 +297,8 @@ function HumanHandoffCardContent(props: HumanHandoffCardProps) {
               {routeCheck}
             </Text>
           ) : null}
-          <RequestActionButton
+          <Button
+            tone="primary"
             label="Check provider status"
             disabled={busy || !canRefresh}
             onPress={() => void checkProviderRoute()}
@@ -406,7 +412,8 @@ function VisibleSshHandoffProgress({
         </View>
       ) : null}
       {progress.kind === "available" ? (
-        <RequestActionButton
+        <Button
+          tone="primary"
           label="Refresh host status"
           disabled={query.waiting}
           onPress={() => sshHost.refreshHandoffProgress(registry, target)}

@@ -5,11 +5,11 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import { runMigrations } from "../Migrations.ts";
-import reportMigration from "./078_MemoryReportLifecycle.ts";
+import reportMigration from "./079_MemoryReportLifecycle.ts";
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
 it.effect("077 DDL and accounting rollback together then ledger restart preserves rows", () =>
   Effect.gen(function* () {
-    yield* runMigrations({ toMigrationInclusive: 77 });
+    yield* runMigrations({ toMigrationInclusive: 78 });
     const sql = yield* SqlClient.SqlClient;
     yield* sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolving_environment_id,outcome,state,created_at) VALUES ('legacy','space','memory','op','owner','failed','pending',0)`;
     const before =
@@ -27,13 +27,13 @@ it.effect("077 DDL and accounting rollback together then ledger restart preserve
       before,
     );
     assert.deepStrictEqual(yield* runMigrations(), [
-      [78, "MemoryReportLifecycle"],
-      [79, "MemoryUsageCounters"],
-      [80, "MemoryRevertResults"],
-      [81, "HandoffLookupIndex"],
-      [82, "MemoryLastReadySpace"],
-      [83, "MemoryHubAdministered"],
-      [84, "MemoryCheckpointLifecycle"],
+      [79, "MemoryReportLifecycle"],
+      [80, "MemoryUsageCounters"],
+      [81, "MemoryRevertResults"],
+      [82, "HandoffLookupIndex"],
+      [83, "MemoryLastReadySpace"],
+      [84, "MemoryHubAdministered"],
+      [85, "MemoryCheckpointLifecycle"],
     ]);
     assert.deepStrictEqual(
       yield* sql`SELECT automatic_attempts,report_kind,report_approved FROM memory_report_outbox`,
@@ -70,7 +70,7 @@ const encodeCompact = Schema.encodeEffect(Schema.fromJsonString(M.MemoryCompactR
 const encodeReceipt = Schema.encodeEffect(Schema.fromJsonString(M.MemoryHubReceipt));
 it.effect("077 classifies only matching durable guards and leaves legacy attempts unknown", () =>
   Effect.gen(function* () {
-    yield* runMigrations({ toMigrationInclusive: 77 });
+    yield* runMigrations({ toMigrationInclusive: 78 });
     const sql = yield* SqlClient.SqlClient;
     const space = M.MemorySpaceId.make("00000000-0000-4000-8000-000000000001");
     const memory = M.MemoryId.make("00000000-0000-4000-8000-000000000002");

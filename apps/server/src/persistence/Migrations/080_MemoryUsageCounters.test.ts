@@ -12,11 +12,11 @@ import migration, {
   memoryUsageSummary,
   memoryUsagePayloadLive,
   memoryUsageRevisionItemMatch,
-} from "./079_MemoryUsageCounters.ts";
+} from "./080_MemoryUsageCounters.ts";
 import * as Store from "../../memory/MemoryStore.ts";
 import { assertUsageCounters } from "../../memory/MemoryUsageScan.testkit.ts";
 
-const database = Layer.effectDiscard(runMigrations({ toMigrationInclusive: 78 })).pipe(
+const database = Layer.effectDiscard(runMigrations({ toMigrationInclusive: 79 })).pipe(
   Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
 );
 const live = Store.layer.pipe(Layer.provideMerge(database));
@@ -49,12 +49,12 @@ it.effect(
         before,
       );
       assert.deepStrictEqual(yield* runMigrations(), [
-        [79, "MemoryUsageCounters"],
-        [80, "MemoryRevertResults"],
-        [81, "HandoffLookupIndex"],
-        [82, "MemoryLastReadySpace"],
-        [83, "MemoryHubAdministered"],
-        [84, "MemoryCheckpointLifecycle"],
+        [80, "MemoryUsageCounters"],
+        [81, "MemoryRevertResults"],
+        [82, "HandoffLookupIndex"],
+        [83, "MemoryLastReadySpace"],
+        [84, "MemoryHubAdministered"],
+        [85, "MemoryCheckpointLifecycle"],
       ]);
       yield* assertUsageCounters;
       assert.deepStrictEqual(yield* runMigrations(), []);

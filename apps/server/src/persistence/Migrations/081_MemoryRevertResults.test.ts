@@ -6,7 +6,7 @@ import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import { runMigrations } from "../Migrations.ts";
-import migration from "./080_MemoryRevertResults.ts";
+import migration from "./081_MemoryRevertResults.ts";
 import * as Store from "../../memory/MemoryStore.ts";
 import {
   assertUsageCounters,
@@ -23,7 +23,7 @@ it.effect(
   "079 backfills only correlated evidence, rolls back DDL/results, and preserves 078 accounting",
   () =>
     Effect.gen(function* () {
-      yield* runMigrations({ toMigrationInclusive: 79 });
+      yield* runMigrations({ toMigrationInclusive: 80 });
       const sql = yield* SqlClient.SqlClient;
       for (let n = 10; n < 15; n++)
         yield* sql`INSERT INTO memory_resolutions(space,resolution_id,memory_id,input_revision_ids_json,input_payload_refs_json,judgment_payload_ref,requested_model_selection_json,effective_provider_model_json,resolving_environment_id,fencing_token,result_revision_id,applied_at,revert_deadline,resolution_json) VALUES (${space},${id(n)},${id(2)},'[]','[]','judgment','{}','{}','fixture',1,${id(n + 100)},0,0,'{}')`;
@@ -82,11 +82,11 @@ it.effect(
         yield* sql`SELECT name FROM sqlite_master WHERE name='memory_report_memory_idx'`,
       );
       assert.deepStrictEqual(yield* runMigrations(), [
-        [80, "MemoryRevertResults"],
-        [81, "HandoffLookupIndex"],
-        [82, "MemoryLastReadySpace"],
-        [83, "MemoryHubAdministered"],
-        [84, "MemoryCheckpointLifecycle"],
+        [81, "MemoryRevertResults"],
+        [82, "HandoffLookupIndex"],
+        [83, "MemoryLastReadySpace"],
+        [84, "MemoryHubAdministered"],
+        [85, "MemoryCheckpointLifecycle"],
       ]);
       assert.deepStrictEqual(
         yield* sql`SELECT resolution_id,revert_operation_id,json_extract(revert_result_json,'$.status') AS status FROM memory_resolutions ORDER BY resolution_id`,

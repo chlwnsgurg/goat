@@ -3,8 +3,8 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Logger from "effect/Logger";
 import * as SqlClient from "effect/sql/SqlClient";
-import memory from "./072_Memory.ts";
-import hub from "./073_MemoryHubSync.ts";
+import memory from "./073_Memory.ts";
+import hub from "./074_MemoryHubSync.ts";
 
 it.effect("upgrades 071 without rewriting legacy resolution data or sync payloads", () =>
   Effect.gen(function* () {
