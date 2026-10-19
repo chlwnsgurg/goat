@@ -3887,6 +3887,89 @@ it.effect("refreshes pull requests only once when startup failure closes its eve
   }),
 );
 
+it.effect("stops a provider turn reported live before its start failed, then fails the run", () =>
+  Effect.gen(function* () {
+    // #489: a restart continuation's turn/start failed after Codex had already
+    // reported the turn. The run failed, but the native turn kept running and
+    // swallowed the next run on the thread, which then stayed running forever.
+    const announced = yield* Deferred.make<void>();
+    const interrupted = yield* Ref.make<ReadonlyArray<ProviderTurnId>>([]);
+    const { observed, written } = yield* captureRootRunTermination({
+      key: "start-failure:announced-turn",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) =>
+        Stream.make({
+          type: "provider_turn.updated",
+          driver,
+          threadId: ids.threadId,
+          providerTurn: {
+            id: ids.rootProviderTurnId,
+            providerThreadId: ids.providerThreadId,
+            nodeId: ids.rootNodeId,
+            runAttemptId: ids.attemptId,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "running",
+            startedAt: null,
+            completedAt: null,
+          },
+        } satisfies ProviderAdapter.ProviderAdapterV2Event).pipe(
+          // The stream pulls this only after the turn update was ingested.
+          Stream.concat(
+            Stream.fromEffect(Deferred.succeed(announced, undefined)).pipe(Stream.drain),
+          ),
+          Stream.concat(Stream.never),
+        ),
+      startTurn: (turnInput) =>
+        Deferred.await(announced).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderAdapter.ProviderAdapterTurnStartError({
+                driver,
+                threadId: turnInput.threadId,
+                providerThreadId: turnInput.providerThread.id,
+                runId: turnInput.runId,
+                cause: "turn/start failed after turn/started",
+              }),
+            ),
+          ),
+        ),
+      interruptTurn: ({ providerTurnId }) =>
+        Ref.update(interrupted, (current) => [...current, providerTurnId]),
+    });
+    assert.deepEqual(yield* Ref.get(interrupted), [
+      backgroundScenarioIds("start-failure:announced-turn").rootProviderTurnId,
+    ]);
+    assert.deepEqual(observed, ["run:failed", "pull-requests-refreshed"]);
+    const error = written.find((item) => item.type === "error");
+    assert.include(error?.failure.message ?? "", "provider could not start this turn");
+  }),
+);
+
+it.effect("does not stop a provider turn when the start fails before one is reported", () =>
+  Effect.gen(function* () {
+    const interrupted = yield* Ref.make(0);
+    const { observed } = yield* captureRootRunTermination({
+      key: "start-failure:no-turn",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: () => Stream.never,
+      startTurn: (turnInput) =>
+        Effect.fail(
+          new ProviderAdapter.ProviderAdapterTurnStartError({
+            driver,
+            threadId: turnInput.threadId,
+            providerThreadId: turnInput.providerThread.id,
+            runId: turnInput.runId,
+            cause: "provider rejected the turn",
+          }),
+        ),
+      interruptTurn: () => Ref.update(interrupted, (count) => count + 1),
+    });
+    assert.equal(yield* Ref.get(interrupted), 0);
+    assert.deepEqual(observed, ["run:failed", "pull-requests-refreshed"]);
+  }),
+);
+
 it.effect("keeps completed runs completed when pull request refresh fails", () =>
   Effect.gen(function* () {
     const { observed } = yield* captureRootRunTermination({
@@ -3912,6 +3995,7 @@ function captureRootRunTermination(input: {
     ProviderAdapter.ProviderAdapterV2Error
   >;
   readonly startTurn?: ProviderAdapter.ProviderAdapterV2SessionRuntime["startTurn"];
+  readonly interruptTurn?: ProviderAdapter.ProviderAdapterV2SessionRuntime["interruptTurn"];
   readonly refreshAfterTurn?: Effect.Effect<void>;
   readonly shouldStartProviderTurn?: RunExecutionService.RunExecutionServiceV2StartRootRunInput["shouldStartProviderTurn"];
   readonly appContext?: ReturnType<McpAppModelContext.McpAppModelContext["Service"]["forThread"]>;
@@ -4038,6 +4122,7 @@ function captureRootRunTermination(input: {
             close: Deferred.succeed(ingestionDone, undefined),
           }),
           startTurn: input.startTurn ?? (() => Effect.void),
+          ...(input.interruptTurn === undefined ? {} : { interruptTurn: input.interruptTurn }),
         } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
         run: {
           id: ids.runId,

@@ -1105,6 +1105,8 @@ export const layer: Layer.Layer<
             }),
           );
           const rootTerminalSeen = yield* Ref.make(false);
+          // The root turn the provider reported as live for this attempt.
+          const liveRootProviderTurn = yield* Ref.make<ProviderTurnId | null>(null);
           const rootRunFinalized = yield* Ref.make(false);
           const providerThreadOwnerLost = yield* Ref.make(false);
           const activeChildProviderTurns = yield* Ref.make<ReadonlySet<ProviderTurnId>>(new Set());
@@ -1464,6 +1466,17 @@ export const layer: Layer.Layer<
                   yield* Ref.set(rootTerminalSeen, true);
                   yield* finalizeRootRun(event);
                 }
+                if (
+                  event.type === "provider_turn.updated" &&
+                  event.providerTurn.runAttemptId === input.attempt.id
+                ) {
+                  yield* Ref.set(
+                    liveRootProviderTurn,
+                    isTerminalProviderTurnStatus(event.providerTurn.status)
+                      ? null
+                      : event.providerTurn.id,
+                  );
+                }
                 yield* trackChildLifecycle(event, deliveredEvent !== null);
               }),
             ),
@@ -1795,6 +1808,29 @@ export const layer: Layer.Layer<
                 cause,
               }).pipe(
                 Effect.andThen(interruptProviderEvents),
+                // A provider can report the turn live before its start call
+                // fails. Left running, it keeps the native thread busy and the
+                // next run on it never gets a turn of its own (#489). Ingestion
+                // is already cut, so this stop cannot settle the run as
+                // interrupted ahead of the failure below.
+                Effect.andThen(Ref.get(liveRootProviderTurn)),
+                Effect.flatMap((providerTurnId) =>
+                  providerTurnId === null
+                    ? Effect.void
+                    : Ref.get(latestProviderThread).pipe(
+                        Effect.flatMap((providerThread) =>
+                          input.session.interruptTurn({ providerThread, providerTurnId }),
+                        ),
+                        Effect.catchCauseIf(
+                          (interruptCause) => !Cause.hasInterruptsOnly(interruptCause),
+                          (interruptCause) =>
+                            Effect.logWarning(
+                              "orchestration V2 could not stop a provider turn whose start failed",
+                              { runId: input.run.id, providerTurnId, cause: interruptCause },
+                            ),
+                        ),
+                      ),
+                ),
                 Effect.andThen(Ref.get(latestProviderThread)),
                 Effect.flatMap((providerThread) =>
                   Ref.get(latestTurnItemOrdinal).pipe(

@@ -6857,6 +6857,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             });
             if (validatedMemory) yield* retainMemory(threadId, memoryContext!, turnInput);
             const started = yield* client.request("turn/start", turnStartParams);
+            // Codex folds input into a turn that is still running. If that turn
+            // belongs to another attempt, adopting it would leave this run
+            // waiting on events routed to that attempt forever (#489).
+            const owner = (yield* Ref.get(activeTurns)).get(started.turn.id);
+            if (owner !== undefined && owner.input.attemptId !== turnInput.attemptId) {
+              return yield* toProtocolError(
+                `Codex continued native turn ${started.turn.id}, which still belongs to an earlier run. Stop that turn and retry.`,
+              );
+            }
             yield* registerRootTurn({
               turnInput,
               nativeTurnId: started.turn.id,

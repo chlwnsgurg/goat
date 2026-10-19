@@ -2730,6 +2730,72 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
+  it.effect("refuses a native turn that still belongs to an earlier attempt", () =>
+    Effect.gen(function* () {
+      // #489: after a failed restart continuation, Codex folded the next run's
+      // input into the still-running turn. Adopting it bound the new run to the
+      // earlier run's turn, so the new run never settled.
+      const nativeThreadId = "folded-turn-thread";
+      const nativeTurnId = "folded-turn";
+      const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "First." });
+      const transcript = makeCodexReplayTranscript({
+        scenario: "folded-turn-earlier-attempt",
+        entries: [
+          ...preamble,
+          {
+            type: "expect_outbound",
+            label: "turn/start/second",
+            frame: {
+              id: 4,
+              method: "turn/start",
+              params: {
+                threadId: nativeThreadId,
+                input: [{ type: "text", text: "Second." }],
+                cwd: "/workspace",
+                model: "gpt-5.4",
+                approvalPolicy: "never",
+                approvalsReviewer: "user",
+                sandboxPolicy: { type: "dangerFullAccess" },
+                summary: "detailed",
+              },
+            },
+          },
+          {
+            type: "emit_inbound",
+            label: "turn/start/second",
+            frame: {
+              id: 4,
+              result: { turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }) },
+            },
+          },
+        ],
+      });
+      const harness = yield* makeCodexReplayHarness(transcript);
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("folded-first-attempt"),
+          text: "First.",
+        }),
+      );
+      const error = yield* harness.runtime
+        .startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("folded-second-attempt"),
+            text: "Second.",
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "ProviderAdapterTurnStartError");
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
+  );
+
   it.effect("settles Stop when a queued native turn fails before starting", () =>
     Effect.gen(function* () {
       const nativeThreadId = "early-stop-thread";

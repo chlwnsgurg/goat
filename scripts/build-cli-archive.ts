@@ -671,9 +671,10 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     // The npm registry rejects a tarball containing any, and the npm platform
     // packages are re-packed from this archive's contents, so store every
     // file as a file. macOS's bsdtar has no such flag; pnpm clones there.
+    // Key on the host's tar, since a Mac can cross-build a Linux archive.
     yield* runCommand(
       ChildProcess.make("tar", [
-        ...(input.platform === "linux" ? ["--hard-dereference"] : []),
+        ...(hostPlatform === "linux" ? ["--hard-dereference"] : []),
         "-czf",
         archivePath,
         "-C",
