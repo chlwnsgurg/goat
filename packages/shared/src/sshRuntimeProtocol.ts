@@ -46,13 +46,14 @@ const validRange = (range: ProtocolRange | undefined): range is ProtocolRange =>
 /**
  * The orchestration protocols a server serves. Servers that advertise only the integer serve
  * exactly that one, and servers shipped before negotiation speak the original protocol 1.
+ * A malformed advertised range is `null`: compatibility cannot be established from it.
  */
 export const orchestrationProtocolRangeOf = (server: {
   readonly protocol?: Partial<RuntimeProtocolRanges> | undefined;
   readonly orchestrationProtocolVersion?: number | undefined;
-}): ProtocolRange => {
+}): ProtocolRange | null => {
   const advertised = server.protocol?.orchestration;
-  if (validRange(advertised)) return advertised;
+  if (advertised !== undefined) return validRange(advertised) ? advertised : null;
   const version = server.orchestrationProtocolVersion ?? 1;
   return { min: version, max: version };
 };

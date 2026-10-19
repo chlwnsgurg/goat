@@ -15,6 +15,12 @@ export function orchestrationProtocolCompatibilityError(
   descriptor: ExecutionEnvironmentDescriptor,
 ): ConnectionBlockedError | null {
   const served = orchestrationProtocolRangeOf(descriptor);
+  if (served === null) {
+    return new ConnectionBlockedError({
+      reason: "unsupported",
+      detail: `${descriptor.label} reports an unreadable protocol range, so GOAT cannot tell whether this app can talk to it. Update GOAT on ${descriptor.label} or this app.`,
+    });
+  }
   if (
     served.min <= ORCHESTRATION_PROTOCOL_VERSION &&
     ORCHESTRATION_PROTOCOL_VERSION <= served.max

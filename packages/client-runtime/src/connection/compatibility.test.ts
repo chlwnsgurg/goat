@@ -111,9 +111,9 @@ describe("orchestration protocol compatibility", () => {
       expect(error).toMatchObject({ serverUpdateRequired: true });
     });
 
-    it("falls back to the advertised integer when the range is malformed", () => {
-      expect(ranged(V + 1, V - 1)).toMatchObject({ reason: "unsupported" });
-      expect(ranged(V + 1, V)).toBeNull();
+    it("refuses a malformed range instead of guessing from the integer", () => {
+      expect(ranged(V + 1, V)?.message).toContain("unreadable protocol range");
+      expect(ranged(0, V)?.message).toContain("unreadable protocol range");
     });
   });
 });

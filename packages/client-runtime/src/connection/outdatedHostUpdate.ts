@@ -219,6 +219,8 @@ export const updateOutdatedHost = Effect.fn("clientRuntime.connection.updateOutd
 function isCompatibleDescriptor(descriptor: ExecutionEnvironmentDescriptor): boolean {
   const served = orchestrationProtocolRangeOf(descriptor);
   return (
-    served.min <= ORCHESTRATION_PROTOCOL_VERSION && ORCHESTRATION_PROTOCOL_VERSION <= served.max
+    served !== null &&
+    served.min <= ORCHESTRATION_PROTOCOL_VERSION &&
+    ORCHESTRATION_PROTOCOL_VERSION <= served.max
   );
 }
