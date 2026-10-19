@@ -167,11 +167,16 @@ from the sidebar. Only top-level threads count: subagents are part of their pare
 archived threads do not count. Work an environment started on an SSH host you are not connected
 to appears as last reported by that environment.
 
+A machine in the graph turns amber, orange, or red as it gets busier, and a machine near its
+limit catches fire. Heat comes from the same reading as **Settings → Connections → Hosts**: CPU
+use, load per core, memory, and the fullest provider quota window; hover a machine to see which
+one is high. A machine that stopped answering shows no heat until it reports again.
+
 At the top, **Fleet telemetry** shows CPU, memory, and load for each machine over the last ten
 minutes, provider quota, runs started and finished in the last hour, and alerts for machines that
-are reconnecting, unreachable, or on a different GOAT version. It reads the same host status as
-**Settings → Hosts**, every 15 seconds while the page is open. A machine shows "No metrics" when
-no connected machine reports on it. Collapse the panel to stop reading host status; it stays
+are reconnecting, unreachable, or on a different GOAT version. It uses the same reading as the
+graph's heat, refreshed every 15 seconds while the page is open. A machine shows "No metrics"
+when no connected machine reports on it. Collapse the panel to a one-line summary; it stays
 collapsed until you open it again.
 
 Below the list, **Connections** shows your saved machines with the same controls as

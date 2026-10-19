@@ -9,19 +9,13 @@ import { useContext } from "react";
 
 import { useLiveRefresh } from "~/hooks/useLiveRefresh";
 import { cn } from "~/lib/utils";
-import { serverEnvironment } from "~/state/server";
+import { HOST_STATUS_REFRESH_MS, hostStatusAtom, refreshHostStatus } from "~/state/hostStatus";
 import { useEnvironmentScope } from "~/state/session";
 import { Badge } from "../ui/badge";
 import { LimitWindows } from "../usage/UsageLimits";
 import { EnvironmentRow } from "./EnvironmentRow";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
-import {
-  HOST_STATUS_REFRESH_MS,
-  type HostCardView,
-  type HostMeterView,
-  hostCards,
-  NOT_AVAILABLE,
-} from "./hostStatusView";
+import { type HostCardView, type HostMeterView, hostCards, NOT_AVAILABLE } from "./hostStatusView";
 import { providerClients } from "./providerDriverMeta";
 import { searchableSetting } from "./settingsSearch";
 
@@ -140,10 +134,10 @@ function HostsPanel({
   readonly localKind: EnvironmentMachineKind;
 }) {
   const registry = useContext(RegistryContext);
-  const atom = serverEnvironment.hostStatus({ environmentId, input: {} });
+  const atom = hostStatusAtom(environmentId);
   const result = useAtomValue(atom);
   const reachesHosts = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
-  useLiveRefresh(() => registry.refresh(atom), {
+  useLiveRefresh(() => refreshHostStatus(registry, atom), {
     key: `host-status:${environmentId}`,
     intervalMs: HOST_STATUS_REFRESH_MS,
   });

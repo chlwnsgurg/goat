@@ -189,7 +189,7 @@ interface FleetPageState {
   readonly key: string;
 }
 
-const fleetPageAtom = Atom.make((get): FleetPageState => {
+export const fleetPageAtom = Atom.make((get): FleetPageState => {
   const serverConfigs = get(environmentServerConfigsAtom);
   const remote = get(fleetRemoteAtom);
   const provider = (environmentId: EnvironmentId, instanceId: string) => {

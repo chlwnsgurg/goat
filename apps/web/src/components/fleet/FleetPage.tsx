@@ -1,10 +1,12 @@
 import type { FleetMachine, FleetThread } from "@goat/client-runtime/state/fleet";
+import { FLEET_HEAT_LABEL, FLEET_HEAT_TIERS } from "@goat/client-runtime/state/fleet-heat";
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
 import { useFleetSnapshot } from "../../state/fleet";
+import { useFleetHostMetrics } from "../../state/fleetHostMetrics";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { Button } from "../ui/button";
@@ -18,10 +20,23 @@ import { FleetGraph } from "./FleetGraph";
 import { describeMachine } from "./describeMachine";
 import { fleetConnectionLegend, UNKNOWN_FLEET_CONNECTION } from "./fleetConnection";
 import { FleetConnectionIcon } from "./FleetConnectionGlyph";
+import { fleetHeatDemo } from "./fleetHeatDemo";
 import { FleetThreadList, STATE_DOT, STATE_LABEL } from "./FleetThreadList";
 
 const plural = (count: number, one: string, many = one + "s") =>
   count + " " + (count === 1 ? one : many);
+
+const HEAT_DOT = {
+  warm: "bg-heat-warm",
+  hot: "bg-heat-hot",
+  burning: "bg-heat-burning",
+} as const;
+
+/** Dev builds draw a fixed fleet in every heat tier at /fleet?fleetDemo=heat, for screenshots. */
+const readHeatDemo = () =>
+  import.meta.env.DEV && new URLSearchParams(window.location.search).get("fleetDemo") === "heat"
+    ? fleetHeatDemo()
+    : null;
 
 function machineWork(machine: FleetMachine): string {
   const parts = [
@@ -52,7 +67,12 @@ function groupThreadsByMachine(threads: ReadonlyArray<FleetThread>) {
 
 /** Everything running across connected machines, as a graph and a list grouped by machine. */
 export function FleetPage() {
-  const { snapshot, connections, currentMachineId, loading } = useFleetSnapshot();
+  const live = useFleetSnapshot();
+  const liveHeat = useFleetHostMetrics();
+  const [demo] = useState(readHeatDemo);
+  const { snapshot, connections, currentMachineId, loading } =
+    demo === null ? live : { ...demo, loading: false };
+  const heat = demo?.heat ?? liveHeat;
   const [selected, setSelected] = useState<string | null>(null);
   const selectedMachine = snapshot.machines.find((machine) => machine.id === selected) ?? null;
   const toggleMachine = (machineId: string) =>
@@ -68,6 +88,9 @@ export function FleetPage() {
     ? []
     : snapshot.machines.filter((machine) => !isBusy(machine) && reachable(machine));
   const connectionLegend = fleetConnectionLegend(connections.values());
+  const heatLegend = FLEET_HEAT_TIERS.flatMap((tier) =>
+    tier !== "normal" && [...heat.values()].some((entry) => entry.tier === tier) ? [tier] : [],
+  );
   const { totals } = snapshot;
 
   return (
@@ -102,6 +125,7 @@ export function FleetPage() {
                 currentMachineId={currentMachineId}
                 selectedMachineId={selected}
                 onSelectMachine={toggleMachine}
+                heat={heat}
               />
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t px-4 py-2 text-xs text-muted-foreground">
                 {(["running", "attention", "reported"] as const).map((state) => (
@@ -117,6 +141,15 @@ export function FleetPage() {
                   <span key={entry.label} className="inline-flex items-center gap-1.5">
                     <FleetConnectionIcon state={entry.state} />
                     {entry.label}
+                  </span>
+                ))}
+                {heatLegend.length > 0 ? (
+                  <span aria-hidden className="hidden h-3 w-px bg-border sm:block" />
+                ) : null}
+                {heatLegend.map((tier) => (
+                  <span key={tier} className="inline-flex items-center gap-1.5">
+                    <span aria-hidden className={cn("size-2 rounded-full", HEAT_DOT[tier])} />
+                    {FLEET_HEAT_LABEL[tier]}
                   </span>
                 ))}
                 <span className="sm:ml-auto">Select a machine to show only its threads.</span>
