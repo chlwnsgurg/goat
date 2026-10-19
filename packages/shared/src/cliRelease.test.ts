@@ -7,11 +7,21 @@ import {
   cliReleaseDownloadBaseUrl,
   cliReleaseChannelOf,
   cliReleaseIndexPageUrl,
+  isPublishableCliReleaseVersion,
   newestCliReleaseVersion,
   parseChecksums,
 } from "./cliRelease.ts";
 
 describe("cliRelease", () => {
+  it("treats only stable, nightly and preview versions as publishable", () => {
+    expect(isPublishableCliReleaseVersion("0.1.0")).toBe(true);
+    expect(isPublishableCliReleaseVersion("0.1.0-nightly.20261019.194")).toBe(true);
+    expect(isPublishableCliReleaseVersion("1.2.3-preview.20260911.4")).toBe(true);
+    expect(isPublishableCliReleaseVersion("0.1.0-dev.1792420473.g7b523f265")).toBe(false);
+    expect(isPublishableCliReleaseVersion("0.1.0-pr.412.3")).toBe(false);
+    expect(isPublishableCliReleaseVersion("0.1.0-nightly.2026.1")).toBe(false);
+  });
+
   it("names archives by version and platform, zip only on Windows", () => {
     expect(cliArchiveFileName("1.2.3-preview.20260911.4", "linux-x64")).toBe(
       "goat-1.2.3-preview.20260911.4-linux-x64.tar.gz",

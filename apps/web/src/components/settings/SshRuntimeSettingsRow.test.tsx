@@ -221,7 +221,7 @@ describe("saved SSH runtime row", () => {
     });
     await click("Update runtime");
     await settle();
-    expect(container.textContent).toContain("Uploading GOAT runtime (about 70 MB)");
+    expect(container.textContent).toContain("Installing GOAT runtime (about 90 MB)");
     const ready: SshHostResult = {
       kind: "ok",
       status: { ...base, state: "ready", runtimeVersion: "0.4.3" },
@@ -231,7 +231,7 @@ describe("saved SSH runtime row", () => {
       finish(ready);
     });
     await settle();
-    expect(container.textContent).not.toContain("Uploading GOAT runtime");
+    expect(container.textContent).not.toContain("Installing GOAT runtime");
     expect(button("Update runtime")).toBeUndefined();
   });
   it.each([false, true])(
@@ -372,7 +372,7 @@ it("polls a pending Add while the Desktop connection has not published its first
   await act(async () => {
     await vi.advanceTimersByTimeAsync(1_000);
   });
-  expect(container.textContent).toContain("Uploading GOAT runtime (about 70 MB)");
+  expect(container.textContent).toContain("Installing GOAT runtime (about 90 MB)");
 });
 
 describe("SSH runtime recovery actions", () => {

@@ -199,8 +199,12 @@ macOS, conservatively keep everything.
 
 Runtime supply targets the owning process's exact release and platform, not the
 latest published build. The acquisition order in
-[`packages/ssh/src/tunnel.ts`](../packages/ssh/src/tunnel.ts) is bundle, local cache,
-then an explicit mirror before the public release download and GitHub CLI fallback.
+[`packages/ssh/src/tunnel.ts`](../packages/ssh/src/tunnel.ts) starts on the host: for a
+published version with no mirror configured, the host downloads the release itself
+(`hostDownload`, set by the desktop and the server's SSH dispatch). If the host's download
+exits with an error, the client supplies the archive from its bundle, local cache, an explicit
+mirror, the public release download, then the GitHub CLI, and uploads it. A lost connection or
+a timeout fails the attempt instead, since the host may still be installing.
 Public archives belong to `goat-si/goat-releases` and are checksum-checked. Enabling
 release publication does not prove an archive exists: fresh-host verification needs
 the matching published asset or an explicitly supplied mirror/cache archive.
