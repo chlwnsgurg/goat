@@ -130,6 +130,8 @@ const REMOTE_ARCHIVE_DOWNLOAD_SECONDS = 240;
 const REMOTE_ARCHIVE_LOCK_WAIT_SECONDS = 360;
 const REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS = 900_000;
 const REMOTE_REUSE_READY_TIMEOUT_MS = 2_000;
+// Reserved by the folded launch protocol for a changed cached selection, never a launch failure.
+const REMOTE_RECONNECT_SELECTION_CHANGED_EXIT_CODE = 76;
 
 export interface RemoteGoatRunnerOptions {
   readonly nodeScriptPath?: string | null;
@@ -2427,7 +2429,7 @@ function buildRemoteRunnerSetupScript(
         ? `  # A folded reconnect may only attach to the owned selection; a race must re-enter preparation.
   if [ "$LIVE_STATUS" != live ] || [ "$LIVE_VERSION" != "$SELECTED_VERSION" ] ||
      [ "$LIVE_OWNED" != 1 ] || ! verify_owned_identity "$LIVE_PID" "$LIVE_PORT"; then
-    printf 'Cached GOAT selection changed; reconnect.\\n' >&2; exit 1
+    printf 'Cached GOAT selection changed; reconnect.\\n' >&2; exit ${REMOTE_RECONNECT_SELECTION_CHANGED_EXIT_CODE}
   fi
 `
         : "",
@@ -3442,10 +3444,7 @@ ${probe}
 ${
   expectedProbe === undefined
     ? ""
-    : `if ! probe_output="$(reconnect_probe)"; then
-  printf '{"status":"reprobe"}\\n'
-  exit 0
-fi
+    : `probe_output="$(reconnect_probe)"
 if [ "$probe_output" != ${shellSingleQuote(expectedProbe)} ]; then
   printf 'GOAT_RECONNECT_PROBE=%s\\n' "$probe_output"
   printf '{"status":"reprobe"}\\n'
@@ -3460,7 +3459,11 @@ GOAT_RECONNECT_LAUNCH_SCRIPT
 ${
   expectedProbe === undefined
     ? 'launch_output="$(reconnect_launch "$1")"'
-    : `if ! launch_output="$(reconnect_launch "$1")"; then
+    : `if launch_output="$(reconnect_launch "$1")"; then
+  :
+else
+  launch_status=$?
+  if [ "$launch_status" -ne ${REMOTE_RECONNECT_SELECTION_CHANGED_EXIT_CODE} ]; then exit "$launch_status"; fi
   printf '{"status":"reprobe"}\\n'
   exit 0
 fi`

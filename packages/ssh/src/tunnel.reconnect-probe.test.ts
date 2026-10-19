@@ -122,6 +122,70 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       180_000,
     );
 
+    it.live.each(["readiness", "launch"] as const)(
+      "propagates an unchanged selection's %s failure without a second launch",
+      (failure) =>
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          if (failure === "readiness") {
+            yield* f.fs.writeFileString(
+              `${f.old}/goat`,
+              (yield* f.fs.readFileString(`${f.old}/goat`)).replace(
+                "// Fixture readiness uses an event, not polling or a delay.",
+                `if (fs.existsSync(path.join(test, "readiness-fail"))) {
+  fs.appendFileSync(path.join(test, "readiness-attempts"), "failed\\n");
+  process.stderr.write("fixture readiness failed\\n"); process.exit(23);
+}`,
+              ),
+            );
+          }
+          yield* f.shiftHostClock(60);
+          const first = yield* launch(f);
+          assert.equal(first.status, "ready");
+          if (first.status !== "ready") return;
+          assert.isString(first.selectedRuntime.reconnectProbe);
+          if (failure === "readiness") {
+            yield* f.fs.writeFileString(`${f.test}/readiness-fail`, "");
+          } else {
+            f.setScriptPrefix(`sh() {
+  if [ "\${3:-}" = runtime ]; then
+    printf 'fixture launch failed\\n' >&2; return 23
+  fi
+  command sh "$@"
+}
+`);
+          }
+          const before = f.remoteCommands.length;
+          const result = yield* Effect.result(launch(f, first.selectedRuntime));
+          assert.equal(result._tag, "Failure");
+          assert.equal(f.remoteCommands.length - before, 1);
+          if (failure === "readiness") {
+            assert.equal(yield* f.fs.readFileString(`${f.test}/readiness-attempts`), "failed\n");
+          }
+          const ordinary = yield* Effect.result(launch(f));
+          assert.equal(ordinary._tag, "Failure");
+          if (result._tag !== "Failure" || ordinary._tag !== "Failure") return;
+          assert.equal(result.failure._tag, "SshCommandError");
+          assert.equal(ordinary.failure._tag, "SshCommandError");
+          if (
+            result.failure._tag !== "SshCommandError" ||
+            ordinary.failure._tag !== "SshCommandError"
+          )
+            return;
+          assert.equal(result.failure.exitCode, failure === "readiness" ? 1 : 23);
+          assert.equal(result.failure.exitCode, ordinary.failure.exitCode);
+          assert.equal(result.failure.stderr, ordinary.failure.stderr);
+          assert.equal(result.failure.message, ordinary.failure.message);
+          assert.equal(
+            result.failure.stderr,
+            failure === "readiness"
+              ? "fixture readiness failed\nSelected live server did not answer; it was left running.\n"
+              : "fixture launch failed\n",
+          );
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+
     it.live.each(["executable", "runner", "runtime record", "identity"] as const)(
       "reprobes a changed %s and preserves ordinary launch behavior",
       (changed) =>
