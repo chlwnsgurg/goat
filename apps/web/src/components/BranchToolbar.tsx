@@ -20,7 +20,6 @@ import {
   memo,
   useImperativeHandle,
   useEffect,
-  useEffectEvent,
   useLayoutEffect,
   useRef,
   useState,
@@ -68,6 +67,7 @@ import { measureRestingComposerControls } from "./chat/restingComposerControlsMe
 import { resolveRestingComposerControlsNaturalWidth } from "./composerFooterLayout";
 import { cn } from "~/lib/utils";
 import { observeResize } from "~/lib/observeResize";
+import { useStableCallback } from "~/hooks/useStableCallback";
 
 export interface BranchToolbarHandle {
   openBranchPicker: () => void;
@@ -402,7 +402,8 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
   const [overflows, setOverflows] = useState(false);
   const pendingLabelRectsRef = useRef<Map<HTMLElement, DOMRect> | null>(null);
   const labelAnimationsRef = useRef(new Map<HTMLElement, Animation>());
-  const measure = useEffectEvent(() => {
+  // useEffectEvent stays stale in memo components; see useStableCallback.
+  const measure = useStableCallback(() => {
     const current = element;
     const compact = overflows;
     if (!current) return;
@@ -520,7 +521,6 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
   );
 
   useLayoutEffect(() => {
-    // oxlint-disable-next-line react/set-state-in-effect -- The label mode comes from measuring the committed DOM, which render cannot read.
     measure();
   });
 
@@ -532,7 +532,7 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
       stopObserving();
       document.fonts.removeEventListener("loadingdone", measure);
     };
-  }, [element]);
+  }, [element, measure]);
 
   return overflows;
 }

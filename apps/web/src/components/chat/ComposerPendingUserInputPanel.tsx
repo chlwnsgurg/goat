@@ -1,5 +1,5 @@
 import { type RuntimeRequestId, type ScopedThreadRef } from "@goat/contracts";
-import { memo, useEffect, useEffectEvent, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { useStableCallback } from "~/hooks/useStableCallback";
 import { type PendingUserInput } from "../../session-logic";
 import {
@@ -138,7 +138,8 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     }, 200);
   };
 
-  const selectOptionFromShortcut = useEffectEvent(handleOptionSelection);
+  // useEffectEvent stays stale in memo components; see useStableCallback.
+  const selectOptionFromShortcut = useStableCallback(handleOptionSelection);
 
   useEffect(() => {
     if (!activeQuestion || responseDisabled || isCollapsed) return;
@@ -165,7 +166,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [activeQuestion, isCollapsed, responseDisabled]);
+  }, [activeQuestion, isCollapsed, responseDisabled, selectOptionFromShortcut]);
 
   if (!activeQuestion) {
     return null;

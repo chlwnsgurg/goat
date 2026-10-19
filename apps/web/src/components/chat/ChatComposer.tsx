@@ -70,7 +70,6 @@ import {
   type ComponentProps,
   type ReactNode,
   useEffect,
-  useEffectEvent,
   useId,
   useImperativeHandle,
   useLayoutEffect,
@@ -1751,7 +1750,8 @@ function useProviderWorkspaceSnapshotRefresh(input: {
       if (!refreshedSnapshot) retryLater();
     }, retryLater);
   };
-  const refreshWorkspaceSnapshotOnChange = useEffectEvent(refreshWorkspaceSnapshotIfStale);
+  // useEffectEvent stays stale in memo components; see useStableCallback.
+  const refreshWorkspaceSnapshotOnChange = useStableCallback(refreshWorkspaceSnapshotIfStale);
   useEffect(() => {
     refreshWorkspaceSnapshotOnChange(
       Date.now(),
@@ -1759,7 +1759,12 @@ function useProviderWorkspaceSnapshotRefresh(input: {
       workspaceRefreshRetry,
       workspaceSnapshotLossCount,
     );
-  }, [workspaceRefreshScopeKey, workspaceRefreshRetry, workspaceSnapshotLossCount]);
+  }, [
+    refreshWorkspaceSnapshotOnChange,
+    workspaceRefreshScopeKey,
+    workspaceRefreshRetry,
+    workspaceSnapshotLossCount,
+  ]);
   return useStableCallback(() =>
     refreshWorkspaceSnapshotIfStale(
       Date.now(),
