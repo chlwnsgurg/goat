@@ -5,32 +5,19 @@ import { useState } from "react";
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
 import { useFleetSnapshot } from "../../state/fleet";
-import { buildThreadRouteParams } from "../../threadRoutes";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { Button } from "../ui/button";
 import { SidebarInset } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsIcon } from "~/components/solar";
-import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { ConnectionCatalogUnreadableAlert } from "../desktop/ConnectionCatalogUnreadableNotice";
 import { ConnectionEnvironmentsSection } from "../settings/ConnectionEnvironmentsSection";
 import { FleetGraph } from "./FleetGraph";
 import { describeMachine } from "./describeMachine";
 import { fleetConnectionLegend, UNKNOWN_FLEET_CONNECTION } from "./fleetConnection";
 import { FleetConnectionIcon } from "./FleetConnectionGlyph";
-
-const STATE_LABEL: Record<FleetThread["state"], string> = {
-  running: "Running",
-  attention: "Needs you",
-  reported: "Reported",
-};
-
-const STATE_DOT: Record<FleetThread["state"], string> = {
-  running: "bg-info",
-  attention: "bg-warning",
-  reported: "border border-muted-foreground bg-transparent",
-};
+import { FleetThreadList, STATE_DOT, STATE_LABEL } from "./FleetThreadList";
 
 const plural = (count: number, one: string, many = one + "s") =>
   count + " " + (count === 1 ? one : many);
@@ -163,13 +150,7 @@ export function FleetPage() {
                     {machineWork(machine)}
                   </span>
                 </button>
-                <ul className="flex flex-col">
-                  {(threadsByMachine.get(machine.id) ?? []).map((thread) => (
-                    <li key={thread.key}>
-                      <FleetThreadRow thread={thread} />
-                    </li>
-                  ))}
-                </ul>
+                <FleetThreadList threads={threadsByMachine.get(machine.id) ?? []} />
               </section>
             ))}
 
@@ -183,7 +164,6 @@ export function FleetPage() {
             ) : null}
 
             <ConnectionCatalogUnreadableAlert />
-            {/* The same rows and Add environment flow as Settings > Connections. */}
             <ConnectionEnvironmentsSection
               title="Connections"
               searchable={false}
@@ -209,43 +189,5 @@ export function FleetPage() {
         </main>
       </div>
     </SidebarInset>
-  );
-}
-
-function FleetThreadRow({ thread }: { readonly thread: FleetThread }) {
-  const content = (
-    <>
-      <span aria-hidden className={cn("size-2 shrink-0 rounded-full", STATE_DOT[thread.state])} />
-      <span className="min-w-0 flex-1 truncate">{thread.title}</span>
-      <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-        {thread.agentDriver ? (
-          <ProviderInstanceIcon
-            driverKind={thread.agentDriver}
-            displayName={thread.agentLabel}
-            iconClassName="size-3.5"
-          />
-        ) : null}
-        {thread.ref === null && thread.reportedBy !== null
-          ? "Last reported by " + thread.reportedBy
-          : thread.agentLabel}
-      </span>
-      <span className="w-20 shrink-0 text-right text-xs text-muted-foreground">
-        {STATE_LABEL[thread.state]}
-      </span>
-    </>
-  );
-  const rowClass = "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm";
-  if (thread.ref === null) return <div className={rowClass}>{content}</div>;
-  return (
-    <Link
-      to="/$environmentId/$threadId"
-      params={buildThreadRouteParams(thread.ref)}
-      className={cn(
-        rowClass,
-        "outline-hidden hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-      )}
-    >
-      {content}
-    </Link>
   );
 }

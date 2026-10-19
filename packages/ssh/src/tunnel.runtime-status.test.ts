@@ -55,6 +55,8 @@ const fixture = (initial: unknown, runnerOptions: SshTunnel.RemoteGoatRunnerOpti
   let probeFailure: string | undefined;
   let toolFixProbe = "1000\nLinux\nID=debian\n";
   let launchVersion = ARCHIVE.archiveVersion as string;
+  let drainPending = false;
+  let drainReplacement: "older" | "capability" = "older";
   const calls = { probes: 0, uploads: 0, launches: 0, forwards: 0, prompts: 0, strict: false };
   const spawner = ChildProcessSpawner.make((command) =>
     Effect.gen(function* () {
@@ -99,6 +101,17 @@ const fixture = (initial: unknown, runnerOptions: SshTunnel.RemoteGoatRunnerOpti
           selectedVersion: launchVersion,
           remotePort: 3773,
           serverKind: "managed",
+          ...(drainPending
+            ? {
+                pending: {
+                  reason: "unknown",
+                  refreshCause: "drain_unavailable",
+                  replacement: drainReplacement,
+                  requestedVersion: ARCHIVE.archiveVersion,
+                  liveVersion: launchVersion,
+                },
+              }
+            : {}),
         }),
       );
     }),
@@ -113,6 +126,10 @@ const fixture = (initial: unknown, runnerOptions: SshTunnel.RemoteGoatRunnerOpti
     },
     failProbe: (value: string) => {
       probeFailure = value;
+    },
+    setDrainPending: (replacement: "older" | "capability" = "older") => {
+      drainPending = true;
+      drainReplacement = replacement;
     },
     setLaunchVersion: (value: string) => {
       launchVersion = value;
@@ -812,5 +829,194 @@ it.effect.each(["stopped", "incompatible", "unverified-binary", "probe-failed"] 
       assert.notEqual(result.status?.state, "ready");
       assert.isUndefined(result.status?.refreshDeferred);
     }).pipe(Effect.provide(f.layer), Effect.scoped);
+  },
+);
+
+it.effect.each(
+  (["older", "capability"] as const).flatMap((replacement) =>
+    [false, true].map((drain) => ({ replacement, drain })),
+  ),
+)(
+  "fresh status preserves $replacement drain deferral when drain becomes $drain",
+  ({ replacement, drain }) => {
+    const f = fixture({ ...stopped, ready: true }, { refreshOwnedRuntimeOnFirstConnection: true });
+    const actualVersion = replacement === "capability" ? "1.2.3-dev.deadbeef" : "1.2.2";
+    f.setLaunchVersion(actualVersion);
+    f.setDrainPending(replacement);
+    return Effect.gen(function* () {
+      const manager = yield* SshTunnel.SshEnvironmentManager;
+      const operation = yield* manager.beginSetupOperation(uploadTarget, "drain-status");
+      yield* manager.ensureEnvironment(uploadTarget);
+      f.setProbe({
+        ...stopped,
+        ready: true,
+        liveStatus: "live",
+        liveOwned: true,
+        liveDrain: drain,
+        liveVersion: actualVersion,
+        livePort: 3773,
+        liveSignals: signals(actualVersion),
+        liveBinarySignals: signals(actualVersion),
+      });
+      const fresh = yield* manager.status(uploadTarget);
+      yield* decodeSshHostResult(fresh);
+      assert.equal(fresh.status?.state, "ready");
+      assert.equal(fresh.status?.runtimeVersion, actualVersion);
+      assert.equal(fresh.status?.refreshDeferred?.refreshCause, "drain_unavailable");
+      yield* manager.publishProviderDiagnosis(uploadTarget, operation, {
+        checkedAt: "2026-10-18T00:00:00.000Z",
+        ready: false,
+        fixes: [{ actor: "human", instruction: "Sign in" }],
+      });
+      const diagnosed = yield* manager.status(uploadTarget);
+      assert.equal(diagnosed.status?.state, "providers_not_ready");
+      assert.equal(diagnosed.status?.refreshDeferred?.refreshCause, "drain_unavailable");
+      yield* manager.readyEnvironment(uploadTarget);
+    }).pipe(Effect.provide(f.layer), Effect.scoped);
+  },
+);
+
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "live no-drain attachment status",
+  () => {
+    it.live("pending ownership loss requires fresh proof before reusing the attachment", () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+          orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+        });
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          const first = yield* manager.ensureEnvironment(uploadTarget, { keyOnly: true });
+          assert.notProperty(first, "type");
+          f.setBeforeCommand((script) =>
+            script.includes('IDENTITY_NEXT="$STATE_DIR/identity.next.$$"')
+              ? f.fs.writeFileString(`${f.test}/pending-proof`, "ownership-loss")
+              : Effect.void,
+          );
+          const rejected = yield* manager.ensureEnvironment(uploadTarget, {
+            keyOnly: true,
+            refreshRuntime: true,
+          });
+          assert.property(rejected, "type");
+          assert.equal((yield* f.fs.readFileString(`${f.state}/managed`)).trim(), "external");
+          assert.isTrue(
+            Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+          );
+          const launches = () =>
+            f.remoteCommands.filter(
+              (command) => command._tag === "StandardCommand" && isRemoteLaunch(command.args),
+            ).length;
+          const beforeReuse = launches();
+          const reused = yield* manager.ensureEnvironment(uploadTarget, {
+            keyOnly: true,
+            reuseWhileRefreshPending: true,
+          });
+          assert.notProperty(reused, "type");
+          if ("type" in reused) throw new Error("Expected freshly verified runtime");
+          assert.equal(launches(), beforeReuse + 1);
+          assert.isUndefined(reused.pendingReplacement);
+          assert.isTrue(
+            Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+          );
+          assert.isTrue(
+            Result.isFailure(
+              yield* Effect.result(
+                manager.issueMcpClientSession(uploadTarget, {
+                  requireReady: true,
+                  label: "ownership-loss",
+                  ttl: "1h",
+                  runtimeModeCeiling: null,
+                }),
+              ),
+            ),
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              SshTunnel.SshEnvironmentManager.layer({
+                resolveCliRunner: Effect.succeed({
+                  ...f.runner,
+                  refreshOwnedRuntimeOnFirstConnection: true,
+                }),
+                leaveRemoteServerRunning: true,
+              }),
+              SshAuth.SshPasswordPrompt.disabledLayer,
+              Layer.succeed(NetService.NetService, testNetService),
+              Layer.succeed(HttpClient.HttpClient, testHttpClient),
+              Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+    it.live("busy runtime admission survives diagnosis and agent sessions", () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+          orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+        });
+        yield* f.fs.writeFileString(`${f.test}/activity`, "busy");
+        const before = yield* f.snapshot;
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          const operation = yield* manager.beginSetupOperation(uploadTarget, "real-drain-status");
+          const connected = yield* manager.ensureEnvironment(uploadTarget, { keyOnly: true });
+          if ("type" in connected) throw new Error("Expected live attachment");
+          assert.equal(connected.remotePort, f.port);
+          assert.equal(connected.pendingReplacement?.refreshCause, "drain_unavailable");
+          const fresh = yield* manager.status(uploadTarget);
+          yield* decodeSshHostResult(fresh);
+          assert.equal(fresh.status?.state, "ready");
+          assert.equal(fresh.status?.refreshDeferred?.refreshCause, "drain_unavailable");
+          yield* manager.publishProviderDiagnosis(
+            uploadTarget,
+            operation,
+            yield* decodeProviders({
+              checkedAt: "2026-10-18T00:00:00.000Z",
+              ready: false,
+              fixes: [{ actor: "human", instruction: "Sign in" }],
+            }),
+          );
+          const diagnosed = yield* manager.status(uploadTarget);
+          assert.equal(diagnosed.status?.state, "providers_not_ready");
+          assert.equal(diagnosed.status?.runtimeVersion, "1.2.2");
+          assert.equal(diagnosed.status?.refreshDeferred?.refreshCause, "drain_unavailable");
+          const session = yield* manager.issueMcpClientSession(uploadTarget, {
+            requireReady: true,
+            label: "diagnose",
+            ttl: "1h",
+            runtimeModeCeiling: null,
+          });
+          assert.equal(session.token, "1.2.2");
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              SshTunnel.SshEnvironmentManager.layer({
+                resolveCliRunner: Effect.succeed({
+                  ...f.runner,
+                  refreshOwnedRuntimeOnFirstConnection: true,
+                }),
+                leaveRemoteServerRunning: true,
+              }),
+              SshAuth.SshPasswordPrompt.disabledLayer,
+              Layer.succeed(NetService.NetService, testNetService),
+              Layer.succeed(HttpClient.HttpClient, testHttpClient),
+              Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+            ),
+          ),
+        );
+        assert.deepEqual(yield* f.snapshot, before);
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        for (const type of ["drain", "drain-request", "supervise", "self-stop", "stop", "activity"])
+          assert.notInclude(events, `"type":"${type}"`);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
   },
 );

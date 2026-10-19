@@ -1,8 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
+import { ChannelConversationId, type ChannelReceptionInput } from "@goat/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { ChannelReceptionModelOutput, toChannelReceptionResult } from "./channelReceptionPrompt.ts";
+import {
+  buildChannelReceptionPrompt,
+  ChannelReceptionModelOutput,
+  toChannelReceptionResult,
+} from "./channelReceptionPrompt.ts";
 
 const emptyOutput = {
   replyText: "Okay.",
@@ -17,6 +22,7 @@ const emptyOutput = {
   question: "",
   options: [],
   clarifyAbout: "other",
+  reads: [],
   remember: "",
   rememberQuote: "",
   notesChangeRequested: "",
@@ -134,5 +140,107 @@ describe("channel reception project questions and other machines", () => {
       convert({ action: "clarify", question: "Which task?", options: [], clarifyAbout: "other" })
         .action,
     ).toEqual({ type: "clarify", question: "Which task?" });
+  });
+});
+
+describe("channel reception reads", () => {
+  it("keeps at most three non-empty reads and refuses a read with none", () => {
+    const result = convert({
+      action: "read",
+      reads: [
+        { kind: "work", query: " #457 " },
+        { kind: "memory", query: "  " },
+        { kind: "thread", query: "login" },
+        { kind: "conversation", query: "score" },
+        { kind: "memory", query: "deploys" },
+      ],
+    });
+    expect(result.action).toEqual({
+      type: "read",
+      reads: [
+        { kind: "work", query: "#457" },
+        { kind: "thread", query: "login" },
+        { kind: "conversation", query: "score" },
+      ],
+    });
+    expect(
+      Option.isNone(
+        toChannelReceptionResult({
+          ...emptyOutput,
+          action: "read",
+          reads: [{ kind: "work", query: "" }],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts a read with an empty reply, since that reply is never shown", () => {
+    const result = convert({
+      replyText: "",
+      action: "read",
+      reads: [{ kind: "memory", query: "deploys" }],
+    });
+    expect(result.action.type).toBe("read");
+    expect(result.replyText).toBe("Looking that up.");
+  });
+
+  it("offers reading only on the first pass and shows results as records", () => {
+    const input = {
+      mode: "input",
+      conversationId: ChannelConversationId.make("conversation:1"),
+      originKind: "goat",
+      inputText: "did it merge?",
+      tail: [],
+      tasks: [],
+      allowedTargets: [],
+      journal: "- 2026-10-12 00:00 Done: ship it",
+      requester: {
+        ownerId: "owner",
+        principalId: "owner",
+        displayName: "Owner",
+        originKind: "goat",
+        runtimeModeCeiling: "full-access",
+        grantedScopes: [],
+      },
+    } satisfies ChannelReceptionInput;
+    const first = buildChannelReceptionPrompt({ ...input, readsAllowed: true }).prompt;
+    expect(first).toContain("- read: look things up before answering");
+    expect(first).toContain("Done: ship it");
+    const second = buildChannelReceptionPrompt({
+      ...input,
+      readsAllowed: false,
+      readResults: [{ kind: "work", query: "#123", text: "goat-si/goat#123 (merged)" }],
+    }).prompt;
+    expect(second).not.toContain("- read: look things up before answering");
+    expect(second).toContain("[work: #123]\ngoat-si/goat#123 (merged)");
+  });
+});
+
+describe("channel reception turns", () => {
+  it("turns run_turn into a turn with its title, instruction and quoted note change", () => {
+    const result = convert({
+      action: "run_turn",
+      title: "Check the disk",
+      instruction: "Find what fills the disk.",
+      notesChangeRequested: " forget the Friday rule ",
+    });
+    expect(result.action).toEqual({
+      type: "run_turn",
+      title: "Check the disk",
+      instruction: "Find what fills the disk.",
+      notesChangeRequested: "forget the Friday rule",
+    });
+    expect(Option.isNone(toChannelReceptionResult({ ...emptyOutput, action: "run_turn" }))).toBe(
+      true,
+    );
+  });
+});
+
+describe("channel reception follow-ups", () => {
+  it("turns follow_up into the task it joins", () => {
+    expect(convert({ action: "follow_up", taskId: "task:1" }).action).toEqual({
+      type: "follow_up",
+      taskId: "task:1",
+    });
   });
 });

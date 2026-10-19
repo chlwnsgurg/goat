@@ -1299,6 +1299,7 @@ it.layer(layerClaudeTextGenerationTest)("channel reception", (it) => {
             answer: "",
             question: "Which project?",
             options: [],
+            reads: [],
             remember: "",
             rememberQuote: "",
             notesChangeRequested: "",

@@ -11,6 +11,7 @@ import { AndroidScreenHeader } from "../../components/ui/AndroidScreenHeader";
 import { useRemoteConnections } from "../../state/use-remote-environment-registry";
 import { LocalEnvironmentList } from "./LocalEnvironmentList";
 import { GitHubRoutingSettings } from "./GitHubRoutingSettings";
+import { useConnectHubEntryLabel } from "./useConnectHubEntryLabel";
 
 export function ConnectionsRouteScreen() {
   const {
@@ -21,6 +22,7 @@ export function ConnectionsRouteScreen() {
     onUpdateEnvironment,
   } = useRemoteConnections();
   const navigation = useNavigation();
+  const connectHubLabel = useConnectHubEntryLabel();
   const insets = useSafeAreaInsets();
   const [expandedId, setExpandedId] = useState<EnvironmentId | null>(null);
   const handleToggle = useCallback((environmentId: EnvironmentId) => {
@@ -35,7 +37,7 @@ export function ConnectionsRouteScreen() {
           onBack={() => navigation.goBack()}
           actions={[
             {
-              accessibilityLabel: "Add environment",
+              accessibilityLabel: connectHubLabel,
               icon: "plus",
               onPress: () => navigation.navigate("ConnectionsNew"),
             },

@@ -294,10 +294,16 @@ describe("desktop SSH runtime status", () => {
             Stream.isStream(input.stream)
               ? yield* input.stream.pipe(Stream.decodeText(), Stream.mkString)
               : "";
-          if (script.includes("ready=false"))
+          // Archive launches embed a reconnect probe; only launches pass a state key to sh -s.
+          const isLaunch = command.args.some(
+            (arg, index) => arg === "-s" && command.args[index + 1] === "--",
+          );
+          if (script.includes("ready=false") && !isLaunch)
             return successfulProcess(
               JSON.stringify({ platform: "linux", arch: "x64", ready: true, liveStatus: "none" }),
             );
+          assert.isTrue(isLaunch, "unexpected SSH command");
+          assert.equal(command.args.at(-1), "runtime");
           const contended = held;
           if (!contended) {
             held = true;
@@ -358,7 +364,9 @@ describe("desktop SSH runtime status", () => {
         yield* Deferred.succeed(release, undefined);
         assert.equal((yield* Fiber.join(desktopUpdate)).status?.state, "update_waiting");
         yield* desktop.disconnectEnvironment(runtimeTarget);
-        assert.equal((yield* dispatch.status(runtimeTarget)).status?.state, "update_waiting");
+        const retainedDispatchStatus = yield* dispatch.status(runtimeTarget);
+        assert.equal(retainedDispatchStatus.status?.state, "update_waiting");
+        assert.equal(retainedDispatchStatus.status?.requestedVersion, "1.2.4");
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
     }).pipe(
       Effect.provideService(SshAuth.SshPasswordPrompt, {

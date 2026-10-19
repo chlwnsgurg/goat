@@ -180,8 +180,18 @@ export const ChannelTaskMove = Schema.Struct({
 });
 export type ChannelTaskMove = typeof ChannelTaskMove.Type;
 
+/**
+ * "work" starts a coding thread wherever the requester asks. A "turn" is GOAT Bot itself
+ * looking into a message with tools: it runs on this machine in the bot's own workspace, on the
+ * bot's model, and its result is the bot's answer.
+ */
+export const ChannelTaskKind = Schema.Literals(["work", "turn"]);
+export type ChannelTaskKind = typeof ChannelTaskKind.Type;
+
 export const ChannelTask = Schema.Struct({
   taskId: ChannelTaskId,
+  /** Missing on tasks stored before turns existed; those are work. */
+  kind: Schema.optional(ChannelTaskKind),
   conversationId: ChannelConversationId,
   originBindingId: ChannelBindingId,
   /** Fixed at intake; follow-up input never changes where results go. */
@@ -223,6 +233,7 @@ export const ChannelTaskEventType = Schema.Literals([
   "task.progress",
   "task.question.opened",
   "task.question.answered",
+  "task.followup.received",
   "task.completion.proposed",
   "task.completed",
   "task.failed",
@@ -288,6 +299,17 @@ export const ChannelTaskEvent = Schema.Union([
     questionId: ChannelQuestionId,
     answer: Schema.String,
     projectChoice: Schema.optional(ChannelAnswerProjectChoice),
+  }),
+  /**
+   * A later message about this work, recorded with the reply to it and then sent to the task's
+   * worker, which takes it into its running turn or starts a new turn on the same thread.
+   */
+  taskEvent("task.followup.received", {
+    inputId: ChannelInputId,
+    text: Schema.String,
+    from: TrimmedNonEmptyString,
+    /** The generation it was written to; a later generation's worker never receives it. */
+    generation: PositiveInt,
   }),
   taskEvent("task.completion.proposed", { proposal: ChannelProposedCompletion }),
   taskEvent("task.completed", {

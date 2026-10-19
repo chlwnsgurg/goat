@@ -174,7 +174,7 @@ export const ComposerTasksContent = memo(function ComposerTasksContent({
                       ? "text-success"
                       : step.status === "inProgress"
                         ? "text-primary"
-                        : "text-muted-foreground/40",
+                        : "text-muted-foreground/40 dark:text-muted-foreground/60",
                   )}
                 >
                   {step.status === "completed" ? (
@@ -189,7 +189,7 @@ export const ComposerTasksContent = memo(function ComposerTasksContent({
                   className={cn(
                     "block wrap-anywhere",
                     step.status === "completed"
-                      ? "text-muted-foreground/55"
+                      ? "text-muted-foreground/55 dark:text-muted-foreground/60"
                       : step.status === "inProgress"
                         ? "text-foreground/90"
                         : "text-muted-foreground/70",
@@ -200,7 +200,7 @@ export const ComposerTasksContent = memo(function ComposerTasksContent({
                 </ComposerBanner.Content>
                 <ComposerBanner.Actions>
                   <span
-                    className="w-12 text-right text-3xs/4 text-muted-foreground/45 tabular-nums"
+                    className="w-12 text-right text-3xs/4 text-muted-foreground/45 dark:text-muted-foreground/60 tabular-nums"
                     data-composer-task-duration="true"
                   >
                     {step.durationMs !== undefined

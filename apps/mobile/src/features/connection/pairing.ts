@@ -1,4 +1,5 @@
 import { APP_SCHEMES } from "@goat/shared/mobileAppIdentity";
+import { MOBILE_PAIRING_URL_PARAM } from "@goat/shared/mobilePairingLink";
 import { readHostedPairingRequest } from "@goat/shared/remote";
 import * as Schema from "effect/Schema";
 
@@ -9,8 +10,6 @@ const PAIRING_LINK_PROTOCOLS = new Set([
   "t3code-dev:",
   "t3code-preview:",
 ]);
-
-const MOBILE_PAIRING_URL_PARAM = "pairingUrl";
 
 function isIpLiteral(host: string): boolean {
   try {

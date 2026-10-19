@@ -114,7 +114,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
-    it.live("reconciles the cached forward after pairing fails during the first ensure", () =>
+    it.live("pairing recovery reuses the deferred attachment until an explicit refresh", () =>
       Effect.gen(function* () {
         const f = yield* makeProtocolFixture({
           live: true,
@@ -156,7 +156,22 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           assert.equal(yield* f.fs.readFileString(`${f.test}/activity-requests`), "1");
           yield* f.fs.remove(`${f.test}/pairing-fail`);
           yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
-          yield* manager.ensureEnvironment(uploadTarget, { issuePairingToken: true });
+          const paired = yield* manager.ensureEnvironment(uploadTarget, {
+            issuePairingToken: true,
+          });
+          assert.notProperty(paired, "type");
+          if ("type" in paired) throw new Error("Expected the retained attachment");
+          assert.equal(paired.pairingToken, "1.2.2");
+          assert.equal(paired.pendingReplacement?.reason, "busy");
+          assert.equal(yield* f.fs.readFileString(`${f.test}/activity-requests`), "1");
+          assert.deepEqual(yield* f.snapshot, before);
+          const beforeRefresh = yield* f.fs.readFileString(`${f.test}/events`);
+          for (const type of ["self-stop", "drain", "stop"])
+            assert.notInclude(beforeRefresh, `"type":"${type}"`);
+          yield* manager.ensureEnvironment(uploadTarget, {
+            issuePairingToken: true,
+            refreshRuntime: true,
+          });
           assert.equal(yield* f.fs.readFileString(`${f.test}/activity-requests`), "3");
           assert.notEqual((yield* f.snapshot).pid, before.pid);
           assert.include(

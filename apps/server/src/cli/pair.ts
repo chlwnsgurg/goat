@@ -7,6 +7,7 @@ import {
 } from "@goat/contracts";
 import { resolveWorktreeHome } from "@goat/shared/devHome";
 import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import { buildMobilePairingLink } from "@goat/shared/mobilePairingLink";
 import { DEFAULT_SIGNAL_EXPORT } from "@goat/shared/observability";
 import * as OtelEnvironment from "@goat/shared/otelEnvironment";
 import {
@@ -170,7 +171,8 @@ const formatPairOutput = (input: {
   [
     `Pairing with ${input.serverLabel} (${input.origin}).`,
     "",
-    renderTerminalQrCode(input.pairingUrl),
+    // The QR is for the phone app; browsers use the printed URL.
+    renderTerminalQrCode(buildMobilePairingLink(input.pairingUrl)),
     "",
     `Pairing URL: ${input.pairingUrl}`,
     `Token: ${input.token}`,

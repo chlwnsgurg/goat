@@ -44,6 +44,8 @@ export const protocolExecutable = (
     commitTime?: number;
     /** The CLI lists memory scopes in `auth session issue --help`; builds before memory do not. */
     memoryScopes?: boolean;
+    contestedPort?: number;
+    contestedAttempts?: number;
   },
   state: string,
 ) => {
@@ -71,13 +73,17 @@ function event(type, extra = {}) { fs.appendFileSync(path.join(test, "events"), 
 event("exec", { args });
 if (args[0] === "--version") {
   event("version", { published: fs.existsSync(path.join(state, "run-t3.sh")) ? fs.readFileSync(path.join(state, "run-t3.sh"), "utf8") : "" });
-  console.log("goat v" + version);
+  const proof = path.join(test, "pending-proof");
+  console.log("goat v" + (fs.existsSync(proof) && fs.readFileSync(proof, "utf8").trim() === "version:" + version ? "0.0.0" : version));
 } else if (args[0] === "__ssh-helper" && args[1] === "protocol") {
   if (${JSON.stringify(signals.missingCommand ?? false)}) process.exit(2);
   const at = args.indexOf("--runtime-file");
   const value = at < 0 ? fields : await (await import(${JSON.stringify(helperUrl)})).readLiveSshRuntimeProtocol(args[at+1], flag("--port-file"), flag("--pid-file"));
   event("protocol", { live: at >= 0, status: value.status });
   if (args.includes("--shell")) {
+if (at < 0 && fs.existsSync(path.join(test, "pending-proof")) && fs.readFileSync(path.join(test, "pending-proof"), "utf8").trim() === "protocol:" + version) {
+  console.log(version + " 999 999 0 0"); return;
+}
 const injected = at < 0 ? ${JSON.stringify(signals.ownTokens ?? null)} : ${JSON.stringify(signals.liveTokens ?? null)};
 if (injected !== null) { console.log(injected); return; }
 console.log((value.status ? value.status + " " : "") + [value.serverVersion ?? "unknown",
@@ -101,6 +107,17 @@ console.log((value.status ? value.status + " " : "") + [value.serverVersion ?? "
   const value = await (await import(${JSON.stringify(helperUrl)})).readSshServerActivity(Number(args[args.indexOf("--port")+1]), Number(args[args.indexOf("--pid")+1]));
   event("activity", { value }); console.log(value);
 } else if (args[0] === "__ssh-helper" && args[1] === "compat") {
+  const control = path.join(test, "compat");
+  if (fs.existsSync(control)) {
+    const sequence = JSON.parse(fs.readFileSync(control, "utf8"));
+    const counter = path.join(test, "compat-requests");
+    const count = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
+    fs.writeFileSync(counter, String(count + 1));
+    const response = sequence[Math.min(count, sequence.length - 1)];
+    event("compat-override", { response, count });
+    if (response === "failure") process.exit(2);
+    if (response !== "real") { console.log(response); return; }
+  }
   try {
     const value = await (await import(${JSON.stringify(helperUrl)})).readSshRuntimeCompatibility(Number(flag("--port")));
     console.log(value.verdict + " " + (value.drainRestart ? 1 : 0) + " " + (value.instanceId ?? "-"));
@@ -122,13 +139,26 @@ console.log((value.status ? value.status + " " : "") + [value.serverVersion ?? "
   event("supervise", { status: result.status });
   fs.writeFileSync(flag("--result"), result.status + " " + (result.pid ?? 0) + " " + (result.version ?? "-") + "\\n");
 } else if (args[0] === "__ssh-helper" && args[1] === "pick-port") {
+  const contestedPort = ${JSON.stringify(signals.contestedPort ?? null)};
+  const picked = path.join(test, "contested-picked");
+  const pickCount = fs.existsSync(picked) ? Number(fs.readFileSync(picked, "utf8")) : 0;
+  if (contestedPort !== null && pickCount < ${JSON.stringify(signals.contestedAttempts ?? 1)}) {
+    fs.writeFileSync(picked, String(pickCount + 1)); console.log(contestedPort); return;
+  }
   const socket = net.createServer(); socket.listen(0, "127.0.0.1", () => {
 const port = socket.address().port; socket.close(() => console.log(port));
   });
 } else if (args[0] === "__ssh-helper" && args[1] === "wait-ready") {
+  const proof = path.join(test, "pending-proof");
+  if (fs.existsSync(proof)) {
+    const action = fs.readFileSync(proof, "utf8").trim();
+    event("pending-proof", { action });
+    if (action === "readiness") process.exit(2);
+    if (action === "ownership-loss") fs.writeFileSync(path.join(state, "managed"), "external\\n");
+  }
   // Fixture readiness uses an event, not polling or a delay.
   let record = fs.existsSync(runtimeFile) ? JSON.parse(fs.readFileSync(runtimeFile, "utf8")) : null;
-  if (!record || !fs.existsSync(path.join(test, "accepted-ready-" + record.pid))) {
+  if (${JSON.stringify(signals.contestedPort === undefined)} && (!record || !fs.existsSync(path.join(test, "accepted-ready-" + record.pid)))) {
 const fd = fs.openSync(path.join(test, "ready.fifo"), "r");
 fs.readSync(fd, Buffer.alloc(32), 0, 32, null); fs.closeSync(fd);
 record = JSON.parse(fs.readFileSync(runtimeFile, "utf8"));
@@ -166,6 +196,10 @@ if (req.method === "POST" && req.url === "/.well-known/goat/runtime/drain" && dr
     if (request.expectedInstanceId !== instanceId) { res.end(JSON.stringify({status: "instance-changed", instanceId, forced: false})); return; }
     const file = path.join(test, "drain");
     const mode = fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : "drained";
+    if (mode === "response-lost") {
+      event("drain", { status: "response-lost" });
+      res.destroy(); return;
+    }
     const status = mode === "cancelled" && request.force !== true ? "cancelled" : "drained";
     event("drain", { status, targetVersion: request.targetVersion, force: request.force === true, grace: request.graceSeconds });
     res.end(JSON.stringify({status, instanceId, forced: status === "drained" && mode === "cancelled"}), () => { if (status === "drained") { event("self-stop"); stopSelf(); } });
@@ -206,7 +240,7 @@ if (args.includes("--test-seed") || process.env.T3_TEST_SEED === "1") {
   console.log(JSON.stringify(record));
 }
 else if (process.env.FIXTURE_SUPERVISED === "1") fs.writeFileSync(path.join(test, "accepted-ready-" + process.pid), "ready");
-else if (!${JSON.stringify(signals.nodeReadiness ?? false)}) { const fd = fs.openSync(path.join(test, "ready.fifo"), "w"); fs.writeSync(fd, "ready\\n"); fs.closeSync(fd); }
+else if (!${JSON.stringify((signals.nodeReadiness ?? false) || signals.contestedPort !== undefined)}) { const fd = fs.openSync(path.join(test, "ready.fifo"), "w"); fs.writeSync(fd, "ready\\n"); fs.closeSync(fd); }
   });
 } else process.exit(97);
 })().catch(error => { console.error(error); process.exitCode = 1; });
@@ -225,6 +259,8 @@ export const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* 
   liveTokens?: string;
   descriptor404?: boolean;
   nodeMode?: boolean;
+  contestedPort?: number;
+  contestedAttempts?: number;
   homePrefix?: string;
   /** The live server drains for a replacement (servers before #119 do not). */
   drain?: boolean;
@@ -552,7 +588,8 @@ if [ "$#" = 1 ] && [ "$1" = +%s ]; then echo $(( ${freezeFileTimes ? '$(cat "$HO
           `#!/bin/sh
 printf '%s\\n' "$1" >> "$HOME/.test/clock/waits"
 second="$(cat "$HOME/.test/clock/second")"
-echo $(( second + $1 )) > "$HOME/.test/clock/second"
+wait_seconds="\${1%%.*}"
+echo $(( second + wait_seconds )) > "$HOME/.test/clock/second"
 `,
         );
         yield* fs.chmod(`${bin}/sleep`, 0o700);
@@ -600,6 +637,11 @@ esac
     fs,
     realSpawner,
     setBeforeCommand,
+    setCompat: (responses: ReadonlyArray<string>) =>
+      Effect.gen(function* () {
+        yield* fs.writeFileString(`${test}/compat`, JSON.stringify(responses));
+        yield* fs.writeFileString(`${test}/compat-requests`, "0");
+      }),
     setScriptPrefix,
     setRemotePath,
     shiftHostClock,

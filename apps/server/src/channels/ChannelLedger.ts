@@ -193,6 +193,16 @@ export class ChannelLedger extends Context.Service<
       conversationId: ChannelConversationId,
       limit: number,
     ) => Effect.Effect<ReadonlyArray<ChannelTailEntry>, ChannelLedgerError>;
+    /**
+     * Inputs in one conversation, accepted before `beforeInputId`, whose text or reply contains
+     * `query`, newest first. The asking input and anything after it are never their own history.
+     */
+    readonly searchConversation: (
+      conversationId: ChannelConversationId,
+      query: string,
+      limit: number,
+      beforeInputId: ChannelInputId,
+    ) => Effect.Effect<ReadonlyArray<ChannelTailEntry>, ChannelLedgerError>;
     readonly listConversationTasks: (
       conversationId: ChannelConversationId,
     ) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
@@ -270,6 +280,15 @@ export class ChannelLedger extends Context.Service<
     readonly listPendingForwards: (
       limit: number,
     ) => Effect.Effect<ReadonlyArray<ChannelPendingEvent>, ChannelLedgerError>;
+    /** Whether any recorded answer or follow-up for this task is still waiting to be sent. */
+    readonly hasPendingForward: (
+      taskId: ChannelTaskId,
+    ) => Effect.Effect<boolean, ChannelLedgerError>;
+    /** Whether a forward for this task was recorded before `sequence` and is still waiting. */
+    readonly hasEarlierPendingForward: (input: {
+      readonly taskId: ChannelTaskId;
+      readonly sequence: number;
+    }) => Effect.Effect<boolean, ChannelLedgerError>;
     readonly completeForward: (input: {
       readonly owner: string;
       readonly sequence: number;
@@ -910,6 +929,37 @@ const make = Effect.gen(function* () {
         Effect.mapError(toLedgerError("readConversationTail")),
       ),
 
+    searchConversation: (conversationId, query, limit, beforeInputId) => {
+      const pattern = "%" + query.replace(/[\\%_]/gu, (char) => "\\" + char) + "%";
+      return sql<{
+        readonly input_id: ChannelInputId;
+        readonly message_json: string;
+        readonly accepted_at: string;
+        readonly reply_json: string | null;
+      }>`
+        SELECT input_id, message_json, accepted_at, reply_json FROM channel_inbox
+        WHERE conversation_id = ${conversationId} AND state != 'rejected'
+          -- Rows are stored in the order inputs were accepted, so rowid orders them without ties.
+          AND EXISTS (
+            SELECT 1 FROM channel_inbox AS asking WHERE asking.input_id = ${beforeInputId}
+              AND channel_inbox.rowid < asking.rowid
+          )
+          AND (json_extract(message_json, '$.text') LIKE ${pattern} ESCAPE '\\'
+            OR json_extract(reply_json, '$.text') LIKE ${pattern} ESCAPE '\\')
+        ORDER BY accepted_at DESC, input_id DESC LIMIT ${limit}
+      `.pipe(
+        Effect.map((rows) =>
+          rows.map((row) => ({
+            inputId: row.input_id,
+            text: decodeInbound(row.message_json).text,
+            receivedAt: row.accepted_at,
+            replyText: row.reply_json === null ? undefined : decodeReply(row.reply_json).text,
+          })),
+        ),
+        Effect.mapError(toLedgerError("searchConversation")),
+      );
+    },
+
     listConversationTasks: (conversationId) =>
       sql<TaskRow>`
         SELECT owner_id, task_json, pending_answer_message_id, completion_hold FROM channel_tasks
@@ -1213,6 +1263,26 @@ const make = Effect.gen(function* () {
           rows.map((row) => ({ sequence: row.sequence, event: decodeEvent(row.event_json) })),
         ),
         Effect.mapError(toLedgerError("listPendingForwards")),
+      ),
+
+    hasPendingForward: (taskId) =>
+      sql<{ readonly found: number }>`
+        SELECT 1 AS found FROM channel_task_events
+        WHERE task_id = ${taskId} AND forward_state = 'pending' LIMIT 1
+      `.pipe(
+        Effect.map((rows) => rows.length > 0),
+        Effect.mapError(toLedgerError("hasPendingForward")),
+      ),
+
+    hasEarlierPendingForward: (input) =>
+      sql<{ readonly found: number }>`
+        SELECT 1 AS found FROM channel_task_events
+        WHERE task_id = ${input.taskId} AND forward_state = 'pending'
+          AND sequence < ${input.sequence}
+        LIMIT 1
+      `.pipe(
+        Effect.map((rows) => rows.length > 0),
+        Effect.mapError(toLedgerError("hasEarlierPendingForward")),
       ),
 
     completeForward: (input) =>

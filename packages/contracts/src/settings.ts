@@ -1287,6 +1287,13 @@ export const ServerSettings = Schema.Struct({
   memoryModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  /**
+   * The model GOAT Bot's own turns run on. Null follows the new-thread default, then the text
+   * generation model, the way a main thread would.
+   */
+  goatBotModelSelection: Schema.NullOr(ModelSelection).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   memoryHubVersion: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
   memoryHub: MemoryHubSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed({ mode: "disabled" as const })),
@@ -1720,6 +1727,7 @@ const ServerSettingsPatchFields = Schema.Struct({
   enableAgentMemoryAccess: Schema.optionalKey(Schema.Boolean),
   memoryEnabled: Schema.optionalKey(Schema.Boolean),
   memoryModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  goatBotModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),

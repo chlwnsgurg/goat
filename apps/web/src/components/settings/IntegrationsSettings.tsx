@@ -4,8 +4,7 @@ import { DeviceToolVersions } from "../device/DeviceToolVersions";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 import { ScopedSwitch } from "./ScopedSwitch";
 import { DeviceHostsSettings } from "./DeviceHostsSettings";
-import { GoatBotSettings } from "./GoatBotSettings";
-import { SlackChannelSettings } from "./SlackChannelSettings";
+import { useNavigate } from "@tanstack/react-router";
 /**
  * Integrations settings - preferences for surfaces GOAT embeds rather than
  * owns. Browser is the first section: the defaults a preview tab opens at,
@@ -1507,8 +1506,28 @@ export function IntegrationsSettingsPanel() {
         <PullRequestLinksOpenInAppSetting />
       </SettingsSection>
       <DeviceIntegrationSettings />
-      <GoatBotSettings />
-      <SlackChannelSettings />
+      <GoatBotSettingsPointer />
     </SettingsPageContainer>
+  );
+}
+
+function GoatBotSettingsPointer() {
+  const navigate = useNavigate();
+  return (
+    <SettingsSection id="goat-bot-pointer" title="GOAT Bot">
+      <SettingsRow
+        title="GOAT Bot and Slack"
+        description="Choose where GOAT Bot runs and connect it to Slack."
+        control={
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void navigate({ to: "/settings/goat-bot", hash: "" })}
+          >
+            Open
+          </Button>
+        }
+      />
+    </SettingsSection>
   );
 }

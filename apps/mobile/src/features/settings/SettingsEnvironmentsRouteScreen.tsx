@@ -5,7 +5,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { managedRelaySessionAtom } from "@goat/client-runtime/relay";
 import type { EnvironmentId } from "@goat/contracts";
 import { useRef, useState } from "react";
-import { Platform, RefreshControl } from "react-native";
+import { Platform, Pressable, RefreshControl, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SettingsScreen } from "./components/SettingsScreen";
@@ -15,7 +15,11 @@ import { CloudEnvironmentRows } from "../connection/CloudEnvironmentRows";
 import { LocalEnvironmentList } from "../connection/LocalEnvironmentList";
 import { GitHubRoutingSettings } from "../connection/GitHubRoutingSettings";
 import { splitEnvironmentSections } from "../connection/environmentSections";
-import { useUniwindTheme } from "../../lib/useUniwindTheme";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { selectHubEnvironmentId } from "../connection/hubEnvironment";
+import { useStoredHubEnvironment } from "../connection/useStoredHubEnvironment";
+import { useConnectionsReady } from "../../state/workspace";
 import { useRemoteConnections } from "../../state/use-remote-environment-registry";
 import { relayEnvironmentDiscovery } from "../../state/relay";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -48,7 +52,12 @@ export function SettingsEnvironmentsRouteScreen() {
   const connectedCloudEnvironments = SHOWCASE_ENABLED
     ? SHOWCASE_CONNECTED_CLOUD_ENVIRONMENTS
     : environmentSections.connectedCloudEnvironments;
-  const headerIconColor = useUniwindTheme()["--color-icon"];
+  const savedHub = useStoredHubEnvironment();
+  const catalogReady = useConnectionsReady();
+  const hubEnvironmentId = selectHubEnvironmentId(localEnvironments, savedHub.storedHubId);
+  const hub = localEnvironments.find(
+    (environment) => environment.environmentId === hubEnvironmentId,
+  );
   const savedRelaySession = useAtomValue(managedRelaySessionAtom);
   const relaySession = isGoatConnectEnabled() ? savedRelaySession : null;
   const refreshRelayEnvironments = useAtomCommand(
@@ -124,18 +133,6 @@ export function SettingsEnvironmentsRouteScreen() {
           </AndroidAnchoredMenu>
         ) : undefined
       }
-      actions={[
-        {
-          accessibilityLabel: "Add environment",
-          icon: "plus",
-          tintColor: headerIconColor,
-          onPress: () =>
-            navigation.navigate("SettingsSheet", {
-              screen: "SettingsContent",
-              params: { screen: "SettingsEnvironmentNew" },
-            }),
-        },
-      ]}
     >
       <ScrollView
         alwaysBounceVertical
@@ -155,16 +152,55 @@ export function SettingsEnvironmentsRouteScreen() {
           ) : undefined
         }
       >
-        <LocalEnvironmentList
-          environments={localEnvironments}
-          expandedId={null}
-          onToggle={openEnvironment}
-          opensDetails
-          onReconnect={onReconnectEnvironment}
-          onRemove={onRemoveEnvironmentPress}
-          onSetEnabled={onSetEnvironmentEnabled}
-          onUpdate={handleUpdateEnvironment}
-        />
+        <View className="mb-4 gap-2">
+          <Pressable
+            accessibilityRole="button"
+            disabled={!savedHub.loaded || !catalogReady}
+            onPress={() =>
+              navigation.navigate("SettingsSheet", {
+                screen: "SettingsContent",
+                params: {
+                  screen: "SettingsEnvironmentNew",
+                  params: hubEnvironmentId
+                    ? { intent: "change-hub", replaceEnvironmentId: hubEnvironmentId }
+                    : { intent: "hub" },
+                },
+              })
+            }
+            className="min-h-13 flex-row items-center gap-3 rounded-[24px] bg-grouped-card px-4 active:opacity-70"
+          >
+            <View className="min-w-0 flex-1 py-3">
+              <Text className="text-base text-foreground">
+                {hub ? "Change hub" : "Connect hub"}
+              </Text>
+              {hub ? (
+                <Text className="text-sm text-foreground-muted">{hub.environmentLabel}</Text>
+              ) : null}
+            </View>
+            <SymbolView
+              name="chevron.right"
+              size={14}
+              tintColorClassName="accent-chevron"
+              type="monochrome"
+              weight="semibold"
+            />
+          </Pressable>
+          {savedHub.error ? (
+            <Text className="px-4 text-sm text-danger-foreground">{savedHub.error}</Text>
+          ) : null}
+        </View>
+        {localEnvironments.length > 0 ? (
+          <LocalEnvironmentList
+            environments={localEnvironments}
+            expandedId={null}
+            onToggle={openEnvironment}
+            opensDetails
+            onReconnect={onReconnectEnvironment}
+            onRemove={onRemoveEnvironmentPress}
+            onSetEnabled={onSetEnvironmentEnabled}
+            onUpdate={handleUpdateEnvironment}
+          />
+        ) : null}
 
         {/* Always mounted: already-connected relay environments must stay
             visible (and removable) even when cloud config is missing or the
@@ -181,6 +217,28 @@ export function SettingsEnvironmentsRouteScreen() {
               }
             : {})}
         />
+        <View className="mt-6 gap-2">
+          <Text className="px-4 text-sm font-goat-medium text-foreground-muted">Advanced</Text>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() =>
+              navigation.navigate("SettingsSheet", {
+                screen: "SettingsContent",
+                params: { screen: "SettingsEnvironmentNew", params: { intent: "add-server" } },
+              })
+            }
+            className="min-h-13 flex-row items-center gap-3 rounded-[24px] bg-grouped-card px-4 active:opacity-70"
+          >
+            <Text className="flex-1 text-base text-foreground">Add another server</Text>
+            <SymbolView
+              name="chevron.right"
+              size={14}
+              tintColorClassName="accent-chevron"
+              type="monochrome"
+              weight="semibold"
+            />
+          </Pressable>
+        </View>
         <GitHubRoutingSettings />
       </ScrollView>
     </SettingsScreen>

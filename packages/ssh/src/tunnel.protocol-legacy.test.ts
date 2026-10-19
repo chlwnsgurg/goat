@@ -102,6 +102,41 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
+    it.live.each([false, true])(
+      "legacy no-drain refusal preserves ownership; outer permits adoption=%s",
+      (outerDrain) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            drain: true,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+          });
+          yield* f.fs.remove(`${f.state}/identity`);
+          yield* f.shiftHostClock(0, true);
+          yield* f.setCompat(outerDrain ? ["real", "compatible 0 -"] : ["compatible 0 -"]);
+          const before = yield* f.snapshot;
+          const result = yield* f.run("launch", false, {
+            refreshOwnedRuntimeOnFirstConnection: true,
+          });
+          assert.isTrue(Result.isFailure(result));
+          if (Result.isFailure(result) && outerDrain)
+            assert.include(
+              String((result.failure as { stderr?: string }).stderr),
+              "was started by an older app that cannot hand over ownership without draining",
+            );
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.equal(before.identity, null);
+          yield* Effect.sync(() => process.kill(f.pid, 0));
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          for (const type of ["drain", "self-stop", "supervise", "stop", "activity"])
+            assert.notInclude(events, `"type":"${type}"`);
+          assert.isAbove(Number(yield* f.fs.readFileString(`${f.test}/compat-requests`)), 0);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
     it.live("legacy acquisition failure preserves all running-server files", () =>
       Effect.gen(function* () {
         const f = yield* makeProtocolFixture({

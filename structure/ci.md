@@ -1,10 +1,12 @@
 # CI
 
-goat-si/goat runs one active workflow, `.github/workflows/goat-ci.yml`, on the EPYC self-hosted
-runners. Every upstream workflow is disabled on GitHub. The pre-push hook
+goat-si/goat runs one active workflow, `.github/workflows/goat-ci.yml`, on GitHub-hosted
+`ubuntu-24.04` runners, which are free for a public repository. Every upstream workflow is disabled
+on GitHub. The pre-push hook
 `.vite-hooks/goat-workflow-guard.mjs` refuses a push that carries any other enabled workflow, and
-holds `goat-ci.yml` to the jobs `scope`, `ci`, `screenshot-gate` and `result`, the EPYC runner
-labels, the `push`, `pull_request`, and `workflow_dispatch` triggers, and an allowlist of actions.
+holds `goat-ci.yml` to the jobs `scope`, `ci`, `screenshot-gate` and `result`, the pinned
+`ubuntu-24.04` image or the EPYC self-hosted labels, the `push`, `pull_request`, and
+`workflow_dispatch` triggers, and an allowlist of actions.
 A new check is therefore a matrix task of `ci`. A separate workflow, `pull_request_target`, or
 `actions/github-script` does not pass the guard.
 

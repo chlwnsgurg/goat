@@ -1245,12 +1245,13 @@ it.effect.skipIf(sshdTestBinaries === undefined)(
       assert.strictEqual(relay.openSockets, 2);
       hookSocket.write("stall\n");
 
-      let sawDroppedDownstream = false;
+      // Whether upload-pack forwards the hook's bytes before the client gives up depends on the
+      // Git build (Ubuntu 24.04's 2.43 holds them), so only the client's dropped keepalive is
+      // awaited; waiting for a downstream drop there outlives the fetch it should observe.
       let sawDroppedUpstream = false;
-      while (!sawDroppedDownstream || !sawDroppedUpstream) {
+      while (!sawDroppedUpstream) {
         const packet = yield* Queue.take(relay.traffic);
         assert.isFalse(packet.forwarded);
-        if (packet.direction === "downstream") sawDroppedDownstream = true;
         if (packet.direction === "upstream") sawDroppedUpstream = true;
       }
       assert.strictEqual(relay.openSockets, 2);

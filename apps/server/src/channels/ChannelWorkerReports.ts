@@ -174,6 +174,9 @@ const make = Effect.gen(function* () {
         if (rebound === undefined) return false;
         const reread = yield* ledger.getTask(task.taskId);
         if (reread === undefined) return true;
+        // Someone else wrote after this pass's write (a follow-up and its fence, say): the runs
+        // read above may no longer be the task's, so judge again on the next pass.
+        if (reread.task.version !== rebound.version) return true;
         latest = reread;
       }
 
@@ -208,10 +211,14 @@ const make = Effect.gen(function* () {
         if (wrote === undefined) return latest !== stored;
         const reread = yield* ledger.getTask(task.taskId);
         if (reread === undefined) return true;
+        if (reread.task.version !== wrote.version) return true;
         latest = reread;
       }
 
       if (!TERMINAL_RUN_STATUSES.has(current.status)) return latest !== stored;
+      // A follow-up or answer recorded but not yet sent belongs to this work; the run read above
+      // has not seen it, so it cannot be the last word.
+      if (yield* ledger.hasPendingForward(task.taskId)) return latest !== stored;
       // A worker that asked a question and stopped waits for the answer; one whose run failed or
       // was stopped while waiting has ended the task all the same.
       const waitingForAnswer =

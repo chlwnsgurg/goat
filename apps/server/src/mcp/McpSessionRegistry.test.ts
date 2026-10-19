@@ -2,11 +2,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@goat/contracts";
 import * as MemoryFixture from "./toolkits/memory/handlers.testkit.ts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import { HttpServer } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import type * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 
 const environmentId = EnvironmentId.make("environment-1");
@@ -182,7 +185,7 @@ it.effect("does not keep credentials of other threads alive", () =>
 );
 
 it.effect(
-  "live authority denies epoch drift, unready policy, ended caller and revoked snapshot handles",
+  "epoch drift, unready policy, ended callers and revoked handles withdraw memory authority",
   () =>
     Effect.gen(function* () {
       const registry = yield* makeRegistry(() => 1000);
@@ -209,12 +212,20 @@ it.effect(
       );
       live = true;
       yield* scope!.reauthorize!(["memory:read"]);
+      const withoutMemory = (
+        resolved: McpInvocationContext.McpThreadInvocationScope | undefined,
+      ) => {
+        // The credential outlives the policy change; only its memory authority ends.
+        expect(resolved?.thread.threadId).toBe(ThreadId.make("thread-memory-epochs"));
+        expect(resolved?.grantedScopes).toEqual([]);
+        expect(resolved?.memoryPolicy?.grant).toBe("none");
+      };
       current = undefined;
-      expect(yield* registry.resolve(token)).toBeUndefined();
+      withoutMemory(yield* registry.resolve(token));
       expect(yield* registry.currentMemoryPolicy!(first.config.providerSessionId)).toBeUndefined();
       current = { grant: "read_write", policyEpoch: 4 };
       // The intermediate stream epochs need not be observed: the latest Ref is authoritative.
-      expect(yield* registry.resolve(token)).toBeUndefined();
+      withoutMemory(yield* registry.resolve(token));
       expect((yield* scope!.reauthorize!(["memory:write"]).pipe(Effect.flip))._tag).toBe(
         "EnvironmentAuthorizationError",
       );
@@ -314,4 +325,278 @@ it.effect.each([
           yield* registry.currentMemoryPolicy!(issued.config.providerSessionId),
         ).toBeUndefined();
     }).pipe(Effect.provide(MemoryFixture.layer)),
+);
+
+it.effect("renews authority under the same token and fences permits taken before the change", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("thread-renew");
+    const policy = { grant: "read_write" as const, policyEpoch: 1 };
+    const request = {
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      grantedScopes: ["memory:read", "memory:write"] as const,
+      memoryPolicy: policy,
+      readCurrentPolicy: () => Effect.succeed(policy),
+      isLiveCaller: Effect.succeed(true),
+    };
+    const first = yield* registry.issue(request);
+    const token = first.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const before = yield* registry.resolve(token);
+    yield* before!.reauthorize!(["memory:write"]);
+
+    const renewed = yield* registry.issue({
+      ...request,
+      grantedScopes: ["memory:read"],
+      memoryPolicy: { grant: "read", policyEpoch: 1 },
+      readCurrentPolicy: () => Effect.succeed({ grant: "read" as const, policyEpoch: 1 }),
+      readOnly: true,
+      renew: {
+        authorizationHeader: first.config.authorizationHeader,
+        providerSessionId: first.config.providerSessionId,
+      },
+    });
+    expect(renewed.renewed).toBe(true);
+    expect(renewed.config.authorizationHeader).toBe(first.config.authorizationHeader);
+    expect(renewed.config.providerSessionId).toBe(first.config.providerSessionId);
+    expect(renewed.config.credentialGeneration).toBe((first.config.credentialGeneration ?? 0) + 1);
+    const after = yield* registry.resolve(token);
+    expect(after?.grantedScopes).toEqual(["memory:read"]);
+    expect(after?.readOnly).toBe(true);
+    // A permit from before the change cannot borrow the replacement's authority.
+    expect((yield* before!.reauthorize!(["memory:read"]).pipe(Effect.flip))._tag).toBe(
+      "EnvironmentAuthorizationError",
+    );
+    yield* after!.reauthorize!(["memory:read"]);
+    expect((yield* after!.reauthorize!(["memory:write"]).pipe(Effect.flip))._tag).toBe(
+      "EnvironmentAuthorizationError",
+    );
+  }),
+);
+
+it.effect("never renews a revoked credential and refuses a mismatched renewal", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("thread-revoked-renewal");
+    const request = { threadId, providerInstanceId: ProviderInstanceId.make("codex") };
+    const first = yield* registry.issue(request);
+    const renew = {
+      authorizationHeader: first.config.authorizationHeader,
+      providerSessionId: first.config.providerSessionId,
+    };
+    const otherThread = yield* registry.issue({
+      ...request,
+      threadId: ThreadId.make("thread-other"),
+      renew,
+    });
+    expect(otherThread.renewed).toBe(false);
+    expect(otherThread.config.authorizationHeader).not.toBe(first.config.authorizationHeader);
+
+    yield* registry.revokeProviderSession(first.config.providerSessionId);
+    const afterRevoke = yield* registry.issue({ ...request, renew });
+    expect(afterRevoke.renewed).toBe(false);
+    expect(afterRevoke.config.authorizationHeader).not.toBe(first.config.authorizationHeader);
+    const token = first.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    expect(yield* registry.resolve(token)).toBeUndefined();
+    expect(yield* registry.explainRefusal!(token)).toMatchObject({
+      reason: "revoked",
+      threadId,
+      providerSessionId: first.config.providerSessionId,
+    });
+  }),
+);
+
+it.effect("renews an idle credential while its session is attached and expires it after", () =>
+  Effect.gen(function* () {
+    let timestamp = 1_000;
+    let attached = true;
+    const registry = yield* makeRegistry(() => timestamp);
+    const threadId = ThreadId.make("thread-attached-idle");
+    const issued = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("pi"),
+      isAttached: Effect.sync(() => attached),
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    timestamp += 1_000;
+    expect((yield* registry.resolve(token))?.thread.threadId).toBe(threadId);
+    // An unrelated issue prunes idle records; an attached one stays renewable.
+    timestamp += 1_000;
+    yield* registry.issue({
+      threadId: ThreadId.make("thread-unrelated"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    });
+    expect((yield* registry.resolve(token))?.thread.threadId).toBe(threadId);
+
+    attached = false;
+    timestamp += 1_000;
+    expect(yield* registry.resolve(token)).toBeUndefined();
+    expect((yield* registry.explainRefusal!(token)).reason).toBe("expired");
+    attached = true;
+    yield* registry.revokeThread(threadId);
+    expect(yield* registry.resolve(token)).toBeUndefined();
+    expect((yield* registry.explainRefusal!(token)).reason).toBe("revoked");
+  }),
+);
+
+it.effect("tells a token from an earlier server run apart from an unknown one", () =>
+  Effect.gen(function* () {
+    const current = yield* makeRegistry(() => 1_000);
+    const earlier = yield* makeRegistry(() => 1_000);
+    const issued = yield* earlier.issue({
+      threadId: ThreadId.make("thread-before-restart"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    expect(current.isRegistryToken!(token)).toBe(true);
+    expect(yield* current.resolve(token)).toBeUndefined();
+    expect((yield* current.explainRefusal!(token)).reason).toBe("earlier_server");
+    // Builds before the run tag minted a bare 43-character secret.
+    expect((yield* current.explainRefusal!(token.slice(8))).reason).toBe("earlier_server");
+    expect((yield* current.explainRefusal!("payload.signature")).reason).toBe("unknown");
+    expect((yield* current.explainRefusal!("")).reason).toBe("missing");
+  }),
+);
+
+it.effect("keeps an idle attached credential through more than a tombstone list of churn", () =>
+  Effect.gen(function* () {
+    let timestamp = 1_000;
+    const registry = yield* makeRegistry(() => timestamp);
+    const held = yield* registry.issue({
+      threadId: ThreadId.make("thread-held-by-pi"),
+      providerInstanceId: ProviderInstanceId.make("pi"),
+      isAttached: Effect.succeed(true),
+    });
+    const token = held.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    timestamp += 1_000;
+    for (let index = 0; index < 600; index += 1) {
+      const churn = yield* registry.issue({
+        threadId: ThreadId.make("thread-churn-" + index),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      });
+      yield* registry.revokeProviderSession(churn.config.providerSessionId);
+    }
+    expect((yield* registry.resolve(token))?.thread.threadId).toBe(
+      ThreadId.make("thread-held-by-pi"),
+    );
+  }),
+);
+
+it.effect("concurrent calls through an attachment probe all renew, and a revocation wins", () =>
+  Effect.gen(function* () {
+    let timestamp = 1_000;
+    const registry = yield* makeRegistry(() => timestamp);
+    const probing = yield* Deferred.make<void>();
+    const answer = yield* Deferred.make<void>();
+    const threadId = ThreadId.make("thread-concurrent-renewal");
+    const issued = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("muse"),
+      isAttached: Deferred.succeed(probing, undefined).pipe(
+        Effect.andThen(Deferred.await(answer)),
+        Effect.as(true),
+      ),
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    timestamp += 1_000;
+    const calls = yield* Effect.forEach([1, 2, 3], () => registry.resolve(token), {
+      concurrency: "unbounded",
+    }).pipe(Effect.forkChild({ startImmediately: true }));
+    yield* Deferred.await(probing);
+    yield* Deferred.succeed(answer, undefined);
+    const resolved = yield* Fiber.join(calls);
+    expect(resolved.map((scope) => scope?.thread.threadId)).toEqual([threadId, threadId, threadId]);
+
+    const revokeProbe = yield* Deferred.make<void>();
+    const revokeAnswer = yield* Deferred.make<void>();
+    const revoked = yield* registry.issue({
+      threadId: ThreadId.make("thread-revoked-during-probe"),
+      providerInstanceId: ProviderInstanceId.make("muse"),
+      isAttached: Deferred.succeed(revokeProbe, undefined).pipe(
+        Effect.andThen(Deferred.await(revokeAnswer)),
+        Effect.as(false),
+      ),
+    });
+    const revokedToken = revoked.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    timestamp += 1_000;
+    const call = yield* registry
+      .resolve(revokedToken)
+      .pipe(Effect.forkChild({ startImmediately: true }));
+    yield* Deferred.await(revokeProbe);
+    yield* registry.revokeProviderSession(revoked.config.providerSessionId);
+    yield* Deferred.succeed(revokeAnswer, undefined);
+    expect(yield* Fiber.join(call)).toBeUndefined();
+    expect((yield* registry.explainRefusal!(revokedToken)).reason).toBe("revoked");
+  }),
+);
+
+it.effect("a permit whose live-caller probe spans an authority change is refused", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const probing = yield* Deferred.make<void>();
+    const answer = yield* Deferred.make<void>();
+    let gate = false;
+    const policy = { grant: "read_write" as const, policyEpoch: 1 };
+    const request = {
+      threadId: ThreadId.make("thread-permit-during-change"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      grantedScopes: ["memory:read", "memory:write"] as const,
+      memoryPolicy: policy,
+      readCurrentPolicy: () => Effect.succeed(policy),
+      isLiveCaller: Effect.suspend(() =>
+        gate
+          ? Deferred.succeed(probing, undefined).pipe(
+              Effect.andThen(Deferred.await(answer)),
+              Effect.as(true),
+            )
+          : Effect.succeed(true),
+      ),
+    };
+    const first = yield* registry.issue(request);
+    const scope = yield* registry.resolve(
+      first.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+    );
+    gate = true;
+    const permit = yield* scope!.reauthorize!(["memory:write"]).pipe(
+      Effect.flip,
+      Effect.forkChild({ startImmediately: true }),
+    );
+    yield* Deferred.await(probing);
+    gate = false;
+    yield* registry.issue({
+      ...request,
+      readOnly: true,
+      renew: {
+        authorizationHeader: first.config.authorizationHeader,
+        providerSessionId: first.config.providerSessionId,
+      },
+    });
+    yield* Deferred.succeed(answer, undefined);
+    expect((yield* Fiber.join(permit))._tag).toBe("EnvironmentAuthorizationError");
+  }),
+);
+
+it.effect("a revocation during a positive attachment probe still refuses the call", () =>
+  Effect.gen(function* () {
+    let timestamp = 1_000;
+    const registry = yield* makeRegistry(() => timestamp);
+    const probing = yield* Deferred.make<void>();
+    const answer = yield* Deferred.make<void>();
+    const issued = yield* registry.issue({
+      threadId: ThreadId.make("thread-revoked-while-attached"),
+      providerInstanceId: ProviderInstanceId.make("pi"),
+      isAttached: Deferred.succeed(probing, undefined).pipe(
+        Effect.andThen(Deferred.await(answer)),
+        Effect.as(true),
+      ),
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    timestamp += 1_000;
+    const call = yield* registry.resolve(token).pipe(Effect.forkChild({ startImmediately: true }));
+    yield* Deferred.await(probing);
+    yield* registry.revokeProviderSession(issued.config.providerSessionId);
+    yield* Deferred.succeed(answer, undefined);
+    expect(yield* Fiber.join(call)).toBeUndefined();
+    expect((yield* registry.explainRefusal!(token)).reason).toBe("revoked");
+  }),
 );

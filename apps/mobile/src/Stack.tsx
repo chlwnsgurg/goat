@@ -289,7 +289,7 @@ const SettingsContentStack = createV5SheetStackNavigator({
       screen: ConnectionsNewRouteScreen,
       linking: "environment-new",
       options: {
-        title: "Add Environment",
+        title: "Connect hub",
       },
     }),
     SettingsArchive: createNativeStackScreen({
@@ -557,6 +557,7 @@ const WORKSPACE_OVERLAY_ROUTES = new Set([
   "ConnectOnboarding",
   "Connections",
   "ConnectionsNew",
+  "Pair",
   "GitBranches",
   "GitCommit",
   "GitConfirm",
@@ -981,7 +982,20 @@ const RootStackConfig = createWorkspaceStackNavigator({
         // Keep the iOS header visible from the first render so the sheet's
         // native header stack mounts without remounting the pairing form.
         ...(Platform.OS === "ios" ? SHEET_GLASS_HEADER_OPTIONS : undefined),
-        title: "Add Environment",
+        title: "Connect hub",
+        ...FORM_SHEET_PRESENTATION_OPTIONS,
+        sheetAllowedDetents: [0.55, 0.7],
+        sheetGrabberVisible: true,
+      },
+    }),
+    Pair: createNativeStackScreen({
+      screen: ConnectionsNewRouteScreen,
+      linking: "pair",
+      options: {
+        // Keep the iOS header visible from the first render so the sheet's
+        // native header stack mounts without remounting the pairing form.
+        ...(Platform.OS === "ios" ? SHEET_GLASS_HEADER_OPTIONS : undefined),
+        title: "Connect hub",
         ...FORM_SHEET_PRESENTATION_OPTIONS,
         sheetAllowedDetents: [0.55, 0.7],
         sheetGrabberVisible: true,

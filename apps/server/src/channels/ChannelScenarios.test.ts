@@ -1857,6 +1857,46 @@ describe("who may do what (scenario 4)", () => {
       assert.strictEqual(harness.world.launches.length, 0);
     }).pipe(Effect.provide(harness.layer));
   });
+  it.effect("keeps the failure reason when the answer after a read fails", () => {
+    const harness = makeHarness();
+    const passes: Array<boolean | undefined> = [];
+    harness.script.current = (input) => {
+      if (input.mode !== "input") return defaultScript(input);
+      passes.push(input.readsAllowed);
+      return input.readsAllowed === true
+        ? Effect.succeed({
+            replyText: "",
+            action: {
+              type: "read" as const,
+              reads: [{ kind: "memory" as const, query: "deploy" }],
+            },
+          })
+        : Effect.fail(
+            new TextGenerationError({
+              operation: "generateChannelReception",
+              detail: "Codex CLI request timed out.",
+            }),
+          );
+    };
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const receipt = yield* gateway.ingest(
+        goatInput("what did I deploy?", "read-fail"),
+        rpcContext,
+      );
+      yield* runtime.drain;
+      assert.deepStrictEqual(passes, [true, false]);
+      assert.deepStrictEqual((yield* ledger.getInput(receipt.inputId))?.snapshot.failure, {
+        reason: "reception_failed",
+        message: CHANNEL_COPY.receptionFailedBecause.timeout,
+      });
+      assert.strictEqual(harness.world.launches.length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect.each([
     {
       kind: "schema_rejected",

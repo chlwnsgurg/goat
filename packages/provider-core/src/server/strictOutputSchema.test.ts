@@ -144,6 +144,40 @@ describe("structured output schemas", () => {
     ]);
   });
 
+  // Codex CLI 0.163.0 accepted this schema and answered with each of these shapes.
+  it("decodes the read, run_turn and follow_up answers a strict provider returns", () => {
+    expect(strictOutputSchemaViolations(toJsonSchemaObject(ChannelReceptionModelOutput))).toEqual(
+      [],
+    );
+    const empty = {
+      replyText: "On it.",
+      title: "",
+      instruction: "",
+      projectId: "",
+      host: "",
+      taskId: "",
+      questionId: "",
+      answer: "",
+      question: "",
+      options: [],
+      clarifyAbout: "other",
+      reads: [],
+      remember: "",
+      rememberQuote: "",
+      notesChangeRequested: "",
+    };
+    const decode = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelReceptionModelOutput));
+    for (const answer of [
+      { ...empty, action: "read", reads: [{ kind: "memory", query: "deploy" }] },
+      { ...empty, action: "run_turn", title: "Check disk", instruction: "Find what fills it." },
+      { ...empty, action: "follow_up", taskId: "task:1" },
+    ]) {
+      expect(decode(JSON.stringify(answer), { onExcessProperty: "error" }).action).toBe(
+        answer.action,
+      );
+    }
+  });
+
   it("checks nested objects, $defs, and refs", () => {
     expect(
       strictOutputSchemaViolations({

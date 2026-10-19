@@ -28,6 +28,10 @@ import {
   ConnectionCatalogDocument,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
   catalogRoutes,
+  readCatalogHub,
+  setCatalogHub,
+  replaceCatalogValue,
+  removeCatalogValue,
   setRoutesInCatalog,
   putRemoteDpopTokenInCatalog,
   registerConnectionInCatalog,
@@ -73,6 +77,103 @@ const REMOTE_TOKEN = new TokenStore.RemoteDpopAccessToken({
 });
 
 describe("ConnectionCatalogDocument", () => {
+  it("decodes a version 1 catalog without hub and round-trips an optional hub", () => {
+    const schema = Schema.fromJsonString(ConnectionCatalogDocument);
+    const withoutHub = Schema.decodeSync(schema)(
+      Schema.encodeSync(schema)(EMPTY_CONNECTION_CATALOG_DOCUMENT),
+    );
+    expect(readCatalogHub(withoutHub)).toBeNull();
+    expect(withoutHub).not.toHaveProperty("hub");
+    const document = setCatalogHub(withoutHub, ENVIRONMENT_ID);
+    const restored = Schema.decodeSync(schema)(Schema.encodeSync(schema)(document));
+    expect(restored.schemaVersion).toBe(1);
+    expect(readCatalogHub(restored)).toBe(ENVIRONMENT_ID);
+    expect(setCatalogHub(restored, null)).toEqual(EMPTY_CONNECTION_CATALOG_DOCUMENT);
+    expect(setCatalogHub(restored, null)).not.toHaveProperty("hub");
+  });
+
+  it("accepts future fields inside hub without rejecting the catalog", () => {
+    const decoded = decodeCatalogDocument({
+      ...EMPTY_CONNECTION_CATALOG_DOCUMENT,
+      hub: { environmentId: ENVIRONMENT_ID, futureSetting: { enabled: true } },
+    });
+    expect(decoded.schemaVersion).toBe(1);
+    expect(readCatalogHub(decoded)).toBe(ENVIRONMENT_ID);
+  });
+
+  it("keeps hub through every catalog rewrite except removing that environment", () => {
+    let document = setCatalogHub(EMPTY_CONNECTION_CATALOG_DOCUMENT, ENVIRONMENT_ID);
+    const bearer = new BearerConnectionRegistration({
+      target: BEARER_TARGET,
+      profile: BEARER_PROFILE,
+      credential: BEARER_CREDENTIAL,
+    });
+    const rewrites: ReadonlyArray<
+      (current: ConnectionCatalogDocument) => ConnectionCatalogDocument
+    > = [
+      (current) => registerConnectionInCatalog(current, bearer),
+      (current) =>
+        registerConnectionInCatalog(
+          current,
+          new RelayConnectionRegistration({ target: RELAY_TARGET }),
+          [BEARER_TARGET, RELAY_TARGET],
+        ),
+      (current) => setRoutesInCatalog(current, ENVIRONMENT_ID, [RELAY_TARGET]),
+      (current) => setConnectionEnabledInCatalog(current, ENVIRONMENT_ID, false),
+      (current) => setConnectionEnabledInCatalog(current, ENVIRONMENT_ID, true),
+      (current) => putRemoteDpopTokenInCatalog(current, REMOTE_TOKEN),
+      (current) => ({
+        ...current,
+        profiles: replaceCatalogValue(
+          current.profiles,
+          (value) => value.connectionId,
+          BEARER_PROFILE,
+        ),
+      }),
+      (current) => ({
+        ...current,
+        profiles: removeCatalogValue(
+          current.profiles,
+          (value) => value.connectionId,
+          BEARER_PROFILE.connectionId,
+        ),
+      }),
+      (current) => ({
+        ...current,
+        credentials: replaceCatalogValue(current.credentials, (value) => value.connectionId, {
+          connectionId: BEARER_TARGET.connectionId,
+          credential: BEARER_CREDENTIAL,
+        }),
+      }),
+      (current) => ({
+        ...current,
+        credentials: removeCatalogValue(
+          current.credentials,
+          (value) => value.connectionId,
+          BEARER_TARGET.connectionId,
+        ),
+      }),
+      (current) => ({
+        ...current,
+        remoteDpopTokens: removeCatalogValue(
+          current.remoteDpopTokens,
+          (value) => value.environmentId,
+          ENVIRONMENT_ID,
+        ),
+      }),
+      (current) => setRoutesInCatalog(current, ENVIRONMENT_ID, []),
+      (current) => removeConnectionFromCatalog(current, EnvironmentId.make("another-environment")),
+    ];
+    for (const rewrite of rewrites) {
+      document = decodeCatalogDocument(rewrite(document));
+      expect(document.schemaVersion).toBe(1);
+      expect(readCatalogHub(document)).toBe(ENVIRONMENT_ID);
+    }
+    const removed = removeConnectionFromCatalog(document, ENVIRONMENT_ID);
+    expect(readCatalogHub(removed)).toBeNull();
+    expect(removed).not.toHaveProperty("hub");
+  });
+
   it.effect("persists explicit GitHub trust and forgets it when a connection is removed", () =>
     Effect.gen(function* () {
       let document = EMPTY_CONNECTION_CATALOG_DOCUMENT;
