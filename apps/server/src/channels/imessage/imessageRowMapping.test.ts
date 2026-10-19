@@ -83,6 +83,11 @@ describe("iMessage row mapping", () => {
       expect(admitted.chatGuid).toBe(row.chat_guid);
     }
   });
+  it("uses stable row metadata when the Apple timestamp is unusable", () => {
+    expect(admitImessageRow({ ...row, date: Number.NaN }, settings)).toMatchObject({
+      receivedAt: "2001-01-01T00:00:00.012Z",
+    });
+  });
   it("extracts only bounded NSString payload and strips attachment placeholders", () => {
     const text = new TextEncoder().encode("hello");
     const body = new Uint8Array([

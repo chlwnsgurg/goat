@@ -90,7 +90,9 @@ export function admitImessageRow(row: ImessageRow, settings: ImessageSettings): 
   const receivedAt =
     Number.isFinite(epochMs) && epochMs >= 978_307_200_000 && epochMs <= 7_258_118_400_000
       ? DateTime.formatIso(DateTime.makeUnsafe(epochMs))
-      : "1970-01-01T00:00:00.000Z";
+      : DateTime.formatIso(
+          DateTime.makeUnsafe(978_307_200_000 + Math.max(0, Math.min(row.rowid, 10_000_000_000))),
+        );
   return {
     type: "message",
     rowId: row.rowid,
