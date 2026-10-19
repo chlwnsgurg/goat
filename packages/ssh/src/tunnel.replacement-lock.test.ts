@@ -8,10 +8,11 @@ import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
 import * as HostProcess from "@goat/shared/HostProcess";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as SshTunnel from "./tunnel.ts";
-import { uploadTarget, installArchivePsDouble } from "./tunnel.fixture.ts";
+import { ARCHIVE, uploadTarget, installArchivePsDouble } from "./tunnel.fixture.ts";
 import { protocolExecutable } from "./tunnel.protocol.fixture.ts";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
@@ -69,6 +70,47 @@ case "$3" in */${name})
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "host-wide replacement symlink mutex",
   () => {
+    it.live.each(["external", "managed"] as const)(
+      "attaches an equal-version %s server without a deferred refresh when the lock is contended",
+      (kind) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind,
+            oldVersion: ARCHIVE.archiveVersion,
+            drain: true,
+            ...current,
+          });
+          if (kind === "external") yield* f.fs.remove(`${f.state}/pid`);
+          const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
+          yield* f.fs.symlink(liveOwner(), lock);
+          const before = yield* f.snapshot;
+          const result = yield* SshTunnel.launchOrReuseRemoteServer(
+            uploadTarget,
+            {},
+            {
+              ...f.runner,
+              refreshOwnedRuntimeOnFirstConnection: true,
+            },
+          ).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+            Effect.provideService(FileSystem.FileSystem, f.observedFs),
+          );
+          assert.equal(result.status, "ready");
+          if (result.status !== "ready") return;
+          assert.equal(result.remoteServerKind, kind);
+          assert.isUndefined(result.pending);
+          assert.isUndefined(result.refresh);
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.equal(yield* f.fs.readLink(lock), liveOwner());
+          assert.isFalse(yield* f.fs.exists(`${f.test}/activity-requests`));
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          for (const type of ["stop", "drain", "self-stop", "supervise"])
+            assert.notInclude(events, `"type":"${type}"`);
+          yield* Effect.sync(() => process.kill(f.pid, 0));
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
     it.live("cancelled legacy drain rolls back identity while holding the replacement lock", () =>
       Effect.gen(function* () {
         const f = yield* makeProtocolFixture({
