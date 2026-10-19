@@ -150,9 +150,19 @@ const fixture = Effect.fn("test.ghFixture")(function* (
 function assertContext(error: unknown, directory: string, expectedAsset = asset) {
   assert.instanceOf(error, SshLaunchError);
   if (!(error instanceof SshLaunchError)) return;
+  // From a launch, the person reads one sentence and one action; the detail rides on the cause.
+  if (error.acquisition !== undefined)
+    assert.match(error.message, /^(No GOAT runtime for |GOAT has no runtime for )/);
   for (const value of [CLI_RELEASE_REPOSITORY, `v${version}`, expectedAsset, directory]) {
-    assert.include(error.message, value);
+    assert.include(detailOf(error), value);
   }
+}
+
+function detailOf(error: unknown): string {
+  if (!(error instanceof SshLaunchError)) return String(error);
+  return error.acquisition !== undefined && error.cause instanceof SshLaunchError
+    ? error.cause.message
+    : error.message;
 }
 
 const assertCleanStaging = Effect.fn("test.cleanStaging")(function* (
@@ -262,7 +272,7 @@ describe("SSH archives from locally authenticated gh", () => {
         assert.isTrue(Result.isFailure(result));
         if (Result.isFailure(result)) {
           assertContext(result.failure, state.directory);
-          if (mode === "mismatch") assert.include(result.failure.message, "SHA-256 mismatch");
+          if (mode === "mismatch") assert.include(detailOf(result.failure), "SHA-256 mismatch");
         }
         assert.deepEqual(state.calls, ["probe", "gh"]);
         assert.deepEqual(state.uploads, []);
@@ -365,7 +375,7 @@ describe("SSH archives from locally authenticated gh", () => {
       assert.isTrue(Result.isFailure(result));
       if (Result.isFailure(result)) {
         assertContext(result.failure, state.directory);
-        assert.include(result.failure.message, "gh not found on PATH");
+        assert.include(detailOf(result.failure), "gh not found on PATH");
       }
       assert.deepEqual(state.calls, ["probe"]);
       assert.deepEqual(state.uploads, []);
@@ -400,11 +410,11 @@ describe("SSH archives from locally authenticated gh", () => {
       assert.isTrue(Result.isFailure(result));
       if (Result.isFailure(result)) {
         assertContext(result.failure, state.directory);
-        assert.include(result.failure.message, "authentication failed");
-        assert.include(result.failure.message, "[redacted]");
-        assert.notInclude(result.failure.message, diagnosticSecret);
+        assert.include(detailOf(result.failure), "authentication failed");
+        assert.include(detailOf(result.failure), "[redacted]");
+        assert.notInclude(detailOf(result.failure), diagnosticSecret);
         // eslint-disable-next-line no-control-regex -- Diagnostics must contain no terminal control bytes.
-        assert.notMatch(result.failure.message, /[\x00-\x1f\x7f-\x9f]/u);
+        assert.notMatch(detailOf(result.failure), /[\x00-\x1f\x7f-\x9f]/u);
         const acquisition = result.failure.cause;
         assert.instanceOf(acquisition, SshLaunchError);
         const ghFailure = acquisition instanceof SshLaunchError ? acquisition.cause : undefined;
@@ -449,7 +459,7 @@ describe("SSH archives from locally authenticated gh", () => {
           assert.isTrue(Result.isFailure(result));
           if (Result.isFailure(result)) {
             assert.instanceOf(result.failure, SshLaunchError);
-            assert.include(result.failure.message, "SHA-256 mismatch or malformed sidecar");
+            assert.include(detailOf(result.failure), "SHA-256 mismatch or malformed sidecar");
           }
           assert.deepEqual(state.calls, ["probe"]);
           assert.deepEqual(state.uploads, []);
@@ -554,7 +564,7 @@ describe("SSH archives from locally authenticated gh", () => {
       assert.isTrue(Result.isFailure(result));
       if (Result.isFailure(result)) {
         assertContext(result.failure, root);
-        assert.include(result.failure.message, "timed out");
+        assert.include(detailOf(result.failure), "timed out");
       }
       assert.isTrue(closed);
       assert.deepEqual(yield* fs.readDirectory(root), []);
