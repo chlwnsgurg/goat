@@ -44,23 +44,43 @@ const makeArchive = async (root: string, key: string) => {
   return NodePath.join(root, `${stem}.tar.gz`);
 };
 
-const run = async (args: ReadonlyArray<string>) => {
+const run = async (
+  args: ReadonlyArray<string>,
+  options: {
+    /** Runs with HOME=<root>/user and no GOAT_HOME, after preparing that home. */
+    readonly userHome?: (home: string) => Promise<void>;
+    /** Writes a SHA256SUMS next to the archive. */
+    readonly sums?: (archive: string) => string;
+  } = {},
+) => {
   const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-server-install-"));
   roots.push(root);
   const log = NodePath.join(root, "calls.log");
   await NodeFSP.writeFile(log, "");
+  const { GOAT_HOME: _ambientHome, ...ambient } = process.env;
+  const userHome = NodePath.join(root, "user");
+  if (options.userHome !== undefined) {
+    await NodeFSP.mkdir(userHome, { recursive: true });
+    await options.userHome(userHome);
+  }
   const env = {
-    ...process.env,
-    GOAT_HOME: NodePath.join(root, "home"),
+    ...ambient,
+    ...(options.userHome === undefined
+      ? { GOAT_HOME: NodePath.join(root, "home") }
+      : { HOME: userHome }),
     GOAT_INSTALL_BIN_DIR: NodePath.join(root, "bin"),
     FAKE_GOAT_LOG: log,
     // Never reach a real installer from a test.
     GOAT_INSTALLER_URL: "http://127.0.0.1:9/install.sh",
   };
   const resolved = await Promise.all(
-    args.map(async (arg) =>
-      arg.startsWith("archive:") ? ["--archive", await makeArchive(root, arg.slice(8))] : [arg],
-    ),
+    args.map(async (arg) => {
+      if (!arg.startsWith("archive:")) return [arg];
+      const archive = await makeArchive(root, arg.slice(8));
+      if (options.sums !== undefined)
+        await NodeFSP.writeFile(NodePath.join(root, "SHA256SUMS"), options.sums(archive));
+      return ["--archive", archive];
+    }),
   );
   const result = NodeChildProcess.spawnSync("sh", [script, ...resolved.flat()], {
     env,
@@ -118,5 +138,24 @@ describe("install-goat-server.sh", () => {
     expect(result.stderr).toContain(`is built for ${other}`);
     expect(result.calls).toEqual([]);
     await expect(NodeFSP.access(NodePath.join(result.root, "bin/goat"))).rejects.toThrow();
+  });
+
+  it("refuses an archive that SHA256SUMS does not list", async () => {
+    const result = await run([`archive:${platformKey}`, "--no-pair"], {
+      sums: () => `${"0".repeat(64)}  goat-other.tar.gz\n`,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("is not listed in");
+    expect(result.calls).toEqual([]);
+  });
+
+  it("installs into a pre-rename ~/.t3 home that still holds the state", async () => {
+    const result = await run([`archive:${platformKey}`, "--no-pair"], {
+      userHome: (home) => NodeFSP.mkdir(NodePath.join(home, ".t3/userdata"), { recursive: true }),
+    });
+    expect(result.status).toBe(0);
+    await NodeFSP.access(
+      NodePath.join(result.root, "user/.t3/runtime/goat/versions/1.2.3-nightly.20261019.1/goat"),
+    );
   });
 });

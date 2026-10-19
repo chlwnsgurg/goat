@@ -20,6 +20,12 @@
 set -eu
 
 installer_url="${GOAT_INSTALLER_URL:-https://raw.githubusercontent.com/goat-si/goat-releases/main/install.sh}"
+# Match install.sh and the CLI: an install from before the GOAT rename keeps ~/.t3
+# until ~/.goat holds state, so the archive lands where the service looks.
+if [ -z "${GOAT_HOME:-}" ] && [ ! -d "$HOME/.goat/userdata" ] && [ -d "$HOME/.t3/userdata" ]; then
+  GOAT_HOME="$HOME/.t3"
+  export GOAT_HOME
+fi
 goat_home="${GOAT_HOME:-$HOME/.goat}"
 bin_dir="${GOAT_INSTALL_BIN_DIR:-$HOME/.local/bin}"
 archive=
@@ -81,9 +87,10 @@ install_archive() {
   sums="$(dirname "$1")/SHA256SUMS"
   if [ -f "$sums" ]; then
     expected="$(grep " \*\{0,1\}${name}\$" "$sums" | cut -d' ' -f1)"
+    [ -n "$expected" ] || fail "$name is not listed in $sums"
     if command -v sha256sum >/dev/null 2>&1; then actual="$(sha256sum "$1" | cut -d' ' -f1)"
     else actual="$(shasum -a 256 "$1" | cut -d' ' -f1)"; fi
-    [ -z "$expected" ] || [ "$actual" = "$expected" ] || fail "checksum mismatch for $name"
+    [ "$actual" = "$expected" ] || fail "checksum mismatch for $name"
   fi
   versions_dir="${goat_home}/runtime/goat/versions"
   mkdir -p "$versions_dir"
