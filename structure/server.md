@@ -30,6 +30,11 @@ names (`t3code.service`, `com.t3tools.t3code.service`) that serves the same home
 new names by a started install or a restart, and put back if the new unit fails to start. A legacy
 unit serving another home belongs to another install and is never touched.
 
+Self-update admission and requester attribution live in `cloud/selfUpdate.ts` and
+`maintenance/MaintenanceAudit.ts`. Boot-service activation closes `RuntimeAdmission`
+and requires idle unless explicitly confirmed; its fsynced journal is outside SQLite
+rollback. SSH setup records requests through that same journal service.
+
 ## Command commit
 
 `ThreadManagementService.dispatch` in `apps/server/src/orchestration-v2/ThreadManagementService.ts`

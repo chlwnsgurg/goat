@@ -13,6 +13,16 @@ immutable runtime. Preflight checks the launcher protocol because a target that
 needs new rollback guarantees cannot safely run under an older launcher. Upgrading
 that launcher requires a local service update.
 
+Boot-service updates without `confirmReplacement: true` refuse while the server is
+busy. This includes older clients that omit the field. Admission closes and idle is
+checked again after staging; thread continuation is recovery intent, not consent to
+interrupt work. Desktop-managed requests retain the app updater's existing behavior.
+
+Before launcher handoff, the server fsyncs a requester record to
+`<userdata>/maintenance-audit.jsonl`. SSH update requests use the same journal on
+the requesting server. The file stays outside SQLite rollback. Launcher acceptance
+is recorded when possible; acceptance does not mean the trial committed.
+
 ## Commit boundary
 
 The launcher durably records the pending update before acknowledging it, then

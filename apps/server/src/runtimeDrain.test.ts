@@ -171,3 +171,15 @@ it.effect("continuations remain admitted and counted during a drain", () =>
     }).pipe(Effect.provide(context));
   }).pipe(Effect.scoped),
 );
+
+it.effect("one cancelled drain cannot reopen admission held by another update", () =>
+  Effect.gen(function* () {
+    const gate = yield* RuntimeAdmission.RuntimeAdmission;
+    yield* gate.beginDrain;
+    yield* gate.beginDrain;
+    yield* gate.resume;
+    assert.equal((yield* gate.admit(Effect.void).pipe(Effect.flip))._tag, "ServerDrainingError");
+    yield* gate.resume;
+    yield* gate.admit(Effect.void);
+  }).pipe(Effect.provide(RuntimeAdmission.layer)),
+);

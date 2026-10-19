@@ -41,6 +41,7 @@
         "apps/server/src/binCli.ts",
         "apps/server/src/server.ts",
         "apps/server/src/ws.ts",
+        "apps/server/src/maintenance/MaintenanceAudit.ts",
         "apps/server/src/config.ts",
         "apps/server/src/mcp/McpHttpServer.ts",
         "apps/web",

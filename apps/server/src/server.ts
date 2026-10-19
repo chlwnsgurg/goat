@@ -223,6 +223,7 @@ import {
 } from "./cloud/managedTunnelStartup.ts";
 import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
 import * as CloudCliState from "./cloud/CliState.ts";
+import * as MaintenanceAudit from "./maintenance/MaintenanceAudit.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
@@ -1243,7 +1244,7 @@ const layerMakeRoutes = Layer.mergeAll(
   // status, and the remote-launch catalog: they all follow runs and wake launchers.
   // The coordinator re-arms watches after a relayed send, so the store comes after it.
   Layer.provide(layerSshWorkspace),
-  Layer.provide(SshHostSetup.layer),
+  Layer.provide(SshHostSetup.layer.pipe(Layer.provide(MaintenanceAudit.layer))),
   Layer.provide(HomeRequests.layer.pipe(Layer.provideMerge(CodexRoutes.layer))),
   Layer.provide(
     ProviderDiagnosisRouting.layer.pipe(
@@ -1273,7 +1274,13 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(PreviewBrowser.layer),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ConnectionCatalogBroker.layer),
-  Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
+  Layer.provide(
+    ServerSelfUpdate.layer.pipe(
+      Layer.provide(layerDesktopAppUpdate),
+      Layer.provide(ProjectionStoreV2.layer),
+      Layer.provide(RuntimeAdmission.layer),
+    ),
+  ),
   Layer.provide(layerCommandReadiness),
   Layer.provide(ServerHttp.layerBrowserApiCors),
   Layer.provide(ServerHttp.layerHttpCompression),
