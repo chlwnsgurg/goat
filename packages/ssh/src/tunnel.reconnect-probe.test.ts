@@ -457,10 +457,10 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             const result = yield* manager
               .ensureEnvironment(uploadTarget)
               .pipe(Effect.provideService(SshReconnectCost, cost));
-            assert.equal("type" in result, contended);
-            if ("type" in result) assert.deepEqual(result.pending, ordinary?.pending);
-            else assert.equal(result.remotePort, f.port);
-            assert.equal(forwards, contended ? 1 : 2);
+            assert.isFalse("type" in result);
+            if ("type" in result) return;
+            assert.equal(result.remotePort, f.port);
+            assert.equal(forwards, 2);
             assert.equal(f.remoteCommands.length - commands, 1);
             assert.property(cost.steps, "runtime-probe-folded");
             assert.deepEqual(yield* f.snapshot, snapshot);

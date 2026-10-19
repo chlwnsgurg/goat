@@ -1600,7 +1600,10 @@ publish_selected_runner() {
   RUNNER_PUBLISHED=1
 }
 pending_attachment_safe() {
-  [ "$LOCK_HELD" = 1 ] && [ "$(readlink "$LOCK" 2>/dev/null || true)" = "$OWNER" ] && [ "$DRAIN_UNCERTAIN" = 0 ]
+  [ "$DRAIN_UNCERTAIN" = 0 ] || return 1
+  # A replacement needs the mutex; lock-only contention can reuse a proven live server.
+  { [ "$LOCK_HELD" = 1 ] && [ "$(readlink "$LOCK" 2>/dev/null || true)" = "$OWNER" ]; } ||
+    { [ "$reason" = contended ] && [ "$NEEDS_OWNED_UPGRADE" = 0 ]; }
 }
 emit_pending_only() {
   printf '{"status":"pending","pending":{%s}}\n' "$pending_fields"
@@ -1612,6 +1615,9 @@ emit_pending() {
   if [ "$LOCK_DETAIL" = recovery-stale ]; then pending_fields="$pending_fields,"'"detail":"recovery-stale"'; fi
   # Reuse is independently proven using the retained runner, never the incompatible candidate.
   pending_attachment_safe || emit_pending_only
+  if [ "$reason" = contended ] && [ "$NEEDS_OWNED_UPGRADE" = 0 ] && [ ! -f "$RETAINED_SNAPSHOT_FILE" ]; then
+    capture_running_runner || emit_pending_only
+  fi
 @@GOAT_READY_BASELINE@@
   if [ "$LIVE_COMPATIBLE" = 1 ] && [ -f "$RETAINED_SNAPSHOT_FILE" ] &&
      [ "$(runner_sha256 "$RUNNER_FILE")" = "$EXPECTED_LIVE_RUNNER_SHA256" ] &&
@@ -1622,9 +1628,9 @@ emit_pending() {
        "$RETAINED_SNAPSHOT_FILE" __ssh-helper wait-ready "$LIVE_PORT" "@@GOAT_REUSE_READY_TIMEOUT_MS@@" "@@GOAT_READY_PROBE_TIMEOUT_MS@@" >/dev/null 2>&1; then
       CHECK_RUNNER="$RUNNER_CANDIDATE_FILE.pin"
       pending_pid="$LIVE_PID"; pending_port="$LIVE_PORT"; pending_version="$LIVE_VERSION"
-      pending_attachment_safe || emit_pending_only
       check_retained_runner
       check_live_protocol
+      pending_attachment_safe || emit_pending_only
       if [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_PID" = "$pending_pid" ] && [ "$LIVE_PORT" = "$pending_port" ] && [ "$LIVE_VERSION" = "$pending_version" ]; then
         pending_kind=external; [ "$LIVE_OWNED" != 1 ] || pending_kind=managed
         # Lock contention does not imply a replacement; compatible attach-only servers stay ready.
@@ -3746,12 +3752,16 @@ trap 'release_recovery_lock; release_replacement_lock' EXIT
 trap 'exit 1' HUP INT TERM
 if ! acquire_replacement_lock; then
   if ! wait_for_replacement_lock || ! acquire_replacement_lock; then
-    ${buildRemoteContendedOutput({
-      replacement: pending.replacement,
-      requestedVersion: pending.requestedVersion,
-      liveVersion: pending.liveVersion,
-    })}
-    exit 0
+    ${
+      selected.reconnectPending === undefined
+        ? ": # Launch revalidates lock-only reuse, including the drain fence."
+        : `${buildRemoteContendedOutput({
+            replacement: pending.replacement,
+            requestedVersion: pending.requestedVersion,
+            liveVersion: pending.liveVersion,
+          })}
+    exit 0`
+    }
   fi
 fi
 ${buildReconnectProbeScript(selected)}

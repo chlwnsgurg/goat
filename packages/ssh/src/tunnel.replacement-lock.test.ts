@@ -101,6 +101,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           assert.equal(result.remoteServerKind, kind);
           assert.isUndefined(result.pending);
           assert.isUndefined(result.refresh);
+          assert.equal(f.remoteCommands.length, 2);
           assert.deepEqual(yield* f.snapshot, before);
           assert.equal(yield* f.fs.readLink(lock), liveOwner());
           assert.isFalse(yield* f.fs.exists(`${f.test}/activity-requests`));
@@ -109,6 +110,59 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             assert.notInclude(events, `"type":"${type}"`);
           yield* Effect.sync(() => process.kill(f.pid, 0));
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(
+      (["external", "managed"] as const).flatMap((kind) =>
+        ["before", "readiness"].map((fence) => ({ kind, fence })),
+      ),
+    )("lock-only $kind contention stays pending when fenced at $fence", ({ kind, fence }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind,
+          oldVersion: ARCHIVE.archiveVersion,
+          drain: true,
+          ...current,
+        });
+        if (kind === "external") yield* f.fs.remove(`${f.state}/pid`);
+        const runtime = JSON.parse(
+          yield* f.fs.readFileString(`${f.home}/.goat/userdata/server-runtime.json`),
+        ) as { instanceId: string };
+        if (fence === "before") {
+          yield* f.fs.writeFileString(`${f.state}/draining`, runtime.instanceId);
+        } else {
+          const executable = `${f.old}/goat`;
+          const code = yield* f.fs.readFileString(executable);
+          const seam = 'args[1] === "wait-ready") {';
+          assert.include(code, seam);
+          yield* f.fs.writeFileString(
+            executable,
+            code.replace(
+              seam,
+              seam +
+                `
+  fs.writeFileSync(${JSON.stringify(`${f.state}/draining`)}, ${JSON.stringify(runtime.instanceId)});`,
+            ),
+          );
+        }
+        const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
+        yield* f.fs.symlink(liveOwner(), lock);
+        const before = yield* f.snapshot;
+        const result = yield* f.run("launch", false, {
+          refreshOwnedRuntimeOnFirstConnection: true,
+        });
+        if (Result.isFailure(result)) throw result.failure;
+        assert.equal(result.success.status, "pending");
+        assert.equal(result.success.pending?.reason, "contended");
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.equal(yield* f.fs.readFileString(`${f.state}/draining`), runtime.instanceId);
+        assert.equal(yield* f.fs.readLink(lock), liveOwner());
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        for (const type of ["stop", "drain", "self-stop", "supervise"])
+          assert.notInclude(events, `"type":"${type}"`);
+        yield* Effect.sync(() => process.kill(f.pid, 0));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
     it.live.each(["deferred", "replaced", "cold"])(

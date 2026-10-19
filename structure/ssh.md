@@ -84,17 +84,20 @@ A stale forward can fold the full probe into the launch command for a previously
 owned runtime, including a deferred replacement, with no blocked update or acquisition failure.
 The probe's answer and a fingerprint of the executable, live process records, runner and
 ownership must match the last launch. The folded command holds the replacement mutex across
-probe and attachment; a competing local owner gets a bounded wait within that command. If it
+probe and attachment when a replacement is pending; a competing local owner gets a bounded wait
+within that command. With no upgrade needed, unresolved lock contention can still attach after
+revalidating the live server, retained runner, ownership and drain fence. If the owner
 finished installing this client's requested version, the same command can verify and attach
 that version. Other changes return the observed probe to normal selection. A deferred attach
 keeps the original ten-minute retry deadline. Explicit refreshes and confirmations, first-connection
 refreshes, and Windows hosts keep the separate probe. The cost log names the folded attempt
 `runtime-probe-folded`; the launch still rechecks its selection before use.
 
-HTTP readiness does not prove a runtime is accepting work during a drain. Attachment requires
-the current replacement-lock owner, and an instance-bound fence survives a lost drain response
-or dead SSH owner. Under replacement ownership, the live helper retires the fence when its
-instance is gone.
+HTTP readiness does not prove a runtime is accepting work during a drain. Attachment while an
+upgrade is needed requires replacement-lock ownership. Lock-only contention can attach without
+pending replacement metadata, but an instance-bound fence still blocks attachment after a lost
+drain response or dead SSH owner. Under replacement ownership, the live helper retires the fence
+when its instance is gone.
 For the same live instance, an authenticated drain retry joins the active drain: cancellation
 allows attachment again, a confirmed drain goes through the supervisor, and an unknown answer
 keeps attachment blocked. An attach-only folded launch leaves this recovery to the scheduled
