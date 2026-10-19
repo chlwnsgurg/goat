@@ -38,8 +38,10 @@ is insufficient; broad repo-wide checks are not required. -->
 Embed clear before/after images here; the goat-screenshot-gate check looks for an embedded
 image. Include a short recording when motion, timing, or interaction details matter.
 
-Drag images into this editor, or commit them to the orphan pr-assets branch and embed them
-by commit SHA: ![after](https://raw.githubusercontent.com/goat-si/goat/<sha>/<pr>/<name>.png)
+Drag images into this editor, or run `node scripts/pr-assets.ts upload <pr> <files...> --patch-body`,
+which uploads them to the orphan pr-assets branch and links them by commit SHA:
+![after](https://raw.githubusercontent.com/goat-si/goat/<sha>/<pr>/<name>.png)
+Relative paths such as pr-assets/after.png and branch-name links do not render.
 Never commit screenshots to the PR branch. Delete this section for non-UI changes. -->
 
 <!-- If you used an agent, end with the model and harness that did the work. -->

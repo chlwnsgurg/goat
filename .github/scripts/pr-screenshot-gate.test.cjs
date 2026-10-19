@@ -11,15 +11,28 @@ const {
   isUiPath,
   isChangedFileListTruncated,
   hasScreenshotEvidence,
+  extractImageEmbeds,
+  renderedImages,
+  staticEmbedProblem,
+  verifyImageUrl,
   isMaintainerPermission,
   latestLabelActor,
   decideGate,
+  checkEmbeds,
   main,
 } = require("./pr-screenshot-gate.cjs");
 
-const SHOT = "![after](https://raw.githubusercontent.com/goat-si/goat/abc123/120/after.png)";
+const SHA = "a".repeat(40);
+const SHOT_PATH = "/goat-si/goat/" + SHA + "/120/after.png";
+const SHOT = "![after](https://raw.githubusercontent.com" + SHOT_PATH + ")";
 const FENCE = "\x60\x60\x60";
 const CHECK_LIST_PATH = "/repos/goat-si/goat/commits/" + "c".repeat(40) + "/check-runs";
+const png = () => ({
+  ok: true,
+  status: 200,
+  headers: new Headers({ "content-type": "image/png" }),
+});
+const notMutating = (request) => request.method === "GET" || request.method === "HEAD";
 
 describe("hasScreenshotEvidence", () => {
   it("accepts inline markdown images, img tags, and defined reference images", () => {
@@ -58,6 +71,223 @@ describe("hasScreenshotEvidence", () => {
       "utf8",
     );
     assert.equal(hasScreenshotEvidence(template), false);
+  });
+});
+
+describe("extractImageEmbeds", () => {
+  it("locates every rendered embed's URL in the original body", () => {
+    const body = [
+      FENCE,
+      "![in fence](pr-assets/x.png)",
+      FENCE,
+      "<!-- ![in comment](pr-assets/y.png) -->",
+      '![before](pr-assets/before.png "title")',
+      "![wrapped](<https://example.com/a b.png>)",
+      "<img width=600 src='https://example.com/c.png?a=1&amp;b=2'>",
+      "![ref][shot] ![ref again][shot]",
+      "",
+      "[shot]: https://example.com/d.png",
+    ].join("\n");
+    const embeds = extractImageEmbeds(body);
+    assert.deepEqual(
+      embeds.map((embed) => [embed.kind, embed.url, body.slice(embed.start, embed.end)]),
+      [
+        ["markdown", "pr-assets/before.png", "pr-assets/before.png"],
+        ["markdown", "https://example.com/a b.png", "https://example.com/a b.png"],
+        ["html", "https://example.com/c.png?a=1&b=2", "https://example.com/c.png?a=1&amp;b=2"],
+        ["reference", "https://example.com/d.png", "https://example.com/d.png"],
+      ],
+    );
+  });
+
+  it("handles parentheses, &amp;, next-line definitions, and inline code", () => {
+    const body = [
+      "![paren](https://example.com/after(1).png)",
+      "![amp](https://example.com/a.png?x=1&amp;y=2)",
+      "Write \x60![example](pr-assets/x.png)\x60 or \x60\x60![two](pr-assets/y.png)\x60\x60 in prose.",
+      "![ref][shot]",
+      "",
+      "[shot]:",
+      "  https://example.com/d.png",
+    ].join("\n");
+    assert.deepEqual(
+      extractImageEmbeds(body).map((embed) => embed.url),
+      [
+        "https://example.com/after(1).png",
+        "https://example.com/a.png?x=1&y=2",
+        "https://example.com/d.png",
+      ],
+    );
+  });
+});
+
+describe("checkEmbeds", () => {
+  it("does not let a code span swallow a CRLF paragraph break", () => {
+    const body = "Use \x60one\r\n\r\n![real](https://example.com/a.png)\r\n\r\nand\x60 two";
+    assert.deepEqual(
+      extractImageEmbeds(body).map((embed) => embed.url),
+      ["https://example.com/a.png"],
+    );
+  });
+
+  it("keeps comments and code spans from hiding each other's neighbours", () => {
+    const body = [
+      "<!-- \x60 -->",
+      "![real](pr-assets/real.png)",
+      "<!-- \x60 -->",
+      "\x60<!--\x60 ![after](pr-assets/after.png)",
+    ].join("\n");
+    assert.deepEqual(
+      extractImageEmbeds(body).map((embed) => embed.url),
+      ["pr-assets/real.png", "pr-assets/after.png"],
+    );
+  });
+
+  it("reads src as an attribute, never from inside another attribute's value", () => {
+    const tag =
+      '<img alt="example src=\'https://example.com/ok.png\' > x" src="pr-assets/broken.png">';
+    assert.deepEqual(
+      extractImageEmbeds(tag).map((embed) => [embed.url, tag.slice(embed.start, embed.end)]),
+      [["pr-assets/broken.png", "pr-assets/broken.png"]],
+    );
+    assert.deepEqual(
+      renderedImages(tag).map((image) => image.url),
+      ["pr-assets/broken.png"],
+    );
+  });
+
+  it("reads GitHub's rendering, keeping the written URL and the proxied fetch URL", () => {
+    const html = [
+      "<pre><code>![code](https://example.com/a.png)</code></pre>",
+      '<img src="pr-assets/x.png" alt="x">',
+      '<a href="#"><img src="https://camo.githubusercontent.com/abc/def" alt="real" data-canonical-src="https://example.com/c(1).png?a=1&amp;b=2"></a>',
+      '<img alt="no source">',
+    ].join("\n");
+    assert.deepEqual(renderedImages(html), [
+      { kind: "rendered", url: "pr-assets/x.png", fetchUrl: "pr-assets/x.png" },
+      {
+        kind: "rendered",
+        url: "https://example.com/c(1).png?a=1&b=2",
+        fetchUrl: "https://camo.githubusercontent.com/abc/def",
+      },
+    ]);
+  });
+
+  it("applies URL rules to every embed and leaves images past the fetch cap unverified", async () => {
+    const original = global.fetch;
+    const fetched = [];
+    global.fetch = async (url) => {
+      fetched.push(url);
+      return png();
+    };
+    try {
+      const embeds = Array.from({ length: 105 }, (_, i) => ({
+        url: "https://example.com/" + i + ".png",
+      }));
+      embeds.push({ url: "pr-assets/late.png" });
+      const checked = await checkEmbeds(embeds);
+      assert.equal(fetched.length, 100);
+      assert.equal(checked.filter((embed) => embed.status === "ok").length, 100);
+      assert.equal(checked.filter((embed) => embed.status === "unverified").length, 5);
+      assert.equal(checked.at(-1).status, "broken");
+    } finally {
+      global.fetch = original;
+    }
+  });
+});
+
+describe("staticEmbedProblem", () => {
+  it("rejects relative paths, branch names, and blob viewer pages", () => {
+    for (const url of [
+      "pr-assets/before-light.png",
+      "./457/before.png",
+      "/goat-si/goat/raw/pr-assets/457/a.png",
+      "https://raw.githubusercontent.com/goat-si/goat/pr-assets/457/a.png",
+      "https://raw.githubusercontent.com/goat-si/goat/refs/heads/pr-assets/457/a.png",
+      "https://github.com/goat-si/goat/blob/pr-assets/457/a.png?raw=true",
+      "https://github.com/goat-si/goat/raw/pr-assets/457/a.png",
+      "https://github.com/goat-si/goat/blob/" + SHA + "/457/a.png",
+      "https://raw.githubusercontent.com/goat-si/goat/abc123/120/after.png",
+    ]) {
+      assert.ok(staticEmbedProblem(url), url);
+    }
+  });
+
+  it("leaves SHA-pinned and other absolute URLs to the fetch", () => {
+    for (const url of [
+      "https://raw.githubusercontent.com" + SHOT_PATH,
+      "https://github.com/goat-si/goat/raw/" + SHA + "/457/a.png",
+      "https://github.com/goat-si/goat/blob/" + SHA + "/457/a.png?raw=true",
+      "https://github.com/user-attachments/assets/0b7c6e0e-1111-2222-3333-444455556666",
+    ]) {
+      assert.equal(staticEmbedProblem(url), null, url);
+    }
+  });
+});
+
+describe("verifyImageUrl", () => {
+  function withFetch(handler, fn) {
+    const original = global.fetch;
+    const calls = [];
+    global.fetch = async (url, options) => {
+      calls.push(options.method);
+      return handler(calls.length, options.method);
+    };
+    const delays = [];
+    return fn({ sleep: async (ms) => delays.push(ms) })
+      .then((result) => ({ result, calls, delays }))
+      .finally(() => {
+        global.fetch = original;
+      });
+  }
+  const response = (status, type) => ({ status, headers: new Headers({ "content-type": type }) });
+
+  it("accepts an image after HEAD, or after a GET when HEAD is refused", async () => {
+    const head = await withFetch(png, (o) => verifyImageUrl("https://x.test/a.png", o));
+    assert.deepEqual(head.result, { status: "ok" });
+    assert.deepEqual(head.calls, ["HEAD"]);
+    const get = await withFetch(
+      (_n, method) => (method === "HEAD" ? response(405, "text/plain") : png()),
+      (o) => verifyImageUrl("https://x.test/a.png", o),
+    );
+    assert.deepEqual(get.result, { status: "ok" });
+    assert.deepEqual(get.calls, ["HEAD", "GET"]);
+  });
+
+  it("reports a missing file or a page that is not an image as broken", async () => {
+    const missing = await withFetch(
+      () => response(404, "text/plain"),
+      (o) => verifyImageUrl("https://x.test/a.png", o),
+    );
+    assert.deepEqual(missing.result, { status: "broken", reason: "returns HTTP 404" });
+    assert.deepEqual(missing.delays, []);
+    const login = await withFetch(
+      () => response(200, "text/html; charset=utf-8"),
+      (o) => verifyImageUrl("https://x.test/a.png", o),
+    );
+    assert.equal(login.result.status, "broken");
+    assert.match(login.result.reason, /text\/html.*not an image/);
+  });
+
+  it("retries network errors and 5xx, then reports unverified", async () => {
+    const flaky = await withFetch(
+      (n) => {
+        if (n === 1) throw new TypeError("fetch failed");
+        // Attempt 2: HEAD answers 503, so the GET fallback runs and succeeds.
+        return n === 2 ? response(503, "text/plain") : png();
+      },
+      (o) => verifyImageUrl("https://x.test/a.png", o),
+    );
+    assert.deepEqual(flaky.result, { status: "ok" });
+    assert.deepEqual(flaky.delays, [250]);
+    const down = await withFetch(
+      () => {
+        throw new TypeError("fetch failed");
+      },
+      (o) => verifyImageUrl("https://x.test/a.png", o),
+    );
+    assert.deepEqual(down.result, { status: "unverified", reason: "fetch failed" });
+    assert.deepEqual(down.delays, [250, 500]);
   });
 });
 
@@ -122,6 +352,31 @@ describe("decideGate", () => {
       "pass",
     );
     assert.equal(decideGate({ draft: false, files: ui, body: "", waived: true }).outcome, "pass");
+  });
+
+  it("treats a description whose images do not load as missing, naming each one", () => {
+    const decision = decideGate({
+      draft: false,
+      files: ui,
+      body: SHOT + "\n![before](pr-assets/before.png)",
+      waived: false,
+    });
+    assert.equal(decision.outcome, "missing");
+    assert.deepEqual(
+      decision.brokenEmbeds.map((embed) => embed.url),
+      ["pr-assets/before.png"],
+    );
+    assert.match(decision.reason, /1 of 2 .*pr-assets\/before\.png \(relative path/);
+  });
+
+  it("is inconclusive when an image could not be fetched and none is known broken", () => {
+    const base = { draft: false, files: ui, body: "", waived: false };
+    const ok = { url: "https://x.test/a.png", status: "ok" };
+    const down = { url: "https://x.test/b.png", status: "unverified", reason: "timed out" };
+    const gone = { url: "https://x.test/c.png", status: "broken", reason: "returns HTTP 404" };
+    assert.equal(decideGate({ ...base, embeds: [ok, down] }).outcome, "inconclusive");
+    assert.equal(decideGate({ ...base, embeds: [down, gone] }).outcome, "missing");
+    assert.equal(decideGate({ ...base, embeds: [ok] }).outcome, "pass");
   });
 
   it("fails closed when the file list is truncated", () => {
@@ -198,7 +453,10 @@ describe("main", () => {
       JSON.stringify({ pull_request: { number: 7, head: { sha: "c".repeat(40) } } }),
     );
     const requests = [];
-    const restore = stubFetch({ [CHECK_LIST_PATH]: { check_runs: [] }, ...routes }, requests);
+    const restore = stubFetch(
+      { [CHECK_LIST_PATH]: { check_runs: [] }, [SHOT_PATH]: png, ...routes },
+      requests,
+    );
     const logs = [];
     const originalLog = console.log;
     console.log = (line) => logs.push(line);
@@ -259,6 +517,86 @@ describe("main", () => {
     const { code, logs } = await run("enforce", uiPr());
     assert.equal(code, 1);
     assert.ok(logs.some((line) => line.startsWith("::error")));
+  });
+
+  it("fails enforce mode on relative or missing images and names the helper", async () => {
+    const routes = uiPr();
+    routes["/repos/goat-si/goat/pulls/7"].body =
+      "![before light](pr-assets/before-light.png)\n![gone](https://raw.githubusercontent.com/goat-si/goat/" +
+      SHA +
+      "/7/gone.png)";
+    const { code, logs, summary, outcome } = await run("enforce", routes);
+    assert.equal(code, 1);
+    assert.equal(outcome, "missing");
+    assert.match(summary, /pr-assets\/before-light\.png \(relative path/);
+    assert.match(summary, /gone\.png \(returns HTTP 404\)/);
+    assert.match(summary, /node scripts\/pr-assets\.ts upload/);
+    assert.ok(logs.some((line) => line.startsWith("::error") && line.includes("do not load")));
+  });
+
+  it("reports an unreachable image host as inconclusive with a neutral check", async () => {
+    for (const mode of ["warn", "enforce"]) {
+      let calls = 0;
+      const pass = uiPr();
+      pass["/repos/goat-si/goat/pulls/7"].body = SHOT;
+      const result = await run(mode, {
+        ...pass,
+        [SHOT_PATH]: async () => {
+          calls += 1;
+          throw new TypeError("fetch failed");
+        },
+        "/repos/goat-si/goat/check-runs": { id: 123 },
+      });
+      assert.equal(calls, 3);
+      assert.deepEqual(result.delays, [250, 500]);
+      assert.equal(result.outcome, "inconclusive");
+      assert.equal(result.code, mode === "warn" ? 0 : 1);
+      assert.match(result.summary, /could not confirm.*after\.png \(fetch failed\)/);
+      const posts = result.requests.filter((request) => request.method === "POST");
+      assert.equal(posts.length, 1);
+      assert.equal(JSON.parse(posts[0].body).conclusion, "neutral");
+    }
+  });
+
+  it("does not fetch images for PRs the gate skips", async () => {
+    const skip = uiPr();
+    skip["/repos/goat-si/goat/pulls/7"].draft = true;
+    skip["/repos/goat-si/goat/pulls/7"].body = SHOT;
+    const result = await run("enforce", skip);
+    assert.equal(result.outcome, "skip");
+    assert.equal(
+      result.requests.some((request) => request.path === SHOT_PATH),
+      false,
+    );
+  });
+
+  it("judges the images GitHub renders when the API returns body_html", async () => {
+    const routes = uiPr();
+    const pr = routes["/repos/goat-si/goat/pulls/7"];
+    // The source has an image only inside an indented code block, which GitHub renders as text.
+    pr.body = "Example:\n\n    " + SHOT + "\n";
+    pr.body_html = "<p>Example:</p>\n<pre><code>" + SHOT + "\n</code></pre>";
+    const code = await run("enforce", routes);
+    assert.equal(code.outcome, "missing");
+    assert.equal(
+      code.requests.some((request) => request.path === SHOT_PATH),
+      false,
+    );
+    assert.equal(
+      code.requests.find((request) => request.path === "/repos/goat-si/goat/pulls/7").headers
+        .accept,
+      "application/vnd.github.full+json",
+    );
+
+    pr.body_html =
+      '<p><img src="https://raw.githubusercontent.com' + SHOT_PATH + '" alt="after"></p>';
+    const rendered = await run("enforce", routes);
+    assert.equal(rendered.outcome, "pass");
+
+    pr.body_html = '<p><img src="pr-assets/after.png" alt="after"></p>';
+    const relative = await run("enforce", routes);
+    assert.equal(relative.outcome, "missing");
+    assert.match(relative.summary, /pr-assets\/after\.png \(relative path/);
   });
 
   it("honors the waiver label only when a maintainer applied it", async () => {
@@ -586,10 +924,7 @@ describe("main", () => {
           });
           assert.equal(result.code, inconclusive && mode === "enforce" ? 1 : 0);
           assert.equal(result.outcome, inconclusive ? "inconclusive" : "pass");
-          assert.equal(
-            result.requests.some((request) => request.method !== "GET"),
-            false,
-          );
+          assert.equal(!result.requests.every(notMutating), false);
           assert.ok(
             result.logs.some(
               (line) =>
