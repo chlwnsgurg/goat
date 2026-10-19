@@ -198,7 +198,11 @@ export function matchHostRows(input: {
         }
       }
       for (const found of viaAlias) claimed.add(found.key);
-      match = find(machine.environmentId, null) ?? viaAlias[0] ?? null;
+      match =
+        find(machine.environmentId, null) ??
+        viaAlias.find((found) => found.entry.reachability === "ok") ??
+        viaAlias[0] ??
+        null;
     } else if (machine.reachedVia !== null) {
       match = find(machine.reachedVia.dispatcherEnvironmentId, machine.reachedVia.alias);
     }

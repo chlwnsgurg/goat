@@ -239,6 +239,26 @@ describe("matchHostRows", () => {
     ]);
   });
 
+  it("prefers an alias that answers over one that does not", () => {
+    const rows = matchHostRows({
+      machines: [machine("mini", { environmentId: mini })],
+      aliasesByEnvironment: new Map([[mini, ["old-mini", "macmini"]]]),
+      reads: [
+        {
+          environmentId: studio,
+          hosts: [
+            entry("old-mini", { reachability: "unreachable", lastKnown: true }),
+            entry("macmini"),
+          ],
+        },
+      ],
+      primaryEnvironmentId: studio,
+    });
+    expect(rows.map((row) => [row.sourceKey, row.tone])).toEqual([
+      [hostSourceKey(studio, "macmini"), "ok"],
+    ]);
+  });
+
   it("keeps another dispatcher's host that shares an alias with a connected environment", () => {
     const other = EnvironmentId.make("other");
     const rows = matchHostRows({

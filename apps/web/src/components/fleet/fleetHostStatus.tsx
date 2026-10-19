@@ -63,6 +63,9 @@ export const fleetHostStatusAtom = Atom.make((get): FleetHostStatus => {
       // A failed refresh keeps its last answer; show it as last known, and let it vouch for
       // nothing so other environments are asked directly.
       failed.push(environmentId);
+      // A failure carries no timestamp. The atom recomputes once per settled refresh, so now
+      // is when this client learned of it.
+      observedAt = Math.max(observedAt, Date.now());
       if (hosts !== null) reads.push({ environmentId, hosts: asLastKnown(hosts) });
       return [];
     }
@@ -104,6 +107,7 @@ export const fleetHostStatusAtom = Atom.make((get): FleetHostStatus => {
   if (
     previous !== null &&
     previous.loading === loading &&
+    previous.observedAt === observedAt &&
     previous.failed.join("\n") === failed.join("\n") &&
     previous.history === hostHistory &&
     previous.sources.join("\n") === sources.join("\n") &&
