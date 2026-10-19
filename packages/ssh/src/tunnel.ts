@@ -548,6 +548,7 @@ interface SshAuthAttemptInput<T> extends SshAuthOperationInput<T> {
 export interface SshRuntimeProgress {
   readonly target: DesktopSshEnvironmentTarget;
   readonly phase: SshRuntimePhase;
+  readonly upload?: SshHostStatus["upload"];
 }
 export type SshRuntimeProgressCallback = (progress: SshRuntimeProgress) => void;
 export interface SshEnvironmentEnsureOptions {
@@ -564,9 +565,10 @@ function notifyRuntimePhase(
   target: DesktopSshEnvironmentTarget,
   phase: SshRuntimePhase,
   onPhase?: SshRuntimeProgressCallback,
+  upload?: SshHostStatus["upload"],
 ) {
   try {
-    onPhase?.({ target, phase });
+    onPhase?.({ target, phase, ...(upload === undefined ? {} : { upload }) });
   } catch {
     // The requesting view may already have gone away.
   }
@@ -2818,16 +2820,31 @@ export function remoteUploadCommand(
   script: string,
   archive: Uint8Array,
   platform: "darwin" | "linux" | "win32",
-): { readonly remoteCommandArgs: ReadonlyArray<string>; readonly stdin: Uint8Array } {
+): {
+  readonly remoteCommandArgs: ReadonlyArray<string>;
+  readonly stdin: Uint8Array;
+  readonly archiveOffset: number;
+  readonly archiveLength: number;
+} {
   if (platform !== "win32") {
-    return { remoteCommandArgs: ["sh", "-c", shellSingleQuote(script)], stdin: archive };
+    return {
+      remoteCommandArgs: ["sh", "-c", shellSingleQuote(script)],
+      stdin: archive,
+      archiveOffset: 0,
+      archiveLength: archive.byteLength,
+    };
   }
   const scriptBytes = new TextEncoder().encode(script);
   const stdin = new Uint8Array(scriptBytes.byteLength + archive.byteLength);
   stdin.set(scriptBytes);
   stdin.set(archive, scriptBytes.byteLength);
   const bootstrap = `upload_script="$(mktemp)" && dd bs=1 count=${scriptBytes.byteLength} of="$upload_script" 2>/dev/null && sh "$upload_script"; upload_status=$?; rm -f "$upload_script"; exit "$upload_status"`;
-  return { remoteCommandArgs: ["sh", "-c", shellSingleQuote(bootstrap)], stdin };
+  return {
+    remoteCommandArgs: ["sh", "-c", shellSingleQuote(bootstrap)],
+    stdin,
+    archiveOffset: scriptBytes.byteLength,
+    archiveLength: archive.byteLength,
+  };
 }
 
 export function buildRemoteRuntimeProbeScript(
@@ -3552,10 +3569,25 @@ export const prepareRemoteRuntime = (
           ),
         catch: runtimePreparationError,
       });
-      notifyRuntimePhase(target, "uploading", onPhase);
+      const { archiveOffset, archiveLength, ...uploadCommand } = remoteUploadCommand(
+        script,
+        archive.bytes,
+        probe.platform,
+      );
+      notifyRuntimePhase(target, "uploading", onPhase, {
+        sentBytes: 0,
+        totalBytes: archiveLength,
+      });
       yield* runSshCommand(target, {
         ...authOptions,
-        ...remoteUploadCommand(script, archive.bytes, probe.platform),
+        ...uploadCommand,
+        onStdinProgress: (sentBytes) => {
+          if (sentBytes <= archiveOffset) return;
+          notifyRuntimePhase(target, "uploading", onPhase, {
+            sentBytes: Math.min(sentBytes - archiveOffset, archiveLength),
+            totalBytes: archiveLength,
+          });
+        },
         timeoutStage: "runtime-install",
         timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
       }).pipe(
@@ -5175,9 +5207,20 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     requestedVersion: string,
     phase: SshRuntimePhase,
     onPhase?: SshRuntimeProgressCallback,
+    upload?: SshHostStatus["upload"],
   ) => {
     if (setupTerminalFailure(key)) return;
     const previous = statuses.get(key);
+    const previousUpload = previous?.status?.upload;
+    if (
+      upload !== undefined &&
+      previousUpload !== undefined &&
+      upload.totalBytes === previousUpload.totalBytes &&
+      upload.sentBytes >= previousUpload.sentBytes &&
+      upload.sentBytes - previousUpload.sentBytes < 1024 * 1024 &&
+      upload.sentBytes !== upload.totalBytes
+    )
+      return;
     statuses.set(key, {
       kind: "ok",
       status: {
@@ -5186,10 +5229,11 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         runtimeVersion: previous?.status?.runtimeVersion ?? null,
         state: "preparing",
         phase,
+        ...(upload === undefined ? {} : { upload }),
         ...setupFields(key, "runtime"),
       },
     });
-    notifyRuntimePhase(target, phase, onPhase);
+    notifyRuntimePhase(target, phase, onPhase, upload);
   };
   const deferredArchiveRefresh = (requestedVersion: string) => ({
     reason: "archive_unavailable" as const,
@@ -5561,7 +5605,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     const managedPin = yield* validateManagedPin(input.resolvedTarget);
     if (closed || (generations.get(input.key) ?? 0) !== generation)
       return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
-    const phase: SshRuntimeProgressCallback = ({ phase }) => {
+    const phase: SshRuntimeProgressCallback = ({ phase, upload }) => {
       // A background refresh of a host whose forward still works keeps its published status;
       // "preparing" would drop provider diagnosis and flap a healthy host every ten minutes.
       if (input.background === true && tunnels.has(input.key)) return;
@@ -5572,6 +5616,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           input.runner?.archiveVersion?.trim() ?? "",
           phase,
           input.onPhase,
+          upload,
         );
       }
     };

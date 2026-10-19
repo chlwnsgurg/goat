@@ -85,6 +85,28 @@ describe("Desktop SSH runtime state", () => {
       "Checking GOAT runtime",
     );
   });
+  it.each([
+    [undefined, "Uploading GOAT runtime (about 70 MB)"],
+    [{ sentBytes: 0, totalBytes: 70 * 1024 * 1024 }, "Uploading GOAT runtime: 0 of 70 MB"],
+    [
+      { sentBytes: 23 * 1024 * 1024 + 512, totalBytes: 70 * 1024 * 1024 },
+      "Uploading GOAT runtime: 23 of 70 MB",
+    ],
+    [{ sentBytes: 1024, totalBytes: 1024 * 1024 + 1 }, "Uploading GOAT runtime: 0 of 2 MB"],
+    [{ sentBytes: 70 * 1024 * 1024, totalBytes: 70 * 1024 * 1024 }, "Installing GOAT runtime"],
+  ])("explains upload progress %j", (upload, text) => {
+    expect(
+      sshRuntimeStatusText({
+        host: "box",
+        runtimeVersion: null,
+        requestedVersion: "1.2.3",
+        state: "preparing",
+        phase: "uploading",
+        ...(upload === undefined ? {} : { upload }),
+      }),
+    ).toBe(text);
+  });
+
   it("compares runtime builds instead of guessing blocked state from detail", () => {
     const base = {
       host: "vps-1",

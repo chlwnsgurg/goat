@@ -81,7 +81,15 @@ describe("SSH runtime IPC", () => {
   it.effect("decodes structured status and failures over IPC", () =>
     Effect.gen(function* () {
       const results = [
-        { kind: "ok", status: { ...baseStatus, state: "preparing", phase: "uploading" } },
+        {
+          kind: "ok",
+          status: {
+            ...baseStatus,
+            state: "preparing",
+            phase: "uploading",
+            upload: { sentBytes: 1024 * 1024, totalBytes: 70 * 1024 * 1024 },
+          },
+        },
         {
           kind: "ok",
           status: {
