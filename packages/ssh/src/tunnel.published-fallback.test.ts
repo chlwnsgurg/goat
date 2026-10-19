@@ -281,6 +281,19 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
+    it.live("a torn hold marker still holds a refused runtime", () =>
+      Effect.gen(function* () {
+        const first = yield* prepare({ release: "pre-manifest", binary: { memoryScopes: false } });
+        failureOf(first.result);
+        const f = first.fixture;
+        // A write cut short leaves an empty marker; installed-runtime recovery must not take it.
+        yield* f.fs.writeFileString(`${f.home}/.goat/runtime/goat/held/${PUBLISHED}`, "");
+        const second = yield* first.again;
+        failureOf(second.result);
+        assert.isTrue(second.installed);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
     it.live("never puts another build on a host that has GOAT data", () =>
       Effect.gen(function* () {
         const { result, requests, installed } = yield* prepare({
