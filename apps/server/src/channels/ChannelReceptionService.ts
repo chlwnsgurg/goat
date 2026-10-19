@@ -27,7 +27,10 @@ import {
   type ChannelReplyAddress,
   type ChannelRequester,
   type ChannelTask,
+  type ChannelTaskApprovalRef,
+  type ChannelTaskNeedsYou,
   ChannelReceptionId,
+  CommandId,
   CHANNEL_RECEPTION_TAIL_LIMITS,
   type ChannelOutboundKind,
   type OrchestrationV2ThreadShell,
@@ -85,6 +88,15 @@ import {
   threadDigest,
 } from "./channelBotRecall.ts";
 import { CHANNEL_COPY } from "./channelCopy.ts";
+import {
+  approvalCard,
+  type ApprovalReply,
+  matchApprovalCard,
+  type OpenApprovalCard,
+  openApprovalCards,
+  parseApprovalReply,
+  whichApproval,
+} from "./channelApprovalCards.ts";
 import { isOpenItem, pendingDigest, workItemState } from "./channelWorkQueue.ts";
 import { WORKERS_PER_REQUESTER } from "./ChannelDispatcher.ts";
 import {
@@ -669,6 +681,112 @@ const make = Effect.gen(function* () {
       { concurrency: "unbounded" },
     );
 
+  /** What an approval asks for, read from its thread's newest runs; missing words are fine. */
+  const approvalDetail = (approval: ChannelTaskApprovalRef) =>
+    Effect.gen(function* () {
+      const { runs } = yield* threads.getThreadRecords(approval.threadId, ["runs"]);
+      const records = yield* threads.getThreadRecords(
+        approval.threadId,
+        ["runtimeRequests", "turnItems"],
+        { turnItemRunIds: runs.slice(-2).map((run) => run.id) },
+      );
+      const item = records.turnItems.find(
+        (entry) => entry.type === "approval_request" && entry.requestId === approval.requestId,
+      );
+      return {
+        kind: records.runtimeRequests.find((request) => request.id === approval.requestId)?.kind,
+        prompt: item?.type === "approval_request" ? item.prompt : undefined,
+      };
+    }).pipe(
+      Effect.timeoutOption(CHANNEL_READ_TIMEOUT_MS),
+      Effect.map(Option.getOrUndefined),
+      Effect.orElseSucceed(() => undefined),
+    );
+
+  /**
+   * Answers one approval for a person allowed to answer for the work's requester. The command id
+   * comes from the input, so a reception that runs again after a restart cannot answer twice.
+   */
+  const answerApproval = (
+    card: OpenApprovalCard,
+    decision: ApprovalReply["decision"],
+    answerer: ChannelRequester | undefined,
+    inputId: ChannelInputId,
+    via: ChannelRequester["originKind"],
+  ) =>
+    Effect.gen(function* () {
+      if (answerer === undefined || !mayAnswerFor(answerer, card.task.requester)) {
+        return CHANNEL_COPY.approvalNotAllowed;
+      }
+      const verb = decision === "accept" ? "Approved" : "Denied";
+      const sent = yield* threads
+        .dispatch({
+          type: "runtime-request.respond",
+          commandId: CommandId.make("channel-approval:" + inputId),
+          threadId: card.approval.threadId,
+          requestId: card.approval.requestId,
+          decision,
+          respondedBy: {
+            type: "client",
+            label: "GOAT Bot",
+            reason: verb + " by " + answerer.displayName + " from GOAT Bot (" + via + ").",
+          },
+        })
+        .pipe(
+          Effect.as(true),
+          Effect.catch((cause) =>
+            Effect.logWarning("GOAT Bot approval not answered", { cause }).pipe(Effect.as(false)),
+          ),
+        );
+      if (sent) {
+        return decision === "accept"
+          ? "Approved. " + card.task.title + " continues."
+          : "Denied. I told the agent on " + card.task.title + " not to.";
+      }
+      const pending = yield* threads
+        .getThreadRecords(card.approval.threadId, ["runtimeRequests"])
+        .pipe(
+          Effect.map((records) =>
+            records.runtimeRequests.some(
+              (request) => request.id === card.approval.requestId && request.status === "pending",
+            ),
+          ),
+          Effect.orElseSucceed(() => true),
+        );
+      return pending ? CHANNEL_COPY.approvalFailed : CHANNEL_COPY.approvalAlreadyAnswered;
+    });
+
+  /** One card per approval the observation lists; a card already sent is not sent again. */
+  const approvalCards = (task: ChannelTask, listed: ReadonlyArray<ChannelTaskNeedsYou>) =>
+    Effect.gen(function* () {
+      const wanted = new Set(listed.flatMap((need) => need.approval?.requestId ?? []));
+      const open = openApprovalCards(yield* ledger.listConversationTasks(task.conversationId));
+      const deliveries: Array<ChannelLedger.ChannelOutboxInsert> = [];
+      for (const card of openApprovalCards([task])) {
+        if (!wanted.has(card.approval.requestId)) continue;
+        const detail = yield* approvalDetail(card.approval);
+        const words = approvalCard({
+          card,
+          bySubagent: card.approval.threadId !== task.worker?.threadId,
+          kind: detail?.kind,
+          prompt: detail?.prompt,
+          coded: open.length > 1,
+        });
+        deliveries.push(
+          replyDelivery({
+            causeKey: "approval:" + card.approval.requestId,
+            destination: task.originAddress,
+            kind: "question",
+            text: words.text,
+            task,
+            mentionActorId: mentionFor(task.originAddress, task.requester.externalActorId),
+            options: words.options,
+          }),
+        );
+      }
+      return deliveries;
+    });
+
   const receive: ChannelReceptionService["Service"]["receive"] = (inputId, owner) =>
     Effect.gen(function* () {
       const isHome = yield* home.requireHome.pipe(
@@ -742,7 +860,88 @@ const make = Effect.gen(function* () {
           .pipe(Effect.ignore);
       }
 
+      // The person as they stand now: a Slack link removed or narrowed since the message
+      // arrived counts.
+      const judgedNow = Effect.gen(function* () {
+        if (message.kind !== "slack" && message.kind !== "imessage") return requester;
+        const linked =
+          requester.externalActorId === undefined
+            ? undefined
+            : yield* ledger.findIdentity({
+                connectionId: message.connectionId,
+                externalActorId: requester.externalActorId,
+              });
+        if (linked === undefined) return undefined;
+        return {
+          ...requester,
+          runtimeModeCeiling: lowerRuntimeMode(
+            requester.runtimeModeCeiling,
+            linked.runtimeModeCeiling,
+          ),
+          grantedScopes: requester.grantedScopes.filter((scope) =>
+            linked.grantedScopes.includes(scope),
+          ),
+        };
+      });
       const tasks = yield* ledger.listConversationTasks(conversationId);
+
+      // An approve or deny for an open approval card is decided here, without a model. Agents
+      // never answer approvals, so an MCP message always goes the usual way.
+      const approvalReply =
+        message.intent === "message" && requester.originKind !== "mcp"
+          ? parseApprovalReply(message.text)
+          : undefined;
+      const approvalMatch =
+        approvalReply === undefined
+          ? undefined
+          : matchApprovalCard(openApprovalCards(tasks), approvalReply.target);
+      if (
+        approvalReply !== undefined &&
+        approvalMatch !== undefined &&
+        approvalMatch.type !== "none"
+      ) {
+        const answer =
+          approvalMatch.type === "several"
+            ? whichApproval(approvalMatch.cards, approvalReply.decision)
+            : {
+                text: yield* answerApproval(
+                  approvalMatch.card,
+                  approvalReply.decision,
+                  yield* judgedNow,
+                  inputId,
+                  message.kind,
+                ),
+                options: undefined,
+              };
+        yield* ledger.completeReception({
+          owner,
+          inputId,
+          receptionId,
+          replyText: answer.text,
+          decision: {
+            replyText: answer.text,
+            action:
+              answer.options === undefined
+                ? { type: "report_only" }
+                : { type: "clarify", question: answer.text, options: answer.options },
+          },
+          deliveries: [
+            replyDelivery({
+              causeKey: "reply:" + inputId,
+              destination: origin,
+              kind: answer.options === undefined ? "receipt" : "question",
+              text: answer.text,
+              inputId,
+              task: approvalMatch.type === "one" ? approvalMatch.card.task : undefined,
+              mentionActorId: mention,
+              options: answer.options,
+            }),
+          ],
+          now: DateTime.formatIso(yield* DateTime.now),
+        });
+        yield* wake.wake;
+        return;
+      }
       const hosts = yield* remoteWorkers.knownHosts;
       const bot = (yield* ledger.getBot(stored.ownerId))?.bot;
       const targets = yield* allowedTargets(bot?.projectId);
@@ -1034,30 +1233,6 @@ const make = Effect.gen(function* () {
           }
         }
       }
-
-      // The person as they stand now: a Slack link removed or narrowed since the message
-      // arrived counts.
-      const judgedNow = Effect.gen(function* () {
-        if (message.kind !== "slack" && message.kind !== "imessage") return requester;
-        const linked =
-          requester.externalActorId === undefined
-            ? undefined
-            : yield* ledger.findIdentity({
-                connectionId: message.connectionId,
-                externalActorId: requester.externalActorId,
-              });
-        if (linked === undefined) return undefined;
-        return {
-          ...requester,
-          runtimeModeCeiling: lowerRuntimeMode(
-            requester.runtimeModeCeiling,
-            linked.runtimeModeCeiling,
-          ),
-          grantedScopes: requester.grantedScopes.filter((scope) =>
-            linked.grantedScopes.includes(scope),
-          ),
-        };
-      });
 
       // A follow-up joins its workstream through the ledger: recorded here with the reply, then sent
       // by the dispatcher, which binds the task to the run that took it. Completion waits for that.
@@ -1377,6 +1552,15 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const stored = yield* ledger.getTask(pending.event.taskId);
       const now = DateTime.formatIso(yield* DateTime.now);
+      if (stored !== undefined && pending.event.type === "task.worker.observed") {
+        const deliveries = yield* approvalCards(
+          stored.task,
+          pending.event.payload.observed.needsYou,
+        );
+        yield* ledger.completeNarration({ owner, sequence: pending.sequence, deliveries, now });
+        yield* wake.wake;
+        return;
+      }
       const base = stored === undefined ? undefined : narrationFor(stored.task, pending.event);
       if (stored === undefined || base === undefined) {
         yield* ledger.completeNarration({ owner, sequence: pending.sequence, deliveries: [], now });

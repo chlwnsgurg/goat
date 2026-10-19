@@ -45,6 +45,7 @@ import { commitTransition } from "./channelTaskWrites.ts";
 import {
   completionHoldCount,
   isThreadMissing,
+  newApprovals,
   needsYouFromRuntimeRequests,
   subagentRequests,
   observeWorker,
@@ -269,18 +270,24 @@ const make = Effect.gen(function* () {
       const observed = observeWorker({
         pullRequests: pullRequestsFromLinks(pullRequestLinks),
         needsYou: [
-          ...needsYouFromRuntimeRequests(records.value.runtimeRequests),
+          ...needsYouFromRuntimeRequests(records.value.runtimeRequests, () => worker.threadId),
           // A subagent waiting on an approval or answer blocks the work as much as the worker.
           ...needsYouFromRuntimeRequests(
             yield* subagentRequests(records.value.subagents, (threadId) =>
               threads.getThreadRecords(threadId, ["runtimeRequests", "subagents"]),
             ),
+            (request) => request.threadId,
           ),
           ...(limit?.needsYou === undefined ? [] : [limit.needsYou]),
         ],
         usageLimitResetAt: limit?.resetAt,
       });
       if (!channelWorkerObservationEquals(latest.task.observed, observed)) {
+        // A new approval becomes an approve/deny card for a person; an MCP requester is an agent,
+        // and agents never answer approvals.
+        const card =
+          latest.task.requester.originKind !== "mcp" &&
+          newApprovals(latest.task.observed?.needsYou, observed.needsYou).length > 0;
         const wrote = yield* commitTransition(
           ledger,
           latest,
@@ -288,7 +295,7 @@ const make = Effect.gen(function* () {
             type: "task.worker.observed",
             payload: { generation: latest.task.generation, observed },
           },
-          { owner },
+          { owner, ...(card ? { narrate: true } : {}) },
         );
         if (wrote === undefined) return latest !== stored;
         const reread = yield* ledger.getTask(task.taskId);

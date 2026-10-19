@@ -5,6 +5,8 @@ import {
   type OrchestrationV2Subagent,
   ProviderThreadId,
   RunId,
+  RuntimeRequestId,
+  ThreadId,
   ThreadPullRequestLink,
 } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
@@ -13,6 +15,7 @@ import * as Schema from "effect/Schema";
 
 import {
   completionHoldCount,
+  newApprovals,
   needsYouFromRuntimeRequests,
   observesUsageLimit,
   pullRequestsFromLinks,
@@ -54,7 +57,12 @@ const request = (
   kind: OrchestrationV2RuntimeRequest["kind"],
   status: OrchestrationV2RuntimeRequest["status"] = "pending",
   at = "2026-10-17T09:30:00.000Z",
-) => ({ kind, status, createdAt: DateTime.makeUnsafe(at) });
+) => ({
+  id: RuntimeRequestId.make("request:" + kind + ":" + status + ":" + at),
+  kind,
+  status,
+  createdAt: DateTime.makeUnsafe(at),
+});
 
 const completedRun = { id: RunId.make("run-1"), ordinal: 1, status: "completed" as const };
 
@@ -74,6 +82,25 @@ describe("needsYouFromRuntimeRequests", () => {
         { kind: "approval", since: "2026-10-17T09:31:00.000Z" },
       ],
     );
+  });
+
+  it("names the request and thread of an approval only when asked to", () => {
+    const worker = ThreadId.make("thread:worker");
+    const pending = request("command");
+    const named = needsYouFromRuntimeRequests([pending, request("user_input")], () => worker);
+    assert.deepStrictEqual(named, [
+      {
+        kind: "approval",
+        since: "2026-10-17T09:30:00.000Z",
+        approval: { requestId: pending.id, threadId: worker },
+      },
+      { kind: "question", since: "2026-10-17T09:30:00.000Z" },
+    ]);
+    // Only approvals not listed before get a card.
+    const later = request("file-change", "pending", "2026-10-17T09:40:00.000Z");
+    const next = needsYouFromRuntimeRequests([pending, later], () => worker);
+    assert.deepStrictEqual(newApprovals(named, next), [{ requestId: later.id, threadId: worker }]);
+    assert.deepStrictEqual(newApprovals(next, next), []);
   });
 });
 

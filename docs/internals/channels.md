@@ -91,8 +91,22 @@ A worker blocked on a person counts the same whether it or one of its subagents 
 reconciliation reads the pending requests of the live subagents a worker started, and of theirs,
 up to three levels and twenty threads, and adds them to the task's `observed.needsYou`, so the
 chip, the waiting count and "what's pending" show a subagent's approval as the work waiting on
-the person. Answering it still happens in that subagent's thread in GOAT. Subagents with no GOAT
-child thread (cloud or other remote children) are not read; see issue #475.
+the person. Subagents with no GOAT child thread (cloud or other remote children) are not read;
+see issue #475.
+
+A local approval also names its request and thread (`needsYou[].approval`), and the observation
+that first lists it narrates one approve/deny card to the work's origin conversation, keyed by the
+request id so a later pass never sends it twice. The open cards are exactly the approvals the
+task's observation lists, so an approval answered in its thread disappears on the next pass with
+no card state to clean up. A reply that starts with an approve or deny word (English or Korean,
+short messages only) is matched to a card before the reception model runs: an approval must not
+depend on how a model read a message. A bare word answers the only open card; with several open
+it asks which, and a card code or words from the task title pick one. The answer is a
+`runtime-request.respond` with a command id derived from the input, so a reception rerun after a
+restart cannot answer twice, from a `client` responder naming the person and channel for the
+thread's audit. The person must pass `mayAnswerFor` against the work's requester as their link
+stands now. MCP requesters get no cards, since agents never answer approvals, and approvals on
+other machines are not carried in their reports yet (#475).
 
 A task is a work item: what a person asked for. Its worker runs are separate records, one per
 run of the task's worker thread, kept as `worker-run:<task>:<run>` rows in
