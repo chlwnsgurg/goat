@@ -172,6 +172,8 @@ const DARK_PAIRS: ReadonlyArray<Pair> = [
     minimum: 3,
   },
   {
+    // The dark floor for any muted text or icon that carries information:
+    // lighter alphas (40-55%) step up to 60% under dark: in their components.
     label: "muted 60% / canvas",
     scope: "root",
     foreground: muted(60),
@@ -179,7 +181,7 @@ const DARK_PAIRS: ReadonlyArray<Pair> = [
     minimum: 3,
   },
   {
-    label: "muted 50% / canvas (disabled)",
+    label: "muted 50% / canvas (separators, illustrations, disabled)",
     scope: "root",
     foreground: muted(50),
     background: ["var(--background)"],

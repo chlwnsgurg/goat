@@ -886,7 +886,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     >
                       <EnvironmentMachineIcon
                         kind={remoteMachine}
-                        className="size-3 text-muted-foreground/40"
+                        className="size-3 text-muted-foreground/40 dark:text-muted-foreground/60"
                       />
                     </TooltipTrigger>
                     <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
