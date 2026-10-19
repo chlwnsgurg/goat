@@ -31,6 +31,8 @@ type ShellOptions = {
   readonly sideChat?: boolean;
   readonly title?: string;
   readonly launchedBy?: FleetShell["source"]["launchedBy"];
+  readonly subagentOf?: string;
+  readonly subagentRequest?: FleetShell["pendingSubagentRequest"];
 };
 
 function shell(environmentId: EnvironmentId, id: string, options: ShellOptions = {}): FleetShell {
@@ -59,6 +61,15 @@ function shell(environmentId: EnvironmentId, id: string, options: ShellOptions =
     archivedAt: options.archived ? "2026-10-17T00:00:00.000Z" : null,
     deletedAt: null,
     sideChatOf: options.sideChat ? ThreadId.make("parent") : null,
+    lineage:
+      options.subagentOf === undefined
+        ? { parentThreadId: null, relationshipToParent: null, rootThreadId: ThreadId.make(id) }
+        : {
+            parentThreadId: ThreadId.make(options.subagentOf),
+            relationshipToParent: "subagent",
+            rootThreadId: ThreadId.make(options.subagentOf),
+          },
+    pendingSubagentRequest: options.subagentRequest ?? null,
     updatedAt: "2026-10-17T00:00:00.000Z",
     source: options.launchedBy === undefined ? {} : { launchedBy: options.launchedBy },
   };
@@ -121,6 +132,33 @@ describe("classifyFleetThread", () => {
     expect(classifyFleetThread(shell(local, "archived", { archived: true }))).toBeNull();
     expect(classifyFleetThread(shell(local, "side", { sideChat: true }))).toBeNull();
   });
+
+  it("leaves subagents out and counts threads an agent launched", () => {
+    expect(classifyFleetThread(shell(local, "child", { subagentOf: "parent" }))).toBeNull();
+    expect(
+      classifyFleetThread(shell(local, "asking", { subagentOf: "parent", approval: true })),
+    ).toBeNull();
+    expect(
+      classifyFleetThread(
+        shell(local, "launched", {
+          launchedBy: {
+            kind: "launch",
+            threadId: ThreadId.make("launcher"),
+            environmentId: null,
+            environmentLabel: null,
+            threadTitle: null,
+            via: "thread_launch",
+          },
+        }),
+      ),
+    ).toBe("running");
+  });
+
+  it("puts a parent whose subagent is waiting on the user in attention", () => {
+    expect(
+      classifyFleetThread(shell(local, "parent", { status: "idle", subagentRequest: "approval" })),
+    ).toBe("attention");
+  });
 });
 
 describe("createFleetSummaryAtom", () => {
@@ -181,6 +219,23 @@ describe("buildFleet", () => {
       ["Box", 0, 0],
     ]);
     expect(fleet.threads.map((thread) => thread.title)).toEqual(["a"]);
+  });
+
+  it("lists only top-level threads, with a subagent's request on its parent", () => {
+    const fleet = buildFleet({
+      environments: [env(local, "Mac")],
+      primaryEnvironmentId: local,
+      shells: [
+        shell(local, "parent", { subagentRequest: "user_input" }),
+        shell(local, "child", { subagentOf: "parent", question: true }),
+        shell(local, "grandchild", { subagentOf: "child" }),
+      ],
+      remote: [],
+    });
+    expect(fleet.totals).toMatchObject({ running: 0, attention: 1 });
+    expect(fleet.threads.map((thread) => [thread.title, thread.state])).toEqual([
+      ["parent", "attention"],
+    ]);
   });
 
   it("counts a launch whose thread is loaded here once, as that live thread", () => {

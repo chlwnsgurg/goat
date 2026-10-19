@@ -37,17 +37,22 @@ export type FleetShell = Pick<
   | "runtime"
   | "hasPendingApprovals"
   | "hasPendingUserInput"
+  | "pendingSubagentRequest"
   | "pendingBackgroundTasks"
   | "archivedAt"
   | "deletedAt"
   | "sideChatOf"
+  | "lineage"
   | "updatedAt"
 > & { readonly source: Pick<OrchestrationV2ThreadShell, "launchedBy"> };
 
 /**
- * Subagents count, since Fleet shows all work in flight; side chats, archived
- * and deleted threads do not. A run parked at idle while its background work
- * holds completion still counts as running, as in the sidebar.
+ * Only top-level threads count. Subagents (delegate_task children and
+ * provider-native subagents) are their parent's work, so a parent waiting on a
+ * subagent's request needs the user. Threads started with goat_thread_launch or
+ * create_threads have no subagent lineage and count on their own. Side chats,
+ * archived and deleted threads do not count. A run parked at idle while its
+ * background work holds completion still counts as running, as in the sidebar.
  */
 export function classifyFleetThread(
   shell: Pick<
@@ -55,16 +60,28 @@ export function classifyFleetThread(
     | "runtime"
     | "hasPendingApprovals"
     | "hasPendingUserInput"
+    | "pendingSubagentRequest"
     | "pendingBackgroundTasks"
     | "archivedAt"
     | "deletedAt"
     | "sideChatOf"
+    | "lineage"
   >,
 ): FleetThreadState | null {
-  if (shell.archivedAt !== null || shell.deletedAt !== null || shell.sideChatOf != null) {
+  if (
+    shell.archivedAt !== null ||
+    shell.deletedAt !== null ||
+    shell.sideChatOf != null ||
+    shell.lineage.relationshipToParent === "subagent"
+  ) {
     return null;
   }
-  if (shell.hasPendingApprovals || shell.hasPendingUserInput) return "attention";
+  if (
+    shell.hasPendingApprovals ||
+    shell.hasPendingUserInput ||
+    shell.pendingSubagentRequest != null
+  )
+    return "attention";
   if (threadRuntimeIsActive(shell.runtime)) return "running";
   if (shell.runtime?.status === "idle" && shell.pendingBackgroundTasks.length > 0) {
     return "running";
