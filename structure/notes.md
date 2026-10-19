@@ -26,9 +26,10 @@ the bytes on disk inside it, and write through a temporary file and rename. A mi
 `NoteConflictError` carrying the current document; nothing is written. `baseRevision: null`
 creates and fails when the file exists. The semaphore does not stop a terminal or editor, so the
 file is hashed again just before the rename or unlink, and a create links the temporary file into
-place, which refuses an existing name. Only the few syscalls between that last check and the rename
-can still lose an outside edit. Thread links and automatic completion own no user revision, so they
-read the note again and retry instead of failing. The author (`updatedBy`) is passed by the caller's
+place, which refuses an existing name (volumes without hard links copy with `COPYFILE_EXCL`
+instead). Only the few syscalls between that last check and the rename can still lose an outside
+edit. Thread links and automatic completion own no user revision, so they read the note again and
+retry up to three times before failing with a storage error. The author (`updatedBy`) is passed by the caller's
 transport: `user` from the WebSocket handlers, `agent` from MCP tools and from automatic
 completion.
 

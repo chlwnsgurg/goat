@@ -500,10 +500,19 @@ const make = Effect.gen(function* () {
               }),
             )
           : code === "EPERM" || code === "ENOTSUP" || code === "EOPNOTSUPP"
-            ? // Volumes without hard links fall back to check-then-rename.
-              expectOnDisk(name, absolute, null).pipe(
-                Effect.andThen(fs.rename(temp, absolute).pipe(Effect.mapError(() => storage))),
-              )
+            ? // Volumes without hard links copy with O_EXCL instead: still never replacing a file,
+              // though a reader can briefly see a partial copy.
+              Effect.tryPromise({
+                try: () => NodeFSP.copyFile(temp, absolute, NodeFS.constants.COPYFILE_EXCL),
+                catch: (cause) =>
+                  (cause as NodeJS.ErrnoException).code === "EEXIST"
+                    ? new NoteError({
+                        reason: "exists",
+                        message: "The note already exists.",
+                        path: name,
+                      })
+                    : storage,
+              })
             : Effect.fail(storage),
       ),
     );
@@ -634,16 +643,12 @@ const make = Effect.gen(function* () {
               message: "The destination already exists.",
               path: input.to,
             });
-          const document = yield* persist(
-            input.to,
-            { ...source.contents, updatedBy: author },
-            null,
-            false,
-          );
+          const contents: NoteContents = { ...source.contents, updatedBy: author };
+          const document = yield* persist(input.to, contents, null, false);
+          // Roll back only the bytes this move placed; a destination edited since then stays.
+          const placed = sha256(new TextEncoder().encode(serializeNote(contents)));
           yield* unlink(source.document.path, source.document.revision).pipe(
-            Effect.tapError(() =>
-              unlink(input.to, document.revision).pipe(Effect.ignore({ log: true })),
-            ),
+            Effect.tapError(() => unlink(input.to, placed).pipe(Effect.ignore({ log: true }))),
           );
           yield* publish(document);
           yield* removed(input.from);

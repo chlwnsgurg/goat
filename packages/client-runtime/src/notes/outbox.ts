@@ -19,7 +19,8 @@ export const NoteOutboxRow = Schema.Struct({
   path: NotePath,
   ...SentEdit.fields,
   state: Schema.Literals(["pending", "conflict"]),
-  current: Schema.NullOr(NoteDocumentSchema),
+  // Rows outlive app versions; a title saved before the wire cap must not block the outbox.
+  current: Schema.NullOr(Schema.Struct({ ...NoteDocumentSchema.fields, title: Schema.String })),
   inFlight: Schema.NullOr(SentEdit),
 });
 export type NoteOutboxRow = typeof NoteOutboxRow.Type;

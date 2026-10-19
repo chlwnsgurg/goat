@@ -6,6 +6,7 @@ import {
   conflictNote,
   enqueueNote,
   markNoteInFlight,
+  NoteOutboxRow,
   noteOutboxKey,
   noteWriteInput,
   resolveNote,
@@ -13,6 +14,7 @@ import {
   type NoteEdit,
 } from "./outbox.ts";
 
+const decodeRow = Schema.decodeUnknownSync(NoteOutboxRow);
 const revision = "a".repeat(64);
 const current = Schema.decodeUnknownSync(NoteDocument)({
   path: "note.md",
@@ -129,4 +131,18 @@ describe("notes outbox", () => {
     expect(() => enqueueNote([], { ...edit, path: "../note.md" })).toThrow();
     expect(() => enqueueNote([], { ...edit, path: "a/b/note.md" })).toThrow();
   });
+});
+
+it("loads a stored conflict whose title predates the wire title cap", () => {
+  const stored = {
+    environmentId: "hub",
+    path: "note.md",
+    body: "mine",
+    baseRevision: revision,
+    localUpdatedAt: 1,
+    state: "conflict",
+    current: { ...current, title: "t".repeat(300) },
+    inFlight: null,
+  };
+  expect(decodeRow(stored).current?.title).toHaveLength(300);
 });
