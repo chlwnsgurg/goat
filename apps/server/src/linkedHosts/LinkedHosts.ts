@@ -158,17 +158,21 @@ export class LinkedHosts extends Context.Service<
      * Spends the code on the host and saves the link, replacing one with the same name.
      * beforeSave re-checks the caller right before the link is written.
      */
-    readonly link: <E, R>(input: {
+    readonly link: <E, R, E2 = never, R2 = never>(input: {
       readonly name: string;
       readonly url: string;
       readonly code?: string | undefined;
       readonly access: AuthMcpClientAccess;
       readonly clientName: string;
       readonly beforeSave: Effect.Effect<void, E, R>;
+      /** Validates the exchanged identity under the write lock before replacing a link. */
+      readonly acceptDescriptor?: (
+        descriptor: ExecutionEnvironmentDescriptor,
+      ) => Effect.Effect<void, E2, R2>;
     }) => Effect.Effect<
       { readonly host: LinkedHost; readonly replaced: boolean },
-      LinkedHostError | E,
-      R
+      LinkedHostError | E | E2,
+      R | R2
     >;
     readonly unlink: (name: string) => Effect.Effect<Option.Option<LinkedHost>, LinkedHostError>;
   }
@@ -348,13 +352,16 @@ export const make = Effect.gen(function* () {
     Effect.orElseSucceed((): ReadonlyArray<string> => []),
   );
 
-  const link: LinkedHosts["Service"]["link"] = <E, R>(input: {
+  const link: LinkedHosts["Service"]["link"] = <E, R, E2 = never, R2 = never>(input: {
     readonly name: string;
     readonly url: string;
     readonly code?: string | undefined;
     readonly access: AuthMcpClientAccess;
     readonly clientName: string;
     readonly beforeSave: Effect.Effect<void, E, R>;
+    readonly acceptDescriptor?: (
+      descriptor: ExecutionEnvironmentDescriptor,
+    ) => Effect.Effect<void, E2, R2>;
   }) =>
     Effect.gen(function* () {
       const name = input.name.trim();
@@ -382,6 +389,7 @@ export const make = Effect.gen(function* () {
         Effect.gen(function* () {
           // The exchange took several requests; the caller may have lost its authority.
           yield* input.beforeSave;
+          if (input.acceptDescriptor) yield* input.acceptDescriptor(descriptor);
           const catalog = yield* read;
           const replaced = catalog.links.some((existing) => existing.name === name);
           yield* write({

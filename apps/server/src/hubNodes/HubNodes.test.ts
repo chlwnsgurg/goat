@@ -1,5 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
+  CloudMachineError,
+  HubNodesError,
   EnvironmentId,
   ExecutionEnvironmentDescriptor,
   type CloudMachine,
@@ -86,6 +88,10 @@ const fixture = Effect.gen(function* () {
     identity: remote as EnvironmentId | null,
     identify: [] as string[],
     cloudLists: 0,
+    snapshotReads: 0,
+    snapshotFailure: null as "sql" | "linked" | "cloud" | null,
+    onSnapshotFailure: Effect.void as Effect.Effect<void>,
+    linkedIdentity: remote,
     httpCalls: [] as string[],
     httpStatus: 200,
     unlinked: [] as string[],
@@ -98,7 +104,12 @@ const fixture = Effect.gen(function* () {
   const repository = HubNodeRepository.HubNodeRepository.of({
     ...original,
     listRegistrations: Effect.gen(function* () {
+      state.snapshotReads++;
       yield* state.beforeRead;
+      if (state.snapshotFailure === "sql") {
+        yield* state.onSnapshotFailure;
+        return yield* new HubNodesError({ reason: "storage_failed", detail: "Test SQL failure" });
+      }
       const rows = yield* original.listRegistrations;
       const after = state.afterRead;
       state.afterRead = Effect.void;
@@ -108,13 +119,29 @@ const fixture = Effect.gen(function* () {
   });
   const linked = LinkedHosts.LinkedHosts.of({
     changes: Stream.fromPubSub(linkSignals),
-    list: Effect.sync(() => state.links),
+    list: Effect.gen(function* () {
+      if (state.snapshotFailure === "linked") {
+        yield* state.onSnapshotFailure;
+        return yield* new LinkedHosts.LinkedHostError({
+          reason: "storage_failed",
+          message: "Test link failure",
+        });
+      }
+      return state.links;
+    }),
     names: Effect.sync(() => state.links.map((entry) => entry.name)),
     find: () => Effect.succeedNone,
     link: (input) =>
       Effect.gen(function* () {
         yield* input.beforeSave;
-        const host = { ...link, name: input.name, access: input.access };
+        const exchanged = { ...descriptor, environmentId: state.linkedIdentity };
+        if (input.acceptDescriptor) yield* input.acceptDescriptor(exchanged);
+        const host = {
+          ...link,
+          name: input.name,
+          access: input.access,
+          environmentId: exchanged.environmentId,
+        };
         const replaced = state.links.some((entry) => entry.name === input.name);
         state.links = [...state.links.filter((entry) => entry.name !== input.name), host];
         yield* PubSub.publish(linkSignals, undefined);
@@ -132,7 +159,13 @@ const fixture = Effect.gen(function* () {
   const forbidden = () => Effect.die("Hub checks must never wake, resume, create, or launch");
   const cloud = CloudMachineService.CloudMachineService.of({
     changes: Stream.fromPubSub(cloudSignals),
-    catalog: Effect.sync(() => state.machines.map(({ alias, label }) => ({ alias, label }))),
+    catalog: Effect.gen(function* () {
+      if (state.snapshotFailure === "cloud") {
+        yield* state.onSnapshotFailure;
+        return yield* new CloudMachineError({ reason: "storage_failed" });
+      }
+      return state.machines.map(({ alias, label }) => ({ alias, label }));
+    }),
     list: () =>
       Effect.sync(() => {
         state.cloudLists++;
@@ -208,6 +241,127 @@ const run = <A, E>(
   );
 
 describe("HubNodes", () => {
+  it.effect.each(
+    (["sql", "linked", "cloud"] as const).flatMap((source) =>
+      [false, true].map((failFirst) => ({ source, failFirst })),
+    ),
+  )(
+    "keeps a subscriber alive after $source snapshot failure (first=$failFirst)",
+    ({ source, failFirst }) =>
+      run(({ service, state }) =>
+        Effect.gen(function* () {
+          const initial = yield* Deferred.make<void>();
+          const failed = yield* Deferred.make<void>();
+          state.onSnapshotFailure = Deferred.succeed(failed, undefined).pipe(Effect.asVoid);
+          if (failFirst) state.snapshotFailure = source;
+          const observing = yield* service.changes.pipe(
+            Stream.tap(() => Deferred.succeed(initial, undefined)),
+            Stream.take(failFirst ? 1 : 2),
+            Stream.runCollect,
+            Effect.forkScoped,
+          );
+          if (!failFirst) {
+            yield* Deferred.await(initial);
+            state.snapshotFailure = source;
+            yield* service.dismissNotice("desktop-import-locked");
+          }
+          yield* Deferred.await(failed);
+          yield* TestClock.adjust(0);
+          expect(observing.pollUnsafe()).toBeUndefined();
+          state.snapshotFailure = null;
+          state.links = [link];
+          yield* service.dismissNotice("desktop-import-locked");
+          const observed = yield* Fiber.join(observing);
+          expect(observed.map((snapshot) => snapshot.nodes.length)).toEqual(
+            failFirst ? [1] : [0, 1],
+          );
+        }),
+      ),
+  );
+  it.effect("coalesces a burst while a subscriber is blocked and delivers the latest state", () =>
+    run(({ service, state }) =>
+      Effect.gen(function* () {
+        const initial = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const observed: string[][] = [];
+        const observing = yield* service.changes.pipe(
+          Stream.runForEach((snapshot) =>
+            Effect.gen(function* () {
+              observed.push(snapshot.nodes.map((node) => node.label));
+              if (observed.length === 1) {
+                yield* Deferred.succeed(initial, undefined);
+                yield* Deferred.await(release);
+              }
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(initial);
+        const reads = state.snapshotReads;
+        for (let index = 0; index < 20; index++) {
+          state.links = [{ ...link, label: `Box ${index}` }];
+          yield* service.dismissNotice("desktop-import-locked");
+        }
+        yield* Deferred.succeed(release, undefined);
+        yield* TestClock.adjust(0);
+        expect(state.snapshotReads - reads).toBeLessThanOrEqual(2);
+        expect(observed).toEqual([[], ["Box 19"]]);
+        yield* Fiber.interrupt(observing);
+      }),
+    ),
+  );
+  it.effect("refuses a linked self replacement before changing the catalog or route state", () =>
+    run(({ service, state, repository }) =>
+      Effect.gen(function* () {
+        state.links = [link];
+        yield* service.check({});
+        const previous = yield* repository.listRouteState;
+        state.linkedIdentity = hub;
+        expect(
+          yield* service
+            .add(
+              {
+                kind: "linked",
+                name: link.name,
+                url: link.baseUrl,
+                code: "code",
+                access: "full-access",
+              },
+              options,
+            )
+            .pipe(Effect.flip),
+        ).toMatchObject({ reason: "refused" });
+        expect(state.links).toEqual([link]);
+        expect(yield* repository.listRouteState).toEqual(previous);
+      }),
+    ),
+  );
+  it.effect(
+    "deletes forgotten cloud route state and does not recreate it on repeated invalidation",
+    () =>
+      run(({ service, state, repository, listeners }) =>
+        Effect.gen(function* () {
+          const alias = machine().alias;
+          state.machines = [machine("running")];
+          yield* service.check({});
+          expect(yield* repository.listRouteState).toHaveLength(1);
+          const initial = yield* Deferred.make<void>();
+          const observing = yield* service.changes.pipe(
+            Stream.tap(() => Deferred.succeed(initial, undefined)),
+            Stream.take(2),
+            Stream.runCollect,
+            Effect.forkScoped,
+          );
+          yield* Deferred.await(initial);
+          state.machines = [];
+          yield* listeners[0]!(alias);
+          expect((yield* Fiber.join(observing))[1]!.nodes).toEqual([]);
+          expect(yield* repository.listRouteState).toEqual([]);
+          yield* listeners[0]!(alias);
+          expect(yield* repository.listRouteState).toEqual([]);
+        }),
+      ),
+  );
   it.effect("reads a headless local snapshot without desktop broker, HTTP, SSH, or Boat", () =>
     run(({ service, state }) =>
       Effect.gen(function* () {

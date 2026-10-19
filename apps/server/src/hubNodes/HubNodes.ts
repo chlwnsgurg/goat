@@ -55,7 +55,7 @@ export class HubNodes extends Context.Service<
   HubNodes,
   {
     readonly snapshot: Effect.Effect<HubNodesSnapshot, HubNodesError>;
-    /** The current snapshot, then a new one after every change to any source. */
+    /** Current snapshot when readable, then distinct snapshots after coalesced source changes. */
     readonly changes: Stream.Stream<HubNodesSnapshot, HubNodesError>;
     readonly get: (nodeId: HubNodeId) => Effect.Effect<Option.Option<HubNode>, HubNodesError>;
     readonly add: <E, R>(
@@ -93,7 +93,7 @@ export const make = Effect.gen(function* () {
   const ssh = yield* SshRemoteDispatch.SshRemoteDispatch;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const http = yield* HttpClient.HttpClient;
-  const signals = yield* PubSub.unbounded<void>();
+  const signals = yield* PubSub.sliding<void>(1);
   const lock = yield* Semaphore.make(1);
   const publish = PubSub.publish(signals, undefined).pipe(Effect.asVoid);
   const now = Clock.currentTimeMillis.pipe(
@@ -151,16 +151,27 @@ export const make = Effect.gen(function* () {
         }),
       ),
     );
+  // A failed read emits nothing; the next invalidation retries for the same subscriber.
+  const readForSubscriber = snapshot.pipe(
+    Effect.tapError((error) =>
+      Effect.logWarning("Could not refresh hub node snapshot.", { reason: error.reason }),
+    ),
+    Effect.option,
+  );
   const changes = Stream.unwrap(
     PubSub.subscribe(signals).pipe(
       Effect.map((subscription) =>
         Stream.concat(
-          Stream.fromEffect(snapshot),
-          Stream.fromSubscription(subscription).pipe(Stream.mapEffect(() => snapshot)),
+          Stream.fromEffect(readForSubscriber),
+          Stream.fromSubscription(subscription).pipe(Stream.mapEffect(() => readForSubscriber)),
         ),
       ),
     ),
-  ).pipe(Stream.changesWith((a, b) => JSON.stringify(a) === JSON.stringify(b)));
+  ).pipe(
+    Stream.filter(Option.isSome),
+    Stream.map((value) => value.value),
+    Stream.changesWith((a, b) => JSON.stringify(a) === JSON.stringify(b)),
+  );
 
   yield* linked.changes.pipe(
     Stream.runForEach(() => publish),
@@ -181,17 +192,22 @@ export const make = Effect.gen(function* () {
       active
         ? Effect.gen(function* () {
             const routeId = `cloud:${alias}`;
-            const previous = (yield* repository.listRouteState).find(
-              (row) => row.routeId === routeId,
-            );
-            yield* repository.upsertRouteState({
-              routeId,
-              environmentId: previous?.environmentId ?? null,
-              status: "unknown",
-              checkedAt: null,
-              lastSeenAt: previous?.lastSeenAt ?? null,
-              lastError: null,
-            });
+            const catalog = yield* cloud.catalog;
+            if (catalog.some((entry) => entry.alias === alias)) {
+              const previous = (yield* repository.listRouteState).find(
+                (row) => row.routeId === routeId,
+              );
+              yield* repository.upsertRouteState({
+                routeId,
+                environmentId: previous?.environmentId ?? null,
+                status: "unknown",
+                checkedAt: null,
+                lastSeenAt: previous?.lastSeenAt ?? null,
+                lastError: null,
+              });
+            } else {
+              yield* repository.deleteRouteState(routeId);
+            }
             yield* publish;
           }).pipe(Effect.ignore)
         : Effect.void,
@@ -209,6 +225,15 @@ export const make = Effect.gen(function* () {
           access: input.access,
           clientName: "GOAT hub",
           beforeSave: options.beforeSave,
+          acceptDescriptor: (descriptor) =>
+            descriptor.environmentId === before.hubEnvironmentId
+              ? Effect.fail(
+                  new HubNodesError({
+                    reason: "refused",
+                    detail: "The hub cannot add itself as a node.",
+                  }),
+                )
+              : Effect.void,
         })
         .pipe(
           Effect.mapError((error) =>
