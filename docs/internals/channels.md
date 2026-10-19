@@ -21,30 +21,32 @@ work. Chip notifications carry `ledgerTask`; only the ledger writes them.
 Questions about past work and memory are answered in reception, without starting a worker,
 because a coding thread costs a minute and a provider session for something the ledger already
 knows. The model still runs no tools: a pass may answer with a `read` action naming up to three
-lookups, the server runs them, and one more pass answers with the results. A second request to
-read is answered with what that pass wrote, so an input costs at most two generations. Reads
-change nothing, so a reception retried after a crash simply reads again.
+lookups, the server runs them (each within five seconds), and one more pass answers with the
+results. A second request to read is answered with what that pass wrote, so an input costs at most
+two generations. Reads change nothing, so a reception retried after a crash reads again.
 
 - **Memory.** Every pass gets the newest 6,000 characters of `goat-bot/memory.md` (standing
-  notes, written only when the person's own message asks, as before) and the newest 3,000 of
-  `goat-bot/journal.md`. The journal is a one-line copy of each task the bot started and how it
-  ended, written by the server when the ledger commits the start or the narration, keyed by that
-  event so a replay writes it once, and trimmed to 64,000 characters. Only the server writes it,
-  so no message can plant text that later passes read as the bot's own record. A `memory` read
-  searches both files and, when memory is on and the requester holds `memory:read`, GOAT memory
-  (`MemoryService.search`, the store agents use). Reception writes GOAT memory only through the
-  coding threads it starts, which get the requester's memory ceiling; summaries of those threads
-  reach memory the usual way.
+  notes, written only when the person's own message asks, as before) and a journal: one line per
+  recent task, with its state, result and pull requests. The journal is built from the ledger for
+  each requester rather than kept in a file, so it shows only work that requester may see, and it
+  cannot drift from the ledger or lose a line in a crash. A `memory` read searches the notes, the
+  requester's whole journal, and GOAT memory (`MemoryService.search`, the store agents use).
+  GOAT memory is read under the requester's `memory:read` as it stands at read time: a Slack or
+  iMessage link is read again on every permit check, and agents over MCP use their own memory
+  tools instead. Reception writes GOAT memory only through the coding threads it starts, which get
+  the requester's memory ceiling.
 - **Work.** A `work` read matches the owner's 200 most recently updated tasks by task id, a
-  linked pull request number or URL, or shared words, and returns each task's request, result,
-  machine, open questions and pull requests with their last known state. A `thread` read adds
-  the last six messages of the task's coding thread on this machine; a thread on another machine
-  is read through the reports already copied into the ledger, never over SSH during reception. A
-  `conversation` read searches older inputs and replies of the same conversation.
+  linked pull request (by repository and number when the question names a repository), or shared
+  words, and returns each task's request, result, machine, open questions and pull requests with
+  their last known state. A `thread` read adds the last six messages from the newest runs of the
+  task's coding thread on this machine; a thread on another machine is read through the reports
+  already copied into the ledger, never over SSH during reception. A `conversation` read searches
+  the text of older inputs and replies in the same conversation.
 - **Who sees what.** Everyone sees the work of the conversation they write in. A person also sees
   work they asked for elsewhere, and all of the owner's work when they hold `orchestration:read`.
   Agents over MCP see only their own conversation. A Slack or iMessage link acts as the GOAT
-  principal who made the link code, so it sees what that principal sees.
+  principal who made the link code, so it sees what that principal sees. Read results and journal
+  lines are labelled as records for the model, but the filtering above is what keeps them private.
 
 An owner has one bot, in the Scratch project, and one bot conversation keyed by the owner rather
 than the thread. Where Scratch is off because the data directory is inside a Git work tree, the bot

@@ -1,6 +1,6 @@
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  type AuthEnvironmentScope,
   ChannelConversationId,
   type ChannelReceptionInput,
   type ChannelReceptionReadResult,
@@ -10,20 +10,22 @@ import {
   type ThreadPullRequestLink,
 } from "@goat/contracts";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
+import * as Layer from "effect/Layer";
 
+import * as MemoryService from "../memory/MemoryService.ts";
+import * as MemorySyncService from "../memory/MemorySyncService.ts";
 import * as ChannelGateway from "./ChannelGateway.ts";
 import * as ChannelIdentityService from "./ChannelIdentityService.ts";
 import * as ChannelRuntime from "./ChannelRuntime.ts";
 import * as ChannelWorkerReports from "./ChannelWorkerReports.ts";
 import {
-  appendChannelBotJournal,
-  channelBotFilesFor,
-  JOURNAL_MAX_CHARS,
-  readChannelBotJournal,
-} from "./channelBotNotes.ts";
-import { canSeeTask, matchMemoryLines, matchTasks, taskDigest } from "./channelBotRecall.ts";
+  canSeeTask,
+  JOURNAL_CHARS,
+  journalFor,
+  matchMemoryLines,
+  matchTasks,
+  taskDigest,
+} from "./channelBotRecall.ts";
 import {
   botMessages,
   defaultScript,
@@ -125,8 +127,14 @@ describe("finding the work a question means", () => {
     assert.deepStrictEqual(matchTasks(tasks, "task:1"), [login]);
     assert.deepStrictEqual(matchTasks(tasks, "is #457 merged?"), [docs]);
     assert.deepStrictEqual(matchTasks(tasks, "https://github.com/goat-si/goat/pull/457"), [docs]);
+    assert.deepStrictEqual(matchTasks(tasks, "goat-si/goat#457"), [docs]);
     assert.deepStrictEqual(matchTasks(tasks, "what happened with the login fix"), [login]);
     assert.deepStrictEqual(matchTasks(tasks, "unrelated words"), []);
+  });
+
+  it("does not take a pull request in another repository for one with the same number", () => {
+    assert.deepStrictEqual(matchTasks(tasks, "https://github.com/other/repo/pull/457"), []);
+    assert.deepStrictEqual(matchTasks(tasks, "other/repo#457"), []);
   });
 
   it("reads a task back with its pull requests and their state", () => {
@@ -145,35 +153,37 @@ describe("finding the work a question means", () => {
 });
 
 describe("GOAT Bot journal", () => {
-  it.effect("writes each event once and drops the oldest lines past its bound", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const files = channelBotFilesFor(path, yield* fs.makeTempDirectoryScoped());
-      yield* appendChannelBotJournal(fs, files, "Done: first", "2026-10-12T00:00:00Z", "event:1");
-      yield* appendChannelBotJournal(fs, files, "Done: again", "2026-10-12T00:00:00Z", "event:1");
-      assert.strictEqual(
-        yield* readChannelBotJournal(fs, files),
-        "- 2026-10-12 00:00 Done: first [event:1]",
-      );
-      for (let index = 2; index < 400; index += 1) {
-        yield* appendChannelBotJournal(
-          fs,
-          files,
-          "Done: task " + index + " " + "x".repeat(300),
-          "2026-10-12T00:00:00Z",
-          "event:" + index,
-        );
-      }
-      const whole = yield* readChannelBotJournal(fs, files, { whole: true });
-      assert.isAtMost(whole.length, JOURNAL_MAX_CHARS);
-      assert.notInclude(whole, "Done: first");
-      assert.include(whole, "[event:399]");
-      const recent = yield* readChannelBotJournal(fs, files);
-      assert.isAtMost(recent.length, 3_000);
-      assert.isTrue(recent.startsWith("- "));
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
+  it("lists the newest work first with results and pull requests, within its bound", () => {
+    const many = Array.from({ length: 40 }, (_, index) =>
+      task({
+        taskId: ChannelTaskId.make("task:many-" + index),
+        title: "Task " + index,
+        resultSummary: "x".repeat(400),
+        updatedAt: "2026-10-12T00:" + String(index).padStart(2, "0") + ":00.000Z",
+      }),
+    );
+    const journal = journalFor(many);
+    assert.isAtMost(journal.length, JOURNAL_CHARS);
+    assert.isTrue(journal.startsWith("- 2026-10-12 00:39 [completed] Task 39 (for Bob) — "));
+    assert.notInclude(journal, "Task 0 ");
+    const withPr = journalFor([
+      task({
+        observed: {
+          pullRequests: [
+            {
+              repository: "goat-si/goat",
+              number: 9,
+              url: "https://github.com/goat-si/goat/pull/9",
+              state: "merged",
+              watching: false,
+            },
+          ],
+          needsYou: [],
+        },
+      }),
+    ]);
+    assert.include(withPr, "goat-si/goat#9 (merged)");
+  });
 });
 
 const mergedLink: ThreadPullRequestLink = {
@@ -222,8 +232,7 @@ describe("GOAT Bot reads its memory and work before answering", () => {
 
       const last = seen.at(-1)!;
       assert.include(last.notes ?? "", "Deploys happen on Fridays.");
-      assert.include(last.journal ?? "", "Started for Owner: fix the build");
-      assert.include(last.journal ?? "", "Done: fix the build");
+      assert.include(last.journal ?? "", "[completed] fix the build (for Owner)");
       assert.isTrue(last.readsAllowed);
     }).pipe(Effect.provide(harness.layer));
   });
@@ -281,7 +290,7 @@ describe("GOAT Bot reads its memory and work before answering", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.effect("finds older messages and remembered notes", () => {
+  it.effect("finds older messages, including ones with quotes and wildcards, and notes", () => {
     const harness = makeHarness();
     const results: Array<ReadonlyArray<ChannelReceptionReadResult>> = [];
     harness.script.current = (input) => {
@@ -302,7 +311,8 @@ describe("GOAT Bot reads its memory and work before answering", () => {
               type: "read",
               reads: [
                 { kind: "memory", query: "staging" },
-                { kind: "conversation", query: "lighthouse" },
+                { kind: "conversation", query: '61% "lighthouse"' },
+                { kind: "conversation", query: "message_json" },
               ],
             },
           });
@@ -315,26 +325,64 @@ describe("GOAT Bot reads its memory and work before answering", () => {
       yield* setupBot;
       const gateway = yield* ChannelGateway.ChannelGateway;
       const runtime = yield* ChannelRuntime.ChannelRuntime;
-      yield* gateway.ingest(goatInput("the lighthouse score dropped to 61", "c1"), rpcContext);
+      yield* gateway.ingest(
+        goatInput('the score dropped to 61% "lighthouse"\nsecond line', "c1"),
+        rpcContext,
+      );
       yield* gateway.ingest(goatInput("remember staging rotates monthly", "c2"), rpcContext);
       yield* runtime.drain;
       yield* gateway.ingest(goatInput("when did I mention that score?", "c3"), rpcContext);
       yield* runtime.drain;
-      const [memory, older] = results[0]!;
+      const [memory, older, metadata] = results[0]!;
       assert.include(memory!.text, "The staging password rotates monthly.");
-      assert.include(older!.text, "the lighthouse score dropped to 61");
+      assert.include(older!.text, 'the score dropped to 61% "lighthouse"');
+      // Only the words people wrote are searched, never the stored record around them.
+      assert.strictEqual(metadata!.text, "No earlier message in this conversation matches.");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("answers with what the second pass wrote when it asks to read again", () => {
+    const harness = makeHarness();
+    let calls = 0;
+    harness.script.current = (input) => {
+      if (input.mode !== "input") return defaultScript(input);
+      calls += 1;
+      return Effect.succeed({
+        replyText: input.readsAllowed === true ? "Looking." : "I could not find it.",
+        action: { type: "read", reads: [{ kind: "work", query: "anything" }] },
+      });
+    };
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      yield* gateway.ingest(goatInput("what happened?", "r1"), rpcContext);
+      yield* runtime.drain;
+      assert.strictEqual(calls, 2);
+      const texts = (yield* botMessages).messages.map((message) => message.text);
+      assert.include(texts, "I could not find it.");
+      assert.notInclude(texts, "Looking.");
     }).pipe(Effect.provide(harness.layer));
   });
 
   it.effect("does not show a linked person work they may not see", () => {
     const harness = makeHarness();
     const results: Array<ReadonlyArray<ChannelReceptionReadResult>> = [];
+    const inputs: Array<ChannelReceptionInput> = [];
     harness.script.current = (input) => {
       if ((input.inputText ?? "").startsWith("what happened")) {
+        inputs.push(input);
         if (input.readsAllowed === true) {
           return Effect.succeed({
             replyText: "",
-            action: { type: "read", reads: [{ kind: "work", query: "payroll" }] },
+            action: {
+              type: "read",
+              reads: [
+                { kind: "work", query: "payroll" },
+                { kind: "thread", query: "payroll" },
+                { kind: "memory", query: "payroll" },
+              ],
+            },
           });
         }
         results.push(input.readResults ?? []);
@@ -373,7 +421,100 @@ describe("GOAT Bot reads its memory and work before answering", () => {
         slackContext,
       );
       yield* runtime.drain;
-      assert.strictEqual(results[0]?.[0]?.text, "No work this person may see matches.");
+      const [work, thread, memory] = results[0]!;
+      assert.strictEqual(work?.text, "No work this person may see matches.");
+      assert.strictEqual(thread?.text, "No work this person may see matches.");
+      assert.strictEqual(memory?.text, "Nothing in memory matches.");
+      // Nothing about the owner's work reaches the model by any other route either.
+      for (const input of inputs) assert.notInclude(JSON.stringify(input), "payroll export");
+    }).pipe(Effect.provide(harness.layer));
+  });
+});
+
+describe("GOAT Bot reads GOAT memory under the asker's current link", () => {
+  const searched: Array<string> = [];
+  const memoryLayer = Layer.mergeAll(
+    Layer.mock(MemoryService.MemoryService)({
+      importPorts: {} as never,
+      search: (input, permit) =>
+        permit.pipe(
+          Effect.andThen(Effect.sync(() => searched.push(input.query))),
+          Effect.as({
+            items: [{ status: "active", payload: { text: "Prefers replies in Korean." } }],
+            projectionWatermark: 0,
+            nextCursor: null,
+          } as never),
+        ),
+    }),
+    Layer.mock(MemorySyncService.MemorySyncService)({
+      readLocalReadiness: () =>
+        Effect.succeed({ memorySpaceId: "space:test" as never, bootstrap: "ready" as const }),
+    }),
+  );
+
+  const linkWith = (user: string, scopes: ReadonlyArray<AuthEnvironmentScope>) =>
+    Effect.gen(function* () {
+      const identities = yield* ChannelIdentityService.ChannelIdentityService;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const granting = {
+        ...owner,
+        grantedScopes: [...owner.grantedScopes, "memory:read"] satisfies AuthEnvironmentScope[],
+      };
+      const { code } = yield* identities.createLink(
+        { connectionId: "slack-1", runtimeModeCeiling: "auto-accept-edits", grantedScopes: scopes },
+        granting,
+      );
+      yield* gateway.linkIdentity(
+        {
+          connectionId: "slack-1",
+          externalActorId: user,
+          code,
+          idempotencyKey: "link-" + user,
+          replyAddress: slackInput("", "unused").replyAddress,
+        },
+        { ...slackContext, grantedScopes: granting.grantedScopes },
+      );
+    });
+
+  // The Slack connection itself may read memory; each link narrows that.
+  const memoryContext = {
+    ...slackContext,
+    grantedScopes: [...owner.grantedScopes, "memory:read"] satisfies AuthEnvironmentScope[],
+  };
+
+  it.effect("finds memory for a link that may read it and skips one that may not", () => {
+    searched.length = 0;
+    const harness = makeHarness({ memoryLayer });
+    const results: Array<ReadonlyArray<ChannelReceptionReadResult>> = [];
+    harness.script.current = (input) => {
+      if (input.readsAllowed === true) {
+        return Effect.succeed({
+          replyText: "",
+          action: { type: "read", reads: [{ kind: "memory", query: "language" }] },
+        });
+      }
+      if (input.readResults !== undefined) results.push(input.readResults);
+      return Effect.succeed({ replyText: "Okay.", action: { type: "report_only" } });
+    };
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      yield* linkWith("U1", ["orchestration:read", "orchestration:operate", "memory:read"]);
+      yield* linkWith("U2", ["orchestration:operate"]);
+      yield* gateway.ingest(
+        slackInput("which language do I like?", "Ev-m1", "1760000000.000300", "U1"),
+        memoryContext,
+      );
+      yield* gateway.ingest(
+        slackInput("which language do I like?", "Ev-m2", "1760000000.000400", "U2"),
+        memoryContext,
+      );
+      yield* runtime.drain;
+      assert.deepStrictEqual(searched, ["language"]);
+      const texts = results.map((result) => result[0]!.text);
+      assert.isTrue(texts.some((text) => text.includes("Prefers replies in Korean.")));
+      assert.isTrue(texts.some((text) => text === "Nothing in memory matches."));
     }).pipe(Effect.provide(harness.layer));
   });
 });

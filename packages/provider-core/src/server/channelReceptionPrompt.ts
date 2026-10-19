@@ -97,7 +97,8 @@ function toActionResult(
       });
     case "read":
       return decodeResult({
-        replyText,
+        // The reply to a read is never shown; the answer comes from the next pass.
+        replyText: replyText === "" ? "Looking that up." : replyText,
         action: {
           type: "read",
           reads: output.reads

@@ -20,10 +20,16 @@ export const RECALL_TASK_LIMIT = 5;
 export const RECALL_TASK_SCAN = 200;
 /** How many of a thread's newest messages a thread read returns. */
 export const RECALL_THREAD_MESSAGES = 6;
+/** How many of a thread's newest runs a thread read loads messages from. */
+export const RECALL_THREAD_RUNS = 3;
 const RECALL_MESSAGE_CHARS = 700;
 const RECALL_FIELD_CHARS = 600;
 /** At most this many memory lines or items answer one memory read. */
 export const RECALL_MEMORY_LINES = 12;
+/** How many of the newest visible tasks the journal shows, and its size in characters. */
+export const JOURNAL_ENTRIES = 15;
+export const JOURNAL_CHARS = 3_000;
+const JOURNAL_RESULT_CHARS = 160;
 
 /**
  * Whether a requester may see a task in GOAT Bot's answers. Everyone sees the work of the
@@ -64,10 +70,19 @@ const words = (text: string) =>
     .split(/[^\p{L}\p{N}#_./-]+/u)
     .filter((word) => word.length >= 2 && !FILLER.has(word));
 
-/** A pull request number ("#123", "123") or URL in a query. */
-const pullRequestNumberIn = (query: string): number | undefined => {
-  const match = /(?:pull\/|#)(\d+)\b/u.exec(query) ?? /^\s*(\d+)\s*$/u.exec(query);
-  return match === null ? undefined : Number(match[1]);
+/**
+ * A pull request named in a query: a URL or "owner/repo#123" names its repository, while a bare
+ * "#123" or "123" names only the number and may match several repositories.
+ */
+const pullRequestIn = (
+  query: string,
+): { readonly number: number; readonly repository?: string } | undefined => {
+  const url = /([\w.-]+\/[\w.-]+)\/pull\/(\d+)\b/u.exec(query);
+  if (url !== null) return { repository: url[1]!.toLowerCase(), number: Number(url[2]) };
+  const named = /([\w.-]+\/[\w.-]+)#(\d+)\b/u.exec(query);
+  if (named !== null) return { repository: named[1]!.toLowerCase(), number: Number(named[2]) };
+  const bare = /#(\d+)\b/u.exec(query) ?? /^\s*(\d+)\s*$/u.exec(query);
+  return bare === null ? undefined : { number: Number(bare[1]) };
 };
 
 /**
@@ -83,14 +98,17 @@ export const matchTasks = (
   const trimmed = query.trim();
   const exact = tasks.filter((task) => task.taskId === trimmed);
   if (exact.length > 0) return exact;
-  const prNumber = pullRequestNumberIn(trimmed);
-  if (prNumber !== undefined) {
+  const pr = pullRequestIn(trimmed);
+  if (pr !== undefined) {
     const linked = tasks.filter((task) =>
       (task.observed?.pullRequests ?? []).some(
-        (pr) => pr.number === prNumber || trimmed.includes(pr.url),
+        (linkedPr) =>
+          linkedPr.number === pr.number &&
+          (pr.repository === undefined || linkedPr.repository.toLowerCase() === pr.repository),
       ),
     );
-    if (linked.length > 0) return linked.slice(0, limit);
+    // A question about a repository's pull request is not about other work sharing its words.
+    if (linked.length > 0 || pr.repository !== undefined) return linked.slice(0, limit);
   }
   const wanted = new Set(words(trimmed));
   if (wanted.size === 0) return tasks.slice(0, limit);
@@ -137,6 +155,37 @@ export const taskDigest = (task: ChannelTask): string => {
     ...task.openQuestions.map((question) => "  open question: " + question.text),
     ...(task.completedAt === undefined ? [] : ["  ended " + task.completedAt.slice(0, 16)]),
   ];
+  return lines.join("\n");
+};
+
+/**
+ * GOAT Bot's journal as one requester may see it: one line per task, newest first, from the
+ * ledger. Built per requester so it never shows work `canSeeTask` hides, and never written to
+ * a file, so it cannot drift from the ledger or lose an entry in a crash.
+ */
+export const journalFor = (tasks: ReadonlyArray<ChannelTask>, entries = JOURNAL_ENTRIES) => {
+  const lines: Array<string> = [];
+  let chars = 0;
+  for (const task of tasks
+    .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, entries)) {
+    const prs = (task.observed?.pullRequests ?? []).map(pullRequestLabel);
+    const line =
+      "- " +
+      task.updatedAt.slice(0, 16).replace("T", " ") +
+      " [" +
+      task.status +
+      "] " +
+      task.title +
+      (task.requester.displayName === "" ? "" : " (for " + task.requester.displayName + ")") +
+      (task.resultSummary === undefined || task.resultSummary.trim() === ""
+        ? ""
+        : " — " + cut(task.resultSummary.replace(/\s+/gu, " ").trim(), JOURNAL_RESULT_CHARS)) +
+      (prs.length === 0 ? "" : " — " + prs.join(", "));
+    if (chars + line.length + 1 > JOURNAL_CHARS) break;
+    lines.push(line);
+    chars += line.length + 1;
+  }
   return lines.join("\n");
 };
 

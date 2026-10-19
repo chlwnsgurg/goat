@@ -41,9 +41,8 @@ GOAT Bot screen shows only a chip for the work and its final report.
   coding threads, older messages in the conversation, and its notes and
   [memory](./memory.md). It shows you only work from the conversation you are
   in, work you asked for, and, if your link may read GOAT's threads, the rest.
-- GOAT Bot keeps a journal of the work it started and how each ended in
-  `goat-bot/journal.md`, next to its notes. GOAT writes this file; the bot
-  reads its newest entries with every message.
+- With every message GOAT Bot also sees a short journal of the latest work
+  you may see: what was asked, how it ended, and its pull requests.
 - Ask GOAT Bot to remember a standing rule ("always reply in Korean") and it
   follows it from then on, in Slack and in GOAT. It keeps a note only when the
   message you send asks for it, and each note names the message it came from.

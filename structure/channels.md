@@ -44,8 +44,9 @@ writes a task. A later pass has `ChannelDispatcher` in `apps/server/src/channels
 launch a worker thread through `ThreadLaunchService.launch`, with the task text as the initial
 message. The worker is an ordinary thread. Its completion is delivered back on the channel outbox.
 
-A reception may first choose `read`: `ChannelReceptionService` runs the lookups (bot notes and
-journal from `channelBotNotes.ts`, GOAT memory through `MemoryService.search`, ledger tasks,
+A reception may first choose `read`: `ChannelReceptionService` runs the lookups (bot notes from
+`channelBotNotes.ts`, a journal built from ledger tasks, GOAT memory through `MemoryService.search`,
+ledger tasks,
 worker thread messages through `ThreadManagementService.getThreadRecords`, and
 `ChannelLedger.searchConversation`) and generates once more with the results. Matching,
 visibility (`canSeeTask`) and size bounds are pure functions in

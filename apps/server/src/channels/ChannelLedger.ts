@@ -926,7 +926,8 @@ const make = Effect.gen(function* () {
       }>`
         SELECT input_id, message_json, accepted_at, reply_json FROM channel_inbox
         WHERE conversation_id = ${conversationId} AND state != 'rejected'
-          AND (message_json LIKE ${pattern} ESCAPE '\\' OR reply_json LIKE ${pattern} ESCAPE '\\')
+          AND (json_extract(message_json, '$.text') LIKE ${pattern} ESCAPE '\\'
+            OR json_extract(reply_json, '$.text') LIKE ${pattern} ESCAPE '\\')
         ORDER BY accepted_at DESC, input_id DESC LIMIT ${limit}
       `.pipe(
         Effect.map((rows) =>

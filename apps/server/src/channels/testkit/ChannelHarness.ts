@@ -38,6 +38,8 @@ import * as Option from "effect/Option";
 
 import * as ServerConfig from "../../config.ts";
 import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
+import * as MemoryService from "../../memory/MemoryService.ts";
+import * as MemorySyncService from "../../memory/MemorySyncService.ts";
 import { CodexProviderCapabilitiesV2 } from "../../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as Orchestrator from "../../orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "../../orchestration-v2/ProjectStore.ts";
@@ -271,6 +273,10 @@ export function makeHarness(
     readonly sshRemote?: Layer.Layer<SshRemoteDispatch.SshRemoteDispatch>;
     /** The state database; defaults to a fresh in-memory one. A file lets a test restart. */
     readonly databaseLayer?: typeof SqlitePersistence.layerMemory;
+    /** GOAT memory for the bot's memory reads; absent by default, as in embeddings without it. */
+    readonly memoryLayer?: Layer.Layer<
+      MemoryService.MemoryService | MemorySyncService.MemorySyncService
+    >;
   } = {},
 ) {
   const world = new WorkerWorld();
@@ -556,6 +562,7 @@ export function makeHarness(
         layerDatabase,
         IdAllocator.layer,
         options.sshRemote ?? layerNoSshHosts,
+        options.memoryLayer ?? Layer.empty,
       ),
     ),
   );

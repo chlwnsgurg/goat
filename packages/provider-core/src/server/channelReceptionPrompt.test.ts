@@ -153,6 +153,16 @@ describe("channel reception reads", () => {
     ).toBe(true);
   });
 
+  it("accepts a read with an empty reply, since that reply is never shown", () => {
+    const result = convert({
+      replyText: "",
+      action: "read",
+      reads: [{ kind: "memory", query: "deploys" }],
+    });
+    expect(result.action.type).toBe("read");
+    expect(result.replyText).toBe("Looking that up.");
+  });
+
   it("offers reading only on the first pass and shows results as records", () => {
     const input = {
       mode: "input",

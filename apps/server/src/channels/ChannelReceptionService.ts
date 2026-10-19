@@ -59,22 +59,22 @@ import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRemoteWorkers from "./ChannelRemoteWorkers.ts";
 import * as ChannelWake from "./ChannelWake.ts";
 import {
-  appendChannelBotJournal,
   appendChannelBotNote,
   channelBotFilesFor,
   listChannelBotSkills,
   quotedFromInput,
-  readChannelBotJournal,
   readChannelBotNotes,
 } from "./channelBotNotes.ts";
 import {
   boundRecall,
   canSeeTask,
+  journalFor,
   matchMemoryLines,
   matchTasks,
   pullRequestLabel,
   RECALL_MEMORY_LINES,
   RECALL_TASK_SCAN,
+  RECALL_THREAD_RUNS,
   taskDigest,
   threadDigest,
 } from "./channelBotRecall.ts";
@@ -86,6 +86,8 @@ import { botAddress, chipDelivery, makeTaskEvent, prepareTransition } from "./ch
 const CHANNEL_RECEPTION_TIMEOUT_MS = 45_000;
 /** How many recently active threads a reception pass sees by title. */
 const CHANNEL_RECEPTION_RECENT_THREADS = 20;
+/** How long one read may take before the answer says so and goes on without it. */
+const CHANNEL_READ_TIMEOUT_MS = 5_000;
 
 const GIB = 1024 ** 3;
 const gib = (bytes: number) => (bytes / GIB).toFixed(bytes < 10 * GIB ? 1 : 0) + " GB";
@@ -194,7 +196,7 @@ const make = Effect.gen(function* () {
   const botFiles = channelBotFilesFor(path, serverConfig.stateDir);
   const platform = yield* HostProcess.Platform;
   const architecture = yield* HostProcess.Architecture;
-  // Absent in embeddings without memory; the bot then reads only its own notes and journal.
+  // Absent in embeddings without memory; the bot then reads only its notes and the ledger.
   const memoryService = yield* Effect.serviceOption(MemoryService.MemoryService);
   const memorySync = yield* Effect.serviceOption(MemorySyncService.MemorySyncService);
 
@@ -328,13 +330,35 @@ const make = Effect.gen(function* () {
       );
 
   /**
-   * GOAT memory items for a query, under the requester's own memory access. Empty when memory is
-   * off, not set up, or the requester may not read it.
+   * The scopes a requester holds now. A Slack or iMessage link is read again, so a link removed
+   * or narrowed since the message arrived counts; an in-app requester keeps the scopes its
+   * session had. Agents over MCP read GOAT memory with their own memory tools, not through the bot.
    */
-  const searchGoatMemory = (viewer: ChannelRequester, query: string) =>
+  const scopesNow = (viewer: ChannelRequester, connectionId: string) =>
+    Effect.gen(function* () {
+      if (viewer.originKind === "mcp") return [];
+      if (viewer.originKind !== "slack" && viewer.originKind !== "imessage") {
+        return viewer.grantedScopes;
+      }
+      if (viewer.externalActorId === undefined) return [];
+      const linked = yield* ledger.findIdentity({
+        connectionId,
+        externalActorId: viewer.externalActorId,
+      });
+      return linked === undefined
+        ? []
+        : viewer.grantedScopes.filter((scope) => linked.grantedScopes.includes(scope));
+    });
+
+  /**
+   * GOAT memory items for a query, under the requester's memory access as it stands now. Empty
+   * when memory is off, not set up, or the requester may not read it.
+   */
+  const searchGoatMemory = (viewer: ChannelRequester, connectionId: string, query: string) =>
     Effect.gen(function* () {
       if (Option.isNone(memoryService) || Option.isNone(memorySync)) return [];
-      if (!viewer.grantedScopes.includes("memory:read")) return [];
+      const live = scopesNow(viewer, connectionId);
+      if (!(yield* live).includes("memory:read")) return [];
       const settings = yield* serverSettings.getSettings;
       if (!settings.memoryEnabled) return [];
       const readiness = yield* memorySync.value.readLocalReadiness();
@@ -346,9 +370,21 @@ const make = Effect.gen(function* () {
           limit: RECALL_MEMORY_LINES,
           mode: "fts",
         },
-        // The requester's scopes were judged for this input; reception holds no other authority.
         MemoryAccess.memoryAccessPermit(
-          { grantedScopes: viewer.grantedScopes, reauthorize: () => Effect.void, readOnly: true },
+          {
+            grantedScopes: viewer.grantedScopes,
+            // Each permit check reads the link again and fails when it no longer allows reading.
+            reauthorize: (required) =>
+              live.pipe(
+                Effect.orElseSucceed((): ReadonlyArray<string> => []),
+                Effect.flatMap((scopes) =>
+                  required.every((scope) => scopes.includes(scope))
+                    ? Effect.void
+                    : Effect.fail(new MemoryService.MemoryAccessError({ code: "unavailable" })),
+                ),
+              ),
+            readOnly: true,
+          },
           "read",
         ),
       );
@@ -365,14 +401,15 @@ const make = Effect.gen(function* () {
     read: ChannelReceptionRead,
     viewer: ChannelRequester,
     conversationId: ChannelConversationId,
+    connectionId: string,
   ) =>
     Effect.gen(function* () {
       switch (read.kind) {
         case "memory": {
           const notes = yield* readChannelBotNotes(fileSystem, botFiles);
-          const journal = yield* readChannelBotJournal(fileSystem, botFiles, { whole: true });
+          const journal = journalFor(yield* visibleTasks(viewer, conversationId), RECALL_TASK_SCAN);
           const local = matchMemoryLines(notes + "\n" + journal, read.query);
-          const goat = yield* searchGoatMemory(viewer, read.query);
+          const goat = yield* searchGoatMemory(viewer, connectionId, read.query);
           if (local.length === 0 && goat.length === 0) return "Nothing in memory matches.";
           return [
             ...(local.length === 0 ? [] : ["GOAT Bot notes and journal:", ...local]),
@@ -401,7 +438,12 @@ const make = Effect.gen(function* () {
               "; only its reports reach this machine."
             );
           }
-          const records = yield* threads.getThreadRecords(worker.threadId, ["messages"]);
+          // Only the newest runs' messages are loaded; a long thread is never read whole.
+          const { runs } = yield* threads.getThreadRecords(worker.threadId, ["runs"]);
+          const recentRuns = runs.slice(-RECALL_THREAD_RUNS).map((run) => run.id);
+          const records = yield* threads.getThreadRecords(worker.threadId, ["messages"], {
+            messageRunIds: recentRuns,
+          });
           return (
             taskDigest(task) +
             "\n" +
@@ -438,16 +480,28 @@ const make = Effect.gen(function* () {
     reads: ReadonlyArray<ChannelReceptionRead>,
     viewer: ChannelRequester,
     conversationId: ChannelConversationId,
+    connectionId: string,
   ): Effect.Effect<ReadonlyArray<ChannelReceptionReadResult>> =>
-    Effect.forEach(reads, (read) =>
-      runRead(read, viewer, conversationId).pipe(
-        Effect.map((text) => ({ kind: read.kind, query: read.query, text: boundRecall(text) })),
-        Effect.catch((cause) =>
-          Effect.logWarning("GOAT Bot read failed", { kind: read.kind, cause }).pipe(
-            Effect.as({ kind: read.kind, query: read.query, text: "(could not be read)" }),
+    Effect.forEach(
+      reads,
+      (read) =>
+        runRead(read, viewer, conversationId, connectionId).pipe(
+          Effect.timeoutOption(CHANNEL_READ_TIMEOUT_MS),
+          Effect.map((text) => ({
+            kind: read.kind,
+            query: read.query,
+            text: Option.match(text, {
+              onNone: () => "(took too long to read)",
+              onSome: boundRecall,
+            }),
+          })),
+          Effect.catch((cause) =>
+            Effect.logWarning("GOAT Bot read failed", { kind: read.kind, cause }).pipe(
+              Effect.as({ kind: read.kind, query: read.query, text: "(could not be read)" }),
+            ),
           ),
         ),
-      ),
+      { concurrency: "unbounded" },
     );
 
   const receive: ChannelReceptionService["Service"]["receive"] = (inputId, owner) =>
@@ -550,7 +604,11 @@ const make = Effect.gen(function* () {
                 const recent = recentThreads(shells, targets, bot?.threadId);
                 const facts = yield* hostFacts(shells);
                 const notes = yield* readChannelBotNotes(fileSystem, botFiles);
-                const journal = yield* readChannelBotJournal(fileSystem, botFiles);
+                const journal = journalFor(
+                  yield* visibleTasks(requester, conversationId).pipe(
+                    Effect.orElseSucceed((): ReadonlyArray<ChannelTask> => []),
+                  ),
+                );
                 const skills = yield* listChannelBotSkills(fileSystem, path, botFiles);
                 const base: ChannelReceptionInput = {
                   mode: "input",
@@ -610,6 +668,7 @@ const make = Effect.gen(function* () {
                   first.value.action.reads,
                   requester,
                   conversationId,
+                  message.connectionId,
                 );
                 const second = yield* generate({ ...base, readsAllowed: false, readResults });
                 return Option.map(second, (result): ChannelReceptionResult =>
@@ -901,21 +960,8 @@ const make = Effect.gen(function* () {
           receptionId,
         });
       }
-      if (committed && createdTask !== undefined) {
-        yield* journalEntry(
-          "Started for " + requester.displayName + ": " + createdTask.task.title,
-          now,
-          "start:" + createdTask.task.taskId,
-        );
-      }
       yield* wake.wake;
     });
-
-  /** The journal is a convenience copy of the ledger; failing to write it never fails a reply. */
-  const journalEntry = (entry: string, at: string, key: string) =>
-    appendChannelBotJournal(fileSystem, botFiles, entry, at, key).pipe(
-      Effect.catch((cause) => Effect.logWarning("GOAT Bot journal was not written", { cause })),
-    );
 
   const narrationFor = (task: ChannelTask, event: ChannelLedger.ChannelPendingEvent["event"]) => {
     switch (event.type) {
@@ -1021,13 +1067,6 @@ const make = Effect.gen(function* () {
         );
       }
       yield* ledger.completeNarration({ owner, sequence: pending.sequence, deliveries, now });
-      if (
-        pending.event.type === "task.completed" ||
-        pending.event.type === "task.failed" ||
-        pending.event.type === "task.cancelled"
-      ) {
-        yield* journalEntry(base.text + " (" + task.taskId + ")", now, pending.event.eventId);
-      }
       yield* wake.wake;
     });
 
