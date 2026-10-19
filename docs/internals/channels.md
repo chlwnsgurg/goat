@@ -101,7 +101,12 @@ task's observation lists, so an approval answered in its thread disappears on th
 no card state to clean up. A reply that starts with an approve or deny word (English or Korean,
 short messages only) is matched to a card before the reception model runs: an approval must not
 depend on how a model read a message. A bare word answers the only open card; with several open
-it asks which, and a card code or words from the task title pick one. The answer is a
+it asks which. Otherwise only the card's three-character code picks one, never words from a task
+title: "approve the PR" must not approve whatever command that task waits on. Buttons always
+carry the code, so an old card's button cannot answer a newer request; a code that names no open
+card says the approval was already answered. Open cards come from every running task in the
+conversation that needs a person, past the recent-task window reception otherwise reads. The
+answer is a
 `runtime-request.respond` with a command id derived from the input, so a reception rerun after a
 restart cannot answer twice, from a `client` responder naming the person and channel for the
 thread's audit. The person must pass `mayAnswerFor` against the work's requester as their link

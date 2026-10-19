@@ -62,10 +62,9 @@ GOAT Bot screen shows only a chip for the work and its final report.
 - When work on this machine needs an approval, GOAT Bot sends a card saying
   what the agent wants to do. Tap Approve or Deny in GOAT, or reply "approve"
   or "deny" in Slack or iMessage. If several approvals are waiting, add the
-  code shown on the card or a word from the work's title, such as "approve
-  login". Only people with the same access as whoever asked for the work can
-  answer. Approvals for work on other machines are still answered in that
-  thread in GOAT.
+  card's three-letter code, such as "approve 2LR". Only people with the same
+  access as whoever asked for the work can answer. Approvals for work on other
+  machines are still answered in that thread in GOAT.
 - Ask GOAT Bot to remember a standing rule ("always reply in Korean") and it
   follows it from then on, in Slack and in GOAT. It keeps a note only when the
   message you send asks for it, and each note names the message it came from.
