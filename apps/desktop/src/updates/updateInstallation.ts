@@ -15,17 +15,17 @@ export function classifyDesktopUpdateInstallation(input: {
 }
 
 const SERVER_UPDATE_NOTICE =
-  "Servers this app connects to, including this Mac's SSH runtime, can still update independently of this app.";
+  "Servers this app connects to, including this Mac's SSH runtime, still update on their own.";
 
 export function getDesktopUpdateInstallationMessage(
   reason: DesktopUpdateInstallationReason,
 ): string {
   switch (reason) {
     case "translocated":
-      return `GOAT cannot update itself while running from App Translocation. Move GOAT to Applications and reopen it. ${SERVER_UPDATE_NOTICE}`;
+      return `GOAT can't update itself while it runs from where it was downloaded. Move GOAT to Applications and reopen it. ${SERVER_UPDATE_NOTICE}`;
     case "read-only-volume":
-      return `GOAT cannot update itself on a read-only volume. Move GOAT to Applications and reopen it. ${SERVER_UPDATE_NOTICE}`;
+      return `GOAT can't update itself from a read-only disk. Move GOAT to Applications and reopen it. ${SERVER_UPDATE_NOTICE}`;
     case "needs-admin":
-      return `GOAT or its containing folder is not writable by your user. Ask an administrator to install the update or make GOAT and its containing folder writable. ${SERVER_UPDATE_NOTICE}`;
+      return `Your account can't write to GOAT or its folder, so installing updates needs an administrator. ${SERVER_UPDATE_NOTICE}`;
   }
 }

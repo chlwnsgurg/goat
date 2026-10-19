@@ -36,7 +36,7 @@ describe("classifyDesktopUpdateInstallation", () => {
       const message = getDesktopUpdateInstallationMessage(reason);
       expect(message).toContain(reason === "needs-admin" ? "administrator" : "Applications");
       expect(message).toContain("including this Mac's SSH runtime");
-      expect(message).toContain("update independently");
+      expect(message).toContain("still update on their own");
     },
   );
 });
