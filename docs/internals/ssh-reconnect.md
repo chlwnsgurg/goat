@@ -199,8 +199,10 @@ also tolerates offline reports while the network recovers.
 
 The connected RPC session also checks liveness: pings run every 5 s with a
 15 s silence budget, so a hanging forward is detected within roughly 15–20 s
-of the last received frame. HTTP checks run on reuse and resume; they are not
-a second periodic heartbeat.
+of the last received frame. A deadline tick more than 2 s late means the web
+page or mobile app may have been frozen: it restarts the silence budget so
+queued replies can arrive before the resumed session is judged unresponsive.
+HTTP checks run on reuse and resume; they are not a second periodic heartbeat.
 
 The server closes an RPC `/ws` connection after 120 s without inbound transport
 traffic, across local, SSH, relay, and tunnel connections. The budget tolerates

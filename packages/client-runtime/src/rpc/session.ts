@@ -14,7 +14,6 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -24,7 +23,11 @@ import * as RpcClientError from "effect/rpc/RpcClientError";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as Socket from "effect/socket/Socket";
 
-import { makeWsRpcProtocolClient, PING_TIMEOUT, type WsRpcProtocolClient } from "./protocol.ts";
+import {
+  makeWsRpcProtocolClient,
+  makeWsRpcSocketProtocol,
+  type WsRpcProtocolClient,
+} from "./protocol.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
 import type {
   ConnectionAttemptError,
@@ -196,12 +199,7 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     }).pipe(Layer.provide(Layer.succeed(Socket.WebSocketConstructor, webSocketConstructor)));
     const layerProtocol = Layer.effect(
       RpcClient.Protocol,
-      RpcClient.makeProtocolSocket({
-        pingTimeout: PING_TIMEOUT,
-        retryTransientErrors: false,
-        retryPolicy: Schedule.recurs(0),
-        onPingTimeout: Ref.set(pingTimedOut, true),
-      }),
+      makeWsRpcSocketProtocol(Ref.set(pingTimedOut, true)),
     ).pipe(
       Layer.provide(
         Layer.mergeAll(

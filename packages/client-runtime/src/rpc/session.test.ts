@@ -12,6 +12,7 @@ import {
 } from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -1108,6 +1109,148 @@ describe("RpcSessionFactory", () => {
       const error = yield* Fiber.join(closedFiber);
       expect(error).toBeInstanceOf(ConnectionTransientError);
       expect(error).toMatchObject({
+        reason: "transport",
+        detail: "Test environment stopped responding.",
+      });
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each([
+    { replacement: false, lateByMs: 120_000 },
+    { replacement: true, lateByMs: 120_000 },
+    { replacement: false, lateByMs: 2_001 },
+    { replacement: false, lateByMs: 2_000 },
+  ])(
+    "handles a ping timer $lateByMs ms late after resume (replacement: $replacement)",
+    ({ replacement, lateByMs }) =>
+      Effect.gen(function* () {
+        const clock = yield* TestClock.testClockWith(Effect.succeed);
+        const resumed = yield* Deferred.make<void>();
+        let frozen = false;
+        // Advancing TestClock normally runs every due timer on time. Hold their
+        // continuations while time advances to model a frozen page's event loop.
+        const frozenClock: Clock.Clock = {
+          ...clock,
+          sleep: (duration) =>
+            clock
+              .sleep(duration)
+              .pipe(
+                Effect.andThen(
+                  Effect.suspend(() => (frozen ? Deferred.await(resumed) : Effect.void)),
+                ),
+              ),
+        };
+        yield* Effect.gen(function* () {
+          const { factory, sockets } = yield* makeFactory();
+          if (replacement) {
+            const previous = yield* factory.connect(PREPARED);
+            const previousReady = yield* Effect.forkChild(previous.ready);
+            const previousSocket = yield* awaitSocket(sockets);
+            previousSocket.open();
+            yield* completeInitialConfig(previousSocket);
+            yield* Fiber.join(previousReady);
+            previousSocket.close(1012, "resume reconnect");
+            yield* Effect.flip(previous.closed);
+          }
+          const session = yield* factory.connect(PREPARED);
+          const ready = yield* Effect.forkChild(session.ready);
+          const closed = yield* session.closed.pipe(Effect.exit, Effect.forkChild);
+          const socket = yield* awaitSocket(sockets, replacement ? 1 : 0);
+          socket.open();
+          yield* completeInitialConfig(socket);
+          yield* Fiber.join(ready);
+          yield* clock.adjust("15 seconds");
+          expect(socket.sent.map((message) => decodeJson(message)).filter(isPing)).toHaveLength(3);
+
+          frozen = true;
+          yield* clock.adjust(5_000 + lateByMs);
+          frozen = false;
+          yield* Deferred.succeed(resumed, undefined);
+          yield* clock.adjust(0);
+          if (lateByMs <= 2_000) {
+            expect(yield* Fiber.join(closed)).toMatchObject({ _tag: "Failure" });
+            return;
+          }
+          expect(closed.pollUnsafe()).toBeUndefined();
+          expect(socket.readyState).toBe(TestWebSocket.OPEN);
+          yield* clock.adjust("15 seconds");
+          expect(closed.pollUnsafe()).toBeUndefined();
+
+          socket.serverMessage(encodeJson({ _tag: "Pong" }));
+          yield* clock.adjust("15 seconds");
+          expect(closed.pollUnsafe()).toBeUndefined();
+          yield* clock.adjust("5 seconds");
+          expect(yield* Fiber.join(closed)).toMatchObject({ _tag: "Failure" });
+        }).pipe(Effect.provideService(Clock.Clock, frozenClock));
+      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each([false, true])(
+    "limits consecutive late timers to one grace per frame (pong: %s)",
+    (pong) =>
+      Effect.gen(function* () {
+        const clock = yield* TestClock.testClockWith(Effect.succeed);
+        let resumed = yield* Deferred.make<void>();
+        let frozen = false;
+        const frozenClock: Clock.Clock = {
+          ...clock,
+          sleep: (duration) =>
+            clock
+              .sleep(duration)
+              .pipe(
+                Effect.andThen(
+                  Effect.suspend(() => (frozen ? Deferred.await(resumed) : Effect.void)),
+                ),
+              ),
+        };
+        const lateTick = Effect.gen(function* () {
+          resumed = yield* Deferred.make<void>();
+          frozen = true;
+          yield* clock.adjust("20 seconds");
+          frozen = false;
+          yield* Deferred.succeed(resumed, undefined);
+          yield* clock.adjust(0);
+        });
+        yield* Effect.gen(function* () {
+          const { factory, sockets } = yield* makeFactory();
+          const session = yield* factory.connect(PREPARED);
+          const ready = yield* Effect.forkChild(session.ready);
+          const closed = yield* session.closed.pipe(Effect.exit, Effect.forkChild);
+          const socket = yield* awaitSocket(sockets);
+          socket.open();
+          yield* completeInitialConfig(socket);
+          yield* Fiber.join(ready);
+          yield* lateTick;
+          expect(closed.pollUnsafe()).toBeUndefined();
+
+          if (pong) {
+            socket.serverMessage(encodeJson({ _tag: "Pong" }));
+            yield* clock.adjust(0);
+            yield* lateTick;
+            expect(closed.pollUnsafe()).toBeUndefined();
+            expect(socket.readyState).toBe(TestWebSocket.OPEN);
+          }
+          yield* lateTick;
+          expect(closed.pollUnsafe()).toBeDefined();
+          expect(yield* Fiber.join(closed)).toMatchObject({ _tag: "Failure" });
+        }).pipe(Effect.provideService(Clock.Clock, frozenClock));
+      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("does not let empty decoded frames extend the silence budget", () =>
+    Effect.gen(function* () {
+      const { factory, sockets } = yield* makeFactory();
+      const session = yield* factory.connect(PREPARED);
+      const ready = yield* Effect.forkChild(session.ready);
+      const closed = yield* Effect.forkChild(Effect.flip(session.closed));
+      const socket = yield* awaitSocket(sockets);
+      socket.open();
+      yield* completeInitialConfig(socket);
+      yield* Fiber.join(ready);
+      yield* TestClock.adjust("10 seconds");
+      socket.serverMessage("[]");
+      yield* TestClock.adjust("10 seconds");
+      expect(yield* Fiber.join(closed)).toMatchObject({
         reason: "transport",
         detail: "Test environment stopped responding.",
       });
