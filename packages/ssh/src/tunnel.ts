@@ -130,8 +130,8 @@ const REMOTE_ARCHIVE_DOWNLOAD_SECONDS = 240;
 const REMOTE_ARCHIVE_LOCK_WAIT_SECONDS = 360;
 const REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS = 900_000;
 const REMOTE_REUSE_READY_TIMEOUT_MS = 2_000;
-// Reserved by the folded launch protocol for a changed cached selection, never a launch failure.
-const REMOTE_RECONNECT_SELECTION_CHANGED_EXIT_CODE = 76;
+// Reserved by the folded launch protocol for re-entering preparation, never a launch failure.
+const REMOTE_RECONNECT_REPROBE_EXIT_CODE = 76;
 
 export interface RemoteGoatRunnerOptions {
   readonly nodeScriptPath?: string | null;
@@ -1575,6 +1575,7 @@ emit_pending() {
       fi
     fi
   fi
+@@GOAT_RECONNECT_PENDING_GUARD@@
   printf '{"status":"pending","pending":{%s}}\n' "$pending_fields"
   exit 0
 }
@@ -2392,6 +2393,10 @@ function buildRemoteRunnerSetupScript(
     ),
     GOAT_REPLACEMENT_LOCK: REMOTE_REPLACEMENT_LOCK_SCRIPT,
     GOAT_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
+    GOAT_RECONNECT_PENDING_GUARD: reconnect
+      ? `  # Normal preparation captures the retained runner so contention can still attach.
+  exit ${REMOTE_RECONNECT_REPROBE_EXIT_CODE}`
+      : "",
     GOAT_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
     GOAT_REQUESTED_RUNNER: shellSingleQuote(
       isNodeScriptRunner(input)
@@ -2429,7 +2434,7 @@ function buildRemoteRunnerSetupScript(
         ? `  # A folded reconnect may only attach to the owned selection; a race must re-enter preparation.
   if [ "$LIVE_STATUS" != live ] || [ "$LIVE_VERSION" != "$SELECTED_VERSION" ] ||
      [ "$LIVE_OWNED" != 1 ] || ! verify_owned_identity "$LIVE_PID" "$LIVE_PORT"; then
-    printf 'Cached GOAT selection changed; reconnect.\\n' >&2; exit ${REMOTE_RECONNECT_SELECTION_CHANGED_EXIT_CODE}
+    printf 'Cached GOAT selection changed; reconnect.\\n' >&2; exit ${REMOTE_RECONNECT_REPROBE_EXIT_CODE}
   fi
 `
         : "",
@@ -3472,7 +3477,7 @@ ${
   :
 else
   launch_status=$?
-  if [ "$launch_status" -ne ${REMOTE_RECONNECT_SELECTION_CHANGED_EXIT_CODE} ]; then exit "$launch_status"; fi
+  if [ "$launch_status" -ne ${REMOTE_RECONNECT_REPROBE_EXIT_CODE} ]; then exit "$launch_status"; fi
   printf '{"status":"reprobe"}\\n'
   exit 0
 fi`

@@ -339,16 +339,18 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       180_000,
     );
 
-    it.live(
-      "a stale manager entry reconnects with one command and records its folded step",
-      () =>
+    it.live.each([false, true])(
+      "a stale manager entry reconnects and creates a forward (replacement lock held=%s)",
+      (contended) =>
         Effect.gen(function* () {
           const f = yield* fixture;
           yield* f.shiftHostClock(60);
           let forwardAlive = true;
+          let forwards = 0;
           const transport = ChildProcessSpawner.make((command) => {
             if (command._tag === "StandardCommand" && command.args.includes("-N")) {
               forwardAlive = true;
+              forwards++;
               return Effect.succeed({
                 ...makeRunningProcess(() => undefined),
                 isRunning: Effect.sync(() => forwardAlive),
@@ -371,10 +373,38 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           yield* Effect.gen(function* () {
             const manager = yield* SshEnvironmentManager;
             yield* manager.ensureEnvironment(uploadTarget);
+            const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
+            const owner = "other-client|0|1|old|fixture";
+            if (contended) yield* f.fs.symlink(owner, lock);
+            const ordinary = contended ? yield* launch(f) : undefined;
+            if (ordinary !== undefined) {
+              assert.equal(ordinary.status, "ready");
+              assert.equal(ordinary.pending?.reason, "contended");
+            }
+            const snapshot = yield* f.snapshot;
             const commands = f.remoteCommands.length;
             forwardAlive = false;
-            yield* manager.ensureEnvironment(uploadTarget);
-            assert.equal(f.remoteCommands.length - commands, 1);
+            const cost = {
+              active: true,
+              spawns: 0,
+              authentications: 0,
+              steps: {} as Record<string, number>,
+            };
+            const result = yield* manager
+              .ensureEnvironment(uploadTarget)
+              .pipe(Effect.provideService(SshReconnectCost, cost));
+            assert.isFalse("type" in result);
+            if ("type" in result) return;
+            assert.deepEqual(result.pendingReplacement, ordinary?.pending);
+            assert.equal(result.remotePort, f.port);
+            assert.equal(forwards, 2);
+            assert.equal(f.remoteCommands.length - commands, contended ? 3 : 1);
+            assert.property(cost.steps, "runtime-probe-folded");
+            assert.deepEqual(yield* f.snapshot, snapshot);
+            if (contended) {
+              assert.equal(yield* f.fs.readLink(lock), owner);
+              yield* f.fs.remove(lock);
+            }
             for (const options of [{ refreshRuntime: true }, { confirmReplacement: true }]) {
               forwardAlive = false;
               const before = f.remoteCommands.length;
