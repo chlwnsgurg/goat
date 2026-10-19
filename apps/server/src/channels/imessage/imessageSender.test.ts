@@ -11,6 +11,40 @@ import {
 } from "./imessageSender.ts";
 
 describe("iMessage sender", () => {
+  it("marks spawn failure unsent and a timed-out child ambiguous", async () => {
+    const failedSpawn = (() => {
+      throw new Error("fixture");
+    }) as unknown as typeof NodeChildProcess.spawn;
+    expect(
+      await makeOsascriptImessageSender({ spawnProcess: failedSpawn }).sendText({
+        chatGuid: "guid",
+        text: "hello",
+      }),
+    ).toEqual({ outcome: "not_sent", code: "unknown" });
+    const child = new NodeEvents.EventEmitter() as NodeEvents.EventEmitter & {
+      stdin: NodeStream.PassThrough;
+      stdout: NodeStream.PassThrough;
+      stderr: NodeStream.PassThrough;
+      kill: () => boolean;
+    };
+    child.stdin = new NodeStream.PassThrough();
+    child.stdout = new NodeStream.PassThrough();
+    child.stderr = new NodeStream.PassThrough();
+    child.kill = () => {
+      queueMicrotask(() => child.emit("close", null));
+      return true;
+    };
+    const timedSpawn = (() => {
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    }) as unknown as typeof NodeChildProcess.spawn;
+    expect(
+      await makeOsascriptImessageSender({ spawnProcess: timedSpawn, timeoutMs: 1 }).sendText({
+        chatGuid: "guid",
+        text: "hello",
+      }),
+    ).toEqual({ outcome: "unknown", code: "timeout" });
+  });
   it("distinguishes proven pre-send failures from uncertain exits", async () => {
     const outcome = async (stderr: string, exitCode: number) => {
       const child = new NodeEvents.EventEmitter() as NodeEvents.EventEmitter & {

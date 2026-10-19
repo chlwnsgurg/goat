@@ -17,6 +17,7 @@ import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
 import * as ChannelLedger from "../ChannelLedger.ts";
+import type { ImessageRow } from "./imessageChatDb.ts";
 import * as ChannelGateway from "../ChannelGateway.ts";
 import * as ChannelBotHome from "../ChannelBotHome.ts";
 import * as ChannelTransport from "../ChannelTransport.ts";
@@ -41,6 +42,119 @@ const file: ImessageSettingsFile = {
 };
 
 describe("iMessage owner poll", () => {
+  it.effect("starts at zero and replays a durable receipt after a lost checkpoint", () =>
+    Effect.gen(function* () {
+      const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-imsg-replay-"));
+      try {
+        NodeFS.writeFileSync(NodePath.join(dir, IMESSAGE_SETTINGS_FILE), JSON.stringify(file));
+        let clock = 1_000_000;
+        let max = 0;
+        let row: ImessageRow | undefined;
+        let cursor: ChannelLedger.ImessageCursor | undefined;
+        let failCheckpoint = false;
+        let scans = 0;
+        const stored = new Set<string>();
+        let receipts = 0;
+        const ledger = {
+          isOwner: () => Effect.succeed(true),
+          getImessageCursor: () => Effect.succeed(cursor),
+          checkpointImessageCursor: ({ next }: { next: ChannelLedger.ImessageCursor }) =>
+            Effect.gen(function* () {
+              if (failCheckpoint) {
+                failCheckpoint = false;
+                return yield* new ChannelLedger.ChannelLedgerError({
+                  reason: "persistence",
+                  detail: "fixture",
+                });
+              }
+              cursor = next;
+            }),
+          getDeliveryState: () => Effect.succeed(undefined),
+        } as unknown as ChannelLedger.ChannelLedger["Service"];
+        const gateway = {
+          ingest: (message: ChannelInboundMessage) =>
+            Effect.sync(() => {
+              receipts += 1;
+              stored.add(message.idempotencyKey);
+              return {} as ChannelIngestResult;
+            }),
+        } as unknown as ChannelGateway.ChannelGateway["Service"];
+        const scope = yield* Scope.make();
+        const runtime = makeImessageChannelRuntime({
+          stateDir: dir,
+          platform: "darwin",
+          dbPath: "fixture",
+          ledger,
+          gateway,
+          home: { requireHome: Effect.void },
+          registry: {
+            register: () => Effect.void,
+          } as unknown as ChannelTransport.ChannelTransportRegistry["Service"],
+          scope,
+          now: () => clock,
+          openDb: () => ({
+            maxRowId: () => max,
+            rowsAfter: (after) => {
+              scans += 1;
+              return row && row.rowid > after ? [row] : [];
+            },
+            rowById: (id) => (row === undefined ? undefined : { ...row, rowid: id }),
+            close: () => {},
+          }),
+        });
+        expect(yield* runtime.pollDue("owner")).toBe(0);
+        expect(cursor).toEqual({ cursor: 0, pendingRowIds: [] });
+        row = {
+          rowid: 1,
+          guid: "guid-1",
+          text: "hello",
+          attributedBody: null,
+          handle_id: 1,
+          is_from_me: 0,
+          date: 0,
+          date_read: null,
+          cache_roomnames: null,
+          associated_message_type: null,
+          item_type: 0,
+          balloon_bundle_id: null,
+          sender_handle: "+15550000000",
+          sender_service: "iMessage",
+          chat_rowid: 1,
+          chat_guid: "iMessage;-;+15550000000",
+          chat_identifier: "+15550000000",
+          style: 45,
+          chat_join_count: 1,
+        };
+        max = 1;
+        clock += 5_000;
+        failCheckpoint = true;
+        expect((yield* Effect.result(runtime.pollDue("owner")))._tag).toBe("Failure");
+        expect(cursor?.cursor).toBe(0);
+        clock += 5_000;
+        expect(yield* runtime.pollDue("owner")).toBe(1);
+        expect(cursor?.cursor).toBe(1);
+        expect(receipts).toBe(2);
+        expect(stored.size).toBe(1);
+        const pendingRowIds = Array.from({ length: 128 }, (_, index) => index + 1);
+        cursor = { cursor: 129, pendingRowIds };
+        row = { ...row, chat_join_count: 0, chat_guid: null };
+        max = 129;
+        clock += 5_000;
+        const scansBefore = scans;
+        expect(yield* runtime.pollDue("owner")).toBe(0);
+        expect(scans).toBe(scansBefore);
+        expect(cursor.pendingRowIds).toHaveLength(128);
+        cursor = { cursor: 2, pendingRowIds: [] };
+        max = 1;
+        clock += 5_000;
+        expect((yield* Effect.result(runtime.pollDue("owner")))._tag).toBe("Failure");
+        expect(cursor.cursor).toBe(2);
+        yield* Scope.close(scope, Exit.void);
+      } finally {
+        NodeFS.rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
   it.effect("starts at max, checkpoints skips and admits only new direct text", () =>
     Effect.gen(function* () {
       const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-imsg-poll-"));

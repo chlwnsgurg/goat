@@ -57,17 +57,31 @@ describe("iMessage row mapping", () => {
   it("fails closed for group, multiple joins, SMS, reactions and own messages", () => {
     for (const changed of [
       { style: 43 },
+      { style: 99 },
       { chat_join_count: 2 },
       { sender_service: "SMS" },
       { associated_message_type: 2000 },
       { item_type: 1 },
       { is_from_me: 1 },
       { sender_handle: "+15550000001" },
+      { text: "\ufffc" },
     ])
       expect(admitImessageRow({ ...row, ...changed }, settings).type).toBe("skip");
     expect(admitImessageRow({ ...row, chat_join_count: 0, chat_guid: null }, settings).type).toBe(
       "pending_join",
     );
+  });
+  it("accepts a normalized email sender and ignores chat_identifier for routing", () => {
+    const emailSettings = { ...settings, allowedHandles: new Set(["person@example.com"]) };
+    const admitted = admitImessageRow(
+      { ...row, sender_handle: "PERSON@EXAMPLE.COM", chat_identifier: "other@example.com" },
+      emailSettings,
+    );
+    expect(admitted.type).toBe("message");
+    if (admitted.type === "message") {
+      expect(admitted.senderHandle).toBe("person@example.com");
+      expect(admitted.chatGuid).toBe(row.chat_guid);
+    }
   });
   it("extracts only bounded NSString payload and strips attachment placeholders", () => {
     const text = new TextEncoder().encode("hello");

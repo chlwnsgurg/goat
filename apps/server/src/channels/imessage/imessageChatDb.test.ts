@@ -50,5 +50,14 @@ describe("iMessage read-only chat database", () => {
     expect(classifyImessageDbError(new Error("no such column: h.service"))).toBe(
       "schema_unsupported",
     );
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-imsg-schema-"));
+    const path = NodePath.join(dir, "empty.sqlite");
+    try {
+      const writer = new NodeSqlite.DatabaseSync(path);
+      writer.close();
+      expect(() => openImessageChatDb(path)).toThrow("schema_unsupported");
+    } finally {
+      NodeFS.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

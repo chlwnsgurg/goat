@@ -51,6 +51,11 @@ describe("iMessage settings", () => {
           (yield* loadImessageSettings({ stateDir: dir, platform: "darwin" }))?.connectionId,
         ).toBe(file.connectionId);
         expect(yield* loadImessageSettings({ stateDir: dir, platform: "linux" })).toBeUndefined();
+        NodeFS.writeFileSync(
+          NodePath.join(dir, IMESSAGE_SETTINGS_FILE),
+          JSON.stringify({ ...file, version: 2 }),
+        );
+        expect(yield* loadImessageSettings({ stateDir: dir, platform: "darwin" })).toBeUndefined();
       } finally {
         NodeFS.rmSync(dir, { recursive: true, force: true });
       }
