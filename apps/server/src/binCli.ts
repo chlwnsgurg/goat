@@ -40,13 +40,46 @@ import { triageCommand } from "./cli/triage.ts";
 
 const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NetService.layer);
 
-const connectUnavailableCommand = Command.make("connect", {
+const connectComingSoonCommand = Command.make("connect", {
   command: Argument.String("command").pipe(Argument.variadic),
 }).pipe(
   Command.withDescription(GOAT_CONNECT_CLI_COMING_SOON_MESSAGE),
   Command.unlisted,
   Command.withHandler(() => Console.log(GOAT_CONNECT_CLI_COMING_SOON_MESSAGE)),
 );
+
+const connectPublicConfigMissingMessage =
+  "T3 Connect commands are unavailable: this build is missing T3 Connect public configuration.";
+
+class ConnectPublicConfigMissingError extends CliError.UserError {
+  override get message() {
+    return connectPublicConfigMissingMessage;
+  }
+}
+
+// With the feature on, a build without its public configuration is a build
+// problem the operator must see, so this exits non-zero unlike the coming-soon stub.
+const connectMissingConfigCommand = Command.make("connect", {
+  command: Argument.String("command").pipe(Argument.variadic),
+}).pipe(
+  Command.withDescription("T3 Connect is unavailable in builds without public configuration."),
+  Command.unlisted,
+  Command.withHandler(() =>
+    Effect.fail(
+      new CliError.ShowHelp({
+        commandPath: ["goat", "connect"],
+        errors: [new ConnectPublicConfigMissingError({ cause: connectPublicConfigMissingMessage })],
+      }),
+    ),
+  ),
+);
+
+const selectConnectCommand = (cloudEnabled: boolean) =>
+  !isGoatConnectEnabled()
+    ? connectComingSoonCommand
+    : cloudEnabled
+      ? connectCommand
+      : connectMissingConfigCommand;
 
 export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
   Command.make("goat", { ...sharedServerCommandFlags }).pipe(
@@ -82,7 +115,7 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
       traceCommand,
       doctorCommand,
       triageCommand,
-      isGoatConnectEnabled() && cloudEnabled ? connectCommand : connectUnavailableCommand,
+      selectConnectCommand(cloudEnabled),
     ]),
   );
 
