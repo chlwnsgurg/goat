@@ -13,6 +13,7 @@ Each release carries the same set of files on both channels:
 - desktop installers: signed and notarized macOS DMG and ZIP (arm64, x64), Windows NSIS (x64, arm64), Linux AppImage and `.deb` (x64, arm64), with blockmaps;
 - electron-updater manifests, merged across architectures (`<channel>-mac.yml`, `<channel>.yml` for Windows, `<channel>-linux.yml`, `<channel>-linux-arm64.yml`);
 - CLI runtime archives `goat-<version>-<platform>-<arch>.tar.gz` (`.zip` on Windows) for darwin-arm64, linux-x64, linux-arm64, win32-x64 and win32-arm64, which SSH hosts download to run the matching server;
+- runtime compatibility manifest `goat-<version>-runtime.json`, also embedded as `goat-runtime.json` beside each archive’s executable. Clients use it to choose a compatible fallback before transferring an archive;
 - `SHA256SUMS` covering every file, the install scripts, and third-party notices.
 
 ## Channels

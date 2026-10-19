@@ -21,6 +21,8 @@ import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as HostProcess from "@goat/shared/HostProcess";
+import { ownRuntimeManifest, RUNTIME_MANIFEST_ARCHIVE_ENTRY } from "@goat/shared/runtimeManifest";
+import { resolveBuildCommit, resolveBuildCommitTime } from "./lib/build-commit-time.ts";
 import { fromYaml } from "@goat/shared/schemaYaml";
 import { resolveSpawnCommand } from "@goat/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
@@ -63,6 +65,18 @@ export const stageCliResourceMonitor = Effect.fn("stageCliResourceMonitor")(func
       yield* fs.rename(legacyPath, currentPath);
     }
   }
+});
+
+export const stageCliRuntimeManifest = Effect.fn("stageCliRuntimeManifest")(function* (
+  contentDir: string,
+  input: Parameters<typeof ownRuntimeManifest>[0],
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fs.writeFileString(
+    path.join(contentDir, RUNTIME_MANIFEST_ARCHIVE_ENTRY),
+    `${yield* encodeJsonString(ownRuntimeManifest(input))}\n`,
+  );
 });
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -624,6 +638,12 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     neutralizeBuildRoot(yield* fs.readFile(builtExecutable), repoRoot),
   );
   yield* fs.chmod(path.join(contentDir, executableName), 0o755);
+  const rawCommitTime = resolveBuildCommitTime(repoRoot);
+  yield* stageCliRuntimeManifest(contentDir, {
+    version: input.version,
+    commit: resolveBuildCommit(repoRoot),
+    commitTime: /^[1-9][0-9]{0,15}$/.test(rawCommitTime) ? Number(rawCommitTime) : undefined,
+  });
   // Upstream T3 Code's MIT notice travels with every GOAT archive.
   yield* fs.copyFile(path.join(repoRoot, "LICENSE"), path.join(contentDir, "LICENSE-T3CODE.txt"));
   yield* stageWebClient(webClient, path.join(contentDir, "client"));

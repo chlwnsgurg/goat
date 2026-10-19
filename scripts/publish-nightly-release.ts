@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { runtimeManifestAssetName } from "@goat/shared/runtimeManifest";
+import { checkReleaseRuntimeManifest } from "./lib/runtime-manifest.ts";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Config from "effect/Config";
@@ -48,6 +50,7 @@ export function releaseChannelOfVersion(version: string): "nightly" | "stable" |
 /** SHA256SUMS is the local asset inventory; verify it before any mutation. */
 export const readLocalReleaseAssets = Effect.fn("readLocalReleaseAssets")(function* (
   dir: string,
+  version: string,
   requireRepositoryFiles = true,
 ) {
   const fs = yield* FileSystem.FileSystem;
@@ -79,6 +82,16 @@ export const readLocalReleaseAssets = Effect.fn("readLocalReleaseAssets")(functi
       message: "SHA256SUMS must include the installers and third-party notices.",
     });
   }
+  const runtimeName = runtimeManifestAssetName(version);
+  if (!checksums.has(runtimeName))
+    return yield* new NightlyPublishError({ message: `Missing runtime manifest: ${runtimeName}.` });
+  const runtimeProblems = checkReleaseRuntimeManifest(
+    yield* fs.readFileString(path.join(dir, runtimeName)),
+    version,
+    checksums,
+  );
+  if (runtimeProblems.length)
+    return yield* new NightlyPublishError({ message: runtimeProblems.join("; ") });
   const entries = yield* fs.readDirectory(dir);
   if (entries.some((name) => name !== "SHA256SUMS" && !checksums.has(name))) {
     return yield* new NightlyPublishError({
@@ -136,7 +149,7 @@ export const publishNightlyRelease = Effect.fn("publishNightlyRelease")(function
   const prerelease = channel === "nightly";
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const local = yield* readLocalReleaseAssets(dir, !assetsOnly);
+  const local = yield* readLocalReleaseAssets(dir, version, !assetsOnly);
   const releases = yield* client.listReleases();
   const sameTag = releases.find((release) => !release.draft && release.tag_name === `v${version}`);
   const allMatch = Effect.fn("nightlyAssetsMatch")(function* (id: number) {
