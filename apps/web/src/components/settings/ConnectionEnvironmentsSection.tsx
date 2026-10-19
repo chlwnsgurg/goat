@@ -718,8 +718,8 @@ function EmptyRemoteEnvironments({ cloudEnabled = true }: { readonly cloudEnable
         <EmptyTitle>No saved remote environments</EmptyTitle>
         <EmptyDescription>
           {cloudEnabled
-            ? "Click “Add environment” to pair another environment, or connect one from T3 Connect."
-            : "Click “Add environment” to pair another environment."}
+            ? "Click “Add device” to pair another environment, or connect one from T3 Connect."
+            : "Click “Add device” to pair another environment."}
         </EmptyDescription>
       </EmptyHeader>
     </Empty>
