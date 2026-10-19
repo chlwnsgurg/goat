@@ -160,7 +160,8 @@ describe("FleetConsoleSlot", () => {
     expect(hostStatus.reads).toBe(0);
 
     await act(async () => toggle().click());
-    expect(hostStatus.reads).toBeGreaterThan(0);
+    // The atom may be served from the registry's cache, so check what the body shows.
+    expect(console_()!.textContent).toContain("91%");
     expect(useUiStateStore.getState().fleetConsoleCollapsed).toBe(false);
   });
 
