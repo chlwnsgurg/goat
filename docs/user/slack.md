@@ -34,6 +34,15 @@ GOAT Bot screen shows only a chip for the work and its final report.
   repository.
 - GOAT Bot answers questions about the machine it runs on, such as its name,
   OS, memory, and what is running, without starting work.
+- Ask GOAT Bot about earlier work ("did the login PR merge?", "what did the
+  docs thread do?", "when did I mention the lighthouse score?") and it looks
+  it up itself and answers, without starting a coding agent. It reads the work
+  it started, the pull requests that work linked, the last messages of its
+  coding threads, older messages in the conversation, and its notes and
+  [memory](./memory.md). It shows you only work from the conversation you are
+  in, work you asked for, and, if your link may read GOAT's threads, the rest.
+- With every message GOAT Bot also sees a short journal of the latest work
+  you may see: what was asked, how it ended, and its pull requests.
 - Ask GOAT Bot to remember a standing rule ("always reply in Korean") and it
   follows it from then on, in Slack and in GOAT. It keeps a note only when the
   message you send asks for it, and each note names the message it came from.

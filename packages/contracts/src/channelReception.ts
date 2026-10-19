@@ -31,6 +31,10 @@ export const ChannelReceptionTaskSummary = Schema.Struct({
   title: TrimmedNonEmptyString,
   status: ChannelTaskStatus,
   resultSummary: Schema.optional(Schema.String),
+  /** The machine the work runs on when it is not this one. */
+  host: Schema.optional(TrimmedNonEmptyString),
+  /** Pull requests the worker linked, as "repo#123 (merged)". */
+  pullRequests: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   openQuestions: Schema.Array(
     Schema.Struct({ questionId: ChannelQuestionId, text: TrimmedNonEmptyString }),
   ),
@@ -73,6 +77,40 @@ export const ChannelReceptionSkill = Schema.Struct({
 });
 export type ChannelReceptionSkill = typeof ChannelReceptionSkill.Type;
 
+/**
+ * What a reception pass can look up before it answers. The server runs each read within what the
+ * requester may see and hands the results to one more pass; reads never change anything.
+ * - memory: GOAT Bot's notes and journal, and GOAT memory when the requester may read it.
+ * - work: tasks GOAT Bot started (any conversation the requester may see), their results,
+ *   final reports and pull requests.
+ * - thread: the latest messages of a task's coding thread.
+ * - conversation: older messages of this conversation than the recent ones shown.
+ */
+export const ChannelReceptionReadKind = Schema.Literals([
+  "memory",
+  "work",
+  "thread",
+  "conversation",
+]);
+export type ChannelReceptionReadKind = typeof ChannelReceptionReadKind.Type;
+
+export const ChannelReceptionRead = Schema.Struct({
+  kind: ChannelReceptionReadKind,
+  /** Words to look for, or a task id, thread title, or pull request number or URL. */
+  query: TrimmedNonEmptyString,
+});
+export type ChannelReceptionRead = typeof ChannelReceptionRead.Type;
+
+export const ChannelReceptionReadResult = Schema.Struct({
+  kind: ChannelReceptionReadKind,
+  query: Schema.String,
+  text: Schema.String,
+});
+export type ChannelReceptionReadResult = typeof ChannelReceptionReadResult.Type;
+
+/** The most reads one pass may ask for; one round of reads per input. */
+export const CHANNEL_RECEPTION_MAX_READS = 3;
+
 /** The most choices a clarifying question offers. */
 export const CHANNEL_RECEPTION_MAX_OPTIONS = 4;
 
@@ -101,6 +139,12 @@ export const ChannelReceptionInput = Schema.Struct({
   hostFacts: Schema.optional(Schema.Array(ChannelReceptionHostFact)),
   /** Standing notes the people using the bot asked it to keep, newest last. */
   notes: Schema.optional(Schema.String),
+  /** The newest lines of GOAT Bot's journal of work it started and how it ended. */
+  journal: Schema.optional(Schema.String),
+  /** Whether this pass may answer with a read; false on the pass that already has results. */
+  readsAllowed: Schema.optional(Schema.Boolean),
+  /** Results of the reads the previous pass asked for. */
+  readResults: Schema.optional(Schema.Array(ChannelReceptionReadResult)),
   /** Written procedures workers can follow. */
   skills: Schema.optional(Schema.Array(ChannelReceptionSkill)),
   requester: ChannelRequester,
@@ -125,6 +169,13 @@ export const ChannelReceptionAction = Schema.Union([
      * note. The server keeps it only when it occurs in that input; only such tasks may edit notes.
      */
     notesChangeRequested: Schema.optional(TrimmedNonEmptyString),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("read"),
+    reads: Schema.Array(ChannelReceptionRead).check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(CHANNEL_RECEPTION_MAX_READS),
+    ),
   }),
   Schema.Struct({
     type: Schema.Literal("move_task"),
