@@ -7,6 +7,10 @@ their service definition or select their own replacement. Local service commands
 may replace the launcher and state while the service is stopped. Foreground CLI
 processes do not self-update.
 
+This page covers one replacement. The policy above it (independent app and server
+updates, protocol ranges, who may update, and auditing) is in
+[remote updates](./remote-updates.md).
+
 Exact-version installs keep restarts independent of npm cache eviction or a moving
 release tag. Installation and preflight happen in staging before publishing an
 immutable runtime. Preflight checks the launcher protocol because a target that
