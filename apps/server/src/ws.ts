@@ -9,6 +9,7 @@ import * as MemorySyncService from "./memory/MemorySyncService.ts";
 import { memoryError } from "./mcp/toolkits/memory/handlers.ts";
 import * as SshWorkspaceSync from "./sshRemote/SshWorkspaceSync.ts";
 import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
+import * as CloudAgentService from "./cloudAgents/CloudAgentService.ts";
 import * as CloudMachineService from "./cloudMachines/CloudMachineService.ts";
 import {
   CHANNEL_GATEWAY_WS_METHODS,
@@ -2335,6 +2336,10 @@ const layerWsRpc = (
           ),
         [WS_METHODS.remoteLaunchesList]: (input) => remoteLaunchCatalog.list(input),
         [WS_METHODS.cloudMachinesList]: () => cloudMachines.list(),
+        [WS_METHODS.cloudAgentsListRuns]: (input) =>
+          CloudAgentService.listCloudRuns(input).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+          ),
         [WS_METHODS.cloudMachinesConfigure]: (input) => cloudMachines.configure(input),
         [WS_METHODS.cloudMachinesDisconnect]: () => cloudMachines.disconnect(),
         [WS_METHODS.cloudMachinesCreate]: (input) => cloudMachines.create(input),
