@@ -1998,6 +1998,7 @@ export const resolveSshCliRunner = (baseDir: string) =>
       archiveDirectory,
       ...(bundledArchiveDirectory === undefined ? {} : { bundledArchiveDirectory }),
       ...(releaseBaseUrl === undefined ? {} : { releaseBaseUrl }),
+      hostDownload: true,
       refreshOwnedRuntimeOnFirstConnection: true,
     } satisfies SshTunnel.RemoteGoatRunnerOptions;
   });

@@ -74,7 +74,8 @@ export function sshRuntimeStatusText(status: SshHostStatus): string {
         case "checking":
           return "Checking GOAT runtime";
         case "uploading":
-          return "Uploading GOAT runtime (about 70 MB)";
+          // The host downloads the release itself when it can, so this phase covers both.
+          return "Installing GOAT runtime (about 90 MB)";
         case "starting":
           return "Starting GOAT";
         case undefined:

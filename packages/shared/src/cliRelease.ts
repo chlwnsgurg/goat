@@ -78,6 +78,15 @@ export function cliReleaseChannelOf(version: string): CliReleaseChannel {
 }
 
 /**
+ * Whether a version has the shape the release workflow publishes. Dev and PR builds
+ * (`-dev.<time>.g<sha>`, `-pr.<pr>.<run>`) never publish, so asking a host to download
+ * them only delays the upload that has to happen anyway.
+ */
+export function isPublishableCliReleaseVersion(version: string): boolean {
+  return /^\d+\.\d+\.\d+(?:-(?:nightly|preview)\.\d{8}\.\d+)?$/.test(version);
+}
+
+/**
  * Callers walk pages until a channel match turns up; a busy nightly train can push the newest
  * preview or stable release past any single page.
  */

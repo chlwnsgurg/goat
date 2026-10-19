@@ -41,6 +41,7 @@ import {
   cliArchiveFileName,
   cliArchivePlatformKey,
   cliReleaseDownloadBaseUrl,
+  isPublishableCliReleaseVersion,
 } from "@goat/shared/cliRelease";
 import * as KeyedLock from "@goat/shared/KeyedLock";
 import * as NetService from "@goat/shared/Net";
@@ -129,6 +130,9 @@ const REMOTE_ARCHIVE_CHECKSUMS_SECONDS = 30;
 const REMOTE_ARCHIVE_DOWNLOAD_SECONDS = 240;
 const REMOTE_ARCHIVE_LOCK_WAIT_SECONDS = 360;
 const REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS = 900_000;
+// A host download waits on the install lock at most as long as a launch would, then
+// fetches with retries; past this the client stops waiting and uploads instead.
+const REMOTE_HOST_DOWNLOAD_TIMEOUT_MS = 600_000;
 const REMOTE_REUSE_READY_TIMEOUT_MS = 2_000;
 // Reserved by the folded launch protocol for re-entering preparation, never a launch failure.
 const REMOTE_RECONNECT_REPROBE_EXIT_CODE = 76;
@@ -149,6 +153,12 @@ export interface RemoteGoatRunnerOptions {
   readonly archiveDirectory?: string | null;
   /** Read-only packaged archives. Never create, repair, or download into this directory. */
   readonly bundledArchiveDirectory?: string | null;
+  /**
+   * Ask the host to download a published release itself before this client uploads one.
+   * The desktop app and the server's SSH dispatch set it; without it the client always
+   * acquires the archive and uploads it.
+   */
+  readonly hostDownload?: boolean;
   /** Local gh executable used for authenticated acquisition; defaults to PATH lookup. */
   readonly ghCommand?: string | undefined;
   /** Deadline for the best-effort post-install cleanup and fact warming round trip; 10 s by default. */
@@ -2535,6 +2545,26 @@ export function buildRemotePairingScript(
   });
 }
 
+/**
+ * Installers are transient copies of the runner with its fetch block swapped out, so the
+ * managed run-t3.sh bytes (and the retained-runner identity built on them) never change.
+ */
+function replaceRunnerAcquisitionBlock(script: string, replace: (block: string) => string): string {
+  const startAnchor = '  goat_fetch "$GOAT_RELEASE_BASE_URL/v$GOAT_ARCHIVE_VERSION/SHA256SUMS"';
+  const endAnchor = "  if command -v sha256sum >/dev/null 2>&1; then";
+  const start = script.indexOf(startAnchor);
+  const end = script.indexOf(endAnchor);
+  if (
+    start < 0 ||
+    end <= start ||
+    script.indexOf(startAnchor, start + 1) !== -1 ||
+    script.indexOf(endAnchor, end + 1) !== -1
+  ) {
+    throw new SshLaunchError({ message: "acquisition block no longer matches", stdout: "" });
+  }
+  return script.slice(0, start) + replace(script.slice(start, end)) + script.slice(end);
+}
+
 export function buildRemoteGoatUploadInstallerScript(
   input: RemoteGoatRunnerOptions,
   sha256: string,
@@ -2549,25 +2579,49 @@ export function buildRemoteGoatUploadInstallerScript(
       stdout: "",
     });
   }
-  const script = buildRemoteGoatRunnerScript(input);
-  const startAnchor = '  goat_fetch "$GOAT_RELEASE_BASE_URL/v$GOAT_ARCHIVE_VERSION/SHA256SUMS"';
-  const endAnchor = "  if command -v sha256sum >/dev/null 2>&1; then";
-  const start = script.indexOf(startAnchor);
-  const end = script.indexOf(endAnchor);
-  if (
-    start < 0 ||
-    end <= start ||
-    script.indexOf(startAnchor, start + 1) !== -1 ||
-    script.indexOf(endAnchor, end + 1) !== -1
-  ) {
-    throw new SshLaunchError({ message: "acquisition block no longer matches", stdout: "" });
+  return replaceRunnerAcquisitionBlock(
+    buildRemoteGoatRunnerScript(input),
+    () =>
+      '  cp "$GOAT_SSH_UPLOADED_ARCHIVE" "$GOAT_STAGING/$GOAT_ARCHIVE"\n' +
+      `  GOAT_EXPECTED='${sha256.toLowerCase()}'\n`,
+  );
+}
+
+// curl --retry and wget --tries back off only on transient failures (timeouts, 408, 429,
+// 5xx), so a 404 or a host without DNS fails at once and the client uploads instead.
+const REMOTE_HOST_FETCH_FUNCTION = `  goat_host_fetch() {
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL --connect-timeout 10 --retry 2 --max-time "$3" "$1" -o "$2" && return 0
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q --timeout=30 --tries=3 --waitretry=2 "$1" -O "$2" && return 0
+    else
+      printf 'Remote host needs curl or wget to download %s.\\n' "$GOAT_ARCHIVE" >&2
+      return 1
+    fi
+    printf 'Remote host could not download %s.\\n' "$1" >&2
+    return 1
   }
-  // Patch a transient copy so preparation never changes the managed runner.
+`;
+
+/**
+ * Installs the requested published release on the host from its own network, verified
+ * against the release's SHA256SUMS like every HTTPS acquisition, and exits after
+ * `goat --version` without starting a server. Launch then finds the runtime ready.
+ */
+export function buildRemoteHostDownloadScript(input: RemoteGoatRunnerOptions): string {
+  if (isNodeScriptRunner(input) || !input.archiveVersion?.trim()) {
+    throw new SshLaunchError({
+      message: "Host download requires an archive version.",
+      stdout: "",
+    });
+  }
   return (
-    script.slice(0, start) +
-    '  cp "$GOAT_SSH_UPLOADED_ARCHIVE" "$GOAT_STAGING/$GOAT_ARCHIVE"\n' +
-    `  GOAT_EXPECTED='${sha256.toLowerCase()}'\n` +
-    script.slice(end)
+    "set -- --version\n" +
+    replaceRunnerAcquisitionBlock(
+      buildRemoteGoatRunnerScript(input),
+      (block) =>
+        REMOTE_HOST_FETCH_FUNCTION + block.replaceAll('  goat_fetch "', '  goat_host_fetch "'),
+    )
   );
 }
 
@@ -2917,6 +2971,45 @@ const archiveSupplyError = (cause: unknown) => {
     : error;
 };
 
+/**
+ * Succeeds with false when the host could not install the release itself (no network,
+ * a proxy, a pruned release, a checksum mismatch), so the caller uploads instead. A
+ * dropped SSH connection (exit 255) fails: an upload over it would fail too.
+ */
+const installOnHost = Effect.fn("ssh/tunnel.installOnHost")(function* (
+  target: DesktopSshEnvironmentTarget,
+  authOptions: SshAuth.SshAuthOptions,
+  runner: RemoteGoatRunnerOptions,
+  onPhase?: SshRuntimeProgressCallback,
+) {
+  const script = yield* Effect.try({
+    try: () => buildRemoteHostDownloadScript(runner),
+    catch: runtimePreparationError,
+  });
+  notifyRuntimePhase(target, "uploading", onPhase);
+  // A login shell picks up the user's proxy settings for curl and wget.
+  return yield* runSshCommand(target, {
+    ...authOptions,
+    remoteCommandArgs: ["sh", "-l", "-s"],
+    stdin: script,
+    timeoutStage: "runtime-install",
+    timeoutMs: REMOTE_HOST_DOWNLOAD_TIMEOUT_MS,
+  }).pipe(
+    Effect.as(true),
+    Effect.catchTags({
+      SshCommandError: (error) =>
+        error.exitCode === 255
+          ? Effect.fail(error)
+          : Effect.logWarning("ssh.runtime.host-download.failed", {
+              ...sshTargetLogFields(target),
+              version: runner.archiveVersion,
+              exitCode: error.exitCode,
+              reason: error.message,
+            }).pipe(Effect.as(false)),
+    }),
+  );
+});
+
 export const prepareRemoteRuntime = (
   target: DesktopSshEnvironmentTarget,
   authOptions: SshAuth.SshAuthOptions,
@@ -3171,6 +3264,20 @@ export const prepareRemoteRuntime = (
           message: `Cannot acquire the SSH runtime archive (repo=${CLI_RELEASE_REPOSITORY}, tag=v${version}, asset=${asset}, archive directory=${directory || "<not configured>"}). Configure a local archive directory and use a supported SSH platform, or an explicit release mirror.`,
           stdout: "",
         });
+      }
+      // The host's own network is usually faster than this client's uplink, and an upload
+      // costs this client the whole archive. Unpublished builds and mirrors skip it.
+      if (
+        runner?.hostDownload === true &&
+        mirror === "" &&
+        isPublishableCliReleaseVersion(version) &&
+        (yield* source(
+          "host",
+          installOnHost(target, authOptions, { ...runner, archiveVersion: version }, onPhase),
+        ))
+      ) {
+        yield* Effect.annotateCurrentSpan("goat.runtime.source", "host-download");
+        return { ...exact, requireInstalled: true, uploaded: true };
       }
       const bundledArchive =
         bundleDirectory === ""

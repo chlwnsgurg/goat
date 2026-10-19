@@ -129,13 +129,18 @@ replacement needs a person's confirmation bound to that environment and target.
 - **Exact target.** An update resolves one exact version. The SSH path targets the
   owning client's release; `goat update` and `server.updateServer` target the
   requested version. The launcher refuses anything that is not newer.
-- **Supply order** is bundle (with a canonical SHA-256 sidecar), local cache,
-  explicit mirror, public `goat-si/goat-releases` over HTTPS, then `gh`. Public
-  and `gh` downloads are checked against `SHA256SUMS`. An archive without a
-  sidecar is accepted only from the local cache, which only the user writes; that
-  is the supported way to hand a source build to remote hosts
+- **Supply order** starts on the host. For a published version (stable, nightly
+  or preview) with no mirror configured, the host downloads the archive from the
+  public release itself and verifies it against `SHA256SUMS`. If it cannot (no
+  route, a proxy, a pruned release, a checksum mismatch), the client supplies it
+  and uploads it over SSH: bundle (with a canonical SHA-256 sidecar), local
+  cache, explicit mirror, public `goat-si/goat-releases` over HTTPS, then `gh`.
+  Public and `gh` downloads are checked against `SHA256SUMS`. An archive
+  without a sidecar is accepted only from the local cache, which only the user
+  writes; that is the supported way to hand a source build to remote hosts
   (`node scripts/dev-runtime-archive.ts --version <server version> --output-dir
-  <base dir>/runtime/archives`).
+  <base dir>/runtime/archives`). Dev and PR builds are never published, so they
+  skip the host download and go straight to the upload.
 - **No release.** `goat-releases` publishes sparsely (the first nightly appeared
   in October 2026), and source builds never publish. When the exact archive is
   missing, a live compatible server stays attached; with nothing running, the
@@ -154,6 +159,60 @@ replacement needs a person's confirmation bound to that environment and target.
   build. Unknown ordering or incomplete process inspection preserves the directory;
   unsupported hosts keep everything. Victims are renamed into sibling trash directories
   before deletion; cleanup errors only log and never fail the connection.
+
+### Where hosts get the runtime
+
+The host downloads first and the client uploads only as a fallback, as VS Code
+Remote-SSH does. An upload costs the client its whole uplink for the archive, while
+a host usually reaches GitHub's CDN faster than a laptop can push to it. Measured
+on 2026-10-20 against a fresh linux-arm64 host (`clisu-oracle`) from a Mac Studio
+on a fast link, for nightly `0.1.0-nightly.20261019.194`:
+
+| Path                                      | Connect to ready | Client bytes sent |
+| ----------------------------------------- | ---------------- | ----------------- |
+| Host download                             | 40.3 s           | 0                 |
+| Host blocked by a dead proxy, then upload | 42.9 s           | 88 MiB            |
+| Upload only (before this change)          | 42.0 s           | 88 MiB            |
+
+The raw transfer takes about 3 s either way on that link; extraction and
+verification on the host take most of the rest. A blocked host costs about 3 s
+before the upload starts, because curl and wget retry only transient failures
+(timeouts, 408, 429, 5xx) and a refused connection, missing DNS or a 404 fails at
+once. A blackholed route waits out three 10 s connect attempts. Proxies come from
+the user's login shell (`https_proxy`), which the download runs under.
+
+Archive sizes for that nightly, which also decide what the desktop bundles:
+
+| Platform     | Archive  |
+| ------------ | -------- |
+| darwin-arm64 | 80.1 MiB |
+| linux-x64    | 92.4 MiB |
+| linux-arm64  | 88.4 MiB |
+| win32-x64    | 83.8 MiB |
+| win32-arm64  | 73.4 MiB |
+
+There is no darwin-x64 archive: Node single executables crash on Intel Macs, so
+those hosts get an `unsupported_platform` failure that names the supported
+platforms. Release desktop builds bundle darwin-arm64, linux-x64 and linux-arm64
+(261 MiB; the nightly app is 634 MB against 452 MB for a host-only bundle). That set
+stays for now: the bundle is the only supply when neither side can reach GitHub, and
+`goat.runtime.source` now separates `host-download` from `upload`, so trimming it
+can wait for evidence of how often uploads still happen.
+
+Integrity is TLS plus `SHA256SUMS` from the same release; the archive executable
+must also report the exact version before the install is published. Release
+signatures would need a signing key and a verifier on every host, which no host
+has today. Channels follow the version string (`cliReleaseChannelOf`), and every
+download names one exact tag, so a host never follows a channel on its own. Paid
+buckets, CDNs and npm were not needed: GitHub release assets are free, public and
+already published by the nightly workflow.
+
+Upstream T3 Code (`pingdotgg/t3code` at `771fd93f`) only downloads on the host,
+with a single attempt and no upload. GOAT kept that download block in `run-t3.sh`
+and added client supply and upload ahead of it, so outside a mirror the host
+never downloaded. The host download is upstream's mechanism restored as the first
+step, run from a transient copy of the runner so `run-t3.sh` bytes, and with them
+retained-runner identity, do not change.
 
 ## Who may update what
 
