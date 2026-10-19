@@ -27,6 +27,7 @@ import { createCommandPermissions } from "../state/commandPermissions.ts";
 
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
+import { isHubNodesUnsupportedError } from "../hubNodes.ts";
 import type { RpcSession } from "../rpc/session.ts";
 
 export class EnvironmentRpcUnavailableError extends Schema.TaggedError<EnvironmentRpcUnavailableError>()(
@@ -273,7 +274,20 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
     environmentId: supervisor.target.environmentId,
     method: tag,
   });
-  return yield* method(dispatchInput).pipe(Effect.ensuring(completeObservation));
+  return yield* method(dispatchInput).pipe(
+    // Older hubs encode a missing RPC as a defect rather than a typed failure.
+    Effect.catchCauseIf(
+      (cause) => tag.startsWith("hub.nodes.") && isHubNodesUnsupportedError(cause),
+      () =>
+        Effect.fail(
+          new EnvironmentRpcUnavailableError({
+            environmentId: supervisor.target.environmentId,
+            message: `Unknown request tag: ${tag}`,
+          }),
+        ),
+    ),
+    Effect.ensuring(completeObservation),
+  );
 });
 
 export function runStreamGuarded<TTag extends EnvironmentStreamCommandRpcTag>(

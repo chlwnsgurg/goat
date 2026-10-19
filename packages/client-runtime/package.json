@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./hub-nodes": {
+      "types": "./src/hubNodes.ts",
+      "default": "./src/hubNodes.ts"
+    },
     "./memory-browsing": {
       "types": "./src/memoryBrowsing.ts",
       "default": "./src/memoryBrowsing.ts"

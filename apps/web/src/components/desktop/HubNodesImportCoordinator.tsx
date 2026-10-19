@@ -1,3 +1,4 @@
+import { isHubNodesUnsupportedError } from "@goat/client-runtime/hub-nodes";
 import { useAtomValue } from "@effect/atom-react";
 import { squashAtomCommandFailure } from "@goat/client-runtime/state/runtime";
 import { useEffect } from "react";
@@ -35,10 +36,12 @@ export function HubNodesImportCoordinator() {
           ? { source: "desktop-catalog" as const, catalog: { state: "locked" as const } }
           : catalogToImportInput(catalog.entries.values());
       const result = await importNodes({ environmentId, input });
-      if (result._tag === "Failure")
+      if (result._tag === "Failure" && !isHubNodesUnsupportedError(result.cause))
         console.warn("Hub device import failed", squashAtomCommandFailure(result));
     };
-    void run().catch(() => console.warn("Hub device import failed"));
+    void run().catch((error: unknown) => {
+      if (!isHubNodesUnsupportedError(error)) console.warn("Hub device import failed");
+    });
   }, [environmentId, connected, permitted, catalog, importNodes]);
   return null;
 }

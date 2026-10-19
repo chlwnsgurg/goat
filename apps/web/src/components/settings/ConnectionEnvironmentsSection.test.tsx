@@ -8,6 +8,9 @@ const state = vi.hoisted(() => ({
   connectPairing: vi.fn(),
   connectSshEnvironment: vi.fn(),
   sshHosts: null as unknown,
+  addHubNode: vi.fn(),
+  canAddHubNode: true,
+  toasts: vi.fn(),
 }));
 
 vi.mock("../../state/environments", () => ({
@@ -38,6 +41,9 @@ vi.mock("../../state/server", async () => {
       ]),
     ),
     serverEnvironment: {
+      addHubNode: Object.assign(state.addHubNode, {
+        permissionAtom: () => Atom.make(state.canAddHubNode),
+      }),
       probeSshHost: vi.fn(),
       trustSshHost: Object.assign(vi.fn(), { permissionAtom: () => Atom.make(false) }),
       forgetSshHost: vi.fn(),
@@ -60,7 +66,7 @@ vi.mock(import("../../cloud/publicConfig"), async (importOriginal) => ({
   hasCloudPublicConfig: () => false,
 }));
 vi.mock("../ui/toast", () => ({
-  toastManager: { add: vi.fn() },
+  toastManager: { add: state.toasts },
   stackedThreadToast: (toast: unknown) => toast,
 }));
 
@@ -71,6 +77,9 @@ let root: Root;
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  state.toasts.mockReset();
+  state.addHubNode.mockReset().mockResolvedValue({ _tag: "Success", value: undefined });
+  state.canAddHubNode = true;
   state.connectPairing.mockReset();
   state.connectSshEnvironment.mockReset();
   container = document.createElement("div");
@@ -226,4 +235,78 @@ it("keeps Add device pending until the GOAT server pairing command settles", asy
   expect(button("Adding…", dialog).disabled).toBe(true);
   await act(async () => finish({ _tag: "Success", value: undefined }));
   expect(document.querySelector('[role="dialog"]')).toBeNull();
+});
+
+async function saveSshDevice() {
+  state.connectSshEnvironment.mockResolvedValue({ _tag: "Success", value: undefined });
+  (window as { desktopBridge?: unknown }).desktopBridge = {
+    resolveSshHost: async () => ({
+      alias: "devbox",
+      hostname: "devbox.local",
+      username: null,
+      port: null,
+    }),
+  };
+  state.sshHosts = [{ alias: "devbox", hostname: "devbox.local", username: null, port: null }];
+  const dialog = await openAddDialog();
+  const sshMode = [...dialog.querySelectorAll("button")].find((element) =>
+    element.textContent?.startsWith("SSH"),
+  );
+  await act(async () => sshMode!.click());
+  const hostInput = document.querySelector<HTMLInputElement>("#saved-backend-ssh-host")!;
+  await act(async () => {
+    hostInput.focus();
+    hostInput.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  });
+  await act(async () => {
+    hostInput.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "1",
+        code: "Digit1",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+}
+
+it("keeps a locally saved SSH device and offers Retry after a real hub failure", async () => {
+  state.addHubNode.mockResolvedValueOnce({
+    _tag: "Failure",
+    cause: Cause.fail(new Error("Storage unavailable")),
+  });
+  await saveSshDevice();
+  expect(state.connectSshEnvironment).toHaveBeenCalledOnce();
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(state.toasts).toHaveBeenCalledWith(expect.objectContaining({ type: "success" }));
+  const toast = state.toasts.mock.calls
+    .map(([value]) => value)
+    .find((value) => value.type === "error");
+  expect(toast).toMatchObject({
+    title: "Device saved on this desktop, but couldn't be added to the hub",
+    actionProps: { children: "Retry" },
+  });
+  await act(async () => toast.actionProps.onClick());
+  expect(state.addHubNode).toHaveBeenCalledTimes(2);
+  expect(state.connectSshEnvironment).toHaveBeenCalledOnce();
+});
+
+it("silently skips unsupported hub registration after saving SSH locally", async () => {
+  state.addHubNode.mockResolvedValue({
+    _tag: "Failure",
+    cause: Cause.die("Unknown request tag: hub.nodes.add"),
+  });
+  await saveSshDevice();
+  expect(state.addHubNode).toHaveBeenCalledOnce();
+  expect(state.connectSshEnvironment).toHaveBeenCalledOnce();
+  expect(state.toasts.mock.calls.map(([value]) => value.type)).toEqual(["success"]);
+});
+
+it("does not register a locally saved SSH device without hub write permission", async () => {
+  state.canAddHubNode = false;
+  await saveSshDevice();
+  expect(state.connectSshEnvironment).toHaveBeenCalledOnce();
+  expect(state.addHubNode).not.toHaveBeenCalled();
+  expect(state.toasts.mock.calls.map(([value]) => value.type)).toEqual(["success"]);
 });

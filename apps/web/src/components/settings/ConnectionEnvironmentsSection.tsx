@@ -1,5 +1,6 @@
 import { GOAT_CONNECT_COMING_SOON } from "@goat/shared/goatConnect";
 import { isGoatConnectUnavailable } from "./EnvironmentRow.logic";
+import { isHubNodesUnsupportedError } from "@goat/client-runtime/hub-nodes";
 import { sshHostProbeErrorText } from "@goat/client-runtime/state/sshHost";
 import * as Schema from "effect/Schema";
 import { HandoffReview } from "../chat/HandoffReview";
@@ -871,7 +872,11 @@ export function ConnectionEnvironmentsSection({
         label: (label.trim() || target.alias).slice(0, 120),
       },
     });
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+    if (
+      result._tag === "Failure" &&
+      !isAtomCommandInterrupted(result) &&
+      !isHubNodesUnsupportedError(result.cause)
+    ) {
       toastManager.add({
         type: "error",
         title: "Device saved on this desktop, but couldn't be added to the hub",
