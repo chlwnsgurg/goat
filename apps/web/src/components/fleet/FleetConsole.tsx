@@ -20,7 +20,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { FleetConnection } from "./fleetConnection";
 import { fleetConsoleFrameClassName } from "./fleetConsoleFrame";
-import { FleetHostStatusRefresh, useFleetHostStatus } from "./fleetHostStatus";
+import { FleetHostStatusRefresh, fleetHostStatusAtom, useFleetHostStatus } from "./fleetHostStatus";
 import {
   fleetAlerts,
   fleetThroughput,
@@ -38,11 +38,12 @@ import {
 
 /**
  * Runs in the last hour. Shell updates stream constantly, so the atom keeps its previous value
- * until a count changes and the console renders only then. The window is anchored when shells
- * change; a quiet fleet keeps the counts it last showed.
+ * until a count changes and the console renders only then. Each host-status answer moves the
+ * window forward, so a quiet fleet's counts still age out without a timer of their own.
  */
 const fleetThroughputAtom = Atom.make((get): FleetThroughput => {
   const connected = new Set(get(fleetEnvironmentsAtom).map((env) => env.environmentId));
+  get(fleetHostStatusAtom);
   const next = fleetThroughput(
     get(environmentThreadShells.threadShellsAtom),
     connected,
@@ -135,11 +136,11 @@ function hostDetail(row: FleetHostRow, now: number): string {
 function HostRow({
   row,
   samples,
-  sampledAt,
+  observedAt,
 }: {
   readonly row: FleetHostRow;
   readonly samples: ReadonlyArray<HostSample>;
-  readonly sampledAt: number;
+  readonly observedAt: number;
 }) {
   const metrics = row.entry?.metrics;
   const stale = row.tone === "stale";
@@ -180,7 +181,7 @@ function HostRow({
           >
             {row.label}
           </TooltipTrigger>
-          <TooltipPopup side="top">{hostDetail(row, sampledAt)}</TooltipPopup>
+          <TooltipPopup side="top">{hostDetail(row, observedAt)}</TooltipPopup>
         </Tooltip>
       </span>
       {statusText !== null ? (
@@ -322,7 +323,11 @@ function FleetConsoleExpanded(props: {
     reads: status.reads,
     primaryEnvironmentId,
   });
-  const alerts = fleetAlerts(rows, connections, status.sampledAt);
+  const unreadable = status.failed.map((environmentId) => ({
+    key: environmentId,
+    label: environments.find((env) => env.environmentId === environmentId)?.label ?? environmentId,
+  }));
+  const alerts = fleetAlerts(rows, connections, status.observedAt, unreadable);
   const hottest = hottestHost(rows);
   const quotas = quotaRows(rows).slice(0, 3);
   const { totals } = snapshot;
@@ -403,7 +408,7 @@ function FleetConsoleExpanded(props: {
                 <HostRow
                   key={row.key}
                   row={row}
-                  sampledAt={status.sampledAt}
+                  observedAt={status.observedAt}
                   samples={
                     (row.sourceKey === null ? undefined : status.history.get(row.sourceKey)) ??
                     NO_SAMPLES

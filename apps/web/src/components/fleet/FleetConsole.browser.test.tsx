@@ -26,7 +26,8 @@ const host: HostStatusEntry = {
 };
 
 const hostStatus = vi.hoisted(() => ({ reads: 0 }));
-vi.mock(import("./fleetHostStatus"), () => ({
+vi.mock(import("./fleetHostStatus"), async (original) => ({
+  ...(await original()),
   useFleetHostStatus: () => {
     hostStatus.reads += 1;
     return {
@@ -34,7 +35,9 @@ vi.mock(import("./fleetHostStatus"), () => ({
       sources: [],
       history: new Map(),
       loading: false,
+      failed: [],
       sampledAt: SAMPLED_AT,
+      observedAt: SAMPLED_AT,
     };
   },
   FleetHostStatusRefresh: () => null,

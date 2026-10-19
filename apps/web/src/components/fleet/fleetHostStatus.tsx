@@ -23,8 +23,12 @@ export interface FleetHostStatus {
   readonly sources: ReadonlyArray<EnvironmentId>;
   readonly history: HostHistory;
   readonly loading: boolean;
-  /** Newest sample time across reads; 0 before the first answer. */
+  /** Environments whose read failed with no earlier answer to fall back on. */
+  readonly failed: ReadonlyArray<EnvironmentId>;
+  /** Newest sample time the hosts reported; 0 before the first answer. */
   readonly sampledAt: number;
+  /** When this client last received an answer, for ages that must not trust host clocks. */
+  readonly observedAt: number;
 }
 
 const hostStatusAtom = (environmentId: EnvironmentId) =>
@@ -37,19 +41,30 @@ const hostStatusAtom = (environmentId: EnvironmentId) =>
  */
 let hostHistory: HostHistory = new Map();
 
-const fleetHostStatusAtom = Atom.make((get): FleetHostStatus => {
+export const fleetHostStatusAtom = Atom.make((get): FleetHostStatus => {
   const environments = get(fleetEnvironmentsAtom);
   const primaryEnvironmentId = get(primaryEnvironmentIdAtom);
   const reads: FleetHostRead[] = [];
   const sources: EnvironmentId[] = [];
+  const failed: EnvironmentId[] = [];
   let loading = false;
+  let observedAt = 0;
+  /** Null while the first answer is still on its way; an empty list once it failed. */
   const read = (environmentId: EnvironmentId): ReadonlyArray<HostStatusEntry> | null => {
     sources.push(environmentId);
     const result = get(hostStatusAtom(environmentId));
-    loading ||= AsyncResult.isInitial(result);
     const hosts = Option.getOrNull(AsyncResult.value(result))?.hosts ?? null;
-    if (hosts !== null) reads.push({ environmentId, hosts });
-    return hosts;
+    if (hosts !== null) {
+      reads.push({ environmentId, hosts });
+      if (AsyncResult.isSuccess(result)) observedAt = Math.max(observedAt, result.timestamp);
+      return hosts;
+    }
+    if (AsyncResult.isFailure(result)) {
+      failed.push(environmentId);
+      return [];
+    }
+    loading = true;
+    return null;
   };
 
   // The primary environment answers for itself and every SSH host it holds open. Another
@@ -81,6 +96,7 @@ const fleetHostStatusAtom = Atom.make((get): FleetHostStatus => {
   if (
     previous !== null &&
     previous.loading === loading &&
+    previous.failed.join("\n") === failed.join("\n") &&
     previous.history === hostHistory &&
     previous.sources.join("\n") === sources.join("\n") &&
     previous.reads.length === reads.length &&
@@ -88,7 +104,7 @@ const fleetHostStatusAtom = Atom.make((get): FleetHostStatus => {
   ) {
     return previous;
   }
-  return { reads, sources, history: hostHistory, loading, sampledAt };
+  return { reads, sources, history: hostHistory, loading, failed, sampledAt, observedAt };
 }).pipe(Atom.withLabel("fleet-host-status"));
 
 export function useFleetHostStatus(): FleetHostStatus {

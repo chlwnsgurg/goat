@@ -175,6 +175,23 @@ describe("matchHostRows", () => {
       [hostSourceKey(studio, "lidge-ai"), hostSourceKey(studio, "lidge-ai"), "ok"],
     ]);
   });
+
+  it("keeps another dispatcher's host that shares an alias with a connected environment", () => {
+    const other = EnvironmentId.make("other");
+    const rows = matchHostRows({
+      machines: [machine("mini", { environmentId: mini })],
+      aliasesByEnvironment: aliases,
+      reads: [
+        { environmentId: studio, hosts: [entry("macmini")] },
+        { environmentId: other, hosts: [entry(null), entry("macmini", { cpu: 0.7 })] },
+      ],
+      primaryEnvironmentId: studio,
+    });
+    expect(rows.map((row) => row.sourceKey)).toEqual([
+      hostSourceKey(studio, "macmini"),
+      hostSourceKey(other, "macmini"),
+    ]);
+  });
 });
 
 describe("hottestHost", () => {
@@ -232,9 +249,14 @@ describe("fleetAlerts", () => {
       ["mini", { state: "attention", label: "Needs attention", reason: "Tailscale is off" }],
     ]);
     expect(
-      fleetAlerts(rows, connections, NOW).map((alert) => [alert.label, alert.tone, alert.detail]),
+      fleetAlerts(rows, connections, NOW, [{ key: "remote", label: "remote" }]).map((alert) => [
+        alert.label,
+        alert.tone,
+        alert.detail,
+      ]),
     ).toEqual([
       ["mini", "destructive", "Tailscale is off"],
+      ["remote", "warning", "Could not read host status"],
       ["box", "warning", "Unreachable, last known 4m ago"],
       ["old", "warning", "Runs GOAT 0.1.0"],
       ["ancient", "muted", "Update GOAT to report status"],
@@ -305,6 +327,13 @@ describe("fleetThroughput", () => {
     expect(result.startedBuckets[11]).toBe(1);
     expect(result.startedBuckets[4]).toBe(1);
     expect(result.finishedBuckets[11]).toBe(1);
+  });
+
+  it("lets runs age out of the window with no new shell updates", () => {
+    const shells = [shell({ started: 40, completed: 3 })];
+    expect(fleetThroughput(shells, new Set([studio]), NOW).finished).toBe(1);
+    const later = fleetThroughput(shells, new Set([studio]), NOW + 58 * 60_000);
+    expect([later.started, later.finished]).toEqual([0, 0]);
   });
 });
 

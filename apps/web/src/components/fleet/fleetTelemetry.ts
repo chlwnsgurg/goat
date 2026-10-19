@@ -110,8 +110,8 @@ function toneOf(entry: HostStatusEntry | null): FleetHostTone {
  * Pairs each Fleet machine with the host-status entry that describes it, and never guesses:
  *
  * 1. An environment's own read, its `host: null` entry, is that machine.
- * 2. Otherwise an entry for one of the SSH aliases this client reaches the environment through,
- *    from the primary environment's read first.
+ * 2. Otherwise the primary environment's entry for one of the SSH aliases this client reaches
+ *    the environment through.
  * 3. A host with no environment of its own matches only the dispatcher that reported it, by the
  *    alias that dispatcher used.
  *
@@ -139,14 +139,15 @@ export function matchHostRows(input: {
     let match: { key: string; entry: HostStatusEntry } | null = null;
     if (machine.environmentId !== null) {
       const aliases = input.aliasesByEnvironment.get(machine.environmentId) ?? [];
+      // Aliases are this client's names for its own SSH connections, which the primary
+      // environment holds. Another dispatcher's host with the same name is another machine.
       const viaAlias: Array<{ key: string; entry: HostStatusEntry }> = [];
-      for (const read of reads) {
+      if (input.primaryEnvironmentId !== null) {
         for (const alias of aliases) {
-          const found = find(read.environmentId, alias);
+          const found = find(input.primaryEnvironmentId, alias);
           if (found !== null) viaAlias.push(found);
         }
       }
-      // The same machine seen through an alias must not show up again as a host of its own.
       for (const found of viaAlias) claimed.add(found.key);
       match = find(machine.environmentId, null) ?? viaAlias[0] ?? null;
     } else if (machine.reachedVia !== null) {
@@ -243,8 +244,15 @@ export function fleetAlerts(
   rows: ReadonlyArray<FleetHostRow>,
   connections: ReadonlyMap<string, FleetConnection>,
   now: number,
+  /** Environments whose host-status read failed with nothing cached. */
+  unreadable: ReadonlyArray<{ readonly key: string; readonly label: string }> = [],
 ): ReadonlyArray<FleetAlert> {
-  const alerts: FleetAlert[] = [];
+  const alerts: FleetAlert[] = unreadable.map(({ key, label }) => ({
+    key: key + ":unreadable",
+    tone: "warning",
+    label,
+    detail: "Could not read host status",
+  }));
   for (const row of rows) {
     const connection = row.machineId === null ? undefined : connections.get(row.machineId);
     const fromConnection = connection === undefined ? null : connectionAlert(connection);
@@ -309,11 +317,41 @@ export interface FleetThroughput {
 export const THROUGHPUT_WINDOW_MS = 60 * 60_000;
 export const THROUGHPUT_BUCKETS = 12;
 
+interface RunTimes {
+  readonly started: number | null;
+  readonly finished: number | null;
+}
+
+/*
+ * Shell objects are replaced only when that thread changes, so each one is classified and its
+ * timestamps parsed once. A streamed update to one thread then costs one parse, not one per
+ * thread.
+ */
+const runTimesByShell = new WeakMap<ThroughputShell, RunTimes | null>();
+
+function runTimesOf(shell: ThroughputShell): RunTimes | null {
+  const cached = runTimesByShell.get(shell);
+  if (cached !== undefined) return cached;
+  const run = shell.latestRun;
+  const times =
+    run === null ||
+    shell.archivedAt !== null ||
+    shell.deletedAt !== null ||
+    shell.sideChatOf != null ||
+    shell.lineage.relationshipToParent === "subagent"
+      ? null
+      : {
+          started: run.startedAt === null ? null : Date.parse(run.startedAt),
+          finished: run.completedAt === null ? null : Date.parse(run.completedAt),
+        };
+  runTimesByShell.set(shell, times);
+  return times;
+}
+
 /**
  * Runs started and finished in the last hour across connected environments, counted from each
  * thread's latest run, so a thread that ran twice in the hour counts once. Top-level threads
- * only, as the Fleet counts them. ISO strings compare in time order, so only shells inside the
- * window are parsed.
+ * only, as the Fleet counts them.
  */
 export function fleetThroughput(
   shells: ReadonlyArray<ThroughputShell>,
@@ -323,33 +361,21 @@ export function fleetThroughput(
   buckets = THROUGHPUT_BUCKETS,
 ): FleetThroughput {
   const from = now - windowMs;
-  const cutoff = new Date(from).toISOString();
   const bucketMs = windowMs / buckets;
   const startedBuckets: number[] = Array.from({ length: buckets }, () => 0);
   const finishedBuckets: number[] = Array.from({ length: buckets }, () => 0);
-  const place = (iso: string | null, into: number[]) => {
-    if (iso === null || iso < cutoff) return false;
-    const at = Date.parse(iso);
-    if (!(at >= from && at <= now)) return false;
+  const place = (at: number | null, into: number[]) => {
+    if (at === null || !(at >= from && at <= now)) return false;
     into[Math.min(buckets - 1, Math.floor((at - from) / bucketMs))]! += 1;
     return true;
   };
   let started = 0;
   let finished = 0;
   for (const shell of shells) {
-    const run = shell.latestRun;
-    if (
-      run === null ||
-      !connected.has(shell.environmentId) ||
-      shell.archivedAt !== null ||
-      shell.deletedAt !== null ||
-      shell.sideChatOf != null ||
-      shell.lineage.relationshipToParent === "subagent"
-    ) {
-      continue;
-    }
-    if (place(run.startedAt, startedBuckets)) started += 1;
-    if (place(run.completedAt, finishedBuckets)) finished += 1;
+    const times = runTimesOf(shell);
+    if (times === null || !connected.has(shell.environmentId)) continue;
+    if (place(times.started, startedBuckets)) started += 1;
+    if (place(times.finished, finishedBuckets)) finished += 1;
   }
   return { started, finished, startedBuckets, finishedBuckets };
 }
