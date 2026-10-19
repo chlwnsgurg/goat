@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { NoteFolder, NotePath } from "./notes.ts";
+import { NOTE_FOLDER_MAX_LENGTH, NoteFolder, NotePath } from "./notes.ts";
 
 const isPath = Schema.is(NotePath);
 const isFolder = Schema.is(NoteFolder);
@@ -37,6 +37,14 @@ describe("NotePath", () => {
     const decomposed = "cafe\u0301.md";
     expect(isPath(decomposed)).toBe(false);
     expect(isPath(decomposed.normalize("NFC"))).toBe(true);
+  });
+
+  it("bounds the folder segment exactly like NoteFolder", () => {
+    const longest = "f".repeat(NOTE_FOLDER_MAX_LENGTH);
+    expect(isFolder(longest)).toBe(true);
+    expect(isPath(`${longest}/a.md`)).toBe(true);
+    expect(isFolder(`${longest}f`)).toBe(false);
+    expect(isPath(`${longest}f/a.md`)).toBe(false);
   });
 });
 

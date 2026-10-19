@@ -15,6 +15,10 @@ import { ThreadResult } from "./threadResult.ts";
  * the hierarchy stops there, so a path is `note.md` or `folder/note.md`.
  */
 export const NOTE_PATH_MAX_LENGTH = 300;
+/** A folder name, alone or as the first segment of a NotePath. */
+export const NOTE_FOLDER_MAX_LENGTH = 120;
+/** Display titles travel in every summary, so a long first heading is cut to this many UTF-16 units. */
+export const NOTE_TITLE_MAX_LENGTH = 200;
 /** Bodies are documents a person edits, not attachments; the cap keeps a write one frame. */
 export const NOTE_BODY_MAX_BYTES = 1024 * 1024;
 
@@ -27,14 +31,13 @@ const isNoteSegment = (segment: string) =>
 
 /** Canonical NFC, so two spellings of one name cannot address the same file twice. */
 const isNfc = (value: string) => value === value.normalize("NFC");
+const isFolderName = (value: string) =>
+  isNfc(value) && value.length <= NOTE_FOLDER_MAX_LENGTH && isNoteSegment(value);
 
 export const NoteFolder = Schema.String.check(
-  Schema.makeFilter(
-    (value: string) => isNfc(value) && value.length <= 120 && isNoteSegment(value),
-    {
-      expected: "one folder name without slashes, leading dots, or control characters",
-    },
-  ),
+  Schema.makeFilter(isFolderName, {
+    expected: "one folder name without slashes, leading dots, or control characters",
+  }),
 );
 export type NoteFolder = typeof NoteFolder.Type;
 
@@ -45,6 +48,7 @@ export const NotePath = Schema.String.check(
         return false;
       const segments = value.split("/");
       if (segments.length > 2) return false;
+      if (segments.length === 2 && !isFolderName(segments[0]!)) return false;
       const file = segments.at(-1) ?? "";
       return segments.every(isNoteSegment) && file.length > ".md".length;
     },
@@ -77,8 +81,8 @@ export type NoteThreadLink = typeof NoteThreadLink.Type;
 export const NoteSummary = Schema.Struct({
   path: NotePath,
   folder: Schema.NullOr(NoteFolder),
-  /** The first heading, else the file name without .md. */
-  title: Schema.String,
+  /** The first heading, else the file name without .md, cut to NOTE_TITLE_MAX_LENGTH. */
+  title: Schema.String.check(Schema.isMaxLength(NOTE_TITLE_MAX_LENGTH)),
   status: NoteStatus,
   threads: Schema.Array(NoteThreadLink),
   updatedBy: Schema.NullOr(NoteAuthor),
