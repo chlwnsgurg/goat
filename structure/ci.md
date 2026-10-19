@@ -12,7 +12,7 @@ A new check is therefore a matrix task of `ci`. Any other new workflow, a
 `pull_request_target` trigger outside `close-outside-prs.yml`, or
 `actions/github-script` does not pass the guard.
 
-`close-outside-prs.yml` is the one `pull_request_target` workflow. It runs from the base branch
+`close-outside-prs.yml` is the one `pull_request_target` workflow. It runs from the repository's default branch (`main`)
 with a write token, so the guard pins it to the `opened` and `reopened` events and to
 `pull-requests: write`, and pins its single `close` job by a hash of the reviewed job. A
 command blocklist cannot prove that a script never fetches or runs pull request code, so any edit

@@ -445,7 +445,7 @@ function isPinnedResolve(step) {
 }
 
 // close-outside-prs.yml stays active on goat-si/goat on purpose (#426, #430). It runs on
-// pull_request_target with a write token from the base branch, so it must never check out or
+// pull_request_target with a write token from the default branch (main), so it must never check out or
 // run pull request code. A blocklist of commands cannot promise that, so the reviewed job is
 // pinned whole: any change to it, including step names, scripts and env, means reviewing it
 // again and updating this hash on purpose.
