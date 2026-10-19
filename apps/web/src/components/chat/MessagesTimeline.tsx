@@ -298,7 +298,8 @@ import {
 } from "../../timestampFormat";
 import { FetchedToolOutput, V2ItemInspector, fileChangeDiffTarget } from "./V2ItemInspector";
 import { FileChangeInlineDiff } from "./FileChangeInlineDiff";
-import { fileChangeRowLabel, fileChangeTargetPaths } from "./fileChangeInlineDiff.logic";
+import { fileChangeTargetPaths } from "@goat/client-runtime/work-log/file-change-diff";
+import { fileChangeRowLabel } from "./fileChangeInlineDiff.logic";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import {
@@ -5720,10 +5721,15 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         <QuestionAnswerHistory answer={workEntry.questionAnswer} />
       ) : null}
       {expanded && isReasoning ? <ReasoningTraceContent entries={[workEntry]} /> : null}
-      {expanded && inlineDiffRunId !== null && projectedFileChange !== null && threadRef ? (
+      {expanded &&
+      inlineDiffRunId !== null &&
+      projectedFileChange !== null &&
+      workEntry.projectedItem &&
+      threadRef ? (
         <WorkLogDetails kind="panel">
           <FileChangeInlineDiff
             threadRef={threadRef}
+            projectedItem={workEntry.projectedItem}
             runId={inlineDiffRunId}
             paths={fileChangeTargetPaths(projectedFileChange)}
             workspaceRoot={workspaceRoot}

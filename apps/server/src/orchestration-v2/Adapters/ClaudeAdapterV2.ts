@@ -164,6 +164,7 @@ import { turnScopedSelectionTransition } from "@goat/provider-core/server/select
 import { providerMessageTextWithAttachmentPaths } from "@goat/provider-core/server/attachmentPrompt";
 import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import { claudeFileChangeLineCounts } from "../fileChangeLineCounts.ts";
+import { claudeFileChangePatch } from "../fileChangePatch.ts";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
@@ -2305,6 +2306,11 @@ function claudeNativeToolOutputValue(output: ClaudeNativeToolOutput): unknown | 
 function claudeNativeToolOutputText(output: ClaudeNativeToolOutput): string {
   const value = claudeNativeToolOutputValue(output);
   return typeof value === "string" ? value : value === undefined ? "" : jsonStringifyForTool(value);
+}
+
+function claudeFileChangeArtifacts(fileName: string, result: unknown) {
+  const patch = claudeFileChangePatch(fileName, result);
+  return { ...claudeFileChangeLineCounts(result), ...(patch === undefined ? {} : { patch }) };
 }
 
 function claudeCommandOutputText(output: ClaudeNativeToolOutput): string {
@@ -4568,7 +4574,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     ...(outputText.length === 0 ? {} : { diffStr: outputText }),
                     ...(input.status !== "failed" &&
                     input.output.type === "structured_tool_use_result"
-                      ? claudeFileChangeLineCounts(input.output.value)
+                      ? claudeFileChangeArtifacts(
+                          fileNameFromClaudeTool(input.toolName, input.toolInput),
+                          input.output.value,
+                        )
                       : undefined),
                   }
                 : itemType === "web_search"

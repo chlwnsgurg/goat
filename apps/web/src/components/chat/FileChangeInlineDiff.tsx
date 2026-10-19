@@ -1,4 +1,10 @@
-import type { RunId, ScopedThreadRef } from "@goat/contracts";
+import type { OrchestrationV2ProjectedTurnItem, RunId, ScopedThreadRef } from "@goat/contracts";
+import {
+  extractFilePatch,
+  INLINE_DIFF_MAX_LINES,
+} from "@goat/client-runtime/work-log/file-change-diff";
+import { turnItemDetailRevision } from "@goat/client-runtime/work-log/item-detail";
+import { workspaceRelativeFilePath } from "@goat/shared/path";
 import { FileDiff } from "@pierre/diffs/react";
 import type { FileDiffMetadata } from "@pierre/diffs";
 import { memo, type ReactNode } from "react";
@@ -15,11 +21,11 @@ import {
 } from "../../lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "../../lib/syntaxHighlighting";
 import { useThreadCheckpointSummaries } from "../../state/entities";
+import { useTurnItemDetail } from "../../state/queries";
 import { DiffWorkerPoolProvider } from "../DiffWorkerPoolProvider";
 import { InlineButton } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { DiffStatLabel } from "./DiffStatLabel";
-import { extractFilePatch, INLINE_DIFF_MAX_LINES } from "./fileChangeInlineDiff.logic";
 import { MessageCopyButton } from "./MessageCopyButton";
 
 function InlineDiffNote({ children }: { children: ReactNode }) {
@@ -30,7 +36,7 @@ function InlineDiffNote({ children }: { children: ReactNode }) {
 const parsedPatchCache = new Map<string, ReadonlyArray<FileDiffMetadata>>();
 const PARSED_PATCH_CACHE_SIZE = 4;
 
-function parseTurnPatch(patch: string, scope: string): ReadonlyArray<FileDiffMetadata> {
+function parsePatch(patch: string, scope: string): ReadonlyArray<FileDiffMetadata> {
   const key = `${scope}\u0000${patch}`;
   const cached = parsedPatchCache.get(key);
   if (cached !== undefined) return cached;
@@ -44,20 +50,51 @@ function parseTurnPatch(patch: string, scope: string): ReadonlyArray<FileDiffMet
   return files;
 }
 
+function matchPatchFiles(
+  files: ReadonlyArray<FileDiffMetadata>,
+  paths: ReadonlyArray<string>,
+  workspaceRoot: string | undefined,
+): ReadonlyArray<FileDiffMetadata> {
+  const matched = paths.flatMap((path) => {
+    const file = findPatchFile(files, path, workspaceRoot);
+    return file === null ? [] : [file];
+  });
+  return [...new Set(matched)];
+}
+
 /**
- * The turn's checkpoint diff for the files one edit touched. Provider payloads do not reach
- * clients (see projectTurnItemForWire), and the checkpoint is the same source the diff panel
- * reads, so both views agree and share one cached query.
+ * What one edit changed. Its own patch comes from getTurnItem when the provider reported one,
+ * so it shows mid-turn and apart from later edits to the same file. Otherwise, and from servers
+ * that send no patch, it is the turn's checkpoint diff, the same cached query the diff panel reads.
  */
 export const FileChangeInlineDiff = memo(function FileChangeInlineDiff(props: {
   readonly threadRef: ScopedThreadRef;
+  readonly projectedItem: OrchestrationV2ProjectedTurnItem;
   readonly runId: RunId;
   readonly paths: ReadonlyArray<string>;
   readonly workspaceRoot: string | undefined;
   readonly resolvedTheme: "light" | "dark";
   readonly onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
 }) {
-  const { threadRef, runId, paths, workspaceRoot, resolvedTheme, onOpenTurnDiff } = props;
+  const { threadRef, projectedItem, runId, paths, workspaceRoot, resolvedTheme, onOpenTurnDiff } =
+    props;
+  const wireItem = projectedItem.item;
+  const hasOwnPatch = wireItem.type === "file_change" && wireItem.patchOmitted === true;
+  const detail = useTurnItemDetail(
+    hasOwnPatch
+      ? {
+          environmentId: threadRef.environmentId,
+          threadId: projectedItem.sourceThreadId,
+          itemId: projectedItem.sourceItemId,
+          revision: turnItemDetailRevision(wireItem),
+        }
+      : null,
+  );
+  const fetched = detail.data?.item;
+  const ownPatch = fetched?.type === "file_change" ? fetched.patch : undefined;
+  const awaitingOwnPatch = hasOwnPatch && detail.isPending && !detail.error;
+  const usesCheckpoint = ownPatch === undefined && !awaitingOwnPatch;
+
   const ignoreWhitespace = useClientSettings((settings) => settings.diffIgnoreWhitespace);
   const summary = useThreadCheckpointSummaries(threadRef).find(
     (candidate) => candidate.runId === runId,
@@ -72,9 +109,26 @@ export const FileChangeInlineDiff = memo(function FileChangeInlineDiff(props: {
       ignoreWhitespace,
       cacheScope: `turn:${runId}`,
     },
-    { enabled: summary !== undefined },
+    { enabled: usesCheckpoint && summary !== undefined },
   );
 
+  // The panel's cache scope, so its highlighting cache is shared too.
+  const scope = `diff-panel:${resolvedTheme}`;
+  if (ownPatch !== undefined) {
+    const files = parsePatch(ownPatch, scope);
+    const matched = matchPatchFiles(files, paths, workspaceRoot);
+    return (
+      <FileDiffCards
+        files={matched.length > 0 ? matched : files}
+        patch={ownPatch}
+        runId={runId}
+        workspaceRoot={workspaceRoot}
+        resolvedTheme={resolvedTheme}
+        onOpenTurnDiff={onOpenTurnDiff}
+      />
+    );
+  }
+  if (awaitingOwnPatch) return <InlineDiffNote>Loading diff…</InlineDiffNote>;
   if (summary === undefined) {
     return <InlineDiffNote>The diff appears when this turn finishes.</InlineDiffNote>;
   }
@@ -86,22 +140,38 @@ export const FileChangeInlineDiff = memo(function FileChangeInlineDiff(props: {
       <InlineDiffNote>Loading diff…</InlineDiffNote>
     );
   }
-  // The panel's cache scope, so its highlighting cache is shared too.
-  const files = parseTurnPatch(patch, `diff-panel:${resolvedTheme}`);
-  const matched = paths.flatMap((path) => {
-    const file = findPatchFile(files, path, workspaceRoot);
-    return file === null ? [] : [file];
-  });
-  const uniqueFiles = [...new Set(matched)];
-  if (uniqueFiles.length === 0) {
+  const matched = matchPatchFiles(parsePatch(patch, scope), paths, workspaceRoot);
+  if (matched.length === 0) {
     return <InlineDiffNote>No net change to this file by the end of the turn.</InlineDiffNote>;
   }
+  return (
+    <FileDiffCards
+      files={matched}
+      patch={patch}
+      runId={runId}
+      workspaceRoot={workspaceRoot}
+      resolvedTheme={resolvedTheme}
+      onOpenTurnDiff={onOpenTurnDiff}
+    />
+  );
+});
 
+function FileDiffCards(props: {
+  readonly files: ReadonlyArray<FileDiffMetadata>;
+  readonly patch: string;
+  readonly runId: RunId;
+  readonly workspaceRoot: string | undefined;
+  readonly resolvedTheme: "light" | "dark";
+  readonly onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
+}) {
+  const { files, patch, runId, workspaceRoot, resolvedTheme, onOpenTurnDiff } = props;
   return (
     // The row toggles on Enter and Space; keys pressed on the card's buttons stay here.
     <div className="flex flex-col gap-2" onKeyDown={(event) => event.stopPropagation()}>
-      {uniqueFiles.map((file) => {
+      {files.map((file) => {
         const filePath = resolveFileDiffPath(file);
+        // An edit's own patch names files by their absolute host path.
+        const displayPath = workspaceRelativeFilePath(filePath, workspaceRoot) ?? filePath;
         const stat = getDiffLineStat([file]);
         const filePatch = extractFilePatch(patch, file);
         const tooLarge = file.unifiedLineCount > INLINE_DIFF_MAX_LINES;
@@ -116,7 +186,7 @@ export const FileChangeInlineDiff = memo(function FileChangeInlineDiff(props: {
                 <TooltipTrigger
                   render={<span className="min-w-0 truncate font-mono text-foreground/80" />}
                 >
-                  {filePath}
+                  {displayPath}
                 </TooltipTrigger>
                 <TooltipPopup>{filePath}</TooltipPopup>
               </Tooltip>
@@ -168,4 +238,4 @@ export const FileChangeInlineDiff = memo(function FileChangeInlineDiff(props: {
       })}
     </div>
   );
-});
+}
