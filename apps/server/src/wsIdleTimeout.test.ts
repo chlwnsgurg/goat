@@ -2,6 +2,7 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import { NodeWS } from "@effect/platform-node/NodeSocket";
 import { assert, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -101,12 +102,12 @@ const subscribe = (client: NodeWS.WebSocket) =>
     ),
   );
 
-it.effect("closes a silent real socket at 60 seconds", () =>
+it.effect("closes a silent real socket at 120 seconds", () =>
   Effect.gen(function* () {
     const server = yield* startServer();
     const { client, closed } = yield* connect(server.url);
     const transport = yield* Deferred.await(server.connected);
-    yield* TestClock.adjust("59 seconds");
+    yield* TestClock.adjust("119 seconds");
     assert.isFalse(transport.destroyed);
     assert.equal(client.readyState, NodeWS.WebSocket.OPEN);
     yield* TestClock.adjust("1 second");
@@ -122,7 +123,7 @@ it.effect("an ordinary RPC frame resets the idle deadline", () =>
     const { client, closed } = yield* connect(server.url);
     yield* TestClock.adjust("50 seconds");
     assert.include(yield* subscribe(client), "started");
-    yield* TestClock.adjust("59 seconds");
+    yield* TestClock.adjust("119 seconds");
     assert.equal(client.readyState, NodeWS.WebSocket.OPEN);
     yield* TestClock.adjust("1 second");
     yield* closed;
@@ -130,15 +131,17 @@ it.effect("an ordinary RPC frame resets the idle deadline", () =>
   }),
 );
 
-it.effect.each(["rpc", "control"] as const)(
-  "keeps a long-running stream alive with 5-second %s pings, then reaps it after silence",
-  (kind) =>
+it.effect.each(
+  (["rpc", "control"] as const).flatMap((kind) => [5, 60, 65, 110].map((gap) => ({ kind, gap }))),
+)(
+  "keeps a long-running stream alive with $gap-second $kind pings, then reaps it after silence",
+  ({ kind, gap }) =>
     Effect.gen(function* () {
       const server = yield* startServer();
       const { client, closed } = yield* connect(server.url);
       assert.include(yield* subscribe(client), "started");
       for (let index = 0; index < 14; index++) {
-        yield* TestClock.adjust("5 seconds");
+        yield* TestClock.adjust(`${gap} seconds`);
         if (kind === "rpc") {
           assert.deepEqual(
             JSON.parse(yield* receive(client, () => client.send('{"_tag":"Ping"}'))),
@@ -149,7 +152,7 @@ it.effect.each(["rpc", "control"] as const)(
         }
         assert.equal(client.readyState, NodeWS.WebSocket.OPEN);
       }
-      yield* TestClock.adjust("59 seconds");
+      yield* TestClock.adjust("119 seconds");
       assert.equal(client.readyState, NodeWS.WebSocket.OPEN);
       yield* TestClock.adjust("1 second");
       yield* closed;
@@ -167,8 +170,47 @@ it.effect("outbound stream frames do not keep an abandoned client alive", () =>
     const output = yield* receive(client).pipe(Effect.forkChild({ startImmediately: true }));
     yield* TestClock.adjust("30 seconds");
     assert.include(yield* Fiber.join(output), "still running");
-    yield* TestClock.adjust("30 seconds");
+    yield* TestClock.adjust("89 seconds");
+    assert.equal(client.readyState, NodeWS.WebSocket.OPEN);
+    yield* TestClock.adjust("1 second");
     yield* closed;
     yield* Deferred.await(server.streamClosed);
   }),
+);
+
+// TestClock.setTime also advances sleepers; override only wall time to isolate jumps.
+it.effect.each([120_000, -120_000])(
+  "keeps the monotonic deadline when wall time jumps by %i ms independently of TestClock elapsed time",
+  (jump) =>
+    Effect.gen(function* () {
+      const clock = yield* Clock.Clock;
+      let wallOffset = 0;
+      const currentTimeMillisUnsafe = () => clock.currentTimeMillisUnsafe() + wallOffset;
+      const currentTimeNanosUnsafe = () =>
+        clock.currentTimeNanosUnsafe() + BigInt(wallOffset) * 1_000_000n;
+      const server = yield* startServer().pipe(
+        Effect.provideService(Clock.Clock, {
+          ...clock,
+          currentTimeMillisUnsafe,
+          currentTimeMillis: Effect.sync(currentTimeMillisUnsafe),
+          currentTimeNanosUnsafe,
+          currentTimeNanos: Effect.sync(currentTimeNanosUnsafe),
+        }),
+      );
+      const { client, closed } = yield* connect(server.url);
+      const transport = yield* Deferred.await(server.connected);
+      yield* TestClock.adjust("50 seconds");
+      yield* receive(client, () => client.send('{"_tag":"Ping"}'));
+      const beforeWall = currentTimeMillisUnsafe();
+      const beforeElapsed = clock.monotonicTimeNanosUnsafe();
+      wallOffset = jump;
+      assert.equal(currentTimeMillisUnsafe() - beforeWall, jump);
+      assert.equal(clock.monotonicTimeNanosUnsafe(), beforeElapsed);
+      yield* TestClock.adjust("119 seconds");
+      assert.isFalse(transport.destroyed);
+      assert.equal(client.readyState, NodeWS.WebSocket.OPEN);
+      yield* TestClock.adjust("1 second");
+      assert.isTrue(transport.destroyed);
+      yield* closed;
+    }),
 );

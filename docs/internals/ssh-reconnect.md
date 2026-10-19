@@ -180,8 +180,9 @@ The connected RPC session also checks liveness: pings run every 5 s with a
 of the last received frame. HTTP checks run on reuse and resume; they are not
 a second periodic heartbeat.
 
-The server closes an RPC `/ws` connection after 60 s without inbound transport
-traffic, across local, SSH, relay, and tunnel connections. All shipped RPC
+The server closes an RPC `/ws` connection after 120 s without inbound transport
+traffic, across local, SSH, relay, and tunnel connections. The budget tolerates
+minute-aligned heartbeat throttling in hidden browser tabs. All shipped RPC
 clients use the 5 s ping interval, including during long-running streams;
 server output alone does not keep an abandoned connection alive. Control
 frames and message fragments also reset the budget. The server destroys the

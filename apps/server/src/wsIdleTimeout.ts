@@ -4,7 +4,8 @@ import * as Effect from "effect/Effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import type * as Scope from "effect/Scope";
 
-const IDLE_TIMEOUT_MS = 60_000;
+// Hidden tabs can throttle heartbeats to minute-aligned wakeups.
+const IDLE_TIMEOUT_MS = 120_000;
 
 export const withWebSocketIdleTimeout = Effect.fnUntraced(function* (
   httpEffect: Effect.Effect<
@@ -16,11 +17,11 @@ export const withWebSocketIdleTimeout = Effect.fnUntraced(function* (
   const request = yield* HttpServerRequest.HttpServerRequest;
   const clock = yield* Clock.Clock;
   const transport = NodeHttpServerRequest.toIncomingMessage(request).socket;
-  let lastReceived = clock.currentTimeMillisUnsafe();
+  let lastReceived = clock.monotonicTimeNanosUnsafe();
   // Observe the transport so control frames and fragmented messages also count,
   // independently of RPC decoding, stream output, or handler execution.
   const onData = () => {
-    lastReceived = clock.currentTimeMillisUnsafe();
+    lastReceived = clock.monotonicTimeNanosUnsafe();
   };
   yield* Effect.acquireRelease(
     Effect.sync(() => transport.on("data", onData)),
@@ -30,9 +31,10 @@ export const withWebSocketIdleTimeout = Effect.fnUntraced(function* (
     let remaining = IDLE_TIMEOUT_MS;
     while (remaining > 0) {
       yield* Effect.sleep(remaining);
-      remaining = IDLE_TIMEOUT_MS - (clock.currentTimeMillisUnsafe() - lastReceived);
+      remaining =
+        IDLE_TIMEOUT_MS - Number(clock.monotonicTimeNanosUnsafe() - lastReceived) / 1_000_000;
     }
-    yield* Effect.logInfo("Closing idle RPC WebSocket after 60 seconds without inbound traffic");
+    yield* Effect.logInfo("Closing idle RPC WebSocket after 120 seconds without inbound traffic");
     // A vanished peer cannot complete a WebSocket close handshake.
     yield* Effect.sync(() => transport.destroy());
     return HttpServerResponse.empty();
