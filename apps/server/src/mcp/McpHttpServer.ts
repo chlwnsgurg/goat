@@ -40,6 +40,8 @@ import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { HostStatusToolkit } from "./toolkits/hostStatus/tools.ts";
 import * as HostStatusHandlers from "./toolkits/hostStatus/handlers.ts";
+import { FleetResourcesToolkit } from "./toolkits/fleet/resources/tools.ts";
+import * as FleetResourcesHandlers from "./toolkits/fleet/resources/handlers.ts";
 import { ProviderToolkit } from "./toolkits/provider/tools.ts";
 import * as ProviderHandlers from "./toolkits/provider/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
@@ -1019,6 +1021,7 @@ export const catalogRegistrations = {
   previewControls: toolkitRegistration(PreviewControlsToolkit, PreviewControlsHandlers.layer),
   environment: toolkitRegistration(EnvironmentToolkit, EnvironmentHandlers.layer),
   hostStatus: toolkitRegistration(HostStatusToolkit, HostStatusHandlers.layer),
+  fleetResources: toolkitRegistration(FleetResourcesToolkit, FleetResourcesHandlers.layer),
   provider: toolkitRegistration(ProviderToolkit, ProviderHandlers.layer),
   project: toolkitRegistration(ProjectToolkit, ProjectHandlers.layer),
   connection: toolkitRegistration(ConnectionToolkit, ConnectionHandlers.layer),
@@ -1095,6 +1098,9 @@ export const layerHostStatusService = HostStatusMcpService.layer.pipe(
 /** Reads HostStatusMcpService from the server's context; see `layerHostStatusService`. */
 export const layerHostStatusToolkit = catalogRegistrations.hostStatus;
 
+/** Reads Placement and FallbackChains from the server's context, like host status. */
+export const layerFleetResourcesToolkit = catalogRegistrations.fleetResources;
+
 /**
  * goat_provider_diagnose. Composed beside `layer` by the server, which provides
  * ProviderDiagnosisService and CodexHomeRequests are shared application services.
@@ -1146,6 +1152,7 @@ export const layer = Layer.mergeAll(
   layerProjectRegistration,
   layerEnvironmentToolkit,
   layerHostStatusToolkit,
+  layerFleetResourcesToolkit,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,
   layerPullRequestsToolkit,

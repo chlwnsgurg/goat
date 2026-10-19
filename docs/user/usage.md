@@ -122,6 +122,75 @@ or endpoint configurations do not report subscription limits.
 API-key accounts may not report subscription limits. This also applies to Claude connections
 using a proxy through `ANTHROPIC_AUTH_TOKEN`.
 
+## Fall back to another model at a limit
+
+A fallback chain moves work to the next model when a usage limit stops it, instead of waiting
+for the reset. Each move leaves a notice on the thread saying which model it left, why, and when
+that limit resets, and the thread is asked to continue where it left off. A move to another
+provider, such as Codex to Claude Code, carries the conversation over as a handoff. When no step
+is left, the thread waits for its reset as before, with **Resume at reset** and auto-resume if you
+turned them on.
+
+Chains are off until you create one. Ask an agent with full access to call
+`goat_fallback_chain_set`, or add them under `fleet` in the environment's `settings.json`.
+This chain tries two Claude accounts routed through Codex, then GPT, then the Claude Code CLI:
+
+```json
+{
+  "fleet": {
+    "fallbackChains": {
+      "claude-opus": {
+        "steps": [
+          { "instanceId": "codex", "model": "anthropic/claude-opus-5-5" },
+          { "instanceId": "codex", "model": "anthropic2/claude-opus-5-5" },
+          { "instanceId": "codex", "model": "gpt-6.1-sol" },
+          { "instanceId": "claudeAgent", "model": "claude-opus-5-5" }
+        ],
+        "on": ["usage_limit"],
+        "cooldownMs": 900000,
+        "scope": "goals_and_threads"
+      }
+    },
+    "defaultFallbackChain": "claude-opus"
+  }
+}
+```
+
+- `scope` decides what the chain moves. `"goals"`, the default, applies it to fleet goals only.
+  `"goals_and_threads"` also moves your ordinary threads whose model is one of the steps.
+- `on` lists what triggers a move: `usage_limit` (the default), `provider_error`,
+  `transport_error`, or `unavailable`. Ordinary threads move only on usage limits.
+- A step that just failed is skipped for `cooldownMs` (15 minutes by default), and so is a step on
+  another provider whose account reports an exhausted window. `maxHops` caps how many moves one
+  piece of work makes; by default it can try every step once.
+- `defaultFallbackChain` is the chain goals use when they name none.
+
+Each step names a provider and model already set up in this environment. GOAT never changes
+provider sign-ins or Codex configuration to move work.
+
+## Set fleet limits
+
+Limits under `fleet` cap how much goal work each machine takes. They count running and queued
+threads, your own included, but never refuse a thread you start yourself. `hosts` keys are SSH
+aliases, with `local` for this machine:
+
+```json
+{
+  "fleet": {
+    "maxRunningThreads": 12,
+    "hosts": {
+      "local": { "maxThreads": 4 },
+      "lidge-ai": { "maxThreads": 6 },
+      "mini": { "allowGoals": false }
+    }
+  }
+}
+```
+
+`goat_scheduler_status` shows each machine's threads against these limits, its quota per
+provider, why it would refuse goal work now, the models cooling down after a failure, and recent
+placement decisions.
+
 ## Connect a CLIProxyAPI hub
 
 To see pooled accounts, open **Settings → Providers → Usage providers → Add hub**. Choose the

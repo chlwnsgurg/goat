@@ -511,6 +511,15 @@ goal resumes them through its own claims instead.
 There is no preemption. A goal never stops someone's thread to make room; it waits, like a pod with
 `preemptionPolicy: Never` ([priority and preemption](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/)).
 
+**Now (T3).** `fleet` settings and `Placement` (`apps/server/src/fleet/resources/Placement.ts`)
+ship as above. The filter is `placementRules.ts`, not `placement.ts`: on a case-insensitive
+filesystem that name is the same file as `Placement.ts`. `choosePlacement` stays in
+`channelPlacement.ts` and is imported rather than moved while channel work is in flight; it is
+still the only scorer. The filter cannot see projects on a host or cordons yet: missing projects
+surface at launch, and the cordon set is an input that T2's `Health` fills. Goal reservations
+belong to T1's action claims and are not counted here. Service keys follow the repository's
+deterministic-key rule (`goat/fleet/resources/Placement`), not the shorter names above.
+
 ## Fallback chains
 
 **Now.** No fallback chain exists in contracts or settings. A thread that fails with
@@ -577,6 +586,14 @@ There is no separate fallback worker. The default (no chain) leaves ordinary thr
 
 Each hop is recorded on the thread as a system notice ("Switched to gpt-6.1-sol after usage limit on
 anthropic/claude-opus-5-5") so the user sees why the model changed.
+
+**Now (T3).** `Fallback` (`apps/server/src/fleet/resources/Fallback.ts`) implements `next` and
+`reportFailure` as above, and `continueThread` is the recovery sweep's branch for ordinary
+threads. A thread's earlier hops are read from the failed runs at the end of its history, so a
+restart finds the same next step and replays the same command ids instead of skipping one. When
+a chain covers threads, the sweep reads unarmed usage-limit failures even with auto-resume off;
+arming still follows the user's settings. `GoalThreadOwnership` is the owner filter: it reports
+no goal threads until the goal controller provides it.
 
 ## Interfaces between T1, T2 and T3
 

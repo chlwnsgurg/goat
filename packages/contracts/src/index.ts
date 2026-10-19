@@ -74,6 +74,7 @@ export * from "./previewAutomation.ts";
 export * from "./connectionCatalog.ts";
 export * from "./resourceTelemetry.ts";
 export * from "./hostStatus.ts";
+export * from "./fleetResources.ts";
 export * from "./usage.ts";
 export * from "./scheduledTask.ts";
 export * from "./worktreeMcp.ts";
