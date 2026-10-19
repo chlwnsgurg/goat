@@ -745,7 +745,7 @@ function CloudRemoteEnvironmentRows({
 }
 
 /**
- * Saved machines with their health, switches and row actions, plus the Add environment
+ * Saved machines with their health, switches and row actions, plus the Add device
  * dialog (remote pairing and SSH). Settings > Connections and the Fleet page both render it.
  */
 export function ConnectionEnvironmentsSection({
@@ -1142,8 +1142,8 @@ export function ConnectionEnvironmentsSection({
           }
         : {
             type: "success",
-            title: "Backend added",
-            description: "The environment is saved and will reconnect on app startup.",
+            title: "Device added",
+            description: "This device is saved and will reconnect when GOAT starts.",
           },
     );
     setIsAddingSavedBackend(false);
@@ -1377,11 +1377,11 @@ export function ConnectionEnvironmentsSection({
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
         <label className="block">
-          <span className="mb-1.5 block text-xs font-medium text-foreground">Host</span>
+          <span className="mb-1.5 block text-xs font-medium text-foreground">GOAT server</span>
           <Input
             value={savedBackendHost}
             onChange={(event) => handleSavedBackendHostChange(event.target.value)}
-            placeholder="backend.example.com"
+            placeholder="hub.tailnet-name.ts.net"
             disabled={isAddingSavedBackend}
             spellCheck={false}
           />
@@ -1399,7 +1399,7 @@ export function ConnectionEnvironmentsSection({
       </div>
       <div>
         <span className="mt-1 block text-2xs text-muted-foreground">
-          Paste a full pairing URL here to fill both fields automatically.
+          Paste a pairing link from a GOAT server on your tailnet to fill both fields.
         </span>
       </div>
     </div>
@@ -1465,7 +1465,7 @@ export function ConnectionEnvironmentsSection({
         onClick={() => void handleAddSavedBackend()}
       >
         <PlusIcon className="size-3.5" />
-        {isAddingSavedBackend ? "Adding…" : routeTarget ? "Add route" : "Add environment"}
+        {isAddingSavedBackend ? "Adding…" : routeTarget ? "Add route" : "Add device"}
       </Button>
     </div>
   );
@@ -1617,7 +1617,7 @@ export function ConnectionEnvironmentsSection({
           onClick={() => void handleAddSavedBackend()}
         >
           <PlusIcon className="size-3.5" />
-          {isAddingSavedBackend ? "Adding…" : routeTarget ? "Add route" : "Add environment"}
+          {isAddingSavedBackend ? "Adding…" : routeTarget ? "Add route" : "Add device"}
         </Button>
       </div>
     </div>
@@ -1656,45 +1656,46 @@ export function ConnectionEnvironmentsSection({
                   render={
                     <DialogTrigger
                       render={
-                        <Button size="xs" variant="ghost-muted" aria-label="Add environment">
+                        <Button size="xs" variant="ghost-muted" aria-label="Add device">
                           <PlusIcon className="size-3" />
-                          <span>Add environment</span>
+                          <span>Add device</span>
                         </Button>
                       }
                     />
                   }
                 />
-                <TooltipPopup side="top">Add environment</TooltipPopup>
+                <TooltipPopup side="top">Add device</TooltipPopup>
               </Tooltip>
               <DialogPopup className="max-h-[80dvh] sm:max-w-3xl">
                 <DialogHeader>
                   <DialogTitle>
-                    {routeTarget ? `Add a route to ${routeTarget.label}` : "Add Environment"}
+                    {routeTarget ? `Add a route to ${routeTarget.label}` : "Add device"}
                   </DialogTitle>
                   <DialogDescription>
                     {routeTarget
                       ? "Pair this machine again over another address, such as its Tailscale name. It joins the existing routes instead of adding a second machine."
-                      : "Pair another environment to this client."}
+                      : desktopBridge
+                        ? "Connect another device using SSH or a GOAT server on your tailnet."
+                        : "Connect to a GOAT server on your tailnet."}
                   </DialogDescription>
                 </DialogHeader>
                 <DialogPanel>
                   <div className="space-y-4">
                     <div className="grid gap-3 sm:grid-cols-2">
-                      {renderConnectionModeCard({
-                        mode: "remote",
-                        title: "Remote link",
-                        description: "Enter a backend host and pairing code.",
-                        icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
-                      })}
                       {desktopBridge
                         ? renderConnectionModeCard({
                             mode: "ssh",
                             title: "SSH",
-                            description:
-                              "Use local SSH config, agent, and tunnels for the backend.",
+                            description: "Connect using this device’s SSH settings.",
                             icon: <TerminalIcon aria-hidden className="size-4" />,
                           })
                         : null}
+                      {renderConnectionModeCard({
+                        mode: "remote",
+                        title: "Tailscale (GOAT server)",
+                        description: "Pair with a GOAT server on your tailnet.",
+                        icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
+                      })}
                     </div>
                     <AnimatedHeight>
                       {savedBackendMode === "ssh" ? renderSshFields() : renderRemoteModeBody()}

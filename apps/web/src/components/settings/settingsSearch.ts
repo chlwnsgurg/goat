@@ -1009,10 +1009,16 @@ export const SETTINGS_SEARCH_ITEMS = [
     localBackendManagementOnly: true,
   },
   {
+    id: "hub-device",
+    title: "Use this device as a hub",
+    to: "/settings/connections",
+    searchTerms: ["hub phone qr pair pairing tailscale https share device"],
+  },
+  {
     id: "tailscale-https",
     title: "Tailscale HTTPS",
     to: "/settings/connections",
-    targetId: "connections-environment",
+    targetId: "hub-device",
     searchTerms: ["serve magicdns endpoint remote secure network"],
     desktopOnly: true,
     localBackendManagementOnly: true,
@@ -1076,7 +1082,9 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "remote-environments",
     title: "Environments",
     to: "/settings/connections",
-    searchTerms: ["add pair backend host code ssh config agent tunnel saved goat connect"],
+    searchTerms: [
+      "add device environment pair backend host code ssh config agent tunnel saved goat connect tailscale server",
+    ],
   },
   {
     id: "hosts",

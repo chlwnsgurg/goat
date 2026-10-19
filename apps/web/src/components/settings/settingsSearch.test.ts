@@ -45,6 +45,24 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
 ];
 
 describe("searchSettings", () => {
+  it.each(["hub", "phone qr", "pair phone"])("routes %s to the hub card", (query) => {
+    const match = searchSettings(query).find((item) => item.id === "hub-device");
+    expect(match).toMatchObject({
+      title: "Use this device as a hub",
+      to: "/settings/connections",
+    });
+    expect(match?.targetId ?? match?.id).toBe("hub-device");
+  });
+
+  it("routes the existing Tailscale search entry to its moved hub control", () => {
+    const entry = SETTINGS_SEARCH_ITEMS.find((item) => item.id === "tailscale-https");
+    expect(entry?.targetId).toBe("hub-device");
+  });
+
+  it("finds the existing saved environment section by Add device", () => {
+    expect(searchSettings("add device").map((item) => item.id)).toContain("remote-environments");
+    expect(searchableSetting("remote-environments").id).toBe("remote-environments");
+  });
   it.each(["OTel", "OTLP", "telemetry export", "Grafana"])(
     "finds environment telemetry settings for %s",
     (query) => {
