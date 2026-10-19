@@ -1637,16 +1637,23 @@ export const REMOTE_RUNTIME_CLEANUP_SCRIPT = String.raw`cleanup_runtime_versions
   valid_live_tokens "$@" && [ "$1" = live ] && [ "$2" = "$SELECTED_VERSION" ] &&
     [ "$6" = "$REMOTE_PORT" ] || return 1
   cleanup_process_paths() {
-    commands="$(ps -axo command=)" && pids="$(ps -axo pid=)" || return 1
+    # Only this user's processes can run from this user's runtime directory, and /proc
+    # hides other users' executable and cwd links from an unprivileged reader.
+    uid="$(id -u)" || return 1
+    commands="$(ps -o command= -U "$uid")" && pids="$(ps -o pid= -U "$uid")" || return 1
     [ -n "$commands" ] && [ -n "$pids" ] || return 1
     paths="$commands"
-    # ps alone misses chdir and exec with a custom argv[0]. Any unreadable process vetoes deletion.
+    # ps alone misses chdir and exec with a custom argv[0]. An unreadable live process vetoes
+    # deletion; one that exited since ps listed it has nothing left to protect.
     for pid in $pids; do
       case "$pid" in *[!0-9]*|'') return 1 ;; esac
-      executable="$(readlink "/proc/$pid/exe")" && cwd="$(readlink "/proc/$pid/cwd")" || return 1
-      paths="$paths
+      if executable="$(readlink "/proc/$pid/exe")" && cwd="$(readlink "/proc/$pid/cwd")"; then
+        paths="$paths
 $executable
 $cwd"
+      elif [ -e "/proc/$pid" ]; then
+        return 1
+      fi
     done
   }
   cleanup_process_paths || return 1

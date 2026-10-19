@@ -42,7 +42,8 @@ function fixture() {
   executable(join(bin, "flock"), "#!/bin/sh\nexit 0\n");
   executable(
     join(bin, "ps"),
-    '#!/bin/sh\ncase "$*" in *command=*) echo unrelated ;; *pid=*) echo 42 ;; *) exit 1 ;; esac\n',
+    // Cleanup must ask only for this user's processes; other users' /proc links are unreadable.
+    '#!/bin/sh\ncase "$*" in *-U*) ;; *) exit 1 ;; esac\ncase "$*" in *command=*) echo unrelated ;; *pid=*) printf "42\\n${GOAT_TEST_EXTRA_PID:-}\\n" ;; *) exit 1 ;; esac\n',
   );
   symlinkSync("/bin/unrelated", join(home, "proc/42/exe"));
   symlinkSync("/tmp", join(home, "proc/42/cwd"));
@@ -121,6 +122,13 @@ describe.skipIf(process.platform === "win32")("SSH runtime cleanup", () => {
       assert.isTrue(existsSync(join(f.versions, v)), v);
     assert.equal(readFileSync(join(outside, "keep"), "utf8"), "safe");
     assert.isFalse(readdirSync(f.versions).some((v) => v.startsWith(".trash-")));
+  });
+
+  it("ignores a process that exited after ps listed it", () => {
+    const f = fixture();
+    const r = f.run("GOAT_TEST_EXTRA_PID=77; export GOAT_TEST_EXTRA_PID");
+    assert.equal(r.status, 0, r.stderr);
+    assert.isFalse(existsSync(join(f.versions, "1.5.0")), r.stderr);
   });
 
   it("keeps an executable in use even when its command hides its path", () => {
