@@ -8,6 +8,9 @@ and how it presents each case. The retry loop itself is the shared
 [connection runtime](connection-runtime.md); SSH adds classification and
 presentation on top of it, not a second loop.
 
+[SSH hardening references](ssh-hardening-references.md) compares this design
+with cmux, herdr, and Codex and holds the backlog for the next changes.
+
 ## States
 
 The [supervisor](../../packages/client-runtime/src/connection/supervisor.ts)
