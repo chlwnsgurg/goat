@@ -24,6 +24,8 @@ import { liveThreadShell } from "../../McpToolAccess.testkit.ts";
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  SSH_PREFLIGHT_STEP_ORDER,
+  type SshPreflightReport,
   TurnItemId,
   handoffSummary,
   EnvironmentAuthorizationError,
@@ -1177,8 +1179,20 @@ const runtimeScope: McpInvocationContext.McpInvocationScope = {
 const runtimeFixture = (
   result = runtimeStatus,
   remote?: Pick<SshRemoteDispatch.SshRemoteDispatch["Service"], "runtimeStatus" | "runtimeUpdate">,
+  preflightReady = true,
 ) => {
   const updates: { host: string; confirmReplacement: boolean }[] = [];
+  const catalogWrites: string[] = [];
+  const preflight: SshPreflightReport = {
+    host: "box",
+    destination: { alias: "box", hostname: "box.example", user: "deploy", port: 22 },
+    ready: preflightReady,
+    steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({
+      id,
+      state: !preflightReady && id === "host_key" ? "needs_review" : "passed",
+      summary: "Checked.",
+    })),
+  };
   let statusReads = 0;
   const defects: string[] = [];
   const reporter: ErrorReporter.ErrorReporter = {
@@ -1249,7 +1263,25 @@ const runtimeFixture = (
   const registered = McpHttpServer.toolkitRegistration(SshToolkit, SshHandlers.layer).pipe(
     Layer.provide(
       SshDeviceAdd.layer.pipe(
-        Layer.provide(Layer.mock(ConnectionCatalogBroker.ConnectionCatalogBroker)({})),
+        Layer.provide(
+          Layer.mock(ConnectionCatalogBroker.ConnectionCatalogBroker)({
+            invoke: (operation) =>
+              Effect.sync(() => {
+                expect(operation.type).toBe("add_ssh");
+                catalogWrites.push("add_ssh");
+                return {
+                  type: "add_ssh" as const,
+                  created: true,
+                  connection: {
+                    environmentId: EnvironmentId.make("box"),
+                    label: "Box",
+                    enabled: true,
+                    routes: [],
+                  },
+                };
+              }),
+          }),
+        ),
       ),
     ),
     Layer.provideMerge(McpServer.McpServer.layer),
@@ -1259,7 +1291,18 @@ const runtimeFixture = (
           const fs = yield* FileSystem.FileSystem;
           // The approval producer reads managed alias metadata; never consult the runner's real SSH home.
           const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-runtime-tools-" });
-          return Layer.effect(SshHostSetup.SshHostSetup, SshHostSetup.make({ home }));
+          yield* fs.makeDirectory(`${home}/.ssh`, { recursive: true });
+          yield* fs.writeFileString(
+            `${home}/.ssh/config`,
+            "Host box\n  HostName box.example\n  User deploy\n",
+          );
+          return Layer.effect(
+            SshHostSetup.SshHostSetup,
+            SshHostSetup.make({
+              home,
+              runPreflight: () => Effect.succeed(preflight),
+            }),
+          );
         }),
       ),
     ),
@@ -1284,7 +1327,16 @@ const runtimeFixture = (
       Effect.provideService(McpSchema.McpServerClient, client),
       Effect.provide(registered),
     );
-  return { registered, call, updates, handoffs, defects, statusReads: () => statusReads };
+  return {
+    registered,
+    call,
+    updates,
+    handoffs,
+    defects,
+    preflight,
+    catalogWrites,
+    statusReads: () => statusReads,
+  };
 };
 
 it.effect("discovers both runtime tools", () =>
@@ -1493,7 +1545,6 @@ it.effect(
 );
 
 it.effect.each([
-  ["goat_ssh_host_add", { address: "box" }],
   ["goat_ssh_host_prepare", { host: "box" }],
   ["goat_ssh_host_forget", { host: "box", stopRuntime: "no" }],
 ] as const)("%s maps missing live authority to capability_denied before SSH", ([name, input]) =>
@@ -1503,5 +1554,51 @@ it.effect.each([
     expect(declaredFailure(response)).toMatchObject({ code: "capability_denied" });
     expect(f.updates).toEqual([]);
     expect(f.statusReads()).toBe(0);
+  }),
+);
+
+it.effect(
+  "SSH add saves a configured alias for a full-access outside client without settings:write",
+  () =>
+    Effect.gen(function* () {
+      const f = runtimeFixture();
+      const response = yield* f.call(
+        "goat_ssh_host_add",
+        { host: "box" },
+        {
+          ...runtimeScope,
+          grantedScopes: ["orchestration:read", "orchestration:operate"],
+        },
+      );
+      expect(response.isError).toBe(false);
+      expect(response.structuredContent).toMatchObject({
+        outcome: "connected",
+        preflight: f.preflight,
+        created: true,
+      });
+      expect(f.catalogWrites).toEqual(["add_ssh"]);
+      expect(f.handoffs).toEqual([]);
+    }),
+);
+it.effect("SSH add returns preflight when a new fingerprint needs settings:write", () =>
+  Effect.gen(function* () {
+    const f = runtimeFixture(runtimeStatus, undefined, false);
+    const response = yield* f.call(
+      "goat_ssh_host_add",
+      { host: "box" },
+      {
+        ...runtimeScope,
+        grantedScopes: ["orchestration:read", "orchestration:operate"],
+      },
+    );
+    expect(response.isError).toBe(false);
+    expect(response.structuredContent).toMatchObject({
+      outcome: "capability_denied",
+      preflight: f.preflight,
+      saved: false,
+      reason: expect.stringContaining("settings:write"),
+    });
+    expect(f.catalogWrites).toEqual([]);
+    expect(f.handoffs).toEqual([]);
   }),
 );

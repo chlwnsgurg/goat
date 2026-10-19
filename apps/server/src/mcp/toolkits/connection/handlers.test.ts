@@ -29,12 +29,13 @@ const outsideCaller = (
   client: { sessionId: "client:connections", label: "Test agent", access },
   capabilities: new Set(["orchestration"]),
   issuedAt: 0,
-  grantedScopes: ["settings:write", "environment:maintain"],
+  grantedScopes: ["orchestration:read", "orchestration:operate"],
   reauthorize: () => Effect.void,
 });
 const threadCaller: McpInvocationContext.McpInvocationScope = {
   ...outsideCaller("full-access"),
   client: undefined,
+  grantedScopes: ["settings:write", "environment:maintain"],
   thread: {
     threadId,
     providerSessionId: "provider:connections",
@@ -102,7 +103,11 @@ it.effect("refuses read-only and approval-required clients on remove, and read-o
       expect(add.at(-1)?.result).toMatchObject(
         access === "read-only"
           ? { code: "capability_denied" }
-          : { saved: false, code: "unsupported" },
+          : {
+              outcome: "capability_denied",
+              saved: false,
+              reason: expect.stringContaining("settings:write"),
+            },
       );
       expect(remove.at(-1)?.result).toMatchObject({ code: "capability_denied" });
     }).pipe(

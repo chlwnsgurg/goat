@@ -1420,6 +1420,29 @@ it.effect(
             { kind: "client", sessionId: probeSessionId },
           ),
         ).toEqual(report);
+        expect(
+          yield* setup.preflight(
+            { host: "configured" },
+            {
+              kind: "mcp",
+              scope: {
+                ...invocation,
+                grantedScopes: ["orchestration:read", "orchestration:operate"],
+              },
+            },
+          ),
+        ).toEqual(report);
+        expect(
+          yield* setup
+            .preflight(
+              { host: "configured" },
+              {
+                kind: "mcp",
+                scope: { ...invocation, capabilities: new Set() },
+              },
+            )
+            .pipe(Effect.flip),
+        ).toMatchObject({ requiredScope: "orchestration:read" });
       }).pipe(
         Effect.provideService(
           ConfigProvider.ConfigProvider,

@@ -257,7 +257,7 @@ export const agentSurfaceRegistry = {
     toolkit: "connection",
     summary: "Add an SSH device",
     description:
-      "Alias of goat_ssh_host_add. Add an SSH device from a configured host alias or typed address. Runs preflight, asks a person to pin a new fingerprint, then saves the connection when a full-access caller and desktop catalog are available. After approval call goat_ssh_host_add with next.host. Otherwise prepares the host and returns saved:false with the result and reason. Key authentication only. Repeated calls return an existing connection with created:false.",
+      "Alias of goat_ssh_host_add. Add an SSH device from a configured host alias or typed address. Runs preflight, asks a person to pin a new fingerprint, then saves the connection when a full-access caller and desktop catalog are available. After approval call goat_ssh_host_add with next.host. Otherwise prepares the host and returns saved:false with the result and reason. Key authentication only. Repeated calls return an existing connection with created:false. Preflight needs the orchestration capability. Creating a host trust handoff needs settings:write; saving a desktop connection needs full access; headless preparation needs environment:maintain. Denied steps return the preflight report with outcome capability_denied and the missing authority in reason.",
     effect: "write",
     hostRoutable: false,
     requires: "either",
@@ -1791,7 +1791,7 @@ export const agentSurfaceRegistry = {
     toolkit: "ssh",
     summary: "Add an SSH host",
     description:
-      "Alias of goat_connection_add_ssh. Add an SSH device from a configured host alias or typed address. Runs reachability, host key, key authentication, platform, disk and runtime preflight. Failed checks have fixes and cause no provisioning. A new fingerprint needs human approval; approval only pins the host. Call this tool again with next.host after approval to preflight and connect. A full-access caller with a desktop catalog saves the connection; otherwise returns saved:false and the real preparation result.",
+      "Alias of goat_connection_add_ssh. Add an SSH device from a configured host alias or typed address. Runs reachability, host key, key authentication, platform, disk and runtime preflight. Failed checks have fixes and cause no provisioning. A new fingerprint needs human approval; approval only pins the host. Call this tool again with next.host after approval to preflight and connect. A full-access caller with a desktop catalog saves the connection; otherwise returns saved:false and the real preparation result. Preflight needs the orchestration capability. Creating a host trust handoff needs settings:write; saving a desktop connection needs full access; headless preparation needs environment:maintain. Denied steps return the preflight report with outcome capability_denied and the missing authority in reason.",
     effect: "write",
     hostRoutable: false,
     requires: "either",

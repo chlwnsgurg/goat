@@ -1,6 +1,5 @@
 import { expect, it } from "@effect/vitest";
 import {
-  EnvironmentAuthorizationError,
   EnvironmentId,
   ProviderInstanceId,
   ThreadId,
@@ -243,15 +242,20 @@ it.effect("a limited caller prepares without writing the desktop catalog", () =>
 it.effect("full access revoked before dispatch stops the catalog write", () =>
   Effect.gen(function* () {
     const f = yield* fixture({ revoke: true });
-    expect(yield* f.call().pipe(Effect.flip)).toBeInstanceOf(EnvironmentAuthorizationError);
+    expect(yield* f.call()).toMatchObject({
+      outcome: "capability_denied",
+      preflight: readyPreflight,
+      saved: false,
+      reason: expect.stringContaining("full-access"),
+    });
     expect(f.calls).toEqual(["preflight"]);
   }),
 );
-it.effect("missing settings authority stops before preflight", () =>
+it.effect("saving a trusted alias does not require settings authority", () =>
   Effect.gen(function* () {
     const f = yield* fixture({ authority: false });
-    expect(yield* f.call().pipe(Effect.flip)).toBeInstanceOf(EnvironmentAuthorizationError);
-    expect(f.calls).toEqual([]);
+    expect(yield* f.call()).toMatchObject({ outcome: "connected" });
+    expect(f.calls).toEqual(["preflight", "broker"]);
   }),
 );
 it.effect.each([{}, { configured: true }])(
@@ -263,6 +267,7 @@ it.effect.each([{}, { configured: true }])(
         yield* f.call({
           ...scope,
           thread: undefined,
+          grantedScopes: ["orchestration:read", "orchestration:operate"],
           client: { sessionId: "client", label: "Client", access: "full-access" },
         }),
       ).toMatchObject({ outcome: "connected", created: true });
@@ -293,6 +298,7 @@ it.effect.each([
 );
 
 const isAddInput = Schema.is(DeviceAdd.SshDeviceAddInput);
+const isAddResult = Schema.is(DeviceAdd.SshDeviceAddResult);
 it.each([
   { input: { host: "build" }, accepted: true },
   { input: { address: "deploy@build.example:2222" }, accepted: true },
@@ -324,4 +330,41 @@ it.effect.each([false, true])(
           : ["preflight", "broker", "approval", "preflight", "broker", "prepare"],
       );
     }),
+);
+
+it.effect("a new fingerprint returns preflight when an outside client lacks settings:write", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture({ typed: true, blocked: "needs_review" });
+    const result = yield* f.call({
+      ...scope,
+      thread: undefined,
+      grantedScopes: ["orchestration:read", "orchestration:operate"],
+      client: { sessionId: "client", label: "Client", access: "full-access" },
+    });
+    expect(result).toMatchObject({
+      outcome: "capability_denied",
+      saved: false,
+      reason: expect.stringContaining("settings:write"),
+      preflight: {
+        ready: false,
+        steps: expect.arrayContaining([
+          { id: "host_key", state: "needs_review", summary: "host_key passed." },
+        ]),
+      },
+    });
+    expect(isAddResult(result)).toBe(true);
+    expect(f.calls).toEqual(["preflight"]);
+  }),
+);
+it.effect("headless preparation returns preflight when environment:maintain is missing", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture({ catalog: "absent" });
+    expect(yield* f.call({ ...scope, grantedScopes: ["settings:write"] })).toMatchObject({
+      outcome: "capability_denied",
+      saved: false,
+      preflight: readyPreflight,
+      reason: expect.stringContaining("environment:maintain"),
+    });
+    expect(f.calls).toEqual(["preflight", "broker"]);
+  }),
 );

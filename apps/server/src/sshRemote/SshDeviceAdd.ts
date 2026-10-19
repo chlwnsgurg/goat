@@ -21,7 +21,7 @@ import * as Broker from "../connections/ConnectionCatalogBroker.ts";
 import * as Sessions from "../auth/SessionStore.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import * as Invocation from "../mcp/McpInvocationContext.ts";
-import { assertLiveCaller, loadCaller } from "../mcp/threadAccess.ts";
+import { assertFullAccess, assertLiveCaller, readCaller } from "../mcp/threadAccess.ts";
 import { authorizeSshHost, type SshHostCaller } from "./SshHostAuthorization.ts";
 import * as Setup from "./SshHostSetup.ts";
 
@@ -44,6 +44,12 @@ const unsaved = {
 };
 export const SshDeviceAddResult = Schema.Union([
   Schema.Struct({ outcome: Schema.Literal("failed"), preflight: SshPreflightReport }),
+  Schema.Struct({
+    outcome: Schema.Literal("capability_denied"),
+    preflight: SshPreflightReport,
+    saved: Schema.Literal(false),
+    reason: Schema.String,
+  }),
   Schema.Struct({
     outcome: Schema.Literal("needs_human"),
     preflight: SshPreflightReport,
@@ -86,7 +92,6 @@ const make = Effect.gen(function* () {
   const threads = yield* Threads.ThreadManagementService;
   const addDevice: SshDeviceAdd["Service"]["addDevice"] = (input, caller) =>
     Effect.gen(function* () {
-      yield* authorizeSshHost(sessions, caller, "settings:write");
       if (caller.kind !== "mcp")
         return {
           saved: false,
@@ -114,117 +119,136 @@ const make = Effect.gen(function* () {
       );
       if (preflight.steps.some((step) => step.state === "failed"))
         return { outcome: "failed", preflight };
-      const requestTrust = (): ReturnType<SshDeviceAdd["Service"]["addDevice"]> =>
-        Effect.gen(function* () {
-          if (!caller.scope.thread)
+      return yield* Effect.gen(function* () {
+        const requestTrust = (): ReturnType<SshDeviceAdd["Service"]["addDevice"]> =>
+          Effect.gen(function* () {
+            yield* authorizeSshHost(sessions, caller, "settings:write");
+            if (!caller.scope.thread)
+              return {
+                saved: false,
+                preflight,
+                reason: "A thread is required for SSH handoffs.",
+                kind: "error",
+                code: "unsupported",
+                message: "Add this host in Settings → Connections.",
+                fix: { actor: "human", instruction: "Add this host in Settings → Connections." },
+              };
+            const result = yield* setup.add(resolved.input, caller);
+            if (result.kind !== "needs_human")
+              return {
+                ...result,
+                preflight,
+                saved: false,
+                reason: "Host trust has not completed.",
+              };
             return {
-              saved: false,
+              outcome: "needs_human",
               preflight,
-              reason: "A thread is required for SSH handoffs.",
-              kind: "error",
-              code: "unsupported",
-              message: "Add this host in Settings → Connections.",
-              fix: { actor: "human", instruction: "Add this host in Settings → Connections." },
+              handoff: result.handoff,
+              status: result.status,
+              next: { after: "approval", call: "goat_ssh_host_add", host: result.status.host },
             };
-          const result = yield* setup.add(resolved.input, caller);
-          if (result.kind !== "needs_human")
-            return {
-              ...result,
-              preflight,
-              saved: false,
-              reason: "Host trust has not completed.",
-            };
-          return {
-            outcome: "needs_human",
-            preflight,
-            handoff: result.handoff,
-            status: result.status,
-            next: { after: "approval", call: "goat_ssh_host_add", host: result.status.host },
-          };
-        });
-      if (!preflight.ready || !resolved.host) return yield* requestTrust();
-      const scope = caller.scope;
-      const liveCaller = loadCaller().pipe(
-        Effect.tap(assertLiveCaller),
-        Effect.provideService(Invocation.McpInvocationContext, scope),
-        Effect.provideService(Threads.ThreadManagementService, threads),
-      );
-      const current = yield* liveCaller;
-      let reason = "Saving a desktop connection needs full access.";
-      if (
-        current.limits.runtimeMode === "full-access" &&
-        current.limits.interactionMode === "default"
-      ) {
-        yield* authorizeSshHost(sessions, caller, "settings:write");
-        const latest = yield* liveCaller;
+          });
+        if (!preflight.ready || !resolved.host) return yield* requestTrust();
+        const scope = caller.scope;
+        const liveCaller = readCaller().pipe(
+          Effect.tap(assertLiveCaller),
+          Effect.provideService(Invocation.McpInvocationContext, scope),
+          Effect.provideService(Threads.ThreadManagementService, threads),
+        );
+        const current = yield* liveCaller;
+        let reason = "Saving a desktop connection needs full access.";
         if (
-          latest.limits.runtimeMode !== "full-access" ||
-          latest.limits.interactionMode !== "default"
-        )
-          return yield* new EnvironmentAuthorizationError({
-            requiredScope: "settings:write",
-            message: "Full access was revoked before saving this connection.",
-          });
-        const response = yield* broker
-          .invoke(
-            {
-              type: "add_ssh",
-              host: resolved.host,
-              ...(input.label ? { label: input.label } : {}),
-              addedBy: {
-                kind: "agent",
-                ...(scope.thread ? { threadId: scope.thread.threadId } : {}),
-                ...(scope.client ? { client: scope.client.label } : {}),
-                at: DateTime.formatIso(yield* DateTime.now),
-              },
-            },
-            10 * 60_000,
-          )
-          .pipe(
-            Effect.catchTags({
-              ConnectionCatalogHostUnavailable: () => Effect.succeed(null),
-              ConnectionCatalogHostDetached: () =>
-                Effect.fail(
-                  new OrchestratorMcpFailure({
-                    code: "host_unavailable",
-                    message:
-                      "The desktop detached while adding this connection. Check Settings → Connections before trying again.",
-                  }),
-                ),
-              ConnectionCatalogTimeout: () =>
-                Effect.fail(
-                  new OrchestratorMcpFailure({
-                    code: "host_unavailable",
-                    message:
-                      "The desktop did not answer while adding this connection. Check Settings → Connections before trying again.",
-                  }),
-                ),
-            }),
+          current.limits.runtimeMode === "full-access" &&
+          current.limits.interactionMode === "default"
+        ) {
+          const at = DateTime.formatIso(yield* DateTime.now);
+          const latest = yield* liveCaller;
+          yield* assertFullAccess(
+            latest,
+            "Saving a desktop connection needs a live full-access/default calling thread or a full-access client.",
           );
-        if (response?.type === "add_ssh")
-          return {
-            outcome: "connected",
-            preflight,
-            connection: response.connection,
-            created: response.created,
-          };
-        if (response !== null)
-          return yield* new OrchestratorMcpFailure({
-            code:
-              response.type === "failure" && response.reason === "connection_failed"
-                ? "host_unavailable"
-                : "invalid_request",
-            message:
-              response.type === "failure"
-                ? response.message.slice(0, 2000)
-                : "The desktop returned a different operation's response.",
-          });
-        reason =
-          "No desktop connection catalog is attached; this environment cannot save a desktop connection.";
-      }
-      if (!resolved.managed) return yield* requestTrust();
-      const result = yield* setup.prepare({ host: resolved.host }, caller);
-      return { ...result, preflight, saved: false, reason };
+          const response = yield* broker
+            .invoke(
+              {
+                type: "add_ssh",
+                host: resolved.host,
+                ...(input.label ? { label: input.label } : {}),
+                addedBy: {
+                  kind: "agent",
+                  ...(scope.thread ? { threadId: scope.thread.threadId } : {}),
+                  ...(scope.client ? { client: scope.client.label } : {}),
+                  at,
+                },
+              },
+              10 * 60_000,
+            )
+            .pipe(
+              Effect.catchTags({
+                ConnectionCatalogHostUnavailable: () => Effect.succeed(null),
+                ConnectionCatalogHostDetached: () =>
+                  Effect.fail(
+                    new OrchestratorMcpFailure({
+                      code: "host_unavailable",
+                      message:
+                        "The desktop detached while adding this connection. Check Settings → Connections before trying again.",
+                    }),
+                  ),
+                ConnectionCatalogTimeout: () =>
+                  Effect.fail(
+                    new OrchestratorMcpFailure({
+                      code: "host_unavailable",
+                      message:
+                        "The desktop did not answer while adding this connection. Check Settings → Connections before trying again.",
+                    }),
+                  ),
+              }),
+            );
+          if (response?.type === "add_ssh")
+            return {
+              outcome: "connected" as const,
+              preflight,
+              connection: response.connection,
+              created: response.created,
+            };
+          if (response !== null)
+            return yield* new OrchestratorMcpFailure({
+              code:
+                response.type === "failure" && response.reason === "connection_failed"
+                  ? "host_unavailable"
+                  : "invalid_request",
+              message:
+                response.type === "failure"
+                  ? response.message.slice(0, 2000)
+                  : "The desktop returned a different operation's response.",
+            });
+          reason =
+            "No desktop connection catalog is attached; this environment cannot save a desktop connection.";
+        }
+        if (!resolved.managed) return yield* requestTrust();
+        yield* authorizeSshHost(sessions, caller, "environment:maintain");
+        const result = yield* setup.prepare({ host: resolved.host }, caller);
+        return { ...result, preflight, saved: false as const, reason };
+      }).pipe(
+        Effect.catchTags({
+          EnvironmentAuthorizationError: (error) =>
+            Effect.succeed({
+              outcome: "capability_denied" as const,
+              preflight,
+              saved: false as const,
+              reason: error.message,
+            }),
+          OrchestratorMcpFailure: (error) =>
+            error.code === "capability_denied"
+              ? Effect.succeed({
+                  outcome: "capability_denied" as const,
+                  preflight,
+                  saved: false as const,
+                  reason: error.message,
+                })
+              : Effect.fail(error),
+        }),
+      );
     });
   return SshDeviceAdd.of({ addDevice });
 });

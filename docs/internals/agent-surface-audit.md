@@ -172,8 +172,8 @@ Names that look like tools but are not in the registry:
 
 | Name                             | Where                                                                   |
 | -------------------------------- | ----------------------------------------------------------------------- |
-| `goat_describe`                  | docs/internals/agent-surface.md:45, docs/internals/agent-surface.md:690 |
-| `goat_call`                      | docs/internals/agent-surface.md:45, docs/internals/agent-surface.md:692 |
+| `goat_describe`                  | docs/internals/agent-surface.md:45, docs/internals/agent-surface.md:692 |
+| `goat_call`                      | docs/internals/agent-surface.md:45, docs/internals/agent-surface.md:694 |
 | `goat_eval`                      | docs/internals/agent-surface.md:45                                      |
 | `goat_thread_create_many`        | docs/internals/agent-surface.md:221                                     |
 | `goat_task_create`               | docs/internals/agent-surface.md:222                                     |
@@ -191,11 +191,11 @@ CLI invocations in the docs that do not resolve:
 
 | Text                                                        | Problem                                           | Where                               |
 | ----------------------------------------------------------- | ------------------------------------------------- | ----------------------------------- |
-| `goat provider setup --driver claudeCloud --dry-run --json` | no subcommand `setup` under `goat provider`       | docs/internals/agent-surface.md:652 |
-| `goat provider setup --driver claudeCloud --json`           | no subcommand `setup` under `goat provider`       | docs/internals/agent-surface.md:654 |
-| `goat provider login-start --instance claudeCloud --json`   | no subcommand `login-start` under `goat provider` | docs/internals/agent-surface.md:658 |
+| `goat provider setup --driver claudeCloud --dry-run --json` | no subcommand `setup` under `goat provider`       | docs/internals/agent-surface.md:654 |
+| `goat provider setup --driver claudeCloud --json`           | no subcommand `setup` under `goat provider`       | docs/internals/agent-surface.md:656 |
+| `goat provider login-start --instance claudeCloud --json`   | no subcommand `login-start` under `goat provider` | docs/internals/agent-surface.md:660 |
 
-72 of 141 tools are never named in any Markdown doc, and 67 are named in neither docs nor agent prompts: `channel_task_export`, `channel_task_move`, `goat_cloud_machine_create`, `goat_cloud_machine_list`, `goat_cloud_machine_resume`, `goat_cloud_machine_stop`, `goat_connection_add_ssh`, `goat_connection_remove`, `goat_host_link_create`, `goat_host_link_list`, `goat_host_link_remove`, `goat_project_clone`, `goat_project_create`, `goat_project_delete`, `goat_project_read`, `goat_project_update`, `goat_provider_diagnose`, `goat_provider_home_request`, `goat_queue_cancel`, `goat_queue_edit`, `goat_queue_promote_to_steer`, `goat_queue_read`, `goat_queue_reorder`, `goat_review_findings_export`, and 43 more. Agents learn these only from the MCP catalog.
+70 of 141 tools are never named in any Markdown doc, and 65 are named in neither docs nor agent prompts: `channel_task_export`, `channel_task_move`, `goat_cloud_machine_create`, `goat_cloud_machine_list`, `goat_cloud_machine_resume`, `goat_cloud_machine_stop`, `goat_connection_remove`, `goat_host_link_create`, `goat_host_link_list`, `goat_host_link_remove`, `goat_project_clone`, `goat_project_create`, `goat_project_delete`, `goat_project_read`, `goat_project_update`, `goat_provider_diagnose`, `goat_provider_home_request`, `goat_queue_cancel`, `goat_queue_edit`, `goat_queue_promote_to_steer`, `goat_queue_read`, `goat_queue_reorder`, `goat_review_findings_export`, `goat_review_findings_record`, and 41 more. Agents learn these only from the MCP catalog.
 
 Listed CLI commands no doc invokes: `goat auth pairing list`, `goat auth pairing revoke`, `goat auth session issue`, `goat project add`, `goat project remove`, `goat project rename`, `goat theme set`, `goat theme clear`, `goat theme show`, `goat triage`.
 
@@ -205,7 +205,7 @@ Nothing generates reference docs from the registry today, so these lists can onl
 
 1. **One error envelope with a machine code and a next action.** 6 error families and two failure modes (106 `return`, 35 `error`) all arrive as JSON inside text. Return `structuredContent` shaped like `{code, message, retryable, field?, next?}` from every tool so an agent branches on data.
 2. **A single human handoff primitive.** Secrets, approvals, mode escalation, capability grants, and sign-in each surface differently (see "Where a human is required"). One handoff result with an id, what the user must do and where, plus one wait call, lets any agent pause and resume instead of failing.
-3. **Generate tool reference docs from the registry and check drift in CI.** 67 tools appear in no doc or prompt. Render reference pages from `inventory.ts` and fail CI when the committed output differs, as `icons:check` does for icons.
+3. **Generate tool reference docs from the registry and check drift in CI.** 65 tools appear in no doc or prompt. Render reference pages from `inventory.ts` and fail CI when the committed output differs, as `icons:check` does for icons.
 4. **Describe every parameter.** 416 of 527 parameters have no description, and 97 tools describe none. Extend the catalog test at apps/server/src/mcp/toolkits/core.test.ts:129 to fail on an undescribed field.
 5. **Publish the real argument contract.** 124 schemas advertise `additionalProperties: true` while the server refuses extra keys. Emit `false` so schema-validating clients reject a bad call before sending it.
 6. **Retry keys on every mutating tool.** 80 mutating tools take no `clientRequestId`, so a dropped response leaves an agent unable to retry safely. Start with destructive tools and thread launch.

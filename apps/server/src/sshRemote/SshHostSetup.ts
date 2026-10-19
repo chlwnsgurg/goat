@@ -537,7 +537,13 @@ export const make = (
       );
     const preflight: SshHostSetup["Service"]["preflight"] = (input, caller) =>
       Effect.gen(function* () {
-        yield* authorize(caller, "settings:write");
+        if (caller.kind === "mcp") {
+          if (!caller.scope.capabilities.has("orchestration"))
+            return yield* new EnvironmentAuthorizationError({
+              requiredScope: "orchestration:read",
+              message: "SSH preflight needs the orchestration capability.",
+            });
+        } else yield* authorize(caller, "settings:write");
         const resolved = yield* resolveDestination({ ...input, address: input.host });
         const owner = yield* environment.getDescriptor;
         const cliRunner = yield* Dispatch.resolveSshCliRunner(
