@@ -166,7 +166,7 @@ connected to appears as last reported by that environment.
 
 Below the list, **Connections** shows your saved machines with the same controls as
 **Settings → Connections**: switch one off, check its routes and permissions, remove it, or pair
-another with **Add environment**.
+another with **Add device**.
 
 ### Fold working threads on mobile
 

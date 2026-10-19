@@ -93,3 +93,13 @@ follow replacement sessions. After a transport failure they wait for the
 supervisor; an expected domain failure may resubscribe on the same healthy
 session. Reconnection does not automatically replay mutations, whose retry and
 idempotency rules belong to the operation.
+
+## The saved connection catalog stays at schema version 1
+
+Add new catalog state as optional keys, as `githubRoutingPermissions`, `disabledEnvironmentIds`
+and `hub` were added, and never raise `schemaVersion`. A mobile build that cannot decode the
+catalog deletes it and falls back to the legacy key
+([catalog-store.ts](../../apps/mobile/src/connection/catalog-store.ts)), so one write of a newer
+version followed by an over-the-air rollback would forget every saved server. Older builds that
+rewrite the catalog drop keys they do not know; anything stored there, such as the phone's hub,
+needs a fallback for its key disappearing.
