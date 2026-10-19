@@ -56,8 +56,9 @@ const HUB_PROXY_METHOD_POLICY: Readonly<Record<string, (payload: unknown) => boo
 export const HUB_PROXY_COMMAND_TYPES: ReadonlySet<string> = new Set([
   // A follow-up in an existing thread, with any attachments uploaded through the hub.
   "message.dispatch",
-  // The stop button.
+  // The stop button, which holds the queue, and resuming that queue afterwards.
   "run.interrupt",
+  "queue.resume",
 ]);
 
 const hubProxyAdmitsCommand = (payload: unknown): boolean => {
