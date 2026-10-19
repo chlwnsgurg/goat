@@ -91,7 +91,8 @@ A worker blocked on a person counts the same whether it or one of its subagents 
 reconciliation reads the pending requests of the live subagents a worker started, and of theirs,
 up to three levels and twenty threads, and adds them to the task's `observed.needsYou`, so the
 chip, the waiting count and "what's pending" show a subagent's approval as the work waiting on
-the person. Answering it still happens in that subagent's thread in GOAT.
+the person. Answering it still happens in that subagent's thread in GOAT. Subagents with no GOAT
+child thread (cloud or other remote children) are not read; see issue #475.
 
 A task is a work item: what a person asked for. Its worker runs are separate records, one per
 run of the task's worker thread, kept as `worker-run:<task>:<run>` rows in
