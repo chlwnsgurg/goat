@@ -20,7 +20,7 @@ import type {
 import * as DateTime from "effect/DateTime";
 
 import type { ThreadHealth } from "../health/Health.ts";
-import { publicWorker, type WorkerRecord } from "./GoalStore.ts";
+import { type LaunchClaim, NOT_SENT, publicWorker, type WorkerRecord } from "./GoalStore.ts";
 
 export const LAUNCH_GRACE_MS = 300_000;
 export const MAX_ACTIONS_PER_GOAL = 3;
@@ -71,6 +71,74 @@ export const desiredSlots = (goal: Pick<FleetGoal, "spec">) => {
     target: workers.perTarget ? (targets[slot] ?? null) : null,
   }));
 };
+
+/** Slots for earlier attempts found only in launch records; they are stopped like dropped slots. */
+export const ORPHAN_SLOT_BASE = 10_000;
+
+const attemptOf = (actionId: string) => Number(/:a(\d+):launch$/.exec(actionId)?.[1] ?? 1);
+const slotOf = (actionId: string) => Number(/:s(\d+):a\d+:launch$/.exec(actionId)?.[1] ?? 0);
+
+/**
+ * Rebuilds slot records from the launch records, which outlive any status write. A launch whose
+ * thread is recorded is attached to its slot; one whose slot record was never written, or was
+ * dropped by a write lost to a generation change, becomes that slot again; and a launch for a
+ * slot that has since moved to another attempt becomes an orphan slot the plan stops. A claimed
+ * launch with no outcome yet is kept as unclear, so nothing (deletion included) forgets it.
+ */
+export function repairWorkers(
+  goal: FleetGoal,
+  workers: ReadonlyArray<WorkerRecord>,
+  launches: ReadonlyArray<LaunchClaim>,
+): ReadonlyArray<WorkerRecord> {
+  const bySlot = new Map(workers.map((worker) => [worker.slot, worker]));
+  const threads = new Set(
+    workers.flatMap((worker) => (worker.threadId === null ? [] : [worker.threadId as string])),
+  );
+  const referenced = new Set(workers.map((worker) => worker.launchClientRequestId));
+  let nextOrphan = Math.max(ORPHAN_SLOT_BASE - 1, ...workers.map((worker) => worker.slot)) + 1;
+  const targets = new Map(desiredSlots(goal).map(({ slot, target }) => [slot, target]));
+  for (const launch of launches) {
+    if (launch.outcome === NOT_SENT) continue;
+    if (launch.threadId !== null && threads.has(launch.threadId)) continue;
+    const slot = launch.slot ?? slotOf(launch.actionId);
+    const current = bySlot.get(slot);
+    if (current !== undefined && current.launchClientRequestId === launch.actionId) {
+      if (current.threadId === null && launch.threadId !== null) {
+        bySlot.set(slot, {
+          ...current,
+          host: launch.host,
+          threadId: launch.threadId as WorkerRecord["threadId"],
+          state: "running",
+        });
+        threads.add(launch.threadId);
+      }
+      continue;
+    }
+    // Settled without a thread: it failed or was given up; nothing started.
+    if (launch.threadId === null && (launch.settledAt !== null || referenced.has(launch.actionId)))
+      continue;
+    const record: WorkerRecord = {
+      ...newWorker(goal, slot, targets.get(slot) ?? null, attemptOf(launch.actionId)),
+      launchClientRequestId: launch.actionId,
+      host: launch.host,
+      threadId: launch.threadId as WorkerRecord["threadId"],
+      state: launch.threadId === null ? "launch_unknown" : "running",
+    };
+    if (current === undefined) bySlot.set(slot, record);
+    else {
+      bySlot.set(nextOrphan, {
+        ...record,
+        slot: nextOrphan,
+        target: null,
+        note: "An earlier attempt of slot " + slot + ".",
+      });
+      nextOrphan += 1;
+    }
+    if (launch.threadId !== null) threads.add(launch.threadId);
+    referenced.add(launch.actionId);
+  }
+  return [...bySlot.values()].toSorted((left, right) => left.slot - right.slot);
+}
 
 export const nextDelayMs = (failures: number) =>
   failures <= 0
@@ -409,7 +477,18 @@ export function planGoal(
   const owner = observation.owner;
   const workers: Array<WorkerRecord> = [];
   for (const { slot, target } of desired) {
-    const known = bySlot.get(slot) ?? newWorker(goal, slot, target);
+    const stored = bySlot.get(slot);
+    // A slot the spec dropped and now wants again starts a new attempt on a new branch.
+    const known =
+      stored === undefined
+        ? newWorker(goal, slot, target)
+        : stored.state === "superseded"
+          ? {
+              ...newWorker(goal, slot, target, stored.attempt + 1),
+              modelSelection: stored.modelSelection,
+              tried: stored.tried,
+            }
+          : stored;
     const unclear =
       known.threadId === null && observation.launchClaims.get(known.launchClientRequestId) != null;
     workers.push(
@@ -445,6 +524,22 @@ export function planGoal(
   // A dropped slot stays as it is until its run is confirmed stopped, so an interrupt that did
   // not fit in this pass, or failed, is planned again next pass.
   for (const worker of shrunk) {
+    const claim =
+      worker.threadId === null
+        ? (observation.launchClaims.get(worker.launchClientRequestId) ?? null)
+        : null;
+    if (claim !== null && worker.state !== "superseded") {
+      // A dropped slot's unclear launch is still looked up, so its thread can be stopped.
+      actions.push({
+        type: "resolve_launch",
+        slot: worker.slot,
+        attempt: worker.attempt,
+        actionId: worker.launchClientRequestId,
+        expired: observation.now - claim.claimedAt > LAUNCH_GRACE_MS,
+      });
+      workers.push({ ...worker, state: "launch_unknown" });
+      continue;
+    }
     if (isLive(worker))
       actions.push({
         type: "interrupt",

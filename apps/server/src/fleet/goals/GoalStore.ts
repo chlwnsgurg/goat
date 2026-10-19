@@ -87,6 +87,19 @@ export type ClaimRefusal =
   | "already_claimed"
   | "gone";
 
+export interface LaunchClaim {
+  readonly actionId: string;
+  readonly slot: number | null;
+  readonly claimedAt: string;
+  readonly settledAt: string | null;
+  readonly outcome: string | null;
+  readonly host: string | null;
+  readonly threadId: string | null;
+}
+
+/** The outcome of a claimed action that was never sent; its claim may be taken again. */
+export const NOT_SENT = "not_sent";
+
 export interface ClaimRequest {
   readonly goalId: FleetGoalId;
   readonly generation: number;
@@ -157,11 +170,20 @@ export class GoalStore extends Context.Service<
      * the turn or wall-clock budget is spent, or the id was already claimed.
      */
     readonly claim: (request: ClaimRequest) => Effect.Effect<ClaimRefusal | null, GoalStoreError>;
+    /**
+     * Records how an action ended. A launch also records the thread it started; that mapping is
+     * written once and never changed, so a later write cannot point the action elsewhere.
+     */
     readonly settle: (
       actionId: string,
       outcome: string,
       nowIso: string,
+      thread?: { readonly host: string | null; readonly threadId: string },
     ) => Effect.Effect<void, GoalStoreError>;
+    /** Every launch the goal claimed, with the thread each one started when that is known. */
+    readonly launches: (
+      id: FleetGoalId,
+    ) => Effect.Effect<ReadonlyArray<LaunchClaim>, GoalStoreError>;
     /** When an action was claimed and whether it settled; null when it never was. */
     readonly claimOf: (actionId: string) => Effect.Effect<
       {
@@ -519,8 +541,11 @@ export const make = Effect.gen(function* () {
             OR observed_generation < generation
             OR (
               paused = 0
-              AND phase NOT IN ('succeeded', 'failed')
-              AND (next_reconcile_at IS NULL OR next_reconcile_at <= ${nowIso})
+              AND (
+                (phase NOT IN ('succeeded', 'failed') AND next_reconcile_at IS NULL)
+                -- A finished goal is scheduled only while it still has cleanup to do.
+                OR next_reconcile_at <= ${nowIso}
+              )
             )
           ORDER BY COALESCE(next_reconcile_at, ''), id
           LIMIT ${limit}
@@ -604,7 +629,13 @@ export const make = Effect.gen(function* () {
                 ${request.actionId}, ${request.goalId}, ${request.generation}, ${request.kind},
                 ${request.host}, ${request.slot}, ${request.nowIso}
               )
-              ON CONFLICT DO NOTHING
+              ON CONFLICT (action_id) DO UPDATE SET
+                generation = excluded.generation,
+                host = excluded.host,
+                claimed_at = excluded.claimed_at,
+                settled_at = NULL,
+                outcome = NULL
+              WHERE fleet_goal_actions.outcome = ${NOT_SENT}
               RETURNING action_id
             `;
             return inserted.length === 0 ? ("already_claimed" as const) : null;
@@ -617,14 +648,48 @@ export const make = Effect.gen(function* () {
               : sqlError("GoalStore.claim")(error),
           ),
         ),
-    settle: (actionId, outcome, nowIso) =>
+    settle: (actionId, outcome, nowIso, thread) =>
       run(
         "GoalStore.settle",
         sql`
-          UPDATE fleet_goal_actions SET settled_at = ${nowIso}, outcome = ${outcome}
+          UPDATE fleet_goal_actions SET
+            settled_at = ${nowIso},
+            outcome = ${outcome},
+            -- Write-once: the first known thread stays the action's thread.
+            thread_host = CASE WHEN thread_id IS NULL THEN ${thread?.host ?? null} ELSE thread_host END,
+            thread_id = COALESCE(thread_id, ${thread?.threadId ?? null})
           WHERE action_id = ${actionId}
         `,
       ).pipe(Effect.asVoid),
+    launches: (id) =>
+      run(
+        "GoalStore.launches",
+        sql<{
+          readonly action_id: string;
+          readonly reserved_slot: number | null;
+          readonly claimed_at: string;
+          readonly settled_at: string | null;
+          readonly outcome: string | null;
+          readonly thread_host: string | null;
+          readonly thread_id: string | null;
+        }>`
+          SELECT action_id, reserved_slot, claimed_at, settled_at, outcome, thread_host, thread_id
+          FROM fleet_goal_actions WHERE goal_id = ${id} AND kind = 'launch'
+          ORDER BY claimed_at, action_id
+        `,
+      ).pipe(
+        Effect.map((rows) =>
+          rows.map((row) => ({
+            actionId: row.action_id,
+            slot: row.reserved_slot,
+            claimedAt: row.claimed_at,
+            settledAt: row.settled_at,
+            outcome: row.outcome,
+            host: row.thread_host,
+            threadId: row.thread_id,
+          })),
+        ),
+      ),
     claimOf: (actionId) =>
       run(
         "GoalStore.claimOf",

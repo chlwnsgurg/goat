@@ -74,7 +74,11 @@ export default Effect.gen(function* () {
       reserved_slot INTEGER,
       claimed_at TEXT NOT NULL,
       settled_at TEXT,
-      outcome TEXT
+      outcome TEXT,
+      -- The thread a launch started, written once when it is known. It outlives slot records,
+      -- so a status write lost to a generation change cannot orphan the thread.
+      thread_host TEXT,
+      thread_id TEXT
     )
   `;
   yield* sql`CREATE INDEX IF NOT EXISTS idx_fleet_goal_actions_goal ON fleet_goal_actions(goal_id, kind)`;

@@ -96,13 +96,16 @@ export class GoalWorkerRuntime extends Context.Service<
       goal: FleetGoal,
       number: number,
     ) => Effect.Effect<"open" | "closed" | "unknown">;
-    /** The thread a launch under this action id started, found by its title marker. */
+    /**
+     * The thread a launch under this action id started: null when it is known not to exist, a
+     * failure when that cannot be told now (the caller must not treat that as absence).
+     */
     readonly findLaunched: (
       access: OwnerAccess,
       goal: FleetGoal,
       actionId: string,
       host: string | null,
-    ) => Effect.Effect<Launched | null>;
+    ) => Effect.Effect<Launched | null, OrchestratorMcpFailure>;
     readonly launch: (
       access: OwnerAccess,
       request: LaunchRequest,
@@ -110,6 +113,7 @@ export class GoalWorkerRuntime extends Context.Service<
     /** Queues a message; with a model selection, the run continues on that model. */
     readonly followUp: (
       access: OwnerAccess,
+      goal: FleetGoal,
       worker: WorkerRecord,
       message: string,
       actionId: string,
@@ -123,15 +127,34 @@ export class GoalWorkerRuntime extends Context.Service<
   }
 >()("goat/fleet/goals/GoalWorkerRuntime") {}
 
-/** Every launched worker's title ends with this, so an unclear launch can find its thread. */
-export const launchMarker = (actionId: string) => "[" + actionId + "]";
+/**
+ * A local worker's thread id comes from its launch action id. It is set when the thread is
+ * created and never changes, so an unclear launch is resolved by asking whether that thread
+ * exists, and a repeated launch cannot create a second one.
+ */
+export const workerThreadId = (actionId: string) => ThreadId.make("fleet-goal:" + actionId);
 
 const TITLE_LIMIT = 200;
-export const workerTitle = (goalTitle: string, slot: number, actionId: string) => {
-  const marker = " " + launchMarker(actionId);
-  const head = (goalTitle + " · s" + slot).slice(0, Math.max(10, TITLE_LIMIT - marker.length));
-  return head + marker;
+export const workerTitle = (goalTitle: string, slot: number, attempt: number) =>
+  (goalTitle + " · s" + slot + " a" + attempt).slice(0, TITLE_LIMIT);
+
+const RANK: Record<RuntimeMode, number> = {
+  "approval-required": 0,
+  "auto-accept-edits": 1,
+  auto: 2,
+  "full-access": 3,
 };
+/**
+ * The mode a worker action may use: the lowest of the goal's worker mode, the goal's stored
+ * ceiling and the owner's current mode (the last two are already folded into access).
+ */
+export const effectiveRuntimeMode = (
+  access: Pick<OwnerAccess, "runtimeMode">,
+  goal: Pick<FleetGoal, "spec">,
+): RuntimeMode =>
+  RANK[goal.spec.workers.runtimeMode] < RANK[access.runtimeMode]
+    ? goal.spec.workers.runtimeMode
+    : access.runtimeMode;
 
 export const pullRequestNumber = (
   pullRequest: { readonly url: string; readonly number?: number | undefined },
@@ -205,7 +228,7 @@ export const make = Effect.gen(function* () {
    * send (review tasks keep their own rules). The orchestrator re-checks the modes under its
    * lock through DispatchModeLimit. A remote host checks its own threads.
    */
-  const localTarget = (access: OwnerAccess, worker: WorkerRecord) =>
+  const localTarget = (access: OwnerAccess, worker: WorkerRecord, runtimeMode: RuntimeMode) =>
     Effect.gen(function* () {
       const threadId = worker.threadId!;
       const shell = yield* threads
@@ -213,10 +236,7 @@ export const make = Effect.gen(function* () {
         .pipe(Effect.mapError(() => notSendable("The worker thread could not be read.")));
       if (shell === null || shell.deletedAt !== null || shell.archivedAt !== null)
         return yield* notSendable("The worker thread is archived or deleted.");
-      yield* assertTargetWithinLimits(
-        { runtimeMode: access.runtimeMode, interactionMode: "default" },
-        shell,
-      );
+      yield* assertTargetWithinLimits({ runtimeMode, interactionMode: "default" }, shell);
       yield* threads
         .assertReviewTaskSendAllowed({
           threadId,
@@ -227,12 +247,9 @@ export const make = Effect.gen(function* () {
       return shell;
     });
 
-  const underLimit = <A, E, R>(access: OwnerAccess, effect: Effect.Effect<A, E, R>) =>
+  const underLimit = <A, E, R>(runtimeMode: RuntimeMode, effect: Effect.Effect<A, E, R>) =>
     effect.pipe(
-      Effect.provideService(DispatchModeLimit, {
-        runtimeMode: access.runtimeMode,
-        interactionMode: "default",
-      }),
+      Effect.provideService(DispatchModeLimit, { runtimeMode, interactionMode: "default" }),
       Effect.mapError(
         () =>
           new OrchestratorMcpFailure({
@@ -361,43 +378,44 @@ export const make = Effect.gen(function* () {
               }),
               Effect.orElseSucceed(() => "unknown" as const),
             ),
-    findLaunched: (access, goal, actionId, host) => {
-      const marker = launchMarker(actionId);
-      if (host === null) {
-        const projectId = goal.spec.project.projectId;
-        if (projectId === null) return Effect.succeed(null);
-        // A project's threads exist as soon as one is created, before anything else is recorded.
-        return threads
-          .listProjectThreads({ projectId, includeSubagents: false, includeArchived: true })
-          .pipe(
-            Effect.map((shells) => {
-              const found = shells.find(
-                (shell) => shell.deletedAt === null && shell.title.endsWith(marker),
-              );
-              return found === undefined
-                ? null
-                : { host: null, threadId: found.id, runId: found.latestRunId };
-            }),
-            Effect.orElseSucceed(() => null),
-          );
-      }
+    findLaunched: (access, _goal, actionId, host) => {
+      if (host === null)
+        return threads.getThreadShell(workerThreadId(actionId)).pipe(
+          Effect.mapError(
+            () =>
+              new OrchestratorMcpFailure({
+                code: "orchestration_error",
+                message: "Could not read whether the worker thread exists.",
+              }),
+          ),
+          Effect.map((shell) =>
+            shell === null || shell.deletedAt !== null
+              ? null
+              : { host: null, threadId: shell.id, runId: shell.latestRunId },
+          ),
+        );
+      // A remote launch has no id of ours on the remote, so the watch it registered is the record.
       return watches.list(access.scope.thread!.threadId).pipe(
+        Effect.mapError(
+          () =>
+            new OrchestratorMcpFailure({
+              code: "orchestration_error",
+              message: "Could not read the launch watches.",
+            }),
+        ),
         Effect.map((list) => {
           const found = list.find(
-            (watch) => (watch.host ?? null) === host && watch.title?.endsWith(marker) === true,
+            (watch) =>
+              (watch.host ?? null) === host && watch.title?.endsWith("[" + actionId + "]") === true,
           );
           return found === undefined ? null : { host, threadId: found.threadId, runId: null };
         }),
-        Effect.orElseSucceed(() => null),
       );
     },
     launch: (access, request) =>
       Effect.gen(function* () {
         const { goal } = request;
-        const runtimeMode = yield* resolveRuntimeMode(
-          access.runtimeMode,
-          goal.spec.workers.runtimeMode,
-        );
+        const runtimeMode = effectiveRuntimeMode(access, goal);
         const workspace = goal.spec.workers.workspace;
         if (request.host === null) {
           const projectId = goal.spec.project.projectId;
@@ -427,6 +445,7 @@ export const make = Effect.gen(function* () {
                 notifyOnCompletion: false,
               },
               { runtimeMode, interactionMode: "default" },
+              { threadId: workerThreadId(request.actionId) },
             ),
           );
           return { host: null, threadId: launched.threadId, runId: launched.runId };
@@ -471,11 +490,11 @@ export const make = Effect.gen(function* () {
                   baseRef: workspace.baseRef,
                   startFromOrigin: workspace.startFromOrigin,
                 },
-                title: request.title,
+                title: request.title + " [" + request.actionId + "]",
                 message: request.message,
                 modelSelection: request.modelSelection,
                 runtimeMode,
-                callerRuntimeMode: access.runtimeMode,
+                callerRuntimeMode: runtimeMode,
                 interactionMode: "default",
               },
             },
@@ -499,60 +518,73 @@ export const make = Effect.gen(function* () {
             host: launched.launch.host,
             threadId,
             projectId: null,
-            title: request.title,
+            title: request.title + " [" + request.actionId + "]",
             runId,
           })
           .pipe(Effect.ignore);
         return { host: launched.launch.host, threadId, runId };
       }),
-    followUp: (access, worker, message, actionId, modelSelection) =>
-      worker.threadId === null
-        ? Effect.void
-        : worker.host === null
-          ? // The goal acts after its owner's turn ends, when goat_thread_send would refuse an
-            // idle caller. The action id is the command id, so a repeated pass delivers once.
-            localTarget(access, worker).pipe(
-              Effect.andThen(
-                underLimit(
-                  access,
-                  threads.dispatch({
-                    type: "message.dispatch",
-                    commandId: CommandId.make(actionId),
-                    threadId: worker.threadId,
-                    messageId: MessageId.make(actionId),
-                    text: message,
-                    attachments: [],
-                    senderThreadId: access.scope.thread!.threadId,
-                    dispatchMode: { type: "queue_after_active" },
-                    ...(modelSelection === undefined ? {} : { modelSelection }),
-                    createdBy: "agent",
-                    creationSource: "server",
-                  }),
-                ),
-              ),
-              Effect.asVoid,
-            )
-          : // Another machine checks for a live caller; this works while the owner's run is active (#494).
-            asOwner(
-              access,
-              hostThreads.sendToThread(access.scope, {
-                threadId: worker.threadId,
-                host: worker.host,
-                message,
-                mode: "queue",
-                clientRequestId: actionId,
-              }),
-            ).pipe(Effect.asVoid),
+    followUp: (access, goal, worker, message, actionId, modelSelection) => {
+      if (worker.threadId === null) return Effect.void;
+      const runtimeMode = effectiveRuntimeMode(access, goal);
+      if (worker.host !== null) {
+        // Another machine checks the target against the owner's ceiling, which may be above the
+        // goal's worker mode; such a send could steer a thread the goal may not.
+        if (runtimeMode !== access.runtimeMode)
+          return Effect.fail(
+            new OrchestratorMcpFailure({
+              code: "runtime_mode_escalation_denied",
+              message:
+                "A follow-up to another machine would carry the owner's mode, above the goal's worker mode.",
+            }),
+          );
+        // Another machine checks for a live caller; this works while the owner's run is active (#494).
+        return asOwner(
+          access,
+          hostThreads.sendToThread(access.scope, {
+            threadId: worker.threadId,
+            host: worker.host,
+            message,
+            mode: "queue",
+            clientRequestId: actionId,
+          }),
+        ).pipe(Effect.asVoid);
+      }
+      // The goal acts after its owner's turn ends, when goat_thread_send would refuse an idle
+      // caller. The action id is the command id, so a repeated pass delivers once.
+      return localTarget(access, worker, runtimeMode).pipe(
+        Effect.andThen(
+          underLimit(
+            runtimeMode,
+            threads.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(actionId),
+              threadId: worker.threadId,
+              messageId: MessageId.make(actionId),
+              text: message,
+              attachments: [],
+              senderThreadId: access.scope.thread!.threadId,
+              dispatchMode: { type: "queue_after_active" },
+              ...(modelSelection === undefined ? {} : { modelSelection }),
+              createdBy: "agent",
+              creationSource: "server",
+            }),
+          ),
+        ),
+        Effect.asVoid,
+      );
+    },
     interrupt: (access, worker, actionId) =>
       worker.threadId === null
         ? Effect.void
         : worker.host === null
-          ? localTarget(access, worker).pipe(
+          ? // Stopping work uses the owner's own authority, so a lowered worker mode cannot block it.
+            localTarget(access, worker, access.runtimeMode).pipe(
               Effect.flatMap((shell) =>
                 shell.activeRunId === null
                   ? Effect.void
                   : underLimit(
-                      access,
+                      access.runtimeMode,
                       threads.dispatch({
                         type: "run.interrupt",
                         commandId: CommandId.make(actionId),

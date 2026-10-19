@@ -44,11 +44,15 @@ const hasReviewGuides = Effect.gen(function* () {
 describe("GOAT migration ids", () => {
   it.effect("moves a released memory ledger past DropUnusedV1Projections", () =>
     Effect.gen(function* () {
+      // The released ledger predates migrations added after 84.
       yield* seedGoatLedger(
-        migrationEntries.filter(([id]) => id > 63).map(([, name]) => name),
+        migrationEntries.filter(([id]) => id > 63 && id <= 84).map(([, name]) => name),
         63,
       );
-      assert.deepStrictEqual(yield* runMigrations(), [[63, "DropUnusedV1Projections"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [63, "DropUnusedV1Projections"],
+        [85, "FleetGoals"],
+      ]);
       assert.deepStrictEqual(yield* history, migrationManifest);
       assert.deepStrictEqual(yield* runMigrations(), []);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -84,6 +88,7 @@ describe("GOAT migration ids", () => {
         [82, "MemoryLastReadySpace"],
         [83, "MemoryHubAdministered"],
         [84, "MemoryCheckpointLifecycle"],
+        [85, "FleetGoals"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -116,6 +121,7 @@ describe("GOAT migration ids", () => {
         [82, "MemoryLastReadySpace"],
         [83, "MemoryHubAdministered"],
         [84, "MemoryCheckpointLifecycle"],
+        [85, "FleetGoals"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -155,6 +161,7 @@ describe("GOAT migration ids", () => {
           [82, "MemoryLastReadySpace"],
           [83, "MemoryHubAdministered"],
           [84, "MemoryCheckpointLifecycle"],
+          [85, "FleetGoals"],
         ]);
         assert.deepStrictEqual(yield* history, migrationManifest);
         assert.deepStrictEqual(yield* runMigrations(), []);
@@ -307,6 +314,7 @@ it.effect("restarts the current WP5 registry without rewriting lineage or accoun
         [82, "MemoryLastReadySpace"],
         [83, "MemoryHubAdministered"],
         [84, "MemoryCheckpointLifecycle"],
+        [85, "FleetGoals"],
       ],
     );
     assert.deepStrictEqual(yield* runMigrations(), []);

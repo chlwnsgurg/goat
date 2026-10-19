@@ -6,7 +6,9 @@ import {
   LAUNCH_GRACE_MS,
   MAX_ACTIONS_PER_GOAL,
   newWorker,
+  ORPHAN_SLOT_BASE,
   planGoal,
+  repairWorkers,
   type SlotObservation,
 } from "./goalPlan.ts";
 import type { WorkerRecord } from "./GoalStore.ts";
@@ -342,5 +344,93 @@ describe("planGoal", () => {
     expect(
       plan.status.conditions.find((condition) => condition.type === "BudgetExhausted"),
     ).toMatchObject({ status: "True" });
+  });
+  it("still resolves the unclear launch of a dropped slot, so deletion is not stuck (P2-6)", () => {
+    const goal = testGoal("goal_l", {
+      spec: testSpec({ workers: { ...testSpec().workers, count: 0 } }),
+    });
+    const unclear = { ...newWorker(goal, 0, null), state: "launch_unknown" as const };
+    const claims = new Map([
+      [unclear.launchClientRequestId, { claimedAt: NOW - 1000, settled: false }],
+    ]);
+    expect(planGoal(goal, [unclear], observe({ launchClaims: claims })).actions).toEqual([
+      {
+        type: "resolve_launch",
+        slot: 0,
+        attempt: 1,
+        actionId: "goal:goal_l:s0:a1:launch",
+        expired: false,
+      },
+    ]);
+    const deleting = testGoal("goal_l", {
+      ...goal,
+      deletionRequestedAt: "2026-10-20T00:30:00.000Z",
+    });
+    const plan = planGoal(deleting, [unclear], observe({ launchClaims: claims }));
+    expect(plan.actions.map((action) => action.type)).toEqual(["resolve_launch"]);
+  });
+
+  it("relaunches a slot the spec drops and then wants again, as a new attempt (P2-8)", () => {
+    const goal = testGoal("goal_m");
+    const superseded = { ...running(goal, 0), state: "superseded" as const };
+    expect(planGoal(goal, [superseded], observe()).actions).toEqual([
+      { type: "launch", slot: 0, attempt: 2, actionId: "goal:goal_m:s0:a2:launch" },
+    ]);
+  });
+
+  it("rebuilds slots from launch records that outlived a status write (P1-3, P1-4)", () => {
+    const goal = testGoal("goal_n");
+    const launch = (attempt: number, threadId: string | null, settledAt: string | null = null) => ({
+      actionId: "goal:goal_n:s0:a" + attempt + ":launch",
+      slot: 0,
+      claimedAt: "2026-10-20T00:00:00.000Z",
+      settledAt,
+      outcome: threadId === null ? null : "launched",
+      host: null,
+      threadId,
+    });
+    // No slot record at all: the launched thread becomes slot 0.
+    expect(
+      repairWorkers(goal, [], [launch(1, "thread:a", "2026-10-20T00:00:01.000Z")]),
+    ).toMatchObject([{ slot: 0, attempt: 1, threadId: "thread:a", state: "running" }]);
+    // A claimed launch with no outcome stays unclear instead of being forgotten.
+    expect(repairWorkers(goal, [], [launch(1, null)])).toMatchObject([
+      { slot: 0, threadId: null, state: "launch_unknown" },
+    ]);
+    // An earlier attempt's thread, after the slot moved on, becomes an orphan slot to stop.
+    const second = {
+      ...newWorker(goal, 0, null, 2),
+      threadId: ThreadId.make("thread:b"),
+      state: "running" as const,
+    };
+    const rebuilt = repairWorkers(
+      goal,
+      [second],
+      [launch(1, "thread:a", "2026-10-20T00:00:01.000Z")],
+    );
+    expect(rebuilt.map((worker) => [worker.slot, worker.threadId])).toEqual([
+      [0, "thread:b"],
+      [ORPHAN_SLOT_BASE, "thread:a"],
+    ]);
+    const live = seen({ terminal: false, runStatus: "running" });
+    expect(
+      planGoal(
+        goal,
+        rebuilt,
+        observe({
+          workers: new Map([
+            [0, live],
+            [ORPHAN_SLOT_BASE, live],
+          ]),
+        }),
+      ).actions,
+    ).toEqual([
+      {
+        type: "interrupt",
+        slot: ORPHAN_SLOT_BASE,
+        attempt: 1,
+        actionId: "goal:goal_n:s10000:a1:interrupt",
+      },
+    ]);
   });
 });
