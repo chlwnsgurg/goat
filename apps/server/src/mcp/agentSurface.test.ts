@@ -61,8 +61,9 @@ import { ConnectionToolkit } from "./toolkits/connection/tools.ts";
 import { DeviceToolkit } from "./toolkits/device/tools.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import { HostStatusToolkit } from "./toolkits/hostStatus/tools.ts";
-import { FleetHealthToolkit } from "./toolkits/fleetHealth/tools.ts";
-import * as FleetHealth from "../fleet/health/HostHealthMonitor.ts";
+import { FleetHealthToolkit } from "./toolkits/fleet/healthTools.ts";
+import * as HostHealthMonitor from "../fleet/health/HostHealthMonitor.ts";
+import * as FleetHostStates from "../fleet/health/FleetHostStates.ts";
 import * as Rescheduler from "../fleet/health/Rescheduler.ts";
 import { HtmlToolkit } from "./toolkits/html/tools.ts";
 import { MemoryToolkit } from "./toolkits/memory/tools.ts";
@@ -162,7 +163,8 @@ const dependencies = Layer.mergeAll(
   Layer.mock(Orchestrator.OrchestratorV2)({}),
   Layer.mock(RemoteReportService.RemoteReportService)({}),
   Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
-  Layer.mock(FleetHealth.Health)({}),
+  Layer.mock(HostHealthMonitor.HostHealthMonitor)({}),
+  Layer.mock(FleetHostStates.FleetHostStates)({}),
   Layer.mock(Rescheduler.Rescheduler)({}),
   Layer.mock(SshHostSetup.SshHostSetup)({}),
   Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),

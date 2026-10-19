@@ -12,8 +12,6 @@ import * as Effect from "effect/Effect";
 
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as CloudMachineService from "../../../cloudMachines/CloudMachineService.ts";
-import * as Rescheduler from "../../../fleet/health/Rescheduler.ts";
-import { selfHealLaunchNote } from "../../../fleet/health/reschedulePolicy.ts";
 import * as LinkedHosts from "../../../linkedHosts/LinkedHosts.ts";
 import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
 import * as SshHostSetup from "../../../sshRemote/SshHostSetup.ts";
@@ -288,18 +286,6 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
       Effect.gen(function* () {
         const caller = yield* check;
         const runtimeMode = yield* resolveRuntimeMode(caller.limits.runtimeMode, input.runtimeMode);
-        // Moving work needs a branch to push and resume from, so self-healing needs a worktree.
-        const healBranch =
-          input.selfHeal === true && input.workspace?.type === "worktree"
-            ? input.workspace.branch
-            : null;
-        if (input.selfHeal === true && healBranch === null) {
-          return yield* new OrchestratorMcpFailure({
-            code: "invalid_request",
-            message:
-              'selfHeal needs workspace {type:"worktree", branch} so the work can be pushed and resumed on another host.',
-          });
-        }
         const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
         // The thread on this machine that launches; an outside client has none to record.
         const launcher = caller.caller;
@@ -326,10 +312,7 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
           cwd: input.cwd,
           workspace: sshLaunchWorkspace(input.workspace),
           title: input.title,
-          message:
-            healBranch === null || input.message === undefined
-              ? input.message
-              : input.message + selfHealLaunchNote(healBranch),
+          message: input.message,
           projectTitle: input.projectTitle,
           // The remote project usually has no default model, so a thread caller's own
           // model is the sensible default; an outside client must pass one.
@@ -397,29 +380,6 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
                 ),
               );
               const runId = result.runId === null ? null : RunId.make(result.runId);
-              const healing =
-                healBranch === null
-                  ? false
-                  : yield* Effect.serviceOption(Rescheduler.Rescheduler).pipe(
-                      Effect.flatMap((service) =>
-                        service._tag === "None"
-                          ? Effect.succeed(false)
-                          : service.value
-                              .register({
-                                launcherThreadId: launcher?.id ?? null,
-                                ceiling: caller.limits.runtimeMode,
-                                host: result.host,
-                                threadId: ThreadId.make(result.threadId),
-                                branch: healBranch,
-                                cwd: result.cwd,
-                                title: input.title,
-                                message: input.message ?? null,
-                                modelSelection: launch.modelSelection ?? null,
-                                runtimeMode: result.runtimeMode,
-                              })
-                              .pipe(Effect.as(true)),
-                      ),
-                    );
               const watching =
                 input.notifyOnCompletion !== false && (launcher !== undefined || runId !== null)
                   ? yield* (
@@ -481,15 +441,6 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
                 watching,
                 notes: [
                   ...result.notes,
-                  ...(healing
-                    ? [
-                        `Self-healing is on: this machine checks the thread every 30 s, steers or restarts it when it stalls, and resumes it on another Ready host from branch ${healBranch} (as ${healBranch}-r<n>) if ${result.host} stays unreachable or is drained. goat_thread_reschedule moves it by hand.`,
-                      ]
-                    : healBranch !== null
-                      ? [
-                          "selfHeal was requested, but this server has no rescheduler; the thread is not healed.",
-                        ]
-                      : []),
                   ...(watching && launcher === undefined
                     ? [
                         `This machine follows the thread on ${result.host} and posts to its completion webhook when the run ends, waits on a question, or if ${result.host} stays unreachable.`,

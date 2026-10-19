@@ -316,7 +316,33 @@ existing fallback in `HostThreadsMcpService.ts` only covers a missing tool.
 
 ## Self-healing
 
-**Now.** Only channel tasks heal. `ChannelRemoteWorkers.ts` gives a remote launch
+**Now.** `apps/server/src/fleet/health/` implements this section. `Health` and `Rescheduler` are
+the tags below; `goat_host_status` returns each host's conditions as the additive `conditions`
+field, and `goat_host_cordon`, `goat_host_uncordon`, `goat_host_drain` and `goat_thread_reschedule`
+live in `apps/server/src/mcp/toolkits/fleet/`. Cordons persist in `fleet_host_states`. Moving work
+off a goal attempt still needs the goal controller: until it lands, drain only cordons and marks the
+host Draining, and `goat_thread_reschedule` takes the branch and folder from its caller. Channel
+tasks still heal through `ChannelRemoteWorkers.ts`; the replica helpers moved to
+`fleet/health/replica.ts` behind a re-export, so channel behavior is unchanged.
+
+Where the code departs from the text below, and why:
+
+- Tag keys are `goat/fleet/health/Health` and `goat/fleet/health/Rescheduler`, because the
+  `deterministicKeys` lint derives keys from the file path.
+- Sleep on this machine never counts against a host. A gap of two minutes or more in the shared
+  Scheduler's ticks, or a suspended power snapshot, drops the failures counted so far and ignores
+  failures for the next five minutes, so a Mac waking from sleep makes no host Lost.
+- `RescheduleRequest` has three optional fields: `project` (the folder and repository key to find on
+  the target), `targetHost` (a person's choice) and `force` (skip only the Lost wait).
+- Placement uses `choosePlacement` over Ready, uncordoned hosts until the T3 `Placement` tag lands.
+- A request that resumes from a replica is refused with `no_resume_point` until replica capture for
+  goal attempts lands; branch and base resumes work.
+- A retry after a lost answer finds the launched thread by its title (`Resume <branch>`) on the
+  candidate hosts instead of launching again; the attempt branch keeps two launches apart as well.
+- `fenceStaleAttempt` interrupts a returning stale attempt with a reason that names the successor.
+  It sends no message, since a message would start another turn there.
+
+**Channel tasks.** `ChannelRemoteWorkers.ts` gives a remote launch
 `LAUNCH_GRACE_MS = 300000` and `MAX_LAUNCH_ATTEMPTS = 3`, notices an outage after
 `OUTAGE_NOTICE_AFTER = 3` failed contacts, and `move` relaunches a task elsewhere but refuses while the
 old host still answers (`MOVE_COPY`). `channelReplica.ts` bundles each finished turn's commits and
@@ -324,7 +350,7 @@ uncommitted changes into `refs/goat/replicas/<task>/<gen>` and resumes on
 `goat/replica/<task>-<gen>`, skipping files over 2 MiB and secret-looking names. Launch watches back
 off 30 s → 15 min per host and report one outage per episode after three failures.
 
-**Proposed (T2, `apps/server/src/fleet/health/`).**
+**Design (T2, `apps/server/src/fleet/health/`).**
 
 ### Host conditions
 

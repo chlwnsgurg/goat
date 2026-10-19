@@ -10,7 +10,8 @@ import {
 } from "@goat/contracts";
 import { Tool, Toolkit } from "effect/ai";
 
-import * as Health from "../../../fleet/health/HostHealthMonitor.ts";
+import * as FleetHostStates from "../../../fleet/health/FleetHostStates.ts";
+import * as HostHealthMonitor from "../../../fleet/health/HostHealthMonitor.ts";
 import * as Rescheduler from "../../../fleet/health/Rescheduler.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import { agentSurfaceAnnotations } from "../../agentSurface.ts";
@@ -22,7 +23,8 @@ const shared = {
   dependencies: [
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
-    Health.Health,
+    FleetHostStates.FleetHostStates,
+    HostHealthMonitor.HostHealthMonitor,
     Rescheduler.Rescheduler,
   ],
 };
@@ -55,6 +57,7 @@ const ThreadRescheduleTool = Tool.make(agentSurfaceRegistry["thread.reschedule"]
   success: GoatThreadRescheduleResult,
 }).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["thread.reschedule"]));
 
+/** T2's tools in the shared fleet toolkit folder; goal and scheduler tools sit beside them. */
 export const FleetHealthToolkit = Toolkit.make(
   HostCordonTool,
   HostUncordonTool,

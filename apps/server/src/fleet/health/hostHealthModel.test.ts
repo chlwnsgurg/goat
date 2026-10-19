@@ -6,7 +6,7 @@ import {
   emptyContact,
   forgetFailures,
   initialClock,
-  isEvictable,
+  isLost,
   isSchedulable,
   isUnreachable,
   observeTick,
@@ -24,7 +24,7 @@ const down: HostStatusEntry = {
   message: "ssh timed out",
 };
 
-/** Samples once per interval from start, ticking the clock the way the monitor does. */
+/** One sample per minute, ticking the monitor clock as the scheduler would in between. */
 function run(
   samples: ReadonlyArray<{
     readonly at: number;
@@ -50,57 +50,40 @@ const every = (fromMin: number, toMin: number, entry: HostStatusEntry) =>
     entry,
   }));
 
-describe("host health", () => {
-  it("needs three failures spread over five minutes before a host is Unreachable", () => {
-    const quick = run([...every(0, 0, ok), ...every(1, 3, down)]);
-    expect(quick.contact.failures).toBe(3);
-    expect(isUnreachable(quick.contact, 3 * MIN)).toBe(false);
+const types = (contact: HostContact, now: number) =>
+  deriveConditions({ contact, scheduling: null, now }).map((condition) => condition.type);
 
-    const sustained = run([...every(0, 0, ok), ...every(1, 6, down)]);
-    expect(isUnreachable(sustained.contact, 6 * MIN)).toBe(true);
-    expect(isEvictable(sustained.contact, 6 * MIN)).toBe(false);
-    expect(isEvictable(sustained.contact, 16 * MIN)).toBe(true);
-    expect(
-      deriveConditions({ contact: sustained.contact, scheduling: undefined, now: 6 * MIN }).map(
-        (c) => c.type,
-      ),
-    ).toEqual(["Unreachable"]);
+describe("host conditions", () => {
+  it("turns Unreachable after three failed contacts and Lost five minutes later", () => {
+    const two = run([...every(0, 0, ok), ...every(1, 2, down)]);
+    expect(isUnreachable(two.contact)).toBe(false);
+    const three = run([...every(0, 0, ok), ...every(1, 3, down)]);
+    expect(types(three.contact, 3 * MIN)).toEqual(["Unreachable"]);
+    expect(isLost(three.contact, 7 * MIN)).toBe(false);
+    expect(types(three.contact, 8 * MIN)).toEqual(["Unreachable", "Lost"]);
   });
 
-  it("one answer ends the outage", () => {
+  it("is Ready for three minutes after an answer, then Unknown until the next contact", () => {
+    const answered = run(every(0, 0, ok));
+    expect(types(answered.contact, 3 * MIN)).toEqual(["Ready"]);
+    expect(types(answered.contact, 4 * MIN)).toEqual(["Unknown"]);
+    expect(types(emptyContact, 0)).toEqual(["Unknown"]);
     const back = run([...every(0, 10, down), ...every(11, 11, ok)]);
-    expect(back.contact.failures).toBe(0);
-    expect(
-      isSchedulable(
-        deriveConditions({ contact: back.contact, scheduling: undefined, now: 11 * MIN }),
-      ),
-    ).toBe(true);
+    expect(types(back.contact, 11 * MIN)).toEqual(["Ready"]);
   });
 
-  it("never evicts across this machine's sleep: a Mac waking after an hour starts counting afresh", () => {
-    // Asleep from minute 2 to 62: the gap in ticks marks a wake, and the failed contacts right
-    // after it (SSH tunnels still reconnecting) fall in the grace window.
-    const woke = run([...every(0, 2, down), ...every(62, 66, down), ...every(67, 67, ok)]);
+  it("never makes a host Lost across this machine's sleep", () => {
+    // Asleep from minute 2 to 62. The tick gap marks the wake; SSH is still reconnecting for a
+    // few minutes after it, and those failures fall in the grace window.
+    const woke = run([...every(0, 2, down), ...every(62, 66, down)]);
     expect(woke.clock.wokeAt).toBe(62 * MIN);
     expect(woke.contact.failures).toBe(0);
-
-    const stillDown = run([...every(0, 2, down), ...every(62, 66, down)]);
-    expect(stillDown.contact.failures).toBe(0);
-    expect(isUnreachable(stillDown.contact, 66 * MIN)).toBe(false);
-    expect(isEvictable(stillDown.contact, 66 * MIN)).toBe(false);
+    expect(isLost(woke.contact, 66 * MIN)).toBe(false);
+    const suspended = run(every(1, 20, down).map((sample) => ({ ...sample, suspended: true })));
+    expect(suspended.contact.failures).toBe(0);
   });
 
-  it("ignores failures while the power monitor reports suspension", () => {
-    const samples = [
-      ...every(0, 0, ok),
-      ...every(1, 20, down).map((sample) => ({ ...sample, suspended: true })),
-    ];
-    const { contact } = run(samples);
-    expect(contact.failures).toBe(0);
-    expect(isEvictable(contact, 20 * MIN)).toBe(false);
-  });
-
-  it("counts launch-watch outages only when they began after the wake grace and the last answer", () => {
+  it("counts a launch-watch outage only after the wake grace and the last answer", () => {
     const clock: MonitorClock = { lastTickAt: 70 * MIN, quietUntil: 67 * MIN, wokeAt: 62 * MIN };
     const outage = (since: number, failures: number) => ({
       since,
@@ -110,17 +93,19 @@ describe("host health", () => {
       nextRetryAt: since,
       lastError: "unreachable",
     });
-    expect(recordOutage(emptyContact, outage(30 * MIN, 5), clock).failures).toBe(0);
-    const counted = recordOutage(emptyContact, outage(68 * MIN, 4), clock);
-    expect(counted).toMatchObject({ failures: 4, firstFailureAt: 68 * MIN });
+    expect(recordOutage(emptyContact, outage(30 * MIN, 5), 70 * MIN, clock).failures).toBe(0);
+    expect(recordOutage(emptyContact, outage(68 * MIN, 4), 70 * MIN, clock)).toMatchObject({
+      failures: 4,
+      unreachableSince: 70 * MIN,
+    });
     const answered = { ...emptyContact, lastOkAt: 69 * MIN };
-    expect(recordOutage(answered, outage(68 * MIN, 4), clock).failures).toBe(0);
+    expect(recordOutage(answered, outage(68 * MIN, 4), 70 * MIN, clock).failures).toBe(0);
   });
 
-  it("derives cordon, drain, version and quota conditions; only some block placement", () => {
-    const sample: HostStatusEntry = {
+  it("warns about versions and quotas, and only cordon, drain and outages block placement", () => {
+    const sample = {
       ...ok,
-      versionMismatch: true,
+      versionMismatch: true as const,
       message: "macmini runs GOAT 0",
       metrics: {
         quotas: [
@@ -142,11 +127,11 @@ describe("host health", () => {
             },
           },
         ],
-      } as unknown as NonNullable<HostStatusEntry["metrics"]>,
-    };
+      },
+    } as unknown as HostStatusEntry;
     const contact = { ...emptyContact, lastOkAt: 0, sample };
-    const warnings = deriveConditions({ contact, scheduling: undefined, now: MIN });
-    expect(warnings.map((c) => [c.type, c.instanceId])).toEqual([
+    const warnings = deriveConditions({ contact, scheduling: null, now: MIN });
+    expect(warnings.map((condition) => [condition.type, condition.instanceId])).toEqual([
       ["Ready", undefined],
       ["VersionMismatch", undefined],
       ["QuotaExhausted", "codex"],
@@ -154,10 +139,17 @@ describe("host health", () => {
     expect(isSchedulable(warnings)).toBe(true);
     const drained = deriveConditions({
       contact,
-      scheduling: { cordonedAt: 0, cordonReason: null, drainingAt: 0 },
+      scheduling: {
+        cordoned: true,
+        draining: true,
+        reason: null,
+        changedAt: "2026-10-20T00:00:00.000Z",
+      },
       now: MIN,
     });
-    expect(drained.map((c) => c.type)).toContain("Draining");
+    expect(drained.map((condition) => condition.type)).toEqual(
+      expect.arrayContaining(["Cordoned", "Draining"]),
+    );
     expect(isSchedulable(drained)).toBe(false);
   });
 });

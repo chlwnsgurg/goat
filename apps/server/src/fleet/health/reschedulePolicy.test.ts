@@ -1,211 +1,141 @@
 import { describe, expect, it } from "@effect/vitest";
+import type { HostCondition, RunId } from "@goat/contracts";
+import * as DateTime from "effect/DateTime";
 
 import {
+  attemptOfBranch,
   backoffDelayMs,
   BACKOFF_MAX_MS,
-  decide,
-  resumeBranchFor,
-  type RescheduleContext,
-  type RescheduleReason,
+  nextAttemptBranch,
+  nextHealingStep,
 } from "./reschedulePolicy.ts";
-import { detectStall, failureClassOf } from "./threadStallModel.ts";
+import {
+  classifyThread,
+  type ThreadHealth,
+  type ThreadStatusSnapshot,
+} from "./threadHealthModel.ts";
 
-const base: RescheduleContext = {
-  now: 1_000_000,
-  hostAnswers: true,
-  hostEvictable: false,
-  threadTerminal: false,
-  attempts: 0,
-  budget: 3,
-  steersThisEpisode: 0,
-  restartsThisEpisode: 0,
-  nextAttemptAt: null,
-};
-
-const transport: RescheduleReason = { type: "retryable_failure", failureClass: "transport_error" };
+const runId = "run:1" as RunId;
+const quiet = { repeated: false, fallbackExhausted: false, hostDraining: false };
+const failed = (
+  failureClass: Extract<ThreadHealth, { _tag: "failed" }>["failureClass"],
+): ThreadHealth => ({
+  _tag: "failed",
+  failureClass,
+  runId,
+});
 
 describe("reschedule decision table", () => {
-  it.each<[string, RescheduleReason, Partial<RescheduleContext>, string]>([
+  it.each<[string, ThreadHealth, Partial<typeof quiet>, string]>([
     [
-      "stalled with an answering host is nudged first",
-      { type: "no_progress", idleMs: 1 },
+      "a stall is interrupted and steered first",
+      { _tag: "stalled", idleMs: 1 },
       {},
-      "steer",
+      "interrupt_and_steer",
     ],
     [
-      "then restarted where it runs",
-      { type: "no_progress", idleMs: 1 },
-      { steersThisEpisode: 1 },
-      "restart",
+      "a repeated stall is rescheduled",
+      { _tag: "stalled", idleMs: 1 },
+      { repeated: true },
+      "reschedule:stalled",
     ],
     [
-      "and never moved while its host answers",
-      { type: "no_progress", idleMs: 1 },
-      { steersThisEpisode: 1, restartsThisEpisode: 1 },
-      "give_up",
-    ],
-    [
-      "a stall on a silent host waits for the host verdict",
-      { type: "no_progress", idleMs: 1 },
-      { hostAnswers: false },
-      "wait",
-    ],
-    [
-      "an unanswered request is never answered for its owner",
-      { type: "unanswered_request", waitingMs: 1, kind: "approval" },
+      "a lost host reschedules at once",
+      { _tag: "host_lost", since: "" },
       {},
-      "wait",
+      "reschedule:host_unreachable",
     ],
-    ["a transport failure is retried once where it ran", transport, {}, "restart"],
+    ["a usage limit goes to the fallback chain", failed("usage_limit"), {}, "fallback"],
+    ["a transport error goes to the fallback chain", failed("transport_error"), {}, "fallback"],
     [
-      "a second failure moves, because the thread itself failed",
-      transport,
-      { restartsThisEpisode: 1 },
-      "move",
+      "an exhausted chain reschedules",
+      failed("provider_error"),
+      { fallbackExhausted: true },
+      "reschedule:failed",
     ],
-    ["a failure on a silent host waits for eviction", transport, { hostAnswers: false }, "wait"],
+    ["a permission error blocks the goal", failed("permission_error"), {}, "blocked"],
+    ["a validation error blocks the goal", failed("validation_error"), {}, "blocked"],
+    ["an unknown failure reschedules", failed("unknown"), {}, "reschedule:failed"],
     [
-      "a failure on an evictable host moves",
-      transport,
-      { hostAnswers: false, hostEvictable: true },
-      "move",
-    ],
-    [
-      "an unreachable host inside the eviction bound waits",
-      { type: "host_unreachable" },
-      { hostAnswers: false },
-      "wait",
+      "drain moves an idle attempt",
+      { _tag: "healthy" },
+      { hostDraining: true },
+      "reschedule:drain",
     ],
     [
-      "an unreachable host past the bound moves its work",
-      { type: "host_unreachable" },
-      { hostAnswers: false, hostEvictable: true },
-      "move",
+      "a waiting attempt is never a stall, even on a draining host",
+      { _tag: "waiting" },
+      { hostDraining: true },
+      "none",
     ],
-    [
-      "a host that answers again keeps its work",
-      { type: "host_unreachable" },
-      { hostEvictable: true },
-      "wait",
-    ],
-    ["drain waits for the current turn", { type: "host_draining", force: false }, {}, "wait"],
-    [
-      "drain moves a finished turn",
-      { type: "host_draining", force: false },
-      { threadTerminal: true },
-      "move",
-    ],
-    ["forced drain moves now", { type: "host_draining", force: true }, {}, "move"],
-    [
-      "a manual move ignores backoff",
-      { type: "manual", targetHost: "macmini" },
-      { nextAttemptAt: 2_000_000 },
-      "move",
-    ],
-    [
-      "backoff holds automatic moves",
-      { type: "host_unreachable" },
-      { hostAnswers: false, hostEvictable: true, nextAttemptAt: 2_000_000 },
-      "wait",
-    ],
-    [
-      "a spent budget gives up instead of moving",
-      { type: "host_unreachable" },
-      { hostAnswers: false, hostEvictable: true, attempts: 3 },
-      "give_up",
-    ],
-    [
-      "a spent budget refuses even a manual move",
-      { type: "manual", targetHost: null },
-      { attempts: 3 },
-      "give_up",
-    ],
-  ])("%s", (_name, reason, context, action) => {
-    expect(decide(reason, { ...base, ...context }).action).toBe(action);
+    ["unknown health takes no action", { _tag: "unknown" }, {}, "none"],
+  ])("%s", (_name, health, context, expected) => {
+    const step = nextHealingStep(health, { ...quiet, ...context });
+    expect(step._tag === "reschedule" ? "reschedule:" + step.reason : step._tag).toBe(expected);
   });
 
   it("backs off with full jitter under a growing, capped ceiling", () => {
     expect(backoffDelayMs(0, 0)).toBe(0);
-    expect(backoffDelayMs(0, 0.999)).toBeLessThan(60_000);
-    expect(backoffDelayMs(3, 0.999)).toBeLessThan(8 * 60_000);
-    expect(backoffDelayMs(3, 0.999)).toBeGreaterThan(7 * 60_000);
+    expect(backoffDelayMs(0, 0.999)).toBeLessThan(30_000);
+    expect(backoffDelayMs(3, 0.999)).toBeGreaterThan(3.9 * 60_000);
+    expect(backoffDelayMs(3, 0.999)).toBeLessThan(4 * 60_000);
     expect(backoffDelayMs(20, 0.999)).toBeLessThan(BACKOFF_MAX_MS);
   });
 
-  it("names every generation from the original branch", () => {
-    expect(resumeBranchFor("feat/x", 1)).toBe("feat/x-r1");
-    expect(resumeBranchFor("feat/x", 2)).toBe("feat/x-r2");
+  it("gives every attempt its own branch without stacking suffixes", () => {
+    expect(attemptOfBranch("feat/x")).toBe(1);
+    expect(nextAttemptBranch("feat/x")).toBe("feat/x-a2");
+    expect(nextAttemptBranch("feat/x-a2")).toBe("feat/x-a3");
+    expect(nextAttemptBranch("goal-s0-a1")).toBe("goal-s0-a2");
   });
 });
 
-describe("stall detection", () => {
+describe("thread health", () => {
   const now = Date.parse("2026-10-20T01:00:00.000Z");
-  const at = (minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
-  const status = (overrides: Partial<Parameters<typeof detectStall>[0]>) =>
-    ({
-      phase: "running" as const,
-      run: {
-        runId: "run:1",
-        status: "running" as const,
-        requestedAt: at(60),
-        startedAt: at(60),
-        completedAt: null,
-      },
-      pendingRequest: null,
-      lastActivityAt: at(1),
-      lastMessage: null,
-      lastError: null,
-      ...overrides,
-    }) as Parameters<typeof detectStall>[0];
+  const ago = (minutes: number) => DateTime.formatIso(DateTime.makeUnsafe(now - minutes * 60_000));
+  const status = (overrides: Partial<ThreadStatusSnapshot>): ThreadStatusSnapshot => ({
+    phase: "running",
+    run: { runId },
+    pendingRequest: null,
+    queuedRunId: null,
+    lastActivityAt: ago(1),
+    ...overrides,
+  });
+  const classify = (
+    snapshot: ThreadStatusSnapshot | null,
+    hostConditions: ReadonlyArray<HostCondition> = [],
+  ) => classifyThread({ status: snapshot, hostConditions, now })._tag;
 
-  it("flags a running thread only after twenty quiet minutes", () => {
-    expect(detectStall(status({ lastActivityAt: at(19) }), now)).toBeNull();
-    expect(
-      detectStall(
-        status({
-          lastActivityAt: at(21),
-          run: {
-            runId: "run:1" as never,
-            status: "running",
-            requestedAt: at(30),
-            startedAt: at(30),
-            completedAt: null,
-          },
-        }),
-        now,
-      ),
-    ).toMatchObject({ type: "no_progress" });
+  it("calls a running thread stalled only after twenty quiet minutes", () => {
+    expect(classify(status({ lastActivityAt: ago(19) }))).toBe("healthy");
+    expect(classify(status({ lastActivityAt: ago(21) }))).toBe("stalled");
   });
 
-  it("treats an hour-old question as unanswered and a queued run as not stalled", () => {
+  it("treats a pending question or a queued run as waiting, however old", () => {
     expect(
-      detectStall(
-        status({
-          phase: "waiting_input",
-          pendingRequest: { requestId: null, kind: "user_input", since: at(61) },
-        }),
-        now,
-      ),
-    ).toMatchObject({ type: "unanswered_request", kind: "user_input" });
-    expect(detectStall(status({ phase: "queued", lastActivityAt: at(600) }), now)).toBeNull();
+      classify(status({ phase: "waiting_input", lastActivityAt: ago(600), pendingRequest: {} })),
+    ).toBe("waiting");
+    expect(classify(status({ queuedRunId: "run:2" as RunId, lastActivityAt: ago(600) }))).toBe(
+      "waiting",
+    );
   });
 
-  it("retries transport and provider failures but leaves usage limits to limit recovery", () => {
+  it("reports a failure with its class, and unknown for a host that predates the field", () => {
     expect(
-      detectStall(status({ phase: "failed", lastErrorClass: "transport_error" }), now),
-    ).toMatchObject({ failureClass: "transport_error" });
-    expect(
-      detectStall(
-        status({ phase: "failed", lastErrorClass: "usage_limit", lastError: "socket hang up" }),
+      classifyThread({
+        status: status({ phase: "failed", lastErrorClass: "transport_error" }),
+        hostConditions: [],
         now,
-      ),
-    ).toBeNull();
+      }),
+    ).toEqual(failed("transport_error"));
     expect(
-      detectStall(status({ phase: "failed", lastErrorClass: "validation_error" }), now),
-    ).toBeNull();
-    // An older host sends only the text.
-    expect(failureClassOf({ lastError: "read ECONNRESET" })).toBe("transport_error");
-    expect(failureClassOf({ lastError: "529 overloaded_error" })).toBe("provider_error");
-    expect(failureClassOf({ lastError: "You've hit your usage limit" })).toBeNull();
+      classifyThread({ status: status({ phase: "failed" }), hostConditions: [], now }),
+    ).toEqual(failed("unknown"));
+  });
+
+  it("is host_lost on a Lost host and unknown while the host is only unreachable", () => {
+    const lost: HostCondition = { type: "Lost", since: ago(1), message: "" };
+    expect(classify(null, [lost])).toBe("host_lost");
+    expect(classify(null, [{ type: "Unreachable", since: ago(2), message: "" }])).toBe("unknown");
   });
 });

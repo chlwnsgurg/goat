@@ -1,35 +1,39 @@
 import * as Schema from "effect/Schema";
 
 import { ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ModelSelection } from "./modelSelection.ts";
 
 /**
- * Self-healing vocabulary shared by goat_host_status, the fleet health tools, and the goal
- * controller. Conditions follow Kubernetes node conditions: each one is a fact about a host
- * with the time it became true, and several can hold at once.
+ * Self-healing vocabulary (docs/internals/agentic-k8s.md, ADR-0017), shared by goat_host_status,
+ * the host and reschedule tools, and the goal controller. Conditions follow Kubernetes node
+ * conditions: each is a fact about a host with the time it became true, and several can hold.
  */
 
-export const FleetHostConditionType = Schema.Literals([
+export const HostConditionType = Schema.Literals([
   "Ready",
+  "Unknown",
   "Unreachable",
+  "Lost",
   "Cordoned",
   "Draining",
   "VersionMismatch",
   "QuotaExhausted",
 ]);
-export type FleetHostConditionType = typeof FleetHostConditionType.Type;
+export type HostConditionType = typeof HostConditionType.Type;
 
-export const FleetHostCondition = Schema.Struct({
-  type: FleetHostConditionType,
+export const HostCondition = Schema.Struct({
+  type: HostConditionType,
   /** When the condition became true (ISO 8601). */
   since: Schema.String,
   /** The provider instance at its limit, for QuotaExhausted. */
   instanceId: Schema.optional(Schema.String),
   message: Schema.String,
 });
-export type FleetHostCondition = typeof FleetHostCondition.Type;
+export type HostCondition = typeof HostCondition.Type;
 
 const FleetHostAlias = TrimmedNonEmptyString.check(Schema.isMaxLength(255)).annotate({
-  description: "SSH host alias from goat_ssh_host_list, or a linked host name.",
+  description:
+    'SSH host alias from goat_ssh_host_list, a linked host name, or "local" for this machine.',
 });
 
 const FleetReason = Schema.String.check(Schema.isMaxLength(500));
@@ -45,67 +49,60 @@ export type GoatHostUncordonInput = typeof GoatHostUncordonInput.Type;
 
 export const GoatHostDrainInput = Schema.Struct({
   host: FleetHostAlias,
-  force: Schema.optional(Schema.Boolean).annotate({
-    description:
-      "Move self-healing workers now, interrupting their current turn. Default false: each moves after its current turn ends.",
-  }),
   reason: Schema.optional(FleetReason),
 });
 export type GoatHostDrainInput = typeof GoatHostDrainInput.Type;
-
-/** What the rescheduler does next for a worker. */
-export const FleetRescheduleAction = Schema.Literals([
-  "wait",
-  "steer",
-  "restart",
-  "move",
-  "give_up",
-]);
-export type FleetRescheduleAction = typeof FleetRescheduleAction.Type;
-
-export const FleetWorkerPhase = Schema.Literals([
-  "watching",
-  "push_requested",
-  "launching",
-  "exhausted",
-]);
-export type FleetWorkerPhase = typeof FleetWorkerPhase.Type;
-
-export const FleetWorkerView = Schema.Struct({
-  workerId: Schema.String,
-  host: Schema.String,
-  threadId: ThreadId,
-  generation: Schema.Number,
-  branch: Schema.NullOr(Schema.String),
-  phase: FleetWorkerPhase,
-  attempts: Schema.Number,
-  lastReason: Schema.NullOr(Schema.String),
-  nextAttemptAt: Schema.NullOr(Schema.String),
-});
-export type FleetWorkerView = typeof FleetWorkerView.Type;
 
 export const GoatHostScheduleResult = Schema.Struct({
   host: Schema.String,
   cordoned: Schema.Boolean,
   draining: Schema.Boolean,
-  conditions: Schema.Array(FleetHostCondition),
-  /** Self-healing workers on the host, with what drain did to each. */
-  workers: Schema.Array(FleetWorkerView),
+  conditions: Schema.Array(HostCondition),
   message: Schema.String,
 });
 export type GoatHostScheduleResult = typeof GoatHostScheduleResult.Type;
 
 export const GoatThreadRescheduleInput = Schema.Struct({
-  host: FleetHostAlias,
+  host: FleetHostAlias.annotate({ description: "Where the thread runs now." }),
   threadId: ThreadId,
+  branch: TrimmedNonEmptyString.annotate({
+    description:
+      "The thread's worktree branch, pushed to origin. The new thread resumes from it on <branch>-a<n+1>.",
+  }),
+  cwd: TrimmedNonEmptyString.annotate({
+    description:
+      "The project folder; the same repository is looked up on the target host by its remote, falling back to this path.",
+  }),
   targetHost: Schema.optional(FleetHostAlias),
+  prompt: Schema.optional(Schema.String.check(Schema.isMaxLength(120000))),
+  modelSelection: Schema.optional(ModelSelection),
   reason: FleetReason,
+  force: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Move off an unreachable host before it counts as Lost (5 minutes). A host that answers is never moved off before its thread is interrupted.",
+  }),
 });
 export type GoatThreadRescheduleInput = typeof GoatThreadRescheduleInput.Type;
 
-export const GoatThreadRescheduleResult = Schema.Struct({
-  action: FleetRescheduleAction,
-  worker: FleetWorkerView,
-  message: Schema.String,
-});
+export const GoatThreadRescheduleResult = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal("rescheduled"),
+    host: Schema.String,
+    threadId: ThreadId,
+    branch: Schema.String,
+    resumedFrom: Schema.Literals(["branch", "replica", "base"]),
+    message: Schema.String,
+  }),
+  Schema.Struct({
+    status: Schema.Literal("refused"),
+    reason: Schema.Literals([
+      "no_capacity",
+      "host_still_answers",
+      "budget",
+      "no_resume_point",
+      "unsupported_remote",
+    ]),
+    message: Schema.String,
+  }),
+]);
 export type GoatThreadRescheduleResult = typeof GoatThreadRescheduleResult.Type;

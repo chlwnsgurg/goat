@@ -1,17 +1,20 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import { type GoatHostStatusResult, ThreadId } from "@goat/contracts";
-import * as Clock from "effect/Clock";
+import { type HostStatusEntry, ThreadId } from "@goat/contracts";
+import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
 
-import * as ServerConfig from "../../config.ts";
 import * as ThreadManagementService from "../../orchestration-v2/ThreadManagementService.ts";
+import Migration0085 from "../../persistence/Migrations/085_FleetHealth.ts";
 import * as SshRemoteDispatch from "../../sshRemote/SshRemoteDispatch.ts";
-import * as FleetHealthStore from "./FleetHealthStore.ts";
+import * as FleetHostStates from "./FleetHostStates.ts";
+import * as Health from "./Health.ts";
 import * as HostHealthMonitor from "./HostHealthMonitor.ts";
 import * as Rescheduler from "./Rescheduler.ts";
 
@@ -19,6 +22,7 @@ interface RemoteThread {
   readonly host: string;
   readonly threadId: ThreadId;
   readonly title: string;
+  phase: string;
 }
 
 interface World {
@@ -30,15 +34,18 @@ interface World {
     readonly tool: string;
     readonly args: Record<string, unknown>;
   }>;
+  /** Interrupts the remote applied, by clientRequestId, as a GOAT server dedupes them. */
+  readonly appliedInterrupts: Set<string>;
   /** The next launch creates its thread, then the answer is lost (SSH dropped mid-call). */
   loseNextLaunchResponse: boolean;
 }
 
 const newWorld = (): World => ({
   reachable: { A: true, B: true },
-  threads: [{ host: "A", threadId: ThreadId.make("thread:a1"), title: "Worker" }],
+  threads: [{ host: "A", threadId: ThreadId.make("thread:a1"), title: "Worker", phase: "running" }],
   launches: [],
   calls: [],
+  appliedInterrupts: new Set(),
   loseNextLaunchResponse: false,
 });
 
@@ -51,30 +58,26 @@ const unavailable = (host: string) =>
 const fakeDispatch = (world: World) =>
   ({
     connectedHosts: Effect.succeed(Object.keys(world.reachable)),
-    callHostTool: (
-      call: SshRemoteDispatch.SshHostToolCall,
-      authorize: Effect.Effect<unknown, unknown>,
-    ) =>
+    callHostTool: (call: SshRemoteDispatch.SshHostToolCall) =>
       Effect.gen(function* () {
-        yield* Effect.orDie(authorize);
         world.calls.push({ host: call.host, tool: call.tool, args: { ...call.arguments } });
         if (world.reachable[call.host] !== true) return yield* unavailable(call.host);
-        const now = new Date(yield* Clock.currentTimeMillis).toISOString();
+        const thread = world.threads.find(
+          (candidate) =>
+            candidate.host === call.host && candidate.threadId === call.arguments.threadId,
+        );
+        const now = DateTime.formatIso(yield* DateTime.now);
         switch (call.tool) {
-          case "goat_thread_status": {
-            const thread = world.threads.find(
-              (candidate) =>
-                candidate.host === call.host && candidate.threadId === call.arguments.threadId,
-            );
+          case "goat_thread_status":
             return {
               structuredContent: {
                 threadId: call.arguments.threadId,
                 title: thread?.title ?? "gone",
-                phase: "running",
-                terminal: false,
+                phase: thread?.phase ?? "completed",
+                terminal: thread?.phase !== "running",
                 run: {
                   runId: "run:1",
-                  status: "running",
+                  status: thread?.phase ?? "completed",
                   requestedAt: now,
                   startedAt: now,
                   completedAt: null,
@@ -87,35 +90,42 @@ const fakeDispatch = (world: World) =>
                 watch: null,
               },
             };
+          case "goat_thread_interrupt": {
+            const id = String(call.arguments.clientRequestId);
+            if (!world.appliedInterrupts.has(id) && thread !== undefined)
+              thread.phase = "interrupted";
+            world.appliedInterrupts.add(id);
+            return {
+              structuredContent: {
+                threadId: call.arguments.threadId,
+                runId: null,
+                status: "interrupt_requested",
+              },
+            };
           }
           case "goat_thread_list":
             return {
               structuredContent: {
                 threads: world.threads
                   .filter(
-                    (thread) =>
-                      thread.host === call.host &&
-                      thread.title.includes(String(call.arguments.titleContains)),
+                    (entry) =>
+                      entry.host === call.host &&
+                      entry.title.includes(String(call.arguments.titleContains)),
                   )
-                  .map((thread) => ({ threadId: thread.threadId, title: thread.title })),
+                  .map((entry) => ({ threadId: entry.threadId, title: entry.title })),
               },
             };
-          case "goat_project_list":
-            return { structuredContent: { projects: [{ id: "project", workspaceRoot: "/repo" }] } };
           default:
             return { structuredContent: {} };
         }
       }),
-    launchThread: (
-      input: SshRemoteDispatch.SshLaunchInput,
-      beforeLaunch: Effect.Effect<void, unknown>,
-    ) =>
+    launchThread: (input: SshRemoteDispatch.SshLaunchInput) =>
       Effect.gen(function* () {
-        yield* Effect.orDie(beforeLaunch);
-        if (world.reachable[input.host] !== true) return yield* unavailable(input.host);
+        const host = input.host ?? "local";
+        if (world.reachable[host] !== true) return yield* unavailable(host);
         world.launches.push(input);
-        const threadId = ThreadId.make("thread:" + input.host + world.launches.length);
-        world.threads.push({ host: input.host, threadId, title: input.title });
+        const threadId = ThreadId.make("thread:" + host + world.launches.length);
+        world.threads.push({ host, threadId, title: input.title, phase: "running" });
         if (world.loseNextLaunchResponse) {
           world.loseNextLaunchResponse = false;
           return yield* new SshRemoteDispatch.SshRemoteDispatchError({
@@ -125,7 +135,7 @@ const fakeDispatch = (world: World) =>
           });
         }
         return {
-          host: input.host,
+          host,
           cwd: input.cwd,
           projectId: "project",
           projectCreated: false,
@@ -140,157 +150,200 @@ const fakeDispatch = (world: World) =>
       }),
   }) as unknown as SshRemoteDispatch.SshRemoteDispatch["Service"];
 
-const sampleOf = (world: World) =>
-  Effect.sync((): GoatHostStatusResult => ({
-    hosts: Object.entries(world.reachable).map(([host, up]) =>
-      up
-        ? { host, reachability: "ok" as const, serverVersion: "1" }
-        : { host, reachability: "unreachable" as const, message: host + " timed out" },
-    ),
-  }));
+const probeOf = (world: World) => (host: string) =>
+  Effect.sync((): HostStatusEntry =>
+    world.reachable[host] === true
+      ? { host, reachability: "ok", serverVersion: "1" }
+      : { host, reachability: "unreachable", message: host + " timed out" },
+  );
 
-const layerFor = (world: World, baseDir: string) =>
-  Rescheduler.layerWithoutScheduler.pipe(
+/** A fresh server over one database file: host contacts start empty, cordons persist. */
+const layerFor = (world: World, filename: string) =>
+  Layer.mergeAll(Health.layer, Rescheduler.layer).pipe(
     Layer.provideMerge(
-      Layer.effect(HostHealthMonitor.Health, HostHealthMonitor.make({ sample: sampleOf(world) })),
+      Layer.effect(
+        HostHealthMonitor.HostHealthMonitor,
+        HostHealthMonitor.make({ probe: probeOf(world) }),
+      ),
     ),
-    Layer.provideMerge(FleetHealthStore.layer),
-    Layer.provide(
+    Layer.provideMerge(FleetHostStates.layer),
+    Layer.provideMerge(
+      // A restart reopens the same file; the tables already exist then.
+      Layer.effectDiscard(Effect.ignore(Migration0085)).pipe(
+        Layer.provideMerge(NodeSqliteClient.layer({ filename })),
+      ),
+    ),
+    Layer.provideMerge(
       Layer.mergeAll(
         Layer.succeed(SshRemoteDispatch.SshRemoteDispatch, fakeDispatch(world)),
         Layer.mock(ThreadManagementService.ThreadManagementService)({}),
-        ServerConfig.layerTest(process.cwd(), baseDir).pipe(Layer.provide(NodeServices.layer)),
-        NodeServices.layer,
       ),
     ),
   );
 
-/** A fresh server over baseDir: in-memory host contacts start empty, the store reloads. */
-const withServer = <A, E>(
-  world: World,
-  baseDir: string,
-  body: Effect.Effect<A, E, Rescheduler.Rescheduler | FleetHealthStore.FleetHealthStore>,
-) => body.pipe(Effect.provide(layerFor(world, baseDir)));
+type Services = Layer.Success<ReturnType<typeof layerFor>>;
+const withServer = <A, E>(world: World, filename: string, body: Effect.Effect<A, E, Services>) =>
+  body.pipe(Effect.provide(layerFor(world, filename)));
 
-/** Scheduler ticks, 30 s apart: short enough that no tick gap looks like sleep. */
-const runFor = (minutes: number) =>
-  Effect.gen(function* () {
-    const rescheduler = yield* Rescheduler.Rescheduler;
-    for (let step = 0; step < minutes * 2; step += 1) {
-      yield* TestClock.adjust(Duration.seconds(30));
-      yield* rescheduler.tick;
-    }
-  });
+const databaseFile = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  return path.join(
+    yield* fs.makeTempDirectoryScoped({ prefix: "goat-fleet-health-" }),
+    "state.sqlite",
+  );
+}).pipe(Effect.provide(NodeServices.layer));
 
-const onlyWorker = FleetHealthStore.FleetHealthStore.pipe(
-  Effect.flatMap((store) => store.read),
-  Effect.map((document) => {
-    expect(document.workers).toHaveLength(1);
-    return document.workers[0]!;
-  }),
-);
+const ref = { host: "A", threadId: ThreadId.make("thread:a1"), watchId: null };
 
-const register = Effect.gen(function* () {
-  const rescheduler = yield* Rescheduler.Rescheduler;
-  yield* rescheduler.register({
-    launcherThreadId: null,
-    ceiling: "full-access",
-    host: "A",
-    threadId: ThreadId.make("thread:a1"),
-    branch: "feat/x",
-    cwd: "/repo",
-    title: "Worker",
-    message: "Build the thing.",
-    modelSelection: null,
-    runtimeMode: "full-access",
-  });
+const request = (
+  overrides: Partial<Rescheduler.RescheduleRequest> = {},
+): Rescheduler.RescheduleRequest => ({
+  ref,
+  owner: "goal:g1",
+  attempt: 1,
+  reason: "host_unreachable",
+  modelSelection: { instanceId: "codex" as never, model: "gpt-6.1-sol" },
+  workspace: { baseRef: "dev", branch: "goal-g1-s0-a2", startFromOrigin: true },
+  previousBranch: "goal-g1-s0-a1",
+  replica: null,
+  prompt: "Ship the thing.",
+  runtimeMode: "full-access",
+  clientRequestId: "goal:g1:s0:a2:launch",
+  project: { cwd: "/repo", canonicalKey: null },
+  ...overrides,
 });
 
-const tempDir = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  return yield* fs.makeTempDirectoryScoped({ prefix: "goat-fleet-health-" });
-}).pipe(Effect.provide(NodeServices.layer));
+/** Thread health reads, a minute apart, as the controller makes them; each is a host contact. */
+const observe = (minutes: number) =>
+  Effect.gen(function* () {
+    const health = yield* Health.Health;
+    let last = yield* health.threadHealth(ref);
+    for (let minute = 0; minute < minutes; minute += 1) {
+      yield* TestClock.adjust(Duration.minutes(1));
+      last = yield* health.threadHealth(ref);
+    }
+    return last;
+  });
 
 describe("Rescheduler", () => {
   it.effect(
-    "relaunches a worker from an unreachable host on another host exactly once, across ticks and a restart, and fences the old thread when it returns",
+    "resumes work from a Lost host on another host exactly once, across a lost answer and a restart",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
           const world = newWorld();
-          const baseDir = yield* tempDir;
+          const filename = yield* databaseFile;
 
           yield* withServer(
             world,
-            baseDir,
+            filename,
             Effect.gen(function* () {
-              yield* register;
-              yield* runFor(1);
-              world.reachable.A = false;
-              world.loseNextLaunchResponse = true;
-              // Inside the eviction bound nothing moves.
-              yield* runFor(10);
-              expect(world.launches).toHaveLength(0);
-              // Tick until the launch goes out, then "crash" before any later tick runs.
               const rescheduler = yield* Rescheduler.Rescheduler;
-              for (let step = 0; step < 20 && world.launches.length === 0; step += 1) {
-                yield* TestClock.adjust(Duration.seconds(30));
-                yield* rescheduler.tick;
-              }
+              expect((yield* observe(0))._tag).toBe("healthy");
+              world.reachable.A = false;
+              expect((yield* observe(3))._tag).toBe("unknown");
+              // Unreachable but not Lost: nothing moves yet.
+              expect(yield* rescheduler.reschedule(request())).toMatchObject({
+                _tag: "Refused",
+                reason: "host_still_answers",
+              });
+              expect((yield* observe(5))._tag).toBe("host_lost");
+              world.loseNextLaunchResponse = true;
+              expect(yield* rescheduler.reschedule(request())).toMatchObject({
+                _tag: "Refused",
+                reason: "no_capacity",
+              });
               expect(world.launches).toHaveLength(1);
-              expect(yield* onlyWorker).toMatchObject({ phase: "launching", host: "A" });
             }),
           );
 
-          // Restart: the lost launch is found on B by its title, never launched again.
+          // After a restart the retry finds the launched thread instead of starting a second one.
           yield* withServer(
             world,
-            baseDir,
+            filename,
             Effect.gen(function* () {
-              yield* runFor(5);
-              yield* runFor(2);
-              expect(world.launches).toHaveLength(1);
-              const worker = yield* onlyWorker;
-              expect(worker).toMatchObject({
-                phase: "watching",
+              const rescheduler = yield* Rescheduler.Rescheduler;
+              const first = yield* rescheduler.reschedule(request());
+              const again = yield* rescheduler.reschedule(request());
+              expect(first).toEqual({
+                _tag: "Rescheduled",
                 host: "B",
                 threadId: "thread:B1",
-                branch: "feat/x-r1",
-                generation: 1,
-                fenced: [{ host: "A", threadId: "thread:a1", generation: 0, stoppedAt: null }],
+                branch: "goal-g1-s0-a2",
+                resumedFrom: "branch",
               });
-              const launch = world.launches[0]!;
-              expect(launch).toMatchObject({
-                host: "B",
-                cwd: "/repo",
-                title: "Worker · r1",
-                workspace: {
-                  type: "worktree",
-                  branch: "feat/x-r1",
-                  baseRef: "feat/x",
-                  startFromOrigin: true,
-                },
-              });
-              expect(launch.message).toContain("Resume from branch feat/x");
-              expect(launch.message).toContain("Build the thing.");
+              expect(again).toEqual(first);
+              expect(world.launches).toHaveLength(1);
+            }),
+          );
 
-              // A comes back: its thread is interrupted and told to stop, once.
-              world.reachable.A = true;
-              yield* runFor(2);
-              const toA = world.calls.filter(
-                (call) => call.host === "A" && call.args.threadId === "thread:a1",
-              );
+          const launch = world.launches[0]!;
+          expect(launch).toMatchObject({
+            host: "B",
+            cwd: "/repo",
+            title: "Resume goal-g1-s0-a2",
+            runtimeMode: "full-access",
+            workspace: {
+              type: "worktree",
+              branch: "goal-g1-s0-a2",
+              baseRef: "goal-g1-s0-a1",
+              startFromOrigin: true,
+            },
+          });
+          expect(launch.message).toContain("Ship the thing.");
+          expect(launch.message).toContain("GOAT moved this work from thread thread:a1 on A");
+        }),
+      ),
+  );
+
+  it.effect(
+    "never moves work off a host that answers before its attempt is interrupted, and respects cordons",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const world = newWorld();
+          const filename = yield* databaseFile;
+          yield* withServer(
+            world,
+            filename,
+            Effect.gen(function* () {
+              const rescheduler = yield* Rescheduler.Rescheduler;
+              const monitor = yield* HostHealthMonitor.HostHealthMonitor;
+              const states = yield* FleetHostStates.FleetHostStates;
+              yield* monitor.annotate({
+                hosts: [{ host: "B", reachability: "ok", serverVersion: "1" }],
+              });
+
               expect(
-                toA.filter((call) => call.tool === "goat_thread_interrupt").length,
-              ).toBeGreaterThan(0);
-              const fenceNotes = toA.filter((call) => call.tool === "goat_thread_send");
-              expect(fenceNotes).toHaveLength(1);
-              expect(String(fenceNotes[0]!.args.message)).toContain("moved to B");
-              expect((yield* onlyWorker).fenced[0]!.stoppedAt).not.toBeNull();
-              yield* runFor(3);
+                yield* rescheduler.reschedule(request({ reason: "host_unreachable" })),
+              ).toMatchObject({
+                reason: "host_still_answers",
+              });
+              const stalled = request({ reason: "stalled" });
+              expect(yield* rescheduler.reschedule(stalled)).toMatchObject({
+                reason: "host_still_answers",
+              });
+              expect(world.launches).toHaveLength(0);
               expect(
-                world.calls.filter((call) => call.host === "A" && call.tool === "goat_thread_send"),
+                world.calls.filter((call) => call.tool === "goat_thread_interrupt"),
               ).toHaveLength(1);
+
+              yield* states.cordon({
+                host: "B",
+                draining: false,
+                reason: "maintenance",
+                changedBy: "test",
+              });
+              expect(yield* rescheduler.reschedule(stalled)).toMatchObject({
+                reason: "no_capacity",
+              });
+              yield* states.uncordon("B");
+
+              expect(yield* rescheduler.reschedule(stalled)).toMatchObject({
+                _tag: "Rescheduled",
+                host: "B",
+              });
               expect(world.launches).toHaveLength(1);
             }),
           );
@@ -298,71 +351,77 @@ describe("Rescheduler", () => {
       ),
   );
 
-  it.effect("does not move work when this machine wakes from an hour of sleep", () =>
+  it.effect("does not count a host as Lost when this machine wakes from an hour of sleep", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const world = newWorld();
-        const baseDir = yield* tempDir;
+        const filename = yield* databaseFile;
         yield* withServer(
           world,
-          baseDir,
+          filename,
           Effect.gen(function* () {
+            const monitor = yield* HostHealthMonitor.HostHealthMonitor;
             const rescheduler = yield* Rescheduler.Rescheduler;
-            yield* register;
-            yield* runFor(1);
-            // SSH drops as the lid closes; then the machine sleeps for an hour.
+            yield* monitor.tick;
             world.reachable.A = false;
-            yield* runFor(3);
+            // The lid closes: two contacts fail, then the machine sleeps for an hour.
+            yield* observe(2);
             yield* TestClock.adjust(Duration.minutes(60));
-            yield* rescheduler.tick;
+            yield* monitor.tick;
             // Tunnels take a few minutes to come back after waking.
-            yield* runFor(6);
+            for (let minute = 0; minute < 4; minute += 1) {
+              yield* TestClock.adjust(Duration.minutes(1));
+              yield* monitor.tick;
+              expect((yield* (yield* Health.Health).threadHealth(ref))._tag).toBe("unknown");
+            }
+            expect(yield* rescheduler.reschedule(request())).toMatchObject({
+              reason: "host_still_answers",
+            });
             world.reachable.A = true;
-            yield* runFor(5);
+            expect((yield* observe(1))._tag).toBe("healthy");
             expect(world.launches).toHaveLength(0);
-            expect(yield* onlyWorker).toMatchObject({ host: "A", phase: "watching", attempts: 0 });
           }),
         );
       }),
     ),
   );
 
-  it.effect("moves by hand only to a host that can take work", () =>
+  it.effect("stops a superseded attempt once when its host returns", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const world = newWorld();
-        const baseDir = yield* tempDir;
+        const filename = yield* databaseFile;
         yield* withServer(
           world,
-          baseDir,
+          filename,
           Effect.gen(function* () {
-            const rescheduler = yield* Rescheduler.Rescheduler;
-            yield* register;
-            const unknown = yield* rescheduler
-              .reschedule({
-                host: "A",
-                threadId: ThreadId.make("thread:a1"),
-                targetHost: "B",
-                reason: "test",
-              })
-              .pipe(Effect.flip);
-            // B has not answered goat_host_status yet, so it is not Ready.
-            expect(unknown.code).toBe("invalid_request");
-            yield* runFor(1);
-            const moved = yield* rescheduler.reschedule({
-              host: "A",
-              threadId: ThreadId.make("thread:a1"),
-              targetHost: "B",
-              reason: "rebalance",
+            const fence = Rescheduler.fenceStaleAttempt({
+              ref,
+              successorHost: "B",
+              successorBranch: "goal-g1-s0-a2",
+              clientRequestId: "goal:g1:s0:a1:interrupt",
+              ceiling: "full-access",
             });
-            // A answers, so its thread is asked to push before anything launches.
-            expect(moved.action).toBe("move");
-            expect(moved.worker.phase).toBe("push_requested");
-            expect(world.launches).toHaveLength(0);
-            const push = world.calls.find(
-              (call) => call.host === "A" && call.tool === "goat_thread_send",
+            world.reachable.A = false;
+            expect((yield* Effect.result(fence))._tag).toBe("Failure");
+            world.reachable.A = true;
+            yield* fence;
+            yield* fence;
+            const interrupts = world.calls.filter(
+              (call) => call.host === "A" && call.tool === "goat_thread_interrupt",
             );
-            expect(String(push?.args.message)).toContain("git push origin HEAD:feat/x");
+            expect(interrupts.map((call) => call.args.clientRequestId)).toEqual([
+              "goal:g1:s0:a1:interrupt",
+              "goal:g1:s0:a1:interrupt",
+              "goal:g1:s0:a1:interrupt",
+            ]);
+            expect(String(interrupts[1]!.args.reason)).toContain(
+              "continues on B on branch goal-g1-s0-a2",
+            );
+            expect(world.appliedInterrupts.size).toBe(1);
+            expect(
+              world.calls.some((call) => call.host === "A" && call.tool === "goat_thread_send"),
+            ).toBe(false);
           }),
         );
       }),
