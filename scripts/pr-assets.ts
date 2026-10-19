@@ -40,6 +40,7 @@ const gate = NodeModule.createRequire(import.meta.url)(
   "../.github/scripts/pr-screenshot-gate.cjs",
 ) as {
   extractImageEmbeds(body: string): ReadonlyArray<ImageEmbed>;
+  renderedImages(html: string): ReadonlyArray<{ readonly url: string }>;
   staticEmbedProblem(url: string): string | null;
   parseGithubContentUrl(url: string): GithubContentUrl | null;
   verifyImageUrl(url: string): Promise<ImageCheck>;
@@ -103,11 +104,14 @@ export function planBodyFix(
     readonly repo: string;
     readonly sha: string;
     readonly assets: ReadonlySet<string>;
+    /** URLs of the images GitHub renders; an embed outside it is example text, not an image. */
+    readonly rendered?: ReadonlySet<string>;
   },
 ): BodyFix {
   const replaced: Array<{ from: string; to: string; start: number; end: number }> = [];
   const missing: Array<{ url: string; reason: string }> = [];
   for (const embed of gate.extractImageEmbeds(body)) {
+    if (options.rendered && !options.rendered.has(embed.url)) continue;
     const problem = gate.staticEmbedProblem(embed.url);
     if (!problem) continue;
     const github = gate.parseGithubContentUrl(embed.url);
@@ -305,15 +309,24 @@ function gh(args: ReadonlyArray<string>): string {
 }
 
 export interface PrBodyStore {
-  readonly read: () => string;
+  readonly read: () => { readonly body: string; readonly rendered: ReadonlySet<string> };
   readonly write: (bodyFile: string) => void;
 }
 
 function ghBodyStore(repo: string, pr: number): PrBodyStore {
   return {
     read: () => {
-      const out = gh(["pr", "view", String(pr), "-R", repo, "--json", "body"]);
-      return (JSON.parse(out) as { body: string }).body;
+      const out = gh([
+        "api",
+        "-H",
+        "Accept: application/vnd.github.full+json",
+        "repos/" + repo + "/pulls/" + pr,
+      ]);
+      const { body, body_html } = JSON.parse(out) as { body: string | null; body_html?: string };
+      return {
+        body: body ?? "",
+        rendered: new Set(gate.renderedImages(body_html ?? "").map((image) => image.url)),
+      };
     },
     write: (bodyFile) => {
       gh(["pr", "edit", String(pr), "-R", repo, "--body-file", bodyFile]);
@@ -338,8 +351,9 @@ export async function patchPrBody(options: {
   readonly verify?: (url: string) => Promise<ImageCheck>;
 }): Promise<boolean> {
   const store = options.store ?? ghBodyStore(options.repo, options.pr);
-  const before = store.read();
+  const { body: before, rendered } = store.read();
   const fix = planBodyFix(before, {
+    rendered,
     pr: options.pr,
     repo: options.repo,
     sha: options.sha,
@@ -369,7 +383,7 @@ export async function patchPrBody(options: {
     if (options.dryRun) console.log("dry run: PR #" + options.pr + " body left unchanged");
     return failed.length === 0 && fix.missing.length === 0;
   }
-  if (store.read() !== before) {
+  if (store.read().body !== before) {
     throw new Error(
       "PR #" + options.pr + " description changed while images were checked; run the command again",
     );
@@ -380,7 +394,7 @@ export async function patchPrBody(options: {
   NodeFS.writeFileSync(beforeFile, before);
   NodeFS.writeFileSync(afterFile, fix.body);
   store.write(afterFile);
-  const stored = store.read();
+  const stored = store.read().body;
   if (stored !== fix.body) {
     throw new Error("PR #" + options.pr + " body differs from " + afterFile + " after the edit");
   }

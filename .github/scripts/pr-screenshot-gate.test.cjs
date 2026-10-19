@@ -12,6 +12,7 @@ const {
   isChangedFileListTruncated,
   hasScreenshotEvidence,
   extractImageEmbeds,
+  renderedImages,
   staticEmbedProblem,
   verifyImageUrl,
   isMaintainerPermission,
@@ -121,6 +122,31 @@ describe("extractImageEmbeds", () => {
 });
 
 describe("checkEmbeds", () => {
+  it("does not let a code span swallow a CRLF paragraph break", () => {
+    const body = "Use \x60one\r\n\r\n![real](https://example.com/a.png)\r\n\r\nand\x60 two";
+    assert.deepEqual(
+      extractImageEmbeds(body).map((embed) => embed.url),
+      ["https://example.com/a.png"],
+    );
+  });
+
+  it("reads GitHub's rendering, keeping the written URL and the proxied fetch URL", () => {
+    const html = [
+      "<pre><code>![code](https://example.com/a.png)</code></pre>",
+      '<img src="pr-assets/x.png" alt="x">',
+      '<a href="#"><img src="https://camo.githubusercontent.com/abc/def" alt="real" data-canonical-src="https://example.com/c(1).png?a=1&amp;b=2"></a>',
+      '<img alt="no source">',
+    ].join("\n");
+    assert.deepEqual(renderedImages(html), [
+      { kind: "rendered", url: "pr-assets/x.png", fetchUrl: "pr-assets/x.png" },
+      {
+        kind: "rendered",
+        url: "https://example.com/c(1).png?a=1&b=2",
+        fetchUrl: "https://camo.githubusercontent.com/abc/def",
+      },
+    ]);
+  });
+
   it("applies URL rules to every embed and leaves images past the fetch cap unverified", async () => {
     const original = global.fetch;
     const fetched = [];
@@ -516,6 +542,35 @@ describe("main", () => {
       result.requests.some((request) => request.path === SHOT_PATH),
       false,
     );
+  });
+
+  it("judges the images GitHub renders when the API returns body_html", async () => {
+    const routes = uiPr();
+    const pr = routes["/repos/goat-si/goat/pulls/7"];
+    // The source has an image only inside an indented code block, which GitHub renders as text.
+    pr.body = "Example:\n\n    " + SHOT + "\n";
+    pr.body_html = "<p>Example:</p>\n<pre><code>" + SHOT + "\n</code></pre>";
+    const code = await run("enforce", routes);
+    assert.equal(code.outcome, "missing");
+    assert.equal(
+      code.requests.some((request) => request.path === SHOT_PATH),
+      false,
+    );
+    assert.equal(
+      code.requests.find((request) => request.path === "/repos/goat-si/goat/pulls/7").headers
+        .accept,
+      "application/vnd.github.full+json",
+    );
+
+    pr.body_html =
+      '<p><img src="https://raw.githubusercontent.com' + SHOT_PATH + '" alt="after"></p>';
+    const rendered = await run("enforce", routes);
+    assert.equal(rendered.outcome, "pass");
+
+    pr.body_html = '<p><img src="pr-assets/after.png" alt="after"></p>';
+    const relative = await run("enforce", routes);
+    assert.equal(relative.outcome, "missing");
+    assert.match(relative.summary, /pr-assets\/after\.png \(relative path/);
   });
 
   it("honors the waiver label only when a maintainer applied it", async () => {

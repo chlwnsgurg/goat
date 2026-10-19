@@ -30,8 +30,8 @@ rewrites a body reference to that local path. Those URLs pass the gate as well. 
 
 ## What counts
 
-Each embed in the rendered description is checked. Markdown, `<img>`, and reference images count;
-anything in an HTML comment or fenced code does not.
+The gate checks the images in GitHub's own rendering of the description (the API's `body_html`), so
+examples in code or HTML comments never count.
 
 - A relative path such as `pr-assets/after.png` fails; GitHub resolves it against the PR page.
 - A link to repository contents by branch name fails, such as

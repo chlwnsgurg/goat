@@ -34,7 +34,10 @@ const MARKDOWN_REFERENCE_IMAGE_RE = /!\[([^\]]*)\]\[([^\]]*)\]/g;
 /** Link definitions that reference-style images depend on; the URL may start on the next line. */
 const MARKDOWN_REFERENCE_DEF_RE = /^[ \t]*\[([^\]]+)\]:[ \t]*(?:\n[ \t]*)?(?:<([^>\n]+)>|(\S+))/dgm;
 /** Inline code spans: a backtick run closed by a run of the same length, within one paragraph. */
-const INLINE_CODE_RE = /(?<!\x60)(\x60+)(?!\x60)(?:[^\n]|\n(?![ \t]*\n))*?(?<!\x60)\1(?!\x60)/g;
+const INLINE_CODE_RE =
+  /(?<!\x60)(\x60+)(?!\x60)(?:[^\r\n]|\r?\n(?![ \t]*\r?\n))*?(?<!\x60)\1(?!\x60)/g;
+/** An <img> tag in GitHub's rendered HTML. */
+const RENDERED_IMG_RE = /<img\b[^>]*>/gi;
 /** HTML image with a non-empty src. */
 const HTML_IMAGE_RE = /<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>"']+))[^>]*>/dgi;
 
@@ -150,6 +153,31 @@ function extractImageEmbeds(body) {
     });
   }
   return embeds.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * Images in GitHub's rendering of the description (the API's body_html), the
+ * authority on what a reader sees: code blocks, comments, and markdown edge
+ * cases are already resolved. url is the URL as written (data-canonical-src
+ * when GitHub proxies it through camo); fetchUrl is what the browser loads.
+ */
+function renderedImages(html) {
+  if (typeof html !== "string") return [];
+  const attribute = (tag, name) => {
+    const match = tag.match(new RegExp("\\s" + name + "\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)')", "i"));
+    return match ? decodeAmpersands(match[1] ?? match[2]) : "";
+  };
+  const images = [];
+  for (const [tag] of html.matchAll(RENDERED_IMG_RE)) {
+    const src = attribute(tag, "src");
+    if (!src) continue;
+    images.push({
+      kind: "rendered",
+      url: attribute(tag, "data-canonical-src") || src,
+      fetchUrl: src,
+    });
+  }
+  return images;
 }
 
 /**
@@ -276,9 +304,8 @@ async function verifyImageUrl(url, { attempts = 3, sleep: wait = sleep } = {}) {
  */
 async function checkEmbeds(embeds, options = {}) {
   const problems = embeds.map((embed) => staticEmbedProblem(embed.url));
-  const urls = [
-    ...new Set(embeds.filter((_, index) => !problems[index]).map((embed) => embed.url)),
-  ];
+  const target = (embed) => embed.fetchUrl ?? embed.url;
+  const urls = [...new Set(embeds.filter((_, index) => !problems[index]).map(target))];
   const fetched = urls.slice(0, MAX_FETCHED_EMBEDS);
   const results = new Map();
   let next = 0;
@@ -293,7 +320,7 @@ async function checkEmbeds(embeds, options = {}) {
     if (problems[index]) return { ...embed, status: "broken", reason: problems[index] };
     return {
       ...embed,
-      ...(results.get(embed.url) ?? {
+      ...(results.get(target(embed)) ?? {
         status: "unverified",
         reason: "not fetched; the description has more than " + MAX_FETCHED_EMBEDS + " images",
       }),
@@ -400,7 +427,15 @@ function decideGate({ draft, files, filesTruncated, body, waived, embeds }) {
 
 async function api(
   path,
-  { token, apiUrl, attempts = 1, sleep: wait = sleep, method = "GET", body },
+  {
+    token,
+    apiUrl,
+    attempts = 1,
+    sleep: wait = sleep,
+    method = "GET",
+    body,
+    accept = "application/vnd.github+json",
+  },
 ) {
   for (let attempt = 1; ; attempt += 1) {
     let response;
@@ -409,7 +444,7 @@ async function api(
         method,
         ...(method === "GET" ? {} : { body: JSON.stringify(body) }),
         headers: {
-          accept: "application/vnd.github+json",
+          accept,
           ...(body === undefined ? {} : { "content-type": "application/json" }),
           authorization: "Bearer " + token,
           "x-github-api-version": "2022-11-28",
@@ -558,7 +593,11 @@ async function main(env = process.env, { sleep: wait = sleep } = {}) {
 
   let decision;
   try {
-    const pr = await api(repoPath + "/pulls/" + number, options);
+    // full+json adds body_html, GitHub's own rendering of the description.
+    const pr = await api(repoPath + "/pulls/" + number, {
+      ...options,
+      accept: "application/vnd.github.full+json",
+    });
     const files = pr.draft
       ? []
       : (await paginate(repoPath + "/pulls/" + number + "/files", options)).map(
@@ -569,13 +608,15 @@ async function main(env = process.env, { sleep: wait = sleep } = {}) {
     const body = pr.body ?? "";
     // Fetch images only when the gate applies; drafts and non-UI PRs skip anyway.
     const gated = !pr.draft && (filesTruncated || files.some(isUiPath));
+    const embeds =
+      typeof pr.body_html === "string" ? renderedImages(pr.body_html) : extractImageEmbeds(body);
     const preliminary = decideGate({
       draft: pr.draft,
       files,
       filesTruncated,
       body,
       waived: false,
-      embeds: gated ? await checkEmbeds(extractImageEmbeds(body), { sleep: wait }) : undefined,
+      embeds: gated ? await checkEmbeds(embeds, { sleep: wait }) : undefined,
     });
     decision =
       (preliminary.outcome === "missing" || preliminary.outcome === "inconclusive") &&
@@ -639,6 +680,7 @@ module.exports = {
   isChangedFileListTruncated,
   hasScreenshotEvidence,
   extractImageEmbeds,
+  renderedImages,
   parseGithubContentUrl,
   staticEmbedProblem,
   verifyImageUrl,

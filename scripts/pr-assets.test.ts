@@ -259,11 +259,13 @@ describe("pr-assets plumbing", () => {
 
   it("rewrites the description, and stops if it changed during the image check", async () => {
     const sha = run(remote, "rev-parse", "refs/heads/pr-assets");
-    const original = "Before\n![before](pr-assets/before.png)\n";
+    // GitHub renders the indented example as code, so it stays as written even though 7/after.png exists.
+    const original =
+      "Before\n![before](pr-assets/before.png)\n\n    ![after](pr-assets/after.png)\n";
     let body = original;
     const writes: string[] = [];
     const store = {
-      read: () => body,
+      read: () => ({ body, rendered: new Set(["pr-assets/before.png"]) }),
       write: (bodyFile: string) => {
         body = NodeFS.readFileSync(bodyFile, "utf8");
         writes.push(body);
@@ -291,7 +293,9 @@ describe("pr-assets plumbing", () => {
 
     body = original;
     expect(await patchPrBody({ ...options, verify: async () => ({ status: "ok" }) })).toBe(true);
-    expect(writes).toEqual(["Before\n![before](" + rawAssetUrl(REPO, sha, "7/before.png") + ")\n"]);
+    expect(writes).toEqual([
+      original.replace("pr-assets/before.png", rawAssetUrl(REPO, sha, "7/before.png")),
+    ]);
     expect(NodeFS.readFileSync(NodePath.join(root, "backup", "before.md"), "utf8")).toBe(original);
   });
 
