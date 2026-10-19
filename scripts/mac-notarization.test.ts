@@ -220,9 +220,18 @@ function signingFixture(
         "node_modules/native/library.dylib",
         "node_modules/pty/spawn-helper",
         "resource-monitor/goat-resource-monitor",
+        "node_modules/@cursor/sdk-darwin-arm64/bin/cursorsandbox",
+        "node_modules/pkg/README",
         "client/index.html",
         "LICENSE-T3CODE.txt",
       ]),
+    // A vendor executable is Mach-O; any other extensionless file is not.
+    readFile: (file) =>
+      Effect.succeed(
+        file.endsWith("/cursorsandbox")
+          ? new Uint8Array([0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01])
+          : new TextEncoder().encode("readme"),
+      ),
     makeTempDirectoryScoped: () =>
       Effect.acquireRelease(Effect.succeed("/scratch/goat-notarize-test"), () =>
         Effect.sync(() => {
@@ -260,10 +269,16 @@ describe("signMacArchiveContents", () => {
       Effect.gen(function* () {
         const fixture = signingFixture();
         yield* fixture.run();
-        assert.equal(
-          fixture.commands.filter((command) => command.command === "codesign").length,
-          5,
+        const signed = fixture.commands
+          .filter((command) => command.command === "codesign")
+          .map((command) => command.args.at(-1));
+        assert.equal(signed.length, 6);
+        assert.include(
+          signed,
+          `${contentDir}/node_modules/@cursor/sdk-darwin-arm64/bin/cursorsandbox`,
         );
+        assert.notInclude(signed, `${contentDir}/node_modules/pkg/README`);
+        assert.equal(signed.at(-1), `${contentDir}/goat`);
         assert.deepEqual(fixture.commands.find((command) => command.command === "ditto")?.args, [
           "-c",
           "-k",
