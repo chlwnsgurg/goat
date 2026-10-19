@@ -48,6 +48,7 @@ function makeBridge(
     readonly savedTokenPermissions?: ReadonlyArray<string>;
     readonly instanceId?: string;
     readonly pairedScopes?: ReadonlyArray<string>;
+    readonly resolvedTarget?: DesktopSshEnvironmentTarget;
   },
 ): DesktopBridge {
   return {
@@ -57,7 +58,7 @@ function makeBridge(
     ) => {
       calls.push("ensure");
       return {
-        target,
+        target: options?.resolvedTarget ?? target,
         httpBaseUrl: "http://127.0.0.1:3201/",
         wsBaseUrl: "ws://127.0.0.1:3201/",
         pairingToken: ensureOptions?.issuePairingToken === true ? "pairing-token" : null,
@@ -342,6 +343,33 @@ describe("desktop SSH pairing", () => {
           "bearer-token",
         );
         expect(upgraded.calls).toContain("token");
+      }),
+    );
+
+    it.effect("finds the record under the target the saved profile keeps after resolution", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        const typed = { ...TARGET, hostname: "devbox", username: null, port: null };
+        yield* reconnect(
+          grants,
+          { ...older, resolvedTarget: TARGET },
+          "token-from-an-earlier-launch",
+          typed,
+        );
+
+        const saved = yield* reconnect(grants, older, "bearer-token", TARGET);
+        expect(saved.calls).toEqual(["ensure", "descriptor", "session"]);
+      }),
+    );
+
+    it.effect("never accepts any token when a pairing granted no standard scope", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        const odd = { ...older, pairedScopes: ["memory:sync"], savedTokenPermissions: [] };
+        yield* reconnect(grants, odd, "token-from-an-earlier-launch");
+
+        const again = yield* reconnect(grants, odd, "bearer-token");
+        expect(again.calls).toContain("token");
       }),
     );
 

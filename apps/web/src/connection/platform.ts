@@ -311,9 +311,12 @@ export function requiredSshTokenScopes(
 ) {
   const key = pairingGrantKey(server, target);
   const granted = key === undefined ? undefined : grants.get(key);
-  return granted === undefined
-    ? AuthStandardClientScopes
-    : AuthStandardClientScopes.filter((scope) => granted.includes(scope));
+  const required =
+    granted === undefined
+      ? []
+      : AuthStandardClientScopes.filter((scope) => granted.includes(scope));
+  // A grant with no standard scope at all says nothing about this server; never accept any token.
+  return required.length === 0 ? AuthStandardClientScopes : required;
 }
 
 export const provisionDesktopSshEnvironment = Effect.fn(
@@ -358,8 +361,10 @@ export const provisionDesktopSshEnvironment = Effect.fn(
     try: () => bridge.bootstrapSshBearerSession(bootstrap.httpBaseUrl, pairingToken),
     catch: sshPreparationFailure,
   });
-  const grantKey = pairingGrantKey(descriptor, target);
-  const granted = parseOAuthScope(access.scope);
+  // Reconnects look the record up by the resolved target the bridge returns, which is also
+  // what the saved profile keeps.
+  const grantKey = pairingGrantKey(descriptor, bootstrap.target);
+  const granted = grantKey === undefined ? null : parseOAuthScope(access.scope);
   if (grantKey !== undefined && granted !== null) grants.set(grantKey, granted);
   return {
     environmentId: descriptor.environmentId,
@@ -430,7 +435,7 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       const granted = session.permissions ?? session.scopes ?? [];
       if (
         session.authenticated &&
-        requiredSshTokenScopes(grants, descriptor, input.target).every((scope) =>
+        requiredSshTokenScopes(grants, descriptor, bootstrap.target).every((scope) =>
           granted.includes(scope),
         )
       ) {
