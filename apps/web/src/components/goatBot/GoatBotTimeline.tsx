@@ -95,7 +95,8 @@ export function GoatBotTimeline({
                 >
                   <div
                     className={cn(
-                      "flex max-w-full items-end",
+                      // Full width so the bubble's 75% cap measures the conversation column.
+                      "flex w-full items-end justify-end",
                       delivery.state === "failed" && delivery.rejectionReason === undefined
                         ? "gap-7"
                         : "gap-2",

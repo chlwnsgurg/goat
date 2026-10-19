@@ -608,7 +608,9 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   border-radius: 18px;
   font-size: 15px;
   line-height: 20px;
-  overflow-wrap: anywhere;
+  /* break-word, unlike anywhere, keeps whole words in the min-content width, so short
+     messages never wrap mid-word. */
+  overflow-wrap: break-word;
   white-space: pre-wrap;
 }
 
