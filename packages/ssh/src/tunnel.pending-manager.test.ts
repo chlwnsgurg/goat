@@ -261,21 +261,21 @@ const fixture = Effect.gen(function* () {
             : mode === "drain-attached"
               ? { ...ready, selectedVersion: "1.2.2", refresh: undefined, pending: drainPending }
               : mode === "ready-reused"
-            ? { ...ready, refresh: undefined }
-            : mode === "older-attached"
-              ? {
-                  ...ready,
-                  selectedVersion: "1.2.2",
-                  refresh: undefined,
-                  pending: { ...pending, replacement: "older" },
-                }
-              : mode === "pending"
-                ? { status: "pending", pending }
-                : mode === "ready-pending"
-                  ? { ...ready, selectedVersion: "1.2.2", refresh: undefined, pending }
-                  : mode === "archive" || mode === "attached"
-                    ? { ...ready, selectedVersion: "1.2.2", refresh: undefined }
-                    : ready,
+                ? { ...ready, refresh: undefined }
+                : mode === "older-attached"
+                  ? {
+                      ...ready,
+                      selectedVersion: "1.2.2",
+                      refresh: undefined,
+                      pending: { ...pending, replacement: "older" },
+                    }
+                  : mode === "pending"
+                    ? { status: "pending", pending }
+                    : mode === "ready-pending"
+                      ? { ...ready, selectedVersion: "1.2.2", refresh: undefined, pending }
+                      : mode === "archive" || mode === "attached"
+                        ? { ...ready, selectedVersion: "1.2.2", refresh: undefined }
+                        : ready,
         ),
       );
     }),
@@ -630,7 +630,7 @@ describe("SSH pending replacement reconciliation", () => {
       }),
   );
 
-  it.effect.each(["ready", "older-attached"] as const)(
+  it.effect.each(["ready", "older-attached", "drain-attached"] as const)(
     "status cannot revive a tunnel after a failed refresh (initial=%s)",
     (initial) =>
       Effect.gen(function* () {
@@ -639,6 +639,11 @@ describe("SSH pending replacement reconciliation", () => {
         yield* Effect.gen(function* () {
           const manager = yield* SshTunnel.SshEnvironmentManager;
           yield* manager.ensureEnvironment(uploadTarget);
+          if (initial === "drain-attached")
+            assert.equal(
+              (yield* manager.status(uploadTarget)).status?.refreshDeferred?.refreshCause,
+              "drain_unavailable",
+            );
           f.useLiveProbe();
           f.setMode("failure");
           assert.isTrue(
