@@ -73,10 +73,15 @@ export function readEnvironmentScope(
   );
 }
 
-/** A node reached through a hub, which registers only folders that already exist there. */
+/**
+ * A node reached through a hub, which registers only folders that already exist there. The active
+ * route decides: cached session state can still describe the route used before.
+ */
 export function readEnvironmentProxiedByHub(environmentId: EnvironmentId): boolean {
-  const result = appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId));
-  return Option.getOrNull(AsyncResult.value(result))?.proxiedByHub === true;
+  const prepared = appAtomRegistry.get(
+    environmentSession.preparedConnectionValueAtom(environmentId),
+  );
+  return Option.isSome(prepared) && prepared.value.target._tag === "HubProxyConnectionTarget";
 }
 
 const EMPTY_PREPARED_CONNECTION_ATOM = Atom.make(Option.none()).pipe(
