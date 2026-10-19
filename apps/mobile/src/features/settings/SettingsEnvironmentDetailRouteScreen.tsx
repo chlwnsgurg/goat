@@ -138,6 +138,8 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                 environmentId,
                 input: {
                   targetVersion,
+                  // The person confirmed that running threads may be interrupted.
+                  confirmReplacement: true,
                   ...(capabilities.serverUpdateThreadContinuation &&
                   config?.settings.continueThreadsAfterServerUpdate
                     ? { continueRunningThreads: true }

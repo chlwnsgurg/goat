@@ -160,7 +160,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
         const error = yield* selfUpdate
           .update({ targetVersion: "1.1.0", continueRunningThreads: true })
           .pipe(Effect.flip);
-        expect(error.reason).toContain("Server is busy");
+        expect(error.reason).toContain("running threads");
         expect(order).toEqual([]);
         yield* admission.admit(Effect.void);
       }),
@@ -222,7 +222,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       });
       expect(
         (yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip)).reason,
-      ).toContain("Server is busy");
+      ).toContain("running threads");
       expect(order).toEqual(["download", "extract", "preflight"]);
       yield* admission.admit(Effect.void);
     }),
@@ -246,7 +246,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const error = yield* admission.admit(
         selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip),
       );
-      expect(error.reason).toContain("Server is busy");
+      expect(error.reason).toContain("running threads");
       expect(order).toEqual([]);
     }),
   );

@@ -206,7 +206,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
     if ((yield* admission.inFlight) !== 0 || activity !== "idle") {
       return yield* new ServerSelfUpdateError({
         reason:
-          "Server is busy. Retry when idle, or set confirmReplacement to interrupt running work.",
+          "GOAT is running threads on this server, so the update waits. Try again when they finish, or update from a GOAT app that can confirm interrupting them.",
       });
     }
   });
