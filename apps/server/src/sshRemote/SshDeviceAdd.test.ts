@@ -57,6 +57,9 @@ const fixture = (
     authority?: boolean;
     typed?: boolean;
     configured?: boolean;
+    fingerprint?: boolean;
+    trustResult?: SshHostResult;
+    prepareResult?: SshHostResult;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -65,15 +68,21 @@ const fixture = (
     const managedAlias = options.configured ? "goat-build" : "build";
     const checkedHosts: string[] = [];
     let checks = 0;
-    const report = options.blocked
+    const sourceReport = options.fingerprint
       ? {
           ...readyPreflight,
+          steps: readyPreflight.steps.map((step) => ({ ...step, fingerprint: "SHA256:private" })),
+        }
+      : readyPreflight;
+    const report = options.blocked
+      ? {
+          ...sourceReport,
           ready: false,
-          steps: readyPreflight.steps.map((step) =>
+          steps: sourceReport.steps.map((step) =>
             step.id === "host_key" ? { ...step, state: options.blocked! } : step,
           ),
         }
-      : readyPreflight;
+      : sourceReport;
     const handoff = handoffSummary({
       handoffId: TurnItemId.make("approval"),
       kind: "approval",
@@ -124,23 +133,25 @@ const fixture = (
             add: () =>
               Effect.sync(() => {
                 calls.push("approval");
-                return {
-                  kind: "needs_human",
-                  handoff,
-                  next: { after: "approval", call: "goat_ssh_host_status" },
-                  status: {
-                    host: managedAlias,
-                    state: "untrusted",
-                    runtimeVersion: null,
-                    requestedVersion: "0.1.0",
-                  },
-                };
+                return (
+                  options.trustResult ?? {
+                    kind: "needs_human",
+                    handoff,
+                    next: { after: "approval", call: "goat_ssh_host_status" },
+                    status: {
+                      host: managedAlias,
+                      state: "untrusted",
+                      runtimeVersion: null,
+                      requestedVersion: "0.1.0",
+                    },
+                  }
+                );
               }),
             prepare: (input) =>
               Effect.sync(() => {
                 expect(input.host).toBe(managedAlias);
                 calls.push("prepare");
-                return prepared;
+                return options.prepareResult ?? prepared;
               }),
           }),
           Layer.mock(Broker.ConnectionCatalogBroker)({
@@ -190,6 +201,7 @@ const fixture = (
       call,
       calls,
       checkedHosts,
+      report,
       approve: () => {
         pinned = true;
       },
@@ -382,5 +394,51 @@ it.effect("a denied fallback still says why the connection was not saved", () =>
       /^No desktop connection catalog is attached.*settings:write/su,
     );
     expect(f.calls).toEqual(["preflight", "broker"]);
+  }),
+);
+
+it.effect.each([
+  { blocked: "failed" as const },
+  { typed: true, blocked: "needs_review" as const },
+  {},
+  { catalog: "absent" as const },
+  { limited: true, authority: false },
+  { typed: true, authority: false },
+  { revoke: true },
+  { typed: true, trustResult: prepared },
+  {
+    typed: true,
+    trustResult: {
+      kind: "error",
+      code: "operation_failed",
+      message: "Could not trust host.",
+    } as const,
+  },
+  {
+    catalog: "absent" as const,
+    prepareResult: {
+      kind: "error",
+      code: "operation_failed",
+      message: "Could not prepare host.",
+    } as const,
+  },
+])("agent results strip fingerprints from every preflight outcome (%s)", (options) =>
+  Effect.gen(function* () {
+    const f = yield* fixture({ ...options, fingerprint: true });
+    const result = yield* f.call();
+    expect(result).toHaveProperty("preflight");
+    expect(JSON.stringify(result)).not.toContain("fingerprint");
+    expect(JSON.stringify(result)).not.toContain("SHA256:private");
+    expect(f.report.steps.every((step) => step.fingerprint === "SHA256:private")).toBe(true);
+  }),
+);
+
+it.effect("outside-thread handoff guidance also keeps fingerprints private", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture({ typed: true, blocked: "needs_review", fingerprint: true });
+    const result = yield* f.call({ ...scope, thread: undefined });
+    expect(result).toMatchObject({ kind: "error", saved: false, preflight: { ready: false } });
+    expect(JSON.stringify(result)).not.toContain("fingerprint");
+    expect(JSON.stringify(result)).not.toContain("SHA256:private");
   }),
 );

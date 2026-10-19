@@ -85,6 +85,12 @@ export class SshDeviceAdd extends Context.Service<
   }
 >()("goat/sshRemote/SshDeviceAdd") {}
 
+// Fingerprints belong to the human trust review, including when an agent cannot proceed.
+const toAgentReport = (report: SshPreflightReport): SshPreflightReport => ({
+  ...report,
+  steps: report.steps.map(({ fingerprint: _fingerprint, ...step }) => step),
+});
+
 const make = Effect.gen(function* () {
   const setup = yield* Setup.SshHostSetup;
   const broker = yield* Broker.ConnectionCatalogBroker;
@@ -111,11 +117,13 @@ const make = Effect.gen(function* () {
         ...input,
         address: input.host ?? input.address!,
       });
-      const preflight = yield* setup.preflight(
-        resolved.host
-          ? { host: resolved.host }
-          : { ...resolved.input, host: resolved.input.address },
-        caller,
+      const preflight = toAgentReport(
+        yield* setup.preflight(
+          resolved.host
+            ? { host: resolved.host }
+            : { ...resolved.input, host: resolved.input.address },
+          caller,
+        ),
       );
       if (preflight.steps.some((step) => step.state === "failed"))
         return { outcome: "failed", preflight };

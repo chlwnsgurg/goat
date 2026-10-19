@@ -494,13 +494,44 @@ export const make = (
           ...(target.user === null ? {} : { user: target.user }),
           ...(target.port === null ? {} : { port: target.port }),
         };
+        const matchesSettings = (config: string) => {
+          const fields = new Map<string, string>();
+          for (const line of config.split(/\r?\n/u)) {
+            const match = /^\s*(\S+)\s+(.+?)\s*$/u.exec(line);
+            const key = match?.[1]?.toLowerCase();
+            if (key && !fields.has(key)) fields.set(key, match![2]!.replace(/^"|"$/gu, ""));
+          }
+          return (
+            fields.get("hostname")?.toLowerCase() === normalized.address.toLowerCase() &&
+            Number(fields.get("port")) === (normalized.port ?? 22) &&
+            (normalized.user === undefined || fields.get("user") === normalized.user) &&
+            (normalized.identityFile === undefined ||
+              fields.get("identityfile") === normalized.identityFile)
+          );
+        };
+        const matchesDestination = (alias: string) =>
+          Effect.gen(function* () {
+            const config = yield* readOptional(path.join(directory, `${alias}.conf`));
+            if (config === null || !matchesSettings(config)) return false;
+            // OpenSSH's first matching setting can override the managed file.
+            const effective = yield* runner.run({
+              command: "ssh",
+              args: ["-G", alias],
+              timeout: "20 seconds",
+            });
+            return effective.code === 0 && matchesSettings(effective.stdout);
+          });
         const host = aliasFor(normalized);
-        if (yield* fs.exists(path.join(directory, `${host}.known_hosts`)))
-          return {
-            input: normalized,
-            host,
-            managed: yield* fs.exists(path.join(directory, `${host}.conf`)),
-          };
+        if (yield* fs.exists(path.join(directory, `${host}.known_hosts`))) {
+          if (!(yield* matchesDestination(host)))
+            return yield* new SshHostProbeError({
+              host,
+              reason: "alias_conflict",
+              message:
+                "This managed SSH alias belongs to a different destination or identity. Choose another alias.",
+            });
+          return { input: normalized, host, managed: true };
+        }
         if (input.alias === undefined && (yield* fs.exists(directory))) {
           const matches: string[] = [];
           for (const file of yield* fs.readDirectory(directory)) {
@@ -511,21 +542,7 @@ export const make = (
               !(yield* fs.exists(path.join(directory, `${alias}.known_hosts`)))
             )
               continue;
-            const config = yield* fs.readFileString(path.join(directory, file));
-            const fields = new Map(
-              config.split(/\r?\n/u).flatMap((line) => {
-                const match = /^\s*(\S+)\s+(.+?)\s*$/u.exec(line);
-                return match ? [[match[1]!.toLowerCase(), match[2]!.replace(/^"|"$/gu, "")]] : [];
-              }),
-            );
-            if (
-              fields.get("hostname") === normalized.address &&
-              Number(fields.get("port")) === (normalized.port ?? 22) &&
-              (normalized.user === undefined || fields.get("user") === normalized.user) &&
-              (normalized.identityFile === undefined ||
-                fields.get("identityfile") === normalized.identityFile)
-            )
-              matches.push(alias);
+            if (yield* matchesDestination(alias)) matches.push(alias);
           }
           if (matches.length === 1) return { input: normalized, host: matches[0]!, managed: true };
         }

@@ -45,6 +45,8 @@ import * as ServerConfig from "../config.ts";
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { dependencies } from "./testkit/SshHostSetupTestkit.ts";
 import * as SshHostSetup from "./SshHostSetup.ts";
+import * as SshDeviceAdd from "./SshDeviceAdd.ts";
+import * as Broker from "../connections/ConnectionCatalogBroker.ts";
 import * as SshRemoteDispatch from "./SshRemoteDispatch.ts";
 
 const target = { alias: "box", hostname: "box", username: null, port: null };
@@ -1382,6 +1384,16 @@ it.effect("preflight normalizes typed destinations and rejects configured alias 
     yield* Effect.gen(function* () {
       const layer = Layer.effect(SshHostSetup.SshHostSetup, SshHostSetup.make({ home })).pipe(
         Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+        Layer.provide(
+          Layer.mock(ProcessRunner.ProcessRunner)({
+            run: ({ args }) => {
+              expect(args).toEqual(["-G", "custom"]);
+              return Effect.succeed(
+                processOutput("hostname build.example\nuser deploy\nport 2222\n"),
+              );
+            },
+          }),
+        ),
         Layer.provide(dependencies),
       );
       const setup = Context.get(yield* Layer.build(layer), SshHostSetup.SshHostSetup);
@@ -1431,8 +1443,13 @@ it.effect(
       const report: SshPreflightReport = {
         host: "configured",
         destination: { alias: "configured", hostname: "build.example", user: "deploy", port: 22 },
-        ready: true,
-        steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({ id, state: "passed", summary: "Passed." })),
+        ready: false,
+        steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({
+          id,
+          state: id === "host_key" ? "needs_review" : "passed",
+          summary: "Checked.",
+          ...(id === "host_key" ? { fingerprint: "SHA256:human-only" } : {}),
+        })),
       };
       const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(
         Effect.succeed([
@@ -1627,6 +1644,114 @@ it.effect.each([true, false])(
             yield* fs.exists(`${home}/.ssh/goat-hosts/goat-cursor-2-e25449c9.known_hosts`),
           ).toBe(false);
         }
+      }).pipe(Effect.ensuring(Effect.sync(() => discover.mockRestore())));
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "managed aliases reject destination and identity conflicts before preflight or dispatch",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-alias-conflict-" });
+      yield* fs.makeDirectory(`${home}/.ssh/goat-hosts`, { recursive: true });
+      yield* fs.writeFileString(
+        `${home}/.ssh/goat-hosts/prod.conf`,
+        'Host prod\n  HostName production.example\n  User deploy\n  Port 2222\n  IdentityFile "/keys/production"\n',
+      );
+      yield* fs.writeFileString(
+        `${home}/.ssh/goat-hosts/prod.known_hosts`,
+        "prod ssh-ed25519 AAAA\n",
+      );
+      const effectiveSettings =
+        "hostname production.example\nuser deploy\nport 2222\nidentityfile /keys/production\n";
+      let effective = effectiveSettings;
+      const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(Effect.succeed([]));
+      yield* Effect.gen(function* () {
+        const setupLayer = Layer.effect(
+          SshHostSetup.SshHostSetup,
+          SshHostSetup.make({
+            home,
+            runPreflight: () => Effect.die("Alias conflict reached preflight"),
+          }),
+        ).pipe(
+          Layer.provide(
+            Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+              beginSetupOperation: () => Effect.die("Alias conflict started preparation"),
+              prepareRuntime: () => Effect.die("Alias conflict prepared a runtime"),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(ProcessRunner.ProcessRunner)({
+              run: ({ args }) => {
+                expect(args).toEqual(["-G", "prod"]);
+                return Effect.succeed(processOutput(effective));
+              },
+            }),
+          ),
+          Layer.provide(dependencies),
+        );
+        const setup = Context.get(yield* Layer.build(setupLayer), SshHostSetup.SshHostSetup);
+        const add = Context.get(
+          yield* Layer.build(
+            SshDeviceAdd.layer.pipe(
+              Layer.provide(Layer.succeed(SshHostSetup.SshHostSetup, setup)),
+              Layer.provide(
+                Layer.mock(Broker.ConnectionCatalogBroker)({
+                  invoke: () => Effect.die("Alias conflict dispatched to the catalog"),
+                }),
+              ),
+              Layer.provide(dependencies),
+            ),
+          ),
+          SshDeviceAdd.SshDeviceAdd,
+        );
+        const destination = {
+          address: "production.example",
+          user: "deploy",
+          port: 2222,
+          alias: "prod",
+        };
+        for (const override of [
+          { address: "staging.example" },
+          { user: "root" },
+          { port: 22 },
+          { port: undefined },
+          { identityFile: "/keys/staging" },
+        ]) {
+          expect(
+            yield* add
+              .addDevice({ ...destination, ...override }, { kind: "mcp", scope: invocation })
+              .pipe(Effect.flip),
+          ).toMatchObject({ reason: "alias_conflict" });
+        }
+        for (const identityFile of [undefined, "/keys/production"]) {
+          expect(yield* setup.resolveDestination({ ...destination, identityFile })).toMatchObject({
+            host: "prod",
+            managed: true,
+          });
+        }
+        for (const [setting, replacement] of [
+          ["hostname production.example", "hostname staging.example"],
+          ["user deploy", "user root"],
+          ["port 2222", "port 22"],
+          ["identityfile /keys/production", "identityfile /keys/staging"],
+        ]) {
+          effective = effectiveSettings.replace(setting!, replacement!);
+          expect(
+            yield* add
+              .addDevice(
+                { ...destination, identityFile: "/keys/production" },
+                { kind: "mcp", scope: invocation },
+              )
+              .pipe(Effect.flip),
+          ).toMatchObject({ reason: "alias_conflict" });
+        }
+        effective = effectiveSettings;
+        yield* fs.remove(`${home}/.ssh/goat-hosts/prod.conf`);
+        expect(
+          yield* add.addDevice(destination, { kind: "mcp", scope: invocation }).pipe(Effect.flip),
+        ).toMatchObject({ reason: "alias_conflict" });
       }).pipe(Effect.ensuring(Effect.sync(() => discover.mockRestore())));
     }).pipe(Effect.provide(NodeServices.layer)),
 );

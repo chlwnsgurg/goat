@@ -47,7 +47,12 @@ const preflight: SshPreflightReport = {
   host: "build-host",
   destination: { alias: "build-host", hostname: "build.example", user: "deploy", port: 22 },
   ready: true,
-  steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({ id, state: "passed", summary: `${id} passed.` })),
+  steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({
+    id,
+    state: "passed",
+    summary: `${id} passed.`,
+    ...(id === "host_key" ? { fingerprint: "SHA256:human-only" } : {}),
+  })),
 };
 const deviceLayer = SshDeviceAdd.layer.pipe(
   Layer.provide(
@@ -129,6 +134,8 @@ it.effect("attributes a thread add and supplies the ten minute SSH timeout", () 
       created: true,
       connection: saved,
     });
+    expect(JSON.stringify(result)).not.toContain("fingerprint");
+    expect(JSON.stringify(result)).not.toContain("SHA256:human-only");
   }).pipe(
     Effect.provide(
       testLayer(threadCaller, (operation, timeoutMs) => {
@@ -160,6 +167,8 @@ it.effect("saves a trusted alias for a full-access outside caller", () =>
       created: false,
       connection: saved,
     });
+    expect(JSON.stringify(result)).not.toContain("fingerprint");
+    expect(JSON.stringify(result)).not.toContain("SHA256:human-only");
   }).pipe(
     Effect.provide(
       testLayer(outsideCaller("full-access"), (operation) => {

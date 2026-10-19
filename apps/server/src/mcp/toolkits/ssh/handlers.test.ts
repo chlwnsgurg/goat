@@ -1191,6 +1191,7 @@ const runtimeFixture = (
       id,
       state: !preflightReady && id === "host_key" ? "needs_review" : "passed",
       summary: "Checked.",
+      ...(!preflightReady && id === "host_key" ? { fingerprint: "SHA256:human-only" } : {}),
     })),
   };
   let statusReads = 0;
@@ -1594,10 +1595,20 @@ it.effect("SSH add returns preflight when a new fingerprint needs settings:write
     expect(response.isError).toBe(false);
     expect(response.structuredContent).toMatchObject({
       outcome: "capability_denied",
-      preflight: f.preflight,
+      preflight: {
+        ready: false,
+        steps: expect.arrayContaining([
+          { id: "host_key", state: "needs_review", summary: "Checked." },
+        ]),
+      },
       saved: false,
       reason: expect.stringContaining("settings:write"),
     });
+    expect(f.preflight.steps.find((step) => step.id === "host_key")?.fingerprint).toBe(
+      "SHA256:human-only",
+    );
+    expect(JSON.stringify(response)).not.toContain("fingerprint");
+    expect(JSON.stringify(response)).not.toContain("SHA256:human-only");
     expect(f.catalogWrites).toEqual([]);
     expect(f.handoffs).toEqual([]);
   }),
