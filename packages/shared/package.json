@@ -247,6 +247,10 @@
       "types": "./src/connectAuth.ts",
       "import": "./src/connectAuth.ts"
     },
+    "./goatConnect": {
+      "types": "./src/goatConnect.ts",
+      "import": "./src/goatConnect.ts"
+    },
     "./symlink": {
       "types": "./src/symlink.ts",
       "import": "./src/symlink.ts"
