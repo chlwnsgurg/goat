@@ -238,5 +238,40 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         }
       },
     );
+
+    // ssh exits as the trap forwards SIGTERM; the interrupted wait must not decide the status.
+    it.each(SHELLS)(
+      "reports ssh's own exit status after a forwarded SIGTERM; %s",
+      async (shell) => {
+        const child = NodeChildProcess.spawn(
+          shell,
+          [
+            "-c",
+            OWNER_PIPE_SUPERVISOR,
+            "goat-ssh-forward",
+            "",
+            process.execPath,
+            "-e",
+            'process.on("SIGTERM", () => process.exit(23)); console.log("up"); setInterval(() => {}, 1e9);',
+          ],
+          { detached: true, stdio: ["pipe", "pipe", "inherit"] },
+        );
+        try {
+          const signal = AbortSignal.timeout(5_000);
+          const lines = NodeReadline.createInterface({ input: child.stdout! });
+          await NodeEvents.EventEmitter.once(lines, "line", { signal });
+          const closed = NodeEvents.EventEmitter.once(child, "close", { signal });
+          process.kill(child.pid!, "SIGTERM");
+          const [code] = await closed;
+          assert.equal(code, 23);
+        } finally {
+          try {
+            process.kill(-child.pid!, "SIGKILL");
+          } catch (error) {
+            assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+          }
+        }
+      },
+    );
   },
 );

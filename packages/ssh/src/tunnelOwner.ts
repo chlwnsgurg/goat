@@ -31,11 +31,12 @@ watcher=$!
 "$@" </dev/null 3<&- &
 ssh_pid=$!
 exec 3<&-
-trap 'kill -TERM "$ssh_pid" 2>/dev/null' TERM INT HUP
+trap 'interrupted=1; kill -TERM "$ssh_pid" 2>/dev/null' TERM INT HUP
 while :; do
+  interrupted=0
   wait "$ssh_pid"
   status=$?
-  kill -0 "$ssh_pid" 2>/dev/null || break
+  [ "$interrupted" -eq 0 ] && break
 done
 kill -KILL "$watcher" 2>/dev/null
 wait "$watcher" 2>/dev/null
