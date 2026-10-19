@@ -191,7 +191,9 @@ the operating system, free disk space, and whether a GOAT runtime is available f
 that platform. A check that fails says what to change, often with a command to
 copy, and **Check again** runs them again. **Connect** turns on once nothing is
 left to fix. A host GOAT has not seen before shows its fingerprint for you to
-approve first. Agents run the same checks and get the same results.
+approve first. If you approved a host but its checks still fail, **Forget host** in the
+same dialog removes the SSH entry and pinned key GOAT added. Agents run the same
+checks and get the same results.
 
 GOAT signs in only with SSH keys or your ssh-agent. If a host turns your key down
 and would ask for a password, the sign-in check says so and offers an

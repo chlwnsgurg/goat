@@ -64,11 +64,14 @@ export function SshPreflightChecklist({
   checking,
   disabled,
   onCheckAgain,
+  onForget,
 }: {
   readonly report: SshPreflightReport | null;
   readonly checking: boolean;
   readonly disabled: boolean;
   readonly onCheckAgain: () => void;
+  /** Present when GOAT pinned this alias but it never became a saved connection. */
+  readonly onForget?: (() => void) | undefined;
 }) {
   return (
     <section aria-label="SSH preflight" aria-busy={checking} className="space-y-3">
@@ -101,9 +104,21 @@ export function SshPreflightChecklist({
           );
         })}
       </ol>
-      <Button variant="outline" size="sm" disabled={disabled || checking} onClick={onCheckAgain}>
-        Check again
-      </Button>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button variant="outline" size="sm" disabled={disabled || checking} onClick={onCheckAgain}>
+          Check again
+        </Button>
+        {onForget ? (
+          <Button
+            variant="ghost-destructive"
+            size="sm"
+            disabled={disabled || checking}
+            onClick={onForget}
+          >
+            Forget host
+          </Button>
+        ) : null}
+      </div>
     </section>
   );
 }

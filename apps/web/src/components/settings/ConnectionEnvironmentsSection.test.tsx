@@ -8,6 +8,8 @@ const state = vi.hoisted(() => ({
   preflightSshHost: vi.fn(),
   probeSshHost: vi.fn(),
   trustSshHost: vi.fn(),
+  forgetSshHost: vi.fn(),
+  confirm: vi.fn(),
   canWriteSsh: true,
   connectPairing: vi.fn(),
   connectSshEnvironment: vi.fn(),
@@ -49,7 +51,7 @@ vi.mock("../../state/server", async () => {
       trustSshHost: Object.assign(state.trustSshHost, {
         permissionAtom: () => Atom.make(state.canWriteSsh),
       }),
-      forgetSshHost: vi.fn(),
+      forgetSshHost: state.forgetSshHost,
       updateStateAtom: () => Atom.make({ status: "idle" }),
     },
     environmentUpdateStatesAtom: (key: string) =>
@@ -68,6 +70,7 @@ vi.mock(import("../../cloud/publicConfig"), async (importOriginal) => ({
   ...(await importOriginal()),
   hasCloudPublicConfig: () => false,
 }));
+vi.mock("~/confirmDialog", () => ({ requestConfirmDialog: state.confirm }));
 vi.mock("../ui/toast", () => ({
   toastManager: { add: vi.fn() },
   stackedThreadToast: (toast: unknown) => toast,
@@ -96,6 +99,8 @@ beforeEach(() => {
   state.preflightSshHost.mockReset();
   state.probeSshHost.mockReset();
   state.trustSshHost.mockReset();
+  state.forgetSshHost.mockReset();
+  state.confirm.mockReset();
   state.preflightSshHost.mockResolvedValue({ _tag: "Success", value: readyReport });
   state.connectPairing.mockReset();
   state.connectSshEnvironment.mockReset();
@@ -502,4 +507,56 @@ it("keeps checking the managed alias a typed address with its own user and port 
     { host: "build.example", user: "deploy", port: 2222 },
     { host: "goat-build-1a2b3c4d" },
   ]);
+});
+
+it("offers Forget host for a pinned alias whose checks failed before it was saved", async () => {
+  const failed = {
+    ...readyReport,
+    host: "goat-box-1a2b3c4d",
+    ready: false,
+    destination: {
+      alias: "goat-box-1a2b3c4d",
+      managed: true,
+      hostname: "box.example",
+      user: "jun",
+      port: 22,
+    },
+    steps: readyReport.steps.map((step) =>
+      step.id === "key_auth" ? { ...step, state: "failed", summary: "Key refused" } : step,
+    ),
+  } satisfies SshPreflightReport;
+  state.preflightSshHost.mockResolvedValue({ _tag: "Success", value: failed });
+  state.confirm.mockResolvedValue(true);
+  state.forgetSshHost.mockResolvedValue({
+    _tag: "Success",
+    value: {
+      kind: "ok",
+      status: {
+        host: "goat-box-1a2b3c4d",
+        state: "untrusted",
+        runtimeVersion: null,
+        requestedVersion: "0.1.0",
+      },
+    },
+  });
+  const dialog = await openSshDialog();
+  type(input("Search hosts or type devbox"), "goat-box-1a2b3c4d");
+  await act(async () => button("Check", dialog).click());
+  await act(async () => button("Forget host", dialog).click());
+  expect(state.confirm).toHaveBeenCalledOnce();
+  expect(state.forgetSshHost).toHaveBeenCalledWith({
+    environmentId: "primary",
+    input: { host: "goat-box-1a2b3c4d", stopRuntime: "no" },
+  });
+  expect(input("Search hosts or type devbox").value).toBe("");
+  expect(dialog.querySelector('[aria-label="SSH preflight"]')).toBeNull();
+});
+
+it("does not offer Forget host for a personal ~/.ssh/config alias", async () => {
+  const dialog = await openSshDialog();
+  type(input("Search hosts or type devbox"), "devbox");
+  await act(async () => button("Check", dialog).click());
+  expect([...dialog.querySelectorAll("button")].some((b) => b.textContent === "Forget host")).toBe(
+    false,
+  );
 });

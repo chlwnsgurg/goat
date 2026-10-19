@@ -937,6 +937,47 @@ export function ConnectionEnvironmentsSection({
     setSavedBackendError(null);
   };
 
+  // Approving a key writes a managed alias and pin even when the checks then fail, so the
+  // dialog must offer the way back for one that never became a saved connection.
+  const unsavedManagedAlias = (() => {
+    const destination = sshPreflight?.report.destination;
+    if (destination?.managed !== true || destination.alias === undefined) return null;
+    const alias = destination.alias;
+    return savedEnvironments.some(
+      (environment) => savedDesktopSshTarget(environment)?.alias === alias,
+    )
+      ? null
+      : alias;
+  })();
+  const forgetUnsavedSshHost = async (alias: string) => {
+    if (primaryEnvironmentId === null || !ownsSshConfig || sshAddInFlight.current) return;
+    const confirmed = await requestConfirmDialog(
+      `Forget ${alias}?\nGOAT removes the SSH entry and pinned key it added for this host. Your own SSH config and keys stay.`,
+      { variant: "destructive" },
+    );
+    if (confirmed !== true) return;
+    sshAddInFlight.current = true;
+    setIsAddingSavedBackend(true);
+    const result = await forgetSshHost({
+      environmentId: primaryEnvironmentId,
+      input: { host: alias, stopRuntime: "no" },
+    });
+    sshAddInFlight.current = false;
+    setIsAddingSavedBackend(false);
+    const message =
+      result._tag === "Failure"
+        ? "Could not forget this host. Check your permissions and try again."
+        : sshSetupError(result.value, alias);
+    if (message) {
+      setSavedBackendError(message);
+      return;
+    }
+    invalidateSshPreflight();
+    setSavedBackendSshHost("");
+    setSavedBackendSshUsername("");
+    setSavedBackendSshPort("");
+  };
+
   const checkSavedBackendSshTarget = async (target: DesktopSshEnvironmentTarget) => {
     if (sshAddInFlight.current || sshConnectInFlight.current) return;
     if (!ownsSshConfig || primaryEnvironmentId === null) {
@@ -1614,6 +1655,11 @@ export function ConnectionEnvironmentsSection({
               isAddingSavedBackend || sshProbe !== null || !canPreflightSsh || !ownsSshConfig
             }
             onCheckAgain={() => void checkSavedBackendSshFields()}
+            onForget={
+              unsavedManagedAlias !== null && canWriteSsh
+                ? () => void forgetUnsavedSshHost(unsavedManagedAlias)
+                : undefined
+            }
           />
         ) : null}
         {sshProbe ? (

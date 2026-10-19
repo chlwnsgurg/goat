@@ -579,11 +579,15 @@ export const make = (
         const target = resolved.host
           ? { host: resolved.host }
           : { ...resolved.input, host: resolved.input.address };
-        return yield* (options.runPreflight ?? runSshPreflight)(target, {
+        const report = yield* (options.runPreflight ?? runSshPreflight)(target, {
           ownerLabel: owner.label,
           runner: cliRunner,
           ...(resolved.host ? { alias: resolved.host } : {}),
         }).pipe(Effect.provide(runtime), Effect.provide(FetchHttpClient.layer));
+        // Lets Settings offer Forget host for a pinned alias that never became a connection.
+        return resolved.managed && report.destination.alias === resolved.host
+          ? { ...report, destination: { ...report.destination, managed: true as const } }
+          : report;
       }).pipe(
         Effect.mapError((cause) =>
           isAuthorizationError(cause) || isProbeError(cause)

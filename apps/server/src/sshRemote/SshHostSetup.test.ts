@@ -1,4 +1,5 @@
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as Schema from "effect/Schema";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it, vi } from "@effect/vitest";
 import {
@@ -13,7 +14,7 @@ import {
   ProviderInstanceId,
   ProviderDriverKind,
   ThreadId,
-  type SshPreflightReport,
+  SshPreflightReport,
   SSH_PREFLIGHT_STEP_ORDER,
   type SshHostResult,
   type SshHostStatus,
@@ -1757,4 +1758,54 @@ it.effect(
         ).toMatchObject({ reason: "alias_conflict" });
       }).pipe(Effect.ensuring(Effect.sync(() => discover.mockRestore())));
     }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("preflight marks GOAT's managed aliases and keeps long personal aliases encodable", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-preflight-managed-" });
+    const longAlias = "personal-" + "a".repeat(57);
+    yield* fs.makeDirectory(home + "/.ssh/goat-hosts", { recursive: true });
+    yield* fs.writeFileString(home + "/.ssh/goat-hosts/goat-box.conf", "Host goat-box\n");
+    yield* fs.writeFileString(home + "/.ssh/goat-hosts/goat-box.known_hosts", "goat-box key\n");
+    const reportFor = (alias: string): SshPreflightReport => ({
+      host: alias,
+      destination: { alias, hostname: "box.example", user: "jun", port: 22 },
+      ready: true,
+      steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({ id, state: "passed", summary: "Checked." })),
+    });
+    const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(
+      Effect.succeed(
+        ["goat-box", longAlias].map((alias) => ({
+          alias,
+          hostname: "box.example",
+          username: "jun",
+          port: 22,
+          source: "ssh-config" as const,
+        })),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const layer = Layer.effect(
+        SshHostSetup.SshHostSetup,
+        SshHostSetup.make({
+          home,
+          runPreflight: (input) => Effect.succeed(reportFor(input.host)),
+        }),
+      ).pipe(
+        Layer.provide(probeClient),
+        Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+        Layer.provide(dependencies),
+      );
+      const setup = Context.get(yield* Layer.build(layer), SshHostSetup.SshHostSetup);
+      const caller = { kind: "client", sessionId: probeSessionId } as const;
+      const managed = yield* setup.preflight({ host: "goat-box" }, caller);
+      expect(managed.destination).toMatchObject({ alias: "goat-box", managed: true });
+      const personal = yield* setup.preflight({ host: longAlias }, caller);
+      expect(personal.destination.managed).toBeUndefined();
+      expect((yield* Schema.encodeEffect(SshPreflightReport)(personal)).destination.alias).toBe(
+        longAlias,
+      );
+    }).pipe(Effect.ensuring(Effect.sync(() => discover.mockRestore())));
+  }).pipe(Effect.provide(NodeServices.layer)),
 );
