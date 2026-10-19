@@ -1,7 +1,15 @@
 import { assert, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@goat/contracts";
+import {
+  type AuthMcpClientAccess,
+  EnvironmentAuthorizationError,
+  EnvironmentId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
@@ -257,3 +265,139 @@ it.effect.each([
     }
   }).pipe(Effect.provide(harness.layer));
 });
+
+/** `access` is read on every check, so a test can lower it while a claim waits. */
+const homeScope = (
+  access: () => AuthMcpClientAccess,
+  reauthorize?: () => Effect.Effect<void, EnvironmentAuthorizationError>,
+) =>
+  Layer.succeed(McpInvocationContext.McpInvocationContext, {
+    environmentId,
+    capabilities: new Set(["orchestration"] as const),
+    issuedAt: 0,
+    requestNamespace: "home-claim",
+    thread: undefined,
+    client: {
+      sessionId: "home-claim",
+      label: "Agent",
+      get access() {
+        return access();
+      },
+    },
+    ...(reauthorize === undefined ? {} : { reauthorize }),
+  });
+const gone = EnvironmentId.make("environment:gone");
+const goneHome = { environmentId: gone, claimedAt: 1_792_398_593_330, claimId: "gone" };
+const callHomeTool = (name: "channel_bot_home" | "channel_bot_home_claim") =>
+  ChannelToolkit.pipe(
+    Effect.provide(McpToolAccess.HandlersLayer.layer(ChannelHandlers.layer)),
+    Effect.flatMap((toolkit) => toolkit.handle(name, {}).pipe(Stream.unwrap, Stream.runCollect)),
+    Effect.map((result) => result.at(-1)!.result),
+  );
+
+it.effect("an agent moves GOAT Bot off a vanished home and the bot takes messages again", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const settings = yield* ServerSettings.ServerSettingsService;
+    yield* settings.updateSettings({ goatBotHome: goneHome });
+    assert.deepStrictEqual(yield* callHomeTool("channel_bot_home"), {
+      home: goneHome,
+      environmentId,
+      isHome: false,
+    });
+    const claimed = yield* callHomeTool("channel_bot_home_claim");
+    assert.deepInclude(claimed, { claimed: true, environmentId });
+    assert.isTrue("claimed" in claimed && claimed.home.claimedAt > goneHome.claimedAt);
+    assert.strictEqual((yield* settings.getSettings).goatBotHome?.environmentId, environmentId);
+    const toolkit = yield* ChannelToolkit.pipe(
+      Effect.provide(McpToolAccess.HandlersLayer.layer(ChannelHandlers.layer)),
+    );
+    const receipt = (yield* toolkit
+      .handle("channel_ingest", { text: "hello", clientRequestId: "after-claim" })
+      .pipe(Stream.unwrap, Stream.runCollect)).at(-1)!.result;
+    assert.isTrue("inputId" in receipt, JSON.stringify(receipt));
+  }).pipe(
+    Effect.provide(
+      Layer.merge(
+        homeScope(() => "full-access"),
+        harness.layer,
+      ),
+    ),
+  );
+});
+
+it.effect.each(["read-only", "approval-required", "auto-accept-edits"] as const)(
+  "refuses to move GOAT Bot's home for a %s client",
+  (access) => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({ goatBotHome: goneHome });
+      const failure = yield* callHomeTool("channel_bot_home_claim");
+      assert.isTrue(
+        "code" in failure && failure.code === "capability_denied",
+        JSON.stringify(failure),
+      );
+      assert.deepStrictEqual((yield* settings.getSettings).goatBotHome, goneHome);
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          homeScope(() => access),
+          harness.layer,
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "a credential revoked while the claim waits for the settings lock changes nothing",
+  () => {
+    const harness = makeHarness();
+    let revoked = false;
+    let started: Deferred.Deferred<void> | undefined;
+    const reauthorize = () =>
+      Effect.suspend(() =>
+        revoked
+          ? Effect.fail(
+              new EnvironmentAuthorizationError({
+                message: "revoked",
+                requiredScope: "settings:write",
+              }),
+            )
+          : Effect.void,
+      );
+    // The claim's first check reads the client's access; that read marks it as started.
+    const access = (): AuthMcpClientAccess => {
+      if (started !== undefined) Deferred.doneUnsafe(started, Effect.void);
+      return "full-access";
+    };
+    return Effect.gen(function* () {
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({ goatBotHome: goneHome });
+      const locked = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const holder = yield* settings
+        .updateSettings(
+          {},
+          Deferred.succeed(locked, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(locked);
+      const begun = yield* Deferred.make<void>();
+      started = begun;
+      const claim = yield* callHomeTool("channel_bot_home_claim").pipe(Effect.forkChild);
+      yield* Deferred.await(begun);
+      // Revoked after the claim passed its first check and while the lock is still held.
+      revoked = true;
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(holder);
+      const failure = yield* Fiber.join(claim);
+      assert.isTrue(
+        "code" in failure && failure.code === "capability_denied",
+        JSON.stringify(failure),
+      );
+      assert.deepStrictEqual((yield* settings.getSettings).goatBotHome, goneHome);
+    }).pipe(Effect.provide(Layer.merge(homeScope(access, reauthorize), harness.layer)));
+  },
+);

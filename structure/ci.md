@@ -64,5 +64,12 @@ than `ci:*` (the waiver included) starts no job, so the script reads the live PR
 that one job re-evaluates it. Switching modes is in
 [the operations guide](../docs/operations/pr-screenshot-gate.md).
 
+An embed counts only if it loads for a reader. A relative path resolves against the PR page, and a
+branch name moves, so both fail along with a `/blob/` viewer page. Any other URL must answer an
+anonymous request with HTTP 200 and an image content type. One broken embed fails the gate. When an
+image cannot be fetched because of a network error, timeout, or 5xx, the result is inconclusive
+instead.
+
 Screenshot evidence never lands on `dev`. Authors drag images into the description editor or
-commit them to the orphan `pr-assets` branch and link them by commit SHA.
+upload them with `scripts/pr-assets.ts`, which commits to the orphan `pr-assets` branch and links
+them by commit SHA.

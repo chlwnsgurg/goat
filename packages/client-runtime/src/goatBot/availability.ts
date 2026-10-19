@@ -35,7 +35,12 @@ export type GoatBotEnsureState =
 export type GoatBotAvailability =
   | { readonly kind: "unsupported" }
   | { readonly kind: "offline"; readonly environmentId: EnvironmentId }
-  | { readonly kind: "home_offline"; readonly environmentId: EnvironmentId; readonly label: string }
+  | {
+      readonly kind: "home_offline";
+      readonly known: boolean;
+      readonly environmentId: EnvironmentId;
+      readonly label: string;
+    }
   | { readonly kind: "connecting"; readonly environmentId: EnvironmentId }
   | { readonly kind: "legacy_active"; readonly environmentId: EnvironmentId }
   | { readonly kind: "error"; readonly environmentId: EnvironmentId; readonly message: string }
@@ -134,10 +139,12 @@ export function resolveGoatBotAvailability(input: {
       const environmentId = resolution.claim.environmentId;
       return {
         kind: "home_offline",
+        known: resolution.homeKnown,
         environmentId,
-        label:
-          input.environments.find((entry) => entry.environmentId === environmentId)?.label ??
-          environmentId,
+        label: resolution.homeKnown
+          ? (input.environments.find((entry) => entry.environmentId === environmentId)?.label ??
+            environmentId)
+          : environmentId.slice(0, 8),
       };
     }
     if (resolution.state !== "claimed") {

@@ -1245,6 +1245,31 @@ export function goatBotHomeClaimSupersedes(
   return current === null || compareGoatBotHomeClaims(next, current) > 0;
 }
 
+/**
+ * A claim that supersedes `observedMax`. Advancing the observed logical clock keeps moving home
+ * working after clock rollback. Clients and the server's own claim share it.
+ */
+export function newGoatBotHomeClaim({
+  environmentId,
+  now,
+  observedMax,
+  randomId,
+}: {
+  environmentId: EnvironmentId;
+  now: number;
+  observedMax: GoatBotHomeClaim | null;
+  randomId: () => string;
+}): GoatBotHomeClaim {
+  return {
+    environmentId,
+    claimedAt: Math.min(
+      Number.MAX_SAFE_INTEGER,
+      Math.max(0, Math.trunc(now), (observedMax?.claimedAt ?? -1) + 1),
+    ),
+    claimId: randomId(),
+  };
+}
+
 export const ServerSettings = Schema.Struct({
   memoryOwnerSourceReadPolicyVersion: NonNegativeInt.pipe(
     Schema.withDecodingDefault(Effect.succeed(0)),
@@ -1260,6 +1285,13 @@ export const ServerSettings = Schema.Struct({
    * never inherit the new-thread default, which can be an expensive or unsupported model.
    */
   memoryModelSelection: Schema.NullOr(ModelSelection).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  /**
+   * The model GOAT Bot's own turns run on. Null follows the new-thread default, then the text
+   * generation model, the way a main thread would.
+   */
+  goatBotModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   memoryHubVersion: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
@@ -1695,6 +1727,7 @@ const ServerSettingsPatchFields = Schema.Struct({
   enableAgentMemoryAccess: Schema.optionalKey(Schema.Boolean),
   memoryEnabled: Schema.optionalKey(Schema.Boolean),
   memoryModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  goatBotModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),

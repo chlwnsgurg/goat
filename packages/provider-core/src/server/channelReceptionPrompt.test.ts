@@ -21,6 +21,7 @@ const emptyOutput = {
   answer: "",
   question: "",
   options: [],
+  clarifyAbout: "other",
   reads: [],
   remember: "",
   rememberQuote: "",
@@ -122,6 +123,26 @@ describe("channel reception note request conversion", () => {
   });
 });
 
+describe("channel reception project questions and other machines", () => {
+  it("marks a clarify about a project so the server can word it", () => {
+    expect(
+      convert({
+        action: "clarify",
+        question: "Which project?",
+        options: [],
+        clarifyAbout: "project",
+      }),
+    ).toEqual({
+      replyText: "Okay.",
+      action: { type: "clarify", question: "Which project?", about: "project" },
+    });
+    expect(
+      convert({ action: "clarify", question: "Which task?", options: [], clarifyAbout: "other" })
+        .action,
+    ).toEqual({ type: "clarify", question: "Which task?" });
+  });
+});
+
 describe("channel reception reads", () => {
   it("keeps at most three non-empty reads and refuses a read with none", () => {
     const result = convert({
@@ -192,5 +213,34 @@ describe("channel reception reads", () => {
     }).prompt;
     expect(second).not.toContain("- read: look things up before answering");
     expect(second).toContain("[work: #123]\ngoat-si/goat#123 (merged)");
+  });
+});
+
+describe("channel reception turns", () => {
+  it("turns run_turn into a turn with its title, instruction and quoted note change", () => {
+    const result = convert({
+      action: "run_turn",
+      title: "Check the disk",
+      instruction: "Find what fills the disk.",
+      notesChangeRequested: " forget the Friday rule ",
+    });
+    expect(result.action).toEqual({
+      type: "run_turn",
+      title: "Check the disk",
+      instruction: "Find what fills the disk.",
+      notesChangeRequested: "forget the Friday rule",
+    });
+    expect(Option.isNone(toChannelReceptionResult({ ...emptyOutput, action: "run_turn" }))).toBe(
+      true,
+    );
+  });
+});
+
+describe("channel reception follow-ups", () => {
+  it("turns follow_up into the task it joins", () => {
+    expect(convert({ action: "follow_up", taskId: "task:1" }).action).toEqual({
+      type: "follow_up",
+      taskId: "task:1",
+    });
   });
 });

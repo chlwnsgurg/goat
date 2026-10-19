@@ -30,6 +30,7 @@ import {
   ChannelTask,
   ChannelTaskEvent,
   ChannelTaskLedgerExportRow,
+  ChannelWorkerRun,
   type ChannelTaskBrief,
   type ChannelTaskExportInput,
   type ChannelTaskExportResult,
@@ -280,6 +281,71 @@ export class ChannelLedger extends Context.Service<
     readonly listPendingForwards: (
       limit: number,
     ) => Effect.Effect<ReadonlyArray<ChannelPendingEvent>, ChannelLedgerError>;
+    /** Records one worker run as it stands now; the newest write for a run wins. */
+    readonly upsertWorkerRun: (run: ChannelWorkerRun) => Effect.Effect<void, ChannelLedgerError>;
+    /** The recorded runs of these tasks, oldest first per task. */
+    readonly listWorkerRuns: (
+      taskIds: ReadonlyArray<ChannelTaskId>,
+    ) => Effect.Effect<ReadonlyArray<ChannelWorkerRun>, ChannelLedgerError>;
+    /**
+     * An owner's finished tasks whose newest outcome has not been delivered to where the work
+     * came from: not written yet, still sending, given up, or unknown after a crash.
+     */
+    readonly listUndeliveredOutcomes: (
+      ownerId: string,
+    ) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
+    /**
+     * Local tasks claimed for a launch that finished since `since` and whose runs are not yet
+     * all recorded as ended, newest first, at most `limit`.
+     */
+    readonly listUnsettledRunHistory: (input: {
+      readonly since: string;
+      readonly limit: number;
+    }) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
+    /** Marks a finished task's runs as all recorded as ended. */
+    readonly settleRunHistory: (input: {
+      readonly taskId: ChannelTaskId;
+      readonly now: string;
+    }) => Effect.Effect<void, ChannelLedgerError>;
+    /** Which attempt a recorded stop is on; it starts at 0. */
+    readonly stopAttempt: (eventId: string) => Effect.Effect<number, ChannelLedgerError>;
+    /** Moves a stop to its next attempt after the orchestrator refused the current one. */
+    readonly advanceStopAttempt: (input: {
+      readonly eventId: string;
+      readonly from: number;
+      readonly now: string;
+    }) => Effect.Effect<void, ChannelLedgerError>;
+    /** Recorded runs still running or waiting, across tasks, for reconciliation. */
+    readonly listOpenWorkerRuns: () => Effect.Effect<
+      ReadonlyArray<ChannelWorkerRun>,
+      ChannelLedgerError
+    >;
+    /**
+     * How many of a person's tasks hold a worker now: dispatching, running, waiting on a person
+     * with a worker, or stopped while the stop has not gone through. Questions asked before any
+     * worker exists hold none.
+     */
+    readonly countBusyTasks: (input: {
+      readonly ownerId: string;
+      readonly principalId: string;
+    }) => Effect.Effect<number, ChannelLedgerError>;
+    /**
+     * How each task's outcome (result, failure or stop) reached its requester: the delivery state
+     * of the narration of the task's newest terminal event to where the work came from, or none
+     * when that narration was not written yet.
+     */
+    readonly outcomeDeliveries: (
+      taskIds: ReadonlyArray<ChannelTaskId>,
+    ) => Effect.Effect<ReadonlyMap<string, string>, ChannelLedgerError>;
+    /** Whether any recorded answer or follow-up for this task is still waiting to be sent. */
+    readonly hasPendingForward: (
+      taskId: ChannelTaskId,
+    ) => Effect.Effect<boolean, ChannelLedgerError>;
+    /** Whether a forward for this task was recorded before `sequence` and is still waiting. */
+    readonly hasEarlierPendingForward: (input: {
+      readonly taskId: ChannelTaskId;
+      readonly sequence: number;
+    }) => Effect.Effect<boolean, ChannelLedgerError>;
     readonly completeForward: (input: {
       readonly owner: string;
       readonly sequence: number;
@@ -434,6 +500,8 @@ const decodeRequester = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelRe
 const encodeDecision = Schema.encodeSync(Schema.fromJsonString(ChannelReceptionResult));
 const decodeDecision = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelReceptionResult));
 const encodeTask = Schema.encodeSync(Schema.fromJsonString(ChannelTask));
+const encodeWorkerRun = Schema.encodeSync(Schema.fromJsonString(ChannelWorkerRun));
+const decodeWorkerRun = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelWorkerRun));
 const decodeTask = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelTask));
 const encodeEvent = Schema.encodeSync(Schema.fromJsonString(ChannelTaskEvent));
 const decodeEvent = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelTaskEvent));
@@ -715,6 +783,8 @@ const make = Effect.gen(function* () {
         )
       `;
     });
+
+  const workerRunKey = (taskId: string, runId: string) => "worker-run:" + taskId + ":" + runId;
 
   const upsertCursor = (cursor: number, now: string) => sql`
     INSERT INTO channel_runtime_state (key, value_json, updated_at)
@@ -1254,6 +1324,174 @@ const make = Effect.gen(function* () {
           rows.map((row) => ({ sequence: row.sequence, event: decodeEvent(row.event_json) })),
         ),
         Effect.mapError(toLedgerError("listPendingForwards")),
+      ),
+
+    upsertWorkerRun: (run) =>
+      sql`
+        INSERT INTO channel_runtime_state (key, value_json, updated_at)
+        VALUES (${workerRunKey(run.taskId, run.runId)}, ${encodeWorkerRun(run)}, ${run.updatedAt})
+        ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+      `.pipe(Effect.asVoid, Effect.mapError(toLedgerError("upsertWorkerRun"))),
+
+    listWorkerRuns: (taskIds) =>
+      taskIds.length === 0
+        ? Effect.succeed([])
+        : Effect.forEach(
+            taskIds,
+            (taskId) =>
+              sql<{ readonly value_json: string }>`
+              SELECT value_json FROM channel_runtime_state
+              WHERE key >= ${"worker-run:" + taskId + ":"} AND key < ${"worker-run:" + taskId + ";"}
+            `,
+          ).pipe(
+            Effect.map((pages) =>
+              pages
+                .flat()
+                .map((row) => decodeWorkerRun(row.value_json))
+                .toSorted((left, right) =>
+                  left.taskId === right.taskId
+                    ? left.startedAt.localeCompare(right.startedAt)
+                    : left.taskId.localeCompare(right.taskId),
+                ),
+            ),
+            Effect.mapError(toLedgerError("listWorkerRuns")),
+          ),
+
+    listUndeliveredOutcomes: (ownerId) =>
+      sql<TaskRow>`
+        SELECT task.owner_id, task.task_json, task.pending_answer_message_id, task.completion_hold
+        FROM channel_tasks AS task
+        JOIN channel_task_events AS outcome ON outcome.task_id = task.task_id
+        LEFT JOIN channel_outbox AS delivery
+          ON delivery.cause_key = 'narration:' || outcome.event_id || ':origin'
+        WHERE task.owner_id = ${ownerId}
+          AND task.status IN ('completed', 'failed', 'cancelled')
+          AND outcome.sequence = (
+            SELECT MAX(latest.sequence) FROM channel_task_events AS latest
+            WHERE latest.task_id = task.task_id
+              AND latest.type IN ('task.completed', 'task.failed', 'task.cancelled')
+          )
+          AND (delivery.state IS NULL OR delivery.state != 'delivered')
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => storedTask(row).task)),
+        Effect.mapError(toLedgerError("listUndeliveredOutcomes")),
+      ),
+
+    listUnsettledRunHistory: (input) =>
+      sql<TaskRow>`
+        SELECT owner_id, task_json, pending_answer_message_id, completion_hold FROM channel_tasks
+        WHERE status IN ('completed', 'failed', 'cancelled') AND updated_at >= ${input.since}
+          AND json_extract(task_json, '$.target') IS NOT NULL
+          AND json_extract(task_json, '$.target.remote') IS NULL
+          AND json_extract(task_json, '$.worker.host') IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM channel_runtime_state WHERE key = 'runs-final:' || channel_tasks.task_id
+          )
+        ORDER BY updated_at DESC LIMIT ${input.limit}
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => storedTask(row).task)),
+        Effect.mapError(toLedgerError("listUnsettledRunHistory")),
+      ),
+
+    settleRunHistory: (input) =>
+      sql`
+        INSERT INTO channel_runtime_state (key, value_json, updated_at)
+        VALUES (${"runs-final:" + input.taskId}, '{}', ${input.now})
+        ON CONFLICT (key) DO NOTHING
+      `.pipe(Effect.asVoid, Effect.mapError(toLedgerError("settleRunHistory"))),
+
+    stopAttempt: (eventId) =>
+      sql<{ readonly value_json: string }>`
+        SELECT value_json FROM channel_runtime_state WHERE key = ${"stop-attempt:" + eventId}
+      `.pipe(
+        Effect.map((rows) =>
+          rows[0] === undefined
+            ? 0
+            : (JSON.parse(rows[0].value_json) as { attempt: number }).attempt,
+        ),
+        Effect.mapError(toLedgerError("stopAttempt")),
+      ),
+
+    advanceStopAttempt: (input) =>
+      sql`
+        INSERT INTO channel_runtime_state (key, value_json, updated_at)
+        VALUES (${"stop-attempt:" + input.eventId}, ${JSON.stringify({ attempt: input.from + 1 })}, ${input.now})
+        ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+        WHERE json_extract(channel_runtime_state.value_json, '$.attempt') = ${input.from}
+      `.pipe(Effect.asVoid, Effect.mapError(toLedgerError("advanceStopAttempt"))),
+
+    listOpenWorkerRuns: () =>
+      sql<{ readonly value_json: string }>`
+        SELECT value_json FROM channel_runtime_state
+        WHERE key >= 'worker-run:' AND key < 'worker-run;'
+          AND json_extract(value_json, '$.status') IN ('running', 'waiting')
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => decodeWorkerRun(row.value_json))),
+        Effect.mapError(toLedgerError("listOpenWorkerRuns")),
+      ),
+
+    countBusyTasks: (input) =>
+      sql<{ readonly busy: number }>`
+        SELECT COUNT(*) AS busy FROM channel_tasks
+        WHERE owner_id = ${input.ownerId}
+          AND json_extract(task_json, '$.requester.principalId') = ${input.principalId}
+          AND (status IN ('dispatching', 'running')
+            OR (status = 'waiting_input' AND json_extract(task_json, '$.worker') IS NOT NULL)
+            -- Stopped, but its worker may still run until the stop goes through.
+            OR (status = 'cancelled' AND EXISTS (
+              SELECT 1 FROM channel_task_events AS stop
+              WHERE stop.task_id = channel_tasks.task_id AND stop.type = 'task.cancelled'
+                AND stop.forward_state = 'pending'
+            )))
+      `.pipe(
+        Effect.map((rows) => rows[0]?.busy ?? 0),
+        Effect.mapError(toLedgerError("countBusyTasks")),
+      ),
+
+    outcomeDeliveries: (taskIds) =>
+      taskIds.length === 0
+        ? Effect.succeed(new Map())
+        : sql<{ readonly task_id: string; readonly state: string | null }>`
+            SELECT outcome.task_id, delivery.state FROM channel_task_events AS outcome
+            LEFT JOIN channel_outbox AS delivery
+              ON delivery.cause_key = 'narration:' || outcome.event_id || ':origin'
+            WHERE outcome.task_id IN ${sql.in(taskIds)}
+              AND outcome.type IN ('task.completed', 'task.failed', 'task.cancelled')
+              AND outcome.sequence = (
+                SELECT MAX(latest.sequence) FROM channel_task_events AS latest
+                WHERE latest.task_id = outcome.task_id
+                  AND latest.type IN ('task.completed', 'task.failed', 'task.cancelled')
+              )
+          `.pipe(
+            Effect.map(
+              (rows) =>
+                new Map(
+                  rows.flatMap((row) => (row.state === null ? [] : [[row.task_id, row.state]])),
+                ),
+            ),
+            Effect.mapError(toLedgerError("outcomeDeliveries")),
+          ),
+
+    hasPendingForward: (taskId) =>
+      sql<{ readonly found: number }>`
+        SELECT 1 AS found FROM channel_task_events
+        WHERE task_id = ${taskId} AND forward_state = 'pending' LIMIT 1
+      `.pipe(
+        Effect.map((rows) => rows.length > 0),
+        Effect.mapError(toLedgerError("hasPendingForward")),
+      ),
+
+    hasEarlierPendingForward: (input) =>
+      sql<{ readonly found: number }>`
+        SELECT 1 AS found FROM channel_task_events
+        WHERE task_id = ${input.taskId} AND forward_state = 'pending'
+          AND sequence < ${input.sequence}
+        LIMIT 1
+      `.pipe(
+        Effect.map((rows) => rows.length > 0),
+        Effect.mapError(toLedgerError("hasEarlierPendingForward")),
       ),
 
     completeForward: (input) =>

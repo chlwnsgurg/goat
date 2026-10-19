@@ -118,6 +118,17 @@ export class WorkerWorld {
   readonly dispatchFailures = new Set<string>();
   readonly launches: Array<ThreadLaunch.ThreadLaunchInput> = [];
   readonly sends: Array<ThreadManagement.ThreadManagementSendInput> = [];
+  /** Interrupts and subagent stops sent to worker threads, by thread id. */
+  readonly interrupts: Array<string> = [];
+  readonly subagentStops: Array<string> = [];
+  /** Command ids the orchestrator refuses for good, as a persisted rejection would. */
+  readonly rejectedCommands = new Set<string>();
+  /** A worker thread's cloud task status, when it has one. */
+  readonly cloudTasks = new Map<string, "running" | "submitting" | "completed">();
+  /** Follow-ups that joined a running run, by message id, and the run they joined. */
+  readonly steered = new Map<string, RunId>();
+  /** Sends to fail, by message id, with the error the orchestrator would give. */
+  readonly sendFailures = new Map<string, unknown>();
 
   addRun(threadId: ThreadId, userMessageId: MessageId) {
     const existing = this.runs.get(threadId) ?? [];
@@ -337,9 +348,15 @@ export function makeHarness(
             },
             runs,
             runtimeRequests: world.runtimeRequests.get(threadId) ?? [],
-            providerThreads: world.background.has(threadId)
-              ? [{ pendingBackgroundTasks: [{ taskId: "background" }] }]
-              : [],
+            turnItems: [],
+            providerThreads: [
+              ...(world.background.has(threadId)
+                ? [{ pendingBackgroundTasks: [{ taskId: "background" }] }]
+                : []),
+              ...(world.cloudTasks.has(threadId)
+                ? [{ cloudTask: { status: world.cloudTasks.get(threadId) } }]
+                : []),
+            ],
             messages: runs
               .filter((run) => messageRunIds === undefined || messageRunIds.includes(run.id))
               .flatMap((run) => {
@@ -386,8 +403,19 @@ export function makeHarness(
               }),
             );
           }
+          if (world.rejectedCommands.has(command.commandId)) {
+            return Effect.fail({ _tag: "OrchestratorCommandPreviouslyRejectedError" } as never);
+          }
           return Effect.sync(() => {
             world.commands.push(command);
+            // A thread stop ends the running run and holds the queue, as the orchestrator does.
+            if (command.type === "thread.stop") {
+              world.interrupts.push(command.threadId);
+              const latest = world.latestRun(command.threadId);
+              if (latest !== undefined && latest.status === "running") {
+                world.setStatus(command.threadId, latest.ordinal, "cancelled");
+              }
+            }
             if (command.type === "thread.metadata.update" && command.limitRecovery !== undefined) {
               const previous = world.shells.get(command.threadId);
               const recovery = command.limitRecovery;
@@ -409,6 +437,26 @@ export function makeHarness(
         sendToThread: (input) => {
           if (!isWorker(input.threadId)) return real.sendToThread(input);
           world.sends.push(input);
+          const failure = world.sendFailures.get(input.messageId);
+          if (failure !== undefined) return Effect.fail(failure as never);
+          // "auto" joins a running run, as steering does, and starts the next run otherwise. A
+          // repeated message id lands where it landed the first time, as command receipts do.
+          const steeredInto = world.steered.get(input.messageId);
+          const latest = world.latestRun(input.threadId);
+          if (steeredInto !== undefined) {
+            const run = (world.runs.get(input.threadId) ?? []).find((r) => r.id === steeredInto);
+            return Effect.succeed({ run, delivery: "steered" } as never);
+          }
+          if (
+            input.mode === "auto" &&
+            latest?.status === "running" &&
+            !(world.runs.get(input.threadId) ?? []).some(
+              (run) => run.userMessageId === input.messageId,
+            )
+          ) {
+            world.steered.set(input.messageId, latest.id);
+            return Effect.succeed({ run: latest, delivery: "steered" } as never);
+          }
           if (
             !(world.runs.get(input.threadId) ?? []).some(
               (run) => run.userMessageId === input.messageId,
@@ -416,9 +464,26 @@ export function makeHarness(
           ) {
             world.addRun(input.threadId, input.messageId);
           }
-          return Effect.succeed({} as never);
+          const run = (world.runs.get(input.threadId) ?? []).find(
+            (candidate) => candidate.userMessageId === input.messageId,
+          );
+          return Effect.succeed({ run, delivery: "started" } as never);
         },
         delegatedTaskResultPending: () => Effect.succeed(false),
+        interruptThread: (input) => {
+          if (!isWorker(input.threadId)) return real.interruptThread(input);
+          world.interrupts.push(input.threadId);
+          const latest = world.latestRun(input.threadId);
+          if (latest !== undefined && latest.status === "running") {
+            world.setStatus(input.threadId, latest.ordinal, "cancelled");
+          }
+          return Effect.succeed({ type: "no_active_run" } as const);
+        },
+        stopDelegatedTasks: (input) => {
+          if (!isWorker(input.threadId)) return real.stopDelegatedTasks(input);
+          world.subagentStops.push(input.threadId);
+          return Effect.void;
+        },
       });
     }),
   ).pipe(Layer.provide(layerRealThreads));

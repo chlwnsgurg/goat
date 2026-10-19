@@ -4,6 +4,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { GoatBotChatView } from "../components/goatBot/GoatBotChatView";
 import { GoatBotChannelContext } from "../components/goatBot/goatBotChannelPort";
 import { useLegacyGlobalAgentRoute } from "../components/goatBot/goatBotHooks";
+import { useGoatBotHomeSettings } from "../components/goatBot/useGoatBotHome";
 import { useGoatBotSession } from "../components/goatBot/useGoatBotSession";
 import { SidebarInset } from "../components/ui/sidebar";
 
@@ -18,6 +19,8 @@ function GoatBotRouteView() {
 
 function GoatBotRouteSession() {
   const session = useGoatBotSession();
+  const homeSettings = useGoatBotHomeSettings();
+  const moveTarget = homeSettings.moveTarget;
   const legacyAgentRoute = useLegacyGlobalAgentRoute();
   const navigate = useNavigate();
   const bot = session.availability.kind === "ready" ? session.availability.bot : null;
@@ -31,7 +34,20 @@ function GoatBotRouteSession() {
   }, [bot, navigate]);
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
-      <GoatBotChatView {...session} legacyAgentRoute={legacyAgentRoute} />
+      <GoatBotChatView
+        {...session}
+        legacyAgentRoute={legacyAgentRoute}
+        homeMove={
+          moveTarget
+            ? {
+                label: moveTarget.label,
+                busy: homeSettings.busy,
+                onMove: () => homeSettings.changeHome(moveTarget.environmentId),
+              }
+            : undefined
+        }
+        homeMoveError={homeSettings.error}
+      />
     </SidebarInset>
   );
 }

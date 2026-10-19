@@ -798,6 +798,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["goat bot home computer environment cluster"],
   },
   {
+    id: "goat-bot-model",
+    title: "GOAT Bot model",
+    to: "/settings/goat-bot",
+    targetId: "goat-bot",
+    searchTerms: ["goat bot model provider llm assistant turns"],
+  },
+  {
     id: "slack-connection",
     title: "Slack connection",
     to: "/settings/goat-bot",

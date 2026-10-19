@@ -417,6 +417,7 @@ export function useMobileGoatBotSession(visible: boolean) {
     replyingSince,
     canSend,
     availability,
+    homeKnown: resolved.kind === "home_offline" ? resolved.known : false,
     homeLabel: resolved.kind === "home_offline" ? resolved.label : null,
     error: ensure.state === "failed" ? ensure.message : null,
     onSend,

@@ -34,6 +34,12 @@ GOAT Bot screen shows only a chip for the work and its final report.
   repository.
 - GOAT Bot answers questions about the machine it runs on, such as its name,
   OS, memory, and what is running, without starting work.
+- For questions that need a look around but no code change (what fills the
+  disk, what several threads concluded, something on the web), GOAT Bot says
+  it is on it and looks into it itself, then answers in the same conversation.
+  Messages you send while it works are added to what it is doing. It uses the
+  model chosen under **Settings → GOAT Bot** (by default, the default model for
+  new threads), and asks before running commands its provider treats as risky.
 - Ask GOAT Bot about earlier work ("did the login PR merge?", "what did the
   docs thread do?", "when did I mention the lighthouse score?") and it looks
   it up itself and answers, without starting a coding agent. It reads the work
@@ -43,6 +49,13 @@ GOAT Bot screen shows only a chip for the work and its final report.
   in, work you asked for, and, if your link may read GOAT's threads, the rest.
 - With every message GOAT Bot also sees a short journal of the latest work
   you may see: what was asked, how it ended, and its pull requests.
+- Ask GOAT Bot "what's pending?" to see everything still open: queued,
+  running, waiting on you, or finished but not yet reported to you. Say "stop
+  everything" (or name one piece of work) to stop it, including anything it
+  handed to subagents. Work running on another machine stops its current turn
+  there; subagents it started there finish on their own.
+- GOAT Bot runs up to four pieces of your work at once. More wait in order and
+  start as earlier ones finish; the reply says when something is queued.
 - Ask GOAT Bot to remember a standing rule ("always reply in Korean") and it
   follows it from then on, in Slack and in GOAT. It keeps a note only when the
   message you send asks for it, and each note names the message it came from.
@@ -69,6 +82,15 @@ GOAT Bot screen shows only a chip for the work and its final report.
 - When you connect to several machines, Slack runs only on the machine GOAT
   Bot lives on. Change it in **Settings → Integrations → GOAT Bot**; set up
   Slack on that machine.
+- If the machine GOAT Bot lives on is gone or stays disconnected, GOAT Bot
+  stops answering on every machine and its screen says so. Use **Move GOAT Bot
+  to …** there, or pick another machine in **Settings → Integrations → GOAT
+  Bot**. An agent with full access can do the same on the machine it runs on
+  with the `channel_bot_home_claim` tool. Other machines follow the move once
+  a GOAT app connected to them is open.
+- When GOAT Bot can't read a message, its reply says why, such as a model that
+  needs you to sign in again or a usage limit, so you know whether resending
+  helps.
 
 ## iMessage (Mac)
 

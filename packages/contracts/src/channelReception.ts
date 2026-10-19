@@ -8,7 +8,12 @@ import {
   ChannelRequester,
   ChannelTaskId,
 } from "./channelCommon.ts";
-import { ChannelDispatchTarget, ChannelTaskEventType, ChannelTaskStatus } from "./channelLedger.ts";
+import {
+  ChannelDispatchTarget,
+  ChannelTaskEventType,
+  ChannelTaskKind,
+  ChannelTaskStatus,
+} from "./channelLedger.ts";
 
 /**
  * Input and output of one reception pass: a short, tool-free text generation that answers a
@@ -28,6 +33,7 @@ export type ChannelReceptionTailMessage = typeof ChannelReceptionTailMessage.Typ
 
 export const ChannelReceptionTaskSummary = Schema.Struct({
   taskId: ChannelTaskId,
+  kind: Schema.optional(ChannelTaskKind),
   title: TrimmedNonEmptyString,
   status: ChannelTaskStatus,
   resultSummary: Schema.optional(Schema.String),
@@ -91,6 +97,7 @@ export const ChannelReceptionReadKind = Schema.Literals([
   "work",
   "thread",
   "conversation",
+  "pending",
 ]);
 export type ChannelReceptionReadKind = typeof ChannelReceptionReadKind.Type;
 
@@ -178,9 +185,33 @@ export const ChannelReceptionAction = Schema.Union([
     ),
   }),
   Schema.Struct({
+    /**
+     * GOAT Bot looks into the message itself with tools (reading files and notes, checking
+     * threads, research through subagents) and answers when done. Never changes a repository.
+     */
+    type: Schema.Literal("run_turn"),
+    title: TrimmedNonEmptyString,
+    instruction: TrimmedNonEmptyString,
+    /** As on create_task: only a turn the person asked to change a note may edit the notes. */
+    notesChangeRequested: Schema.optional(TrimmedNonEmptyString),
+  }),
+  Schema.Struct({
     type: Schema.Literal("move_task"),
     taskId: ChannelTaskId,
     host: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    /** The message adds to or corrects running work listed in this conversation; it joins it. */
+    type: Schema.Literal("follow_up"),
+    taskId: ChannelTaskId,
+  }),
+  Schema.Struct({
+    /**
+     * Stop work: the one task named, or, with no taskId, every open piece of work the person may
+     * stop. Workers and the subagents they started are stopped too.
+     */
+    type: Schema.Literal("stop_work"),
+    taskId: Schema.optional(ChannelTaskId),
   }),
   Schema.Struct({
     type: Schema.Literal("status"),
@@ -197,6 +228,8 @@ export const ChannelReceptionAction = Schema.Union([
     question: TrimmedNonEmptyString,
     /** Short answers the person can pick instead of typing one. */
     options: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+    /** The question picks a project; the server words it from the projects it would offer. */
+    about: Schema.optional(Schema.Literal("project")),
   }),
   Schema.Struct({ type: Schema.Literal("report_only") }),
 ]);

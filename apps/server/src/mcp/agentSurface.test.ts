@@ -13,6 +13,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as ChannelGateway from "../channels/ChannelGateway.ts";
 import * as ChannelLedger from "../channels/ChannelLedger.ts";
 import * as ChannelTaskExport from "../channels/ChannelTaskExport.ts";
+import * as ChannelBotHome from "../channels/ChannelBotHome.ts";
 import * as ChannelRemoteWorkers from "../channels/ChannelRemoteWorkers.ts";
 import * as ChannelRuntime from "../channels/ChannelRuntime.ts";
 import * as ChannelWorkerReports from "../channels/ChannelWorkerReports.ts";
@@ -121,6 +122,7 @@ const dependencies = Layer.mergeAll(
   Layer.mock(ChannelTaskExport.ChannelTaskExport)({}),
   Layer.mock(ChannelWorkerReports.ChannelWorkerReports)({}),
   Layer.mock(ChannelRemoteWorkers.ChannelRemoteWorkers)({}),
+  Layer.mock(ChannelBotHome.ChannelBotHome)({}),
   Layer.mock(ChannelRuntime.ChannelRuntime)({ ownerToken: "test-owner" }),
   Layer.mock(ConnectionCatalogBroker.ConnectionCatalogBroker)({}),
   Layer.mock(DeviceService.DeviceService)({}),
@@ -191,7 +193,7 @@ const client = McpSchema.McpServerClient.of({
 });
 
 it("gives every entry a unique path, legacy name and resolvable schema reference", () => {
-  expect(entries).toHaveLength(145); // Includes current memory, browser, provider and SSH runtime tools.
+  expect(entries).toHaveLength(147); // Includes current memory, browser, provider, SSH runtime, GOAT Bot home and notes tools.
   expect(new Set(entries.map((entry) => entry.name)).size).toBe(entries.length);
   for (const [path, entry] of Object.entries(agentSurfaceRegistry)) {
     expect(path).toBe(entry.path);
