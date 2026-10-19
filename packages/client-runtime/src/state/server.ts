@@ -1366,6 +1366,14 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:signal-process",
       tag: WS_METHODS.serverSignalProcess,
     }),
+    addHubNode: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:hub-nodes:add",
+      tag: WS_METHODS.hubNodesAdd,
+    }),
+    importHubNodes: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:hub-nodes:import",
+      tag: WS_METHODS.hubNodesImport,
+    }),
     upsertScheduledTask: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:scheduled-task:upsert",
       tag: WS_METHODS.scheduledTasksUpsert,

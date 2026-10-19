@@ -854,6 +854,36 @@ export function ConnectionEnvironmentsSection({
   const [removeForgottenConnection, setRemoveForgottenConnection] = useState(false);
   const [forgetBusy, setForgetBusy] = useState(false);
   const [forgetError, setForgetError] = useState<string | null>(null);
+  const canAddHubNode = useAtomValue(
+    serverEnvironment.addHubNode.permissionAtom(primaryEnvironmentId),
+  );
+  const addHubNode = useAtomCommand(serverEnvironment.addHubNode, { reportFailure: false });
+  const registerSavedHubNode = async (target: DesktopSshEnvironmentTarget, label: string) => {
+    if (!desktopBridge || !primaryEnvironmentId || !canAddHubNode) return;
+    const result = await addHubNode({
+      environmentId: primaryEnvironmentId,
+      input: {
+        kind: "ssh",
+        alias: target.alias,
+        hostname: target.hostname,
+        username: target.username,
+        port: target.port,
+        label: (label.trim() || target.alias).slice(0, 120),
+      },
+    });
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      toastManager.add({
+        type: "error",
+        title: "Device saved on this desktop, but couldn't be added to the hub",
+        actionProps: {
+          children: "Retry",
+          onClick: () => {
+            void registerSavedHubNode(target, label);
+          },
+        },
+      });
+    }
+  };
   const canWriteSsh = useAtomValue(
     serverEnvironment.trustSshHost.permissionAtom(primaryEnvironmentId),
   );
@@ -938,6 +968,7 @@ export function ConnectionEnvironmentsSection({
       return;
     }
 
+    void registerSavedHubNode(target, routeTarget?.label ?? target.alias);
     sshConnectInFlight.current = false;
     setPendingSshTarget(null);
     setSavedBackendHost("");
