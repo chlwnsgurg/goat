@@ -1830,6 +1830,8 @@ const REMOTE_RUNTIME_FACT_WARMUP_SCRIPT = String.raw`warm_runtime_facts() (
   # exec_fact_key keys a runner only when it is an archive runner that execs this executable
   # with the same arguments, so its answers are the executable's under the runner's key.
   exec_fact_key "$RUNNER_FILE" || exit 0
+  # The runner may have been republished for another version while this ran.
+  [ "${"${FACT_KEY% *}"}" = "${"${warm_exe_key% *}"}" ] || exit 0
   warm_runner_key="$FACT_KEY"; warm_runner_name="$FACT_NAME"
   exec_fact_key "$warm_exe" && [ "$FACT_KEY" = "$warm_exe_key" ] || exit 0
   for warm_kind in version own commit scopes live compat; do
