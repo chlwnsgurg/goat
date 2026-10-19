@@ -49,7 +49,7 @@ Three rules keep registration from being a confused deputy:
   Nothing a caller sends is fetched.
 - The holder follows the run only through its own sign-in. If that account cannot see the run,
   the attach fails and the task becomes `tracking: "link-only"`. GOAT never reports a result it
-  did not observe.
+  did not observe: the launch watch skips `run.completed` for a link-only registration.
 - Devin's CLI binds sessions to the sign-in that created them, so registered Devin sessions are
   link-only by design.
 
