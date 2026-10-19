@@ -3,11 +3,10 @@ import { GOAT_BOT_BUBBLE_COLORS, goatBotBubbleLayout } from "./goatBotBubbleStyl
 
 describe("GOAT Bot bubble layout", () => {
   it("separates groups and shows a tail only on their final bubble", () => {
-    expect(goatBotBubbleLayout("first", false)).toEqual({ marginTop: 10, tail: false });
-    expect(goatBotBubbleLayout("middle", false)).toEqual({ marginTop: 2, tail: false });
-    expect(goatBotBubbleLayout("last", false)).toEqual({ marginTop: 2, tail: true });
-    expect(goatBotBubbleLayout("single", false)).toEqual({ marginTop: 10, tail: true });
-    expect(goatBotBubbleLayout("single", true)).toEqual({ marginTop: 0, tail: true });
+    expect(goatBotBubbleLayout("first")).toEqual({ marginTop: 10, tail: false });
+    expect(goatBotBubbleLayout("middle")).toEqual({ marginTop: 2, tail: false });
+    expect(goatBotBubbleLayout("last")).toEqual({ marginTop: 2, tail: true });
+    expect(goatBotBubbleLayout("single")).toEqual({ marginTop: 10, tail: true });
   });
 
   it("uses Messages colors in both appearances", () => {

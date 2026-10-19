@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import type { ReactNode } from "react";
 import type { GoatBotRow } from "@goat/client-runtime/goatBot";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import {
@@ -7,6 +6,8 @@ import {
   renderNative,
   type NativeMemoryHarness,
 } from "../../testing/memoryNativeHarness";
+
+const appearance = vi.hoisted(() => ({ mode: "light" as "light" | "dark" }));
 
 vi.mock("@legendapp/list/react-native", () => ({ LegendList: () => null }));
 vi.mock("react-native-keyboard-controller", () => ({
@@ -17,9 +18,9 @@ vi.mock("../../native/NativeScrollViewMarker", () => ({ NativeScrollViewMarker: 
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ bottom: 0 }) }));
 vi.mock("./useMobileGoatBotSession", () => ({ useMobileGoatBotSession: () => ({}) }));
 vi.mock("./GoatBotAvatar", () => ({ GoatBotAvatar: () => null }));
-vi.mock("./GoatBotBubble", () => ({
-  GoatBotBubble: (props: { children: ReactNode | ((color: string) => ReactNode) }) =>
-    typeof props.children === "function" ? props.children("#000000") : props.children,
+vi.mock("react-native-svg", () => ({ default: () => null, Path: () => null }));
+vi.mock("../settings/appearance/AppearancePreferencesProvider", () => ({
+  useAppearancePreferences: () => ({ themeAppearance: appearance.mode }),
 }));
 import { GoatBotTimelineRow } from "./GoatBotScreen";
 
@@ -28,9 +29,23 @@ let view: ReturnType<typeof renderNative>;
 afterEach(async () => {
   await view?.unmount();
   h?.dispose();
+  appearance.mode = "light";
 });
 
 const props = { canSend: true, onSend: () => true, onRetry: vi.fn(), onSelectThread: () => {} };
+const bot = (overrides: Partial<Extract<GoatBotRow, { kind: "bot" }>> = {}): GoatBotRow => ({
+  kind: "bot",
+  id: "bot",
+  text: "Progress update",
+  createdAt: "2026-10-12T09:40:00Z",
+  tone: "reply",
+  proactive: false,
+  replyTo: null,
+  options: [],
+  firstInGroup: true,
+  groupPosition: "single",
+  ...overrides,
+});
 const user = (
   delivery: Extract<GoatBotRow, { kind: "user" }>["delivery"],
   showReceipt: boolean,
@@ -96,4 +111,20 @@ it("offers retry only for a recoverable failure", async () => {
   );
   expect(view.container.textContent).toContain("Not Delivered");
   expect(view.container.textContent).toContain("Retry");
+});
+
+it("labels only the first proactive bubble in a group", async () => {
+  h = createNativeMemoryHarness();
+  view = renderNative(h, <GoatBotTimelineRow {...props} row={bot({ proactive: true })} />);
+  await view.render();
+  expect(view.container.textContent).toContain("GOAT Bot · Update");
+  await view.rerender(<GoatBotTimelineRow {...props} row={bot({ proactive: false })} />);
+  expect(view.container.textContent).not.toContain("GOAT Bot · Update");
+  await view.rerender(
+    <GoatBotTimelineRow
+      {...props}
+      row={bot({ proactive: true, firstInGroup: false, groupPosition: "last" })}
+    />,
+  );
+  expect(view.container.textContent).not.toContain("GOAT Bot · Update");
 });

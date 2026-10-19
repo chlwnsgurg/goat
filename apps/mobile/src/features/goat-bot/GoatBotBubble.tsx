@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
-import { useColorScheme, View } from "react-native";
+import { View } from "react-native";
 import Svg, { Path } from "react-native-svg";
 
+import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { GOAT_BOT_BUBBLE_COLORS, type BubbleSide } from "./goatBotBubbleStyle";
 
 export function GoatBotBubble(props: {
@@ -10,7 +11,8 @@ export function GoatBotBubble(props: {
   readonly children: ReactNode | ((textColor: string) => ReactNode);
   readonly maxWidth?: `${number}%`;
 }) {
-  const colors = GOAT_BOT_BUBBLE_COLORS[useColorScheme() === "dark" ? "dark" : "light"];
+  const { themeAppearance } = useAppearancePreferences();
+  const colors = GOAT_BOT_BUBBLE_COLORS[themeAppearance];
   const backgroundColor = colors[props.side];
   return (
     <View

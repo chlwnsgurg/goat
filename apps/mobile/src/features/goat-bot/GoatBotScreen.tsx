@@ -17,7 +17,8 @@ import { useHomeThreadSelection } from "../home/home-thread-navigation";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
 import { useMobileGoatBotSession } from "./useMobileGoatBotSession";
 import { GoatBotBubble } from "./GoatBotBubble";
-import { goatBotBubbleLayout } from "./goatBotBubbleStyle";
+import { GOAT_BOT_BUBBLE_COLORS, goatBotBubbleLayout } from "./goatBotBubbleStyle";
+import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 
 type ThreadSelection = Pick<EnvironmentThreadShell, "environmentId" | "id">;
 const rowKey = (row: GoatBotRow) => row.id;
@@ -117,9 +118,10 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
   readonly onSend: (answer: string) => boolean;
   readonly onRetry: (key: string) => void;
   readonly onSelectThread: (thread: ThreadSelection) => void;
-  readonly isFirstRow?: boolean;
 }) {
   const { row } = props;
+  const { themeAppearance } = useAppearancePreferences();
+  const outgoingColor = GOAT_BOT_BUBBLE_COLORS[themeAppearance].out;
   const [nowMs] = useState(() => Date.now());
   if (row.kind === "day") {
     return (
@@ -128,7 +130,7 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
       </Text>
     );
   }
-  const layout = goatBotBubbleLayout(row.groupPosition, props.isFirstRow ?? false);
+  const layout = goatBotBubbleLayout(row.groupPosition);
   if (row.kind === "task") {
     return (
       <View style={{ marginTop: layout.marginTop, alignItems: "flex-start" }}>
@@ -175,6 +177,9 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
   }
   return (
     <View className="items-start gap-1" style={{ marginTop: layout.marginTop }}>
+      {row.proactive && row.firstInGroup ? (
+        <Text className="text-xs text-foreground-muted">GOAT Bot · Update</Text>
+      ) : null}
       <GoatBotBubble side="in" tail={layout.tail}>
         {(textColor) => (
           <View className="gap-1">
@@ -187,7 +192,12 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
                 {row.replyTo}
               </Text>
             ) : null}
-            <Text selectable className="text-base" style={{ color: textColor }}>
+            <Text
+              selectable
+              className={row.tone === "failure" ? "text-base text-danger-foreground" : "text-base"}
+              style={row.tone === "failure" ? undefined : { color: textColor }}
+              accessibilityLabel={row.tone === "failure" ? `Failed: ${row.text}` : undefined}
+            >
               {row.text}
             </Text>
           </View>
@@ -206,9 +216,9 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
               disabled={!props.canSend}
               onPress={() => props.onSend(answer)}
               className="rounded-full border px-3 py-2"
-              style={{ borderColor: "#1B86F9" }}
+              style={{ borderColor: outgoingColor }}
             >
-              <Text className="text-sm" style={{ color: "#1B86F9" }}>
+              <Text className="text-sm" style={{ color: outgoingColor }}>
                 {answer}
               </Text>
             </Pressable>
@@ -224,6 +234,8 @@ export function GoatBotScreen(props: {
   readonly onSelectThread?: (thread: ThreadSelection) => void;
 }) {
   const session = useMobileGoatBotSession(props.visible);
+  const { themeAppearance } = useAppearancePreferences();
+  const outgoingColor = GOAT_BOT_BUBBLE_COLORS[themeAppearance].out;
   const selectThread = useHomeThreadSelection();
   const onSelectThread = props.onSelectThread ?? selectThread;
   const insets = useSafeAreaInsets();
@@ -235,14 +247,13 @@ export function GoatBotScreen(props: {
   const [inputHeight, setInputHeight] = useState(40);
   const replying = useReplying(session.replyingSince, props.visible);
   const renderItem = useCallback(
-    ({ item, index }: { item: GoatBotRow; index: number }) => (
+    ({ item }: { item: GoatBotRow }) => (
       <GoatBotTimelineRow
         row={item}
         canSend={session.canSend}
         onSend={session.onSend}
         onRetry={session.onRetryInput}
         onSelectThread={onSelectThread}
-        isFirstRow={index === 0}
       />
     ),
     [session.canSend, session.onSend, session.onRetryInput, onSelectThread],
@@ -352,7 +363,7 @@ export function GoatBotScreen(props: {
           style={{
             width: 32,
             height: 32,
-            backgroundColor: "#1B86F9",
+            backgroundColor: outgoingColor,
             opacity: session.canSend && text.trim() ? 1 : 0.45,
           }}
         >

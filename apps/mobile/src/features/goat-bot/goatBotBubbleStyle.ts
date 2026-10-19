@@ -7,12 +7,12 @@ export const GOAT_BOT_BUBBLE_COLORS = {
   dark: { out: "#2C66CA", outText: "#FFFFFF", in: "#3A3A3C", inText: "#FFFFFF" },
 } as const;
 
-export function goatBotBubbleLayout(
-  position: GoatBotGroupPosition,
-  isFirstRow: boolean,
-): { readonly marginTop: number; readonly tail: boolean } {
+export function goatBotBubbleLayout(position: GoatBotGroupPosition): {
+  readonly marginTop: number;
+  readonly tail: boolean;
+} {
   return {
-    marginTop: isFirstRow ? 0 : position === "single" || position === "first" ? 10 : 2,
+    marginTop: position === "single" || position === "first" ? 10 : 2,
     tail: position === "single" || position === "last",
   };
 }
