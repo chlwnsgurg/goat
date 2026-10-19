@@ -47,6 +47,7 @@ source alone does not explain. Most code changes do not need an internal documen
 - [Remote environments](./internals/remote.md)
 - [Channels and the GOAT bot](./internals/channels.md)
 - [Server updates](./internals/server-updates.md)
+- [Remote updates](./internals/remote-updates.md)
 - [Release channels](./internals/release-channels.md)
 - [Resource telemetry](./internals/resource-telemetry.md)
 - [Product analytics](./internals/product-analytics.md)

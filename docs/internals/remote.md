@@ -94,6 +94,8 @@ describes the server. Process replacement belongs to the launcher's
 resulting disconnect. An SSH-managed server is replaced only by draining and
 stopping itself ([SSH replacement](../../structure/ssh.md#replacement)); a client
 never signals it to make way for a new version.
+Which versions may talk to each other, who may start an update, and what happens
+when the app itself cannot update are decided in [remote updates](./remote-updates.md).
 
 ### Desktop without a local environment
 
