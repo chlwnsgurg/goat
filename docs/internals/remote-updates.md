@@ -173,7 +173,9 @@ Rules that hold for every row:
   not only when it is requested; a revoked session cannot finish a pending update.
 - **Idle unless confirmed.** A server update that would stop running work waits
   for idle or is refused as busy, unless a person confirmed replacing it now. This
-  holds for the launcher path as it already did for SSH drain.
+  holds for the launcher path as it already did for SSH drain. Pressing Update in
+  a GOAT app is that confirmation (`confirmReplacement`); requests that omit it,
+  from older clients or automation, are refused while the server is busy.
 - **No self-approval.** An agent can request an immediate update but cannot approve
   it; the handoff names the host and target, and the approver's grant is
   rechecked when it runs.
@@ -187,9 +189,12 @@ Rules that hold for every row:
 
 ### Audit
 
-Every update request appends one line to `<userdata>/maintenance-audit.jsonl`
-before handoff: time, operation or update ID, actor (session kind and ID, or the
-MCP thread and run), destination, from and target version, mode, and outcome.
+Every update request on a server appends a line to
+`<userdata>/maintenance-audit.jsonl` (next to `statev2.sqlite`) and syncs it
+before handing off: time, operation ID, launcher update ID once accepted, actor
+(session method and ID, or the MCP caller), destination host for SSH updates, from
+and target version, mode (idle or confirmed), and outcome (requested, accepted,
+failed). Acceptance means the launcher took the update, not that the trial committed.
 The file sits outside SQLite so a database rollback cannot erase the record of
 the update that caused it. It never contains credentials or signed URLs.
 
