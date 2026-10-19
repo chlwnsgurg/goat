@@ -1,4 +1,11 @@
-import type { EnvironmentId, ProviderInstanceId, ServerProvider } from "@goat/contracts";
+import { useAtomValue } from "@effect/atom-react";
+import {
+  ProviderHostSyncDriver,
+  type EnvironmentId,
+  type ProviderInstanceId,
+  type ServerProvider,
+} from "@goat/contracts";
+import * as Schema from "effect/Schema";
 import { useRef, useState } from "react";
 import { CopyIcon } from "~/components/solar";
 
@@ -11,9 +18,13 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { WizardFooter, WizardPanel } from "../ui/wizard";
 import { resolveProviderSetupPlan } from "./AddProviderInstanceDialog.logic";
 import { ProviderAuthenticationSection } from "./ProviderAuthenticationSection";
+import { startProviderHostSync } from "./ProviderHostMatrix.commands";
+import { ProviderHostSyncDialog } from "./ProviderHostSyncDialog";
 import { ProviderInstallRow } from "./ProviderInstallRow";
 import { SettingsGroup } from "./SettingsGroup";
 import { SettingsRow } from "./settingsLayout";
+
+const isHostSyncDriver = Schema.is(ProviderHostSyncDriver);
 
 /** The wizard's last step: install the CLI when missing, then sign in where the app can. */
 export function ProviderWizardAuthenticationStep({
@@ -41,6 +52,9 @@ export function ProviderWizardAuthenticationStep({
   const [checkError, setCheckError] = useState<string | null>(null);
   const auth = query.data;
   const plan = resolveProviderSetupPlan({ provider, auth, authError: query.error });
+  const canSyncHosts = useAtomValue(startProviderHostSync.permissionAtom(environmentId));
+  const [syncOpen, setSyncOpen] = useState(false);
+  const syncDriver = provider && isHostSyncDriver(provider.driver) ? provider.driver : null;
   const active =
     auth?.phase === "starting" || auth?.phase === "waiting" || auth?.phase === "verifying";
   const label = provider?.displayName ?? instanceId;
@@ -194,6 +208,11 @@ export function ProviderWizardAuthenticationStep({
         </SettingsGroup>
       </WizardPanel>
       <WizardFooter>
+        {plan.kind === "signedIn" && syncDriver && canSyncHosts ? (
+          <Button size="sm" variant="ghost-muted" onClick={() => setSyncOpen(true)}>
+            Sync to other hosts…
+          </Button>
+        ) : null}
         <Button
           size="sm"
           variant={plan.kind === "signedIn" ? "default" : "outline"}
@@ -203,6 +222,15 @@ export function ProviderWizardAuthenticationStep({
           {plan.kind === "signedIn" || plan.kind === "manual" ? "Done" : "Skip for now"}
         </Button>
       </WizardFooter>
+      {syncDriver && syncOpen ? (
+        <ProviderHostSyncDialog
+          environmentId={environmentId}
+          driver={syncDriver}
+          displayName={label}
+          open
+          onOpenChange={setSyncOpen}
+        />
+      ) : null}
     </>
   );
 }
