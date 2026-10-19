@@ -57,13 +57,15 @@ const fixture = (
     revoke?: boolean;
     authority?: boolean;
     typed?: boolean;
+    configured?: boolean;
   } = {},
 ) =>
   Effect.gen(function* () {
     const calls: string[] = [];
-    let pinned = !options.typed;
+    let pinned = !options.typed && !options.configured;
+    const managedAlias = options.configured ? "goat-build" : "build";
+    const checkedHosts: string[] = [];
     let checks = 0;
-    let saves = 0;
     const report = options.blocked
       ? {
           ...readyPreflight,
@@ -108,10 +110,16 @@ const fixture = (
           }),
           Layer.mock(Setup.SshHostSetup)({
             resolveDestination: (input) =>
-              Effect.succeed({ input, ...(pinned ? { host: "build" } : {}) }),
-            preflight: () =>
+              Effect.succeed({
+                input,
+                ...(pinned || options.configured
+                  ? { host: pinned ? managedAlias : "build", managed: pinned }
+                  : {}),
+              }),
+            preflight: (input) =>
               Effect.sync(() => {
                 calls.push("preflight");
+                checkedHosts.push(input.host);
                 return pinned && options.typed ? readyPreflight : report;
               }),
             add: () =>
@@ -122,15 +130,16 @@ const fixture = (
                   handoff,
                   next: { after: "approval", call: "goat_ssh_host_status" },
                   status: {
-                    host: "build",
+                    host: managedAlias,
                     state: "untrusted",
                     runtimeVersion: null,
                     requestedVersion: "0.1.0",
                   },
                 };
               }),
-            prepare: () =>
+            prepare: (input) =>
               Effect.sync(() => {
+                expect(input.host).toBe(managedAlias);
                 calls.push("prepare");
                 return prepared;
               }),
@@ -150,7 +159,7 @@ const fixture = (
                 expect(operation).toMatchObject({ host: "build", addedBy: { threadId } });
                 return {
                   type: "add_ssh",
-                  created: saves++ === 0,
+                  created: true,
                   connection: {
                     environmentId: EnvironmentId.make("build"),
                     label: "Build",
@@ -164,9 +173,9 @@ const fixture = (
       ),
     );
     const service = Context.get(yield* Layer.build(layer), DeviceAdd.SshDeviceAdd);
-    const call = (callerScope = scope) =>
+    const call = (callerScope = scope, host = "build") =>
       service.addDevice(
-        { host: "build" },
+        { host },
         {
           kind: "mcp",
           scope: options.authority === false ? { ...callerScope, grantedScopes: [] } : callerScope,
@@ -175,6 +184,7 @@ const fixture = (
     return {
       call,
       calls,
+      checkedHosts,
       approve: () => {
         pinned = true;
       },
@@ -187,7 +197,7 @@ it.effect("failed preflight creates no handoff and never dispatches", () =>
     expect(f.calls).toEqual(["preflight"]);
   }),
 );
-it.effect("review requests approval; a repeat after pinning saves only once", () =>
+it.effect("review requests approval and recall reruns preflight before catalog dispatch", () =>
   Effect.gen(function* () {
     const f = yield* fixture({ typed: true, blocked: "needs_review" });
     expect(yield* f.call()).toMatchObject({
@@ -197,8 +207,8 @@ it.effect("review requests approval; a repeat after pinning saves only once", ()
     expect(f.calls).toEqual(["preflight", "approval"]);
     f.approve();
     expect(yield* f.call()).toMatchObject({ outcome: "connected", created: true });
-    expect(yield* f.call()).toMatchObject({ outcome: "connected", created: false });
     expect(f.calls.filter((call) => call === "prepare")).toEqual([]);
+    expect(f.calls).toEqual(["preflight", "approval", "preflight", "broker"]);
   }),
 );
 it.effect("an absent catalog returns the real preparation result", () =>
@@ -265,3 +275,27 @@ it.each([
 ])("requires exactly one host or address: $input", ({ input, accepted }) => {
   expect(isAddInput(input)).toBe(accepted);
 });
+
+it.effect.each([false, true])(
+  "configured alias fallback pins before preparation (limited=%s)",
+  (limited) =>
+    Effect.gen(function* () {
+      const f = yield* fixture({ configured: true, catalog: "absent", limited });
+      expect(yield* f.call()).toMatchObject({
+        outcome: "needs_human",
+        next: { call: "goat_ssh_host_add", host: "goat-build" },
+      });
+      expect(f.calls).toEqual(
+        limited ? ["preflight", "approval"] : ["preflight", "broker", "approval"],
+      );
+      f.approve();
+      expect(f.calls).not.toContain("prepare");
+      expect(yield* f.call(scope, "goat-build")).toMatchObject({ ...prepared, saved: false });
+      expect(f.checkedHosts).toEqual(["build", "goat-build"]);
+      expect(f.calls).toEqual(
+        limited
+          ? ["preflight", "approval", "preflight", "prepare"]
+          : ["preflight", "broker", "approval", "preflight", "broker", "prepare"],
+      );
+    }),
+);

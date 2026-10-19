@@ -39,6 +39,10 @@ const commonArgs = [
   "-o",
   "ControlPath=none",
   "-o",
+  "UpdateHostKeys=no",
+  "-o",
+  "PermitLocalCommand=no",
+  "-o",
   "BatchMode=yes",
   "-o",
   "LogLevel=VERBOSE",
@@ -65,6 +69,27 @@ const tailscaleHost = (hostname: string) =>
   /\.ts\.net$/iu.test(hostname) ||
   (!hostname.includes(".") && !hostname.includes(":")) ||
   /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./u.test(hostname);
+
+const diagnosticHost = (stderr: string) => /(?:^|\n)[^\s@]+@(\S+):\s+/u.exec(stderr)?.[1];
+const normalizedHost = (hostname: string) => {
+  const host = hostname.replace(/^\[|\]$/gu, "").toLowerCase();
+  if (!host.includes(":")) return host;
+  try {
+    return new URL(`http://[${host}]/`).hostname;
+  } catch {
+    return host;
+  }
+};
+const formatDiskSpace = (kib: number) => {
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = kib;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${Math.round(value)} ${units[unit]}`;
+};
 
 export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
   input: SshPreflightInput,
@@ -132,8 +157,12 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
       ...(platformKey ? { platformKey } : {}),
     };
   };
+  const isJumpHop = (host: string) =>
+    ![destination.hostname, target.hostname].some(
+      (candidate) => normalizedHost(candidate) === normalizedHost(host),
+    );
   const reachabilityFailure = (stderr: string) => {
-    const hop = /(?:^|\n)([^\s@]+)@([^\s:]+):/u.exec(stderr)?.[2];
+    const hop = diagnosticHost(stderr);
     const diagnostic = sshFailureDiagnostic(`Cannot reach ${input.host}.`, stderr);
     const proxy = sshLocalProxyFailure(stderr);
     const instruction =
@@ -146,10 +175,7 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
     steps.push({
       id: "reachability",
       state: "failed",
-      summary:
-        hop && hop !== destination.hostname && hop !== target.hostname
-          ? `SSH jump hop ${hop} failed: ${diagnostic}`
-          : diagnostic,
+      summary: hop && isJumpHop(hop) ? `SSH jump hop ${hop} failed: ${diagnostic}` : diagnostic,
       fix: { actor: "human", instruction },
     });
   };
@@ -169,8 +195,8 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
       ...command,
     ]);
   const handshake = yield* run("none");
-  const wrongHop = /(?:^|\n)[^\s@]+@([^\s:]+):/u.exec(handshake.stderr)?.[1];
-  if (wrongHop && wrongHop !== destination.hostname && wrongHop !== target.hostname) {
+  const wrongHop = diagnosticHost(handshake.stderr);
+  if (wrongHop && isJumpHop(wrongHop)) {
     reachabilityFailure(handshake.stderr);
     return finish();
   }
@@ -288,7 +314,9 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
     summary: authenticatedKey
       ? `Signed in using ${/Offering public key: (.+?)(?: SHA256:|$)/mu.exec(facts.stderr)?.[1] ?? `${options.ownerLabel}'s SSH key`}.`
       : handshake.exitCode === 0
-        ? "Signed in without authentication (none)."
+        ? tailscaleHost(destination.hostname)
+          ? "Signed in through Tailscale SSH; no key needed."
+          : "The host let GOAT in without a key."
         : "Signed in using an SSH key.",
   });
   const values = new Map(
@@ -358,15 +386,15 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
         ? "failed"
         : "passed",
     summary: !Number.isFinite(freeKiB)
-      ? "Could not check free space in the home directory."
+      ? "Could not check free space in the home folder."
       : freeKiB < 512 * 1024 && runtime.needsTransfer
-        ? `Only ${Math.floor(freeKiB / 1024)} MiB free; installing GOAT needs 512 MiB for the archive, extracted runtime and retained previous version.`
-        : `${Math.floor(freeKiB / 1024)} MiB free in the home directory.`,
+        ? `Only ${formatDiskSpace(freeKiB)} free; installing GOAT needs ${formatDiskSpace(512 * 1024)} for the archive and extracted runtime.`
+        : `${formatDiskSpace(freeKiB)} free in the home folder.`,
     ...(freeKiB < 512 * 1024 && runtime.needsTransfer
       ? {
           fix: {
             actor: "human" as const,
-            instruction: "Free at least 512 MiB in the host's home directory, then check again.",
+            instruction: `Free at least ${formatDiskSpace(512 * 1024)} in the host's home folder, then check again.`,
           },
         }
       : {}),

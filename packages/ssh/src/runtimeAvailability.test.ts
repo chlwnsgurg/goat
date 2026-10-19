@@ -7,11 +7,13 @@ import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 import * as Stream from "effect/Stream";
 import { checkRuntimeAvailability, RuntimeReleaseHead } from "./runtimeAvailability.ts";
 import { makeSuccessfulProcess } from "./tunnel.fixture.ts";
+import { MAX_RUNTIME_ARCHIVE_BYTES } from "./runtimeArchive.ts";
 import { cliArchiveFileName } from "@goat/shared/cliRelease";
 
 const fixture = (
   options: {
-    local?: "archive" | "both";
+    local?: "archive" | "both" | "directory" | "oversized";
+    cache?: boolean;
     head?: "present" | "absent" | "unknown";
     gh?: "both" | "archive" | "absent" | "unknown";
     installed?: string[];
@@ -23,7 +25,13 @@ const fixture = (
     const fs = yield* FileSystem.FileSystem;
     const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-runtime-preflight-" });
     const fileName = cliArchiveFileName("0.1.0", "linux-arm64");
-    if (options.local) yield* fs.writeFileString(`${directory}/${fileName}`, "not read or hashed");
+    if (options.local === "directory") yield* fs.makeDirectory(`${directory}/${fileName}`);
+    else if (options.local)
+      yield* fs.writeFileString(`${directory}/${fileName}`, "not read or hashed");
+    if (options.local === "oversized") {
+      const file = yield* fs.open(`${directory}/${fileName}`, { flag: "r+" });
+      yield* file.truncate(MAX_RUNTIME_ARCHIVE_BYTES + 1);
+    }
     if (options.local === "both")
       yield* fs.writeFileString(`${directory}/${fileName}.sha256`, "not read or hashed");
     let requests = 0;
@@ -55,7 +63,9 @@ const fixture = (
       installedVersions: options.installed ?? [],
       runner: {
         archiveVersion: "0.1.0",
-        bundledArchiveDirectory: directory,
+        ...(options.cache
+          ? { archiveDirectory: directory }
+          : { bundledArchiveDirectory: directory }),
         ...(options.source
           ? { nodeScriptPath: "/src/server.ts", nodeEngineRange: "^24.13.1" }
           : {}),
@@ -158,4 +168,23 @@ it.effect.each([200, 404, 401, 500])(
         ),
       ).toBe(status === 200 ? "present" : status === 404 ? "absent" : "unknown");
     }),
+);
+
+it.effect("accepts a user-supplied cache archive without a checksum or content reads", () =>
+  Effect.gen(function* () {
+    const result = yield* fixture({ local: "archive", cache: true });
+    expect(result.step.state).toBe("passed");
+    expect(result.step.summary).toContain("Uploads GOAT");
+    expect(result.requests).toBe(0);
+    expect(result.needsTransfer).toBe(true);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["directory", "oversized"] as const)(
+  "rejects a cache archive with invalid %s metadata",
+  (local) =>
+    Effect.gen(function* () {
+      const result = yield* fixture({ local, cache: true });
+      expect(result.step.state).toBe("failed");
+      expect(result.needsTransfer).toBe(false);
+    }).pipe(Effect.provide(NodeServices.layer)),
 );

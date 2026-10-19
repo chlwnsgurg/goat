@@ -25,6 +25,7 @@ export const runPreflightProcess = (command: string, args: ReadonlyArray<string>
         ChildProcess.make(command, args, {
           stdin: "ignore",
           shell: false,
+          forceKillAfter: 2_000,
           env: { GH_PROMPT_DISABLED: "1", LC_ALL: "C" },
           extendEnv: true,
         }),

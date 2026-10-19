@@ -838,6 +838,16 @@ export function ConnectionEnvironmentsSection({
     if (isSshDiscoveryActive) refreshDesktopSshHosts();
   }, [isSshDiscoveryActive, refreshDesktopSshHosts]);
   const discoveredSshHosts = desktopSshHosts.data ?? EMPTY_DISCOVERED_SSH_HOSTS;
+  const sshConfigDestination = sshPreflight?.report.destination.alias
+    ? sshPreflight.report.destination
+    : null;
+  const configuredSshAlias =
+    sshConfigDestination !== null ||
+    discoveredSshHosts.some(
+      (target) =>
+        target.source === "ssh-config" &&
+        target.alias.toLowerCase() === savedBackendSshHost.trim().toLowerCase(),
+    );
   const unsavedDiscoveredSshHosts = discoveredSshHosts.filter((target) => {
     const address = formatDesktopSshTarget(target);
     return (
@@ -1042,8 +1052,8 @@ export function ConnectionEnvironmentsSection({
     try {
       target = parseDesktopSshTarget({
         host: savedBackendSshHost,
-        username: savedBackendSshUsername,
-        port: savedBackendSshPort,
+        username: configuredSshAlias ? "" : savedBackendSshUsername,
+        port: configuredSshAlias ? "" : savedBackendSshPort,
       });
     } catch (error) {
       setSavedBackendError(formatDesktopSshConnectionError(error));
@@ -1540,7 +1550,11 @@ export function ConnectionEnvironmentsSection({
           <label className="block">
             <span className="mb-1.5 block text-xs font-medium text-foreground">Username</span>
             <Input
-              value={savedBackendSshUsername}
+              value={
+                configuredSshAlias ? (sshConfigDestination?.user ?? "") : savedBackendSshUsername
+              }
+              readOnly={configuredSshAlias}
+              aria-describedby={configuredSshAlias ? "saved-backend-ssh-config-hint" : undefined}
               onChange={(event) => {
                 invalidateSshPreflight();
                 setSavedBackendSshUsername(event.target.value);
@@ -1554,7 +1568,15 @@ export function ConnectionEnvironmentsSection({
           <label className="block">
             <span className="mb-1.5 block text-xs font-medium text-foreground">Port</span>
             <Input
-              value={savedBackendSshPort}
+              value={
+                configuredSshAlias
+                  ? sshConfigDestination
+                    ? String(sshConfigDestination.port)
+                    : ""
+                  : savedBackendSshPort
+              }
+              readOnly={configuredSshAlias}
+              aria-describedby={configuredSshAlias ? "saved-backend-ssh-config-hint" : undefined}
               onChange={(event) => {
                 invalidateSshPreflight();
                 setSavedBackendSshPort(event.target.value);
@@ -1567,6 +1589,11 @@ export function ConnectionEnvironmentsSection({
             />
           </label>
         </div>
+        {configuredSshAlias ? (
+          <DialogDescription id="saved-backend-ssh-config-hint">
+            From ~/.ssh/config
+          </DialogDescription>
+        ) : null}
         {!ownsSshConfig ? (
           <p className="text-sm text-muted-foreground">
             Add new SSH hosts from the machine that runs this environment.

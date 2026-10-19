@@ -36,7 +36,9 @@ export const probeHostKey = Effect.fn("ssh/hostKey.probeHostKey")(function* (inp
       const run = (command: string, commandArgs: string[]) =>
         Effect.scoped(
           Effect.gen(function* () {
-            const child = yield* spawner.spawn(ChildProcess.make(command, commandArgs));
+            const child = yield* spawner.spawn(
+              ChildProcess.make(command, commandArgs, { forceKillAfter: 2_000 }),
+            );
             const [stdout, stderr, code] = yield* Effect.all(
               [
                 collectPreflightOutput(child.stdout),
@@ -87,6 +89,8 @@ export const probeHostKey = Effect.fn("ssh/hostKey.probeHostKey")(function* (inp
         "StrictHostKeyChecking=accept-new",
         "-o",
         "UpdateHostKeys=no",
+        "-o",
+        "PermitLocalCommand=no",
         "-o",
         `UserKnownHostsFile="${knownHosts.replaceAll("\\", "/").replaceAll('"', '\\"')}"`,
         "-o",

@@ -114,23 +114,25 @@ const make = Effect.gen(function* () {
       );
       if (preflight.steps.some((step) => step.state === "failed"))
         return { outcome: "failed", preflight };
-      if (!preflight.ready || !resolved.host) {
-        const result = yield* setup.add(resolved.input, caller);
-        if (result.kind !== "needs_human")
+      const requestTrust = (): ReturnType<SshDeviceAdd["Service"]["addDevice"]> =>
+        Effect.gen(function* () {
+          const result = yield* setup.add(resolved.input, caller);
+          if (result.kind !== "needs_human")
+            return {
+              ...result,
+              preflight,
+              saved: false,
+              reason: "Host trust has not completed.",
+            };
           return {
-            ...result,
+            outcome: "needs_human",
             preflight,
-            saved: false,
-            reason: "Host trust has not completed.",
+            handoff: result.handoff,
+            status: result.status,
+            next: { after: "approval", call: "goat_ssh_host_add", host: result.status.host },
           };
-        return {
-          outcome: "needs_human",
-          preflight,
-          handoff: result.handoff,
-          status: result.status,
-          next: { after: "approval", call: "goat_ssh_host_add", host: result.status.host },
-        };
-      }
+        });
+      if (!preflight.ready || !resolved.host) return yield* requestTrust();
       const scope = caller.scope;
       const liveCaller = loadCaller().pipe(
         Effect.tap(assertLiveCaller),
@@ -210,6 +212,7 @@ const make = Effect.gen(function* () {
         reason =
           "No desktop connection catalog is attached; this environment cannot save a desktop connection.";
       }
+      if (!resolved.managed) return yield* requestTrust();
       const result = yield* setup.prepare({ host: resolved.host }, caller);
       return { ...result, preflight, saved: false, reason };
     });

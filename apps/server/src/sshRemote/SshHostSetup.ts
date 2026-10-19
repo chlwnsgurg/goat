@@ -71,7 +71,10 @@ export class SshHostSetup extends Context.Service<
     ) => Effect.Effect<SshPreflightReport, EnvironmentAuthorizationError | SshHostProbeError>;
     readonly resolveDestination: (
       input: SshHostAddInput,
-    ) => Effect.Effect<{ input: SshHostAddInput; host?: string }, SshHostProbeError>;
+    ) => Effect.Effect<
+      { input: SshHostAddInput; host?: string; managed?: boolean },
+      SshHostProbeError
+    >;
     readonly status: (input: SshHostStatusInput) => Effect.Effect<SshHostResult>;
     readonly update: (
       input: SshRuntimeUpdateInput,
@@ -470,7 +473,13 @@ export const make = (
             return yield* invalid(
               `Set User, Port and IdentityFile for ${configured.alias} in ${path.join(home, ".ssh", "config")}; configured aliases cannot have overrides.`,
             );
-          return { input: { ...input, address: configured.alias }, host: configured.alias };
+          return {
+            input: { ...input, address: configured.alias },
+            host: configured.alias,
+            managed:
+              (yield* fs.exists(path.join(directory, `${configured.alias}.conf`))) &&
+              (yield* fs.exists(path.join(directory, `${configured.alias}.known_hosts`))),
+          };
         }
         const normalized = {
           ...input,
@@ -480,7 +489,11 @@ export const make = (
         };
         const host = aliasFor(normalized);
         if (yield* fs.exists(path.join(directory, `${host}.known_hosts`)))
-          return { input: normalized, host };
+          return {
+            input: normalized,
+            host,
+            managed: yield* fs.exists(path.join(directory, `${host}.conf`)),
+          };
         if (input.alias === undefined && (yield* fs.exists(directory))) {
           const matches: string[] = [];
           for (const file of yield* fs.readDirectory(directory)) {
@@ -507,7 +520,7 @@ export const make = (
             )
               matches.push(alias);
           }
-          if (matches.length === 1) return { input: normalized, host: matches[0]! };
+          if (matches.length === 1) return { input: normalized, host: matches[0]!, managed: true };
         }
         return { input: normalized };
       }).pipe(
@@ -1051,28 +1064,7 @@ export const make = (
       Effect.gen(function* () {
         yield* authorize(caller, "environment:maintain");
         const generation = aliasGenerations.get(input.host) ?? 0;
-        const managedConfig = yield* readOptional(path.join(directory, `${input.host}.conf`)).pipe(
-          Effect.mapError((cause) => new HandoffError({ reason: "unavailable", cause })),
-        );
-        if (managedConfig !== null) {
-          yield* validateManaged(input.host);
-        } else {
-          const destination = yield* resolveDestination({ address: input.host });
-          if (destination.host !== input.host)
-            return yield* new HandoffError({ reason: "not_found" });
-          const report = yield* preflight({ host: input.host }, caller);
-          if (!report.ready) {
-            const step = report.steps.find(
-              (step) => step.state === "failed" || step.state === "needs_review",
-            );
-            return {
-              kind: "error",
-              code: "operation_failed",
-              message: step?.summary ?? "Complete SSH preflight before preparing this host.",
-              ...(step?.fix ? { fix: step.fix } : {}),
-            } satisfies SshHostResult;
-          }
-        }
+        yield* validateManaged(input.host);
         return yield* Deferred.await(
           yield* startJob(
             input.host,
@@ -1088,7 +1080,6 @@ export const make = (
         );
       }).pipe(
         Effect.catchTags({
-          SshHostProbeError: (error) => Effect.succeed(errorResult(error.message)),
           HandoffError: (error) => Effect.succeed(setupFailure(input.host, error)),
         }),
       );

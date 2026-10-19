@@ -93,6 +93,8 @@ it.effect(
         expect(args).toContain("ControlMaster=no");
         expect(args).toContain("ControlPath=none");
         expect(args).toContain("BatchMode=yes");
+        expect(args).toContain("UpdateHostKeys=no");
+        expect(args).toContain("PermitLocalCommand=no");
         expect(args.filter((arg) => arg.startsWith("LogLevel="))).toEqual(["LogLevel=VERBOSE"]);
       }
       expect(calls[2]).toContain("PreferredAuthentications=publickey");
@@ -169,7 +171,7 @@ it.effect("accepts none authentication", () =>
       handshake: "Authenticated to build.example using none.",
     });
     expect(report.ready).toBe(true);
-    expect(report.steps[2]?.summary).toContain("none");
+    expect(report.steps[2]?.summary).toBe("The host let GOAT in without a key.");
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 it.effect.each([
@@ -217,7 +219,8 @@ it.effect.each([true, false])("low disk space blocks only a required transfer (%
       facts: `GOAT_OS=Linux\nGOAT_ARCH=aarch64\nGOAT_FREE_KIB=1024\nGOAT_FACTS_DONE=yes\n${transfer ? "" : "GOAT_INSTALLED=0.1.0\n"}`,
     });
     expect(report.steps[4]?.state).toBe(transfer ? "failed" : "passed");
-    if (transfer) expect(report.steps[4]?.summary).toContain("512 MiB");
+    if (transfer)
+      expect(report.steps[4]?.summary).toContain("512 MB for the archive and extracted runtime");
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 it.effect("bounds both process streams to 64 KiB while draining the child", () =>
@@ -235,4 +238,84 @@ it.effect("bounds both process streams to 64 KiB while draining the child", () =
     expect(output.stdout.length).toBe(64 * 1024);
     expect(output.stderr.length).toBe(64 * 1024);
   }),
+);
+
+it.effect.each([
+  ["2001:db8::1", "2001:db8::1"],
+  ["2001:db8::1", "[2001:db8::1]"],
+  ["2001:0DB8:0:0:0:0:0:1", "2001:db8::1"],
+] as const)("recognizes IPv6 destination %s reported as %s", ([host, diagnostic]) =>
+  Effect.gen(function* () {
+    const { report, calls } = yield* fixture({
+      host,
+      handshake: `deploy@${diagnostic}: Permission denied (publickey,password).`,
+    });
+    expect(report.ready).toBe(true);
+    expect(report.steps[0]?.state).toBe("passed");
+    expect(report.steps[2]?.state).toBe("passed");
+    expect(calls).toHaveLength(3);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["2001:db8::2", "[2001:db8::2]"])("attributes IPv6 jump-hop %s", (hop) =>
+  Effect.gen(function* () {
+    const { report, calls } = yield* fixture({
+      host: "2001:db8::1",
+      handshake: `jump@${hop}: Permission denied (publickey,password).`,
+    });
+    expect(report.steps[0]?.state).toBe("failed");
+    expect(report.steps[0]?.summary).toContain(`jump hop ${hop} failed`);
+    expect(report.steps[2]?.state).toBe("skipped");
+    expect(calls).toHaveLength(2);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["clisu-oracle", "oracle.tail.ts.net", "100.64.0.1", "100.127.255.254"])(
+  "explains no-key Tailscale sign-in for %s",
+  (host) =>
+    Effect.gen(function* () {
+      const { report } = yield* fixture({
+        host,
+        none: true,
+        handshake: `Authenticated to ${host} using none.`,
+      });
+      expect(report.ready).toBe(true);
+      expect(report.steps[2]?.summary).toBe("Signed in through Tailscale SSH; no key needed.");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["100.63.255.255", "100.128.0.0", "public.example"])(
+  "does not call non-Tailscale none authentication Tailscale for %s",
+  (host) =>
+    Effect.gen(function* () {
+      const { report } = yield* fixture({
+        host,
+        none: true,
+        handshake: `Authenticated to ${host} using none.`,
+      });
+      expect(report.steps[2]?.summary).toBe("The host let GOAT in without a key.");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect("formats disk space in human units and only counts incremental installation space", () =>
+  Effect.gen(function* () {
+    const { report } = yield* fixture({ facts: facts.replace("1048576", String(156652 * 1024)) });
+    expect(report.steps[4]?.summary).toBe("153 GB free in the home folder.");
+    const low = yield* fixture({
+      facts: facts.replace("1048576", "1024").replace("GOAT_INSTALLED=0.1.0", ""),
+    });
+    expect(low.report.steps[4]?.summary).toBe(
+      "Only 1 MB free; installing GOAT needs 512 MB for the archive and extracted runtime.",
+    );
+    expect(low.report.steps[4]?.fix?.instruction).toContain("512 MB");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("fingerprint review keeps every SSH stage read-only", () =>
+  Effect.gen(function* () {
+    const { report, calls } = yield* fixture({ handshake: stderr.unknownKey });
+    expect(report.steps[1]?.state).toBe("needs_review");
+    for (const args of calls.filter((args) => !args.includes("-lf"))) {
+      expect(args).toContain("UpdateHostKeys=no");
+      expect(args).toContain("PermitLocalCommand=no");
+      expect(args).toContain("ControlMaster=no");
+      expect(args).toContain("ControlPath=none");
+    }
+  }).pipe(Effect.provide(NodeServices.layer)),
 );

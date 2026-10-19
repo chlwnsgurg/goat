@@ -14,6 +14,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import type { RemoteGoatRunnerOptions } from "./tunnel.ts";
+import { MAX_RUNTIME_ARCHIVE_BYTES } from "./runtimeArchive.ts";
 import { runPreflightProcess } from "./preflightProcess.ts";
 
 type Availability = "present" | "absent" | "unknown";
@@ -59,10 +60,17 @@ export const checkRuntimeAvailability = Effect.fn("ssh/preflight.runtime")(funct
   const path = yield* Path.Path;
   let inconclusive = false;
   const fileName = cliArchiveFileName(version, platformKey);
-  for (const directory of [runner.bundledArchiveDirectory, runner.archiveDirectory]) {
+  for (const [directory, requireSidecar] of [
+    [runner.bundledArchiveDirectory, true],
+    [runner.archiveDirectory, false],
+  ] as const) {
     if (!directory?.trim()) continue;
     const available = yield* Effect.gen(function* () {
-      for (const file of [fileName, `${fileName}.sha256`]) {
+      const archivePath = path.join(directory, fileName);
+      if (!(yield* fs.exists(archivePath))) return false;
+      const stat = yield* fs.stat(archivePath);
+      if (stat.type !== "File" || stat.size > BigInt(MAX_RUNTIME_ARCHIVE_BYTES)) return false;
+      for (const file of requireSidecar ? [`${fileName}.sha256`] : []) {
         const filePath = path.join(directory, file);
         if (!(yield* fs.exists(filePath))) return false;
         if ((yield* fs.stat(filePath)).type !== "File") return false;

@@ -75,7 +75,7 @@ export function sshRuntimeStatusText(status: SshHostStatus): string {
           return "Checking GOAT runtime";
         case "uploading": {
           const upload = status.upload;
-          if (upload === undefined) return "Uploading GOAT runtime (about 70 MB)";
+          if (upload === undefined) return `Installing GOAT runtime on ${status.host}`;
           if (upload.sentBytes === upload.totalBytes) return "Installing GOAT runtime";
           const sent = Math.floor(upload.sentBytes / (1024 * 1024));
           const total = Math.ceil(upload.totalBytes / (1024 * 1024));

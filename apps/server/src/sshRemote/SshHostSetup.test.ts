@@ -1233,6 +1233,7 @@ it.effect("preflight normalizes typed destinations and rejects configured alias 
       });
       expect(yield* setup.resolveDestination({ address: "configured" })).toEqual({
         host: "configured",
+        managed: false,
         input: { address: "configured" },
       });
       yield* fs.makeDirectory(`${home}/.ssh/goat-hosts`, { recursive: true });
@@ -1322,79 +1323,34 @@ it.effect(
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.effect("a configured alias can prepare after preflight without creating managed SSH files", () =>
+it.effect("preparation rejects a configured alias without managed files before dispatch", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-configured-prepare-" });
-    const completed = yield* Deferred.make<void>();
-    const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(
-      Effect.succeed([
-        {
-          alias: "configured",
-          hostname: "build.example",
-          username: "deploy",
-          port: 22,
-          source: "ssh-config",
-        },
-      ]),
-    );
-    yield* Effect.gen(function* () {
-      const layer = Layer.effect(
-        SshHostSetup.SshHostSetup,
-        SshHostSetup.make({
-          home,
-          runPreflight: () =>
-            Effect.succeed({
-              host: "configured",
-              destination: {
-                alias: "configured",
-                hostname: "build.example",
-                user: "deploy",
-                port: 22,
-              },
-              ready: true,
-              steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({
-                id,
-                state: "passed",
-                summary: "Passed.",
-              })),
-            }),
+    const sshConfig =
+      "Host configured\n  HostName build.example\n  User deploy\n  StrictHostKeyChecking no\n";
+    yield* fs.makeDirectory(`${home}/.ssh`);
+    yield* fs.writeFileString(`${home}/.ssh/config`, sshConfig);
+    const layer = Layer.effect(
+      SshHostSetup.SshHostSetup,
+      SshHostSetup.make({
+        home,
+        runPreflight: () => Effect.die("Unmanaged preparation must not rely on preflight"),
+      }),
+    ).pipe(
+      Layer.provide(
+        Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+          beginSetupOperation: () => Effect.die("Unmanaged preparation started a job"),
+          prepareRuntime: () => Effect.die("Unmanaged preparation installed a runtime"),
         }),
-      ).pipe(
-        Layer.provide(
-          Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
-            beginSetupOperation: (_host, { operationId }) =>
-              Effect.succeed({ operationId, generation: 1, stage: "runtime" }),
-            prepareRuntime: () =>
-              Effect.gen(function* () {
-                yield* Deferred.succeed(completed, undefined);
-                return {
-                  kind: "ok",
-                  status: { ...stopped, host: "configured", state: "preparing" },
-                };
-              }),
-            runtimeStatus: () =>
-              Effect.succeed({
-                kind: "ok",
-                status: { ...stopped, host: "configured", state: "preparing" },
-              }),
-            publishSetupOutcome: () => Effect.succeed(true),
-          }),
-        ),
-        Layer.provide(dependencies),
-      );
-      const setup = Context.get(yield* Layer.build(layer), SshHostSetup.SshHostSetup);
-      expect(
-        yield* setup.prepare(
-          { host: "configured" },
-          {
-            kind: "mcp",
-            scope: { ...invocation, grantedScopes: ["settings:write", "environment:maintain"] },
-          },
-        ),
-      ).toMatchObject({ kind: "ok", status: { host: "configured" } });
-      yield* Deferred.await(completed);
-      expect(yield* fs.exists(`${home}/.ssh`)).toBe(false);
-    }).pipe(Effect.ensuring(Effect.sync(() => discover.mockRestore())));
+      ),
+      Layer.provide(dependencies),
+    );
+    const setup = Context.get(yield* Layer.build(layer), SshHostSetup.SshHostSetup);
+    expect(
+      yield* setup.prepare({ host: "configured" }, { kind: "mcp", scope: invocation }),
+    ).toMatchObject({ kind: "error", code: "operation_failed" });
+    expect(yield* fs.exists(`${home}/.ssh/goat-hosts`)).toBe(false);
+    expect(yield* fs.readFileString(`${home}/.ssh/config`)).toBe(sshConfig);
   }).pipe(Effect.provide(NodeServices.layer)),
 );

@@ -394,6 +394,13 @@ it("rechecks the alias returned by trust, without connecting on approval", async
 it.each(["root", "22"])(
   "invalidates ready checks when the %s field changes",
   async (placeholder) => {
+    state.preflightSshHost.mockResolvedValueOnce({
+      _tag: "Success",
+      value: {
+        ...readyReport,
+        destination: { hostname: "build.example", user: "deploy", port: 22 },
+      },
+    });
     const dialog = await openSshDialog();
     type(input("Search hosts or type devbox"), "devbox");
     await act(async () => button("Check", dialog).click());
@@ -403,3 +410,69 @@ it.each(["root", "22"])(
     expect(dialog.querySelector('[aria-label="SSH preflight"]')).toBeNull();
   },
 );
+
+it("shows resolved configured User and Port read-only and sends no overrides on recheck", async () => {
+  state.sshHosts = [
+    {
+      alias: "devbox",
+      hostname: "devbox.local",
+      username: "ubuntu",
+      port: 2222,
+      source: "ssh-config",
+    },
+    {
+      alias: "build.example",
+      hostname: "build.example",
+      username: null,
+      port: null,
+      source: "known-hosts",
+    },
+  ];
+  state.preflightSshHost.mockResolvedValue({
+    _tag: "Success",
+    value: {
+      ...readyReport,
+      destination: { alias: "devbox", hostname: "devbox.local", user: "ubuntu", port: 2222 },
+    },
+  });
+  const dialog = await openSshDialog();
+  const host = input("Search hosts or type devbox");
+  await act(async () => {
+    host.focus();
+    host.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  });
+  await act(async () =>
+    host.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "1",
+        code: "Digit1",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    ),
+  );
+  expect(input("root").value).toBe("ubuntu");
+  expect(input("22").value).toBe("2222");
+  expect(input("root").readOnly).toBe(true);
+  expect(input("22").readOnly).toBe(true);
+  expect(dialog.textContent).toContain("From ~/.ssh/config");
+  await act(async () => button("Check again", dialog).click());
+  expect(state.preflightSshHost.mock.calls.map(([call]) => call.input)).toEqual([
+    { host: "devbox" },
+    { host: "devbox" },
+  ]);
+  expect(input("root").value).toBe("ubuntu");
+  type(host, "build.example");
+  expect(input("root").readOnly).toBe(false);
+  expect(input("22").readOnly).toBe(false);
+  expect(input("root").value).toBe("");
+  expect(input("22").value).toBe("");
+  type(input("root"), "deploy");
+  type(input("22"), "2200");
+  await act(async () => button("Check", dialog).click());
+  expect(state.preflightSshHost).toHaveBeenLastCalledWith({
+    environmentId: "primary",
+    input: { host: "build.example", user: "deploy", port: 2200 },
+  });
+});

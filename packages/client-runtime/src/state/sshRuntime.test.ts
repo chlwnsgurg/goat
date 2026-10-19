@@ -86,7 +86,7 @@ describe("Desktop SSH runtime state", () => {
     );
   });
   it.each([
-    [undefined, "Uploading GOAT runtime (about 70 MB)"],
+    [undefined, "Installing GOAT runtime on box"],
     [{ sentBytes: 0, totalBytes: 70 * 1024 * 1024 }, "Uploading GOAT runtime: 0 of 70 MB"],
     [
       { sentBytes: 23 * 1024 * 1024 + 512, totalBytes: 70 * 1024 * 1024 },

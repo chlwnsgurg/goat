@@ -27,6 +27,7 @@ const fixture = Effect.gen(function* () {
     Effect.gen(function* () {
       if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected command");
       calls.push({ command: command.command, args: command.args });
+      assert.equal(command.options.forceKillAfter, 2_000);
       if (command.args.includes("-G"))
         return makeSuccessfulProcess(
           "hostname endpoint.example\nport 2200\nuser deploy\nproxyjump trusted-jump\nproxycommand none\n",
@@ -115,6 +116,7 @@ describe("negotiated SSH host keys", () => {
           "PreferredAuthentications=none",
           "StrictHostKeyChecking=accept-new",
           "UpdateHostKeys=no",
+          "PermitLocalCommand=no",
           "GlobalKnownHostsFile=/dev/null",
         ])
           assert.include(args, option);
