@@ -17,6 +17,7 @@ import {
   ThreadId,
   EnvironmentId,
   ScheduledTaskId,
+  ORCHESTRATION_V2_WS_METHODS,
   WS_METHODS,
   type AuthSessionState,
 } from "@goat/contracts";
@@ -579,3 +580,31 @@ it.effect("memory commands check the destination's live grant for all 16 install
     }),
   ),
 );
+
+describe("command permissions through a hub", () => {
+  it.effect("hides node actions the hub does not forward and keeps follow-ups and stop", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const dispatch = createCommandPermissions(
+          runtime,
+          ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+        );
+        const remove = { type: "thread.delete", commandId: "c1", threadId: "t1" };
+        const followUp = { type: "message.dispatch", commandId: "c2", threadId: "t1" };
+        const stop = { type: "run.interrupt", commandId: "c3", threadId: "t1", runId: "r1" };
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        // A direct connection is unaffected.
+        expect(registry.get(dispatch.permissionAtom(env, remove))).toBe(true);
+        registry.set(sessions(env), AsyncResult.success({ ...grant(true), proxiedByHub: true }));
+        expect(registry.get(dispatch.permissionAtom(env, remove))).toBe(false);
+        expect(registry.get(dispatch.permissionAtom(env, followUp))).toBe(true);
+        expect(registry.get(dispatch.permissionAtom(env, stop))).toBe(true);
+        expect(yield* dispatch.authorize(registry, env, remove).pipe(Effect.flip)).toMatchObject({
+          requiredScope: "hub:proxy",
+        });
+        yield* dispatch.authorize(registry, env, followUp);
+      }),
+    ),
+  );
+});

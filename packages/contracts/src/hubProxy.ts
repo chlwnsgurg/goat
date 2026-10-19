@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 
 import {
   AuthHubProxyScope,
+  AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthEnvironmentScopes,
   type AuthEnvironmentScope,
@@ -28,6 +29,7 @@ export type HubProxyNodeId = typeof HubProxyNodeId.Type;
  */
 export const HUB_PROXY_NODE_SCOPE_CEILING: ReadonlyArray<AuthEnvironmentScope> = [
   AuthOrchestrationReadScope,
+  AuthOrchestrationOperateScope,
 ];
 
 /** The client's rights on a node: none without `hub:proxy`, otherwise its scopes within the ceiling. */
@@ -43,7 +45,26 @@ export const hubProxyEffectiveScopes = (
  * Read-only calls pass on their scope alone. Anything that needs more must be listed here with a
  * payload check, because one scope (`orchestration:operate`) covers far more than the hub offers.
  */
-const HUB_PROXY_METHOD_POLICY: Readonly<Record<string, (payload: unknown) => boolean>> = {};
+const HUB_PROXY_METHOD_POLICY: Readonly<Record<string, (payload: unknown) => boolean>> = {
+  "orchestration.dispatchCommand": (payload) => hubProxyAdmitsCommand(payload),
+  // Image and file follow-ups: the node mints a signed upload URL the hub forwards bytes to.
+  "attachments.createUploadUrl": () => true,
+  "attachments.delete": () => true,
+};
+
+/** Orchestration commands a client may send to a node through the hub. */
+export const HUB_PROXY_COMMAND_TYPES: ReadonlySet<string> = new Set([
+  // A follow-up in an existing thread, with any attachments uploaded through the hub.
+  "message.dispatch",
+  // The stop button.
+  "run.interrupt",
+]);
+
+const hubProxyAdmitsCommand = (payload: unknown): boolean => {
+  if (typeof payload !== "object" || payload === null) return false;
+  const command = payload as { readonly type?: unknown };
+  return typeof command.type === "string" && HUB_PROXY_COMMAND_TYPES.has(command.type);
+};
 
 /** Whether the hub forwards a call that already passed the scope check for these required scopes. */
 export const hubProxyAdmitsMethod = (
@@ -56,6 +77,21 @@ export const hubProxyAdmitsMethod = (
     ? HUB_PROXY_METHOD_POLICY[method]
     : undefined;
   return admits !== undefined && admits(payload);
+};
+
+/**
+ * Client-side mirror of the hub's policy, for hiding actions on a node reached through a hub.
+ * Clients only know the guarded scopes, so a call they cannot classify stays visible and the hub
+ * still refuses it if it must.
+ */
+export const hubProxyHidesClientCall = (
+  method: string,
+  payload: unknown,
+  guardedScopes: ReadonlyArray<AuthEnvironmentScope>,
+): boolean => {
+  if (Object.hasOwn(HUB_PROXY_METHOD_POLICY, method))
+    return !HUB_PROXY_METHOD_POLICY[method]!(payload);
+  return guardedScopes.some((scope) => scope !== AuthOrchestrationReadScope);
 };
 
 /** The hub's last copy of a node's shell, served while the node is unreachable. */

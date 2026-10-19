@@ -8,7 +8,7 @@ import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
-import { FetchHttpClient, HttpClient } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
 import {
   authLayer,
@@ -201,7 +201,10 @@ it.effect(
       expect(state.status).toBe(200);
       expect(JSON.parse(state.text)).toMatchObject({
         authenticated: true,
-        scopes: ["orchestration:read"],
+        // Within the ceiling: settings:write never reaches a node through the hub.
+        scopes: ["orchestration:read", "orchestration:operate"],
+        permissions: ["orchestration:read", "orchestration:operate"],
+        proxiedByHub: true,
       });
       const ticket = yield* fetchResponse(
         `${path}api/auth/websocket-ticket`,
@@ -499,5 +502,31 @@ it.effect.each([
     expect(asset.headers["content-security-policy"]).toBe(policy);
     expect(asset.headers["content-security-policy"]).not.toContain("allow-same-origin");
     expect(asset.headers["x-content-type-options"]).toBe("nosniff");
+  }).pipe(Effect.scoped, Effect.provide(authLayer)),
+);
+
+it.effect("4b: signed uploads need a cached operate session and never dial for strangers", () =>
+  Effect.gen(function* () {
+    const hub = yield* startHub();
+    const url = `${hub.baseUrl}hub/nodes/node-1/api/attachments/upload/signed-upload`;
+    const post = () =>
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        return yield* client.execute(
+          HttpClientRequest.post(url).pipe(HttpClientRequest.bodyText("bytes", "image/png")),
+        );
+      }).pipe(Effect.provide(FetchHttpClient.layer));
+    expect((yield* post()).status).toBe(404);
+    yield* hub.sessions.open("node-1", readScopes);
+    // A read-only session may load assets but not upload.
+    expect((yield* post()).status).toBe(404);
+    expect(hub.ssh.endpoints).toHaveLength(1);
+    yield* hub.sessions.open("node-1", ["orchestration:read", "orchestration:operate"]);
+    const uploaded = yield* post();
+    expect(uploaded.status).toBe(200);
+    expect(uploaded.headers["x-content-type-options"]).toBe("nosniff");
+    expect(hub.node.requests).toEqual([
+      { url: "/api/attachments/upload/signed-upload", authorization: `Bearer ${NODE_TOKEN}` },
+    ]);
   }).pipe(Effect.scoped, Effect.provide(authLayer)),
 );

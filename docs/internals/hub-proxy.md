@@ -63,7 +63,15 @@ for `12` would leave the call hanging. An SSH node session holds exactly the int
 the node enforces it again. A linked node only enforces its enrollment grant, which is why the
 hub check is not optional.
 
-The proxied `/api/auth/session` reports the intersection, so clients hide what they may not do.
+The policy lets a client send a follow-up (`message.dispatch`), stop a run (`run.interrupt`)
+and upload the attachments a follow-up references. Every other orchestration command, such as
+archiving, deleting or renaming a thread, stays with the node's own clients.
+
+The proxied `/api/auth/session` reports the intersection and `proxiedByHub: true`. Client
+command permissions mirror the method policy for such sessions
+([commandPermissions.ts](../../packages/client-runtime/src/state/commandPermissions.ts)), so every
+surface hides a node action the hub would refuse instead of offering it. The mirror only knows
+the client-guarded scopes, so it hides less than the hub refuses; the hub stays authoritative.
 
 ## Node credentials never leave the hub
 
@@ -81,6 +89,9 @@ capability. GET and HEAD need no hub authentication, but only use a current, une
 node session with `orchestration:read`. Without one they return 404. This path never reads an
 enrollment, issues a session, or dials SSH. The node validates the asset signature; the hub adds
 only its cached node bearer and applies the same request and response header allowlists.
+Signed attachment upload URLs (`POST .../api/attachments/upload/<token>`) work the same way, but
+need a cached session with `orchestration:operate`. The body streams to the node unbuffered;
+the node checks the token, size and type as it does for its own clients.
 
 ## Lifecycle
 
@@ -133,6 +144,7 @@ peers and nodes are not trusted with anything the hub holds.
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | A stranger makes the hub dial nodes                                    | Authentication and `hub:proxy` precede session acquisition; capability assets use cached sessions only                        |
 | Capability asset URLs are loaded without hub headers                   | The node validates its signed URL; only current, unexpired cached read sessions are forwarded, with no SSH or enrollment read |
+| Capability upload URLs are posted without hub headers                  | The node validates its signed URL; only cached sessions with `orchestration:operate` forward, and nothing dials or buffers    |
 | An old or narrowed pairing proxies                                     | `hub:proxy` is required; it is not implied by any other scope                                                                 |
 | A client exceeds its rights on a node                                  | Per-envelope `authorizeRpcCall` against the intersection, then the method policy, before forwarding                           |
 | A full-scope client reaches settings, terminals or providers on a node | The ceiling excludes them; the node session never holds them                                                                  |

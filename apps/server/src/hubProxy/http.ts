@@ -6,6 +6,7 @@
  */
 import {
   AuthHubProxyScope,
+  AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthSessionState,
   AuthWebSocketTicketResult,
@@ -57,6 +58,8 @@ const READ_PATHS: ReadonlyArray<RegExp> = [
 ];
 const DESCRIPTOR_PATHS = new Set([".well-known/goat/environment", ".well-known/t3/environment"]);
 const ASSET_PATH = /^api\/assets\/[^/]+\/[^/]+$/u;
+/** Signed upload URL a node minted for attachments.createUploadUrl; the token is the capability. */
+const UPLOAD_PATH = /^api\/attachments\/upload\/[^/]+$/u;
 const SHELL_PATH = "api/orchestration/shell";
 
 /** Request headers that describe the call itself; credentials and hop headers are never copied. */
@@ -208,6 +211,38 @@ const upstreamRequest = (
     new URL(pathAndSearch, upstream.httpBaseUrl).toString(),
   ).pipe(HttpClientRequest.setHeaders(headers));
 };
+
+/**
+ * Streams an attachment body to the node's signed upload URL with the hub's cached session. The
+ * body is never buffered here; the node checks the token, size and type as it does for its own
+ * clients.
+ */
+const proxyUpload = Effect.fn("HubProxyHttp.proxyUpload")(function* (
+  request: HttpServerRequest.HttpServerRequest,
+  upstream: HubProxyUpstream,
+  path: string,
+) {
+  const contentLength = Number(request.headers["content-length"]);
+  const response = yield* send(
+    HttpClientRequest.post(new URL(path, upstream.httpBaseUrl).toString()).pipe(
+      HttpClientRequest.setHeaders({ authorization: `Bearer ${upstream.token}` }),
+      HttpClientRequest.bodyStream(request.stream, {
+        ...(request.headers["content-type"]
+          ? { contentType: request.headers["content-type"] }
+          : {}),
+        ...(Number.isSafeInteger(contentLength) && contentLength >= 0 ? { contentLength } : {}),
+      }),
+    ),
+  ).pipe(
+    Effect.mapError(
+      () => new HubProxyError({ reason: "unavailable", message: "The node did not answer." }),
+    ),
+  );
+  return HttpServerResponse.empty({
+    status: response.status,
+    headers: proxiedDocumentPolicy(undefined),
+  });
+});
 
 const proxyRead = Effect.fn("HubProxyHttp.proxyRead")(function* (
   request: HttpServerRequest.HttpServerRequest,
@@ -405,6 +440,16 @@ const handler = Effect.gen(function* () {
       }),
     );
   }
+  // Like assets, uploads are capability URLs clients send without a hub header; only a cached
+  // session that may operate serves them, so an unauthenticated caller never makes the hub dial.
+  if (request.method === "POST" && UPLOAD_PATH.test(target.path)) {
+    const sessions = yield* HubProxySessions;
+    const cached = yield* sessions.peek(target.nodeId, AuthOrchestrationOperateScope);
+    if (Option.isNone(cached)) return HttpServerResponse.text("Not Found", { status: 404 });
+    return yield* proxyUpload(request, cached.value, target.path).pipe(
+      Effect.catchTags({ HubProxyError: (error) => Effect.succeed(errorResponse(error)) }),
+    );
+  }
   // Authentication precedes any operation that can acquire node authority or dial SSH.
   const session = yield* authenticate(request);
   const scopes = hubProxyEffectiveScopes(session.scopes);
@@ -425,7 +470,9 @@ const handler = Effect.gen(function* () {
     const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const state = yield* serverAuth.getSessionState(request);
     // What this client may do on the node, never the node session's own grant.
-    const narrowed = state.authenticated ? { ...state, ...authScopeResponse(scopes) } : state;
+    const narrowed = state.authenticated
+      ? { ...state, ...authScopeResponse(scopes), proxiedByHub: true }
+      : state;
     return HttpServerResponse.jsonUnsafe(yield* encodeSessionState(narrowed).pipe(Effect.orDie));
   }
   if (path === "api/auth/websocket-ticket" && request.method === "POST") {

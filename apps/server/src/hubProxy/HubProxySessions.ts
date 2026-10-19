@@ -163,7 +163,10 @@ export class HubProxySessions extends Context.Service<
       unauthorized?: boolean,
     ) => Effect.Effect<void>;
     /** Reads current in-memory authority only; never issues or loads a credential. */
-    readonly peek: (nodeId: string) => Effect.Effect<Option.Option<HubProxyUpstream>>;
+    readonly peek: (
+      nodeId: string,
+      requiredScope?: AuthEnvironmentScope,
+    ) => Effect.Effect<Option.Option<HubProxyUpstream>>;
     /** Completes when this generation of the node's access ends: removal, unenrollment, route change. */
     readonly revoked: (nodeId: string, generation: number) => Effect.Effect<void>;
     readonly isCurrent: (nodeId: string, generation: number) => Effect.Effect<boolean>;
@@ -428,7 +431,10 @@ export const make = Effect.gen(function* () {
         if (session.token === token) state.sessions.delete(key);
     });
 
-  const peek: HubProxySessions["Service"]["peek"] = (nodeId) =>
+  const peek: HubProxySessions["Service"]["peek"] = (
+    nodeId,
+    requiredScope = AuthOrchestrationReadScope,
+  ) =>
     Effect.gen(function* () {
       const node = yield* nodes.get(nodeId);
       const route = Option.isSome(node) ? preferredRoute(node.value) : undefined;
@@ -443,7 +449,7 @@ export const make = Effect.gen(function* () {
         if (
           session.generation === state.generation &&
           session.expiresAtMs > now &&
-          session.scopes.includes(AuthOrchestrationReadScope)
+          session.scopes.includes(requiredScope)
         )
           return Option.some(session);
       }

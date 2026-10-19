@@ -139,3 +139,62 @@ it.effect(
       expect(hubProxyRefusal("denied").requiredScope).toBe("hub:proxy");
     }).pipe(Effect.scoped),
 );
+
+const operate = (payload: unknown) =>
+  refuseProxiedCall(["orchestration:read", "orchestration:operate"], write, payload);
+const followUp = {
+  type: "message.dispatch",
+  commandId: "c1",
+  threadId: "t1",
+  messageId: "m1",
+  createdBy: "user",
+  creationSource: "mobile",
+  text: "Continue",
+  attachments: [],
+  dispatchMode: { type: "queue_after_active" },
+};
+
+it("4b: an operate client may send a follow-up and stop a run through the hub", () => {
+  expect(operate(followUp)).toBeUndefined();
+  expect(
+    operate({
+      type: "run.interrupt",
+      commandId: "c2",
+      threadId: "t1",
+      runId: "r1",
+      holdQueue: true,
+    }),
+  ).toBeUndefined();
+});
+
+it("4b: other commands stay on the node's own clients", () => {
+  for (const command of [
+    { type: "thread.delete", commandId: "c3", threadId: "t1" },
+    { type: "thread.archive", commandId: "c4", threadId: "t1" },
+    null,
+  ]) {
+    expect(operate(command)).toMatchObject({ requiredScope: "hub:proxy" });
+  }
+});
+
+it("4b: a read-only client still cannot send a follow-up", () => {
+  expect(admit(write, followUp)).toMatchObject({ requiredScope: "orchestration:operate" });
+});
+
+it("4b: an operate client may upload follow-up attachments through the hub", () => {
+  const scopes = ["orchestration:read", "orchestration:operate"] as const;
+  expect(
+    refuseProxiedCall(scopes, "attachments.createUploadUrl", {
+      name: "screen.png",
+      mimeType: "image/png",
+      sizeBytes: 10,
+    }),
+  ).toBeUndefined();
+  expect(
+    refuseProxiedCall(["orchestration:read"], "attachments.createUploadUrl", {
+      name: "screen.png",
+      mimeType: "image/png",
+      sizeBytes: 10,
+    }),
+  ).toMatchObject({ requiredScope: "orchestration:operate" });
+});

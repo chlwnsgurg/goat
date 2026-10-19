@@ -418,6 +418,11 @@ export const AuthSessionState = Schema.Struct({
   permissions: authScopeResponseFields.permissions,
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
+  /**
+   * True when a hub answers for one of its nodes. The hub forwards only some actions there, so
+   * clients hide the rest instead of offering what the hub will refuse.
+   */
+  proxiedByHub: Schema.optionalKey(Schema.Boolean),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
 
