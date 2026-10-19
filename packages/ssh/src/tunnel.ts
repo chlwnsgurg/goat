@@ -134,6 +134,8 @@ export interface RemoteGoatRunnerOptions {
    * the host's when their versions cannot be ordered, such as two `0.1.0-dev.<sha>` builds.
    */
   readonly archiveCommitTime?: number;
+  /** Acquisition authority recorded only when an archive is installed. */
+  readonly archiveSource?: "bundle" | "cache" | "mirror" | "https" | "gh";
   readonly releaseBaseUrl?: string | null;
   /** Writable user cache; only this directory may receive gh downloads. */
   readonly archiveDirectory?: string | null;
@@ -166,7 +168,8 @@ export interface PreparedRemoteRuntime {
   readonly runner: RemoteGoatRunnerOptions;
   readonly version: string | null;
   readonly requestedVersion: string | null;
-  readonly source: "requested" | "retained" | "live";
+  readonly source: "requested" | "retained" | "live" | "installed";
+  readonly installedExecutableSha256?: string;
   readonly requireInstalled: boolean;
   readonly mayUpgradeOwnedServer: boolean;
   /** SHA-256 of the retained run-t3.sh observed by preparation; null for other sources. */
@@ -905,6 +908,13 @@ if ! goat_runtime_ready; then
     printf 'Cannot install goat %s: expected goat v%s, but the archive executable reported "%s". The existing runtime directory and completion marker have been left unchanged. Supply the correct requested archive in the local SSH runtime archive directory or release mirror, then retry.\\n' "$GOAT_ARCHIVE_VERSION" "$GOAT_ARCHIVE_VERSION" "$GOAT_STAGED_VERSION_OUTPUT" >&2
     exit 1
   fi
+  if command -v shasum >/dev/null 2>&1; then
+    GOAT_EXECUTABLE_SHA256="$(shasum -a 256 "$GOAT_STAGING/goat" | cut -d' ' -f1)"
+  else
+    GOAT_EXECUTABLE_SHA256="$(sha256sum "$GOAT_STAGING/goat" | cut -d' ' -f1)"
+  fi
+  # Publish provenance with the verified executable, never backfill legacy directories.
+  printf '%s %s %s %s\\n' "$GOAT_ARCHIVE_VERSION" "$GOAT_EXPECTED" "$GOAT_EXECUTABLE_SHA256" @@GOAT_ARCHIVE_SOURCE@@ > "$GOAT_STAGING/.install-record"
   printf '%s\\n' "$GOAT_ARCHIVE_VERSION" > "$GOAT_STAGING/.install-complete"
   rm -rf "$GOAT_RUNTIME_DIR"
   mv "$GOAT_STAGING" "$GOAT_RUNTIME_DIR"
@@ -1244,9 +1254,15 @@ RUNNER_PUBLISHED=0; REFRESH_DECISION=; LEGACY_PENDING=0; LEGACY_COMMITTED=0
 LEGACY_TERMINATED=0; LEGACY_IDENTITY_LINK=; LEGACY_PUBLICATION_STARTED=0
 RETAINED_SNAPSHOT_FILE=; LEGACY_PID=; LEGACY_PORT=; LEGACY_IDENTITY=; LEGACY_VERSION=; LEGACY_UID=; LEGACY_START=
 EXPECTED_RETAINED_SHA256=@@GOAT_RETAINED_RUNNER_SHA256@@
+EXPECTED_INSTALLED_SHA256=@@GOAT_INSTALLED_EXECUTABLE_SHA256@@
 @@GOAT_PROTOCOL_TOKENS@@
 ${REMOTE_RUNNER_HINT_SCRIPT}
 check_retained_runner() {
+  # Recovery pins the executable observed by the probe as well as the runner.
+  if [ -n "$EXPECTED_INSTALLED_SHA256" ] &&
+     [ "$(runner_sha256 "$HOME/.goat/runtime/goat/versions/$SELECTED_VERSION/goat")" != "$EXPECTED_INSTALLED_SHA256" ]; then
+    printf 'Recorded GOAT executable changed since probe; reconnect.\\n' >&2; exit 1
+  fi
   if [ "$RUNNER_PUBLISHED" = 0 ] && [ -n "$EXPECTED_LIVE_RUNNER_SHA256" ] &&
      [ "$(runner_sha256 "$RUNNER_FILE")" != "$EXPECTED_LIVE_RUNNER_SHA256" ]; then
     printf 'Running runner changed before publication; process was preserved.\\n' >&2; exit 1
@@ -1984,6 +2000,9 @@ export function buildRemoteGoatRunnerScript(input?: RemoteGoatRunnerOptions): st
       GOAT_NODE_SCRIPT_PATH: shellSingleQuote(nodeScriptPath),
       GOAT_ARCHIVE_VERSION: shellSingleQuote(archiveVersion),
       GOAT_RELEASE_BASE_URL: shellSingleQuote(releaseBaseUrl),
+      GOAT_ARCHIVE_SOURCE: shellSingleQuote(
+        input?.archiveSource ?? (input?.releaseBaseUrl?.trim() ? "mirror" : "https"),
+      ),
       GOAT_ARCHIVE_LOCK_WAIT_SECONDS: String(REMOTE_ARCHIVE_LOCK_WAIT_SECONDS),
       GOAT_ARCHIVE_DOWNLOAD_SECONDS: String(REMOTE_ARCHIVE_DOWNLOAD_SECONDS),
       GOAT_ARCHIVE_CHECKSUMS_SECONDS: String(REMOTE_ARCHIVE_CHECKSUMS_SECONDS),
@@ -2048,6 +2067,7 @@ function buildRemoteRunnerSetupScript(
       ? 'if [ "$ALLOW_LEGACY_ADOPTION" = 1 ] || [ "$REFRESH_IF_IDLE" = 1 ]; then capture_running_runner || ownership_unverified; fi'
       : "",
     GOAT_RETAINED_RUNNER_SHA256: shellSingleQuote(selection.retainedRunnerSha256 ?? ""),
+    GOAT_INSTALLED_EXECUTABLE_SHA256: shellSingleQuote(selection.installedExecutableSha256 ?? ""),
     GOAT_PROTOCOL_TOKENS: REMOTE_PROTOCOL_TOKEN_SCRIPT,
     GOAT_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteGoatRunnerScript(input)),
     GOAT_PROTOCOL_GUARD: applyScriptPlaceholders(REMOTE_PROTOCOL_GUARD_SCRIPT, {
@@ -2292,13 +2312,40 @@ if ready_version "$retained_version"; then
     fi
   fi
 fi
+# Records are data, never shell code. A completion marker alone authorizes no discovery.
+installed_candidates=
+installed_versions=
+record_list="$(ls -t "$HOME/.goat/runtime/goat/versions/"*/.install-record 2>/dev/null | head -n 8)"
+old_ifs="$IFS"; IFS='
+'
+for record in $record_list; do
+  IFS="$old_ifs"
+  dir="\${record%/.install-record}"; recorded_version="\${dir##*/}"
+  valid_version "$recorded_version" || continue
+  [ "$recorded_version" != "$retained_version" ] || continue
+  [ ! -L "$dir" ] && [ ! -L "$record" ] && [ ! -L "$dir/goat" ] || continue
+  read -r record_version archive_sha executable_sha record_source record_extra < "$record" || continue
+  [ "$record_version" = "$recorded_version" ] && [ -z "$record_extra" ] || continue
+  case "$record_source" in bundle|cache|mirror|https|gh) ;; *) continue ;; esac
+  printf '%s\\n' "$archive_sha" "$executable_sha" | LC_ALL=C grep -Eqv '^[0-9a-f]{64}$' && continue
+  [ "$(runner_sha256 "$dir/goat")" = "$executable_sha" ] || continue
+  candidate_signals="$(binary_json "$recorded_version" || true)"
+  [ -n "$candidate_signals" ] || continue
+  candidate_fields="$(printf '{"version":"%s","signals":%s,"executableSha256":"%s"' "$recorded_version" "$candidate_signals" "$executable_sha")"
+  if candidate_commit="$(build_commit_time "$dir/goat")"; then
+    candidate_fields="$candidate_fields,\\"commitTime\\":$candidate_commit"
+  fi
+  installed_versions="$installed_versions $recorded_version"
+  installed_candidates="$installed_candidates\${installed_candidates:+,}$candidate_fields}"
+done
+IFS="$old_ifs"
 # Persisted version is a path hint only. The live descriptor proves identity.
 live_hint="$(sed -n 's/.*"serverVersion"[[:space:]]*:[[:space:]]*"\\([^" ]*\\)".*/\\1/p' "$runtime_file" 2>/dev/null || true)"
 live_fields=
 live_owned=false
 identity_absent=false
 if [ -n "$state_key" ] && [ ! -e "$state/identity" ] && [ ! -L "$state/identity" ]; then identity_absent=true; fi
-for candidate in "$live_hint" "$retained_version" "$V"; do
+for candidate in "$live_hint" "$retained_version" "$V" $installed_versions; do
   if ! ready_version "$candidate"; then continue; fi
   exe="$HOME/.goat/runtime/goat/versions/$candidate/goat"
   if live="$("$exe" __ssh-helper protocol --runtime-file "$runtime_file" --port-file "$state/port" --pid-file "$state/pid" --shell 2>/dev/null)"; then
@@ -2342,7 +2389,7 @@ esac
 case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x64 ;; *) exit 1 ;; esac
 ready=false
 if ready_version "$V"; then ready=true; fi
-printf '{"platform":"%s","arch":"%s","ready":%s,"liveOwned":%s,"identityAbsent":%s%s%s}\\n' "$platform" "$arch" "$ready" "$live_owned" "$identity_absent" "$retained_fields" "$live_fields"
+printf '{"platform":"%s","arch":"%s","ready":%s,"liveOwned":%s,"identityAbsent":%s,"installedCandidates":[%s]%s%s}\\n' "$platform" "$arch" "$ready" "$live_owned" "$identity_absent" "$installed_candidates" "$retained_fields" "$live_fields"
 `;
 }
 
@@ -2352,6 +2399,16 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
       platform: Schema.Literals(["darwin", "linux", "win32"]),
       arch: Schema.Literals(["arm64", "x64"]),
       ready: Schema.Boolean,
+      installedCandidates: Schema.optionalKey(
+        Schema.Array(
+          Schema.Struct({
+            version: Schema.String,
+            signals: RuntimeSignals,
+            commitTime: Schema.optionalKey(Schema.Int),
+            executableSha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+          }),
+        ),
+      ),
       retained: Schema.optionalKey(Schema.Literals(["ready", "missing"])),
       retainedVersion: Schema.optionalKey(Schema.String),
       retainedSignals: Schema.optionalKey(RuntimeSignals),
@@ -2586,6 +2643,10 @@ export const prepareRemoteRuntime = (
           ? probe.retainedVersion
           : undefined;
     const selectInstalled = (selectedVersion: string) => {
+      const installed =
+        probe.liveStatus === "none"
+          ? probe.installedCandidates?.find((candidate) => candidate.version === selectedVersion)
+          : undefined;
       const retained =
         selectedVersion === probe.retainedVersion &&
         probe.retainedSignals !== undefined &&
@@ -2594,12 +2655,15 @@ export const prepareRemoteRuntime = (
         probe.retainedRunnerSha256 !== undefined;
       return Effect.annotateCurrentSpan(
         "goat.runtime.source",
-        retained ? "retained-runner" : "live-runtime",
+        retained ? "retained-runner" : installed ? "recorded-install" : "live-runtime",
       ).pipe(
         Effect.as({
           ...exact,
           version: selectedVersion,
-          source: retained ? "retained" : "live",
+          source: retained ? "retained" : installed ? "installed" : "live",
+          ...(installed === undefined
+            ? {}
+            : { installedExecutableSha256: installed.executableSha256 }),
           requireInstalled: true,
           runner: { ...runner, archiveVersion: selectedVersion },
           retainedRunnerSha256: retained ? (probe.retainedRunnerSha256 ?? null) : null,
@@ -2730,7 +2794,22 @@ export const prepareRemoteRuntime = (
         "goat.runtime.upload.installComplete": false,
       });
       const script = yield* Effect.try({
-        try: () => buildRemoteUploadScript({ ...runner, archiveVersion: version }, archive.sha256),
+        try: () =>
+          buildRemoteUploadScript(
+            {
+              ...runner,
+              archiveVersion: version,
+              archiveSource:
+                bundledArchive !== null
+                  ? "bundle"
+                  : localArchive !== null
+                    ? "cache"
+                    : sourcesTried.at(-1) === "gh"
+                      ? "gh"
+                      : "https",
+            },
+            archive.sha256,
+          ),
         catch: runtimePreparationError,
       });
       notifyRuntimePhase(target, "uploading", onPhase);
@@ -2780,11 +2859,36 @@ export const prepareRemoteRuntime = (
     // Legacy ownership must be adopted through its normal replacement path;
     // attaching without adoption would fail the launch-time identity check.
     const fallbackToLive = probe.liveStatus === "live" && liveCompatible && !adoptLegacy;
-    const fallbackVersion = fallbackToLive
+    let fallbackVersion = fallbackToLive
       ? probe.liveVersion
       : upgradeRetained
         ? probe.retainedVersion
         : undefined;
+    // Disk discovery is recovery only: exact acquisition and a compatible live server win.
+    if (owningLaunch && probe.liveStatus === "none") {
+      let chosen = retainedCompatible
+        ? { version: probe.retainedVersion, commitTime: probe.retainedCommitTime }
+        : undefined;
+      for (const candidate of probe.installedCandidates ?? []) {
+        if (
+          candidate.signals.serverVersion !== candidate.version ||
+          !matchesSignals(candidate.signals, version) ||
+          compareRuntimeBuilds(candidate, requestedBuild) === undefined
+        )
+          continue;
+        if (probe.retainedVersion !== undefined) {
+          const retainedOrder = compareRuntimeBuilds(candidate, {
+            version: probe.retainedVersion,
+            commitTime: probe.retainedCommitTime,
+          });
+          if (retainedOrder === undefined || retainedOrder <= 0) continue;
+        }
+        const order = chosen === undefined ? 1 : compareRuntimeBuilds(candidate, chosen);
+        if (order !== undefined && order > 0)
+          chosen = { version: candidate.version, commitTime: candidate.commitTime };
+      }
+      if (chosen !== undefined) fallbackVersion = chosen.version;
+    }
     if (fallbackVersion !== undefined) {
       yield* Effect.logInfo("ssh.runtime.upgrade.start", {
         ...sshTargetLogFields(target),
@@ -2801,7 +2905,7 @@ export const prepareRemoteRuntime = (
               ...sshTargetLogFields(target),
               installedVersion: fallbackVersion,
               requestedVersion: version,
-              reason: `GOAT ${version} could not be installed, so compatible GOAT ${fallbackVersion} is used instead: ${error.message}`,
+              reason: `GOAT ${version} could not be installed; using compatible GOAT ${fallbackVersion} (${fallbackToLive ? "live server" : fallbackVersion === probe.retainedVersion ? "retained runtime; no verified newer ordered candidate" : "newest verified installed runtime with proven build order"}): ${error.message}`,
             }).pipe(
               Effect.andThen(selectInstalled(fallbackVersion)),
               Effect.map((selected): PreparedRemoteRuntime => {
