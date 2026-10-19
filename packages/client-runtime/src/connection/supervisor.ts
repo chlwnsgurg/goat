@@ -104,6 +104,7 @@ interface SetupPreparation {
 
 interface EstablishmentProgress {
   readonly preparation: SetupPreparation;
+  readonly pendingPreparations: ReadonlyMap<string, bigint>;
   readonly synchronizedRoutes: number;
   readonly hostAnswered: boolean;
   readonly setup: { readonly routeId: string; readonly elapsedMs: number } | null;
@@ -475,9 +476,13 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
             progress.stage === "preparing" &&
             progress.routeId !== undefined &&
             progress.routeId !== current.preparation.routeId
-              ? { routeId: progress.routeId, startedAt: now }
+              ? {
+                  routeId: progress.routeId,
+                  startedAt: current.pendingPreparations.get(progress.routeId) ?? now,
+                }
               : current.preparation;
           return {
+            ...current,
             preparation,
             synchronizedRoutes:
               current.synchronizedRoutes + (progress.stage === "synchronizing" ? 1 : 0),
@@ -762,6 +767,12 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     const startedAt = yield* Clock.monotonicTimeNanos;
     const establishmentProgress = yield* Ref.make<EstablishmentProgress>({
       preparation: setupContinuation ?? { routeId: undefined, startedAt },
+      // Earlier failed routes must not overwrite the still-pending fallback's start.
+      pendingPreparations: new Map(
+        setupContinuation?.routeId === undefined
+          ? []
+          : [[setupContinuation.routeId, setupContinuation.startedAt]],
+      ),
       synchronizedRoutes: 0,
       hostAnswered: false,
       setup: null,

@@ -1,6 +1,18 @@
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import { EnvironmentId } from "@goat/contracts";
+import {
+  Connectivity,
+  ConnectionDriver,
+  EnvironmentSupervisor,
+  SshConnectionTarget,
+  Wakeups,
+  connectionRouteId,
+  type SupervisorConnectionState,
+} from "@goat/client-runtime/connection";
+import type { WsRpcProtocolClient } from "@goat/client-runtime/rpc";
+import { SshHostAnswered } from "@goat/ssh/command";
 import * as NetService from "@goat/shared/Net";
 import * as SshTunnel from "@goat/ssh/tunnel";
 import { SshLaunchError, SshPasswordPromptError } from "@goat/ssh/errors";
@@ -17,6 +29,11 @@ import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as Sink from "effect/Sink";
+import * as Queue from "effect/Queue";
+import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
+import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as DesktopSshEnvironment from "./DesktopSshEnvironment.ts";
@@ -355,6 +372,191 @@ describe("desktop SSH runtime status", () => {
 });
 
 describe("sshEnvironment", () => {
+  it.effect(
+    "limits authentication replay to pending requests for the same target and generation",
+    () =>
+      Effect.gen(function* () {
+        const entered = yield* Queue.unbounded<() => void>();
+        const finish = yield* Deferred.make<void>();
+        const answers: string[] = [];
+        const service = yield* DesktopSshEnvironment.make.pipe(
+          Effect.provideService(SshTunnel.SshEnvironmentManager, {
+            ...unusedManager,
+            ensureEnvironment: () =>
+              Effect.gen(function* () {
+                const answer = yield* SshHostAnswered;
+                yield* Queue.offer(entered, () => answer?.());
+                yield* Deferred.await(finish);
+                return pendingRuntime;
+              }),
+          }),
+        );
+        const start = Effect.fnUntraced(function* (id: string, target = runtimeTarget) {
+          const fiber = yield* service.ensureEnvironment(target).pipe(
+            Effect.provideService(SshHostAnswered, () => {
+              answers.push(id);
+            }),
+            Effect.forkChild,
+          );
+          return { fiber, answer: yield* Queue.take(entered) };
+        });
+        const original = yield* start("original");
+        const early = yield* start("early");
+        original.answer();
+        original.answer();
+        assert.deepEqual(answers, ["original", "early"]);
+        const retry = yield* start("retry");
+        const other = yield* start("other", { ...runtimeTarget, hostname: "other.example.test" });
+        assert.deepEqual(answers, ["original", "early", "retry"]);
+        yield* service.disconnectEnvironment(runtimeTarget);
+        const replacement = yield* start("replacement");
+        original.answer();
+        assert.deepEqual(answers, ["original", "early", "retry"]);
+        replacement.answer();
+        yield* Fiber.interrupt(original.fiber);
+        yield* Fiber.interrupt(early.fiber);
+        yield* Fiber.interrupt(retry.fiber);
+        const replacementRetry = yield* start("replacement-retry");
+        assert.deepEqual(answers, [
+          "original",
+          "early",
+          "retry",
+          "replacement",
+          "replacement-retry",
+        ]);
+        yield* Deferred.succeed(finish, undefined);
+        yield* Fiber.join(replacement.fiber);
+        yield* Fiber.join(replacementRetry.fiber);
+        yield* Fiber.join(other.fiber);
+        yield* start("fresh");
+        assert.deepEqual(answers, [
+          "original",
+          "early",
+          "retry",
+          "replacement",
+          "replacement-retry",
+        ]);
+      }).pipe(Effect.provide(desktopRuntimeLayer)),
+  );
+
+  it.effect("learns 42 seconds when only the original SSH request authenticates", () =>
+    Effect.gen(function* () {
+      const scope = yield* Scope.Scope;
+      const finishSetup = yield* Deferred.make<void>();
+      const lock = yield* Semaphore.make(1);
+      let requests = 0;
+      let authentications = 0;
+      const service = yield* DesktopSshEnvironment.make.pipe(
+        Effect.provideService(SshTunnel.SshEnvironmentManager, {
+          ...unusedManager,
+          ensureEnvironment: () =>
+            Effect.gen(function* () {
+              const request = ++requests;
+              return yield* lock.withPermit(
+                Effect.gen(function* () {
+                  // IPC retries wait behind the original target lock without authenticating again.
+                  if (request === 1 || request === 4) {
+                    authentications++;
+                    (yield* SshHostAnswered)?.();
+                  }
+                  if (request <= 3) yield* Deferred.await(finishSetup);
+                  else return yield* Effect.never;
+                  return {
+                    target: runtimeTarget,
+                    httpBaseUrl: "http://127.0.0.1:41773/",
+                    wsBaseUrl: "ws://127.0.0.1:41773/",
+                    pairingToken: null,
+                  };
+                }),
+              );
+            }),
+        }),
+      );
+      const target = new SshConnectionTarget({
+        environmentId: EnvironmentId.make("ssh-test"),
+        label: "SSH test",
+        connectionId: "ssh:devbox",
+      });
+      const prepared = {
+        environmentId: target.environmentId,
+        label: target.label,
+        httpBaseUrl: "http://127.0.0.1:41773/",
+        socketUrl: "ws://127.0.0.1:41773/ws",
+        httpAuthorization: null,
+        target,
+      };
+      const supervisor = yield* EnvironmentSupervisor.make(
+        { target, profile: Option.none(), enabled: true },
+        { initiallyDesired: true },
+      ).pipe(
+        Effect.provideService(Connectivity.Connectivity, {
+          status: Effect.succeed("online" as const),
+          changes: Stream.never,
+        }),
+        Effect.provideService(Wakeups.ConnectionWakeups, { changes: Stream.never }),
+        Effect.provideService(ConnectionDriver, {
+          checkRoute: () => Effect.succeed("unchecked"),
+          preflight: () => Effect.succeed(false),
+          connect: (_entry, progress) =>
+            Effect.gen(function* () {
+              yield* progress({ stage: "preparing", routeId: connectionRouteId(target) });
+              const answered = yield* Deferred.make<void>();
+              const request = yield* service.ensureEnvironment(runtimeTarget).pipe(
+                Effect.provideService(SshHostAnswered, () => {
+                  Deferred.doneUnsafe(answered, Effect.void);
+                }),
+                // Renderer cancellation does not cancel the desktop IPC request.
+                Effect.forkIn(scope),
+              );
+              yield* Deferred.await(answered).pipe(
+                Effect.andThen(progress({ stage: "preparing", hostAnswered: true })),
+                Effect.forkChild,
+              );
+              yield* Fiber.join(request).pipe(Effect.orDie);
+              yield* progress({ stage: "synchronizing", prepared });
+              return {
+                prepared,
+                session: {
+                  client: {} as WsRpcProtocolClient,
+                  initialConfig: Effect.die("unused config"),
+                  subscribeServerConfig: () => Stream.never,
+                  ready: Effect.void,
+                  probe: Effect.void,
+                  closed: Effect.never,
+                },
+              };
+            }),
+        }),
+      );
+      const awaitPhase = (phase: SupervisorConnectionState["phase"]) =>
+        SubscriptionRef.changes(supervisor.state).pipe(
+          Stream.filter((state) => state.phase === phase),
+          Stream.runHead,
+        );
+      yield* TestClock.adjust(0);
+      assert.equal(requests, 1);
+      yield* TestClock.adjust("15 seconds");
+      assert.equal(requests, 2);
+      yield* TestClock.adjust("15 seconds");
+      assert.equal((yield* SubscriptionRef.get(supervisor.state)).phase, "backoff");
+      yield* TestClock.adjust("2 seconds");
+      assert.equal(requests, 3);
+      yield* TestClock.adjust("10 seconds");
+      yield* Deferred.succeed(finishSetup, undefined);
+      yield* awaitPhase("connected");
+      assert.equal(authentications, 1);
+      yield* supervisor.disconnect;
+      yield* awaitPhase("available");
+      yield* supervisor.connect;
+      yield* TestClock.adjust(0);
+      yield* TestClock.adjust("44 seconds");
+      assert.equal(requests, 4);
+      assert.equal((yield* SubscriptionRef.get(supervisor.state)).phase, "connecting");
+      yield* TestClock.adjust("1 second");
+      assert.equal(requests, 5);
+    }).pipe(Effect.provide(Layer.mergeAll(desktopRuntimeLayer, TestClock.layer()))),
+  );
+
   it.effect("passes key-only provisioning to the SSH manager without requesting a password", () => {
     const target = { alias: "devbox", hostname: "box.example.test", username: null, port: null };
     return Effect.gen(function* () {
