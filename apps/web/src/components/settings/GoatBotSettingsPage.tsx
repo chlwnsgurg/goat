@@ -12,7 +12,20 @@ export function GoatBotSettingsPanel() {
       <SettingsSection id="imessage-channel" title="iMessage">
         <SettingsRow
           {...searchableSetting("imessage-channel")}
-          description="Set up in Terminal on the Mac that runs GOAT Bot: goat imessage enable, then goat imessage link-code."
+          title="Set up in Terminal"
+          description={
+            <>
+              On the Mac that runs GOAT Bot, run{" "}
+              <code className="rounded bg-muted px-1 py-px text-2xs whitespace-nowrap">
+                goat imessage enable
+              </code>
+              , then{" "}
+              <code className="rounded bg-muted px-1 py-px text-2xs whitespace-nowrap">
+                goat imessage link-code
+              </code>
+              .
+            </>
+          }
         />
       </SettingsSection>
     </SettingsPageContainer>
