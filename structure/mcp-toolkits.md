@@ -3,7 +3,9 @@
 Agents that are already running inside a provider CLI call back into this server over MCP. The
 HTTP server is `layerMcpTransport` in `apps/server/src/mcp/McpHttpServer.ts`: `McpServer.layerHttp`
 with `name: "GOAT"`, `path: "/mcp"`, and protocol `McpProtocol.v2025_06_18`. Unauthorized calls
-fail with copy that names a GOAT MCP credential.
+fail with copy that names a GOAT MCP credential; a refused thread credential's `tools/call` gets
+a tool error stating the reason, which `McpSessionRegistry.explainRefusal` supplies (see
+[credential lifecycle](../docs/orchestration-v2/orchestrator-mcp-server.md#transport-and-authentication)).
 
 `McpHttpServer.layer` merges one toolkit layer per area and provides `RemoteReportService` and
 `ThreadResultService`. `apps/server/src/server.ts` provides `LaunchWatchService` and

@@ -159,8 +159,8 @@ function deriveEmptyState(props: {
 
   if (!catalogState.hasConnections) {
     return {
-      title: "No environments connected",
-      detail: "Add an environment to load projects and start coding sessions.",
+      title: "Connect your hub",
+      detail: "Scan the QR code your hub shows to see its sessions here.",
       loading: false,
     };
   }
@@ -746,7 +746,11 @@ export function HomeScreen(props: HomeScreenProps) {
                 title={emptyState.title}
                 detail={emptyState.detail}
                 actionLabel={
-                  !props.catalogState.hasReadyEnvironment ? "Add environment" : undefined
+                  !props.catalogState.hasReadyEnvironment
+                    ? props.catalogState.hasConnections
+                      ? "Change hub"
+                      : "Scan QR code"
+                    : undefined
                 }
                 onAction={
                   !props.catalogState.hasReadyEnvironment ? props.onAddConnection : undefined
@@ -754,8 +758,8 @@ export function HomeScreen(props: HomeScreenProps) {
                 action={
                   Platform.OS === "android" && !props.catalogState.hasReadyEnvironment ? (
                     <FloatingActionButton
-                      label="Add environment"
-                      icon="plus"
+                      label={props.catalogState.hasConnections ? "Change hub" : "Scan QR code"}
+                      icon={props.catalogState.hasConnections ? "plus" : "qrcode.viewfinder"}
                       variant="extended"
                       tone="primary"
                       onPress={props.onAddConnection}

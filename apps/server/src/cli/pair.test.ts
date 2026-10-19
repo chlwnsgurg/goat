@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { AuthStandardClientScopes } from "@goat/contracts";
+import { buildMobilePairingLink } from "@goat/shared/mobilePairingLink";
 import * as NetService from "@goat/shared/Net";
 import * as HostProcess from "@goat/shared/HostProcess";
 import { afterEach, assert, describe, expect, it } from "@effect/vitest";
@@ -15,6 +16,7 @@ import * as TestConsole from "effect/testing/TestConsole";
 import { Command, CliError } from "effect/cli";
 
 import { cli } from "../binCli.ts";
+import { renderTerminalQrCode } from "../startupAccess.ts";
 import {
   SERVICE_LAUNCHER_CONTEXT_ENV,
   SERVICE_LAUNCHER_PROTOCOL,
@@ -197,6 +199,10 @@ describe("goat pair", () => {
 
           const token = /#token=([A-Z2-9]+)/.exec(output)?.[1];
           assert.isString(token);
+          assert.include(
+            output,
+            renderTerminalQrCode(buildMobilePairingLink(`${origin}/pair#token=${token}`)),
+          );
 
           const listed = yield* captureStdout(
             runCli(["auth", "pairing", "list", "--base-dir", baseDir, "--json"]),

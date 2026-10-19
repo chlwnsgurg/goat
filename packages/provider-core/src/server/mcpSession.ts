@@ -14,6 +14,11 @@ export interface McpProviderSessionConfig {
   readonly endpoint: string;
   readonly authorizationHeader: string;
   /**
+   * Bumped when GOAT replaces this credential's authority under the same
+   * token, so a config read before the change is recognizably stale.
+   */
+  readonly credentialGeneration?: number;
+  /**
    * Adapters read it to keep developer instructions truthful: when the user
    * withholds agent browser access, the prompt must not advertise `preview_*`
    * tools that every call would reject.

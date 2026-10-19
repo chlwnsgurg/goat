@@ -107,6 +107,7 @@ import {
 
 const DEFAULT_REMOTE_PORT = 3773;
 const REMOTE_PORT_SCAN_WINDOW = 200;
+const REMOTE_LAUNCH_ATTEMPTS = 3;
 const SSH_READY_TIMEOUT_MS = 20_000;
 const SSH_READY_PROBE_TIMEOUT_MS = 1_000;
 // Ceilings for a slow link. A forwarded probe costs at least one round trip,
@@ -133,6 +134,7 @@ const REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS = 900_000;
 const REMOTE_REUSE_READY_TIMEOUT_MS = 2_000;
 // Reserved by the folded launch protocol for re-entering preparation, never a launch failure.
 const REMOTE_RECONNECT_REPROBE_EXIT_CODE = 76;
+const REMOTE_REPLACEMENT_WAIT_ATTEMPTS = 50;
 
 export interface RemoteGoatRunnerOptions {
   readonly nodeScriptPath?: string | null;
@@ -200,6 +202,7 @@ export interface PreparedRemoteRuntime {
   /** Why a compatible live selection can be attached to, but cannot be updated. */
   readonly updateBlocked?: string;
   readonly reconnectProbe?: string;
+  readonly reconnectPending?: SshRuntimePendingReplacement;
   readonly hostPlatform?: "darwin" | "linux" | "win32";
 }
 const requestedRuntime = (runner: RemoteGoatRunnerOptions | undefined): PreparedRemoteRuntime => ({
@@ -313,9 +316,9 @@ fact_valid() {
     compat)
       (set -f; set -- $2
         [ "$#" = 3 ] || exit 1
-        case "$1" in compatible|update-required|client-too-old|unknown) ;; *) exit 1 ;; esac
-        case "$2" in 0|1) ;; *) exit 1 ;; esac
-        case "$3" in -|*[!A-Za-z0-9-]*) [ "$3" = - ] ;; *) ;; esac) ;;
+        case "$1" in compatible|update-required|client-too-old) ;; *) exit 1 ;; esac
+        [ "$2" = 1 ] || exit 1
+        case "$3" in ''|-|*[!A-Za-z0-9-]*) exit 1 ;; *) ;; esac) ;;
     *) return 1 ;;
   esac
 }
@@ -472,6 +475,9 @@ export interface SshEnvironmentManagerOptions {
 interface SshTunnelEntry {
   readonly master?: SshMasterConnection;
   selectedRuntime: PreparedRemoteRuntime;
+  attachmentInvalidated?: boolean;
+  // Status can revalidate an attachment, but cannot prove a submitted drain was cancelled.
+  uncertainDrain?: boolean;
   readonly key: string;
   readonly target: DesktopSshEnvironmentTarget;
   readonly remotePort: number;
@@ -734,6 +740,15 @@ function stripTrailingNewlines(value: string): string {
 
 function shellSingleQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function buildRemoteContendedOutput(
+  pending: Pick<SshRuntimePendingReplacement, "replacement" | "requestedVersion" | "liveVersion">,
+) {
+  const fields = JSON.stringify({ reason: "contended", ...pending }).slice(1, -1);
+  return `lock_pending_fields=${shellSingleQuote(fields)}
+if [ "$LOCK_DETAIL" = recovery-stale ]; then lock_pending_fields="$lock_pending_fields,"'"detail":"recovery-stale"'; fi
+printf '{"status":"pending","pending":{%s}}\\n' "$lock_pending_fields"`;
 }
 
 function applyScriptPlaceholders(
@@ -1239,6 +1254,7 @@ owner_proven_dead() {
   [ -n "$current_start" ] && [ "$current_start" != "$owner_start" ]
 }
 acquire_replacement_lock() {
+  if [ "$LOCK_HELD" = 1 ] && [ "$(readlink "$LOCK" 2>/dev/null || true)" = "$OWNER" ]; then return 0; fi
   LOCK_HOST="$(uname -n 2>/dev/null)" || return 1
   LOCK_UID="$(id -u 2>/dev/null)" || return 1
   LOCK_START="$(process_start "$$")" || return 1
@@ -1264,6 +1280,20 @@ acquire_replacement_lock() {
   if [ ! -d "$LOCK" ] && ln -s "$OWNER" "$LOCK" 2>/dev/null &&
      [ "$(readlink "$LOCK" 2>/dev/null || true)" = "$OWNER" ]; then LOCK_HELD=1; return 0; fi
   return 1
+}
+wait_for_replacement_lock() {
+  replacement_wait=0
+  while [ -e "$LOCK" ] || [ -L "$LOCK" ]; do
+    [ "$replacement_wait" -lt ${REMOTE_REPLACEMENT_WAIT_ATTEMPTS} ] || return 1
+    waiting_owner="$(readlink "$LOCK" 2>/dev/null)" || return 1
+    old_ifs="$IFS"; IFS='|'; set -f; set -- $waiting_owner; IFS="$old_ifs"
+    [ "$#" = 5 ] && [ "$1" = "$(uname -n)" ] && [ "$2" = "$(id -u)" ] &&
+      valid_positive "$3" && [ -n "$4" ] && [ -n "$5" ] || return 1
+    # Only a proven local owner can make progress; foreign or ambiguous locks stay pending.
+    [ "$(process_start "$3" 2>/dev/null)" = "$4" ] || return 1
+    replacement_wait=$((replacement_wait + 1))
+    sleep 0.1
+  done
 }
 `;
 
@@ -1298,7 +1328,7 @@ check_candidate_protocol() {
 check_live_protocol() {
   LIVE_STATUS=none; LIVE_PID=0; LIVE_PORT=0; LIVE_VERSION=unknown
   LIVE_COMPATIBLE=0; LIVE_OWNED=0; NEEDS_OWNED_UPGRADE=0; REPLACEMENT_REASON=incompatible; comparison=
-  LIVE_DRAIN=0; LIVE_INSTANCE_ID=
+  LIVE_DRAIN=0; LIVE_INSTANCE_ID=; DEFER_NO_DRAIN=0
   if live="$(live_fact "$CHECK_RUNNER" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" 2>/dev/null)"; then
     set -f; set -- $live
     if ! valid_live_tokens "$@"; then printf 'Malformed live protocol output.\n' >&2; exit 1; fi
@@ -1310,6 +1340,17 @@ check_live_protocol() {
     if [ "$LIVE_STATUS" = live ]; then read_live_compat "$2" "$3" "$4"; fi
   else
     if [ -e "$DEFAULT_RUNTIME_FILE" ] || [ -e "$PORT_FILE" ] || [ -e "$PID_FILE" ]; then LIVE_STATUS=unknown; fi
+  fi
+  DRAIN_UNCERTAIN=0
+  if [ -e "$STATE_DIR/draining" ] || [ -L "$STATE_DIR/draining" ]; then
+    draining_instance="$(cat "$STATE_DIR/draining" 2>/dev/null || true)"
+    if [ "$LIVE_STATUS" = none ] ||
+       { [ -n "$draining_instance" ] && [ -n "$LIVE_INSTANCE_ID" ] && [ "$draining_instance" != "$LIVE_INSTANCE_ID" ]; }; then
+      # Only an owner can retire a fence after the live helper proves its start is gone.
+      if [ "$LOCK_HELD" = 1 ] && [ "$(readlink "$LOCK" 2>/dev/null || true)" = "$OWNER" ]; then
+        rm -f "$STATE_DIR/draining"
+      fi
+    else DRAIN_UNCERTAIN=1; fi
   fi
 @@GOAT_RECONNECT_LIVE_GUARD@@  if [ "$ALLOW_LEGACY_ADOPTION" = 1 ] &&
      { [ "$LIVE_STATUS" = unknown ] || { [ "$LIVE_STATUS" = live ] && [ "$LIVE_OWNED" = 1 ] && [ ! -e "$STATE_DIR/identity" ] && [ ! -L "$STATE_DIR/identity" ]; }; }; then
@@ -1389,8 +1430,14 @@ check_live_protocol() {
     printf 'Secondary preparation cannot replace a live runtime.\n' >&2; exit 1
   fi
   if [ "$NEEDS_OWNED_UPGRADE" = 1 ] && [ "$LIVE_DRAIN" != 1 ]; then
-    # A server that cannot drain for its replacement is attach-only: never replaced or signalled.
-    printf 'Live GOAT PID=%s port=%s cannot drain for a replacement and this app cannot attach to it; it was left running. Stop it on the remote host when its work is done, then reconnect.\n' "$LIVE_PID" "$LIVE_PORT" >&2; exit 1
+    if [ "$REFRESH_IF_IDLE" = 1 ] && [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_OWNED" = 1 ] &&
+       { [ "$REPLACEMENT_REASON" = older ] || [ "$REPLACEMENT_REASON" = capability ]; }; then
+      DEFER_NO_DRAIN=1
+    elif [ "$REPLACEMENT_REASON" = legacy ]; then
+      printf 'Live GOAT PID=%s port=%s was started by an older app that cannot hand over ownership without draining; it was left running. Stop it on the remote host when its work is done, then reconnect.\n' "$LIVE_PID" "$LIVE_PORT" >&2; exit 1
+    else
+      printf 'Live GOAT PID=%s port=%s is incompatible; it was left running because it cannot drain for a replacement and this app cannot attach to it. Stop it on the remote host when its work is done, then reconnect.\n' "$LIVE_PID" "$LIVE_PORT" >&2; exit 1
+    fi
   fi
 }
 read_live_compat() {
@@ -1560,11 +1607,30 @@ publish_selected_runner() {
 @@GOAT_RUNNER_INSTALL@@
   RUNNER_PUBLISHED=1
 }
+pending_attachment_safe() {
+  [ "$DRAIN_UNCERTAIN" = 0 ] || return 1
+  # A replacement needs the mutex; lock-only contention can reuse a proven live server.
+  { [ "$LOCK_HELD" = 1 ] && [ "$(readlink "$LOCK" 2>/dev/null || true)" = "$OWNER" ]; } ||
+    { [ "$reason" = contended ] && [ "$NEEDS_OWNED_UPGRADE" = 0 ]; }
+}
+emit_pending_only() {
+  printf '{"status":"pending","pending":{%s}}\n' "$pending_fields"
+  exit 0
+}
 emit_pending() {
-  reason="$1"
+  reason="$1"; pending_detail="\${2:-}"
+  [ -n "$pending_detail" ] || pending_detail="$LOCK_DETAIL"
   pending_fields="$(printf '"reason":"%s","replacement":"%s","requestedVersion":"%s","liveVersion":"%s"' "$reason" "$REPLACEMENT_REASON" "$REQUESTED_VERSION" "$LIVE_VERSION")"
-  if [ "$LOCK_DETAIL" = recovery-stale ]; then pending_fields="$pending_fields,"'"detail":"recovery-stale"'; fi
+  case "$pending_detail" in
+    recovery-stale) pending_fields="$pending_fields,"'"detail":"recovery-stale"' ;;
+    drain-unavailable) pending_fields="$pending_fields,"'"refreshCause":"drain_unavailable"' ;;
+  esac
   # Reuse is independently proven using the retained runner, never the incompatible candidate.
+  pending_attachment_safe || emit_pending_only
+  if [ "$reason" = contended ] && [ "$NEEDS_OWNED_UPGRADE" = 0 ] && [ ! -f "$RETAINED_SNAPSHOT_FILE" ]; then
+    capture_running_runner || emit_pending_only
+  fi
+@@GOAT_READY_BASELINE@@
   if [ "$LIVE_COMPATIBLE" = 1 ] && [ -f "$RETAINED_SNAPSHOT_FILE" ] &&
      [ "$(runner_sha256 "$RUNNER_FILE")" = "$EXPECTED_LIVE_RUNNER_SHA256" ] &&
      [ "$("$RETAINED_SNAPSHOT_FILE" --version 2>/dev/null || true)" = "goat v$LIVE_VERSION" ]; then
@@ -1576,7 +1642,9 @@ emit_pending() {
       pending_pid="$LIVE_PID"; pending_port="$LIVE_PORT"; pending_version="$LIVE_VERSION"
       check_retained_runner
       check_live_protocol
-      if [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_PID" = "$pending_pid" ] && [ "$LIVE_PORT" = "$pending_port" ] && [ "$LIVE_VERSION" = "$pending_version" ]; then
+      pending_attachment_safe || emit_pending_only
+      if [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_PID" = "$pending_pid" ] && [ "$LIVE_PORT" = "$pending_port" ] && [ "$LIVE_VERSION" = "$pending_version" ] &&
+         { [ "$pending_detail" != drain-unavailable ] || { [ "$LIVE_OWNED" = 1 ] && verify_owned_identity "$LIVE_PID" "$LIVE_PORT"; }; }; then
         pending_kind=external; [ "$LIVE_OWNED" != 1 ] || pending_kind=managed
         # Lock contention does not imply a replacement; compatible attach-only servers stay ready.
         pending_suffix=
@@ -1588,14 +1656,26 @@ emit_pending() {
       fi
     fi
   fi
-@@GOAT_RECONNECT_PENDING_GUARD@@  printf '{"status":"pending","pending":{%s}}\n' "$pending_fields"
-  exit 0
+  emit_pending_only
 }
 if [ "$OWNING_LAUNCH" = 1 ]; then
-  acquire_replacement_lock || emit_pending contended
+  acquire_replacement_lock || { wait_for_replacement_lock && acquire_replacement_lock || emit_pending contended; }
   # Classification and ordering must be fresh under the host-wide mutex.
   CHECK_RUNNER="$RUNNER_CANDIDATE_FILE.pin"
   check_live_protocol
+  RECONCILING_DRAIN=0
+  if [ "$DRAIN_UNCERTAIN" = 1 ]; then
+    [ "$ALLOW_OWNED_UPGRADE" = 1 ] && [ "$LIVE_OWNED" = 1 ] && [ "$LIVE_DRAIN" = 1 ] && [ -n "$LIVE_INSTANCE_ID" ] || emit_pending unknown
+    # Retry the authenticated request: the server joins an active drain, confirms its
+    # cancellation, or exits for the supervisor. HTTP readiness alone proves none of these.
+    RECONCILING_DRAIN=1; NEEDS_OWNED_UPGRADE=1
+  fi
+  if [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_VERSION" = "$SELECTED_VERSION" ] &&
+     [ "$LIVE_VERSION" = "$REQUESTED_VERSION" ] && [ -n "$REFRESH_LIVE_VERSION" ] &&
+     [ "$REFRESH_LIVE_VERSION" != "$LIVE_VERSION" ]; then
+    # Another owner completed this exact refresh while we waited; the old runner pin is obsolete.
+    EXPECTED_LIVE_RUNNER_SHA256="$(runner_sha256 "$RUNNER_FILE")" || ownership_unverified
+  fi
   if [ "$LIVE_COMPATIBLE" = 1 ] && [ "$comparison" = newer ] && [ "$LIVE_VERSION" != "$SELECTED_VERSION" ]; then
     # Another client may have completed a newer installation since preparation.
     # Pin its independently verified retained runner rather than publish our older candidate.
@@ -1613,8 +1693,10 @@ if [ "$OWNING_LAUNCH" = 1 ]; then
   check_candidate_protocol
   check_retained_runner
   check_live_protocol
+  [ "$RECONCILING_DRAIN" != 1 ] || NEEDS_OWNED_UPGRADE=1
 @@GOAT_VERIFY_OWNED_BEFORE_PUBLICATION@@
-  if [ "$NEEDS_OWNED_UPGRADE" = 1 ] && [ "$REPLACEMENT_REASON" != incompatible ] && [ "$DRAIN_FORCE" != 1 ]; then
+  [ "$DEFER_NO_DRAIN" != 1 ] || emit_pending unknown drain-unavailable
+  if [ "$NEEDS_OWNED_UPGRADE" = 1 ] && [ "$RECONCILING_DRAIN" != 1 ] && [ "$REPLACEMENT_REASON" != incompatible ] && [ "$DRAIN_FORCE" != 1 ]; then
     # An optional refresh waits for idle; launch probes again last, then the server drains.
     activity="$(read_refresh_activity)"
     [ "$activity" = idle ] || emit_pending "$activity"
@@ -1965,6 +2047,38 @@ $cwd"
 (cleanup_runtime_versions) || { printf 'ssh.runtime.cleanup.skipped inspection, lock, or cleanup failed\n' >&2 || true; }
 `;
 
+// Retained archives have a port-only wait-ready helper. Inspect the kernel's socket owner
+// in the launch shell instead, without adding helper arguments or starts on reconnect.
+export const REMOTE_LAUNCH_LISTENER_SCRIPT = String.raw`server_owns_listener() (
+  # Protocol parsing leaves noglob enabled; socket fd discovery needs expansion.
+  set +f
+  if [ "$GOAT_HOST_WINDOWS" = 1 ]; then
+    GOAT_PROCESS_ID="$1" GOAT_LISTEN_PORT="$2" MSYS2_ARG_CONV_EXCL='*' powershell.exe -NoProfile -NonInteractive -EncodedCommand '${encodePowerShellCommand("$ErrorActionPreference = 'Stop'; $connections = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$env:GOAT_LISTEN_PORT) -ErrorAction Stop); if ($connections | Where-Object { $_.OwningProcess -eq [int]$env:GOAT_PROCESS_ID -and $_.LocalAddress -eq '127.0.0.1' }) { exit 0 }; exit 1")}' </dev/null >/dev/null 2>&1
+  elif [ -d /proc/self/fd ]; then
+    listen_sockets=' '
+    for listen_fd in /proc/"$1"/fd/*; do
+      listen_socket="$(readlink "$listen_fd" 2>/dev/null)" || continue
+      case "$listen_socket" in socket:*) listen_sockets="$listen_sockets$listen_socket " ;; esac
+    done
+    listen_address="$(printf '0100007F:%04X' "$2")" || return 1
+    awk -v address="$listen_address" -v sockets="$listen_sockets" '
+      $2 == address && $4 == "0A" && index(sockets, " socket:[" $10 "] ") { found=1 }
+      END { exit !found }
+    ' /proc/"$1"/net/tcp 2>/dev/null
+  else
+    lsof -nP -a -p "$1" -iTCP@127.0.0.1:"$2" -sTCP:LISTEN -t 2>/dev/null | grep -qx "$1"
+  fi
+)
+wait_launched_listener() {
+  listen_deadline=$(( $(date +%s) + (@@GOAT_READY_TIMEOUT_MS@@ + 999) / 1000 ))
+  while server_alive "$REMOTE_PID" && [ "$(date +%s)" -lt "$listen_deadline" ]; do
+    server_owns_listener "$REMOTE_PID" "$REMOTE_PORT" && return 0
+    sleep 0.1
+  done
+  return 1
+}
+`;
+
 const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@GOAT_NODE_ENV_SCRIPT@@
 STATE_KEY="$1"
@@ -2011,6 +2125,7 @@ wait_ready() {
 @@GOAT_WAIT_READY_SCRIPT@@
 NODE
 }
+${REMOTE_LAUNCH_LISTENER_SCRIPT}
 wait_for_pid_exit() {
   PID_TO_WAIT="$1"
   WAIT_COUNT=0
@@ -2039,6 +2154,8 @@ reuse_live_server() {
     fi
 }
 recheck_selected_before_use
+[ "\${RECONCILING_DRAIN:-0}" != 1 ] || NEEDS_OWNED_UPGRADE=1
+[ "$DEFER_NO_DRAIN" != 1 ] || emit_pending unknown drain-unavailable
 REMOTE_PID=""
 REMOTE_PORT=""
 REMOTE_MANAGED=""
@@ -2058,7 +2175,7 @@ if [ "$NEEDS_OWNED_UPGRADE" = 1 ]; then
   else verify_owned_identity "$LIVE_PID" "$LIVE_PORT" || ownership_unverified; fi
   UPGRADE_START="$(server_start "$UPGRADE_PID")" || ownership_unverified
   [ -n "$UPGRADE_START" ] || ownership_unverified
-  if [ "$REPLACEMENT_REASON" != incompatible ] && [ "$DRAIN_FORCE" != 1 ]; then
+  if [ "$RECONCILING_DRAIN" != 1 ] && [ "$REPLACEMENT_REASON" != incompatible ] && [ "$DRAIN_FORCE" != 1 ]; then
     # An optional refresh drains only an idle server, so its retries never hold up new turns.
     activity="$(read_refresh_activity)"
     [ "$activity" = idle ] || emit_pending "$activity"
@@ -2080,11 +2197,14 @@ if [ "$NEEDS_OWNED_UPGRADE" = 1 ]; then
   # finish within the grace window, and exits. Unconfirmed, an expired window cancels.
   drain_force=
   [ "$DRAIN_FORCE" != 1 ] || drain_force=--force
+  # A lost response or a dead SSH owner cannot prove the server stopped draining.
+  printf '%s\\n' "$UPGRADE_INSTANCE" > "$STATE_DIR/draining.next.$$"
+  mv "$STATE_DIR/draining.next.$$" "$STATE_DIR/draining"
   drain_result="$("$RUNNER_CANDIDATE_FILE.pin" __ssh-helper drain --port "$UPGRADE_PORT" --instance-id "$UPGRADE_INSTANCE" --target-version "$TARGET_VERSION" --grace-seconds "$DRAIN_GRACE_SECONDS" $drain_force --token-file "$DEFAULT_SERVER_HOME/userdata/runtime-control.token" 2>/dev/null || true)"
   case "$drain_result" in
     drained) ;;
-    cancelled) rm -f "$PREVIOUS_RUNNER"; emit_pending busy ;;
-    *) rm -f "$PREVIOUS_RUNNER"; emit_pending unknown ;;
+    cancelled) rm -f "$STATE_DIR/draining" "$PREVIOUS_RUNNER"; DRAIN_UNCERTAIN=0; emit_pending busy ;;
+    *) DRAIN_UNCERTAIN=1; rm -f "$PREVIOUS_RUNNER"; emit_pending unknown ;;
   esac
   LEGACY_TERMINATED=1
   rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$STATE_DIR/identity"
@@ -2130,6 +2250,7 @@ if [ "$NEEDS_OWNED_UPGRADE" = 1 ]; then
     *)
       printf 'Remote runtime replacement failed; see %s.\n' "$LOG_FILE" >&2; exit 1 ;;
   esac
+  rm -f "$STATE_DIR/draining"
 elif [ "$LIVE_STATUS" = live ]; then
   if [ "$LIVE_COMPATIBLE" != 1 ]; then
     printf 'Live GOAT compatibility changed; reconnect.\n' >&2; exit 1
@@ -2143,7 +2264,12 @@ elif [ "$LIVE_STATUS" = live ]; then
 else
   publish_selected_runner
 fi
-if [ -z "$REMOTE_PORT" ]; then
+LAUNCH_ATTEMPTS=0
+while [ -z "$REMOTE_PORT" ]; do
+  if [ "$GOAT_HOST_WINDOWS" = 0 ] && [ ! -d /proc/self/fd ] && ! command -v lsof >/dev/null 2>&1; then
+    printf 'Cannot verify the launched GOAT listener: this host needs /proc or lsof.\\n' >&2; exit 1
+  fi
+  LAUNCH_ATTEMPTS=$((LAUNCH_ATTEMPTS + 1))
   REMOTE_PORT="$(pick_port)" || true
   if [ -z "$REMOTE_PORT" ]; then
     if [ "$GOAT_ARCHIVE_MODE" = "1" ]; then
@@ -2163,6 +2289,8 @@ if [ -z "$REMOTE_PORT" ]; then
   else
     SPAWN_IDENTITY="$GOAT_NODE_SCRIPT_PATH"
   fi
+  touch "$LOG_FILE"
+  LAUNCH_LOG_OFFSET="$(wc -c <"$LOG_FILE")"
   if [ "$GOAT_HOST_WINDOWS" = 1 ]; then
     # Windows OpenSSH ends every process left in the session, so the server starts outside it.
     if [ "$GOAT_ARCHIVE_MODE" = 1 ]; then set -- "$(cygpath -w "$SPAWN_IDENTITY")"
@@ -2182,22 +2310,38 @@ if [ -z "$REMOTE_PORT" ]; then
   printf '%s\\n' "$REMOTE_PID" >"$PID_FILE"
   printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
   printf 'managed\\n' >"$MANAGED_FILE"
-  if ! wait_ready "@@GOAT_READY_TIMEOUT_MS@@"; then
-    printf 'Remote GOAT server did not become ready on 127.0.0.1:%s.\\n' "$REMOTE_PORT" >&2
+  if ! wait_launched_listener || ! wait_ready "@@GOAT_READY_TIMEOUT_MS@@" ||
+     ! server_owns_listener "$REMOTE_PID" "$REMOTE_PORT"; then
+    # Only this attempt's exited child and bind error authorize another port selection.
+    # Never signal the listener that won the race between pick-port and serve.
+    if ! server_alive "$REMOTE_PID" &&
+       tail -c "+$((LAUNCH_LOG_OFFSET + 1))" "$LOG_FILE" | grep -q EADDRINUSE; then
+      wait "$REMOTE_PID" 2>/dev/null || true
+      rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$STATE_DIR/identity"
+      if [ "$LAUNCH_ATTEMPTS" -lt @@GOAT_LAUNCH_ATTEMPTS@@ ]; then
+        printf 'Remote GOAT port %s was taken during launch; retrying.\\n' "$REMOTE_PORT" >&2
+        REMOTE_PORT=
+        continue
+      fi
+    fi
+    printf 'Remote GOAT server did not become ready with its own listener on 127.0.0.1:%s.\\n' "$REMOTE_PORT" >&2
     if [ -s "$LOG_FILE" ]; then
       tail -n 80 "$LOG_FILE" >&2 2>/dev/null || true
     else
       printf 'It wrote nothing to %s, so it exited before producing any output.\\n' "$LOG_FILE" >&2
     fi
-    server_kill "$REMOTE_PID" || true
+    if server_alive "$REMOTE_PID"; then server_kill "$REMOTE_PID" || true; fi
     wait_for_pid_exit "$REMOTE_PID"
     rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$STATE_DIR/identity"
     exit 1
   fi
-fi
+done
 refresh_fields=
 [ "$REFRESH_DECISION" != replaced ] || refresh_fields=',"refresh":"replaced"'
-printf '{"status":"ready","remotePort":%s,"serverKind":"%s","selectedVersion":"%s"%s}\n' "$REMOTE_PORT" "\${REMOTE_MANAGED:-managed}" "$SELECTED_VERSION" "$refresh_fields"
+if [ "$OWNING_LAUNCH" = 1 ] && [ "$(readlink "$LOCK" 2>/dev/null || true)" != "$OWNER" ]; then
+  printf 'Replacement lock ownership changed before attachment.\\n' >&2; exit 1
+fi
+@@GOAT_READY_BASELINE@@printf '{"status":"ready","remotePort":%s,"serverKind":"%s","selectedVersion":"%s"%s}\n' "$REMOTE_PORT" "\${REMOTE_MANAGED:-managed}" "$SELECTED_VERSION" "$refresh_fields"
 
 `;
 
@@ -2389,6 +2533,7 @@ function buildRemoteRunnerSetupScript(
   selection: PreparedRemoteRuntime,
   verifyOwnedBeforePublication = false,
   reconnect = false,
+  captureBaseline = false,
 ): string {
   const preserve = selection.source === "retained";
   return applyScriptPlaceholders(REMOTE_RUNNER_SETUP_SCRIPT, {
@@ -2403,13 +2548,32 @@ function buildRemoteRunnerSetupScript(
         RUNTIME_DRAIN_MAX_GRACE_SECONDS,
       ),
     ),
-    GOAT_REPLACEMENT_LOCK: REMOTE_REPLACEMENT_LOCK_SCRIPT,
-    GOAT_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
-    GOAT_RECONNECT_PENDING_GUARD: reconnect
-      ? `  # Normal preparation captures the retained runner so contention can still attach.
-  exit ${REMOTE_RECONNECT_REPROBE_EXIT_CODE}
+    GOAT_REPLACEMENT_LOCK:
+      REMOTE_REPLACEMENT_LOCK_SCRIPT +
+      (reconnect
+        ? `
+# The outer folded command holds this exact owner link across probe and attachment.
+OWNER="\${2:-}"
+acquire_replacement_lock() {
+  [ -n "$OWNER" ] && [ "$(readlink "$LOCK" 2>/dev/null || true)" = "$OWNER" ] || return 1
+  LOCK_HELD=1
+}
+release_replacement_lock() { LOCK_HELD=0; }
+# The outer command already spent the lock wait budget. A borrowed owner cannot be reacquired.
+wait_for_replacement_lock() { return 1; }
 `
-      : "",
+        : "") +
+      (captureBaseline
+        ? `
+${buildReconnectProbeScript(selection)}
+capture_reconnect_baseline() {
+  if [ "$LOCK_HELD" = 1 ] && [ "$(readlink "$LOCK" 2>/dev/null || true)" = "$OWNER" ] &&
+     probe_output="$(reconnect_probe capture)"; then printf 'GOAT_RECONNECT_PROBE=%s\\n' "$probe_output"; fi
+}
+`
+        : ""),
+    GOAT_READY_BASELINE: captureBaseline ? "capture_reconnect_baseline\n" : "",
+    GOAT_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
     GOAT_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
     GOAT_REQUESTED_RUNNER: shellSingleQuote(
       isNodeScriptRunner(input)
@@ -2463,6 +2627,7 @@ export function buildRemoteLaunchScript(
   input?: RemoteGoatRunnerOptions,
   selection = requestedRuntime(input),
   reconnect = false,
+  captureBaseline = false,
 ): string {
   return applyScriptPlaceholders(REMOTE_LAUNCH_SCRIPT, {
     GOAT_ARCHIVE_MODE: isNodeScriptRunner(input) ? "0" : "1",
@@ -2470,11 +2635,19 @@ export function buildRemoteLaunchScript(
     GOAT_OWNED_IDENTITY: REMOTE_OWNED_IDENTITY_SCRIPT,
     GOAT_LEGACY_IDENTITY: REMOTE_LEGACY_IDENTITY_SCRIPT,
     GOAT_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
-    GOAT_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, selection, true, reconnect),
+    GOAT_RUNNER_SETUP: buildRemoteRunnerSetupScript(
+      input,
+      selection,
+      true,
+      reconnect,
+      captureBaseline,
+    ),
+    GOAT_READY_BASELINE: captureBaseline ? "capture_reconnect_baseline\n" : "",
     GOAT_PICK_PORT_SCRIPT: stripTrailingNewlines(REMOTE_PICK_PORT_SCRIPT),
     GOAT_WAIT_READY_SCRIPT: stripTrailingNewlines(REMOTE_WAIT_READY_SCRIPT),
     GOAT_DEFAULT_REMOTE_PORT: String(DEFAULT_REMOTE_PORT),
     GOAT_REMOTE_PORT_SCAN_WINDOW: String(REMOTE_PORT_SCAN_WINDOW),
+    GOAT_LAUNCH_ATTEMPTS: String(REMOTE_LAUNCH_ATTEMPTS),
     GOAT_READY_TIMEOUT_MS: String(REMOTE_READY_TIMEOUT_MS),
     GOAT_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
     GOAT_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
@@ -2846,6 +3019,7 @@ probe_live() {
      [ "$(cat "$state/port" 2>/dev/null || true)" = "$6" ]; then live_owned=true; fi
   if [ "$1" = live ] && valid_version "$2"; then
     live_version="$2"
+    live_fields="$live_fields$(printf ',"livePort":%s' "$6")"
     live_signals="$(signals_json "$2" "$3" "$4" || true)"
     live_binary="$(binary_json "$live_version" || true)"
     if [ -n "$live_signals" ]; then
@@ -2940,6 +3114,9 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
       liveOwned: Schema.optionalKey(Schema.Boolean),
       identityAbsent: Schema.optionalKey(Schema.Boolean),
       liveVersion: Schema.optionalKey(Schema.String),
+      livePort: Schema.optionalKey(
+        Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 })),
+      ),
       liveSignals: Schema.optionalKey(RuntimeSignals),
       liveBinarySignals: Schema.optionalKey(RuntimeSignals),
       liveCommitTime: Schema.optionalKey(Schema.Int),
@@ -3157,7 +3334,6 @@ export const prepareRemoteRuntime = (
       owningLaunch &&
       exact.mayUpgradeOwnedServer &&
       runner?.refreshOwnedRuntimeOnFirstConnection === true &&
-      probe.liveDrain === true &&
       liveCompatible &&
       probe.liveOwned === true &&
       probe.identityAbsent !== true &&
@@ -3566,42 +3742,89 @@ GOAT_RECONNECT_PROBE_SCRIPT
 }
 
 function buildReconnectLaunchScript(selected: PreparedRemoteRuntime, expectedProbe?: string) {
-  // The folded launch guard only attaches to the unchanged owned server. Reusing the compared
-  // baseline is safe: stale facts only force a reprobe next reconnect, never a wrong selection.
-  const baseline =
-    expectedProbe === undefined
-      ? 'if probe_output="$(reconnect_probe capture)"; then printf \'GOAT_RECONNECT_PROBE=%s\\n\' "$probe_output"; fi'
-      : "printf 'GOAT_RECONNECT_PROBE=%s\\n' \"$probe_output\"";
+  const pending = selected.reconnectPending ?? {
+    reason: "contended" as const,
+    replacement: "incompatible" as const,
+    requestedVersion: selected.requestedVersion ?? "",
+    liveVersion: selected.version ?? "unknown",
+  };
+  const successor = {
+    ...selected,
+    version: selected.requestedVersion,
+    source: "installed" as const,
+    runner: { ...selected.runner, archiveVersion: selected.requestedVersion },
+    retainedRunnerSha256: null,
+    mayUpgradeOwnedServer: false,
+    refreshIfIdle: false,
+  };
+  delete successor.installedExecutableSha256;
+  delete successor.expectedLiveRunnerSha256;
+  delete successor.expectedLiveVersion;
   return `set -eu
-${buildReconnectProbeScript(selected)}
 ${
   expectedProbe === undefined
     ? ""
-    : `probe_output="$(reconnect_probe)"
+    : `STATE_DIR="$HOME/.goat/ssh-launch/$1"
+DEFAULT_SERVER_HOME="$HOME/.goat"
+${REMOTE_PROTOCOL_TOKEN_SCRIPT}
+${REMOTE_REPLACEMENT_LOCK_SCRIPT}
+trap 'release_recovery_lock; release_replacement_lock' EXIT
+trap 'exit 1' HUP INT TERM
+if ! acquire_replacement_lock; then
+  if ! wait_for_replacement_lock || ! acquire_replacement_lock; then
+    ${
+      selected.reconnectPending === undefined
+        ? ": # Launch revalidates lock-only reuse, including the drain fence."
+        : `${buildRemoteContendedOutput({
+            replacement: pending.replacement,
+            requestedVersion: pending.requestedVersion,
+            liveVersion: pending.liveVersion,
+          })}
+    exit 0`
+    }
+  fi
+fi
+${buildReconnectProbeScript(selected)}
+probe_output="$(reconnect_probe)"
+reconnect_successor=0
 if [ "$probe_output" != ${shellSingleQuote(expectedProbe)} ]; then
-  printf 'GOAT_RECONNECT_PROBE=%s\\n' "$probe_output"
-  printf '{"status":"reprobe"}\\n'
-  exit 0
+  case "$probe_output" in
+    *${shellSingleQuote(`"liveVersion":"${selected.requestedVersion}"`)}*)
+      ${selected.version !== selected.requestedVersion ? "reconnect_successor=1" : ":"} ;;
+  esac
+  if [ "$reconnect_successor" = 0 ]; then
+    printf 'GOAT_RECONNECT_PROBE=%s\\n' "$probe_output"
+    printf '{"status":"reprobe"}\\n'
+    exit 0
+  fi
 fi`
 }
 reconnect_launch() {
-sh -s -- "$1" <<'GOAT_RECONNECT_LAUNCH_SCRIPT'
-${buildRemoteLaunchScript(selected.runner, expectedProbe === undefined ? selected : { ...selected, mayUpgradeOwnedServer: false }, expectedProbe !== undefined)}
+sh -s -- "$1" "\${OWNER:-}" <<'GOAT_RECONNECT_LAUNCH_SCRIPT'
+${buildRemoteLaunchScript(selected.runner, expectedProbe === undefined ? selected : { ...selected, mayUpgradeOwnedServer: false }, expectedProbe !== undefined, expectedProbe === undefined)}
 GOAT_RECONNECT_LAUNCH_SCRIPT
 }
 ${
-  expectedProbe === undefined
-    ? 'launch_output="$(reconnect_launch "$1")"'
-    : `if launch_output="$(reconnect_launch "$1")"; then
+  expectedProbe !== undefined && selected.version !== selected.requestedVersion
+    ? `if [ "$reconnect_successor" = 1 ]; then
+reconnect_launch() {
+sh -s -- "$1" "$OWNER" <<'GOAT_RECONNECT_SUCCESSOR_SCRIPT'
+${buildRemoteLaunchScript(successor.runner, successor, true)}
+GOAT_RECONNECT_SUCCESSOR_SCRIPT
+}
+fi`
+    : ""
+}
+if launch_output="$(reconnect_launch "$1")"; then
   :
 else
   launch_status=$?
   if [ "$launch_status" -ne ${REMOTE_RECONNECT_REPROBE_EXIT_CODE} ]; then exit "$launch_status"; fi
+  # A guard can fail after the probe; selection must observe that race afresh.
   printf '{"status":"reprobe"}\\n'
   exit 0
-fi`
-}
-${baseline}
+fi
+${expectedProbe === undefined ? "" : "printf 'GOAT_RECONNECT_PROBE=%s\\n' \"$probe_output\""}
 printf '%s\\n' "$launch_output"
 `;
 }
@@ -3713,6 +3936,11 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       ),
     );
     if (parsed.status === "pending") return parsed;
+    const pending =
+      parsed.pending ??
+      (folded !== undefined && parsed.selectedVersion === previousSelection?.version
+        ? previousSelection?.reconnectPending
+        : undefined);
     if (!Number.isInteger(parsed.remotePort)) {
       return yield* new SshLaunchError({
         message: `SSH launch returned an invalid remote port: ${String(parsed.remotePort)}.`,
@@ -3820,12 +4048,13 @@ if probe_output="$(reconnect_probe capture)"; then printf 'GOAT_RECONNECT_PROBE=
     delete durableSelection.expectedLiveVersion;
     delete durableSelection.expectedLiveRunnerSha256;
     delete durableSelection.reconnectProbe;
+    delete durableSelection.reconnectPending;
+    if (pending !== undefined) durableSelection.reconnectPending = pending;
     if (
       probeOutput !== undefined &&
-      parsed.pending === undefined &&
       selected.upgradeFailure === undefined &&
       selected.updateBlocked === undefined &&
-      parsed.selectedVersion === selected.version
+      parsed.selectedVersion === cachedSelection.version
     ) {
       const probe = yield* decodeRemoteRuntimeProbe(probeOutput).pipe(Effect.option);
       if (
@@ -3835,10 +4064,11 @@ if probe_output="$(reconnect_probe capture)"; then printf 'GOAT_RECONNECT_PROBE=
         probe.value.liveStatus === "live" &&
         probe.value.liveOwned === true &&
         probe.value.identityAbsent === false &&
-        probe.value.liveVersion === selected.version &&
-        probe.value.retainedVersion === selected.version &&
-        (selected.source !== "retained" ||
-          probe.value.retainedRunnerSha256 === selected.retainedRunnerSha256) &&
+        probe.value.liveVersion === cachedSelection.version &&
+        probe.value.retainedVersion === cachedSelection.version &&
+        (cachedSelection.source !== "retained" ||
+          cachedSelection.retainedRunnerSha256 === null ||
+          probe.value.retainedRunnerSha256 === cachedSelection.retainedRunnerSha256) &&
         probe.value.liveSignals !== undefined &&
         probe.value.liveBinarySignals !== undefined &&
         matchesSignals(probe.value.liveSignals, selected.requestedVersion ?? "") &&
@@ -3859,7 +4089,7 @@ if probe_output="$(reconnect_probe capture)"; then printf 'GOAT_RECONNECT_PROBE=
         requireInstalled: !isNodeScriptRunner(selected.runner),
       },
       ...(parsed.refresh === undefined ? {} : { refresh: parsed.refresh }),
-      ...(parsed.pending === undefined ? {} : { pending: parsed.pending }),
+      ...(pending === undefined ? {} : { pending }),
     };
   },
 );
@@ -4982,21 +5212,55 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     requestedVersion,
     detail: `Refresh deferred: archive for ${requestedVersion} unavailable`,
   });
-  const publishResult = (
+  const deferredDrainRefresh = (requestedVersion: string) => ({
+    reason: "archive_unavailable" as const,
+    refreshCause: "drain_unavailable" as const,
+    requestedVersion,
+    detail: "Refresh deferred: this runtime could not drain for the refresh",
+  });
+  const publishResult = Effect.fn("ssh/tunnel.publishResult")(function* (
     key: string,
     target: DesktopSshEnvironmentTarget,
     result: SshTunnelEntry | DesktopSshRuntimePendingResult,
     runner?: RemoteGoatRunnerOptions,
-  ) => {
-    if (setupTerminalFailure(key)) return;
-    const pending = "type" in result ? result.pending : pendingReplacements.get(key)?.pending;
+  ) {
+    if (closed || setupTerminalFailure(key)) return;
+    const generation = generations.get(key) ?? 0;
+    const intent = pendingReplacements.get(key);
+    const pending = "type" in result ? result.pending : intent?.pending;
     const host = target.alias || target.hostname;
     const runtimeVersion =
       "type" in result ? result.pending.liveVersion : result.selectedRuntime.version;
     const requestedVersion = pending?.requestedVersion ?? runner?.archiveVersion?.trim() ?? "";
     const base = { host, runtimeVersion, requestedVersion };
+    const observed = statuses.get(key);
+    const drainAttached =
+      !("type" in result) &&
+      result.attachmentInvalidated !== true &&
+      pending?.refreshCause === "drain_unavailable" &&
+      (pending.replacement === "older" || pending.replacement === "capability") &&
+      pending.liveVersion === runtimeVersion &&
+      result.selectedRuntime.requestedVersion === requestedVersion &&
+      intent?.requestedRunner.archiveVersion?.trim() === requestedVersion &&
+      intent.generation === generation &&
+      tunnels.get(key) === result &&
+      (yield* result.process.isRunning.pipe(Effect.orElseSucceed(() => false)));
+    if (
+      closed ||
+      (generations.get(key) ?? 0) !== generation ||
+      pendingReplacements.get(key) !== intent ||
+      (!("type" in result) && tunnels.get(key) !== result) ||
+      (drainAttached &&
+        (result.attachmentInvalidated === true || statuses.get(key) !== observed)) ||
+      setupTerminalFailure(key)
+    )
+      return;
     let snapshot: SshHostStatus;
-    if (pending !== undefined) {
+    if (drainAttached) {
+      const refreshDeferred = deferredDrainRefresh(requestedVersion);
+      snapshot = { ...base, state: "ready", refreshDeferred, detail: refreshDeferred.detail };
+      acquisitionFailures.delete(key);
+    } else if (pending !== undefined) {
       const detail =
         pending.detail === "recovery-stale"
           ? "Check that no other GOAT client is updating this host before clearing the stale lock."
@@ -5036,7 +5300,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       ),
     };
     statuses.set(key, { kind: "ok", status: snapshot });
-  };
+  });
   const publishFailure = Effect.fn("ssh/tunnel.publishFailure")(function* (
     key: string,
     target: DesktopSshEnvironmentTarget,
@@ -5071,6 +5335,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       generation: number;
       managedPin?: ManagedPin;
       nextAttemptAt: number;
+      selectedRuntime: PreparedRemoteRuntime | undefined;
     } & (
       | { pending: SshRuntimePendingReplacement; archiveFailure?: never }
       | { pending?: never; archiveFailure: SshHostFailure }
@@ -5372,7 +5637,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         );
       });
     const launchStartedAt = yield* Clock.currentTimeMillis;
-    const remoteLaunch = yield* (
+    const observedLaunch = yield* (
       input.background
         ? operation(backgroundAuth(input.key))
         : runWithSshAuth({
@@ -5394,7 +5659,37 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           return Effect.fail(error);
         },
       }),
+      Effect.onExit((exit) =>
+        Exit.isSuccess(exit)
+          ? Effect.void
+          : Effect.sync(() => {
+              const previous = input.previous ?? tunnels.get(input.key);
+              if (previous !== undefined) previous.uncertainDrain = true;
+            }),
+      ),
     );
+    const deferredIntent = pendingReplacements.get(input.key);
+    const retainedPending = deferredIntent?.pending;
+    const remoteLaunch =
+      observedLaunch.status === "ready" &&
+      observedLaunch.pending === undefined &&
+      retainedPending !== undefined &&
+      deferredIntent !== undefined &&
+      deferredIntent.generation === generation &&
+      observedLaunch.selectedRuntime.requestedVersion === retainedPending.requestedVersion &&
+      observedLaunch.selectedRuntime.version === retainedPending.liveVersion &&
+      observedLaunch.selectedRuntime.version !== retainedPending.requestedVersion &&
+      observedLaunch.selectedRuntime.updateBlocked === undefined &&
+      observedLaunch.selectedRuntime.upgradeFailure === undefined
+        ? {
+            ...observedLaunch,
+            pending: retainedPending,
+            selectedRuntime: {
+              ...observedLaunch.selectedRuntime,
+              reconnectPending: retainedPending,
+            },
+          }
+        : observedLaunch;
     const currentPin = yield* readManagedPin(input.resolvedTarget).pipe(
       Effect.orElseSucceed(() => undefined),
     );
@@ -5431,12 +5726,27 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       remoteLaunch.status === "ready" ? remoteLaunch.selectedRuntime.upgradeFailure : undefined;
     const needsArchiveRetry = archiveFailure?.reason === "archive_unavailable";
     if ((remoteLaunch.pending !== undefined || needsArchiveRetry) && input.runner !== undefined) {
+      const previousIntent = pendingReplacements.get(input.key);
+      const sameIntent =
+        previousIntent !== undefined &&
+        previousIntent.generation === generation &&
+        previousIntent.requestedRunner.archiveVersion === input.runner.archiveVersion;
       const intent = {
         target: input.resolvedTarget,
-        requestedRunner: { ...input.runner, confirmReplacement: false },
+        requestedRunner: sameIntent
+          ? previousIntent.requestedRunner
+          : { ...input.runner, confirmReplacement: false },
         generation,
         ...(managedPin === undefined ? {} : { managedPin }),
-        nextAttemptAt: (yield* Clock.currentTimeMillis) + 600_000,
+        nextAttemptAt: sameIntent
+          ? previousIntent.nextAttemptAt
+          : (yield* Clock.currentTimeMillis) + 600_000,
+        selectedRuntime:
+          remoteLaunch.status === "ready"
+            ? remoteLaunch.selectedRuntime
+            : (input.previousSelection ??
+              input.previous?.selectedRuntime ??
+              previousIntent?.selectedRuntime),
       };
       if (remoteLaunch.pending !== undefined) {
         yield* Effect.logWarning("ssh.runtime.refresh.deferred", {
@@ -5445,6 +5755,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           requestedVersion: remoteLaunch.pending.requestedVersion,
           reason: remoteLaunch.pending.reason,
           replacement: remoteLaunch.pending.replacement,
+          detail: remoteLaunch.pending.detail,
           retryInMinutes: 10,
         });
         pendingReplacements.set(input.key, { ...intent, pending: remoteLaunch.pending });
@@ -5462,8 +5773,11 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       }
     }
     if (setupTerminalFailure(input.key)) pendingReplacements.delete(input.key);
-    if (remoteLaunch.status === "pending")
+    if (remoteLaunch.status === "pending") {
+      const previous = input.previous ?? tunnels.get(input.key);
+      if (previous !== undefined) previous.attachmentInvalidated = true;
       return pendingResult(input.resolvedTarget, remoteLaunch.pending);
+    }
     if (
       input.previous !== undefined &&
       remoteLaunch.refresh !== "replaced" &&
@@ -5474,6 +5788,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         pendingReplacements.delete(input.key);
       // Keep the forward's identity for its finalizer while updating the latest selection.
       input.previous.selectedRuntime = remoteLaunch.selectedRuntime;
+      input.previous.attachmentInvalidated = false;
+      input.previous.uncertainDrain = false;
       return input.previous;
     }
     if (input.previous !== undefined) {
@@ -5693,8 +6009,15 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     keyOnly = keyOnly || managedPin !== undefined;
     const entry = tunnels.get(key);
     if (entry !== undefined) {
+      if (entry.attachmentInvalidated === true || entry.uncertainDrain === true)
+        allowFoldedProbe = false;
       // The background retry owns a deferred refresh; this caller only needs a forward.
-      if (reuseWhileRefreshPending && pendingReplacements.has(key)) {
+      if (
+        reuseWhileRefreshPending &&
+        pendingReplacements.has(key) &&
+        entry.attachmentInvalidated !== true &&
+        entry.uncertainDrain !== true
+      ) {
         if (yield* keepAnsweringTunnel(key, entry)) return entry;
         // The stale forward is closed; connect anew, refreshing if the host is idle now.
         return yield* createTunnelEntry({
@@ -5703,12 +6026,33 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           keyOnly,
           ...(runner === undefined ? {} : { runner }),
           previousLocalPort: entry.localPort,
+          ...(allowFoldedProbe ? { previousSelection: entry.selectedRuntime } : {}),
+          background,
+          ...(onPhase === undefined ? {} : { onPhase }),
+        });
+      }
+      if (
+        allowFoldedProbe &&
+        pendingReplacements.has(key) &&
+        runner?.refreshOwnedRuntimeOnFirstConnection !== true
+      ) {
+        if (yield* keepAnsweringTunnel(key, entry)) return entry;
+        return yield* createTunnelEntry({
+          key,
+          resolvedTarget,
+          keyOnly,
+          ...(runner === undefined ? {} : { runner }),
+          previousLocalPort: entry.localPort,
+          previousSelection: entry.selectedRuntime,
           background,
           ...(onPhase === undefined ? {} : { onPhase }),
         });
       }
       const replace =
-        pendingReplacements.has(key) || runner?.refreshOwnedRuntimeOnFirstConnection === true;
+        entry.attachmentInvalidated === true ||
+        entry.uncertainDrain === true ||
+        pendingReplacements.has(key) ||
+        runner?.refreshOwnedRuntimeOnFirstConnection === true;
       if (!replace && (yield* keepAnsweringTunnel(key, entry))) return entry;
       if (replace) {
         const readiness = yield* Effect.exit(waitForHttpReady(existingTunnelCheck(entry, 2_000)));
@@ -5729,6 +6073,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         }).pipe(Effect.uninterruptible);
       }
     }
+    const previousSelection =
+      entry?.selectedRuntime ?? pendingReplacements.get(key)?.selectedRuntime;
     return yield* createTunnelEntry({
       key,
       resolvedTarget,
@@ -5736,10 +6082,9 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       ...(runner === undefined ? {} : { runner }),
       ...(entry === undefined ? {} : { previousLocalPort: entry.localPort }),
       ...(allowFoldedProbe &&
-      entry !== undefined &&
-      !pendingReplacements.has(key) &&
+      previousSelection !== undefined &&
       runner?.refreshOwnedRuntimeOnFirstConnection !== true
-        ? { previousSelection: entry.selectedRuntime }
+        ? { previousSelection }
         : {}),
       background,
       ...(onPhase === undefined ? {} : { onPhase }),
@@ -5801,7 +6146,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
                 true,
               );
               if (closed || (generations.get(key) ?? 0) !== intent.generation) return;
-              publishResult(key, intent.target, result, intent.requestedRunner);
+              yield* publishResult(key, intent.target, result, intent.requestedRunner);
               if (!("type" in result) && !pendingReplacements.has(key)) {
                 firstConnectionDecisions.add(
                   `${key}:${intent.requestedRunner.archiveVersion ?? intent.requestedRunner.nodeScriptPath ?? ""}`,
@@ -5848,7 +6193,13 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     if (ensureSuperseded(ticket) || (generations.get(knownKey) ?? 0) !== requestGeneration)
       return yield* new SshLaunchError({ message: "SSH connection was cancelled.", stdout: "" });
     forgotten.delete(knownKey);
-    const announcedConnecting = statuses.get(knownKey)?.status?.state !== "preparing";
+    const reusingPending = (key: string) =>
+      requestOptions?.reuseWhileRefreshPending === true &&
+      requestOptions.refreshRuntime !== true &&
+      pendingReplacements.has(key) &&
+      tunnels.has(key);
+    const announcedConnecting =
+      !reusingPending(knownKey) && statuses.get(knownKey)?.status?.state !== "preparing";
     if (announcedConnecting) {
       publishPhase(
         knownKey,
@@ -5915,13 +6266,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         const ensureGeneration = generations.get(key) ?? 0;
         const decisionKey = `${key}:${runner?.archiveVersion ?? runner?.nodeScriptPath ?? ""}`;
         if (requestOptions?.refreshRuntime === true) acquisitionFailures.delete(key);
-        publishPhase(
-          key,
-          resolvedTarget,
-          runner?.archiveVersion?.trim() ?? "",
-          "connecting",
-          announcedConnecting ? undefined : requestOptions?.onPhase,
-        );
+        if (!reusingPending(key))
+          publishPhase(
+            key,
+            resolvedTarget,
+            runner?.archiveVersion?.trim() ?? "",
+            "connecting",
+            announcedConnecting ? undefined : requestOptions?.onPhase,
+          );
         const connectionRunner =
           runner === undefined
             ? undefined
@@ -5930,8 +6282,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
                 refreshOwnedRuntimeOnFirstConnection:
                   runner.keepExistingRunner !== true &&
                   (requestOptions?.refreshRuntime === true ||
-                    !firstConnectionDecisions.has(decisionKey) ||
-                    pendingReplacements.has(key)) &&
+                    (!firstConnectionDecisions.has(decisionKey) &&
+                      !pendingReplacements.has(key))) &&
                   runner.refreshOwnedRuntimeOnFirstConnection === true,
                 confirmReplacement: requestOptions?.confirmReplacement === true,
               };
@@ -5952,7 +6304,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
             stdout: "",
           });
         if ("type" in entry) {
-          publishResult(key, resolvedTarget, entry, runner);
+          yield* publishResult(key, resolvedTarget, entry, runner);
           return entry;
         }
 
@@ -5988,7 +6340,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           });
         // A busy runtime that still answers is used now and replaced when idle; say so.
         const pendingReplacement = pendingReplacements.get(key)?.pending;
-        publishResult(key, resolvedTarget, entry, runner);
+        yield* publishResult(key, resolvedTarget, entry, runner);
         return {
           target: entry.target,
           httpBaseUrl: entry.httpBaseUrl,
@@ -6151,6 +6503,12 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     let clearArchiveDeferral:
       | { readonly failure: SshHostFailure | undefined; readonly intent: unknown }
       | undefined;
+    let drainAttachment:
+      | { entry: SshTunnelEntry; intent: NonNullable<ReturnType<typeof pendingReplacements.get>> }
+      | undefined;
+    let verifiedDrainDeferral:
+      | { entry: SshTunnelEntry; intent: NonNullable<ReturnType<typeof pendingReplacements.get>> }
+      | undefined;
     const result = yield* Effect.gen(function* () {
       const { resolvedTarget } = yield* resolveManagedTarget(target);
       key = targetConnectionKey(resolvedTarget);
@@ -6172,6 +6530,10 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       generation = generations.get(key) ?? 0;
       resolvedTargets.set(requestKey, resolvedTarget);
       observed = statuses.get(key);
+      const entry = tunnels.get(key);
+      const intent = pendingReplacements.get(key);
+      if (entry !== undefined && intent?.pending?.refreshCause === "drain_unavailable")
+        drainAttachment = { entry, intent };
       yield* validateManagedPin(resolvedTarget);
       if (observed?.status?.state === "preparing" || observed?.status?.state === "update_waiting")
         return observed;
@@ -6267,8 +6629,61 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         };
       }
       // A successful probe observes liveness; it does not retry a failed acquisition.
+      const pending = intent?.pending;
+      if (
+        compatibleLive &&
+        probe.liveStatus === "live" &&
+        probe.liveOwned === true &&
+        entry !== undefined &&
+        intent !== undefined &&
+        intent.generation === generation &&
+        intent.requestedRunner.archiveVersion?.trim() === requestedVersion &&
+        pending?.refreshCause === "drain_unavailable" &&
+        (pending.replacement === "older" || pending.replacement === "capability") &&
+        pending.requestedVersion === requestedVersion &&
+        pending.liveVersion === probe.liveVersion &&
+        entry.selectedRuntime.version === probe.liveVersion &&
+        entry.selectedRuntime.requestedVersion === requestedVersion &&
+        entry.remotePort === probe.livePort &&
+        !setupTerminalFailure(key) &&
+        (yield* entry.process.isRunning.pipe(Effect.orElseSucceed(() => false))) &&
+        (yield* waitForHttpReady(existingTunnelCheck(entry, EXISTING_TUNNEL_CHECK_TIMEOUT_MS)).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        ))
+      ) {
+        const pin = yield* validateManagedPin(resolvedTarget);
+        if (
+          !closed &&
+          (generations.get(key) ?? 0) === generation &&
+          tunnels.get(key) === entry &&
+          pendingReplacements.get(key) === intent &&
+          !setupTerminalFailure(key) &&
+          samePin(intent.managedPin, pin)
+        )
+          verifiedDrainDeferral = { entry, intent };
+      }
       const previousFailure = acquisitionFailures.get(key);
-      if (compatibleLive && snapshot.runtimeVersion === requestedVersion) {
+      if (verifiedDrainDeferral !== undefined) {
+        const refreshDeferred = deferredDrainRefresh(requestedVersion);
+        snapshot = {
+          ...base,
+          runtimeVersion: probe.liveVersion!,
+          state: snapshot.providers?.ready === false ? "providers_not_ready" : "ready",
+          ...(snapshot.providers === undefined ? {} : { providers: snapshot.providers }),
+          refreshDeferred,
+          detail: refreshDeferred.detail,
+        };
+      } else if (pending?.refreshCause === "drain_unavailable") {
+        snapshot = {
+          ...base,
+          runtimeVersion: snapshot.runtimeVersion,
+          state: "update_blocked",
+          detail:
+            snapshot.detail ??
+            `${host}: The deferred runtime attachment could not be verified. Try reconnecting.`,
+        };
+      } else if (compatibleLive && snapshot.runtimeVersion === requestedVersion) {
         clearArchiveDeferral = { failure: previousFailure, intent: pendingReplacements.get(key) };
       } else if (
         compatibleLive &&
@@ -6330,6 +6745,16 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     if (latest !== observed && latest !== undefined) return latest;
     const enriched = yield* enrichFailure(target, result);
     if (closed || (generations.get(key) ?? 0) !== generation) return statuses.get(key) ?? enriched;
+    if (statuses.get(key) !== observed && statuses.has(key)) return statuses.get(key)!;
+    if (verifiedDrainDeferral !== undefined) {
+      if (
+        tunnels.get(key) !== verifiedDrainDeferral.entry ||
+        pendingReplacements.get(key) !== verifiedDrainDeferral.intent ||
+        setupTerminalFailure(key)
+      )
+        return statuses.get(key) ?? enriched;
+      acquisitionFailures.delete(key);
+    }
     if (clearArchiveDeferral !== undefined) {
       if (acquisitionFailures.get(key) === clearArchiveDeferral.failure)
         acquisitionFailures.delete(key);
@@ -6340,6 +6765,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         intent.archiveFailure !== undefined
       )
         pendingReplacements.delete(key);
+    }
+    if (
+      drainAttachment !== undefined &&
+      tunnels.get(key) === drainAttachment.entry &&
+      pendingReplacements.get(key) === drainAttachment.intent
+    ) {
+      // Historical launch proof cannot readmit an attachment rejected by a fresh probe.
+      drainAttachment.entry.attachmentInvalidated = verifiedDrainDeferral === undefined;
     }
     statuses.set(key, enriched);
     return enriched;
@@ -6354,6 +6787,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     if (
       closed ||
       entry === undefined ||
+      entry.attachmentInvalidated === true ||
+      entry.uncertainDrain === true ||
       (snapshot?.state !== "ready" && snapshot?.state !== "providers_not_ready") ||
       !(yield* entry.process.isRunning.pipe(Effect.orElseSucceed(() => false)))
     )

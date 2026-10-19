@@ -15,6 +15,10 @@
       "types": "./src/mobileAppIdentity.ts",
       "import": "./src/mobileAppIdentity.ts"
     },
+    "./mobilePairingLink": {
+      "types": "./src/mobilePairingLink.ts",
+      "import": "./src/mobilePairingLink.ts"
+    },
     "./sshRuntimeProtocol": {
       "types": "./src/sshRuntimeProtocol.ts",
       "import": "./src/sshRuntimeProtocol.ts"

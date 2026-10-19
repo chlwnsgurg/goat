@@ -33,6 +33,7 @@ if (!Number.isFinite(delayMs) || delayMs < 0 || !Number.isInteger(runs) || runs 
   throw new Error("Use a nonnegative delay and at least five runs.");
 }
 const root = NodePath.resolve(import.meta.dirname, "..");
+const pipelineModule = "/apps/web/src/connection/bench-ssh-post-connect.pipeline.ts";
 const sockets = new Set();
 const delay = () =>
   new NodeStream.Transform({
@@ -72,6 +73,8 @@ try {
           .split("\n"),
       )
     : new Set();
+  // Compare application code from the ref while keeping the current benchmark driver.
+  sourceFiles.delete(pipelineModule.slice(1));
   vite = await createServer({
     root,
     configFile: false,
@@ -95,7 +98,7 @@ try {
         ]
       : [],
   });
-  const { run } = await vite.ssrLoadModule("/scripts/bench-ssh-post-connect.pipeline.ts");
+  const { run } = await vite.ssrLoadModule(pipelineModule);
   const devLog = values["dev-log"] ? await NodeFSP.readFile(values["dev-log"], "utf8") : "";
   const pairingUrl = devLog.match(/pairingUrl:\s*(https?:\/\/\S+)/)?.[1];
   const pairingCredential = pairingUrl

@@ -159,16 +159,16 @@ describe("theme files", () => {
     },
   );
 
-  it("keeps stock dark controls in the neutral-black surface hierarchy", () => {
+  it("keeps stock dark controls one step above the near-black canvas", () => {
     expectThemeColors(getStandardThemeColors("dark"), {
-      canvas: "#0a0a0a",
-      surface: "#111111",
-      surfaceRaised: "#111111",
-      surfaceOverlay: "#111111",
-      toolbarControl: "#111111",
-      secondary: "#111111",
-      muted: "#111111",
-      accentSurface: "#141414",
+      canvas: "#171717",
+      surface: "#232323",
+      surfaceRaised: "#232323",
+      surfaceOverlay: "#232323",
+      toolbarControl: "#232323",
+      secondary: "#232323",
+      muted: "#232323",
+      accentSurface: "#252525",
     });
   });
 
@@ -180,10 +180,10 @@ describe("theme files", () => {
       messageSurface: "#f4f4f5",
     });
     expectThemeColors(getStandardThemeColors("dark"), {
-      canvas: "#0a0a0a",
-      sidebar: "#000000",
-      sidebarRowActive: "#1a1b1b",
-      messageSurface: "#141414",
+      canvas: "#171717",
+      sidebar: "#0f0f0f",
+      sidebarRowActive: "#272828",
+      messageSurface: "#252525",
     });
   });
 

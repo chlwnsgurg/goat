@@ -85,8 +85,6 @@ afterEach(() => {
   delete (window as { desktopBridge?: unknown }).desktopBridge;
 });
 
-const flush = () => act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
-
 function button(name: string, scope: ParentNode = document) {
   const match = [...scope.querySelectorAll("button")].find(
     (element) =>
@@ -114,10 +112,9 @@ async function openAddDialog() {
   await act(async () => {
     root.render(<ConnectionEnvironmentsSection title="Connections" searchable={false} />);
   });
-  await act(async () => button("Add environment").click());
-  await flush();
+  await act(async () => button("Add device").click());
   const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
-  if (!dialog) throw new Error("Add environment dialog did not open");
+  if (!dialog) throw new Error("Add device dialog did not open");
   return dialog;
 }
 
@@ -129,18 +126,17 @@ it("shows the empty state when no machines are saved", async () => {
   expect(container.textContent).toContain("No saved remote environments");
 });
 
-it("pairs a pasted pairing URL and closes the dialog", async () => {
+it("pairs a pasted GOAT server link through Add device and closes the dialog", async () => {
   state.connectPairing.mockResolvedValue({ _tag: "Success", value: undefined });
   const dialog = await openAddDialog();
 
-  type(input("backend.example.com"), "https://box.example.com/pair#token=PAIR1234");
+  type(input("hub.tailnet-name.ts.net"), "https://hub.tail.ts.net/pair#token=PAIR1234");
   expect(input("PAIRCODE").value).toBe("PAIR1234");
 
-  await act(async () => button("Add environment", dialog).click());
-  await flush();
+  await act(async () => button("Add device", dialog).click());
 
   expect(state.connectPairing).toHaveBeenCalledWith({
-    host: "https://box.example.com",
+    host: "https://hub.tail.ts.net",
     pairingCode: "PAIR1234",
   });
   expect(document.querySelector('[role="dialog"]')).toBeNull();
@@ -153,10 +149,9 @@ it("keeps the dialog open with the error when pairing fails", async () => {
   });
   const dialog = await openAddDialog();
 
-  type(input("backend.example.com"), "box.example.com");
+  type(input("hub.tailnet-name.ts.net"), "box.example.com");
   type(input("PAIRCODE"), "OLDCODE");
-  await act(async () => button("Add environment", dialog).click());
-  await flush();
+  await act(async () => button("Add device", dialog).click());
 
   expect(state.connectPairing).toHaveBeenCalledWith({
     host: "box.example.com",
@@ -181,13 +176,11 @@ it("keeps thread jump chords inside the SSH host suggestions", async () => {
     element.textContent?.startsWith("SSH"),
   );
   await act(async () => sshMode!.click());
-  await flush();
   const hostInput = document.querySelector<HTMLInputElement>("#saved-backend-ssh-host")!;
   await act(async () => {
     hostInput.focus();
     hostInput.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
   });
-  await flush();
 
   const chord = (key: string) =>
     new KeyboardEvent("keydown", {
@@ -208,9 +201,29 @@ it("keeps thread jump chords inside the SSH host suggestions", async () => {
   await act(async () => {
     hostInput.dispatchEvent(chord("1"));
   });
-  await flush();
   expect(resolveSshHost).toHaveBeenCalledWith("devbox");
   expect(state.connectSshEnvironment).toHaveBeenCalledWith(
     expect.objectContaining({ target: expect.objectContaining({ alias: "devbox" }) }),
   );
+});
+
+it("keeps Add device pending until the GOAT server pairing command settles", async () => {
+  let finish!: (result: { _tag: "Success"; value: undefined }) => void;
+  state.connectPairing.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const dialog = await openAddDialog();
+  type(input("hub.tailnet-name.ts.net"), "https://hub.tail.ts.net/pair#token=PAIR1234");
+  await act(async () => button("Add device", dialog).click());
+  expect(state.connectPairing).toHaveBeenCalledWith({
+    host: "https://hub.tail.ts.net",
+    pairingCode: "PAIR1234",
+  });
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  expect(button("Adding…", dialog).disabled).toBe(true);
+  await act(async () => finish({ _tag: "Success", value: undefined }));
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
 });

@@ -507,6 +507,22 @@
       "types": "./src/pullRequestQuery.ts",
       "default": "./src/pullRequestQuery.ts"
     },
+    "./authorization/service": {
+      "types": "./src/authorization/service.ts",
+      "default": "./src/authorization/service.ts"
+    },
+    "./connection/driver": {
+      "types": "./src/connection/driver.ts",
+      "default": "./src/connection/driver.ts"
+    },
+    "./connection/resolver": {
+      "types": "./src/connection/resolver.ts",
+      "default": "./src/connection/resolver.ts"
+    },
+    "./rpc/session": {
+      "types": "./src/rpc/session.ts",
+      "default": "./src/rpc/session.ts"
+    },
     "./notes": {
       "types": "./src/notes/index.ts",
       "default": "./src/notes/index.ts"

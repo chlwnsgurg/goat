@@ -36,6 +36,7 @@ import { usePromptLinkResolver } from "../prompt-links/usePromptLinkResolver";
 import { useIncomingShare } from "../sharing/IncomingShareProvider";
 import { useNewTaskFlow } from "./new-task-flow-provider";
 import { filterProjectScopes, getProjectScopeSelectionTarget } from "./new-task-project-selection";
+import { useConnectHubEntryLabel } from "../connection/useConnectHubEntryLabel";
 
 type NewTaskRouteParams = {
   readonly incomingShareId?: string | string[];
@@ -61,8 +62,8 @@ function deriveProjectEmptyState(catalogState: WorkspaceState): {
 
   if (!catalogState.hasConnections) {
     return {
-      title: "No environments connected",
-      detail: "Add an environment before creating a task.",
+      title: "Connect your hub",
+      detail: "Connect your hub before creating a task.",
       loading: false,
     };
   }
@@ -148,6 +149,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
   const { projectScopes, selectedEnvironmentId, setProject } = useNewTaskFlow();
   const { state: catalogState } = useWorkspaceState();
   const navigation = useNavigation();
+  const connectHubLabel = useConnectHubEntryLabel();
   const isFocused = useIsFocused();
   const insets = useSafeAreaInsets();
   const { getShare, releaseShareReservation } = useIncomingShare();
@@ -383,7 +385,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
               {Platform.OS === "android" ? (
                 <>
                   <Button
-                    label={catalogState.hasReadyEnvironment ? "Add new project" : "Add environment"}
+                    label={catalogState.hasReadyEnvironment ? "Add new project" : connectHubLabel}
                     tone="primary"
                     onPress={() =>
                       catalogState.hasReadyEnvironment
@@ -405,7 +407,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                   onPress={() => navigation.navigate("ConnectionsNew")}
                 >
                   <Text className="text-sm font-goat-bold text-primary-foreground">
-                    Add environment
+                    {connectHubLabel}
                   </Text>
                 </Pressable>
               ) : (

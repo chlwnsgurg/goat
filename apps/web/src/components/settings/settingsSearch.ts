@@ -24,6 +24,7 @@ export type SettingsPath =
   | "/settings/snap-shot"
   | "/settings/providers"
   | "/settings/integrations"
+  | "/settings/goat-bot"
   | "/settings/scheduled-tasks"
   | "/settings/source-control"
   | "/settings/storage"
@@ -85,6 +86,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/providers": "Providers",
   "/settings/memory": "Memory",
   "/settings/integrations": "Integrations",
+  "/settings/goat-bot": "GOAT Bot",
   "/settings/scheduled-tasks": "Scheduled Tasks",
   "/settings/source-control": "Source Control",
   "/settings/storage": "Storage",
@@ -791,17 +793,23 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "goat-bot-home",
     title: "Runs on",
-    to: "/settings/integrations",
+    to: "/settings/goat-bot",
     targetId: "goat-bot",
     searchTerms: ["goat bot home computer environment cluster"],
   },
   {
     id: "slack-connection",
     title: "Slack connection",
-    to: "/settings/integrations",
+    to: "/settings/goat-bot",
     targetId: "slack-channel",
     environmentOnly: true,
     searchTerms: ["slack socket mode bot app token mention direct message dm channel thread reply"],
+  },
+  {
+    id: "imessage-channel",
+    title: "iMessage",
+    to: "/settings/goat-bot",
+    searchTerms: ["goat bot imessage messages text sms phone mac link code"],
   },
   {
     id: "browser-profiles",
@@ -1009,10 +1017,16 @@ export const SETTINGS_SEARCH_ITEMS = [
     localBackendManagementOnly: true,
   },
   {
+    id: "hub-device",
+    title: "Use this device as a hub",
+    to: "/settings/connections",
+    searchTerms: ["hub phone qr pair pairing tailscale https share device"],
+  },
+  {
     id: "tailscale-https",
     title: "Tailscale HTTPS",
     to: "/settings/connections",
-    targetId: "connections-environment",
+    targetId: "hub-device",
     searchTerms: ["serve magicdns endpoint remote secure network"],
     desktopOnly: true,
     localBackendManagementOnly: true,
@@ -1076,7 +1090,9 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "remote-environments",
     title: "Environments",
     to: "/settings/connections",
-    searchTerms: ["add pair backend host code ssh config agent tunnel saved goat connect"],
+    searchTerms: [
+      "add device environment pair backend host code ssh config agent tunnel saved goat connect tailscale server",
+    ],
   },
   {
     id: "hosts",
@@ -1134,6 +1150,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/keybindings": null,
   "/settings/providers": null,
   "/settings/integrations": null,
+  "/settings/goat-bot": null,
   "/settings/source-control": "environment-defaults",
   "/settings/storage": "project-defaults",
   "/settings/connections": "connections",
@@ -1235,6 +1252,17 @@ export function searchableSetting(id: SettingsSearchItemId): {
 } {
   const { id: anchorId, title } = SEARCH_ITEMS_BY_ID.get(id)!;
   return { id: anchorId, title };
+}
+
+const GOAT_BOT_SETTINGS_TARGETS = new Set(
+  (SETTINGS_SEARCH_ITEMS as ReadonlyArray<SettingsSearchItem>)
+    .filter((item) => item.to === "/settings/goat-bot")
+    .flatMap((item) => (item.targetId ? [item.id, item.targetId] : [item.id])),
+);
+
+/** Whether a settings hash names a GOAT Bot control, which once lived under Integrations. */
+export function isGoatBotSettingsTarget(hash: string): boolean {
+  return GOAT_BOT_SETTINGS_TARGETS.has(hash.replace(/^#/, ""));
 }
 
 export function filterAvailableSettingsSearchItems(

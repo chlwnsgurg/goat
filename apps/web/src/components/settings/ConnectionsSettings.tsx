@@ -4,6 +4,7 @@ import { settlePromise } from "@goat/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 import { SessionPermissions } from "./SessionPermissions";
 import { ConnectionEnvironmentsSection } from "./ConnectionEnvironmentsSection";
+import { HubDeviceCard } from "./HubDeviceCard";
 import { AUTH_SCOPE_OPTIONS as PAIRING_SCOPE_OPTIONS } from "@goat/shared/authScopeOptions";
 import { ChevronRightIcon, EllipsisIcon, PlusIcon, QrCodeIcon } from "~/components/solar";
 import { useAtomValue } from "@effect/atom-react";
@@ -37,6 +38,7 @@ import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestam
 import { resolveDesktopPairingUrl, resolveHostedPairingUrl } from "./pairingUrls";
 import {
   applyWslEnableSelection,
+  buildClientPairingQrPayload,
   canRevokeOtherClients,
   isQrShareableEndpoint,
   isWslSettingsRowVisible,
@@ -604,11 +606,11 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                 {isRevealValueUrl && isRevealValueQrShareable ? (
                   <div className="flex justify-center rounded-xl border border-border/60 bg-muted/30 p-4">
                     <QRCodeSvg
-                      value={revealValue}
+                      value={buildClientPairingQrPayload(revealValue)}
                       size={132}
                       level="M"
                       marginSize={2}
-                      title="Pairing link — scan to open on another device"
+                      title="Scan with the GOAT app on your phone: Connect hub → Scan QR code."
                     />
                   </div>
                 ) : null}
@@ -707,11 +709,11 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
           {canRenderQrForSelection ? (
             <div className="w-fit shrink-0 self-center rounded-xl bg-white p-3 sm:self-start">
               <QRCodeSvg
-                value={qrPairingUrl}
+                value={buildClientPairingQrPayload(qrPairingUrl)}
                 size={168}
                 level="M"
                 marginSize={1}
-                title="Pairing link — scan to open on another device"
+                title="Scan with the GOAT app on your phone: Connect hub → Scan QR code."
               />
             </div>
           ) : (
@@ -2306,7 +2308,6 @@ export function ConnectionsSettings() {
               <>
                 {renderNetworkAccessRow()}
                 {renderEndpointRows("endpoint-rail")}
-                {renderTailscaleRow()}
                 {renderWslRow()}
                 {canReadRelay || canManageRelay ? (
                   <CloudLinkRow canReadRelay={canReadRelay} canManageRelay={canManageRelay} />
@@ -2669,6 +2670,23 @@ export function ConnectionsSettings() {
   return (
     <SettingsPageContainer>
       <ConnectionCatalogUnreadableAlert />
+      <HubDeviceCard
+        key={primaryEnvironmentId ?? "no-primary-environment"}
+        primaryEnvironmentId={primaryEnvironmentId}
+        isDesktop={desktopBridge !== undefined}
+        canWriteAccess={canWriteAccess}
+        canManageLocalBackend={canManageLocalBackend}
+        delegatableScopes={currentSessionScopes ?? []}
+        endpoints={visibleDesktopAdvertisedEndpoints}
+        tailscaleRow={canManageLocalBackend && desktopBridge ? renderTailscaleRow() : null}
+        isNetworkAccessPending={
+          desktopNetworkAccess.isPending ||
+          isUpdatingDesktopServerExposure ||
+          isUpdatingTailscaleServe
+        }
+        networkAccessError={desktopServerExposureError}
+        onPairingLinkCreated={handlePairingLinkCreated}
+      />
       {!isGoatConnectEnabled() ? (
         <SettingsSection {...searchableSetting("goat-connect-coming-soon")} hideTitle>
           <SettingsRow
@@ -2688,8 +2706,8 @@ export function ConnectionsSettings() {
           />
         </SettingsSection>
       ) : null}
-      {primarySettings}
       <ConnectionEnvironmentsSection />
+      {primarySettings}
       <AdvancedSettingsDisclosure targetIds={ADVANCED_CONNECTION_SETTING_IDS}>
         {primaryEnvironmentId !== null ? (
           <HostsSettings
