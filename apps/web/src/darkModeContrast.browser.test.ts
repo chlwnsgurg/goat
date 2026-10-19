@@ -77,6 +77,14 @@ type Pair = {
 const muted = (alpha: number) =>
   `color-mix(in oklab, var(--contrast-muted-foreground) ${alpha}%, transparent)`;
 
+// The dropdown-glass utility fill, seen over a card: the lightest surface a
+// menu commonly opens above.
+const MENU_OVER_CARD = [
+  "var(--background)",
+  "var(--card)",
+  "color-mix(in srgb, var(--popover) 18%, color-mix(in srgb, var(--popover) var(--glass-opacity), transparent))",
+];
+
 // Backgrounds list every layer from the canvas up, so translucent fills such as
 // --secondary and --accent are measured where they actually sit.
 const DARK_PAIRS: ReadonlyArray<Pair> = [
@@ -186,7 +194,7 @@ const DARK_PAIRS: ReadonlyArray<Pair> = [
     label: "muted 70% / highlighted menu item",
     scope: "root",
     foreground: muted(70),
-    background: ["var(--background)", "var(--popover)", "var(--accent)"],
+    background: [...MENU_OVER_CARD, "var(--accent)"],
     minimum: 3,
   },
   {
@@ -194,8 +202,7 @@ const DARK_PAIRS: ReadonlyArray<Pair> = [
     scope: "root",
     foreground: muted(70),
     background: [
-      "var(--background)",
-      "var(--popover)",
+      ...MENU_OVER_CARD,
       "color-mix(in oklab, var(--contrast-foreground) 8%, transparent)",
     ],
     minimum: 3,
