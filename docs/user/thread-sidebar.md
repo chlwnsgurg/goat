@@ -167,6 +167,11 @@ from the sidebar. Only top-level threads count: subagents are part of their pare
 archived threads do not count. Work an environment started on an SSH host you are not connected
 to appears as last reported by that environment.
 
+A machine in the graph turns amber, orange, or red as it gets busier, and a machine near its
+limit catches fire. Heat comes from the same reading as **Settings → Connections → Hosts**: CPU
+use, load per core, memory, and the fullest provider quota window; hover a machine to see which
+one is high. A machine that stopped answering shows no heat until it reports again.
+
 Below the list, **Connections** shows your saved machines with the same controls as
 **Settings → Connections**: switch one off, check its routes and permissions, remove it, or pair
 another with **Add device**.
