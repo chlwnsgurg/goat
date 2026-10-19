@@ -1811,16 +1811,36 @@ const REMOTE_RUNTIME_FACT_WARMUP_SCRIPT = String.raw`warm_runtime_facts() (
   [ "$warm_age" -ge 0 ] || exit 1
   if [ "$warm_age" -lt 2 ]; then sleep "$(( 2 - warm_age ))"; fi
   exec_fact_key "$warm_exe" || exit 1
-  for warm_helper in "$warm_exe" "$RUNNER_FILE"; do
-    exec_fact version "$warm_helper" --version >/dev/null 2>&1 || true
-    exec_fact own "$warm_helper" __ssh-helper protocol --shell >/dev/null 2>&1 || true
-    build_commit_time "$warm_helper" >/dev/null 2>&1 || true
-    lacks_memory_scopes "$warm_helper" >/dev/null 2>&1 || true
-    warm_live="$(live_fact "$warm_helper" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" 2>/dev/null)" || continue
-    set -f; set -- $warm_live
-    valid_live_tokens "$@" && [ "$1" = live ] && [ "$2" = "$SELECTED_VERSION" ] &&
-      [ "$6" = "$REMOTE_PORT" ] || continue
-    compat_fact "$warm_helper" "$6" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" "$5" >/dev/null 2>&1 || true
+  warm_exe_key="$FACT_KEY"; warm_exe_name="$FACT_NAME"
+  # Independent answers run side by side, so warming costs about two goat starts on a host
+  # whose cleanup already used most of the deadline.
+  exec_fact version "$warm_exe" --version >/dev/null 2>&1 &
+  exec_fact own "$warm_exe" __ssh-helper protocol --shell >/dev/null 2>&1 &
+  build_commit_time "$warm_exe" >/dev/null 2>&1 &
+  lacks_memory_scopes "$warm_exe" >/dev/null 2>&1 &
+  if warm_live="$(live_fact "$warm_exe" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" 2>/dev/null)"; then
+    (
+      set -f; set -- $warm_live
+      valid_live_tokens "$@" && [ "$1" = live ] && [ "$2" = "$SELECTED_VERSION" ] &&
+        [ "$6" = "$REMOTE_PORT" ] &&
+        compat_fact "$warm_exe" "$6" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" "$5" >/dev/null 2>&1
+    ) || true
+  fi
+  wait || true
+  # exec_fact_key keys a runner only when it is an archive runner that execs this executable
+  # with the same arguments, so its answers are the executable's under the runner's key.
+  exec_fact_key "$RUNNER_FILE" || exit 0
+  # The runner may have been republished for another version while this ran.
+  [ "${"${FACT_KEY% *}"}" = "${"${warm_exe_key% *}"}" ] || exit 0
+  warm_runner_key="$FACT_KEY"; warm_runner_name="$FACT_NAME"
+  exec_fact_key "$warm_exe" && [ "$FACT_KEY" = "$warm_exe_key" ] || exit 0
+  for warm_kind in version own commit scopes live compat; do
+    warm_file="$GOAT_FACTS_DIR/$warm_kind.$warm_exe_name"
+    [ -f "$warm_file" ] && [ ! -L "$warm_file" ] || continue
+    { IFS= read -r warm_key && IFS= read -r warm_value; } <"$warm_file" || continue
+    case "$warm_key" in "$warm_exe_key"*) ;; *) continue ;; esac
+    fact_valid "$warm_kind" "$warm_value" || continue
+    fact_put "$warm_kind.$warm_runner_name" "$warm_runner_key${'${warm_key#"$warm_exe_key"}'}" "$warm_value"
   done
 )
 warm_runtime_facts >/dev/null 2>&1 || true

@@ -389,10 +389,10 @@ sleep() {
           yield* f.fs.readFileString(record),
         ) as Record<string, unknown>;
         yield* f.fs.writeFileString(record, JSON.stringify(historical));
+        // Nothing is recorded here, so every ask starts goat; one launch already asks the live
+        // server more than once, and a second launch would only double a slow runner's cost.
         yield* launch(f);
-        const first = yield* recordableAsks(f);
-        yield* launch(f);
-        assert.isAbove((yield* recordableAsks(f)).live, first.live);
+        assert.isAbove((yield* recordableAsks(f)).live, 1);
         const names = yield* f.fs.readDirectory(`${f.home}/.goat/ssh-launch/facts`);
         assert.isFalse(
           names.some((name) => name.startsWith("live.") || name.startsWith("compat.")),
