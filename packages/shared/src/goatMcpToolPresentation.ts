@@ -406,6 +406,22 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     ["Diagnose", "Diagnosing", "Diagnosed", "a provider"],
     "provider-diagnose",
   ),
+  goat_provider_host_matrix: tool(
+    ["Read", "Reading", "Read", "providers on each machine"],
+    "provider-diagnose",
+  ),
+  goat_provider_sync: tool(
+    ["Sync", "Syncing", "Synced", "a provider to other machines"],
+    "provider-diagnose",
+  ),
+  goat_provider_sync_status: tool(
+    ["Check", "Checking", "Checked", "provider sync progress"],
+    "provider-diagnose",
+  ),
+  goat_provider_sync_cancel: tool(
+    ["Stop", "Stopping", "Stopped", "a provider sync"],
+    "provider-diagnose",
+  ),
   goat_thread_launch: tool(
     ["Launch", "Launching", "Launched", "a project thread"],
     "thread-create",

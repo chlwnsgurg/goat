@@ -1109,6 +1109,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "provider-host-matrix",
+    title: "Providers on your machines",
+    to: "/settings/connections",
+    searchTerms: ["hosts ssh sync install sign in codex claude cursor grok opencode pi versions"],
+  },
+  {
     id: "hosts",
     title: "Hosts",
     to: "/settings/connections",

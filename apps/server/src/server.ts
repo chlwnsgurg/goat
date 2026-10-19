@@ -54,6 +54,7 @@ import * as HostThreadsMcpService from "./mcp/HostThreadsMcpService.ts";
 import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as ThreadResultService from "./threadResults/ThreadResultService.ts";
 import * as ProviderDiagnosisRouting from "./provider/ProviderDiagnosisRouting.ts";
+import * as ProviderHostSync from "./provider/ProviderHostSync.ts";
 import * as SshHostSetup from "./sshRemote/SshHostSetup.ts";
 import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
 import * as BoatClient from "./cloudMachines/BoatClient.ts";
@@ -1258,7 +1259,13 @@ const layerMakeRoutes = Layer.mergeAll(
   // status, and the remote-launch catalog: they all follow runs and wake launchers.
   // The coordinator re-arms watches after a relayed send, so the store comes after it.
   Layer.provide(layerSshWorkspace),
-  Layer.provide(SshHostSetup.layer.pipe(Layer.provide(MaintenanceAudit.layer))),
+  // SshHostSetup routes approvals of agent-requested provider syncs to ProviderHostSync.
+  Layer.provide(
+    SshHostSetup.layer.pipe(
+      Layer.provide(MaintenanceAudit.layer),
+      Layer.provideMerge(ProviderHostSync.layer),
+    ),
+  ),
   Layer.provide(HomeRequests.layer.pipe(Layer.provideMerge(CodexRoutes.layer))),
   Layer.provide(
     ProviderDiagnosisRouting.layer.pipe(

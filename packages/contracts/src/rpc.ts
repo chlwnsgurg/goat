@@ -41,6 +41,16 @@ import {
   ChatGptHandoffInput,
   ChatGptHandoffState,
 } from "./providerSetup.ts";
+import {
+  ProviderHostMatrixInput,
+  ProviderHostMatrixResult,
+  ProviderHostSyncError,
+  ProviderSyncCancelInput,
+  ProviderSyncInput,
+  ProviderSyncResultJson,
+  ProviderSyncState,
+  ProviderSyncStatusInput,
+} from "./providerHostSync.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
@@ -521,6 +531,10 @@ export const WS_METHODS = {
   providerInstallCancel: "provider.install.cancel",
   providerInstallSubscribe: "provider.install.subscribe",
   providerInstallRemove: "provider.install.remove",
+  providerHostMatrix: "provider.hostSync.matrix",
+  providerHostSyncStart: "provider.hostSync.start",
+  providerHostSyncStatus: "provider.hostSync.status",
+  providerHostSyncCancel: "provider.hostSync.cancel",
 
   vcsPull: "vcs.pull",
   vcsRefreshStatus: "vcs.refreshStatus",
@@ -829,6 +843,31 @@ const WsProviderInstallCancelRpc = Rpc.make(WS_METHODS.providerInstallCancel, {
   payload: ProviderInstallCancelInput,
   success: ProviderInstallState,
   error: ProviderSetupRpcError,
+});
+
+const ProviderHostSyncRpcError = Schema.Union([
+  ProviderHostSyncError,
+  EnvironmentAuthorizationError,
+]);
+export const WsProviderHostMatrixRpc = Rpc.make(WS_METHODS.providerHostMatrix, {
+  payload: ProviderHostMatrixInput,
+  success: ProviderHostMatrixResult,
+  error: ProviderHostSyncRpcError,
+});
+export const WsProviderHostSyncStartRpc = Rpc.make(WS_METHODS.providerHostSyncStart, {
+  payload: ProviderSyncInput,
+  success: ProviderSyncResultJson,
+  error: ProviderHostSyncRpcError,
+});
+export const WsProviderHostSyncStatusRpc = Rpc.make(WS_METHODS.providerHostSyncStatus, {
+  payload: ProviderSyncStatusInput,
+  success: ProviderSyncState,
+  error: ProviderHostSyncRpcError,
+});
+export const WsProviderHostSyncCancelRpc = Rpc.make(WS_METHODS.providerHostSyncCancel, {
+  payload: ProviderSyncCancelInput,
+  success: ProviderSyncState,
+  error: ProviderHostSyncRpcError,
 });
 
 const WsProviderInstallSubscribeRpc = Rpc.make(WS_METHODS.providerInstallSubscribe, {
@@ -2235,6 +2274,10 @@ export const WsCoreServerRpcGroup = RpcGroup.make(
   WsProviderInstallCancelRpc,
   WsProviderInstallSubscribeRpc,
   WsProviderInstallRemoveRpc,
+  WsProviderHostMatrixRpc,
+  WsProviderHostSyncStartRpc,
+  WsProviderHostSyncStatusRpc,
+  WsProviderHostSyncCancelRpc,
   WsServerUpdateServerRpc,
   WsServerUpdateServerWithProgressRpc,
   WsServerCommitDesktopUpdateRpc,

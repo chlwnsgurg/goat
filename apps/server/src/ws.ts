@@ -2,6 +2,7 @@ import { installRelayClient } from "./cloud/installRelayClient.ts";
 import * as CodexRoutes from "./provider/CodexRouteService.ts";
 import * as SshHostSetup from "./sshRemote/SshHostSetup.ts";
 import * as Handoffs from "./handoffs/Handoffs.ts";
+import * as ProviderHostSync from "./provider/ProviderHostSync.ts";
 import { ProviderMemoryImportRuntime } from "./memory/imports/MemoryImportTypes.ts";
 import * as MemoryService from "./memory/MemoryService.ts";
 import * as MemorySyncService from "./memory/MemorySyncService.ts";
@@ -1312,6 +1313,7 @@ const layerWsRpc = (
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const handoffs = yield* Handoffs.Handoffs;
       const sshHostSetup = yield* SshHostSetup.SshHostSetup;
+      const providerHostSync = yield* ProviderHostSync.ProviderHostSync;
       const codexRoutes = yield* CodexRoutes.CodexRouteService;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
@@ -2625,6 +2627,14 @@ const layerWsRpc = (
         [WS_METHODS.providerInstallCancel]: (input) => providerInstallation.cancel(input),
         [WS_METHODS.providerInstallSubscribe]: (input) => providerInstallation.subscribe(input),
         [WS_METHODS.providerInstallRemove]: (input) => providerInstallation.remove(input),
+        [WS_METHODS.providerHostMatrix]: (input) =>
+          providerHostSync.matrix(input, { kind: "client", sessionId: currentSessionId }),
+        [WS_METHODS.providerHostSyncStart]: (input) =>
+          providerHostSync.sync(input, { kind: "client", sessionId: currentSessionId }),
+        [WS_METHODS.providerHostSyncStatus]: (input) =>
+          providerHostSync.status(input, { kind: "client", sessionId: currentSessionId }),
+        [WS_METHODS.providerHostSyncCancel]: (input) =>
+          providerHostSync.cancel(input, { kind: "client", sessionId: currentSessionId }),
         [WS_METHODS.serverUpdateServer]: (input) =>
           serverSelfUpdate.update(input, undefined, undefined, {
             kind: currentSession.method,
@@ -3423,6 +3433,7 @@ export const layer = Layer.unwrap(
     const sshHostSetup = yield* SshHostSetup.SshHostSetup;
     const codexRoutes = yield* CodexRoutes.CodexRouteService;
     const sshWorkspace = yield* SshWorkspaceSync.SshWorkspaceSync;
+    const providerHostSync = yield* ProviderHostSync.ProviderHostSync;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const hostStatus = yield* HostStatusMcpService.HostStatusMcpService;
     const remoteLaunches = yield* RemoteLaunchCatalog.RemoteLaunchCatalog;
@@ -3495,6 +3506,7 @@ export const layer = Layer.unwrap(
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
               Layer.provide(Layer.succeed(SshWorkspaceSync.SshWorkspaceSync, sshWorkspace)),
               Layer.provide(Layer.succeed(SshHostSetup.SshHostSetup, sshHostSetup)),
+              Layer.provide(Layer.succeed(ProviderHostSync.ProviderHostSync, providerHostSync)),
               Layer.provide(Layer.succeed(CodexRoutes.CodexRouteService, codexRoutes)),
               Layer.provide(OtlpEndpointCheck.layer),
               Layer.provide(
