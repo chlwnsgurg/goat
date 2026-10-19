@@ -235,6 +235,10 @@ describe("desktop SSH pairing", () => {
       });
 
       expect(prepared.bearerToken).toBe("saved-token");
+      expect(prepared.verifiedEndpoint).toMatchObject({
+        httpBaseUrl: prepared.bootstrap.httpBaseUrl,
+        descriptor: { environmentId: EnvironmentId.make("environment-ssh") },
+      });
       expect(calls).toEqual(["ensure", "descriptor", "session"]);
     }),
   );

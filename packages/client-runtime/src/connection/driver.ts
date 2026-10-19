@@ -26,6 +26,7 @@ import {
 } from "./routes.ts";
 import * as RpcSession from "../rpc/session.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
+import { withSshConnectionTiming } from "./sshTiming.ts";
 
 export type ConnectionDriverProgress =
   | {
@@ -171,21 +172,34 @@ export const make = Effect.gen(function* () {
     return yield* connectOverRoutes(
       entry,
       (route) => checkRoute(entry, route),
-      Effect.fnUntraced(function* (route) {
-        yield* reportProgress({
-          stage: "preparing",
-          routeId: connectionRouteId(route.target),
-        });
-        const prepared = yield* resolver.prepare(
-          routeEntry(entry, route),
-          reportProgress({ stage: "preparing", hostAnswered: true }),
-        );
-        yield* reportProgress({ stage: "opening", prepared });
-        const session = yield* sessions.connect(prepared);
-        yield* reportProgress({ stage: "synchronizing", prepared });
-        yield* session.ready;
-        return { prepared, session } satisfies EnvironmentConnectionLease;
-      }),
+      Effect.fnUntraced(
+        function* (route) {
+          yield* reportProgress({
+            stage: "preparing",
+            routeId: connectionRouteId(route.target),
+          });
+          const prepared = yield* resolver.prepare(
+            routeEntry(entry, route),
+            reportProgress({ stage: "preparing", hostAnswered: true }),
+          );
+          yield* reportProgress({ stage: "opening", prepared });
+          const session = yield* Effect.gen(function* () {
+            const session = yield* sessions.connect(prepared);
+            yield* reportProgress({ stage: "synchronizing", prepared });
+            yield* session.ready;
+            return session;
+          }).pipe((effect) =>
+            route.target._tag === "SshConnectionTarget"
+              ? withSshConnectionTiming("ready")(effect)
+              : effect,
+          );
+          return { prepared, session } satisfies EnvironmentConnectionLease;
+        },
+        (effect, route) =>
+          route.target._tag === "SshConnectionTarget"
+            ? withSshConnectionTiming("attempt")(effect)
+            : effect,
+      ),
     );
   });
 

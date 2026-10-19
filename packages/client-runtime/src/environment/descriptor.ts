@@ -1,10 +1,17 @@
 import { GOAT_ENVIRONMENT_PATH, LEGACY_ENVIRONMENT_PATH } from "@goat/contracts/legacyT3Names";
+import type { ExecutionEnvironmentDescriptor } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 
 import { environmentEndpointUrl } from "./endpoint.ts";
 import { executeEnvironmentHttpRequest, makeEnvironmentHttpApiGroupClient } from "../rpc/http.ts";
 
 const DEFAULT_REMOTE_REQUEST_TIMEOUT_MS = 10_000;
+
+/** SSH discovery metadata; revalidate before sending credentials because a forward can be replaced. */
+export interface VerifiedSshEndpoint {
+  readonly httpBaseUrl: string;
+  readonly descriptor: ExecutionEnvironmentDescriptor;
+}
 
 export const fetchRemoteEnvironmentDescriptor = Effect.fn(
   "clientRuntime.environment.fetchRemoteEnvironmentDescriptor",

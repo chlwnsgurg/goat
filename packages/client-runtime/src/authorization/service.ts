@@ -23,7 +23,10 @@ import {
   ConnectionTransientError,
   type ConnectionAttemptError,
 } from "../connection/model.ts";
-import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
+import {
+  fetchRemoteEnvironmentDescriptor,
+  type VerifiedSshEndpoint,
+} from "../environment/descriptor.ts";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
@@ -51,6 +54,7 @@ export interface AuthorizedRemoteEnvironment {
   readonly httpBaseUrl: string;
   readonly socketUrl: string;
   readonly httpAuthorization: PreparedHttpAuthorization;
+  readonly verifiedEndpoint?: VerifiedSshEndpoint;
 }
 
 export interface AuthorizedRemoteHttpEnvironment {
@@ -69,6 +73,10 @@ export class RemoteEnvironmentAuthorization extends Context.Service<
       readonly wsBaseUrl: string;
       readonly bearerToken: string;
       readonly connectionMethod: ClientConnectionMethod;
+      readonly verifiedSshEndpoint?: VerifiedSshEndpoint;
+      readonly onEndpointVerified?: (
+        descriptor: ExecutionEnvironmentDescriptor,
+      ) => Effect.Effect<void>;
     }) => Effect.Effect<AuthorizedRemoteEnvironment, ConnectionAttemptError>;
     readonly authorizeDpop: (input: {
       readonly expectedEnvironmentId: EnvironmentId;
@@ -185,39 +193,64 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const authorizeBearer = Effect.fn("clientRuntime.connection.remote.authorizeBearer")(
-    function* (input: {
-      readonly expectedEnvironmentId: Parameters<
-        RemoteEnvironmentAuthorization["Service"]["authorizeBearer"]
-      >[0]["expectedEnvironmentId"];
-      readonly httpBaseUrl: string;
-      readonly wsBaseUrl: string;
-      readonly bearerToken: string;
-      readonly connectionMethod: ClientConnectionMethod;
-    }) {
-      const descriptor = yield* verifyDirectEndpoint(input);
-      const socketUrl = yield* resolveRemoteWebSocketConnectionUrl({
-        wsBaseUrl: input.wsBaseUrl,
-        httpBaseUrl: input.httpBaseUrl,
-        bearerToken: input.bearerToken,
-        clientMetadata: presentation.metadata,
-        connectionMethod: input.connectionMethod,
-      }).pipe(
-        Effect.mapError(mapRemoteEnvironmentError),
-        Effect.provideService(HttpClient.HttpClient, httpClient),
-      );
-      return {
-        environmentId: descriptor.environmentId,
-        label: descriptor.label,
-        httpBaseUrl: input.httpBaseUrl,
-        socketUrl,
-        httpAuthorization: {
-          _tag: "Bearer" as const,
-          token: input.bearerToken,
-        },
-      };
-    },
-  );
+  const authorizeBearer = Effect.fn("clientRuntime.connection.remote.authorizeBearer")(function* (
+    input: Parameters<RemoteEnvironmentAuthorization["Service"]["authorizeBearer"]>[0],
+  ) {
+    // Reject inconsistent gateway metadata before any request can carry credentials.
+    const verified = input.connectionMethod === "ssh" ? input.verifiedSshEndpoint : undefined;
+    if (verified !== undefined && verified.httpBaseUrl !== input.httpBaseUrl) {
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail: "SSH identity was verified on a different endpoint. Reconnect to verify it again.",
+      });
+    }
+    if (
+      verified !== undefined &&
+      verified.descriptor.environmentId !== input.expectedEnvironmentId
+    ) {
+      return yield* environmentMismatchError({
+        expected: input.expectedEnvironmentId,
+        actual: verified.descriptor.environmentId,
+      });
+    }
+    // The native manager can replace a forward while reusing its URL. Until it
+    // provides an attachment lease, SSH must revalidate without the address cache.
+    const descriptor = yield* input.connectionMethod === "ssh"
+      ? fetchDescriptor(input.httpBaseUrl, input.connectionMethod).pipe(
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+        )
+      : verifyDirectEndpoint(input);
+    if (descriptor.environmentId !== input.expectedEnvironmentId) {
+      return yield* environmentMismatchError({
+        expected: input.expectedEnvironmentId,
+        actual: descriptor.environmentId,
+      });
+    }
+    yield* input.onEndpointVerified?.(descriptor) ?? Effect.void;
+    const socketUrl = yield* resolveRemoteWebSocketConnectionUrl({
+      wsBaseUrl: input.wsBaseUrl,
+      httpBaseUrl: input.httpBaseUrl,
+      bearerToken: input.bearerToken,
+      clientMetadata: presentation.metadata,
+      connectionMethod: input.connectionMethod,
+    }).pipe(
+      Effect.mapError(mapRemoteEnvironmentError),
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+    );
+    return {
+      environmentId: descriptor.environmentId,
+      label: descriptor.label,
+      httpBaseUrl: input.httpBaseUrl,
+      socketUrl,
+      httpAuthorization: {
+        _tag: "Bearer" as const,
+        token: input.bearerToken,
+      },
+      ...(input.connectionMethod === "ssh"
+        ? { verifiedEndpoint: { httpBaseUrl: input.httpBaseUrl, descriptor } }
+        : {}),
+    };
+  });
 
   const createDpopSocketUrl = Effect.fn("clientRuntime.connection.remote.createDpopSocketUrl")(
     function* (

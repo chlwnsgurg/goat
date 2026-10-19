@@ -16,6 +16,7 @@ export { formatConnectionDiagnostic } from "./diagnostic.ts";
 export * as ProfileStore from "./profileStore.ts";
 export * from "./routes.ts";
 export { sshPreparationFailure } from "./sshFailure.ts";
+export { withSshConnectionTiming } from "./sshTiming.ts";
 export { type RouteCheck } from "./driver.ts";
 export * as EnvironmentRegistry from "./registry.ts";
 // Flat so consumers' inferred types can name them.

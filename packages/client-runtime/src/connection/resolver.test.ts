@@ -88,6 +88,7 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
   readonly primaryBearerToken?: string;
   readonly prepareSsh?: ClientCapabilities.SshEnvironmentGateway["Service"]["prepare"];
   readonly descriptorProtocolVersion?: number | null | undefined;
+  readonly fetch?: typeof fetch;
 }) => {
   const profiles = new Map(
     (options?.profiles ?? []).map((profile) => [profile.connectionId, profile]),
@@ -153,21 +154,24 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
   });
 
   const layerDependencies = Layer.mergeAll(
-    RpcHttp.layerRemoteHttpClient((() =>
-      Promise.resolve(
-        Response.json({
-          environmentId: ENVIRONMENT_ID,
-          label: "Compatible environment",
-          platform: { os: "linux", arch: "x64" },
-          serverVersion: "0.0.0-test",
-          ...(options?.descriptorProtocolVersion === undefined
-            ? { orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION }
-            : options.descriptorProtocolVersion === null
-              ? {}
-              : { orchestrationProtocolVersion: options.descriptorProtocolVersion }),
-          capabilities: { repositoryIdentity: true },
-        }),
-      )) satisfies typeof fetch),
+    RpcHttp.layerRemoteHttpClient(
+      options?.fetch ??
+        ((() =>
+          Promise.resolve(
+            Response.json({
+              environmentId: ENVIRONMENT_ID,
+              label: "Compatible environment",
+              platform: { os: "linux", arch: "x64" },
+              serverVersion: "0.0.0-test",
+              ...(options?.descriptorProtocolVersion === undefined
+                ? { orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION }
+                : options.descriptorProtocolVersion === null
+                  ? {}
+                  : { orchestrationProtocolVersion: options.descriptorProtocolVersion }),
+              capabilities: { repositoryIdentity: true },
+            }),
+          )) satisfies typeof fetch),
+    ),
     Layer.succeed(
       ConnectionProfileStore.ConnectionProfileStore,
       options?.profileStore ?? profileStore,
@@ -193,6 +197,84 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
 });
 
 describe("ConnectionResolver", () => {
+  it.effect.each(["compatible", "older-runtime", "restarted"] as const)(
+    "uses verified SSH discovery for the protocol gate (%s)",
+    (scenario) =>
+      Effect.gen(function* () {
+        let attempts = 0;
+        const target = new SshConnectionTarget({
+          environmentId: ENVIRONMENT_ID,
+          label: "SSH",
+          connectionId: "ssh-1",
+        });
+        const profile = new SshConnectionProfile({
+          connectionId: target.connectionId,
+          environmentId: ENVIRONMENT_ID,
+          label: "SSH",
+          target: SSH_TARGET,
+        });
+        const layerBroker = yield* makeDependencies({
+          fetch: () => Promise.reject(new Error("Duplicate descriptor request")),
+          prepareSsh: () =>
+            Effect.sync(() => {
+              attempts += 1;
+              return {
+                bootstrap: {
+                  target: SSH_TARGET,
+                  httpBaseUrl: ENDPOINT.httpBaseUrl,
+                  wsBaseUrl: ENDPOINT.wsBaseUrl,
+                  pairingToken: null,
+                },
+                bearerToken: "ssh-token",
+                verifiedEndpoint: {
+                  httpBaseUrl: ENDPOINT.httpBaseUrl,
+                  descriptor: {
+                    environmentId: ENVIRONMENT_ID,
+                    label: "SSH",
+                    platform: { os: "linux", arch: "arm64" },
+                    serverVersion: "0.0.0-test",
+                    instanceId: `instance-${attempts}`,
+                    ...(scenario === "older-runtime" || (scenario === "restarted" && attempts > 1)
+                      ? {}
+                      : { orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION }),
+                    capabilities: { repositoryIdentity: true },
+                  },
+                },
+              };
+            }),
+          authorizeBearer: (input) =>
+            Effect.succeed({
+              environmentId: input.expectedEnvironmentId,
+              label: "SSH",
+              httpBaseUrl: input.httpBaseUrl,
+              socketUrl: `${ENDPOINT.wsBaseUrl}/ws`,
+              httpAuthorization: { _tag: "Bearer" as const, token: input.bearerToken },
+              ...(input.verifiedSshEndpoint === undefined
+                ? {}
+                : { verifiedEndpoint: input.verifiedSshEndpoint }),
+            }),
+        });
+        const broker = yield* ConnectionResolver.ConnectionResolver.pipe(
+          Effect.provide(layerBroker),
+        );
+        const entry = catalogEntry(target, Option.some(profile));
+        if (scenario === "older-runtime") {
+          expect(yield* broker.prepare(entry).pipe(Effect.flip)).toMatchObject({
+            reason: "unsupported",
+          });
+          // The update path still receives discovery, even when normal RPC is unsupported.
+          expect((yield* broker.prepareForUpdate(entry)).descriptor.instanceId).toBe("instance-2");
+        } else {
+          expect((yield* broker.prepare(entry)).socketUrl).toContain("orchestrationProtocol=");
+          if (scenario === "restarted") {
+            expect(yield* broker.prepare(entry).pipe(Effect.flip)).toMatchObject({
+              reason: "unsupported",
+            });
+          }
+        }
+      }),
+  );
+
   it.effect("blocks an old host during discovery before opening orchestration RPC", () =>
     Effect.gen(function* () {
       const layerBroker = yield* makeDependencies({ descriptorProtocolVersion: null });
