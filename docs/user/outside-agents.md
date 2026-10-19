@@ -134,6 +134,32 @@ Agents running inside GOAT and clients that signed in through the sign-in page
 never get this permission. To make approvals human-only again, revoke the token
 and create one without `orchestration:approve`.
 
+## Cloud agents from any machine
+
+Claude Cloud, Cursor Cloud and Devin Cloud runs only need one environment that is signed in to
+that service. An agent can call `goat_cloud_holders` to see which connected environments hold a
+login, and `goat_cloud_launch` to start a run there. Add `dryRun: true` to see which environment
+would run it. The environment needs a project for the repository, and the run starts from that
+project's pushed branch. Launching needs **Full access**.
+
+A bot that starts cloud runs on its own can show them in GOAT with `goat_cloud_run_register`:
+
+```json
+{
+  "provider": "cursorCloud",
+  "url": "https://cursor.com/agents/bc-…",
+  "repo": "owner/name",
+  "launchedBy": "Grok Bot",
+  "notifyWebhook": true
+}
+```
+
+The run appears in Fleet under its provider and in the thread list with "via Grok Bot". When an
+environment signed in to the same account can see the run, GOAT follows it and reports when it
+ends. Otherwise it keeps only the link and says so (`tracking: "link-only"`). Devin Cloud sessions
+started outside GOAT are always link-only. `goat_cloud_run_forget` stops tracking a registered run;
+the cloud run itself keeps going.
+
 ## Remove an agent
 
 Approved agents appear under **Settings → Connections** like other clients.

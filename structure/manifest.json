@@ -126,6 +126,8 @@
       "scope": "Process entry, command commit, local/cloud orchestration, human handoffs, checkpoints, providers, and source control.",
       "documents": [
         "apps/server/src/bin.ts",
+        "apps/server/src/cloudAgents/CloudAgentService.ts",
+        "packages/contracts/src/cloudAgents.ts",
         "apps/server/src/binCli.ts",
         "apps/server/src/cli/server.ts",
         "apps/server/src/cli/sshHelper.ts",
