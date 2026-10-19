@@ -18,10 +18,14 @@ import * as NodeOS from "node:os";
 import {
   CHANNEL_HOST_WORKSPACE_LABEL,
   type ChannelInputId,
+  type ChannelConversationId,
   type ChannelReceptionHostFact,
   type ChannelReceptionInput,
+  type ChannelReceptionRead,
+  type ChannelReceptionReadResult,
   type ChannelReceptionResult,
   type ChannelReplyAddress,
+  type ChannelRequester,
   type ChannelTask,
   ChannelReceptionId,
   CHANNEL_RECEPTION_TAIL_LIMITS,
@@ -41,6 +45,9 @@ import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { countHostThreads } from "../mcp/hostStatusModel.ts";
+import * as MemoryAccess from "../memory/MemoryAccess.ts";
+import * as MemoryService from "../memory/MemoryService.ts";
+import * as MemorySyncService from "../memory/MemorySyncService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -58,6 +65,20 @@ import {
   quotedFromInput,
   readChannelBotNotes,
 } from "./channelBotNotes.ts";
+import {
+  boundRecall,
+  canSeeTask,
+  journalFor,
+  matchMemoryLines,
+  matchTasks,
+  pullRequestLabel,
+  RECALL_MEMORY_LINES,
+  RECALL_RESULT_CHARS,
+  RECALL_TASK_SCAN,
+  RECALL_THREAD_RUNS,
+  taskDigest,
+  threadDigest,
+} from "./channelBotRecall.ts";
 import { CHANNEL_COPY } from "./channelCopy.ts";
 import { answerForwardIdsFor, deliveryIdFor, taskEventIdFor, taskIdFor } from "./channelIds.ts";
 import { botAddress, chipDelivery, makeTaskEvent, prepareTransition } from "./channelTaskWrites.ts";
@@ -66,6 +87,8 @@ import { botAddress, chipDelivery, makeTaskEvent, prepareTransition } from "./ch
 const CHANNEL_RECEPTION_TIMEOUT_MS = 45_000;
 /** How many recently active threads a reception pass sees by title. */
 const CHANNEL_RECEPTION_RECENT_THREADS = 20;
+/** How long one read may take before the answer says so and goes on without it. */
+const CHANNEL_READ_TIMEOUT_MS = 5_000;
 
 const GIB = 1024 ** 3;
 const gib = (bytes: number) => (bytes / GIB).toFixed(bytes < 10 * GIB ? 1 : 0) + " GB";
@@ -174,6 +197,9 @@ const make = Effect.gen(function* () {
   const botFiles = channelBotFilesFor(path, serverConfig.stateDir);
   const platform = yield* HostProcess.Platform;
   const architecture = yield* HostProcess.Architecture;
+  // Absent in embeddings without memory; the bot then reads only its notes and the ledger.
+  const memoryService = yield* Effect.serviceOption(MemoryService.MemoryService);
+  const memorySync = yield* Effect.serviceOption(MemorySyncService.MemorySyncService);
 
   // Facts that do not change while the server runs.
   const linuxName =
@@ -296,6 +322,225 @@ const make = Effect.gen(function* () {
       );
     });
 
+  /** The owner's newest tasks this requester may see. */
+  const visibleTasks = (viewer: ChannelRequester, conversationId: ChannelConversationId) =>
+    ledger
+      .listTasks({ ownerId: viewer.ownerId, limit: RECALL_TASK_SCAN })
+      .pipe(
+        Effect.map((page) => page.tasks.filter((task) => canSeeTask(viewer, task, conversationId))),
+      );
+
+  /**
+   * The scopes a requester holds now. A Slack or iMessage link is read again, so a link removed
+   * or narrowed since the message arrived counts; an in-app requester keeps the scopes its
+   * session had. Agents over MCP read GOAT memory with their own memory tools, not through the bot.
+   */
+  const scopesNow = (viewer: ChannelRequester, connectionId: string) =>
+    Effect.gen(function* () {
+      if (viewer.originKind === "mcp") return [];
+      if (viewer.originKind !== "slack" && viewer.originKind !== "imessage") {
+        return viewer.grantedScopes;
+      }
+      if (viewer.externalActorId === undefined) return [];
+      const linked = yield* ledger.findIdentity({
+        connectionId,
+        externalActorId: viewer.externalActorId,
+      });
+      return linked === undefined || linked.principalId !== viewer.principalId
+        ? []
+        : viewer.grantedScopes.filter((scope) => linked.grantedScopes.includes(scope));
+    });
+
+  /**
+   * The requester as reads judge them now. A Slack or iMessage link removed or moved to another
+   * person since the message arrived leaves only this conversation's work visible.
+   */
+  const viewerNow = (requester: ChannelRequester, connectionId: string) =>
+    Effect.gen(function* () {
+      const scopes = yield* scopesNow(requester, connectionId).pipe(
+        Effect.orElseSucceed((): ReadonlyArray<string> => []),
+      );
+      const external = requester.originKind === "slack" || requester.originKind === "imessage";
+      const linkedNow =
+        !external ||
+        (requester.externalActorId !== undefined &&
+          (yield* ledger
+            .findIdentity({ connectionId, externalActorId: requester.externalActorId })
+            .pipe(Effect.orElseSucceed(() => undefined)))?.principalId === requester.principalId);
+      return {
+        ...requester,
+        grantedScopes: requester.grantedScopes.filter((scope) => scopes.includes(scope)),
+        ...(linkedNow ? {} : { principalId: "unlinked:" + (requester.externalActorId ?? "") }),
+      } satisfies ChannelRequester;
+    });
+
+  /**
+   * GOAT memory items for a query, under the requester's memory access as it stands now. Empty
+   * when memory is off, not set up, or the requester may not read it.
+   */
+  const searchGoatMemory = (viewer: ChannelRequester, connectionId: string, query: string) =>
+    Effect.gen(function* () {
+      if (Option.isNone(memoryService) || Option.isNone(memorySync)) return [];
+      const live = scopesNow(viewer, connectionId);
+      if (!(yield* live).includes("memory:read")) return [];
+      const settings = yield* serverSettings.getSettings;
+      if (!settings.memoryEnabled) return [];
+      const readiness = yield* memorySync.value.readLocalReadiness();
+      if (readiness.bootstrap !== "ready" || readiness.memorySpaceId === null) return [];
+      const page = yield* memoryService.value.search(
+        {
+          memorySpaceId: readiness.memorySpaceId,
+          query: query.trim().normalize("NFC"),
+          limit: RECALL_MEMORY_LINES,
+          mode: "fts",
+        },
+        MemoryAccess.memoryAccessPermit(
+          {
+            grantedScopes: viewer.grantedScopes,
+            // Each permit check reads the link again and fails when it no longer allows reading.
+            reauthorize: (required) =>
+              live.pipe(
+                Effect.orElseSucceed((): ReadonlyArray<string> => []),
+                Effect.flatMap((scopes) =>
+                  required.every((scope) => scopes.includes(scope))
+                    ? Effect.void
+                    : Effect.fail(new MemoryService.MemoryAccessError({ code: "unavailable" })),
+                ),
+              ),
+            readOnly: true,
+          },
+          "read",
+        ),
+      );
+      return page.items.flatMap((item) =>
+        item.status === "active" ? ["- " + item.payload.text.replace(/\s+/gu, " ").trim()] : [],
+      );
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.logInfo("GOAT Bot memory search skipped", { cause }).pipe(Effect.as([])),
+      ),
+    );
+
+  const runRead = (
+    read: ChannelReceptionRead,
+    viewer: ChannelRequester,
+    conversationId: ChannelConversationId,
+    connectionId: string,
+    inputId: ChannelInputId,
+  ) =>
+    Effect.gen(function* () {
+      switch (read.kind) {
+        case "memory": {
+          const notes = yield* readChannelBotNotes(fileSystem, botFiles);
+          // The whole visible journal is searched; only the prompt's copy is cut to size.
+          const journal = journalFor(
+            yield* visibleTasks(viewer, conversationId),
+            RECALL_TASK_SCAN,
+            Number.POSITIVE_INFINITY,
+          );
+          // Oldest first, as the notes are, so the newest matches survive the limit.
+          const local = matchMemoryLines(
+            notes + "\n" + journal.split("\n").toReversed().join("\n"),
+            read.query,
+          );
+          const goat = yield* searchGoatMemory(viewer, connectionId, read.query);
+          if (local.length === 0 && goat.length === 0) return "Nothing in memory matches.";
+          return [
+            ...(local.length === 0 ? [] : ["GOAT Bot notes and journal:", ...local]),
+            ...(goat.length === 0 ? [] : ["GOAT memory:", ...goat]),
+          ].join("\n");
+        }
+        case "work": {
+          const matched = matchTasks(yield* visibleTasks(viewer, conversationId), read.query);
+          return matched.length === 0
+            ? "No work this person may see matches."
+            : matched.map(taskDigest).join("\n\n");
+        }
+        case "thread": {
+          const task = matchTasks(yield* visibleTasks(viewer, conversationId), read.query, 1)[0];
+          if (task === undefined) return "No work this person may see matches.";
+          const worker = task.worker;
+          if (worker === undefined) {
+            return taskDigest(task) + "\nIts coding thread has not started.";
+          }
+          if (worker.host !== undefined) {
+            // Remote threads are read through their reports, which the ledger already holds.
+            return (
+              taskDigest(task) +
+              "\nIts thread runs on " +
+              worker.host +
+              "; only its reports reach this machine."
+            );
+          }
+          // Only the newest runs' messages are loaded; a long thread is never read whole.
+          const { runs } = yield* threads.getThreadRecords(worker.threadId, ["runs"]);
+          const recentRuns = runs.slice(-RECALL_THREAD_RUNS).map((run) => run.id);
+          const records = yield* threads.getThreadRecords(worker.threadId, ["messages"], {
+            messageRunIds: recentRuns,
+          });
+          const digest = taskDigest(task);
+          return (
+            digest +
+            "\n" +
+            threadDigest(
+              records.thread.title || task.title,
+              records.messages.map((message) => ({
+                role: message.role,
+                text: message.text,
+                createdAt: DateTime.formatIso(message.createdAt),
+              })),
+              RECALL_RESULT_CHARS - digest.length - 1,
+            )
+          );
+        }
+        case "conversation": {
+          const found = yield* ledger.searchConversation(conversationId, read.query, 5, inputId);
+          return found.length === 0
+            ? "No earlier message in this conversation matches."
+            : found
+                .map(
+                  (entry) =>
+                    "- " +
+                    entry.receivedAt.slice(0, 16) +
+                    " Person: " +
+                    entry.text +
+                    (entry.replyText === undefined ? "" : "\n  GOAT: " + entry.replyText),
+                )
+                .join("\n");
+        }
+      }
+    });
+
+  /** Runs one pass's reads. A read that fails says so instead of failing the reply. */
+  const runReads = (
+    reads: ReadonlyArray<ChannelReceptionRead>,
+    viewer: ChannelRequester,
+    conversationId: ChannelConversationId,
+    connectionId: string,
+    inputId: ChannelInputId,
+  ): Effect.Effect<ReadonlyArray<ChannelReceptionReadResult>> =>
+    Effect.forEach(
+      reads,
+      (read) =>
+        runRead(read, viewer, conversationId, connectionId, inputId).pipe(
+          Effect.timeoutOption(CHANNEL_READ_TIMEOUT_MS),
+          Effect.map((text) => ({
+            kind: read.kind,
+            query: read.query,
+            text: Option.match(text, {
+              onNone: () => "(took too long to read)",
+              onSome: boundRecall,
+            }),
+          })),
+          Effect.catch((cause) =>
+            Effect.logWarning("GOAT Bot read failed", { kind: read.kind, cause }).pipe(
+              Effect.as({ kind: read.kind, query: read.query, text: "(could not be read)" }),
+            ),
+          ),
+        ),
+      { concurrency: "unbounded" },
+    );
+
   const receive: ChannelReceptionService["Service"]["receive"] = (inputId, owner) =>
     Effect.gen(function* () {
       const isHome = yield* home.requireHome.pipe(
@@ -396,8 +641,15 @@ const make = Effect.gen(function* () {
                 const recent = recentThreads(shells, targets, bot?.threadId);
                 const facts = yield* hostFacts(shells);
                 const notes = yield* readChannelBotNotes(fileSystem, botFiles);
+                // Everything this pass sees about other work is judged with the link as it is now.
+                const viewer = yield* viewerNow(requester, message.connectionId);
+                const journal = journalFor(
+                  yield* visibleTasks(viewer, conversationId).pipe(
+                    Effect.orElseSucceed((): ReadonlyArray<ChannelTask> => []),
+                  ),
+                );
                 const skills = yield* listChannelBotSkills(fileSystem, path, botFiles);
-                return yield* generate({
+                const base: ChannelReceptionInput = {
                   mode: "input",
                   conversationId,
                   originKind: message.kind,
@@ -427,6 +679,12 @@ const make = Effect.gen(function* () {
                     ...(task.resultSummary === undefined
                       ? {}
                       : { resultSummary: task.resultSummary }),
+                    ...((task.worker?.host ?? task.host) === undefined
+                      ? {}
+                      : { host: task.worker?.host ?? task.host }),
+                    ...((task.observed?.pullRequests ?? []).length === 0
+                      ? {}
+                      : { pullRequests: task.observed!.pullRequests.map(pullRequestLabel) }),
                     openQuestions: task.openQuestions.map((question) => ({
                       questionId: question.questionId,
                       text: question.text,
@@ -437,9 +695,49 @@ const make = Effect.gen(function* () {
                   ...(recent.length === 0 ? {} : { recentThreads: recent }),
                   ...(facts.length === 0 ? {} : { hostFacts: facts }),
                   ...(notes === "" ? {} : { notes }),
+                  ...(journal === "" ? {} : { journal }),
                   ...(skills.length === 0 ? {} : { skills }),
                   requester,
+                };
+                const first = yield* generate({ ...base, readsAllowed: true });
+                if (Option.isNone(first) || first.value.action.type !== "read") return first;
+                // One round of reads, then the answer. Reads run within what this requester
+                // may see; a second request to read is answered with what the pass wrote.
+                // The first pass can take most of a minute; judge the link again before reading.
+                const reader = yield* viewerNow(requester, message.connectionId);
+                const results = yield* runReads(
+                  first.value.action.reads,
+                  reader,
+                  conversationId,
+                  message.connectionId,
+                  inputId,
+                );
+                // The first pass wrote its queries from what it could see then. When the link
+                // narrowed since, a query may quote work the person can no longer see.
+                const narrowed =
+                  reader.principalId !== viewer.principalId ||
+                  viewer.grantedScopes.some((scope) => !reader.grantedScopes.includes(scope));
+                const readResults = narrowed
+                  ? results.map((result) => ({ ...result, query: "(withheld)" }))
+                  : results;
+                const journalNow = journalFor(
+                  yield* visibleTasks(reader, conversationId).pipe(
+                    Effect.orElseSucceed((): ReadonlyArray<ChannelTask> => []),
+                  ),
+                );
+                const { journal: _journal, ...rest } = base;
+                const second = yield* generate({
+                  ...rest,
+                  ...(journalNow === "" ? {} : { journal: journalNow }),
+                  readsAllowed: false,
+                  readResults,
                 });
+                // A pass that asks to read again found nothing to answer from; say so plainly.
+                return Option.map(second, (result): ChannelReceptionResult =>
+                  result.action.type === "read"
+                    ? { replyText: CHANNEL_COPY.readFoundNothing, action: { type: "report_only" } }
+                    : result,
+                );
               }),
             );
 

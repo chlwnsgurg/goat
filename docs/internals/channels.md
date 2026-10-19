@@ -5,6 +5,8 @@ Input from the GOAT bot, Slack, local Mac iMessage, and agents over MCP goes thr
 and who asked; coding threads own the work and its history. Code lives in
 [`apps/server/src/channels/`](../../apps/server/src/channels/); the wire types are in
 [`packages/contracts/src/channel*.ts`](../../packages/contracts/src/).
+What the bot must do for a person, and how it compares with other chat bots, is in
+[goat-bot-behavior-spec.md](goat-bot-behavior-spec.md).
 
 ## The bot never runs a provider
 
@@ -15,6 +17,40 @@ and the orchestrator refuses any other `message.dispatch` to it (MCP sends, sche
 starts a provider turn there. Replies come from a one-shot, tool-free text generation per input
 (`generateChannelReception`; Codex and Claude only), not from a session that could queue behind
 work. Chip notifications carry `ledgerTask`; only the ledger writes them.
+
+## What the bot remembers and reads
+
+Questions about past work and memory are answered in reception, without starting a worker,
+because a coding thread costs a minute and a provider session for something the ledger already
+knows. The model still runs no tools: a pass may answer with a `read` action naming up to three
+lookups, the server runs them (each within five seconds), and one more pass answers with the
+results. A second request to read is answered with what that pass wrote, so an input costs at most
+two generations. Reads change nothing, so a reception retried after a crash reads again.
+
+- **Memory.** Every pass gets the newest 6,000 characters of `goat-bot/memory.md` (standing
+  notes, written only when the person's own message asks, as before) and a journal: one line per
+  recent task, with its state, result and pull requests. The journal is built from the ledger for
+  each requester rather than kept in a file, so it shows only work that requester may see, and it
+  cannot drift from the ledger or lose a line in a crash. A `memory` read searches the notes, the
+  requester's whole journal, and GOAT memory (`MemoryService.search`, the store agents use).
+  GOAT memory is read under the requester's `memory:read` as it stands at read time: a Slack or
+  iMessage link is read again on every permit check, and agents over MCP use their own memory
+  tools instead. Reception writes GOAT memory only through the coding threads it starts, which get
+  the requester's memory ceiling.
+- **Work.** A `work` read matches the owner's 200 most recently updated tasks by task id, a
+  linked pull request (by repository and number when the question names a repository), or shared
+  words, and returns each task's request, result, machine, open questions and pull requests with
+  their last known state. A `thread` read adds the last six messages from the newest runs of the
+  task's coding thread on this machine; a thread on another machine is read through the reports
+  already copied into the ledger, never over SSH during reception. A `conversation` read searches
+  the text of older inputs and replies in the same conversation.
+- **Who sees what.** Everyone sees the work of the conversation they write in. A person also sees
+  work they asked for elsewhere, and all of the owner's work when they hold `orchestration:read`.
+  Agents over MCP see only their own conversation. A Slack or iMessage link acts as the GOAT
+  principal who made the link code, so it sees what that principal sees, judged with the link as
+  it stands when reception reads: a link removed or narrowed after the message arrived leaves
+  only that conversation's work. Read results and journal
+  lines are labelled as records for the model, but the filtering above is what keeps them private.
 
 An owner has one bot, in the Scratch project, and one bot conversation keyed by the owner rather
 than the thread. Where Scratch is off because the data directory is inside a Git work tree, the bot

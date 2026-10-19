@@ -75,7 +75,8 @@ function event(type, extra = {}) { fs.appendFileSync(path.join(test, "events"), 
 event("exec", { args });
 if (args[0] === "--version") {
   event("version", { published: fs.existsSync(path.join(state, "run-t3.sh")) ? fs.readFileSync(path.join(state, "run-t3.sh"), "utf8") : "" });
-  console.log("goat v" + version);
+  const proof = path.join(test, "pending-proof");
+  console.log("goat v" + (fs.existsSync(proof) && fs.readFileSync(proof, "utf8").trim() === "version:" + version ? "0.0.0" : version));
 } else if (args[0] === "__ssh-helper" && args[1] === "protocol") {
   if (${JSON.stringify(signals.missingCommand ?? false)}) process.exit(2);
   const at = args.indexOf("--runtime-file");
@@ -85,6 +86,9 @@ if (args[0] === "--version") {
   const value = at < 0 ? fields : await (await import(${JSON.stringify(helperUrl)})).readLiveSshRuntimeProtocol(args[at+1], flag("--port-file"), flag("--pid-file"));
   event("protocol", { live: at >= 0, status: value.status });
   if (args.includes("--shell")) {
+if (at < 0 && fs.existsSync(path.join(test, "pending-proof")) && fs.readFileSync(path.join(test, "pending-proof"), "utf8").trim() === "protocol:" + version) {
+  console.log(version + " 999 999 0 0"); return;
+}
 const injected = at < 0 ? ${JSON.stringify(signals.ownTokens ?? null)} : ${JSON.stringify(signals.liveTokens ?? null)};
 if (injected !== null) { console.log(injected); return; }
 console.log((value.status ? value.status + " " : "") + [value.serverVersion ?? "unknown",
@@ -108,6 +112,17 @@ console.log((value.status ? value.status + " " : "") + [value.serverVersion ?? "
   const value = await (await import(${JSON.stringify(helperUrl)})).readSshServerActivity(Number(args[args.indexOf("--port")+1]), Number(args[args.indexOf("--pid")+1]));
   event("activity", { value }); console.log(value);
 } else if (args[0] === "__ssh-helper" && args[1] === "compat") {
+  const control = path.join(test, "compat");
+  if (fs.existsSync(control)) {
+    const sequence = JSON.parse(fs.readFileSync(control, "utf8"));
+    const counter = path.join(test, "compat-requests");
+    const count = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
+    fs.writeFileSync(counter, String(count + 1));
+    const response = sequence[Math.min(count, sequence.length - 1)];
+    event("compat-override", { response, count });
+    if (response === "failure") process.exit(2);
+    if (response !== "real") { console.log(response); return; }
+  }
   try {
     const value = await (await import(${JSON.stringify(helperUrl)})).readSshRuntimeCompatibility(Number(flag("--port")));
     console.log(value.verdict + " " + (value.drainRestart ? 1 : 0) + " " + (value.instanceId ?? "-"));
@@ -140,6 +155,13 @@ console.log((value.status ? value.status + " " : "") + [value.serverVersion ?? "
 const port = socket.address().port; socket.close(() => console.log(port));
   });
 } else if (args[0] === "__ssh-helper" && args[1] === "wait-ready") {
+  const proof = path.join(test, "pending-proof");
+  if (fs.existsSync(proof)) {
+    const action = fs.readFileSync(proof, "utf8").trim();
+    event("pending-proof", { action });
+    if (action === "readiness") process.exit(2);
+    if (action === "ownership-loss") fs.writeFileSync(path.join(state, "managed"), "external\\n");
+  }
   // Fixture readiness uses an event, not polling or a delay.
   let record = fs.existsSync(runtimeFile) ? JSON.parse(fs.readFileSync(runtimeFile, "utf8")) : null;
   if (${JSON.stringify(signals.contestedPort === undefined)} && (!record || !fs.existsSync(path.join(test, "accepted-ready-" + record.pid)))) {
@@ -573,7 +595,8 @@ if [ "$#" = 1 ] && [ "$1" = +%s ]; then echo $(( ${freezeFileTimes ? '$(cat "$HO
           `#!/bin/sh
 printf '%s\\n' "$1" >> "$HOME/.test/clock/waits"
 second="$(cat "$HOME/.test/clock/second")"
-echo $(( second + $1 )) > "$HOME/.test/clock/second"
+wait_seconds="\${1%%.*}"
+echo $(( second + wait_seconds )) > "$HOME/.test/clock/second"
 `,
         );
         yield* fs.chmod(`${bin}/sleep`, 0o700);
@@ -621,6 +644,11 @@ esac
     fs,
     realSpawner,
     setBeforeCommand,
+    setCompat: (responses: ReadonlyArray<string>) =>
+      Effect.gen(function* () {
+        yield* fs.writeFileString(`${test}/compat`, JSON.stringify(responses));
+        yield* fs.writeFileString(`${test}/compat-requests`, "0");
+      }),
     setScriptPrefix,
     setRemotePath,
     shiftHostClock,
