@@ -94,10 +94,16 @@ type AttemptOutcome =
       readonly established: boolean;
       readonly stable: boolean;
       readonly failure: TracedAttemptFailure;
-      readonly slowSetupTimeout?: { readonly startedAt: bigint };
+      readonly slowSetupTimeout?: SetupPreparation;
     };
 
+interface SetupPreparation {
+  readonly routeId: string | undefined;
+  readonly startedAt: bigint;
+}
+
 interface EstablishmentProgress {
+  readonly preparation: SetupPreparation;
   readonly synchronizedRoutes: number;
   readonly hostAnswered: boolean;
   readonly setup: { readonly routeId: string; readonly elapsedMs: number } | null;
@@ -458,29 +464,37 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     generation: number,
     lastFailure: ConnectionAttemptError | null,
     establishmentProgress: Ref.Ref<EstablishmentProgress>,
-    startedAt: bigint,
     attemptActive: Ref.Ref<boolean>,
   ) {
     return yield* driver.connect(yield* attemptEntry, (progress) =>
       Effect.gen(function* () {
         if (!(yield* Ref.get(attemptActive))) return;
         const now = yield* Clock.monotonicTimeNanos;
-        yield* Ref.update(establishmentProgress, (current) => ({
-          synchronizedRoutes:
-            current.synchronizedRoutes + (progress.stage === "synchronizing" ? 1 : 0),
-          // Plain preparing precedes I/O; SSH must explicitly report the final host's answer.
-          hostAnswered:
-            current.hostAnswered ||
-            progress.stage !== "preparing" ||
-            progress.hostAnswered === true,
-          setup:
-            progress.stage === "synchronizing"
-              ? {
-                  routeId: connectionRouteId(progress.prepared.target),
-                  elapsedMs: Number(now - startedAt) / 1_000_000,
-                }
-              : current.setup,
-        }));
+        yield* Ref.update(establishmentProgress, (current) => {
+          const preparation =
+            progress.stage === "preparing" &&
+            progress.routeId !== undefined &&
+            progress.routeId !== current.preparation.routeId
+              ? { routeId: progress.routeId, startedAt: now }
+              : current.preparation;
+          return {
+            preparation,
+            synchronizedRoutes:
+              current.synchronizedRoutes + (progress.stage === "synchronizing" ? 1 : 0),
+            // Plain preparing precedes I/O; SSH must explicitly report the final host's answer.
+            hostAnswered:
+              current.hostAnswered ||
+              progress.stage !== "preparing" ||
+              progress.hostAnswered === true,
+            setup:
+              progress.stage === "synchronizing"
+                ? {
+                    routeId: connectionRouteId(progress.prepared.target),
+                    elapsedMs: Number(now - preparation.startedAt) / 1_000_000,
+                  }
+                : current.setup,
+          };
+        });
         yield* reportProgress(attempt, generation, lastFailure, attemptActive, progress);
       }),
     );
@@ -534,19 +548,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     lastFailure: ConnectionAttemptError | null,
     pendingRetry: Option.Option<PendingRetryTrace>,
     establishmentProgress: Ref.Ref<EstablishmentProgress>,
-    startedAt: bigint,
     attemptActive: Ref.Ref<boolean>,
   ) {
     if (usesRelay) {
       return yield* traceRelayEstablishment(
-        establishConnection(
-          attempt,
-          generation,
-          lastFailure,
-          establishmentProgress,
-          startedAt,
-          attemptActive,
-        ),
+        establishConnection(attempt, generation, lastFailure, establishmentProgress, attemptActive),
         attempt,
         generation,
         pendingRetry,
@@ -557,7 +563,6 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       generation,
       lastFailure,
       establishmentProgress,
-      startedAt,
       attemptActive,
     ).pipe(
       Effect.map((lease) => ({
@@ -747,20 +752,20 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     lastFailure: ConnectionAttemptError | null,
     pendingRetry: Option.Option<PendingRetryTrace>,
     ignoreOffline: boolean,
-    setupContinuation: bigint | undefined,
+    setupContinuation: SetupPreparation | undefined,
   ) {
     const sequence = yield* Ref.updateAndGet(attemptSequence, (current) => current + 1);
     const ignoreOfflineState = yield* Ref.make(ignoreOffline);
     const attemptActive = yield* Ref.make(true);
     const switchingTo = yield* Ref.get(preferredRouteId);
     yield* SubscriptionRef.set(prepared, Option.none());
+    const startedAt = yield* Clock.monotonicTimeNanos;
     const establishmentProgress = yield* Ref.make<EstablishmentProgress>({
+      preparation: setupContinuation ?? { routeId: undefined, startedAt },
       synchronizedRoutes: 0,
       hostAnswered: false,
       setup: null,
     });
-    const startedAt = yield* Clock.monotonicTimeNanos;
-    const measurementStartedAt = setupContinuation ?? startedAt;
     const setupBudgetMs = Math.min(
       SETUP_TIMEOUT_CAP_MS,
       Math.max(
@@ -776,7 +781,6 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           lastFailure,
           pendingRetry,
           establishmentProgress,
-          measurementStartedAt,
           attemptActive,
         ).pipe(Effect.ensuring(Ref.set(attemptActive, false))),
       ).pipe(
@@ -796,9 +800,12 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       // a route that fails late does not eat the next route's time.
       Effect.gen(function* () {
         const routeCount = connectionRoutes(yield* Ref.get(currentEntry)).length;
-        const setup = Duration.toNanosUnsafe(Duration.millis(setupBudgetMs * routeCount));
         while (true) {
-          const synchronized = BigInt((yield* Ref.get(establishmentProgress)).synchronizedRoutes);
+          const progress = yield* Ref.get(establishmentProgress);
+          // Slow successes say nothing about an attempt whose host has not answered yet.
+          const budgetMs = progress.hostAnswered ? setupBudgetMs : SETUP_TIMEOUT_FLOOR_MS;
+          const setup = Duration.toNanosUnsafe(Duration.millis(budgetMs * routeCount));
+          const synchronized = BigInt(progress.synchronizedRoutes);
           const deadline =
             startedAt + setup + synchronized * Duration.toNanosUnsafe(synchronizationTimeout);
           const remaining = deadline - (yield* Clock.monotonicTimeNanos);
@@ -825,7 +832,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         established: false,
         stable: false,
         ...(progress.hostAnswered && progress.synchronizedRoutes === 0
-          ? { slowSetupTimeout: { startedAt: measurementStartedAt } }
+          ? { slowSetupTimeout: progress.preparation }
           : {}),
         failure: {
           error: new ConnectionTransientError({
@@ -879,12 +886,13 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       } satisfies AttemptOutcome;
     }
 
-    const setup = (yield* Ref.get(establishmentProgress)).setup;
+    const progress = yield* Ref.get(establishmentProgress);
+    const setup = progress.setup;
     // Exclude the successful route's snapshot wait from future setup budgets.
     const setupElapsedMs =
       setup?.routeId === connectionRouteId(active.lease.prepared.target)
         ? setup.elapsedMs
-        : Number((yield* Clock.monotonicTimeNanos) - measurementStartedAt) / 1_000_000;
+        : Number((yield* Clock.monotonicTimeNanos) - progress.preparation.startedAt) / 1_000_000;
     yield* Ref.update(setupSamples, (samples) =>
       [...samples, setupElapsedMs].slice(-SETUP_SAMPLE_COUNT),
     );
@@ -994,7 +1002,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   const run = Effect.fnUntraced(function* () {
     let failureCount = 0;
     let previousSlowSetupTimeout = false;
-    let setupContinuation: bigint | undefined;
+    let setupContinuation: SetupPreparation | undefined;
     let generation = 0;
     let latestFailure: ConnectionAttemptError | null = null;
     let pendingRetry = Option.none<PendingRetryTrace>();
@@ -1023,6 +1031,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       const currentIntent = yield* Ref.get(intent);
       if (!currentIntent.desired) {
         previousSlowSetupTimeout = false;
+        setupContinuation = undefined;
         resetRetryLadder();
         latestFailure = null;
         replacing = false;
@@ -1085,12 +1094,10 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       const slowSetupTimeout = outcome.slowSetupTimeout !== undefined;
       const retrySlowSetup = slowSetupTimeout && !previousSlowSetupTimeout;
       previousSlowSetupTimeout = slowSetupTimeout;
+      // Counted retries can still join the same preparation; retain its full cost.
+      setupContinuation = outcome.slowSetupTimeout;
       // Retry once without penalizing a host that already answered.
-      if (retrySlowSetup) {
-        // The free retry rejoins the same preparation, whose full cost must be learned.
-        setupContinuation = outcome.slowSetupTimeout?.startedAt;
-        continue;
-      }
+      if (retrySlowSetup) continue;
 
       const attemptSpan: Option.Option<Tracer.Span> = outcome.failure.attemptSpan;
       const error: ConnectionAttemptError = outcome.failure.error;
