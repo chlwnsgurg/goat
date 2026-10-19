@@ -159,6 +159,7 @@ describe("projectScripts helpers", () => {
     expect(projectScriptMenuLabel({ ...script, runOnSettle: true })).toBe(
       "Both (setup, on settle)",
     );
+    expect(projectScriptMenuLabel({ ...script, runAsCheck: true })).toBe("Both (setup, check)");
     expect(projectScriptMenuLabel({ ...script, runOnWorktreeCreate: false })).toBe("Both");
   });
 
@@ -178,6 +179,7 @@ describe("projectScripts helpers", () => {
       icon: "play" as const,
       runOnWorktreeCreate: true,
       runOnSettle: true,
+      runAsCheck: true,
     };
 
     expect(
@@ -189,6 +191,14 @@ describe("projectScripts helpers", () => {
     expect(
       releaseClaimedRoles(holder, { ...input, runOnWorktreeCreate: false, runOnSettle: false }),
     ).toBe(holder);
+    expect(
+      releaseClaimedRoles(holder, {
+        ...input,
+        runOnWorktreeCreate: false,
+        runOnSettle: false,
+        runAsCheck: true,
+      }),
+    ).toMatchObject({ runOnWorktreeCreate: true, runOnSettle: true, runAsCheck: false });
   });
 
   it("builds default runtime env for scripts", () => {
