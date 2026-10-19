@@ -721,6 +721,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.enableProviderUpdateChecks !== DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
       ? ["Provider update checks"]
       : []),
+    ...(settings.automaticServerUpdates !== DEFAULT_UNIFIED_SETTINGS.automaticServerUpdates
+      ? ["Automatic server updates"]
+      : []),
     ...(settings.continueThreadsAfterServerUpdate !==
     DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate
       ? ["Continue threads after restarts"]
@@ -842,6 +845,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
+      automaticServerUpdates: DEFAULT_UNIFIED_SETTINGS.automaticServerUpdates,
       continueThreadsAfterServerUpdate: DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate,
       backgroundActivity: DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
       backgroundActivityProfile: DEFAULT_UNIFIED_SETTINGS.backgroundActivityProfile,
@@ -2879,6 +2883,35 @@ export function GeneralSettingsPanel() {
                 updateSettings({ enableProviderUpdateChecks: Boolean(checked) })
               }
               aria-label="Check provider versions"
+            />
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("automatic-server-updates")}
+          serverScoped
+          settingKeys={["automaticServerUpdates"]}
+          description="When this server runs as a background service, install new releases from its channel while no threads are running. A failed update rolls back."
+          resetAction={
+            settings.automaticServerUpdates !== DEFAULT_UNIFIED_SETTINGS.automaticServerUpdates ? (
+              <SettingResetButton
+                label="automatic server updates"
+                onClick={() =>
+                  updateSettings({
+                    automaticServerUpdates: DEFAULT_UNIFIED_SETTINGS.automaticServerUpdates,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <ScopedSwitch
+              settingKeys={["automaticServerUpdates"]}
+              checked={settings.automaticServerUpdates}
+              onCheckedChange={(checked) =>
+                updateSettings({ automaticServerUpdates: Boolean(checked) })
+              }
+              aria-label="Automatic server updates"
             />
           }
         />

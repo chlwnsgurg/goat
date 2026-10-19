@@ -2,6 +2,7 @@ import { expect, it } from "@effect/vitest";
 import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   SERVICE_LAUNCHER_CONTEXT_ENV,
@@ -151,4 +152,51 @@ it.effect("ignores launcher context inherited without an IPC channel", () =>
     expect(error).toMatchObject({ _tag: "ServiceLauncherClientError", operation: "unmanaged" });
     expect(host.sent).toEqual([]);
   }),
+);
+
+it.effect("reports the bound port and allows the launcher's complete smoke deadline", () =>
+  Effect.gen(function* () {
+    const host = new FakeLauncherProcess({
+      protocol: SERVICE_LAUNCHER_PROTOCOL,
+      childVersion: "1.1.0",
+      update: {
+        id: "smoke-update",
+        fromVersion: "1.0.0",
+        targetVersion: "1.1.0",
+        dbPath: "/tmp/state.sqlite",
+        status: "pending",
+      },
+    });
+    const client = yield* makeClient(host, "1.1.0").pipe(
+      Effect.provideService(ServiceLauncherClient.ServiceLauncherPort, 43210),
+    );
+    const prepared = yield* Effect.forkChild(client.prepareTrial, { startImmediately: true });
+    yield* Effect.yieldNow;
+    expect(host.sent).toEqual([{ type: "prepared", updateId: "smoke-update", port: 43210 }]);
+    yield* TestClock.adjust("31 seconds");
+    host.emit({ type: "committed", updateId: "smoke-update" });
+    expect(yield* Fiber.join(prepared)).toMatchObject({ status: "committed", id: "smoke-update" });
+  }),
+);
+
+it.effect.each(["failed", "rolled-back"] as const)(
+  "exposes the last %s update without sending IPC",
+  (status) =>
+    Effect.gen(function* () {
+      const update = {
+        id: "update-1",
+        fromVersion: "1.0.0",
+        targetVersion: "1.1.0",
+        status,
+        reason: "failed trial",
+      };
+      const host = new FakeLauncherProcess({
+        protocol: SERVICE_LAUNCHER_PROTOCOL,
+        childVersion: "1.0.0",
+        update,
+      });
+      const client = yield* makeClient(host, "1.0.0");
+      expect(client.lastUpdate).toEqual(update);
+      expect(host.sent).toEqual([]);
+    }),
 );

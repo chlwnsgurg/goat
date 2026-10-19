@@ -243,7 +243,7 @@ become aliases. Grouped by resource:
 | `channel`            | `channel_ingest`, `channel_input_get`, `channel_task_get`, `channel_task_list`, `channel_task_report`                                                                                                                                               | `goat_channel_ingest`, `goat_channel_input_read`, `goat_channel_task_read`, `_list`, `_report` | `packages/contracts/src/channelGateway.ts:320-326`                       |
 
 New entries: `goat_describe`, `goat_call`, `goat_eval`, `goat_handoff_{create,list,read,wait,cancel}`,
-`goat_provider_{diagnose,setup,login_start,verify}`.
+`goat_provider_{diagnose,addable_list,setup_open,login_start,login_status,login_cancel}`.
 
 Renames are 1:1 with identical schemas. Merging tools that overlap (for example
 `goat_thread_watch` and `watch_pull_request` into one `watch` resource) is out
@@ -625,57 +625,80 @@ machine" (`packages/provider-claude-cloud/src/server/cli.ts:142-160`). The
 driver reports `setup: { canAuthenticate: false, canInstall: false }`
 (`apps/server/src/provider/Drivers/ClaudeCloudDriver.ts:174`). Devin Cloud reuses
 an ACP Registry Devin instance named by `siblingInstanceId`
-(`packages/provider-devin-cloud/src/settings.ts:11`). An agent can see that a
-provider is unavailable through `orchestrator_capabilities` and do nothing
-about it.
+(`packages/provider-devin-cloud/src/settings.ts:11`). Agents can inspect provider
+availability through `orchestrator_capabilities` and request CLI installation
+and sign-in across hosts through `provider.sync`.
 
-**Proposed.** Four entries:
+**Now.** `provider.host_matrix` (`goat_provider_host_matrix`) reads installed
+versions and sign-in state across this machine and SSH hosts. `provider.sync`
+(`goat_provider_sync`, write) installs with the vendor's official npm package or
+OS-specific script, matching this machine's version by default (latest if absent;
+Cursor's installer always installs latest), then starts sign-in on each host.
+Thread agents receive a `needs_human` approval handoff targeting
+`provider.host_sync`; the approver needs `providers:manage`, and execution uses
+their session. Follow approval with `goat_provider_sync_status` by `handoffId`,
+then use its `syncId` for `goat_provider_sync_cancel` if needed. Cancellation
+stops unfinished work but keeps completed installs.
 
-| Path                   | Effect         | Does                                                                                                                        |
-| ---------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `provider.diagnose`    | read           | Runs the driver's readiness check and returns `checks[]`, each with `status` and a `fix`: a path to call, or a handoff kind |
-| `provider.setup`       | write, dry-run | Creates or enables the instance and fills `sourceInstanceId` / `siblingInstanceId` from instances that exist                |
-| `provider.login_start` | write          | Starts the driver's auth flow through `ProviderAuthService` and returns `needs_human`                                       |
-| `provider.verify`      | read           | Re-runs readiness; the target that a completed login handoff resumes                                                        |
+Each remote runs its own `goat_provider_sync` locally. Installer output stays
+there; only a device code and vendor page (Codex's `codex login --device-auth`)
+or an allowlisted vendor sign-in page (Cursor) can be relayed. Other flows ask
+the person to run the vendor's terminal command or finish in GOAT on that host.
+Sign-in details are visible only to the requester, approver, or a
+`providers:manage` caller. Credentials are never copied between machines. See
+[ProviderHostSync](../../apps/server/src/provider/ProviderHostSync.ts) and its
+[installer and login rules](../../apps/server/src/provider/ProviderHostSyncRecipes.ts).
 
-`provider.setup` and installing a CLI need `providers:manage`, which thread
-credentials lack. Instead of granting it, they return `needs_human` with
-`kind: "approval"`, so the person approves the specific change ("Enable Claude
-Cloud on mac-mini using claudeAgent"). The server performs it under the person's
-session.
+SSH-issued remote sessions do not carry `providers:manage`. Consequently, the
+remote accepts an outside client with a `full-access` ceiling plus
+`orchestration:operate`, as sent by an approved sync from another machine. The
+origin enforces `providers:manage`; a follow-up issue tracks carrying that grant
+to the remote.
 
-A Claude Cloud run, as an agent sees it:
+**Single environment.** Five entries add providers and sign in on the caller's own
+environment:
 
-```text
-goat provider diagnose --driver claudeCloud --json
-  → ok, checks: [instance missing → fix provider.setup]
-goat provider setup --driver claudeCloud --dry-run --json
-  → ok, plan: [create claudeCloud, sourceInstanceId=claudeAgent]
-goat provider setup --driver claudeCloud --json
-  → needs_human (approval), exit 3
-goat handoff wait h_123      # person approves on desktop or phone
-  → ok, instance created, verify: auth_required
-goat provider login-start --instance claudeCloud --json
-  → needs_human (terminal), exit 3
-     the person runs "goat handoff open h_124" in their terminal, which runs
-     "claude auth login --claudeai" with the sibling's environment
-goat handoff wait h_124
-  → ok (provider.verify): ready
-```
+| Path                    | Effect | Does                                                                                                          |
+| ----------------------- | ------ | ------------------------------------------------------------------------------------------------------------- |
+| `provider.addable_list` | read   | Every driver this environment can add, its install state, how it signs in, and its configured instances       |
+| `provider.setup_open`   | write  | Creates a `provider.setup` handoff that opens the add-provider window, preselecting a driver or instance      |
+| `provider.login_start`  | write  | Thread agents get the same handoff; a client holding `providers:manage` starts the flow under its own session |
+| `provider.login_status` | read   | The redacted phase of a flow the caller's own session started                                                 |
+| `provider.login_cancel` | write  | Cancels that flow                                                                                             |
 
-The claude.ai login is written by the Claude CLI into the sibling's own config.
-GOAT never reads, stores, or relays it (`credentialOwner: "provider"`,
-`providerSetup.ts:141`). Devin Cloud follows the same path: `diagnose` finds no
-ACP Registry Devin instance, `setup` proposes creating one (approval), and
-`login_start` uses the ACP agent's own auth method.
+Thread credentials never hold `providers:manage`, so an agent cannot install a
+CLI or sign in. It gets `needs_human` with a `provider.setup` handoff, and the
+person finishes in the same add-provider window the model picker's **+** opens,
+under their own session. The handoff is the only way an agent reaches that
+window: it renders as a card in the thread, opening it needs `providers:manage`
+on its origin environment, and the preselection travels in the encrypted human
+payload. Its title, reason, and instructions are server text built from driver
+metadata, so an agent cannot put a link or command in front of the person. It
+expires on a 30-minute clock, since the person often finishes after the
+requesting turn ends.
+
+A sign-in flow is owned by the auth session that started it
+([providerAuthFlow](../../packages/provider-core/src/server/providerAuthFlow.ts)), so
+another session that replays its `flowId` sees no flow. MCP results go through
+`redactProviderAuthState` in
+[providerOnboarding](../../packages/contracts/src/providerOnboarding.ts): a device
+code and its https verification URL are meant for the person and pass; browser
+authorization and callback URLs, terminal output, and credential fields stay
+with the client that owns the flow, and the result says `continueIn: "app"`.
+
+Claude Code signs in with its own `claude auth login` in a PTY that the app
+renders, and the Claude CLI writes the credentials
+(`credentialOwner: "provider"`). Claude Cloud and Devin Cloud follow their
+sibling instance, so signing in to the sibling is the fix.
 
 The callable provider diagnosis path accepts an SSH host and uses
 [ProviderDiagnosisRouting](../../apps/server/src/provider/ProviderDiagnosisRouting.ts)
 to inspect that host's own providers. It requires a ready runtime; a stopped or
 unprepared host returns instructions to prepare it and check status, without
 waiting for installation or silently diagnosing the local environment.
-`provider.setup` and `provider.login_start` above remain proposals, not callable
-SSH setup capabilities. Provider installation and sign-in stay on the remote host.
+Callable `provider.sync` installs CLIs and starts sign-in across hosts, with
+installation and credential storage on each destination machine; the onboarding
+entries above act on the caller's own environment.
 See the [registry](../../packages/contracts/src/agentSurface/registry.ts) for current
 callable paths and human steps, and the [SSH ownership map](../../structure/ssh.md#host-trust-and-forgetting)
 for trust, key registration, and forget boundaries.

@@ -29,12 +29,17 @@ interface HarnessOptions {
   readonly managed?: boolean;
   readonly preflight?: "ready" | "blocked";
   readonly beforeDownload?: Effect.Effect<void>;
+  readonly corruptChecksum?: boolean;
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
 }
 
 const archiveBytes = new TextEncoder().encode("not really a tarball");
-const releaseHttpClient = (order: string[], beforeDownload?: Effect.Effect<void>) =>
+const releaseHttpClient = (
+  order: string[],
+  beforeDownload?: Effect.Effect<void>,
+  corruptChecksum = false,
+) =>
   HttpClient.make((request) =>
     Effect.gen(function* () {
       if (request.url.endsWith("/SHA256SUMS")) {
@@ -44,7 +49,7 @@ const releaseHttpClient = (order: string[], beforeDownload?: Effect.Effect<void>
         ).join("");
         return HttpClientResponse.fromWeb(
           request,
-          new Response(`${hex}  goat-1.1.0-linux-x64.tar.gz\n`),
+          new Response(`${corruptChecksum ? "0".repeat(64) : hex}  goat-1.1.0-linux-x64.tar.gz\n`),
         );
       }
       if (beforeDownload) yield* beforeDownload;
@@ -67,7 +72,9 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
           order.push("extract");
           const stagingDir = input.args[input.args.indexOf("-C") + 1];
           if (stagingDir === undefined) return yield* Effect.die("missing tar target");
-          yield* fs.writeFileString(path.join(stagingDir, "t3"), "#!/bin/sh\n").pipe(Effect.orDie);
+          yield* fs
+            .writeFileString(path.join(stagingDir, "goat"), "#!/bin/sh\n")
+            .pipe(Effect.orDie);
           return {
             stdout: "",
             stderr: "",
@@ -138,7 +145,10 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
         run: () => Effect.die("unexpected desktop app update run"),
       },
     ),
-    Effect.provideService(HttpClient.HttpClient, releaseHttpClient(order, options.beforeDownload)),
+    Effect.provideService(
+      HttpClient.HttpClient,
+      releaseHttpClient(order, options.beforeDownload, options.corruptChecksum),
+    ),
     Effect.provideService(HostProcess.Platform, "linux"),
     Effect.provideService(HostProcess.Architecture, "x64"),
     Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
@@ -152,6 +162,80 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
 });
 
 it.layer(NodeServices.layer)("server self update", (it) => {
+  it.effect(
+    "prepares with checksum and preflight while busy, then reuses the download after idle refusal",
+    () =>
+      Effect.gen(function* () {
+        let busy = true;
+        const h = yield* makeHarness({ activity: () => (busy ? "busy" : "idle") });
+        yield* h.selfUpdate.prepare("1.1.0");
+        expect(h.order).toEqual(["download", "extract", "preflight"]);
+        expect(yield* h.selfUpdate.isUpdating).toBe(false);
+        const error = yield* h.selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip);
+        expect(error.reason).toBe(ServerSelfUpdate.SERVER_UPDATE_BUSY_REASON);
+        expect(h.order).toEqual(["download", "extract", "preflight"]);
+        busy = false;
+        yield* h.selfUpdate.update({ targetVersion: "1.1.0" });
+        expect(h.order).toEqual(["download", "extract", "preflight", "preflight", "accept"]);
+      }),
+  );
+
+  it.effect("background preparation refuses a checksum mismatch before preflight or handoff", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ corruptChecksum: true });
+      yield* h.selfUpdate.prepare("1.1.0").pipe(Effect.flip);
+      expect(h.order).toEqual(["download"]);
+      expect(yield* h.selfUpdate.isUpdating).toBe(false);
+    }),
+  );
+
+  it.effect("background preparation refuses a blocked preflight", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ preflight: "blocked" });
+      const error = yield* h.selfUpdate.prepare("1.1.0").pipe(Effect.flip);
+      expect(error.reason).toBe("local update required");
+      expect(h.order).toEqual(["download", "extract", "preflight"]);
+    }),
+  );
+
+  it.effect("background preparation and manual activation share one in-flight guard", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const h = yield* makeHarness({
+        beforeDownload: Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+        ),
+      });
+      const fiber = yield* Effect.forkChild(h.selfUpdate.prepare("1.1.0"));
+      yield* Deferred.await(entered);
+      expect(yield* h.selfUpdate.isUpdating).toBe(true);
+      expect(
+        (yield* h.selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip)).reason,
+      ).toContain("already in progress");
+      expect((yield* h.selfUpdate.prepare("1.1.0").pipe(Effect.flip)).reason).toContain(
+        "already in progress",
+      );
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(fiber);
+      expect(yield* h.selfUpdate.isUpdating).toBe(false);
+    }),
+  );
+
+  it.effect("interrupted background preparation releases the shared in-flight guard", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const h = yield* makeHarness({
+        beforeDownload: Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+      });
+      const fiber = yield* Effect.forkChild(h.selfUpdate.prepare("1.1.0"));
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(fiber);
+      expect(yield* h.selfUpdate.isUpdating).toBe(false);
+      yield* h.admission.admit(Effect.void);
+    }),
+  );
+
   it.effect(
     "refuses a busy unconfirmed service without downloading or contacting the launcher",
     () =>
@@ -257,6 +341,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "web",
         selfUpdate: {
+          capability: "boot-service",
+          isUpdating: Effect.succeed(false),
+          prepare: () => Effect.void,
           update: (_input, reportProgress = () => Effect.void) =>
             reportProgress("downloading").pipe(
               Effect.andThen(reportProgress("installing")),
@@ -291,6 +378,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "desktop",
         selfUpdate: {
+          capability: "boot-service",
+          isUpdating: Effect.succeed(false),
+          prepare: () => Effect.void,
           update: (_input, reportProgress = () => Effect.void) =>
             reportProgress("installing").pipe(
               Effect.as({
@@ -339,6 +429,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "web",
         selfUpdate: {
+          capability: "boot-service",
+          isUpdating: Effect.succeed(false),
+          prepare: () => Effect.void,
           update: (_input, reportProgress = () => Effect.void) =>
             reportProgress("installing").pipe(Effect.andThen(Effect.fail(updateError))),
           commitDesktopUpdate: () => Effect.never,
@@ -361,6 +454,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "web",
         selfUpdate: {
+          capability: "boot-service",
+          isUpdating: Effect.succeed(false),
+          prepare: () => Effect.void,
           update: (
             _input,
             reportProgress = () => Effect.void,
@@ -394,6 +490,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "desktop",
         selfUpdate: {
+          capability: "boot-service",
+          isUpdating: Effect.succeed(false),
+          prepare: () => Effect.void,
           update: () =>
             Effect.succeed({
               targetVersion: "1.2.0",
@@ -430,6 +529,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "desktop",
         selfUpdate: {
+          capability: "boot-service",
+          isUpdating: Effect.succeed(false),
+          prepare: () => Effect.void,
           update: () =>
             Effect.succeed({
               targetVersion: "1.2.0",

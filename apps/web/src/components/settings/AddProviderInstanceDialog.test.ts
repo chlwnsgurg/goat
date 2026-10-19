@@ -5,7 +5,9 @@ import {
   getProviderIdentityDraft,
   isConfiguredAcpRegistryAgent,
   resolveAcpRegistryWizardNavigation,
+  resolveProviderSetupPlan,
   resolveWizardNavigation,
+  summarizeDriverSetupState,
   updateProviderIdentityDraft,
 } from "./AddProviderInstanceDialog.logic";
 
@@ -113,5 +115,95 @@ describe("ACP Registry wizard", () => {
       label: "Gemini CLI",
       instanceIdOverride: "acpRegistry_gemini_cli",
     });
+  });
+});
+
+describe("summarizeDriverSetupState", () => {
+  const snapshot = (
+    driver: string,
+    installed: boolean,
+    auth: "authenticated" | "unauthenticated" | "unknown",
+    status: "ready" | "disabled" | "error" = "ready",
+  ) => ({ driver, installed, status, auth: { status: auth } }) as never;
+
+  it("is unknown until the environment has checked a snapshot of the driver", () => {
+    expect(summarizeDriverSetupState([snapshot("codex", true, "authenticated")], "grok")).toBe(
+      null,
+    );
+    expect(
+      summarizeDriverSetupState([snapshot("grok", false, "unknown", "disabled")], "grok"),
+    ).toBe(null);
+  });
+
+  it("reports the most advanced state across the driver's instances", () => {
+    expect(
+      summarizeDriverSetupState(
+        [
+          snapshot("claudeAgent", true, "unauthenticated"),
+          snapshot("claudeAgent", true, "authenticated"),
+        ],
+        "claudeAgent",
+      ),
+    ).toBe("signedIn");
+    expect(summarizeDriverSetupState([snapshot("opencode", true, "unknown")], "opencode")).toBe(
+      "installed",
+    );
+    expect(
+      summarizeDriverSetupState([snapshot("cursor", false, "unknown", "error")], "cursor"),
+    ).toBe("missing");
+  });
+});
+
+describe("resolveProviderSetupPlan", () => {
+  const provider = (patch: Record<string, unknown>) =>
+    ({
+      driver: "claudeAgent",
+      installed: true,
+      auth: { status: "unauthenticated" },
+      setup: { canAuthenticate: true, canInstall: false },
+      ...patch,
+    }) as never;
+  const plan = (
+    snapshot: ReturnType<typeof provider> | undefined,
+    auth: Record<string, unknown> | null = null,
+  ) => resolveProviderSetupPlan({ provider: snapshot, auth: auth as never, authError: null });
+
+  it("waits for the new instance's first snapshot", () => {
+    expect(plan(undefined)).toEqual({ kind: "checking" });
+  });
+
+  it("installs before sign-in, in the app only when the environment can", () => {
+    expect(plan(provider({ installed: false }))).toEqual({ kind: "install", inApp: false });
+    expect(
+      plan(provider({ installed: false, setup: { canAuthenticate: true, canInstall: true } })),
+    ).toEqual({ kind: "install", inApp: true });
+  });
+
+  it("signs in inside the app when the driver advertises it", () => {
+    expect(plan(provider({}))).toEqual({ kind: "signIn" });
+    expect(plan(provider({ auth: { status: "authenticated" } }))).toEqual({ kind: "signedIn" });
+    expect(plan(provider({ auth: { status: "unknown" } }), { phase: "succeeded" })).toEqual({
+      kind: "signedIn",
+    });
+  });
+
+  it("falls back to the provider's own command, or its docs, without an in-app method", () => {
+    const noInApp = { canAuthenticate: false, canInstall: false };
+    expect(plan(provider({ setup: noInApp }))).toEqual({
+      kind: "command",
+      command: "claude auth login",
+    });
+    expect(plan(provider({ driver: "opencode", setup: noInApp }))).toEqual({
+      kind: "command",
+      command: "opencode auth login",
+    });
+    expect(plan(provider({ driver: "grok", setup: noInApp }))).toEqual({ kind: "manual" });
+  });
+
+  it("waits for an ACP agent to advertise its methods before choosing", () => {
+    const acp = provider({ driver: "acpRegistry" });
+    expect(plan(acp, { phase: "idle" })).toEqual({ kind: "discovering" });
+    expect(plan(acp, { phase: "idle", methods: [{ id: "oauth" }] })).toEqual({ kind: "signIn" });
+    expect(plan(acp, { phase: "idle", methods: [] })).toEqual({ kind: "manual" });
   });
 });

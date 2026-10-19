@@ -25,6 +25,8 @@ export const HostCondition = Schema.Struct({
   type: HostConditionType,
   /** When the condition became true (ISO 8601). */
   since: Schema.String,
+  /** A machine-readable cause, as in Kubernetes conditions; VersionMismatch uses the host status compatibility verdict. */
+  reason: Schema.optional(Schema.String),
   /** The provider instance at its limit, for QuotaExhausted. */
   instanceId: Schema.optional(Schema.String),
   message: Schema.String,

@@ -151,5 +151,15 @@ describe("host conditions", () => {
       expect.arrayContaining(["Cordoned", "Draining"]),
     );
     expect(isSchedulable(drained)).toBe(false);
+    // A host that cannot work with this machine takes no work; compatible builds raise nothing.
+    const incompatible = { ...contact, sample: { ...ok, compatibility: "incompatible" as const } };
+    expect(
+      isSchedulable(deriveConditions({ contact: incompatible, scheduling: null, now: MIN })),
+    ).toBe(false);
+    const compatible = {
+      ...contact,
+      sample: { ...ok, versionMismatch: true as const, compatibility: "compatible" as const },
+    };
+    expect(types(compatible, MIN)).toEqual(["Ready"]);
   });
 });

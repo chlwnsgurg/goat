@@ -205,11 +205,16 @@ export function deriveConditions(input: {
     });
   }
   const sample = contact.sample;
-  if (sample?.versionMismatch === true) {
+  // Since host status judges protocols (#497), only a host that cannot prove or does not have
+  // compatibility warrants a condition; different compatible builds are routine.
+  const verdict =
+    sample?.compatibility ?? (sample?.versionMismatch === true ? "degraded" : "compatible");
+  if (verdict !== "compatible") {
     conditions.push({
       type: "VersionMismatch",
       since: iso(contact.lastOkAt ?? now),
-      message: sample.message ?? "Runs a different GOAT version.",
+      reason: verdict,
+      message: sample?.message ?? "Runs a different GOAT version.",
     });
   }
   for (const quota of sample?.metrics?.quotas ?? []) {
@@ -236,12 +241,16 @@ export function deriveConditions(input: {
   return conditions;
 }
 
-/** New or moved work may go here. VersionMismatch and quotas are warnings for placement. */
+/**
+ * New or moved work may go here. Quotas and a degraded version are warnings; a host that cannot
+ * work with this machine (compatibility "incompatible") takes no work.
+ */
 export const isSchedulable = (conditions: ReadonlyArray<HostCondition>) =>
   conditions.some((condition) => condition.type === "Ready") &&
   !conditions.some(
     (condition) =>
       condition.type === "Unreachable" ||
       condition.type === "Cordoned" ||
-      condition.type === "Draining",
+      condition.type === "Draining" ||
+      (condition.type === "VersionMismatch" && condition.reason === "incompatible"),
   );

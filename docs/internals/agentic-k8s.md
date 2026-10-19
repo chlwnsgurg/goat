@@ -334,6 +334,9 @@ Where the code departs from the text below, and why:
   failures for the next five minutes, so a Mac waking from sleep makes no host Lost.
 - `RescheduleRequest` has three optional fields: `project` (the folder and repository key to find on
   the target), `targetHost` (a person's choice) and `force` (skip only the Lost wait).
+- VersionMismatch follows the host status compatibility verdict (#497): it appears only for a
+  `degraded` or `incompatible` host, with that verdict as its `reason`, and an `incompatible` host
+  takes no work. Different builds that are compatible raise no condition.
 - Placement uses `choosePlacement` over Ready, uncordoned hosts until the T3 `Placement` tag lands.
 - A request that resumes from a replica is refused with `no_resume_point` until replica capture for
   goal attempts lands; branch and base resumes work.
