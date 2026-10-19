@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - Drives the real shell script against a fake goat CLI archive.
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -6,7 +7,7 @@ import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 const script = NodePath.resolve(import.meta.dirname, "install-goat-server.sh");
-const platformKey = `${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`;
+const platformKey = `${HostProcess.Platform.defaultValue() === "darwin" ? "darwin" : "linux"}-${HostProcess.Architecture.defaultValue() === "arm64" ? "arm64" : "x64"}`;
 
 /** A goat that records each call and prints what goat pair prints. */
 const FAKE_GOAT = `#!/bin/sh
@@ -162,7 +163,9 @@ describe("install-goat-server.sh", () => {
 
   it("installs into a pre-rename ~/.t3 home that still holds the state", async () => {
     const result = await run([`archive:${platformKey}`, "--no-pair"], {
-      userHome: (home) => NodeFSP.mkdir(NodePath.join(home, ".t3/userdata"), { recursive: true }),
+      userHome: async (home) => {
+        await NodeFSP.mkdir(NodePath.join(home, ".t3/userdata"), { recursive: true });
+      },
     });
     expect(result.status).toBe(0);
     await NodeFSP.access(
