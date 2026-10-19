@@ -397,3 +397,188 @@ describe("buildClientPairingQrPayload", () => {
     );
   });
 });
+
+import { EnvironmentId, type SshHostStatus } from "@goat/contracts";
+import {
+  SshConnectionProfile,
+  SshConnectionTarget,
+  connectionRouteId,
+  type EnvironmentConnectionPresentation,
+} from "@goat/client-runtime/connection";
+import * as Option from "effect/Option";
+import { savedConnectionPresentation } from "./ConnectionsSettings.logic";
+
+const sshEnvironmentId = EnvironmentId.make("fixture-vps");
+const sshTarget = new SshConnectionTarget({
+  environmentId: sshEnvironmentId,
+  connectionId: "fixture-ssh",
+  label: "Fixture VPS",
+});
+const sshEntry = {
+  target: sshTarget,
+  profile: Option.some(
+    new SshConnectionProfile({
+      environmentId: sshEnvironmentId,
+      connectionId: "fixture-ssh",
+      label: "Fixture VPS",
+      target: { alias: "fixture-vps", hostname: "example.invalid", username: null, port: null },
+    }),
+  ),
+  enabled: true,
+};
+const sshRouteId = connectionRouteId(sshTarget);
+const readyRuntime: SshHostStatus = {
+  host: "fixture-vps",
+  state: "ready",
+  runtimeVersion: null,
+  requestedVersion: "0.4.3",
+};
+function rowPresentation(
+  connection: EnvironmentConnectionPresentation,
+  runtimeStatus = readyRuntime,
+  enabled = true,
+) {
+  return savedConnectionPresentation({
+    environment: { entry: { ...sshEntry, enabled }, connection, serverConfig: null },
+    runtimeStatus,
+  });
+}
+function failedAttempt(
+  failureAttempt: number,
+  readyAttempt: number,
+): EnvironmentConnectionPresentation {
+  return {
+    phase: "reconnecting",
+    stage: "opening",
+    error: "did not respond during connection setup",
+    traceId: null,
+    failure: {
+      kind: "retrying",
+      reason: "timeout",
+      detail: "did not respond during connection setup",
+    },
+    failureOrigin: {
+      supervisorId: "window-1",
+      attemptId: failureAttempt,
+      routeId: sshRouteId,
+      stage: "preparing",
+      setupTimeout: true,
+    },
+    sshRuntimeReady: {
+      supervisorId: "window-1",
+      attemptId: readyAttempt,
+      routeId: sshRouteId,
+      operationId: "operation-2",
+      attachmentId: "attachment-2",
+      runtimeStatus: readyRuntime,
+    },
+  };
+}
+
+describe("saved SSH row semantic status", () => {
+  it("shows a newer verified ready attempt over the older setup timeout in row and tooltip", () => {
+    const result = rowPresentation(failedAttempt(1, 2));
+    expect(result.text).toBe("Runtime ready · Opening connection");
+    expect(result.tone).toBe("muted");
+    expect(result.tooltipText).toContain("Runtime ready");
+    expect(JSON.stringify(result)).not.toMatch(/unknown|did not respond/);
+  });
+  it.each([
+    [2, 1],
+    [2, 2],
+  ])(
+    "keeps timeout A%s against ready A%s, including a same-attempt socket timeout",
+    (failure, ready) => {
+      const result = rowPresentation(failedAttempt(failure, ready));
+      expect(result.tone).toBe("error");
+      expect(result.text).toContain("did not respond");
+      expect(result.tooltipText).toContain("did not respond");
+    },
+  );
+  it("does not turn a new poll of old readiness into new attempt evidence", () => {
+    const connection = failedAttempt(2, 1);
+    expect(rowPresentation(connection, { ...readyRuntime }).tone).toBe("error");
+  });
+  it.each(["route", "owner", "no-origin"])(
+    "does not suppress incomparable %s evidence",
+    (mismatch) => {
+      const connection = failedAttempt(1, 2);
+      const origin = connection.failureOrigin!;
+      const { failureOrigin: _origin, ...withoutOrigin } = connection;
+      const result = rowPresentation(
+        mismatch === "no-origin"
+          ? withoutOrigin
+          : {
+              ...connection,
+              failureOrigin: {
+                ...origin,
+                ...(mismatch === "route"
+                  ? { routeId: "another-route" }
+                  : { supervisorId: "another-window" }),
+              },
+            },
+      );
+      expect(result.tone).toBe("error");
+      expect(result.tooltipText).toContain("did not respond");
+    },
+  );
+  it("uses the active matching phase once while the owner poll is still delayed", () => {
+    const connection = failedAttempt(1, 2);
+    const result = rowPresentation(
+      {
+        ...connection,
+        sshPreparation: {
+          supervisorId: "window-1",
+          attemptId: 2,
+          routeId: sshRouteId,
+          operationId: "operation-2",
+          phase: "uploading",
+          hostAnswered: true,
+        },
+      },
+      { ...readyRuntime, state: "preparing", phase: "checking" },
+    );
+    expect(result.text).toBe("Installing GOAT runtime — first setup can take a few minutes");
+    expect(result.tone).toBe("muted");
+    expect(result.runtimeText).toBeNull();
+    expect(result.tooltipText).toBe(result.text);
+  });
+  it.each(["authentication", "configuration", "transport"] as const)(
+    "preserves a fresh %s failure against old ready evidence",
+    (reason) => {
+      const result = rowPresentation({
+        ...failedAttempt(2, 1),
+        phase: reason === "transport" ? "reconnecting" : "error",
+        error: "fresh failure",
+        failure: { kind: "blocked", reason, detail: "fresh failure" },
+      });
+      expect(result.tone).toBe("error");
+      expect(result.tooltipText).toContain("fresh failure");
+    },
+  );
+  it.each(["failed", "untrusted", "stopped", "providers_not_ready", "update_waiting"] as const)(
+    "does not let cached ready hide current owner %s",
+    (state) => {
+      expect(rowPresentation(failedAttempt(1, 2), { ...readyRuntime, state }).tone).toBe("error");
+    },
+  );
+  it("keeps disabled, unsupported, and offline distinct from preparation", () => {
+    const connection = failedAttempt(1, 2);
+    expect(rowPresentation(connection, readyRuntime, false).text).toBe("Off");
+    expect(rowPresentation({ ...connection, phase: "offline" }).text).toBe("Offline");
+    expect(rowPresentation({ ...connection, phase: "unsupported" }).text).toBe(
+      "Client not supported",
+    );
+  });
+});
+
+it("does not apply coherent evidence from a different saved SSH route to this row", () => {
+  const connection = failedAttempt(1, 2);
+  const result = rowPresentation({
+    ...connection,
+    failureOrigin: { ...connection.failureOrigin!, routeId: "another-saved-route" },
+    sshRuntimeReady: { ...connection.sshRuntimeReady!, routeId: "another-saved-route" },
+  });
+  expect(result.tone).toBe("error");
+  expect(result.text).toContain("did not respond");
+});

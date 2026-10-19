@@ -52,6 +52,7 @@ import {
   isRemoteLaunch,
 } from "./tunnel.fixture.ts";
 import { nextVersion, shell, fixture } from "./tunnel.runnerSwitch.fixture.ts";
+import { makeEnsureFlightFixture } from "./tunnel.ensure-flight.fixture.ts";
 
 // Archive acquisition stays local to these transport doubles.
 beforeEach(() => vi.stubGlobal("fetch", async () => new Response(null, { status: 404 })));
@@ -2996,5 +2997,117 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("remote process
       );
       assert.equal(Number(yield* probe.exitCode), 0);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+});
+
+describe("validated preparation attachment completion", () => {
+  it.effect(
+    "renews pairing on a live attachment without another preparation or phase publication",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* makeEnsureFlightFixture;
+        f.state.holdUpload = false;
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          const bootstrap = yield* manager.ensureEnvironment(uploadTarget);
+          if ("type" in bootstrap) return yield* Effect.die("Expected a ready attachment");
+          assert.isString(bootstrap.attachmentId);
+          const before = { ...f.count };
+          const phases: string[] = [];
+          const admissions: string[] = [];
+          const options = {
+            preparedAttachmentId: bootstrap.attachmentId!,
+            issuePairingToken: true,
+            onPhase: () => phases.push("phase"),
+            onPreparationProgress: () => phases.push("progress"),
+            onPreparationAdmission: ({ disposition }: { disposition: string }) =>
+              admissions.push(disposition),
+          };
+          const first = yield* manager.ensureEnvironment(uploadTarget, options);
+          const second = yield* manager.ensureEnvironment(uploadTarget, options);
+          if ("type" in first || "type" in second)
+            return yield* Effect.die("Expected fresh credentials");
+          assert.notEqual(first.pairingToken, second.pairingToken);
+          assert.equal(first.attachmentId, bootstrap.attachmentId);
+          assert.deepEqual(f.count, { ...before, pairings: 2 });
+          assert.deepEqual(phases, []);
+          assert.deepEqual(admissions, ["attachment-completion", "attachment-completion"]);
+        }).pipe(Effect.provide(f.layer), Effect.scoped);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect.each([
+    "exited",
+    "removed",
+    "generation",
+    "rotated",
+    "uncertain-drain",
+    "invalid-pin",
+  ] as const)(
+    "rejects a %s attachment neutrally and never uploads/pairs through the hint",
+    (change) =>
+      Effect.gen(function* () {
+        const f = yield* makeEnsureFlightFixture;
+        f.state.holdUpload = false;
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          const bootstrap = yield* manager.ensureEnvironment(uploadTarget);
+          if ("type" in bootstrap) return yield* Effect.die("Expected a ready attachment");
+          switch (change) {
+            case "exited":
+              f.state.forwardAlive = false;
+              break;
+            case "removed":
+              yield* manager.disconnectEnvironment(uploadTarget);
+              break;
+            case "generation":
+              yield* manager.beginSetupOperation(uploadTarget, "successor");
+              break;
+            case "rotated":
+              yield* manager.ensureEnvironment(uploadTarget, { refreshRuntime: true });
+              break;
+            case "uncertain-drain":
+              f.state.launchFails = true;
+              assert.isTrue(
+                Result.isFailure(
+                  yield* Effect.result(
+                    manager.ensureEnvironment(uploadTarget, { refreshRuntime: true }),
+                  ),
+                ),
+              );
+              f.state.launchFails = false;
+              break;
+            case "invalid-pin": {
+              const fs = yield* FileSystem.FileSystem;
+              const directory = `${f.root}/.ssh/goat-hosts`;
+              yield* fs.makeDirectory(directory, { recursive: true });
+              yield* fs.writeFileString(`${directory}/devbox.conf`, "Host devbox\n");
+              yield* fs.writeFileString(`${directory}/devbox.known_hosts`, "invalid pin\n");
+              break;
+            }
+          }
+          const before = { ...f.count };
+          const result = yield* Effect.result(
+            manager.ensureEnvironment(uploadTarget, {
+              preparedAttachmentId: bootstrap.attachmentId!,
+              issuePairingToken: true,
+            }),
+          );
+          assert.isTrue(Result.isFailure(result));
+          if (Result.isFailure(result))
+            assert.equal(result.failure._tag, "SshEnsureSupersededError");
+          assert.equal(f.count.acquisitions, before.acquisitions);
+          assert.equal(f.count.uploads, before.uploads);
+          assert.equal(f.count.launches, before.launches);
+          assert.equal(f.count.pairings, 0);
+          if (change === "exited" || change === "removed") {
+            const renewed = yield* manager.ensureEnvironment(uploadTarget);
+            assert.notProperty(renewed, "type");
+            assert.equal(f.count.forwards, 2);
+            assert.equal(f.count.uploads, 1);
+            assert.equal(f.count.kills, 1);
+          }
+        }).pipe(Effect.provide(f.layer), Effect.scoped);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });

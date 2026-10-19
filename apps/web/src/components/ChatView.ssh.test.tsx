@@ -20,12 +20,18 @@ import { DEFAULT_CLIENT_SETTINGS } from "@goat/contracts/settings";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@goat/shared/keybindings";
 import { createModelSelection } from "@goat/shared/model";
 import { scopeProjectRef } from "@goat/client-runtime/environment";
-import { SshConnectionProfile, SshConnectionTarget } from "@goat/client-runtime/connection";
+import {
+  SshConnectionProfile,
+  SshConnectionTarget,
+  type EnvironmentConnectionPresentation,
+} from "@goat/client-runtime/connection";
+import * as chatViewLogic from "./ChatView.logic";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import type { LegendListRef } from "@legendapp/list/react";
 import type { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { ChatComposer, ChatComposerHandle } from "./chat/ChatComposer";
 const state = vi.hoisted(() => ({
+  primaryConnection: null as EnvironmentConnectionPresentation | null,
   launch: vi.fn(),
   navigate: vi.fn(),
   retry: vi.fn(),
@@ -114,7 +120,11 @@ vi.mock("../state/device", async (original) => ({
 }));
 vi.mock("../state/environments", async (original) => ({
   ...(await original<typeof import("../state/environments")>()),
-  useEnvironments: () => ({ environments: [primary] }),
+  useEnvironments: () => ({
+    environments: [
+      state.primaryConnection ? { ...primary, connection: state.primaryConnection } : primary,
+    ],
+  }),
   usePrimaryEnvironment: () => primary,
 }));
 vi.mock("../state/entities", async (original) => ({
@@ -244,6 +254,13 @@ vi.mock("./chat/ChatComposer", async () => {
       );
       return (
         <div data-editor="editable">
+          {props.bannerItems.map((item) => (
+            <div key={item.id} data-banner={item.id}>
+              {item.title}
+              {item.description}
+              {item.actions}
+            </div>
+          ))}
           <button onClick={() => void props.onSend()}>Send</button>
         </div>
       );
@@ -290,6 +307,7 @@ const project = {
 const primary = {
   environmentId: local,
   label: "Local",
+  entry: { target: { _tag: "PrimaryConnectionTarget" } },
   connection: { phase: "connected" },
   serverConfig: null,
 };
@@ -340,6 +358,7 @@ async function mount(draftId = id) {
   );
 }
 beforeEach(() => {
+  state.primaryConnection = null;
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("matchMedia", () => ({
     matches: false,
@@ -991,4 +1010,67 @@ describe("timeline follow navigation", () => {
     expect(state.scrollToEnd).toHaveBeenCalledTimes(1);
     expect(state.scrollNode!.scrollTop).toBe(600);
   });
+});
+
+it("uses reconciled SSH presentation in the chat banner while keeping fresh failures visible", async () => {
+  vi.spyOn(chatViewLogic, "scheduleEnvironmentReconnectWarning").mockImplementation((show) => {
+    show();
+    return () => {};
+  });
+  const identity = { supervisorId: "chat-fixture", attemptId: 2, routeId: "ssh-fixture-route" };
+  const connection: EnvironmentConnectionPresentation = {
+    phase: "reconnecting",
+    stage: "opening",
+    error: "OLD SETUP TIMEOUT",
+    traceId: null,
+    failure: { kind: "retrying", reason: "timeout", detail: "OLD SETUP TIMEOUT" },
+    failureOrigin: { ...identity, attemptId: 1, stage: "preparing", setupTimeout: true },
+    sshRuntimeReady: {
+      ...identity,
+      operationId: "fixture-op",
+      attachmentId: "fixture-attachment",
+      runtimeStatus: {
+        host: "fixture-vps",
+        state: "ready",
+        runtimeVersion: "0.4.3",
+        requestedVersion: "0.4.3",
+      },
+    },
+  };
+  state.primaryConnection = connection;
+  await mount();
+  const banner = () => container.querySelector('[data-banner^="environment-unavailable:"]');
+  expect(banner()?.textContent).toContain("Runtime ready · Opening connection");
+  expect(banner()?.textContent).not.toContain("OLD SETUP TIMEOUT");
+  for (const reason of ["timeout", "authentication", "transport"] as const) {
+    state.primaryConnection = {
+      ...connection,
+      error: "FRESH FAILURE",
+      failure: { kind: "retrying", reason, detail: "FRESH FAILURE" },
+      failureOrigin: {
+        ...identity,
+        attemptId: 3,
+        stage: "opening",
+        setupTimeout: reason === "timeout",
+      },
+    };
+    await act(async () => root.render(<div />));
+    await mount();
+    expect(banner()?.textContent).toContain("FRESH FAILURE");
+  }
+  state.primaryConnection = {
+    ...connection,
+    sshPreparation: {
+      ...identity,
+      operationId: "fixture-op",
+      phase: "uploading",
+      hostAnswered: true,
+    },
+  };
+  await act(async () => root.render(<div />));
+  await mount();
+  expect(banner()?.textContent).toContain(
+    "Installing GOAT runtime — first setup can take a few minutes",
+  );
+  expect(banner()?.textContent).not.toContain("OLD SETUP TIMEOUT");
 });

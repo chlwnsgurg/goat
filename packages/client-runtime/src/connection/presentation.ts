@@ -1,13 +1,17 @@
-import type { ServerConfig } from "@goat/contracts";
+import type { ServerConfig, SshHostStatus } from "@goat/contracts";
 import * as Option from "effect/Option";
 
 import type { ConnectionCatalogEntry } from "./catalog.ts";
 import type {
   ConnectionAttemptStage,
-  ConnectionAttemptError,
+  ConnectionFailure,
+  ConnectionFailureOrigin,
+  ConnectionSshPreparation,
+  ConnectionSshRuntimeReady,
   ConnectionTarget,
   SupervisorConnectionState,
 } from "./model.ts";
+import { sshRuntimePhaseText } from "../state/sshRuntime.ts";
 import { connectionRouteId, connectionRoutes, routeHttpBaseUrl } from "./routes.ts";
 
 export type EnvironmentConnectionPhase =
@@ -21,11 +25,15 @@ export type EnvironmentConnectionPhase =
 
 export interface EnvironmentConnectionPresentation {
   readonly phase: EnvironmentConnectionPhase;
+  readonly failureOrigin?: ConnectionFailureOrigin;
+  readonly sshPreparation?: ConnectionSshPreparation;
+  readonly sshRuntimeReady?: ConnectionSshRuntimeReady;
+  readonly failureSuppressed?: true;
   readonly error: string | null;
   readonly traceId: string | null;
   readonly failure?: {
     readonly kind: "blocked" | "retrying";
-    readonly reason: ConnectionAttemptError["reason"];
+    readonly reason: ConnectionFailure["reason"];
     readonly detail: string;
     readonly traceId?: string;
   };
@@ -54,7 +62,7 @@ export interface EnvironmentPresentation {
   readonly serverConfig: EnvironmentServerConfig | null;
 }
 
-export function presentConnectionState(
+function projectConnectionState(
   state: SupervisorConnectionState,
 ): EnvironmentConnectionPresentation {
   const unreachable = state.lastFailure?.reason === "host-unreachable";
@@ -107,7 +115,81 @@ export function presentConnectionState(
   }
 }
 
+/** Native ready evidence orders attempts; a status poll never creates that provenance. */
+export function reconcileSshConnectionPresentation(
+  connection: EnvironmentConnectionPresentation,
+  runtimeStatus?: SshHostStatus,
+): EnvironmentConnectionPresentation {
+  const { failureSuppressed: _suppressed, sshRuntimeReady: observedReady, ...rest } = connection;
+  const invalidated =
+    runtimeStatus !== undefined &&
+    runtimeStatus.state !== "ready" &&
+    runtimeStatus.state !== "preparing";
+  const base = {
+    ...rest,
+    ...(!invalidated && observedReady !== undefined ? { sshRuntimeReady: observedReady } : {}),
+  };
+  const active =
+    (base.phase === "connecting" || base.phase === "reconnecting") &&
+    base.sshPreparation !== undefined;
+  const ready =
+    runtimeStatus !== undefined &&
+    runtimeStatus.state !== "ready" &&
+    runtimeStatus.state !== "preparing"
+      ? undefined
+      : base.sshRuntimeReady;
+  const origin = base.failureOrigin;
+  const staleSetupTimeout =
+    base.failure?.reason === "timeout" &&
+    origin?.setupTimeout === true &&
+    ready?.runtimeStatus.state === "ready" &&
+    ready.supervisorId === origin.supervisorId &&
+    ready.routeId === origin.routeId &&
+    ready.attemptId > origin.attemptId;
+  if (
+    (base.phase === "connecting" || base.phase === "reconnecting") &&
+    (active || staleSetupTimeout)
+  ) {
+    return { ...base, error: null, traceId: null, unreachable: false, failureSuppressed: true };
+  }
+  if (connection.failureSuppressed) {
+    const { sshRuntimeReady: _ready, ...withoutReady } = base;
+    return {
+      ...withoutReady,
+      ...(ready === undefined ? {} : { sshRuntimeReady: ready }),
+      error: base.failure?.detail ?? null,
+      traceId: base.failure?.traceId ?? null,
+      ...(base.failure?.reason === "host-unreachable" ? { unreachable: true } : {}),
+    };
+  }
+  return invalidated && observedReady !== undefined ? base : connection;
+}
+
+export function presentConnectionState(
+  state: SupervisorConnectionState,
+): EnvironmentConnectionPresentation {
+  return reconcileSshConnectionPresentation({
+    ...projectConnectionState(state),
+    ...(state.failureOrigin === undefined ? {} : { failureOrigin: state.failureOrigin }),
+    ...(state.sshPreparation === undefined ? {} : { sshPreparation: state.sshPreparation }),
+    ...(state.sshRuntimeReady === undefined ? {} : { sshRuntimeReady: state.sshRuntimeReady }),
+  });
+}
+
+function preparationLabel(connection: EnvironmentConnectionPresentation): string | undefined {
+  return (connection.phase === "connecting" || connection.phase === "reconnecting") &&
+    connection.sshPreparation !== undefined
+    ? sshRuntimePhaseText(connection.sshPreparation.phase)
+    : undefined;
+}
+
 export function connectionStatusText(connection: EnvironmentConnectionPresentation): string {
+  connection = reconcileSshConnectionPresentation(connection);
+  const phase = preparationLabel(connection);
+  if (phase !== undefined) return phase;
+  if (connection.failureSuppressed && connection.sshRuntimeReady !== undefined) {
+    return `Runtime ready · ${connectionProgressLabel(connection, 0)}`;
+  }
   switch (connection.phase) {
     case "available":
       return "Available";
@@ -136,6 +218,9 @@ export function connectionStatusText(connection: EnvironmentConnectionPresentati
 }
 
 export function connectionStatusTitle(connection: EnvironmentConnectionPresentation): string {
+  connection = reconcileSshConnectionPresentation(connection);
+  const phase = preparationLabel(connection);
+  if (phase !== undefined) return phase;
   if (connection.phase === "reconnecting" && connection.unreachable) return "Host unreachable";
   if (connection.phase === "reconnecting" && connection.error) {
     return "Failed to connect. Reconnecting...";
@@ -174,6 +259,9 @@ export function connectionProgressLabel(
   connection: EnvironmentConnectionPresentation,
   nowMs: number,
 ): string {
+  connection = reconcileSshConnectionPresentation(connection);
+  const phase = preparationLabel(connection);
+  if (phase !== undefined) return phase;
   switch (connection.phase) {
     case "connecting":
     case "reconnecting": {

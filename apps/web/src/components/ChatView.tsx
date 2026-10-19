@@ -100,7 +100,11 @@ import {
   resolveEnvironmentMachineKind,
   RuntimeMode,
 } from "@goat/contracts";
-import { type EnvironmentConnectionPresentation } from "@goat/client-runtime/connection";
+import {
+  connectionStatusText,
+  reconcileSshConnectionPresentation,
+  type EnvironmentConnectionPresentation,
+} from "@goat/client-runtime/connection";
 import { deriveThreadTitleSeed } from "@goat/client-runtime/operations";
 import {
   wasBootstrapThreadDeleted,
@@ -2414,7 +2418,9 @@ export default function ChatView(props: ChatViewProps) {
   const systemComposerBannerItems = (() => {
     const items: ComposerBannerStackItem[] = [];
     const updateRunning = serverUpdateState.status === "running";
-    const unavailableConnection = activeEnvironmentUnavailableState?.connection ?? null;
+    const unavailableConnection = activeEnvironmentUnavailableState
+      ? reconcileSshConnectionPresentation(activeEnvironmentUnavailableState.connection)
+      : null;
     const disconnectAction =
       canDisconnectActiveEnvironment && activeEnvironmentUnavailableState ? (
         <Button
@@ -2457,8 +2463,8 @@ export default function ChatView(props: ChatViewProps) {
         ),
         description: unavailableConnection.unreachable ? (
           "The host may be asleep or off the network. GOAT keeps trying."
-        ) : unavailableConnection.error ? (
-          <span className="line-clamp-2">{unavailableConnection.error}</span>
+        ) : unavailableConnection.error !== null || unavailableConnection.failureSuppressed ? (
+          <span className="line-clamp-2">{connectionStatusText(unavailableConnection)}</span>
         ) : undefined,
         actions: (
           <>
