@@ -39,7 +39,7 @@ import {
 import * as KeyedLock from "@goat/shared/KeyedLock";
 import * as NetService from "@goat/shared/Net";
 import { extractJsonObject, fromLenientJson } from "@goat/shared/schemaJson";
-import { compareRuntimeBuilds, satisfiesSemverRange } from "@goat/shared/semver";
+import { compareRuntimeBuilds } from "@goat/shared/semver";
 import {
   encodePowerShellCommand,
   WINDOWS_DETACHED_SPAWN_POWERSHELL,
@@ -63,6 +63,7 @@ import { HttpClient } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as SshAuth from "./auth.ts";
+import { REMOTE_NODE_ENGINE_CHECK_SCRIPT } from "./remoteNodeEngineCheck.ts";
 import { readLocalRuntimeArchive } from "./runtimeArchive.ts";
 import { downloadRuntimeArchiveWithGh } from "./runtimeArchiveGh.ts";
 import { downloadRuntimeArchiveWithHttps } from "./runtimeArchiveHttp.ts";
@@ -511,24 +512,6 @@ const decodeRemoteLaunchOutput = (stdout: string) =>
 
 const decodeRemotePairingOutput = (stdout: string) =>
   decodeRemoteJsonOutput(stdout, decodeRemotePairingResult);
-
-const remoteNodeEngineCheckMain = function remoteNodeEngineCheckMain() {
-  const range = process.argv[2] || "";
-  const rawVersion =
-    process.versions && process.versions.node ? process.versions.node : process.version;
-
-  if (!satisfiesSemverRange(rawVersion, range)) {
-    process.stderr.write(
-      "Remote node " + rawVersion + " does not satisfy required range " + range + ".\n",
-    );
-    process.exit(1);
-  }
-};
-
-function buildRemoteNodeEngineCheckScript(): string {
-  return `${satisfiesSemverRange.toString()}
-(${remoteNodeEngineCheckMain.toString()})();`;
-}
 
 function normalizeSshErrorMessage(stderr: string, fallbackMessage: string): string {
   const cleaned = stderr.trim();
@@ -2003,7 +1986,7 @@ export function buildRemoteNodeEnvScript(input?: RemoteGoatRunnerOptions): strin
   return stripTrailingNewlines(
     applyScriptPlaceholders(REMOTE_NODE_ENV_SCRIPT, {
       GOAT_NODE_ENGINE_RANGE: shellSingleQuote(input?.nodeEngineRange?.trim() || ""),
-      GOAT_NODE_ENGINE_CHECK_SCRIPT: stripTrailingNewlines(buildRemoteNodeEngineCheckScript()),
+      GOAT_NODE_ENGINE_CHECK_SCRIPT: REMOTE_NODE_ENGINE_CHECK_SCRIPT,
     }),
   );
 }

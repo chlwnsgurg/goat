@@ -202,10 +202,7 @@ export function compareRuntimeBuilds(left: RuntimeBuild, right: RuntimeBuild): n
   return leftTime - rightTime;
 }
 
-/**
- * Keep the function body valid plain JavaScript: SSH startup stringifies this
- * function and runs it on remote Node versions before TypeScript support is known.
- */
+/** The SSH remote engine check in `@goat/ssh` carries a source copy of this; keep them in step. */
 export const satisfiesSemverRange: (rawVersion: string, range: string) => boolean =
   function satisfiesSemverRange(rawVersion, range) {
     const normalizedVersion = String(rawVersion).trim().replace(/^v/, "");
