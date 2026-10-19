@@ -42,7 +42,7 @@ import {
   finishHubPairing,
   resolveConnectHubIntent,
 } from "./connectHubIntent";
-import { rememberHubEnvironment, selectHubEnvironmentId } from "./hubEnvironment";
+import { selectHubEnvironmentId } from "./hubEnvironment";
 import { useStoredHubEnvironment } from "./useStoredHubEnvironment";
 import { useConnectionsReady } from "../../state/workspace";
 import { PairingDiagnostics } from "./PairingDiagnostics";
@@ -248,7 +248,7 @@ export function ConnectionsNewRouteScreen({
       if (!AsyncResult.isSuccess(result)) return;
 
       // Persist before removing the old hub so other saved servers cannot become the hub.
-      await rememberHubEnvironment({ intent, pairedEnvironmentId: result.value });
+      await savedHub.rememberHubEnvironment({ intent, pairedEnvironmentId: result.value });
       const completion = await finishHubPairing({
         pairedEnvironmentId: result.value,
         intent,
