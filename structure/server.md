@@ -47,7 +47,7 @@ this machine speaks, `incompatible` when they miss one (the message names the si
 `degraded` when it does not report valid ranges. `versionMismatch` only marks a different build;
 clients warn from `compatibility`.
 
-> Decision record: [ADR-0016](decisions/ADR-0016-update-compatibility.md)
+> Decision record: [ADR-0019](decisions/ADR-0019-update-compatibility.md)
 
 ## Command commit
 
