@@ -3,6 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   DESKTOP_SLEEP_RECONNECT_AFTER_MS,
@@ -36,9 +37,7 @@ function makeDesktopShell() {
   };
 }
 
-const settle = Effect.gen(function* () {
-  for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
-});
+const settle = TestClock.adjust(0).pipe(Effect.provide(TestClock.layer()));
 
 describe("desktop wakeups", () => {
   it("replaces sessions after a long sleep and only probes after a short one or an unlock", () => {
@@ -92,6 +91,69 @@ describe("desktop wakeups", () => {
       expect(shell.isSubscribed()).toBe(false);
       shell.dispatch("online");
       expect(seen).toHaveLength(3);
+    }),
+  );
+
+  it.effect(
+    "deduplicates repeated macOS system wake events while allowing a short probe to upgrade to a reconnect",
+    () =>
+      Effect.gen(function* () {
+        const shell = makeDesktopShell();
+        const seen: Array<DesktopWakeup> = [];
+        const fiber = yield* desktopWakeups(shell.sources).pipe(
+          Stream.runForEach((wakeup) => Effect.sync(() => seen.push(wakeup))),
+          Effect.forkChild,
+        );
+        yield* settle;
+
+        // macOS emits duplicate resume events and unlock-screen within seconds of lid open.
+        shell.wake({ reason: "resume", asleepMs: 5 * 60_000 });
+        shell.advance(200);
+        shell.wake({ reason: "resume", asleepMs: null });
+        shell.advance(300);
+        shell.wake({ reason: "unlock-screen", asleepMs: null });
+        shell.dispatch("focus");
+        yield* settle;
+        expect(seen).toEqual(["application-active-reconnect"]);
+
+        // After the sleep window, an early unlock probe still upgrades when a long resume arrives.
+        shell.advance(DESKTOP_SLEEP_RECONNECT_AFTER_MS);
+        shell.wake({ reason: "unlock-screen", asleepMs: null });
+        shell.advance(100);
+        shell.wake({ reason: "unlock-screen", asleepMs: null });
+        shell.advance(100);
+        shell.wake({ reason: "resume", asleepMs: DESKTOP_SLEEP_RECONNECT_AFTER_MS });
+        shell.advance(100);
+        shell.wake({ reason: "resume", asleepMs: DESKTOP_SLEEP_RECONNECT_AFTER_MS });
+        yield* settle;
+        expect(seen).toEqual([
+          "application-active-reconnect",
+          "application-active-probe",
+          "application-active-reconnect",
+        ]);
+
+        yield* Fiber.interrupt(fiber);
+      }),
+  );
+
+  it.effect("still reports a second real sleep that starts right after a wake", () =>
+    Effect.gen(function* () {
+      const shell = makeDesktopShell();
+      const seen: Array<DesktopWakeup> = [];
+      const fiber = yield* desktopWakeups(shell.sources).pipe(
+        Stream.runForEach((wakeup) => Effect.sync(() => seen.push(wakeup))),
+        Effect.forkChild,
+      );
+      yield* settle;
+
+      // Lid opens after a long sleep, closes a second later, and opens 5 s after that.
+      shell.wake({ reason: "resume", asleepMs: 5 * 60_000 });
+      shell.advance(6_000);
+      shell.wake({ reason: "resume", asleepMs: 5_000 });
+      yield* settle;
+      expect(seen).toEqual(["application-active-reconnect", "application-active-probe"]);
+
+      yield* Fiber.interrupt(fiber);
     }),
   );
 });

@@ -12,6 +12,9 @@ import * as DesktopSshEnvironment from "../ssh/DesktopSshEnvironment.ts";
 
 type PowerTransition = "suspend" | DesktopSystemWakeEvent["reason"];
 
+/** Repeated macOS powerMonitor resume events within this window belong to the same wake. */
+export const RESUME_DEDUP_WINDOW_MS = 3_000;
+
 /**
  * Tells the renderer when the machine wakes or the screen unlocks, so its
  * connections can check or replace sockets that died while asleep. A lid
@@ -38,11 +41,20 @@ export const layer = Layer.effectDiscard(
       );
       // Wall-clock time: the monotonic clock does not advance during sleep on macOS.
       let suspendedAtMs: number | null = null;
+      let lastResumeAtMs: number | null = null;
       for (;;) {
         const transition = yield* Queue.take(transitions);
         const nowMs = yield* Clock.currentTimeMillis;
         if (transition === "suspend") {
           suspendedAtMs = nowMs;
+          continue;
+        }
+        if (
+          transition === "resume" &&
+          suspendedAtMs === null &&
+          lastResumeAtMs !== null &&
+          nowMs - lastResumeAtMs < RESUME_DEDUP_WINDOW_MS
+        ) {
           continue;
         }
         const event: DesktopSystemWakeEvent = {
@@ -56,6 +68,7 @@ export const layer = Layer.effectDiscard(
         yield* electronWindow.sendAll(SYSTEM_WAKE_CHANNEL, event);
         if (transition === "resume") {
           suspendedAtMs = null;
+          lastResumeAtMs = nowMs;
           yield* sshEnvironment.revalidateTunnels.pipe(Effect.forkScoped);
         }
       }
