@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { formatGoatBotStamp, goatBotReceiptLabel } from "./labels.ts";
+import { formatGoatBotStamp, goatBotReceiptLabel, goatBotStampParts } from "./labels.ts";
 
 const time = (iso: string) => iso.slice(11, 16);
 
@@ -48,5 +48,49 @@ describe("formatGoatBotStamp", () => {
     expect(formatGoatBotStamp(local(2026, 9, 12, 9, 41), now, displayTime)).toMatch(
       /^[A-Za-z]+,? Oct 12 at 9:41 AM$/,
     );
+  });
+
+  it.each(["8:13 PM", "20:13", "오후 8:13"])(
+    "keeps all four stamp leads separate from %s time",
+    (displayTime) => {
+      const local = (day: number) => {
+        // @effect-diagnostics-next-line globalDate:off - stamps use the device's local calendar.
+        return new Date(2026, 9, day, 20, 13).toISOString();
+      };
+      // @effect-diagnostics-next-line globalDate:off - stamps use the device's local calendar.
+      const now = new Date(2026, 9, 19, 20, 14).getTime();
+      const formatTime = () => displayTime;
+      const weekday = new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(
+        // @effect-diagnostics-next-line globalDate:off - compare against the same local date.
+        new Date(local(16)),
+      );
+      const older = new Intl.DateTimeFormat(undefined, {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+      }).format(
+        // @effect-diagnostics-next-line globalDate:off - compare against the same local date.
+        new Date(local(12)),
+      );
+
+      for (const [day, lead] of [
+        [19, "Today"],
+        [18, "Yesterday"],
+        [16, weekday],
+        [12, `${older} at`],
+      ] as const) {
+        const iso = local(day);
+        expect(goatBotStampParts(iso, now, formatTime)).toEqual({ lead, time: displayTime });
+        expect(formatGoatBotStamp(iso, now, formatTime)).toBe(`${lead} ${displayTime}`);
+      }
+    },
+  );
+
+  it("keeps invalid dates empty without formatting their time", () => {
+    const formatTime = () => {
+      throw new Error("invalid date must not reach time formatter");
+    };
+    expect(goatBotStampParts("invalid", 0, formatTime)).toEqual({ lead: "", time: "" });
+    expect(formatGoatBotStamp("invalid", 0, formatTime)).toBe("");
   });
 });

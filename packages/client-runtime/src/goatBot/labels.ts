@@ -31,22 +31,31 @@ const older = new Intl.DateTimeFormat(undefined, {
 });
 
 /** A local-calendar stamp, repeated after a long pause even on the same day. */
-export function formatGoatBotStamp(
+export function goatBotStampParts(
   iso: string,
   nowMs: number,
   formatTime: (iso: string) => string,
-): string {
+): { lead: string; time: string } {
   // @effect-diagnostics-next-line globalDate:off - stamps follow the device's local calendar.
   const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
+  if (Number.isNaN(date.getTime())) return { lead: "", time: "" };
   // @effect-diagnostics-next-line globalDate:off - stamps follow the device's local calendar.
   const now = new Date(nowMs);
   const calendarDay = (value: Date) =>
     Date.UTC(value.getFullYear(), value.getMonth(), value.getDate());
   const days = Math.round((calendarDay(now) - calendarDay(date)) / 86_400_000);
   const time = formatTime(iso);
-  if (days === 0) return `Today ${time}`;
-  if (days === 1) return `Yesterday ${time}`;
-  if (days > 1 && days <= 6) return `${weekday.format(date)} ${time}`;
-  return `${older.format(date)} at ${time}`;
+  if (days === 0) return { lead: "Today", time };
+  if (days === 1) return { lead: "Yesterday", time };
+  if (days > 1 && days <= 6) return { lead: weekday.format(date), time };
+  return { lead: `${older.format(date)} at`, time };
+}
+
+export function formatGoatBotStamp(
+  iso: string,
+  nowMs: number,
+  formatTime: (iso: string) => string,
+): string {
+  const { lead, time } = goatBotStampParts(iso, nowMs, formatTime);
+  return lead ? `${lead} ${time}` : "";
 }

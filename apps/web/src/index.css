@@ -257,6 +257,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --color-goat-avatar-border: color-mix(in oklab, var(--foreground) 12%, var(--background));
   --color-goat-avatar-foreground: color-mix(in oklab, var(--foreground) 82%, var(--background));
   /* GOAT Bot's Messages colors stay local to its conversation. */
+  --color-goat-bubble-out-top: var(--goat-bubble-out-top);
   --color-goat-bubble-out: var(--goat-bubble-out);
   --color-goat-bubble-out-foreground: #fff;
   --color-goat-bubble-in: var(--goat-bubble-in);
@@ -604,14 +605,31 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
 @utility goat-bubble {
   position: relative;
   max-width: min(75%, 34rem);
-  padding: 7px 12px 8px;
-  border-radius: 18px;
-  font-size: 15px;
-  line-height: 20px;
+  padding: 8px 13px;
+  border-radius: 20px;
+  font-size: 1rem;
+  line-height: 1.375rem;
   /* break-word, unlike anywhere, keeps whole words in the min-content width, so short
      messages never wrap mid-word. */
   overflow-wrap: break-word;
   white-space: pre-wrap;
+
+  @media (max-width: 640px) {
+    font-size: 1.0625rem;
+  }
+}
+
+@utility goat-bubble-out-fill {
+  background-color: var(--color-goat-bubble-out);
+  background-image: linear-gradient(
+    to bottom,
+    var(--color-goat-bubble-out-top),
+    var(--color-goat-bubble-out)
+  );
+
+  @media (forced-colors: active) {
+    background-image: none;
+  }
 }
 
 /* The canvas-colored mask cuts a curved Messages tail from the last bubble in a group. */
@@ -685,9 +703,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
 }
 
 @utility goat-reply-line {
-  border-left: 2px solid var(--color-goat-bubble-in);
-  border-top: 2px solid var(--color-goat-bubble-in);
-  border-top-left-radius: 12px;
+  border-left: 2px solid
+    color-mix(in oklab, var(--color-goat-bubble-in-foreground) 18%, transparent);
+  border-top: 0;
+  border-top-left-radius: 10px;
 }
 
 @utility visible-animate-spin {
@@ -1050,7 +1069,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
 
 :root {
   color-scheme: light;
-  --goat-bubble-out: #1b86f9;
+  --goat-bubble-out-top: #1f74e0;
+  --goat-bubble-out: #1466d0;
   --goat-bubble-in: #e9e9eb;
   --goat-bubble-in-foreground: #000;
   --radius: 0.625rem;
@@ -1126,7 +1146,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
 
   @variant dark {
     color-scheme: dark;
-    --goat-bubble-out: #2c66ca;
+    --goat-bubble-out-top: #3574d4;
+    --goat-bubble-out: #2b66c6;
     --goat-bubble-in: #3a3a3c;
     --goat-bubble-in-foreground: #fff;
     /* Keep controls and floating surfaces close to the neutral-black canvas.

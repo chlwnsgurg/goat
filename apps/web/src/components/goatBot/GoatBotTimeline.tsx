@@ -1,5 +1,5 @@
 import {
-  formatGoatBotStamp,
+  goatBotStampParts,
   goatBotReceiptLabel,
   type GoatBotRow,
 } from "@goat/client-runtime/goatBot";
@@ -77,12 +77,18 @@ export function GoatBotTimeline({
       >
         {rows.map((row, index) => {
           switch (row.kind) {
-            case "day":
+            case "day": {
+              const stamp = goatBotStampParts(row.at, nowMs, time);
               return (
-                <li key={row.id} className="mt-4 mb-1 text-center text-2xs text-muted-foreground">
-                  {formatGoatBotStamp(row.at, nowMs, time)}
+                <li
+                  key={row.id}
+                  className="mt-4 mb-1 text-center text-xs leading-4 text-muted-foreground"
+                >
+                  <span className="font-semibold">{stamp.lead}</span>{" "}
+                  <span className="font-normal">{stamp.time}</span>
                 </li>
               );
+            }
             case "user": {
               const delivery = row.delivery;
               return (
@@ -90,7 +96,7 @@ export function GoatBotTimeline({
                   key={row.id}
                   className={cn(
                     "flex flex-col items-end",
-                    index > 1 && (row.firstInGroup ? "mt-2.5" : "mt-0.5"),
+                    index > 1 && (row.firstInGroup ? "mt-3" : "mt-1"),
                   )}
                 >
                   <div
@@ -107,7 +113,7 @@ export function GoatBotTimeline({
                         render={
                           <div
                             className={cn(
-                              "goat-bubble bg-goat-bubble-out text-goat-bubble-out-foreground",
+                              "goat-bubble goat-bubble-out-fill text-goat-bubble-out-foreground",
                               (row.groupPosition === "single" || row.groupPosition === "last") &&
                                 "goat-bubble-tail-out",
                             )}
@@ -131,12 +137,12 @@ export function GoatBotTimeline({
                     ) : null}
                   </div>
                   {row.delivery.state === "failed" ? (
-                    <span className="mt-1 text-2xs font-medium text-destructive-foreground">
+                    <span className="mt-1 text-xs leading-4 font-medium text-destructive-foreground">
                       {row.delivery.rejectionReason ?? "Not Delivered"}
                     </span>
                   ) : row.showReceipt ? (
                     <span
-                      className="mt-1 text-2xs font-medium text-muted-foreground"
+                      className="mt-1 text-xs leading-4 font-medium text-muted-foreground"
                       aria-label={goatBotReceiptLabel(row.delivery, time)?.accessibleText}
                     >
                       {goatBotReceiptLabel(row.delivery, time)?.text}
@@ -151,17 +157,17 @@ export function GoatBotTimeline({
                   <li
                     className={cn(
                       "flex flex-col items-start",
-                      index > 1 && (row.firstInGroup ? "mt-2.5" : "mt-0.5"),
+                      index > 1 && (row.firstInGroup ? "mt-3" : "mt-1"),
                     )}
                   >
                     {row.proactive && row.firstInGroup ? (
-                      <div className="mb-1.5 flex items-center gap-1 text-2xs text-muted-foreground">
-                        <BellIcon className="size-3" aria-hidden />
+                      <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                        <BellIcon className="size-3.5" aria-hidden />
                         GOAT Bot · Update
                       </div>
                     ) : null}
                     {row.replyTo ? (
-                      <blockquote className="goat-reply-line mb-1 ml-2 max-w-[min(75%,34rem)] px-2 pt-1 text-xs text-muted-foreground">
+                      <blockquote className="goat-reply-line mb-1 ml-1.5 max-w-[min(75%,34rem)] px-2 py-1 text-xs text-muted-foreground">
                         <span className="block truncate">{row.replyTo}</span>
                       </blockquote>
                     ) : null}
@@ -170,7 +176,7 @@ export function GoatBotTimeline({
                         render={
                           <div
                             className={cn(
-                              "goat-bubble flex gap-1.5 bg-goat-bubble-in text-goat-bubble-in-foreground",
+                              "goat-bubble flex gap-1 bg-goat-bubble-in text-goat-bubble-in-foreground",
                               (row.groupPosition === "single" || row.groupPosition === "last") &&
                                 "goat-bubble-tail-in",
                             )}
@@ -178,9 +184,9 @@ export function GoatBotTimeline({
                         }
                       >
                         {row.tone === "failure" ? (
-                          <CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive-foreground" />
+                          <CircleAlertIcon className="mt-1 size-3.5 shrink-0 text-destructive-foreground" />
                         ) : row.tone === "question" ? (
-                          <MessageCircleQuestionIcon className="mt-0.5 size-4 shrink-0 text-warning-foreground" />
+                          <MessageCircleQuestionIcon className="mt-1 size-3.5 shrink-0 text-warning-foreground" />
                         ) : null}
                         <div className="min-w-0">
                           {row.text}
@@ -225,7 +231,7 @@ export function GoatBotTimeline({
                   key={row.id}
                   className={cn(
                     "flex items-end",
-                    index > 1 && (row.firstInGroup ? "mt-2.5" : "mt-0.5"),
+                    index > 1 && (row.firstInGroup ? "mt-3" : "mt-1"),
                   )}
                 >
                   <GoatBotTaskChip
@@ -237,17 +243,17 @@ export function GoatBotTimeline({
           }
         })}
         {replying ? (
-          <li className={cn("flex items-end", rows.at(-1)?.kind === "user" && "mt-2.5")}>
+          <li className={cn("flex items-end", rows.at(-1)?.kind === "user" && "mt-3")}>
             <div
               role="status"
               aria-label="GOAT Bot is replying"
-              className="goat-typing-tail relative flex h-9 items-center gap-1 rounded-2xl bg-goat-bubble-in px-3.5"
+              className="goat-typing-tail relative flex h-10 items-center gap-1 rounded-2xl bg-goat-bubble-in px-4"
             >
               {TYPING_DOT_DELAYS.map((delay) => (
                 <span
                   key={delay}
                   aria-hidden
-                  className="size-1.5 animate-typing-wave rounded-full bg-muted-foreground motion-reduce:animate-none"
+                  className="size-[7px] animate-typing-wave rounded-full bg-muted-foreground motion-reduce:animate-none"
                   style={{ animationDelay: delay }}
                 />
               ))}
