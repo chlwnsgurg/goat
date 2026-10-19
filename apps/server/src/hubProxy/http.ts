@@ -20,7 +20,6 @@ import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
@@ -221,9 +220,6 @@ const upstreamRequest = (
  * clients.
  */
 const UPLOAD_DEADLINE = Duration.minutes(10);
-/** Uploads at once per node: anyone holding the URL can post, and the hub cannot check the token. */
-const UPLOADS_PER_NODE = 4;
-const uploadSlots = new Map<string, Semaphore.Semaphore>();
 
 const uploadTooLarge = () =>
   new HubProxyError({
@@ -250,8 +246,7 @@ const proxyUpload = Effect.fn("HubProxyHttp.proxyUpload")(function* (
         : Effect.succeed(chunk);
     }),
   );
-  const slots = uploadSlots.get(upstream.nodeId) ?? Semaphore.makeUnsafe(UPLOADS_PER_NODE);
-  uploadSlots.set(upstream.nodeId, slots);
+  const slots = yield* sessions.uploadSlots(upstream.nodeId);
   const transfer = send(
     HttpClientRequest.post(new URL(path, upstream.httpBaseUrl).toString()).pipe(
       HttpClientRequest.setHeaders({ authorization: `Bearer ${upstream.token}` }),

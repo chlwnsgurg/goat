@@ -68,6 +68,8 @@ export interface HubProxyCachedSnapshot {
 /** Bounded so one large node cannot grow the hub's memory without limit. */
 export const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 export const SNAPSHOT_REFRESH_INTERVAL = Duration.seconds(60);
+/** Uploads at once per node: anyone holding the URL can post, and the hub cannot check the token. */
+const UPLOADS_PER_NODE = 4;
 const SESSION_REFRESH_MARGIN_MS = 10 * 60 * 1000;
 const UPSTREAM_TIMEOUT = Duration.seconds(20);
 const LAST_REFRESH_TIMEOUT = Duration.seconds(5);
@@ -86,6 +88,7 @@ interface NodeState {
   linkedSession: (CachedSession & HubProxyUpstream) | undefined;
   enrollmentRejected: boolean;
   readonly lock: Semaphore.Semaphore;
+  readonly uploads: Semaphore.Semaphore;
   snapshot: HubProxyCachedSnapshot | undefined;
   relays: number;
   refresher: Fiber.Fiber<void> | undefined;
@@ -193,6 +196,8 @@ export class HubProxySessions extends Context.Service<
     ) => Effect.Effect<void>;
     /** Counts an open relay; while any is open the hub refreshes its snapshot of the node. */
     readonly trackRelay: (nodeId: string) => Effect.Effect<void, never, Scope.Scope>;
+    /** Bounds uploads streaming to one node at a time. */
+    readonly uploadSlots: (nodeId: string) => Effect.Effect<Semaphore.Semaphore>;
   }
 >()("goat/hubProxy/HubProxySessions") {}
 
@@ -215,6 +220,7 @@ export const make = Effect.gen(function* () {
       linkedSession: undefined,
       enrollmentRejected: false,
       lock: yield* Semaphore.make(1),
+      uploads: yield* Semaphore.make(UPLOADS_PER_NODE),
       snapshot: undefined,
       relays: 0,
       refresher: undefined,
@@ -413,6 +419,10 @@ export const make = Effect.gen(function* () {
         Effect.orElseSucceed(() => Option.none<Enrollment>()),
       );
       if (Option.isNone(enrollment) || enrollment.value.baseUrl !== route.baseUrl) return [];
+      // Same rule as opening it, so session state never offers a grant that has run out.
+      const expiresAt = enrollment.value.expiresAt;
+      if (expiresAt !== null && Date.parse(expiresAt) <= (yield* Clock.currentTimeMillis))
+        return [];
       return scopes.filter((scope) => enrollment.value.scopes.includes(scope));
     });
 
@@ -741,6 +751,7 @@ export const make = Effect.gen(function* () {
     snapshot,
     recordSnapshot,
     trackRelay,
+    uploadSlots: (nodeId) => Effect.map(stateFor(nodeId), (state) => state.uploads),
   });
 });
 

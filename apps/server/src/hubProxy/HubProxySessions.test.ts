@@ -243,6 +243,36 @@ it.effect("S2: limit reports SSH rights without acquiring an endpoint or issuing
   }).pipe(Effect.scoped),
 );
 
+it.effect("S2: limit stops advertising a linked enrollment once it expires", () =>
+  Effect.gen(function* () {
+    const baseUrl = "https://node.invalid";
+    const nodes = yield* makeNodes({ ...sshNode, routes: [{ kind: "linked", baseUrl }] });
+    const secrets = makeSecrets();
+    const ssh = makeSsh(baseUrl);
+    const sessions = yield* makeSessions(nodes.service, ssh.service, secrets.service);
+    yield* nodes.subscribed;
+    const scopes = ["orchestration:read", "orchestration:operate"] as const;
+    yield* secrets.service.set(
+      enrollmentSecretName("node-1"),
+      new TextEncoder().encode(
+        JSON.stringify({
+          version: 1,
+          nodeId: "node-1",
+          baseUrl,
+          token: "linked-token",
+          scopes,
+          // TestClock starts at the epoch.
+          expiresAt: "1970-01-01T01:00:00.000Z",
+        }),
+      ),
+    );
+    expect(yield* sessions.limit("node-1", scopes)).toEqual(scopes);
+    yield* TestClock.adjust("1 hour");
+    expect(yield* sessions.limit("node-1", scopes)).toEqual([]);
+    expect(ssh.endpoints).toEqual([]);
+  }).pipe(Effect.scoped),
+);
+
 it.effect(
   "S2: limit follows linked enrollment scopes, replacement and rejection without dialing",
   () =>
