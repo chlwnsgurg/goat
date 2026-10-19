@@ -252,6 +252,25 @@ describe("SshRemoteDispatch with a linked host", () => {
     }),
   );
 
+  it("checks a linked host's folder without browsing it", () => {
+    expect(SshRemoteDispatch.linkedHostFolder("box", "~/app")).toContain("absolute path");
+    for (const [cwd, broad] of [
+      ["/srv/app/../..", "the filesystem root"],
+      ["/home/alice", "the home directory"],
+      ["/Users/alice/../alice/", "the home directory"],
+      ["/srv", "a top-level folder"],
+    ] as const) {
+      const folder = SshRemoteDispatch.linkedHostFolder("box", cwd);
+      if (typeof folder === "string") throw new Error(folder);
+      expect(SshRemoteDispatch.broadWorkspaceRoot(folder), cwd).toBe(broad);
+    }
+    const project = SshRemoteDispatch.linkedHostFolder("box", "/home/alice/./work/app/");
+    expect(project).toMatchObject({ path: "/home/alice/work/app", home: "/home/alice" });
+    expect(SshRemoteDispatch.broadWorkspaceRoot(project as SshRemoteDispatch.SshBrowseResult)).toBe(
+      null,
+    );
+  });
+
   it.effect("keeps SSH tools off a linked name", () =>
     Effect.gen(function* () {
       const { result } = yield* withLinkedHost(

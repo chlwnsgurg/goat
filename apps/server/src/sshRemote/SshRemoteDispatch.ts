@@ -447,6 +447,43 @@ export function broadWorkspaceRoot(
   return null;
 }
 
+/**
+ * What launch knows about a folder on a linked host, which it cannot browse, or why the
+ * folder is unusable. The path must be absolute so it matches the host's project roots, and
+ * a home under /home or /Users stands in for the home the host would report, so
+ * broadWorkspaceRoot still refuses it.
+ */
+export function linkedHostFolder(alias: string, cwd: string): SshBrowseResult | string {
+  const trimmed = cwd.trim();
+  const windows = /^[A-Za-z]:[\\/]/u.test(trimmed);
+  if (!windows && !trimmed.startsWith("/"))
+    return `${alias} is a linked host, so cwd must be an absolute path there, not ${trimmed}. goat_project_list with host "${alias}" shows its project folders.`;
+  // Resolve . and .. so a path cannot climb past what the checks below see.
+  const [root, ...rest] = trimmed.split(/[\\/]+/u);
+  const parts: Array<string> = [];
+  for (const part of rest) {
+    if (part === "..") parts.pop();
+    else if (part !== "" && part !== ".") parts.push(part);
+  }
+  const separator = windows ? "\\" : "/";
+  const path = `${root}${separator}${parts.join(separator)}`;
+  const home = windows
+    ? (/^[A-Za-z]:\\Users\\[^\\]+/iu.exec(path)?.[0] ?? null)
+    : (/^\/(?:home|Users)\/[^/]+/u.exec(path)?.[0] ?? null);
+  return {
+    host: alias,
+    os: null,
+    home,
+    path,
+    realPath: path,
+    gitRoot: null,
+    branch: null,
+    worktrees: [],
+    entries: [],
+    truncated: false,
+  };
+}
+
 /** Finds the project registered at the browsed folder, by either form of its path. */
 export function matchRemoteProject(
   projects: ReadonlyArray<RemoteProject>,
@@ -1364,20 +1401,6 @@ const make = Effect.gen(function* () {
     port: null,
   });
 
-  /** What launch knows about a folder on a linked host without browsing it. */
-  const linkedFolder = (alias: string, cwd: string): SshBrowseResult => ({
-    host: alias,
-    os: null,
-    home: null,
-    path: normalizeRemotePath(cwd.trim()),
-    realPath: normalizeRemotePath(cwd.trim()),
-    gitRoot: null,
-    branch: null,
-    worktrees: [],
-    entries: [],
-    truncated: false,
-  });
-
   /**
    * The session saved with a link, when this caller may use it to change things there.
    * It was issued with the access chosen at link time and carries no memory scopes.
@@ -1413,9 +1436,9 @@ const make = Effect.gen(function* () {
       : (input.target ?? (yield* resolveHost(input.host!)));
     // A linked host has no shell to browse with: its server checks the folder when the
     // project is created, and a worktree needs an explicit baseRef.
-    const folder = Option.isSome(linked)
-      ? linkedFolder(target.alias, input.cwd)
-      : yield* browseTarget(target, { path: input.cwd, limit: 0 });
+    const linkedPath = Option.isSome(linked) ? linkedHostFolder(target.alias, input.cwd) : null;
+    if (typeof linkedPath === "string") return yield* failure("invalid_request", linkedPath);
+    const folder = linkedPath ?? (yield* browseTarget(target, { path: input.cwd, limit: 0 }));
     const broad = input.allowBroadWorkspaceRoot === true ? null : broadWorkspaceRoot(folder);
     if (broad !== null) {
       return yield* failure(
@@ -1478,7 +1501,8 @@ const make = Effect.gen(function* () {
         "host_unavailable",
         pendingRuntimeMessage(target.alias, bootstrap.pending),
       );
-    connected.add(target.alias);
+    // A link is reached through its catalog entry, so unlinking it also ends fan-out to it.
+    if (Option.isNone(linked)) connected.add(target.alias);
     const versionNote = remoteVersionNote(
       target.alias,
       bootstrap.remoteServerVersion,

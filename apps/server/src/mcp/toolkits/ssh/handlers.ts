@@ -215,7 +215,7 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
     }),
   ),
   // Linking stores a session that reaches another machine, like saving a connection.
-  goat_host_link_create: McpToolAccess.writesEnvironment((input) =>
+  goat_host_link_create: McpToolAccess.writesEnvironment((input, check) =>
     Effect.gen(function* () {
       yield* requireOrchestration;
       const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
@@ -237,9 +237,14 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
           url: input.url,
           code: input.code,
           access: input.access ?? "approval-required",
+          beforeSave: check.pipe(Effect.asVoid),
           clientName: `GOAT on ${descriptor.label}`,
         })
-        .pipe(Effect.mapError(toLinkFailure));
+        .pipe(
+          Effect.mapError((error) =>
+            error instanceof LinkedHosts.LinkedHostError ? toLinkFailure(error) : error,
+          ),
+        );
       return { host: linked.host, replaced: linked.replaced };
     }),
   ),

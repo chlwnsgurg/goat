@@ -151,14 +151,22 @@ export class LinkedHosts extends Context.Service<
     ) => Effect.Effect<Option.Option<LinkedHostCredential>, LinkedHostError>;
     /** Names this machine has linked; a store it cannot read counts as none. */
     readonly names: Effect.Effect<ReadonlyArray<string>>;
-    /** Spends the code on the host and saves the link, replacing one with the same name. */
-    readonly link: (input: {
+    /**
+     * Spends the code on the host and saves the link, replacing one with the same name.
+     * beforeSave re-checks the caller right before the link is written.
+     */
+    readonly link: <E, R>(input: {
       readonly name: string;
       readonly url: string;
       readonly code?: string | undefined;
       readonly access: AuthMcpClientAccess;
       readonly clientName: string;
-    }) => Effect.Effect<{ readonly host: LinkedHost; readonly replaced: boolean }, LinkedHostError>;
+      readonly beforeSave: Effect.Effect<void, E, R>;
+    }) => Effect.Effect<
+      { readonly host: LinkedHost; readonly replaced: boolean },
+      LinkedHostError | E,
+      R
+    >;
     readonly unlink: (name: string) => Effect.Effect<Option.Option<LinkedHost>, LinkedHostError>;
   }
 >()("goat/linkedHosts/LinkedHosts") {}
@@ -336,7 +344,14 @@ export const make = Effect.gen(function* () {
     Effect.orElseSucceed((): ReadonlyArray<string> => []),
   );
 
-  const link: LinkedHosts["Service"]["link"] = (input) =>
+  const link: LinkedHosts["Service"]["link"] = <E, R>(input: {
+    readonly name: string;
+    readonly url: string;
+    readonly code?: string | undefined;
+    readonly access: AuthMcpClientAccess;
+    readonly clientName: string;
+    readonly beforeSave: Effect.Effect<void, E, R>;
+  }) =>
     Effect.gen(function* () {
       const name = input.name.trim();
       if (!LINK_NAME.test(name))
@@ -361,6 +376,8 @@ export const make = Effect.gen(function* () {
       };
       return yield* lock.withPermits(1)(
         Effect.gen(function* () {
+          // The exchange took several requests; the caller may have lost its authority.
+          yield* input.beforeSave;
           const catalog = yield* read;
           const replaced = catalog.links.some((existing) => existing.name === name);
           yield* write({

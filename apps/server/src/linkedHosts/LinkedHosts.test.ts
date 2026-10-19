@@ -149,6 +149,7 @@ describe("LinkedHosts", () => {
             url: `https://${HOST}/pair#token=${code}`,
             access: "approval-required",
             clientName: "GOAT on laptop",
+            beforeSave: Effect.void,
           });
           const found = yield* links.find("build-box");
           const token = Option.getOrThrow(found).token;
@@ -204,6 +205,7 @@ describe("LinkedHosts", () => {
             code,
             access: "read-only",
             clientName: "GOAT",
+            beforeSave: Effect.void,
           });
           const again = yield* links
             .link({
@@ -212,6 +214,7 @@ describe("LinkedHosts", () => {
               code,
               access: "read-only",
               clientName: "GOAT",
+              beforeSave: Effect.void,
             })
             .pipe(Effect.flip);
           return { again, names: yield* links.names };
@@ -219,6 +222,30 @@ describe("LinkedHosts", () => {
       );
       expect(result.again).toMatchObject({ reason: "link_refused" });
       expect(result.names).toEqual(["first"]);
+    }),
+  );
+
+  it.live("saves nothing when the caller loses its authority during the exchange", () =>
+    Effect.gen(function* () {
+      const { result } = yield* withHost((hostAuth) =>
+        Effect.gen(function* () {
+          const links = yield* LinkedHosts.LinkedHosts;
+          const code = yield* pairingCode(hostAuth);
+          const refused = yield* links
+            .link({
+              name: "box",
+              url: `https://${HOST}`,
+              code,
+              access: "full-access",
+              clientName: "GOAT",
+              beforeSave: Effect.fail("caller_changed" as const),
+            })
+            .pipe(Effect.flip);
+          return { refused, names: yield* links.names };
+        }),
+      );
+      expect(result.refused).toBe("caller_changed");
+      expect(result.names).toEqual([]);
     }),
   );
 
@@ -236,6 +263,7 @@ describe("LinkedHosts", () => {
                   code,
                   access,
                   clientName: "GOAT",
+                  beforeSave: Effect.void,
                 }),
               ),
             );
