@@ -147,6 +147,19 @@ describe("mobile connection storage", () => {
     vi.clearAllMocks();
   });
 
+  it("persists an optional hub id and preserves it across other preference updates", async () => {
+    const hubEnvironmentId = EnvironmentId.make("hub-c");
+    await expect(loadPreferences()).resolves.toEqual({});
+    await savePreferencesPatch({ hubEnvironmentId });
+    await savePreferencesPatch({ themeMode: "dark" });
+    await expect(loadPreferences()).resolves.toEqual({ hubEnvironmentId, themeMode: "dark" });
+  });
+
+  it("ignores malformed hub ids in old preference data", async () => {
+    mocks.setPreferencesJson(JSON.stringify({ hubEnvironmentId: 42, themeMode: "dark" }), 1);
+    await expect(loadPreferences()).resolves.toEqual({ themeMode: "dark" });
+  });
+
   it("persists relay-managed connections without their ephemeral access token", async () => {
     await saveConnection(managedConnection);
 

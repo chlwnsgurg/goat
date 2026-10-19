@@ -27,6 +27,7 @@ import { MobileStorageDecodeError, MobileStorageEncodeError } from "./mobile-sto
 const PREFERENCES_KEY = "goat.preferences";
 const PREFERENCES_FALLBACK_KEY = "goat.preferences.fallback";
 const isChannelBotRef = Schema.is(ChannelBotRef);
+const isEnvironmentId = Schema.is(EnvironmentId);
 
 export const PullRequestListControls = Schema.Struct({
   state: PullRequestListState,
@@ -68,6 +69,7 @@ export interface Preferences {
   readonly markdownFontSize?: number;
   readonly codeFontSize?: number | null;
   readonly codeWordBreak?: boolean;
+  readonly hubEnvironmentId?: EnvironmentId;
   readonly connectOnboardingOptOutAccounts?: ReadonlyArray<string>;
   readonly collapsedProjectGroups?: readonly string[];
   /** Environments whose "reclaim database space" notice was dismissed. */
@@ -144,6 +146,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     markdownFontSize?: number;
     codeFontSize?: number | null;
     codeWordBreak?: boolean;
+    hubEnvironmentId?: EnvironmentId;
     connectOnboardingOptOutAccounts?: ReadonlyArray<string>;
     collapsedProjectGroups?: readonly string[];
     dismissedDatabaseStorageNotices?: readonly string[];
@@ -224,6 +227,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     preferences.codeFontSize = parsed.codeFontSize;
   }
   if (typeof parsed.codeWordBreak === "boolean") preferences.codeWordBreak = parsed.codeWordBreak;
+  if (isEnvironmentId(parsed.hubEnvironmentId)) {
+    preferences.hubEnvironmentId = parsed.hubEnvironmentId;
+  }
   if (Array.isArray(parsed.connectOnboardingOptOutAccounts)) {
     preferences.connectOnboardingOptOutAccounts = parsed.connectOnboardingOptOutAccounts.filter(
       (account): account is string => typeof account === "string",
