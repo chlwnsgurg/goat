@@ -7,7 +7,12 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 import * as HostProcess from "@goat/shared/HostProcess";
-import { makeOwnedSshTunnelCommand, ownedAuthDirectory } from "./tunnelOwner.ts";
+import * as NodeFS from "node:fs";
+import {
+  makeOwnedSshTunnelCommand,
+  OWNER_PIPE_SUPERVISOR,
+  ownedAuthDirectory,
+} from "./tunnelOwner.ts";
 import { assert, describe, expect, it } from "@effect/vitest";
 
 describe("owned auth directory", () => {
@@ -158,3 +163,80 @@ Effect.runPromise(Effect.gen(function* () {
     },
   );
 });
+
+// Every shell the supervisor may meet as /bin/sh: dash on Debian and Ubuntu, bash elsewhere.
+const SHELLS = ["/bin/sh", "/bin/dash", "/bin/bash"].filter((shell) => NodeFS.existsSync(shell));
+// Stands in for ssh -N: ignores SIGTERM (reporting it) and holds a connection open until it dies.
+const FAKE_SSH = `
+const net = require("node:net");
+process.on("SIGTERM", () => process.stdout.write("term\\n"));
+const server = net.createServer((socket) => socket.write("alive\\n"));
+server.listen(0, "127.0.0.1", () => process.stdout.write(server.address().port + "\\n"));
+`;
+
+async function startSupervisor(shell: string) {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-owner-shell-"));
+  const script = NodePath.join(directory, "ssh.cjs");
+  await NodeFSP.writeFile(script, FAKE_SSH);
+  const child = NodeChildProcess.spawn(
+    shell,
+    ["-c", OWNER_PIPE_SUPERVISOR, "goat-ssh-forward", "", process.execPath, script],
+    { detached: true, stdio: ["pipe", "pipe", "inherit"] },
+  );
+  const lines = NodeReadline.createInterface({ input: child.stdout! });
+  const signal = AbortSignal.timeout(5_000);
+  const nextLine = async () =>
+    (await NodeEvents.EventEmitter.once(lines, "line", { signal }))[0] as string;
+  const port = Number(await nextLine());
+  // A held connection closes exactly when the fake ssh dies.
+  const socket = NodeNet.connect(port, "127.0.0.1");
+  const greeting = NodeReadline.createInterface({ input: socket });
+  assert.equal((await NodeEvents.EventEmitter.once(greeting, "line", { signal }))[0], "alive");
+  const died = NodeEvents.EventEmitter.once(socket, "close", { signal });
+  const cleanup = async () => {
+    socket.destroy();
+    lines.close();
+    try {
+      process.kill(-child.pid!, "SIGKILL");
+    } catch (error) {
+      assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+    }
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  };
+  return { child, nextLine, died, cleanup };
+}
+
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "SSH owner supervisor shells",
+  () => {
+    it.each(SHELLS)(
+      "keeps the forward while the owner holds the pipe, and ends it on EOF; %s",
+      async (shell) => {
+        const run = await startSupervisor(shell);
+        try {
+          run.child.stdin!.end();
+          await run.died;
+        } finally {
+          await run.cleanup();
+        }
+      },
+    );
+
+    it.each(SHELLS)(
+      "stays the fence through repeated SIGTERM to a resistant ssh; %s",
+      async (shell) => {
+        const run = await startSupervisor(shell);
+        try {
+          process.kill(run.child.pid!, "SIGTERM");
+          assert.equal(await run.nextLine(), "term");
+          process.kill(run.child.pid!, "SIGTERM");
+          assert.equal(await run.nextLine(), "term");
+          run.child.stdin!.end();
+          await run.died;
+        } finally {
+          await run.cleanup();
+        }
+      },
+    );
+  },
+);

@@ -15,24 +15,28 @@ export function ownedAuthDirectory(askpassPath: string | undefined): string {
 // kills only this dedicated process group if the owner disappears without cleanup.
 // The reader ignores the group's graceful signals: an owner that dies during its own
 // SIGTERM grace period must still leave the reader to fence a SIGTERM-resistant ssh.
-const OWNER_PIPE_SUPERVISOR = `auth_directory=$1
+// The reader takes the pipe through fd 3 because dash points a background job's stdin
+// at /dev/null even when the job redirects from fd 0. The supervisor waits until ssh has
+// really exited, since each further signal interrupts wait.
+export const OWNER_PIPE_SUPERVISOR = `auth_directory=$1
 shift
+exec 3<&0
 (
   trap '' TERM INT HUP
-  while IFS= read -r ignored; do :; done
+  while IFS= read -r ignored <&3; do :; done
   if [ -n "$auth_directory" ]; then rm -rf -- "$auth_directory"; fi
   kill -KILL "-$$"
-) <&0 &
+) &
 watcher=$!
-"$@" </dev/null &
+"$@" </dev/null 3<&- &
 ssh_pid=$!
+exec 3<&-
 trap 'kill -TERM "$ssh_pid" 2>/dev/null' TERM INT HUP
-wait "$ssh_pid"
-status=$?
-if kill -0 "$ssh_pid" 2>/dev/null; then
+while :; do
   wait "$ssh_pid"
   status=$?
-fi
+  kill -0 "$ssh_pid" 2>/dev/null || break
+done
 kill -KILL "$watcher" 2>/dev/null
 wait "$watcher" 2>/dev/null
 exit "$status"
