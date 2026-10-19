@@ -95,6 +95,12 @@ export const GoalThreadOwnership = Context.Reference<{
   defaultValue: () => ({ isGoalThread: () => Effect.succeed(false) }),
 });
 
+/**
+ * Cooldown windows a restart looks back through for its own committed selection, about an hour
+ * at the default cooldown. Past that, a hop left half done is handled as a model change.
+ */
+const RESTART_LOOKBACK_WINDOWS = 4;
+
 /** Runs remembered as already told that nothing could be switched. */
 const MAX_NOTICED_RUNS = 1000;
 
@@ -339,17 +345,25 @@ export const make = Effect.gen(function* () {
       // A restart after our selection landed: finish that hop instead of choosing again, even
       // if its account has since run out. The receipt tells it apart from a model the user
       // picked by hand, which is left alone.
+      const moved = stepKey(shell.modelSelection) !== stepKey(current);
+      let ourSelection = false;
+      if (moved)
+        for (let back = 0; back < RESTART_LOOKBACK_WINDOWS && !ourSelection; back++)
+          ourSelection = yield* threads.hasReceipt(
+            selectId(shell.modelSelection, generation - back),
+          );
       const committed =
-        stepKey(shell.modelSelection) !== stepKey(current) &&
+        moved &&
         resolved.chain.steps.some((step) => stepKey(step) === stepKey(shell.modelSelection)) &&
-        ((yield* threads.hasReceipt(selectId(shell.modelSelection, generation))) ||
-          (yield* threads.hasReceipt(selectId(shell.modelSelection, generation - 1))));
+        ourSelection;
       if (committed) {
         yield* announce(shell.modelSelection, new Set(tried.map(stepKey)).size);
         return true;
       }
-      // The user picked another model since the failure; theirs to resume.
-      if (stepKey(shell.modelSelection) !== stepKey(current)) return false;
+      // The user picked another model since the failure: the recovery sweep handles it as it
+      // would without a chain.
+      if (moved) return false;
+      const projectDisabled = new Set<string>();
       for (let attempt = 0; attempt < resolved.chain.steps.length; attempt++) {
         const unavailable = yield* unavailability;
         const decision = decideNext({
@@ -357,7 +371,10 @@ export const make = Effect.gen(function* () {
           current,
           failure,
           tried,
-          unavailable: (step) => unavailable(step, current.instanceId, true),
+          unavailable: (step) =>
+            projectDisabled.has(step.instanceId)
+              ? "is turned off for this project"
+              : unavailable(step, current.instanceId, true),
         });
         if (decision._tag === "Exhausted") {
           yield* noticeOnce(threadId, runId, resolved.id, decision.reason);
@@ -370,7 +387,8 @@ export const make = Effect.gen(function* () {
             instanceId: target.instanceId,
           }))
         ) {
-          yield* reportFailure(target, "unavailable");
+          // Only this project turned it off; other projects may still use it.
+          projectDisabled.add(target.instanceId);
           continue;
         }
         const selected = yield* threads
