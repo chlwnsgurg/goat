@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import type { ReactNode } from "react";
 import type { GoatBotRow } from "@goat/client-runtime/goatBot";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import {
@@ -16,6 +17,10 @@ vi.mock("../../native/NativeScrollViewMarker", () => ({ NativeScrollViewMarker: 
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ bottom: 0 }) }));
 vi.mock("./useMobileGoatBotSession", () => ({ useMobileGoatBotSession: () => ({}) }));
 vi.mock("./GoatBotAvatar", () => ({ GoatBotAvatar: () => null }));
+vi.mock("./GoatBotBubble", () => ({
+  GoatBotBubble: (props: { children: ReactNode | ((color: string) => ReactNode) }) =>
+    typeof props.children === "function" ? props.children("#000000") : props.children,
+}));
 import { GoatBotTimelineRow } from "./GoatBotScreen";
 
 let h: NativeMemoryHarness;

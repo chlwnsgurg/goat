@@ -16,7 +16,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useHomeThreadSelection } from "../home/home-thread-navigation";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
 import { useMobileGoatBotSession } from "./useMobileGoatBotSession";
-import { GoatBotAvatar } from "./GoatBotAvatar";
+import { GoatBotBubble } from "./GoatBotBubble";
+import { goatBotBubbleLayout } from "./goatBotBubbleStyle";
 
 type ThreadSelection = Pick<EnvironmentThreadShell, "environmentId" | "id">;
 const rowKey = (row: GoatBotRow) => row.id;
@@ -39,6 +40,7 @@ type GoatBotTaskRow = Extract<GoatBotRow, { kind: "task" }>;
 function GoatBotTaskCard(props: {
   readonly card: GoatBotTaskRow["card"];
   readonly onSelectThread: (thread: ThreadSelection) => void;
+  readonly tail: boolean;
 }) {
   const { card } = props;
   const target = card.target;
@@ -60,47 +62,52 @@ function GoatBotTaskCard(props: {
         ? `Connect ${unreachableHost} to open`
         : "Open thread";
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={`${card.title}. ${card.statusLabel}.${card.attentionLabel ? ` ${card.attentionLabel}.` : ""}${card.continuationLabel ? ` ${card.continuationLabel}.` : ""} ${action}`}
-      disabled={target.kind !== "thread" || unreachableHost !== null}
-      onPress={() => {
-        if (target.kind === "thread" && unreachableHost === null)
-          props.onSelectThread({ environmentId: target.environmentId, id: target.threadId });
-      }}
-      className="my-2 max-w-[90%] gap-1 rounded-2xl border border-border bg-card p-3"
-    >
-      <Text
-        className={
-          card.tone === "danger"
-            ? "text-xs text-danger-foreground"
-            : "text-xs text-foreground-muted"
-        }
-      >
-        {card.statusLabel}
-        {card.attentionLabel ? ` · ${card.attentionLabel}` : ""}
-      </Text>
-      <Text className="font-semibold text-foreground">{card.title}</Text>
-      {card.sourceLabel ? (
-        <Text className="text-xs text-foreground-muted">{card.sourceLabel}</Text>
-      ) : null}
-      {card.continuationLabel ? (
-        <Text className="text-xs text-foreground-muted">{card.continuationLabel}</Text>
-      ) : null}
-      {card.summary ? (
-        <Text numberOfLines={3} className="text-sm text-foreground">
-          {card.summary}
-        </Text>
-      ) : null}
-      {card.pullRequests.length > 0 ? (
-        <Text className="text-xs text-foreground-muted">
-          {"Pull requests: " + card.pullRequests.map((pullRequest) => pullRequest.label).join(", ")}
-        </Text>
-      ) : null}
-      <Text className="text-xs text-foreground-muted">
-        {action === "Open thread" ? "Open thread ↗" : action}
-      </Text>
-    </Pressable>
+    <GoatBotBubble side="in" tail={props.tail} maxWidth="90%">
+      {(textColor) => (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`${card.title}. ${card.statusLabel}.${card.attentionLabel ? ` ${card.attentionLabel}.` : ""}${card.continuationLabel ? ` ${card.continuationLabel}.` : ""} ${action}`}
+          disabled={target.kind !== "thread" || unreachableHost !== null}
+          onPress={() => {
+            if (target.kind === "thread" && unreachableHost === null)
+              props.onSelectThread({ environmentId: target.environmentId, id: target.threadId });
+          }}
+          className="gap-1"
+        >
+          <Text className="text-xs" style={{ color: textColor, opacity: 0.7 }}>
+            {card.statusLabel}
+            {card.attentionLabel ? ` · ${card.attentionLabel}` : ""}
+          </Text>
+          <Text className="font-semibold" style={{ color: textColor }}>
+            {card.title}
+          </Text>
+          {card.sourceLabel ? (
+            <Text className="text-xs" style={{ color: textColor, opacity: 0.7 }}>
+              {card.sourceLabel}
+            </Text>
+          ) : null}
+          {card.continuationLabel ? (
+            <Text className="text-xs" style={{ color: textColor, opacity: 0.7 }}>
+              {card.continuationLabel}
+            </Text>
+          ) : null}
+          {card.summary ? (
+            <Text numberOfLines={3} className="text-sm" style={{ color: textColor }}>
+              {card.summary}
+            </Text>
+          ) : null}
+          {card.pullRequests.length > 0 ? (
+            <Text className="text-xs" style={{ color: textColor, opacity: 0.7 }}>
+              {"Pull requests: " +
+                card.pullRequests.map((pullRequest) => pullRequest.label).join(", ")}
+            </Text>
+          ) : null}
+          <Text className="text-xs" style={{ color: textColor, opacity: 0.7 }}>
+            {action === "Open thread" ? "Open thread ↗" : action}
+          </Text>
+        </Pressable>
+      )}
+    </GoatBotBubble>
   );
 }
 
@@ -110,29 +117,37 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
   readonly onSend: (answer: string) => boolean;
   readonly onRetry: (key: string) => void;
   readonly onSelectThread: (thread: ThreadSelection) => void;
+  readonly isFirstRow?: boolean;
 }) {
   const { row } = props;
   const [nowMs] = useState(() => Date.now());
   if (row.kind === "day") {
     return (
-      <Text className="py-4 text-center text-xs text-foreground-muted">
+      <Text className="py-4 text-center text-xs font-semibold text-foreground-muted">
         {formatGoatBotStamp(row.at, nowMs, receiptTime)}
       </Text>
     );
   }
+  const layout = goatBotBubbleLayout(row.groupPosition, props.isFirstRow ?? false);
   if (row.kind === "task") {
-    return <GoatBotTaskCard card={row.card} onSelectThread={props.onSelectThread} />;
+    return (
+      <View style={{ marginTop: layout.marginTop, alignItems: "flex-start" }}>
+        <GoatBotTaskCard card={row.card} onSelectThread={props.onSelectThread} tail={layout.tail} />
+      </View>
+    );
   }
   if (row.kind === "user") {
     const delivery = row.delivery;
     const receipt = goatBotReceiptLabel(delivery, receiptTime);
     return (
-      <View className="my-1 items-end gap-1">
-        <View className="max-w-[85%] rounded-2xl bg-user-bubble px-3 py-2">
-          <Text selectable className="text-base text-user-bubble-foreground">
-            {row.text}
-          </Text>
-        </View>
+      <View className="items-end gap-1" style={{ marginTop: layout.marginTop }}>
+        <GoatBotBubble side="out" tail={layout.tail}>
+          {(textColor) => (
+            <Text selectable className="text-base" style={{ color: textColor }}>
+              {row.text}
+            </Text>
+          )}
+        </GoatBotBubble>
         {row.showReceipt || delivery.state === "failed" ? (
           <View className="flex-row items-center gap-2">
             <Text
@@ -159,33 +174,25 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
     );
   }
   return (
-    <View className="my-1 items-start gap-1">
-      <View className="max-w-[85%] gap-1 rounded-2xl bg-card px-3 py-2">
-        {row.firstInGroup ? (
-          <View className="flex-row items-center gap-1.5">
-            <GoatBotAvatar size="sm" />
-            <Text className="text-xs font-semibold text-foreground-muted">GOAT Bot</Text>
+    <View className="items-start gap-1" style={{ marginTop: layout.marginTop }}>
+      <GoatBotBubble side="in" tail={layout.tail}>
+        {(textColor) => (
+          <View className="gap-1">
+            {row.replyTo ? (
+              <Text
+                numberOfLines={2}
+                className="border-l-2 border-border pl-2 text-xs"
+                style={{ color: textColor, opacity: 0.7 }}
+              >
+                {row.replyTo}
+              </Text>
+            ) : null}
+            <Text selectable className="text-base" style={{ color: textColor }}>
+              {row.text}
+            </Text>
           </View>
-        ) : null}
-        {row.replyTo ? (
-          <Text
-            numberOfLines={2}
-            className="border-l-2 border-border pl-2 text-xs text-foreground-muted"
-          >
-            {row.replyTo}
-          </Text>
-        ) : null}
-        <Text
-          selectable
-          className={
-            row.tone === "failure"
-              ? "text-base text-danger-foreground"
-              : "text-base text-foreground"
-          }
-        >
-          {row.text}
-        </Text>
-      </View>
+        )}
+      </GoatBotBubble>
       {row.memory ? <MemoryReportLink reference={row.memory} /> : null}
       {row.options.length > 0 ? (
         <View
@@ -198,9 +205,12 @@ export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
               accessibilityRole="button"
               disabled={!props.canSend}
               onPress={() => props.onSend(answer)}
-              className="rounded-xl border border-border px-3 py-2"
+              className="rounded-full border px-3 py-2"
+              style={{ borderColor: "#1B86F9" }}
             >
-              <Text className="text-sm text-foreground">{answer}</Text>
+              <Text className="text-sm" style={{ color: "#1B86F9" }}>
+                {answer}
+              </Text>
             </Pressable>
           ))}
         </View>
@@ -225,13 +235,14 @@ export function GoatBotScreen(props: {
   const [inputHeight, setInputHeight] = useState(40);
   const replying = useReplying(session.replyingSince, props.visible);
   const renderItem = useCallback(
-    ({ item }: { item: GoatBotRow }) => (
+    ({ item, index }: { item: GoatBotRow; index: number }) => (
       <GoatBotTimelineRow
         row={item}
         canSend={session.canSend}
         onSend={session.onSend}
         onRetry={session.onRetryInput}
         onSelectThread={onSelectThread}
+        isFirstRow={index === 0}
       />
     ),
     [session.canSend, session.onSend, session.onRetryInput, onSelectThread],
@@ -287,13 +298,29 @@ export function GoatBotScreen(props: {
           }
           ListFooterComponent={
             replying ? (
-              <Text
+              <View
                 accessibilityRole="text"
                 accessibilityLabel="GOAT Bot is replying"
-                className="self-start rounded-2xl bg-card px-4 py-2 text-foreground-muted"
+                className="self-start"
               >
-                ● ● ●
-              </Text>
+                <GoatBotBubble side="in" tail>
+                  {(textColor) => (
+                    <View className="flex-row items-center gap-1 py-1">
+                      {[0, 1, 2].map((dot) => (
+                        <View
+                          key={dot}
+                          style={{
+                            width: 6,
+                            height: 6,
+                            borderRadius: 3,
+                            backgroundColor: textColor,
+                          }}
+                        />
+                      ))}
+                    </View>
+                  )}
+                </GoatBotBubble>
+              </View>
             ) : null
           }
         />
@@ -313,7 +340,7 @@ export function GoatBotScreen(props: {
           onContentSizeChange={(event) =>
             setInputHeight(Math.min(160, Math.max(40, event.nativeEvent.contentSize.height)))
           }
-          className="flex-1 rounded-2xl border border-border px-3 py-2 text-base text-foreground"
+          className="flex-1 rounded-full border border-border px-3 py-2 text-base text-foreground"
           style={{ height: inputHeight }}
         />
         <Pressable
@@ -321,10 +348,15 @@ export function GoatBotScreen(props: {
           accessibilityLabel="Send message"
           disabled={!session.canSend || !text.trim()}
           onPress={send}
-          className="rounded-xl bg-composer-send px-4 py-3"
-          style={{ opacity: session.canSend && text.trim() ? 1 : 0.45 }}
+          className="items-center justify-center rounded-full"
+          style={{
+            width: 32,
+            height: 32,
+            backgroundColor: "#1B86F9",
+            opacity: session.canSend && text.trim() ? 1 : 0.45,
+          }}
         >
-          <Text className="font-semibold text-primary-foreground">Send</Text>
+          <Text className="text-xl font-semibold text-white">↑</Text>
         </Pressable>
       </View>
     </KeyboardAvoidingView>
