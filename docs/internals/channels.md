@@ -87,6 +87,12 @@ the running turn and give the bot thread runs it was built never to have.
 
 ## Work items, worker runs, and stopping
 
+A worker blocked on a person counts the same whether it or one of its subagents asked. Worker
+reconciliation reads the pending requests of the live subagents a worker started, and of theirs,
+up to three levels and twenty threads, and adds them to the task's `observed.needsYou`, so the
+chip, the waiting count and "what's pending" show a subagent's approval as the work waiting on
+the person. Answering it still happens in that subagent's thread in GOAT.
+
 A task is a work item: what a person asked for. Its worker runs are separate records, one per
 run of the task's worker thread, kept as `worker-run:<task>:<run>` rows in
 `channel_runtime_state` (a `ChannelWorkerRun`) rather than a new table, so no migration

@@ -18,6 +18,7 @@ import {
   MessageId,
   type OrchestrationV2Run,
   type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2Subagent,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadShell,
   ProjectId,
@@ -103,6 +104,8 @@ export class WorkerWorld {
   readonly background = new Set<string>();
   readonly pullRequests = new Map<string, ReadonlyArray<ThreadPullRequestLink>>();
   readonly runtimeRequests = new Map<string, ReadonlyArray<OrchestrationV2RuntimeRequest>>();
+  /** Subagents a worker (or a subagent) thread started, by parent thread id. */
+  readonly subagents = new Map<string, ReadonlyArray<OrchestrationV2Subagent>>();
   readonly shells = new Map<
     string,
     Partial<
@@ -346,6 +349,7 @@ export function makeHarness(
             },
             runs,
             runtimeRequests: world.runtimeRequests.get(threadId) ?? [],
+            subagents: world.subagents.get(threadId) ?? [],
             providerThreads: world.background.has(threadId)
               ? [{ pendingBackgroundTasks: [{ taskId: "background" }] }]
               : [],
