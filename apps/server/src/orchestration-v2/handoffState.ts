@@ -33,6 +33,7 @@ export function transitionHandoff(
     (record.kind === "approval" &&
       !record.target.path.startsWith("ssh.") &&
       record.target.path !== "provider.home_request" &&
+      record.target.path !== "provider.host_sync" &&
       runEnded);
   const next = expired ? "expired" : state;
   if (next === "pending" || (next === "expired" && !expired))

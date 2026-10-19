@@ -54,6 +54,7 @@ import * as HostThreadsMcpService from "./mcp/HostThreadsMcpService.ts";
 import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as ThreadResultService from "./threadResults/ThreadResultService.ts";
 import * as ProviderDiagnosisRouting from "./provider/ProviderDiagnosisRouting.ts";
+import * as ProviderHostSync from "./provider/ProviderHostSync.ts";
 import * as SshHostSetup from "./sshRemote/SshHostSetup.ts";
 import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
 import * as BoatClient from "./cloudMachines/BoatClient.ts";
@@ -214,6 +215,7 @@ import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts"
 import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
 import * as MaintenanceAudit from "./maintenance/MaintenanceAudit.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
+import * as ServerAutoUpdate from "./cloud/autoUpdate.ts";
 import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
@@ -1208,6 +1210,12 @@ const layerSshWorkspace = SshWorkspaceSync.layer.pipe(
 );
 
 const layerMakeRoutes = Layer.mergeAll(
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const autoUpdate = yield* ServerAutoUpdate.ServerAutoUpdate;
+      yield* ServerActivation.forkParked(autoUpdate.run);
+    }).pipe(Effect.provide(ServerAutoUpdate.layer)),
+  ),
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
       Layer.provide(AuthHttp.layer),
@@ -1251,7 +1259,13 @@ const layerMakeRoutes = Layer.mergeAll(
   // status, and the remote-launch catalog: they all follow runs and wake launchers.
   // The coordinator re-arms watches after a relayed send, so the store comes after it.
   Layer.provide(layerSshWorkspace),
-  Layer.provide(SshHostSetup.layer.pipe(Layer.provide(MaintenanceAudit.layer))),
+  // SshHostSetup routes approvals of agent-requested provider syncs to ProviderHostSync.
+  Layer.provide(
+    SshHostSetup.layer.pipe(
+      Layer.provide(MaintenanceAudit.layer),
+      Layer.provideMerge(ProviderHostSync.layer),
+    ),
+  ),
   Layer.provide(HomeRequests.layer.pipe(Layer.provideMerge(CodexRoutes.layer))),
   Layer.provide(
     ProviderDiagnosisRouting.layer.pipe(
@@ -1305,7 +1319,30 @@ const layerMakeServer = Layer.unwrap(
     const tailscaleParked = yield* Deferred.make<void>();
     const cloudLinkParked = yield* Deferred.make<void>();
     const routesReady = yield* Deferred.make<void>();
-    const layerLauncher = ServiceLauncherClient.layer;
+    const layerLauncher = ServiceLauncherClient.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.effect(
+            ServiceLauncherClient.ServiceLauncherPort,
+            Effect.map(HttpServer.HttpServer, (server) =>
+              typeof server.address === "string" || !("port" in server.address)
+                ? undefined
+                : server.address.port,
+            ),
+          ),
+          Layer.effect(
+            ServiceLauncherClient.ServiceLauncherHost,
+            Effect.map(HttpServer.HttpServer, (server) =>
+              typeof server.address !== "string" &&
+              "hostname" in server.address &&
+              typeof server.address.hostname === "string"
+                ? server.address.hostname
+                : undefined,
+            ),
+          ),
+        ),
+      ),
+    );
 
     yield* fixPath({ shellEnvironmentPrepared: config.shellEnvironmentPrepared });
 

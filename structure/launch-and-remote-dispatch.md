@@ -112,3 +112,16 @@ arrived quotes the reason and the message and, under `wake`, wakes the launcher,
 whether to send it itself. The relay does not change the dispatch's latest report.
 
 > Decision record: [ADR-0010](decisions/ADR-0010-remote-dispatch.md)
+
+## Fleet goals
+
+No goal controller, host cordon, placement limit, or fallback chain exists yet. Remote work is
+started and followed only through the launch watches and dispatches above. The proposed design,
+which builds goals, self-healing and fallback on these watches, is in
+[agentic-k8s.md](../docs/internals/agentic-k8s.md).
+
+> Decision record: [ADR-0016](decisions/ADR-0016-agentic-goals-controller.md)
+
+> Decision record: [ADR-0017](decisions/ADR-0017-agentic-self-healing.md)
+
+> Decision record: [ADR-0018](decisions/ADR-0018-agentic-resources-fallback.md)
