@@ -31,12 +31,25 @@ const fixture = makeProtocolFixture({
   live: true,
   kind: "managed",
   oldVersion: ARCHIVE.archiveVersion,
+  commitTime: 1_700_000_000,
   ssh: SSH_RUNTIME_PROTOCOL_VERSION,
   orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+  candidateSignals: {
+    ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+    orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+    commitTime: 1_700_000_000,
+    drain: true,
+  },
 });
 type Fixture = Effect.Success<typeof fixture>;
 const launch = (f: Fixture, previous?: PreparedRemoteRuntime) =>
-  launchOrReuseRemoteServer(uploadTarget, {}, f.runner, undefined, previous).pipe(
+  launchOrReuseRemoteServer(
+    uploadTarget,
+    {},
+    { ...f.runner, cleanupTimeoutMs: 60_000 },
+    undefined,
+    previous,
+  ).pipe(
     Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport),
     Effect.provideService(FileSystem.FileSystem, f.observedFs),
   );
@@ -94,6 +107,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             live: true,
             kind: "managed",
             oldVersion: version,
+            commitTime: 1_700_000_000,
             drain: true,
             ssh: SSH_RUNTIME_PROTOCOL_VERSION,
             orchestration: ORCHESTRATION_PROTOCOL_VERSION,
@@ -113,6 +127,18 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           assert.equal(yield* f.fs.readFileString(`${f.test}/probe-invocations`), "probe\n");
           const commands = f.remoteCommands.length;
           const events = yield* f.fs.readFileString(`${f.test}/events`);
+          const readinessEvent =
+            JSON.stringify({
+              type: "exec",
+              version,
+              args: ["__ssh-helper", "wait-ready", String(first.remotePort), "60000", "1000"],
+            }) + "\n";
+          const reconnectEvents = f.fs.readFileString(`${f.test}/events`).pipe(
+            Effect.map((current) => {
+              assert.equal(current.slice(0, events.length), events);
+              return current.slice(events.length);
+            }),
+          );
           const cost = {
             active: true,
             spawns: 0,
@@ -124,7 +150,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           );
           assert.equal(second.status, "ready");
           assert.equal(f.remoteCommands.length - commands, 1);
-          assert.equal(yield* f.fs.readFileString(`${f.test}/events`), events);
+          assert.equal(yield* reconnectEvents, readinessEvent);
           assert.property(cost.steps, "runtime-probe-folded");
           assert.equal(yield* f.fs.readFileString(`${f.test}/probe-invocations`), "probe\nprobe\n");
           if (second.status !== "ready") return;
@@ -136,7 +162,61 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             yield* f.fs.readFileString(`${f.test}/probe-invocations`),
             "probe\nprobe\nprobe\n",
           );
-          assert.equal(yield* f.fs.readFileString(`${f.test}/events`), events);
+          assert.equal(yield* reconnectEvents, readinessEvent + readinessEvent);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+
+    it.live.each([0, 1, 60])(
+      "folds the first reconnect after install using warmed facts (age %s s at cleanup)",
+      (age) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: false,
+            kind: "managed",
+            oldVersion: ARCHIVE.archiveVersion,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+            candidateSignals: {
+              ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+              orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+              commitTime: 1_700_000_000,
+              drain: true,
+            },
+          });
+          yield* f.fs.remove(f.old, { recursive: true });
+          yield* f.fs.remove(`${f.state}/run-t3.sh`);
+          yield* f.shiftHostClock(age, true);
+          const installed = yield* launch(f);
+          assert.equal(installed.status, "ready");
+          if (installed.status !== "ready") return;
+          assert.isString(installed.selectedRuntime.reconnectProbe);
+          assert.equal(f.counters().uploads, 1);
+          const runtime = JSON.parse(
+            yield* f.fs.readFileString(`${f.home}/.goat/userdata/server-runtime.json`),
+          ) as { pid: number };
+          yield* installArchivePsDouble(
+            f.home,
+            runtime.pid,
+            installed.remotePort,
+            ARCHIVE.archiveVersion,
+          );
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          const before = f.remoteCommands.length;
+          yield* f.shiftHostClock(60, true);
+          const reconnected = yield* launch(f, installed.selectedRuntime);
+          assert.equal(reconnected.status, "ready");
+          if (reconnected.status !== "ready") return;
+          assert.equal(reconnected.remotePort, installed.remotePort);
+          assert.equal(f.remoteCommands.length - before, 1);
+          assert.equal(
+            (yield* f.fs.readFileString(`${f.test}/events`)).slice(events.length),
+            JSON.stringify({
+              type: "exec",
+              version: ARCHIVE.archiveVersion,
+              args: ["__ssh-helper", "wait-ready", String(installed.remotePort), "60000", "1000"],
+            }) + "\n",
+          );
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
       180_000,
     );
@@ -385,6 +465,10 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           yield* f.fs.makeDirectory(unverified);
           yield* f.fs.writeFileString(`${unverified}/.install-complete`, "8.0.0\n");
           yield* f.fs.writeFileString(
+            `${unverified}/.install-record`,
+            `8.0.0 ${"a".repeat(64)} ${"b".repeat(64)} cache\n`,
+          );
+          yield* f.fs.writeFileString(
             `${unverified}/goat`,
             '#!/bin/sh\ntouch "$HOME/.test/unverified-executed"\nexit 1\n',
           );
@@ -394,6 +478,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           assert.equal(result.status, "ready");
           if (result.status !== "ready") return;
           assert.equal(result.selectedRuntime.version, ARCHIVE.archiveVersion);
+          assert.isString(result.selectedRuntime.reconnectProbe);
           assert.isFalse(yield* f.fs.exists(`${f.test}/unverified-executed`));
           assert.equal(f.counters().uploads, 1);
           assert.equal(f.remoteCommands.length - before, 4);

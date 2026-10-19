@@ -1813,7 +1813,7 @@ const REMOTE_RUNTIME_FACT_WARMUP_SCRIPT = String.raw`warm_runtime_facts() (
   warm_age=$(( $(date +%s) - ${"${warm_sig##*:}"} ))
   # A clock behind ctime is not a reason to extend the cleanup's deadline.
   [ "$warm_age" -ge 0 ] || exit 1
-  if [ "$warm_age" -lt 2 ]; then sleep "$(( 2 - warm_age ))"; fi
+  if [ "$warm_age" -lt 2 ]; then sleep "$(( 2 - warm_age ))" || exit 1; fi
   exec_fact_key "$warm_exe" || exit 1
   warm_exe_key="$FACT_KEY"; warm_exe_name="$FACT_NAME"
   # Independent answers run side by side, so warming costs about two goat starts on a host
@@ -1847,7 +1847,7 @@ const REMOTE_RUNTIME_FACT_WARMUP_SCRIPT = String.raw`warm_runtime_facts() (
     fact_put "$warm_kind.$warm_runner_name" "$warm_runner_key${'${warm_key#"$warm_exe_key"}'}" "$warm_value"
   done
 )
-warm_runtime_facts >/dev/null 2>&1 || true
+warm_runtime_facts >/dev/null 2>&1 || exit 0
 `;
 
 // The caller holds the replacement mutex after readiness, outside any supervisor trial.
@@ -3433,12 +3433,15 @@ function buildRemoteLogTailScript(stateKey: string): string {
 }
 
 // Keep the probe in its own shell: its exit paths and shell options must not affect launch.
-function buildReconnectLaunchScript(selected: PreparedRemoteRuntime, expectedProbe?: string) {
-  const probe = `reconnect_probe() {
+function buildReconnectProbeScript(selected: PreparedRemoteRuntime) {
+  return `reconnect_probe() {
 sh -s -- "\${1:-}" <<'GOAT_RECONNECT_PROBE_SCRIPT'
 ${buildRemoteRuntimeProbeScript(selected.requestedVersion ?? "", REMOTE_RUNTIME_STATE_KEY, false, true)}
 GOAT_RECONNECT_PROBE_SCRIPT
 }`;
+}
+
+function buildReconnectLaunchScript(selected: PreparedRemoteRuntime, expectedProbe?: string) {
   // The folded launch guard only attaches to the unchanged owned server. Reusing the compared
   // baseline is safe: stale facts only force a reprobe next reconnect, never a wrong selection.
   const baseline =
@@ -3446,7 +3449,7 @@ GOAT_RECONNECT_PROBE_SCRIPT
       ? 'if probe_output="$(reconnect_probe capture)"; then printf \'GOAT_RECONNECT_PROBE=%s\\n\' "$probe_output"; fi'
       : "printf 'GOAT_RECONNECT_PROBE=%s\\n' \"$probe_output\"";
   return `set -eu
-${probe}
+${buildReconnectProbeScript(selected)}
 ${
   expectedProbe === undefined
     ? ""
@@ -3601,6 +3604,10 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       refresh: parsed.refresh ?? null,
       stateKey,
     });
+    let probeOutput = result.stdout
+      .split(/\r?\n/u)
+      .find((line) => line.startsWith("GOAT_RECONNECT_PROBE="))
+      ?.slice("GOAT_RECONNECT_PROBE=".length);
     if (
       !isNodeScriptRunner(selected.runner) &&
       // Garbage appears only when this launch installed a runtime; skip the round trip otherwise.
@@ -3638,8 +3645,16 @@ ${REMOTE_RUNTIME_CLEANUP_SCRIPT}
 release_recovery_lock
 release_replacement_lock
 # Cleanup gets the full deadline under the mutex; only optional fact warming uses what remains.
-${REMOTE_RUNTIME_FACT_WARMUP_SCRIPT}`,
+${REMOTE_RUNTIME_FACT_WARMUP_SCRIPT}
+# A fresh install could not be keyed before warm-up; return its baseline in this round trip.
+${buildReconnectProbeScript(selected)}
+if probe_output="$(reconnect_probe capture)"; then printf 'GOAT_RECONNECT_PROBE=%s\\n' "$probe_output"; fi`,
         });
+        probeOutput =
+          cleanup.stdout
+            .split(/\r?\n/u)
+            .find((line) => line.startsWith("GOAT_RECONNECT_PROBE="))
+            ?.slice("GOAT_RECONNECT_PROBE=".length) ?? probeOutput;
         for (const line of cleanup.stderr.split(/\r?\n/u)) {
           if (line.startsWith("ssh.runtime.cleanup.")) {
             yield* Effect.logInfo("ssh.runtime.cleanup.result", {
@@ -3681,10 +3696,6 @@ ${REMOTE_RUNTIME_FACT_WARMUP_SCRIPT}`,
     delete durableSelection.expectedLiveVersion;
     delete durableSelection.expectedLiveRunnerSha256;
     delete durableSelection.reconnectProbe;
-    const probeOutput = result.stdout
-      .split(/\r?\n/u)
-      .find((line) => line.startsWith("GOAT_RECONNECT_PROBE="))
-      ?.slice("GOAT_RECONNECT_PROBE=".length);
     if (
       probeOutput !== undefined &&
       parsed.pending === undefined &&
