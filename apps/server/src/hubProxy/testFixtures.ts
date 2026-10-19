@@ -131,6 +131,7 @@ export const makeSsh = (
 ) => {
   const endpoints: Array<Parameters<SshRemoteDispatch["Service"]["proxyEndpoint"]>[0]> = [];
   const issues: Array<ReadonlyArray<AuthEnvironmentScope>> = [];
+  let forward = baseUrl;
   const unused = () => Effect.die("Unexpected SSH operation");
   const service = SshRemoteDispatch.of({
     runtimeStatus: unused,
@@ -153,7 +154,7 @@ export const makeSsh = (
     proxyEndpoint: (target) =>
       Effect.sync(() => {
         endpoints.push(target);
-        return { httpBaseUrl: baseUrl, wsBaseUrl: baseUrl.replace(/^http/u, "ws") };
+        return { httpBaseUrl: forward, wsBaseUrl: forward.replace(/^http/u, "ws") };
       }),
     issueProxySession: (_target, scopes) =>
       Effect.gen(function* () {
@@ -165,7 +166,15 @@ export const makeSsh = (
         };
       }),
   });
-  return { service, endpoints, issues };
+  return {
+    service,
+    endpoints,
+    issues,
+    /** A relaunched node's forward listens on a new local port. */
+    moveForward: (url: string) => {
+      forward = url;
+    },
+  };
 };
 
 export const makeSessions = Effect.fnUntraced(function* (

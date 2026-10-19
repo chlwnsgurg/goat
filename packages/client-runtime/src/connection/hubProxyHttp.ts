@@ -4,14 +4,36 @@ import * as Schema from "effect/Schema";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import { executeEnvironmentHttpRequest } from "../rpc/http.ts";
-import { ConnectionBlockedError } from "./model.ts";
+import { ConnectionBlockedError, ConnectionTransientError } from "./model.ts";
 import { mapRemoteEnvironmentError } from "./errors.ts";
 import type { HubProxyAuthorization } from "./hubProxyAuthSource.ts";
 
 const isConnectionBlockedError = Schema.is(ConnectionBlockedError);
+const isConnectionTransientError = Schema.is(ConnectionTransientError);
+
+/**
+ * The hub is up but cannot reach the node: asleep, off, or its SSH or runtime failing. That is the
+ * quiet unreachable-host state, retried on the normal backoff while the cached threads stay shown.
+ */
+export const hubProxyNodeUnavailable = (body: unknown): ConnectionTransientError | undefined => {
+  const fields = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+  if (fields["code"] !== "hub_node_unavailable") return undefined;
+  return new ConnectionTransientError({
+    reason: "host-unreachable",
+    detail:
+      typeof fields["message"] === "string" && fields["message"].length > 0
+        ? `The hub cannot reach this machine: ${fields["message"].slice(0, 200)}`
+        : "The hub cannot reach this machine.",
+  });
+};
 
 export const hubProxyHttpBaseUrl = (httpBaseUrl: string, nodeId: string): string =>
   environmentEndpointUrl(httpBaseUrl, `${hubProxyNodePath(nodeId)}/`);
+
+const nodeUnavailableResult = (body: unknown) => {
+  const offline = hubProxyNodeUnavailable(body);
+  return offline === undefined ? undefined : ({ offline } as const);
+};
 
 /**
  * A 403 under a node path says which grant is missing: the hub's access to that node, or this
@@ -63,14 +85,22 @@ export const requestHubProxyJson = <A, E>(
         return {
           refused: yield* response.json.pipe(Effect.orElseSucceed((): unknown => null)),
         } as const;
+      if (response.status === 503) {
+        const unavailable = nodeUnavailableResult(
+          yield* response.json.pipe(Effect.orElseSucceed((): unknown => null)),
+        );
+        if (unavailable !== undefined) return unavailable;
+      }
       const ok = yield* HttpClientResponse.filterStatusOk(response);
       return { value: yield* decode(yield* ok.json) } as const;
     }),
   ).pipe(
-    Effect.flatMap((result) =>
+    Effect.flatMap((result): Effect.Effect<A, ConnectionBlockedError | ConnectionTransientError> =>
       "refused" in result
         ? Effect.fail(hubProxyRefusal(result.refused))
-        : Effect.succeed(result.value),
+        : "offline" in result
+          ? Effect.fail(result.offline)
+          : Effect.succeed(result.value),
     ),
     (request) =>
       auth.authorization === null
@@ -79,7 +109,7 @@ export const requestHubProxyJson = <A, E>(
           )
         : request,
     Effect.mapError((error) =>
-      isConnectionBlockedError(error)
+      isConnectionBlockedError(error) || isConnectionTransientError(error)
         ? error
         : error._tag === "RemoteEnvironmentAuthUndeclaredStatusError" &&
             (error.status === 401 || error.status === 403)

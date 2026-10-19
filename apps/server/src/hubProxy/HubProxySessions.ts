@@ -332,12 +332,15 @@ export const make = Effect.gen(function* () {
             }),
           );
     yield* checkAdmission(nodeId, state, routeKey(route), generation);
+    // A cached session outlives its forward: a relaunched node gets a new local port.
     const upstream = {
+      token: session.token,
+      scopes: session.scopes,
+      expiresAtMs: session.expiresAtMs,
       nodeId,
       generation,
       httpBaseUrl: endpoint.httpBaseUrl,
       wsBaseUrl: endpoint.wsBaseUrl,
-      ...session,
     };
     state.sessions.set(key, upstream);
     return upstream;

@@ -50,6 +50,19 @@ it.effect("caches sessions by the exact scope set, independent of scope order", 
   }).pipe(Effect.scoped),
 );
 
+it.effect("a cached session follows the node's forward to its new port after a relaunch", () =>
+  Effect.gen(function* () {
+    const { sessions, ssh } = yield* fixture();
+    const before = yield* sessions.open("node-1", readScopes);
+    ssh.moveForward("http://127.0.0.1:2/");
+    const after = yield* sessions.open("node-1", readScopes);
+    expect(after.token).toBe(before.token);
+    expect(ssh.issues).toHaveLength(1);
+    expect(after.httpBaseUrl).toBe("http://127.0.0.1:2/");
+    expect(after.wsBaseUrl).toBe("ws://127.0.0.1:2/");
+  }),
+);
+
 it.effect("refreshes a node session exactly ten minutes before expiry using TestClock", () =>
   Effect.gen(function* () {
     const { sessions, ssh } = yield* fixture();

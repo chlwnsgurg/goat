@@ -28,7 +28,7 @@ import {
 } from "./routes.ts";
 import { environmentMcpUrl } from "./presentation.ts";
 import { reconcileHubProxyRoutes } from "./hubProxyDiscovery.ts";
-import { hubProxyRefusal } from "./hubProxyHttp.ts";
+import { hubProxyNodeUnavailable, hubProxyRefusal } from "./hubProxyHttp.ts";
 import { make as makeAuth } from "./hubProxyAuthSource.ts";
 import { ConnectionProfileStore } from "./profileStore.ts";
 import { ConnectionCredentialStore } from "./credentialStore.ts";
@@ -347,5 +347,19 @@ describe("hubProxyRefusal", () => {
       "The hub session does not permit access to this node.",
     );
     expect(hubProxyRefusal({ code: "x", message: "Node said no." }).reason).toBe("permission");
+  });
+});
+
+describe("hubProxyNodeUnavailable", () => {
+  it("retries a node the hub cannot reach quietly, keeping the hub's reason", () => {
+    expect(
+      hubProxyNodeUnavailable({ code: "hub_node_unavailable", message: "mini is unavailable" }),
+    ).toMatchObject({
+      reason: "host-unreachable",
+      detail: "The hub cannot reach this machine: mini is unavailable",
+    });
+    // Any other 503 is not the hub speaking about its node.
+    expect(hubProxyNodeUnavailable({ message: "busy" })).toBeUndefined();
+    expect(hubProxyNodeUnavailable(null)).toBeUndefined();
   });
 });

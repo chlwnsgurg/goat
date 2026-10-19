@@ -481,6 +481,7 @@ function SavedBackendListRow({
   const subtitleText = [
     environmentTransportLabel(environment, connectedTarget),
     resumingServerUpdate ? "Restarting" : status.text,
+    snapshotAge,
     enabled && versionMismatch ? serverVersion : null,
     savedSshTarget && runtimeStatus
       ? runtimeStatus.state === "preparing"

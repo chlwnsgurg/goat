@@ -107,7 +107,14 @@ copy is capped at 4 MiB of encoded bytes and served at `/hub/nodes/<nodeId>/snap
 the node. When a hub-proxy environment cannot connect, the client hydrates its shell from that
 copy. A live snapshot always replaces it. The offline age shown is the capture time stored with
 the snapshot actually displayed. If the client is showing its own newer cache without a known
-capture time, it shows plain "Offline".
+capture time, it shows no age.
+
+A node the hub cannot reach is answered with `503 hub_node_unavailable`, which clients treat as an
+unreachable host: quiet retries on the normal backoff. Every open asks the SSH manager for the
+node's endpoint, and the manager probes a reused forward and relaunches the node's server behind a
+new one when it stopped. A cached node session outlives that forward, so the upstream is rebuilt
+from the session's credential and the current endpoint; reusing the cached address kept a
+recovered node unreachable on a dead local port.
 
 Shell reads stream to the client while retaining at most that cap, and only complete bodies are
 cacheable. Oversized bodies keep streaming without a retained copy. Background refreshes stop
