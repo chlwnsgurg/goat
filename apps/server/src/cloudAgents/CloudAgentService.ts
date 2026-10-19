@@ -100,12 +100,12 @@ export interface CloudAgentServiceShape {
   readonly launch: (
     scope: McpInvocationScope,
     input: CloudLaunchInput,
-    modes: StartModes,
+    modes: Effect.Effect<StartModes, OrchestratorMcpFailure>,
   ) => Effect.Effect<CloudLaunchResult, OrchestratorMcpFailure>;
   readonly register: (
     scope: McpInvocationScope,
     input: CloudRunRegisterInput,
-    modes: StartModes,
+    modes: Effect.Effect<StartModes, OrchestratorMcpFailure>,
   ) => Effect.Effect<CloudRunRegisterResult, OrchestratorMcpFailure>;
   readonly list: (
     input: CloudRunListInput,
@@ -236,6 +236,37 @@ const make = Effect.gen(function* () {
     readCloudRuns(limit).pipe(
       Effect.provideService(SqlClient.SqlClient, sql),
       Effect.mapError(() => failure("orchestration_error", "Could not read cloud runs here.")),
+    );
+
+  /** Every registration, not just recent ones, so an old run is never registered twice. */
+  const findRegistered = (provider: CloudAgentProvider, externalId: string) =>
+    sql<{ readonly provider_json: string; readonly thread_json: string }>`
+      SELECT p.payload_json AS provider_json, t.payload_json AS thread_json
+      FROM orchestration_v2_projection_provider_threads AS p
+      JOIN orchestration_v2_projection_threads AS t ON t.thread_id = p.thread_id
+      WHERE p.driver = ${provider}
+        AND p.owner_node_id IS NULL
+        AND t.deleted_at IS NULL
+        AND json_extract(p.payload_json, '$.nativeThreadRef.nativeId') = ${externalId}
+        AND json_extract(p.payload_json, '$.cloudTask.attach') = 'registered'
+      LIMIT 1
+    `.pipe(
+      Effect.flatMap((rows) =>
+        rows[0] === undefined
+          ? Effect.succeed(undefined)
+          : Effect.all([
+              decodeProviderThreadPayload(rows[0].provider_json),
+              decodeThreadPayload(rows[0].thread_json),
+            ]).pipe(
+              Effect.map(([providerThread, thread]) => ({
+                summary: {
+                  threadId: thread.id,
+                  tracking: providerThread.cloudTask?.tracking ?? ("link-only" as const),
+                },
+              })),
+            ),
+      ),
+      Effect.mapError(() => failure("orchestration_error", "Could not read registered runs.")),
     );
 
   const accountLabel = (providers: ReadonlyArray<ServerProvider>) => (instanceId: string) => {
@@ -463,6 +494,7 @@ const make = Effect.gen(function* () {
       }
       const project = yield* projectFor(input.repo);
       const instanceId = holder.instanceId ?? ProviderInstanceId.make(input.provider);
+      const started = yield* modes;
       const launched = yield* launches
         .launch(
           scope,
@@ -479,7 +511,7 @@ const make = Effect.gen(function* () {
             standingInstructions: false,
             ...(input.notifyWebhook === undefined ? {} : { notifyWebhook: input.notifyWebhook }),
           },
-          modes,
+          started,
         )
         .pipe(Effect.mapError(mapLaunchError));
       return {
@@ -553,12 +585,9 @@ const make = Effect.gen(function* () {
         );
         return { ...result, holder: { ...result.holder, host: target } };
       }
-      return yield* registering.withPermits(1)(
+      const outcome = yield* registering.withPermits(1)(
         Effect.gen(function* () {
-          const existing = (yield* runs(200)).find(
-            (run) =>
-              run.summary.provider === input.provider && run.externalId === reference.externalId,
-          );
+          const existing = yield* findRegistered(input.provider, reference.externalId);
           const [holder] = (yield* holders(scope, { provider: input.provider, local: true }))
             .holders;
           const self: CloudHolder = holder ?? {
@@ -603,6 +632,7 @@ const make = Effect.gen(function* () {
           const threadId = ThreadId.make(
             `cloud-run:${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`,
           );
+          const started = yield* modes;
           yield* launches.launch(
             scope,
             {
@@ -618,7 +648,7 @@ const make = Effect.gen(function* () {
                 : {}),
               ...(input.notifyWebhook === undefined ? {} : { notifyWebhook: input.notifyWebhook }),
             },
-            modes,
+            started,
             {
               threadId,
               externalLauncher: input.launchedBy,
@@ -632,26 +662,30 @@ const make = Effect.gen(function* () {
               },
             },
           );
-          const tracking = follow ? yield* waitForAttach(threadId) : ("link-only" as const);
-          return {
-            holder: self,
-            threadId,
-            externalId: reference.externalId,
-            url: reference.url,
-            created: true,
-            tracking,
-            ...(tracking === "link-only"
-              ? {
-                  note: follow
-                    ? "This holder's sign-in cannot see this run, so GOAT keeps only its link."
-                    : linkOnlyNote,
-                }
-              : tracking === "pending"
-                ? { note: "Still attaching; goat_cloud_run_list shows the outcome." }
-                : { note: "GOAT follows this run and reports when it finishes." }),
-          };
+          return { fresh: { holder: self, threadId, follow, linkOnlyNote } } as const;
         }),
       );
+      if (!("fresh" in outcome)) return outcome;
+      const { holder: self, threadId, follow, linkOnlyNote } = outcome.fresh;
+      // Outside the lock: one slow attach must not hold up other registrations.
+      const tracking = follow ? yield* waitForAttach(threadId) : ("link-only" as const);
+      return {
+        holder: self,
+        threadId,
+        externalId: reference.externalId,
+        url: reference.url,
+        created: true,
+        tracking,
+        ...(tracking === "link-only"
+          ? {
+              note: follow
+                ? "This holder's sign-in cannot see this run, so GOAT keeps only its link."
+                : linkOnlyNote,
+            }
+          : tracking === "pending"
+            ? { note: "Still attaching; goat_cloud_run_list shows the outcome." }
+            : { note: "GOAT follows this run and reports when it finishes." }),
+      };
     },
   );
 

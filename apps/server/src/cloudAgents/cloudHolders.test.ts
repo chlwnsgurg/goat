@@ -128,9 +128,38 @@ describe("holderFromDiagnoses", () => {
       runtime: "current",
       instanceId: "claudeCloud",
       ready: false,
-      reason: "Claude is not signed in to claude.ai.",
+      reason: "Not signed in.",
       command: "claude auth login --claudeai",
     });
+  });
+
+  it("never forwards a machine's own paths or values from a diagnosis", () => {
+    const result = holderFromDiagnoses({
+      provider: "claudeCloud",
+      host: "box",
+      runtime: "current",
+      diagnoses: [
+        diagnosis({
+          ready: false,
+          checks: [
+            {
+              id: "auth",
+              status: "fail",
+              reason: "not_signed_in",
+              summary: "Not signed in for CLAUDE_CONFIG_DIR=/Users/me/.secret-profile.",
+              fix: {
+                actor: "human",
+                instruction: "Sign in.",
+                command:
+                  'CLAUDE_CONFIG_DIR="/Users/me/.secret-profile" claude auth login --claudeai',
+              },
+            },
+          ],
+        }),
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain("secret-profile");
+    expect(result.command).toBe("claude auth login --claudeai");
   });
 
   it("picks a ready instance among several and names its account", () => {

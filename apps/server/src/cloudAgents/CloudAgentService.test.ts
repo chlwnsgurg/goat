@@ -316,7 +316,7 @@ const run = <A, E>(
   body: Effect.Effect<A, E, CloudAgents.CloudAgentService | ProjectionStore.ProjectionStoreV2>,
 ) => body.pipe(Effect.provide(layerFor(world)));
 
-const full = { runtimeMode: "full-access", interactionMode: "default" } as const;
+const full = Effect.succeed({ runtimeMode: "full-access", interactionMode: "default" } as const);
 
 it.effect("probes holders once a minute, falls back for old runtimes, and drops gone hosts", () =>
   Effect.gen(function* () {
@@ -478,6 +478,19 @@ it.effect("registers outside runs: validated, deduplicated, followed or link-onl
           ],
         );
         assert.notInclude(JSON.stringify([followed, again, devin, claude, listed]), SECRET);
+
+        // The caller's modes dropped while it waited: nothing starts.
+        const downgraded = yield* service
+          .register(
+            scope("full-access"),
+            { ...base, provider: "cursorCloud", externalId: "bc-0a1b2c3d4e5f6a7b" },
+            Effect.fail(
+              new OrchestratorMcpFailure({ code: "capability_denied", message: "Now plan mode." }),
+            ),
+          )
+          .pipe(Effect.flip);
+        assert.equal(downgraded.code, "capability_denied");
+        assert.equal(world.launches.length, 3);
       }),
     );
   }),
