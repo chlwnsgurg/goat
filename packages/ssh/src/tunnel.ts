@@ -47,7 +47,7 @@ import * as KeyedLock from "@goat/shared/KeyedLock";
 import * as NetService from "@goat/shared/Net";
 import * as HostProcess from "@goat/shared/HostProcess";
 import { extractJsonObject, fromLenientJson } from "@goat/shared/schemaJson";
-import { compareRuntimeBuilds } from "@goat/shared/semver";
+import { compareRuntimeBuilds, parseSemver, type RuntimeBuild } from "@goat/shared/semver";
 import {
   encodePowerShellCommand,
   WINDOWS_DETACHED_SPAWN_POWERSHELL,
@@ -3207,6 +3207,33 @@ const installOnHost = Effect.fn("ssh/tunnel.installOnHost")(function* (
   );
 });
 
+/**
+ * `compareRuntimeBuilds` for runtimes found on a host. Between a plain release and a prerelease
+ * the commit time decides, and a plain build without one predates stamping, so it is older.
+ * GOAT has only published prereleases, so a plain `0.1.1` on a host is a leftover from an older
+ * install. It sorts above every `0.1.0-nightly.*` yet lacks their migrations, so starting it
+ * against their database fails every launch.
+ */
+export const compareHostRuntimeBuilds = (
+  left: RuntimeBuild,
+  right: RuntimeBuild,
+): number | undefined => {
+  const leftParsed = parseSemver(left.version);
+  const rightParsed = parseSemver(right.version);
+  const leftPlain = leftParsed?.prerelease.length === 0;
+  if (
+    leftParsed === null ||
+    rightParsed === null ||
+    leftPlain === (rightParsed.prerelease.length === 0)
+  )
+    return compareRuntimeBuilds(left, right);
+  const [plain, prerelease] = leftPlain ? [left, right] : [right, left];
+  if (prerelease.commitTime === undefined) return compareRuntimeBuilds(left, right);
+  const plainNewer = plain.commitTime === undefined ? -1 : plain.commitTime - prerelease.commitTime;
+  if (plainNewer === 0) return compareRuntimeBuilds(left, right);
+  return leftPlain ? plainNewer : -plainNewer;
+};
+
 export const prepareRemoteRuntime = (
   target: DesktopSshEnvironmentTarget,
   authOptions: SshAuth.SshAuthOptions,
@@ -3262,7 +3289,7 @@ export const prepareRemoteRuntime = (
     const retainedOrder =
       probe.retainedVersion === undefined
         ? undefined
-        : compareRuntimeBuilds(
+        : compareHostRuntimeBuilds(
             { version: probe.retainedVersion, commitTime: probe.retainedCommitTime },
             requestedBuild,
           );
@@ -3637,17 +3664,17 @@ export const prepareRemoteRuntime = (
         if (
           candidate.signals.serverVersion !== candidate.version ||
           !matchesSignals(candidate.signals, version) ||
-          compareRuntimeBuilds(candidate, requestedBuild) === undefined
+          compareHostRuntimeBuilds(candidate, requestedBuild) === undefined
         )
           continue;
         if (probe.retainedVersion !== undefined) {
-          const retainedOrder = compareRuntimeBuilds(candidate, {
+          const retainedOrder = compareHostRuntimeBuilds(candidate, {
             version: probe.retainedVersion,
             commitTime: probe.retainedCommitTime,
           });
           if (retainedOrder === undefined || retainedOrder <= 0) continue;
         }
-        const order = chosen === undefined ? 1 : compareRuntimeBuilds(candidate, chosen);
+        const order = chosen === undefined ? 1 : compareHostRuntimeBuilds(candidate, chosen);
         if (order !== undefined && order > 0)
           chosen = { version: candidate.version, commitTime: candidate.commitTime };
       }
