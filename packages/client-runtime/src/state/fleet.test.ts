@@ -33,6 +33,8 @@ type ShellOptions = {
   readonly launchedBy?: FleetShell["source"]["launchedBy"];
   readonly subagentOf?: string;
   readonly subagentRequest?: FleetShell["pendingSubagentRequest"];
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
 };
 
 function shell(environmentId: EnvironmentId, id: string, options: ShellOptions = {}): FleetShell {
@@ -70,7 +72,8 @@ function shell(environmentId: EnvironmentId, id: string, options: ShellOptions =
             rootThreadId: ThreadId.make(options.subagentOf),
           },
     pendingSubagentRequest: options.subagentRequest ?? null,
-    updatedAt: "2026-10-17T00:00:00.000Z",
+    createdAt: options.createdAt ?? "2026-10-17T00:00:00.000Z",
+    updatedAt: options.updatedAt ?? "2026-10-17T00:00:00.000Z",
     source: options.launchedBy === undefined ? {} : { launchedBy: options.launchedBy },
   };
 }
@@ -355,7 +358,7 @@ describe("buildFleet", () => {
     expect(fleet.machines[2]).toMatchObject({ label: "Cloud box", subtitle: "via Mac" });
   });
 
-  it("orders work needing the user first and groups agents per machine", () => {
+  it("groups agents per machine", () => {
     const fleet = buildFleet({
       environments: [env(local, "Mac")],
       primaryEnvironmentId: local,
@@ -363,13 +366,77 @@ describe("buildFleet", () => {
       remote: [],
       provider: () => ({ label: "Codex", driver: ProviderDriverKind.make("codex") }),
     });
-    expect(fleet.threads.map((thread) => thread.state)).toEqual([
-      "attention",
-      "running",
-      "running",
-    ]);
     expect(fleet.machines[0]!.agents).toEqual([
       { key: "codex", label: "Codex", driver: "codex", running: 2, attention: 1, reported: 0 },
     ]);
+  });
+});
+
+describe("buildFleet thread order", () => {
+  const at = (minute: number) => `2026-10-17T00:${String(minute).padStart(2, "0")}:00.000Z`;
+  const titles = (shells: ReadonlyArray<FleetShell>) =>
+    buildFleet({
+      environments: [env(local, "Mac")],
+      primaryEnvironmentId: local,
+      shells,
+      remote: [],
+    }).threads.map((thread) => thread.title);
+
+  const first = shell(local, "first", { createdAt: at(1) });
+  const second = shell(local, "second", { createdAt: at(2) });
+  const third = shell(local, "third", { createdAt: at(3) });
+
+  it("lists threads oldest first, whatever order the shells arrive in", () => {
+    expect(titles([third, first, second])).toEqual(["first", "second", "third"]);
+  });
+
+  it("keeps rows in place when activity and status change", () => {
+    expect(
+      titles([
+        shell(local, "first", { createdAt: at(1), updatedAt: at(59) }),
+        shell(local, "second", { createdAt: at(2), approval: true, updatedAt: at(58) }),
+        shell(local, "third", { createdAt: at(3), status: "idle", background: true }),
+      ]),
+    ).toEqual(["first", "second", "third"]);
+  });
+
+  it("appends a newly started thread at the end", () => {
+    expect(titles([first, second, third, shell(local, "new", { createdAt: at(9) })])).toEqual([
+      "first",
+      "second",
+      "third",
+      "new",
+    ]);
+  });
+
+  it("drops a finished thread, keeps one waiting on the user, and restores a re-run in place", () => {
+    const settled = [
+      shell(local, "first", { createdAt: at(1), status: "completed" }),
+      shell(local, "second", { createdAt: at(2), status: "idle", question: true }),
+      shell(local, "third", { createdAt: at(3), status: "interrupted" }),
+    ];
+    expect(titles(settled)).toEqual(["second"]);
+    expect(
+      titles([
+        ...settled.slice(1),
+        shell(local, "first", { createdAt: at(1), status: "queued", updatedAt: at(30) }),
+      ]),
+    ).toEqual(["first", "second"]);
+  });
+
+  it("breaks a creation-time tie by thread, and lists reported work after live threads", () => {
+    const fleet = buildFleet({
+      environments: [env(local, "Mac", ["devbox"])],
+      primaryEnvironmentId: local,
+      shells: [shell(remote, "zeta"), shell(local, "beta"), shell(local, "alpha")],
+      remote: [
+        {
+          dispatcherEnvironmentId: local,
+          launches: [launch({ host: "devbox", title: "Reported" })],
+          cloudMachines: [],
+        },
+      ],
+    });
+    expect(fleet.threads.map((thread) => thread.title)).toEqual(["alpha", "beta", "Reported"]);
   });
 });
