@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { fileBasename, isWindowsAbsolutePath } from "@goat/shared/path";
-import { useMemo, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { useActiveProjectTarget, type ActiveProjectTarget } from "~/hooks/useActiveProjectTarget";
 import { useTheme } from "~/hooks/useTheme";
@@ -96,48 +96,35 @@ function FilePickerResults(
   const { resolvedTheme } = useTheme();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const hasMatchedQuery = /\S/.test(props.matchedQuery);
-  const items = useMemo<CommandPaletteActionItem[]>(
-    () =>
-      props.matches.map((match) => ({
-        kind: "action",
-        value: `${match.kind}:${match.path}`,
-        searchTerms: [match.name, match.path],
-        title: (
-          <>
-            {props.direct ? `Open ${match.kind === "directory" ? "folder" : "file"}: ` : null}
-            <HighlightedFuzzyText
-              active={hasMatchedQuery}
-              value={match.name}
-              indices={match.nameMatchIndices}
-            />
-          </>
-        ),
-        description: (
-          <HighlightedFuzzyText
-            active={hasMatchedQuery}
-            value={`${match.path}${props.line ? `:${props.line}` : ""}`}
-            indices={match.pathMatchIndices}
-          />
-        ),
-        icon: <PierreEntryIcon pathValue={match.path} kind={match.kind} theme={resolvedTheme} />,
-        run: async () => {
-          const path = projectFilePickerWorkspacePath(match.path, target.cwd, props.platform);
-          useRightPanelStore
-            .getState()
-            .openFile(target.threadRef, path, match.kind === "file" ? props.line : undefined);
-        },
-      })),
-    [
-      hasMatchedQuery,
-      props.direct,
-      props.line,
-      props.matches,
-      props.platform,
-      resolvedTheme,
-      target.cwd,
-      target.threadRef,
-    ],
-  );
+  const items: CommandPaletteActionItem[] = props.matches.map((match) => ({
+    kind: "action",
+    value: `${match.kind}:${match.path}`,
+    searchTerms: [match.name, match.path],
+    title: (
+      <>
+        {props.direct ? `Open ${match.kind === "directory" ? "folder" : "file"}: ` : null}
+        <HighlightedFuzzyText
+          active={hasMatchedQuery}
+          value={match.name}
+          indices={match.nameMatchIndices}
+        />
+      </>
+    ),
+    description: (
+      <HighlightedFuzzyText
+        active={hasMatchedQuery}
+        value={`${match.path}${props.line ? `:${props.line}` : ""}`}
+        indices={match.pathMatchIndices}
+      />
+    ),
+    icon: <PierreEntryIcon pathValue={match.path} kind={match.kind} theme={resolvedTheme} />,
+    run: async () => {
+      const path = projectFilePickerWorkspacePath(match.path, target.cwd, props.platform);
+      useRightPanelStore
+        .getState()
+        .openFile(target.threadRef, path, match.kind === "file" ? props.line : undefined);
+    },
+  }));
 
   return (
     <CommandPaletteResults
@@ -165,10 +152,7 @@ function SearchFilePickerResults(props: PickerResultsProps) {
     PROJECT_FILE_PICKER_RESULT_LIMIT,
     { includeDirectories: true },
   );
-  const matches = useMemo(
-    () => getProjectFilePickerMatches(result.entries, result.matchedQuery),
-    [result.entries, result.matchedQuery],
-  );
+  const matches = getProjectFilePickerMatches(result.entries, result.matchedQuery);
   return (
     <FilePickerResults
       {...props}

@@ -13,7 +13,7 @@ import { MemoryOperationId } from "@goat/contracts";
 import { memoryEnvironment as memory } from "../../state/memory";
 import { MemoryProjectPicker } from "./MemoryProjectPicker";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsActionRow } from "./components/SettingsActionRow";
 

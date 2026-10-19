@@ -26,16 +26,8 @@ const dependencies = [
   DeviceService.DeviceService,
 ];
 
-/** What a device tool fails with, including the access gate's refusal. */
 const DeviceToolFailure = Schema.Union([DeviceToolError, OrchestratorMcpFailure]);
 
-/**
- * Deliberately a small surface: lifecycle, visibility for the user, and one
- * image-returning verb. Driving the device (taps, typing, install, logs)
- * happens through the preconfigured `agent-device` CLI, which has the
- * semantic snapshot model agents need and stays current with its own
- * releases. Wrapping its commands here would only lag behind it.
- */
 const DeviceListTool = Tool.make(agentSurfaceRegistry["device.list"].name, {
   description: agentSurfaceRegistry["device.list"].description,
   // An empty struct serializes as `anyOf [object, array]`, which some

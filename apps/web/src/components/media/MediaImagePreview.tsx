@@ -44,16 +44,19 @@ export function MediaImagePreview(props: {
   const retry = async () => {
     if (retrying) return;
     setRetrying(true);
-    try {
+    const retryLoad = async () => {
       await props.onRetry?.();
       setFailedSrc(null);
       setUnsupportedSrc(null);
       setAttempt((current) => current + 1);
-    } catch {
-      // Keep the failed preview and its actions available while disconnected.
-    } finally {
-      setRetrying(false);
-    }
+    };
+    await retryLoad()
+      .catch(() => {
+        // Keep the failed preview and its actions available while disconnected.
+      })
+      .finally(() => {
+        setRetrying(false);
+      });
   };
 
   if (failed) {

@@ -1,9 +1,6 @@
 /**
- * The OpenCode 2 server behind one provider instance. A 2.x server serves every
- * location from one process, so an instance shares one server across all of its
- * threads and directories.
- *
- * @module provider/opencode2/OpenCode2Server
+ * A 2.x server serves every location from one process, so an instance shares
+ * one server across all of its threads and directories.
  */
 import type { OpenCodeClient } from "@opencode/client/effect";
 import * as Context from "effect/Context";
@@ -44,7 +41,6 @@ export class OpenCode2Server extends Context.Service<
       providerId: string,
       use: (connection: OpenCode2Connection) => Effect.Effect<A, E, R>,
     ) => Effect.Effect<A, E | TextGenerationError | OpenCodeRuntime.OpenCodeRuntimeError, R>;
-    /** Runs `use` against the instance's server, spawning it first when GOAT owns it. */
     readonly withConnection: <A, E, R>(
       use: (connection: OpenCode2Connection) => Effect.Effect<A, E, R>,
     ) => Effect.Effect<A, E | OpenCodeRuntime.OpenCodeRuntimeError, R>;
@@ -52,9 +48,8 @@ export class OpenCode2Server extends Context.Service<
 >()("@goat/provider-opencode/server/v2/OpenCode2Server") {}
 
 /**
- * A fresh password for a spawned server. OpenCode 2 always requires one and
- * prints a generated one to stdout otherwise, so GOAT supplies its own and keeps
- * it in memory.
+ * OpenCode 2 always requires one and prints a generated one to stdout
+ * otherwise, so GOAT supplies its own and keeps it in memory.
  */
 export const generatePassword = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
@@ -63,9 +58,9 @@ export const generatePassword = Effect.gen(function* () {
 });
 
 /**
- * The environment for a spawned 2.x server. `OPENCODE_PASSWORD` wins over
- * `OPENCODE_SERVER_PASSWORD` in OpenCode 2, so the inherited 1.x variable is
- * dropped to keep the GOAT password the only one in play.
+ * `OPENCODE_PASSWORD` wins over `OPENCODE_SERVER_PASSWORD` in OpenCode 2, so
+ * the inherited 1.x variable is dropped to keep the GOAT password the only one in
+ * play.
  */
 export const serverEnvironment = (
   environment: NodeJS.ProcessEnv,
@@ -89,10 +84,10 @@ const httpFailureOf = (cause: unknown): HttpClientError.HttpClientError | undefi
 };
 
 /**
- * Describes a failed `/api/info` call. Only a transport failure means the
- * server is unreachable; a 401 without the 2.x error body is still a rejected
- * password (1.x sends it empty), and any other failed status is a server error.
- * A 2xx the client cannot decode is not OpenCode 2 (1.x answers with HTML).
+ * Only a transport failure means the server is unreachable; a 401 without the
+ * 2.x error body is still a rejected password (1.x sends it empty), and any
+ * other failed status is a server error. A 2xx the client cannot decode is not
+ * OpenCode 2 (1.x answers with HTML).
  */
 const describeInfoFailure = (cause: unknown) => {
   const failure = httpFailureOf(cause);
@@ -108,11 +103,10 @@ const describeInfoFailure = (cause: unknown) => {
 };
 
 /**
- * Confirms a server is an authenticated OpenCode 2 server through `/api/info`
- * and returns its version. `/health` and friends answer 200 with the web UI's
- * HTML on every version, so only this endpoint proves readiness. Details are
- * fixed text because they reach clients and a `serverUrl` can carry
- * credentials; the underlying failure stays in `cause`.
+ * `/health` and friends answer 200 with the web UI's HTML on every version, so
+ * only this endpoint proves readiness. Details are fixed text because they
+ * reach clients and a `serverUrl` can carry credentials; the underlying failure
+ * stays in `cause`.
  */
 export const verifyServer = (client: OpenCodeClient) =>
   client.server.info().pipe(
@@ -148,13 +142,6 @@ export const verifyServer = (client: OpenCodeClient) =>
     Effect.map((info) => info.version),
   );
 
-/**
- * One server per provider instance. With a `serverUrl` it connects to that
- * server with the configured password; otherwise it spawns `binaryPath serve`
- * with a generated password through {@link OpenCodeServerOwner}, which shares
- * the process between borrowers and stops it after an idle period. Clients are
- * built once per server; a failed check is not remembered.
- */
 export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
   readonly binaryPath: string;
   readonly serverUrl: string;
@@ -237,7 +224,6 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
       ),
     withConnection: (use) =>
       owner.withServer((server) =>
-        // The owner verifies every server it starts before lending it out.
         latest?.url === server.url
           ? use(latest)
           : Effect.die(new Error("OpenCode 2 server was lent before verification.")),
@@ -245,6 +231,5 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
   });
 });
 
-/** Built once per provider instance from its settings; closing it stops a spawned server. */
 export const layer = (input: Parameters<typeof make>[0]) =>
   Layer.effect(OpenCode2Server, make(input));

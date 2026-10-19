@@ -1,13 +1,6 @@
 import type { GoatBotDelivery, GoatBotRow } from "@goat/client-runtime/goatBot";
 import { CircleAlertIcon, MessageCircleQuestionIcon } from "~/components/solar";
-import {
-  Fragment,
-  type UIEvent,
-  useCallback,
-  useLayoutEffect,
-  useRef,
-  useSyncExternalStore,
-} from "react";
+import { Fragment, type UIEvent, useLayoutEffect, useRef, useSyncExternalStore } from "react";
 
 import { usePrimarySettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
@@ -46,11 +39,11 @@ export function GoatBotTimeline({
   const scrollRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(true);
   const replying = useReplying(replyingSince);
-  const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+  const handleScroll = (event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;
     followingRef.current =
       element.scrollHeight - element.scrollTop - element.clientHeight < FOLLOW_THRESHOLD_PX;
-  }, []);
+  };
   // New rows and the replying bubble keep the view pinned to the latest message unless the
   // reader scrolled up.
   useLayoutEffect(() => {
@@ -191,15 +184,12 @@ export function GoatBotTimeline({
 /** True from when GOAT Bot starts reading until its reply lands or the limit passes. */
 function useReplying(since: string | null): boolean {
   const deadlineMs = (since === null ? Number.NaN : Date.parse(since)) + REPLYING_LIMIT_MS;
-  const getSnapshot = useCallback(() => Date.now() < deadlineMs, [deadlineMs]);
-  const subscribe = useCallback(
-    (onChange: () => void) => {
-      const remaining = deadlineMs - Date.now();
-      const timer = remaining > 0 ? setTimeout(onChange, remaining) : undefined;
-      return () => clearTimeout(timer);
-    },
-    [deadlineMs],
-  );
+  const getSnapshot = () => Date.now() < deadlineMs;
+  const subscribe = (onChange: () => void) => {
+    const remaining = deadlineMs - Date.now();
+    const timer = remaining > 0 ? setTimeout(onChange, remaining) : undefined;
+    return () => clearTimeout(timer);
+  };
   return useSyncExternalStore(subscribe, getSnapshot, () => false);
 }
 

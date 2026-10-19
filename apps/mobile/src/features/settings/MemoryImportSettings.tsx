@@ -17,7 +17,7 @@ import { mobileMemoryImportRecovery } from "../../persistence/memory-import-reco
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { memoryEnvironment as memory } from "../../state/memory";
 import { environmentSession } from "../../state/session";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsActionRow } from "./components/SettingsActionRow";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";

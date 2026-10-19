@@ -47,6 +47,7 @@ import * as Ingestor from "./ProviderEventIngestor.ts";
 import * as Execution from "./RunExecutionService.ts";
 import * as Finalization from "./RunFinalizationService.ts";
 import * as Policy from "./CommandPolicy.ts";
+import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import {
   makeFakeCloudAdapter,
   fakeCloudCapabilities,
@@ -215,6 +216,9 @@ it.effect.each([
             inboxLayer,
             IdAllocator.layer,
             ServerSettings.layerTest(),
+            Layer.mock(TurnItemPositionStore.TurnItemPositionStoreV2)({
+              allocate: () => Effect.succeed(1),
+            }),
             Layer.mock(Checkpoints.CheckpointServiceV2)({
               captureBaseline: () => Ref.update(captures, (n) => n + 1),
             }),

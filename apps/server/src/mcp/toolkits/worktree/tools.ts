@@ -33,7 +33,6 @@ const dependencies = [
   WorktreeMcpService.WorktreeMcpService,
 ];
 
-/** What handoff and status fail with, including the access gate's refusal. */
 const WorktreeToolFailure = Schema.Union([WorktreeMcpFailure, OrchestratorMcpFailure]);
 
 const WorktreeHandoffTool = Tool.make(agentSurfaceRegistry["worktree.handoff"].name, {

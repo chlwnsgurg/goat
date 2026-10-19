@@ -9,7 +9,6 @@ import { museClient } from "@goat/provider-muse/client";
 import { openCodeClient } from "@goat/provider-opencode/client";
 import { piClient } from "@goat/provider-pi/client";
 
-/** The provider client definitions this mobile build ships. */
 const providerClients = makeProviderClientRegistry([
   cursorClient,
   cursorCloudClient,
@@ -22,7 +21,6 @@ const providerClients = makeProviderClientRegistry([
   devinCloudClient,
 ]);
 
-/** The client definition for a driver kind, or `undefined` for drivers drawn by hand. */
 export function getProviderClient(driver: string | null | undefined) {
   return isProviderDriverKind(driver) ? providerClients.get(driver) : undefined;
 }

@@ -26,7 +26,7 @@ import {
   type ConnectionCatalogEntry,
   type PreparedConnection,
 } from "@goat/client-runtime/connection";
-import type { ControlPillMenuProps } from "../components/ControlPillMenu.types";
+import type { MenuProps } from "../components/ui/Menu.types";
 import type { RpcSession } from "@goat/client-runtime/rpc";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import * as Effect from "effect/Effect";
@@ -231,8 +231,8 @@ vi.mock("../state/use-remote-environment-registry", () => ({
 vi.mock("../features/home/home-thread-navigation", () => ({
   useHomeThreadSelection: () => (thread: unknown) => bridge.navigations.push(thread),
 }));
-vi.mock("../components/AppText", async () => ({ AppText: (await import("react-native")).Text }));
-vi.mock("../components/ScreenScrollView", async () => ({
+vi.mock("../components/ui/AppText", async () => ({ AppText: (await import("react-native")).Text }));
+vi.mock("../components/ui/ScreenScrollView", async () => ({
   ScreenScrollView: (await import("react-native")).View,
 }));
 vi.mock("../features/settings/components/SettingsScreen", () => ({
@@ -270,10 +270,8 @@ vi.mock("../features/settings/components/SettingsSwitchRow", () => ({
     </button>
   ),
 }));
-vi.mock("../components/ControlPillMenu", () => ({
-  ControlPillMenu: function ControlPillMenu(
-    props: Pick<ControlPillMenuProps, "actions" | "onPressAction" | "children">,
-  ) {
+vi.mock("../components/ui/Menu", () => ({
+  Menu: function Menu(props: Pick<MenuProps, "actions" | "onPressAction" | "children">) {
     const [open, setOpen] = React.useState(false);
     const trigger = React.isValidElement<{ onPress?: () => void }>(props.children)
       ? React.cloneElement(props.children, { onPress: () => setOpen(true) })

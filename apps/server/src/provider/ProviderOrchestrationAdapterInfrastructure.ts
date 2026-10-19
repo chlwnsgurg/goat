@@ -95,10 +95,9 @@ export type ProviderOrchestrationAdapterInfrastructure =
   | MemoryDerivedCache.MemoryDerivedCache;
 
 /**
- * Infrastructure shared by the V2 adapters materialized inside provider
- * instances. `providerContinuationRequestsLayer` must be the same layer
- * reference the orchestration runtime provides to its continuation worker so
- * Effect layer memoization yields one shared queue.
+ * `providerContinuationRequestsLayer` must be the same layer reference the
+ * orchestration runtime provides to its continuation worker so Effect layer
+ * memoization yields one shared queue.
  */
 export const layer = Layer.mergeAll(
   MemoryDerivedCache.layer,

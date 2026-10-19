@@ -66,17 +66,45 @@ function notifyFixture() {
   state.version += 1;
   for (const listener of state.listeners) listener();
 }
-vi.mock("@effect/atom-react", async (original) => ({
-  ...(await original<typeof import("@effect/atom-react")>()),
-  useAtomValue: (atom: { label: string }) => {
-    useFixtureVersion();
-    return atom.label === "syncChanges"
-      ? state.exposure
-      : ["forget", "upsert", "projectBindingGet"].includes(atom.label)
-        ? state.write
-        : state.allowed;
-  },
-}));
+function fixtureAtomValue(atom: { label: string }) {
+  return atom.label === "syncChanges"
+    ? state.exposure
+    : ["forget", "upsert", "projectBindingGet"].includes(atom.label)
+      ? state.write
+      : state.allowed;
+}
+vi.mock("@effect/atom-react", async (original) => {
+  const { useEffect } = await import("react");
+  return {
+    ...(await original<typeof import("@effect/atom-react")>()),
+    useAtomValue: (atom: { label: string }) => {
+      useFixtureVersion();
+      return fixtureAtomValue(atom);
+    },
+    // Like the registry: the current value with immediate, then each change.
+    useAtomSubscribe: (
+      atom: { label: string },
+      f: (value: unknown) => void,
+      options?: { readonly immediate?: boolean },
+    ) => {
+      const immediate = options?.immediate === true;
+      useEffect(() => {
+        let last = fixtureAtomValue(atom);
+        if (immediate) f(last);
+        const listener = () => {
+          const next = fixtureAtomValue(atom);
+          if (next === last) return;
+          last = next;
+          f(next);
+        };
+        state.listeners.add(listener);
+        return () => {
+          state.listeners.delete(listener);
+        };
+      }, [atom, f, immediate]);
+    },
+  };
+});
 vi.mock("../../state/memory", async () => {
   const { createMemoryImportWorkflow } =
     await import("@goat/client-runtime/memory-import-workflow");

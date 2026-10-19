@@ -1,13 +1,3 @@
-/**
- * Migration runner with an inline loader.
- *
- * Uses Migrator.make with fromRecord to define migrations inline.
- * All migrations are statically imported - no dynamic file system loading.
- *
- * `runMigrations` is called by the SQLite persistence layer at startup, so the
- * schema is always up to date before the application starts.
- */
-
 import * as Migrator from "effect/sql/Migrator";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -17,7 +7,6 @@ import {
 } from "./reconcileGoatMigrationIds.ts";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
 
-// Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
 import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
 import Migration0003 from "./Migrations/003_CheckpointDiffBlobs.ts";
@@ -80,38 +69,29 @@ import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
 import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
 import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
 import Migration0062 from "./Migrations/062_ThreadFailureLookupIndex.ts";
-import Migration0063 from "./Migrations/063_ServerActivityIndexes.ts";
-import Migration0064 from "./Migrations/064_RemoteReports.ts";
-import Migration0065 from "./Migrations/065_RemoteDispatches.ts";
-import Migration0066 from "./Migrations/066_ChannelLedger.ts";
-import Migration0067 from "./Migrations/067_RemoteDispatchQuestions.ts";
-import Migration0068 from "./Migrations/068_ThreadRunResults.ts";
-import Migration0069 from "./Migrations/069_RemoteReportRelay.ts";
-import Migration0070 from "./Migrations/070_ProjectionTurnItemRequestIndex.ts";
-import Migration0071 from "./Migrations/071_Memory.ts";
-import Migration0072 from "./Migrations/072_MemoryHubSync.ts";
-import Migration0073 from "./Migrations/073_MemorySearchCounters.ts";
-import Migration0074 from "./Migrations/074_MemoryTaskGrantCeiling.ts";
-import Migration0075 from "./Migrations/075_MemoryImportLineage.ts";
-import Migration0076 from "./Migrations/076_MemoryCheckpointAccounting.ts";
-import Migration0078 from "./Migrations/078_MemoryUsageCounters.ts";
-import Migration0079 from "./Migrations/079_MemoryRevertResults.ts";
-import Migration0077 from "./Migrations/077_MemoryReportLifecycle.ts";
-import Migration0080 from "./Migrations/080_HandoffLookupIndex.ts";
-import Migration0081 from "./Migrations/081_MemoryLastReadySpace.ts";
-import Migration0082 from "./Migrations/082_MemoryHubAdministered.ts";
-import Migration0083 from "./Migrations/083_MemoryCheckpointLifecycle.ts";
+import Migration0063 from "./Migrations/063_DropUnusedV1Projections.ts";
+import Migration0064 from "./Migrations/064_ServerActivityIndexes.ts";
+import Migration0065 from "./Migrations/065_RemoteReports.ts";
+import Migration0066 from "./Migrations/066_RemoteDispatches.ts";
+import Migration0067 from "./Migrations/067_ChannelLedger.ts";
+import Migration0068 from "./Migrations/068_RemoteDispatchQuestions.ts";
+import Migration0069 from "./Migrations/069_ThreadRunResults.ts";
+import Migration0070 from "./Migrations/070_RemoteReportRelay.ts";
+import Migration0071 from "./Migrations/071_ProjectionTurnItemRequestIndex.ts";
+import Migration0072 from "./Migrations/072_Memory.ts";
+import Migration0073 from "./Migrations/073_MemoryHubSync.ts";
+import Migration0074 from "./Migrations/074_MemorySearchCounters.ts";
+import Migration0075 from "./Migrations/075_MemoryTaskGrantCeiling.ts";
+import Migration0076 from "./Migrations/076_MemoryImportLineage.ts";
+import Migration0077 from "./Migrations/077_MemoryCheckpointAccounting.ts";
+import Migration0079 from "./Migrations/079_MemoryUsageCounters.ts";
+import Migration0080 from "./Migrations/080_MemoryRevertResults.ts";
+import Migration0078 from "./Migrations/078_MemoryReportLifecycle.ts";
+import Migration0081 from "./Migrations/081_HandoffLookupIndex.ts";
+import Migration0082 from "./Migrations/082_MemoryLastReadySpace.ts";
+import Migration0083 from "./Migrations/083_MemoryHubAdministered.ts";
+import Migration0084 from "./Migrations/084_MemoryCheckpointLifecycle.ts";
 
-/**
- * Migration loader with all migrations defined inline.
- *
- * Key format: "{id}_{name}" where:
- * - id: numeric migration ID (determines execution order)
- * - name: descriptive name for the migration
- *
- * Uses Migrator.fromRecord which parses the key format and
- * returns migrations sorted by ID.
- */
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
   [2, "OrchestrationCommandReceipts", Migration0002],
@@ -167,7 +147,6 @@ export const migrationEntries = [
   [52, "ProjectionThreadTitleState", Migration0052],
   [53, "PullRequestFilesViewed", Migration0053],
   [54, "ProjectionThreadsAutoSettleDisabledAt", Migration0054],
-  // Released as 53 and 54 in V2 previews; reconcileV2PreviewMigration preserves their ledger.
   // Preserve this migration's schema. Future V2 schema changes need new migrations.
   [55, "OrchestrationV2", Migration0055],
   [56, "RemoveRedundantProjectionIndexes", Migration0056],
@@ -177,29 +156,30 @@ export const migrationEntries = [
   [60, "ThreadSnapshotWindowIndexes", Migration0060],
   [61, "PullRequestReviewGuides", Migration0061],
   [62, "ThreadFailureLookupIndex", Migration0062],
+  [63, "DropUnusedV1Projections", Migration0063],
   // GOAT's own migrations follow upstream's. When an upstream sync claims these ids, move them
   // up and add the names to GOAT_MIGRATION_NAMES; reconcileGoatMigrationIds fixes old ledgers.
-  [63, "ServerActivityIndexes", Migration0063],
-  [64, "RemoteReports", Migration0064],
-  [65, "RemoteDispatches", Migration0065],
-  [66, "ChannelLedger", Migration0066],
-  [67, "RemoteDispatchQuestions", Migration0067],
-  [68, "ThreadRunResults", Migration0068],
-  [69, "RemoteReportRelay", Migration0069],
-  [70, "ProjectionTurnItemRequestIndex", Migration0070],
-  [71, "Memory", Migration0071],
-  [72, "MemoryHubSync", Migration0072],
-  [73, "MemorySearchCounters", Migration0073],
-  [74, "MemoryTaskGrantCeiling", Migration0074],
-  [75, "MemoryImportLineage", Migration0075],
-  [76, "MemoryCheckpointAccounting", Migration0076],
-  [77, "MemoryReportLifecycle", Migration0077],
-  [78, "MemoryUsageCounters", Migration0078],
-  [79, "MemoryRevertResults", Migration0079],
-  [80, "HandoffLookupIndex", Migration0080],
-  [81, "MemoryLastReadySpace", Migration0081],
-  [82, "MemoryHubAdministered", Migration0082],
-  [83, "MemoryCheckpointLifecycle", Migration0083],
+  [64, "ServerActivityIndexes", Migration0064],
+  [65, "RemoteReports", Migration0065],
+  [66, "RemoteDispatches", Migration0066],
+  [67, "ChannelLedger", Migration0067],
+  [68, "RemoteDispatchQuestions", Migration0068],
+  [69, "ThreadRunResults", Migration0069],
+  [70, "RemoteReportRelay", Migration0070],
+  [71, "ProjectionTurnItemRequestIndex", Migration0071],
+  [72, "Memory", Migration0072],
+  [73, "MemoryHubSync", Migration0073],
+  [74, "MemorySearchCounters", Migration0074],
+  [75, "MemoryTaskGrantCeiling", Migration0075],
+  [76, "MemoryImportLineage", Migration0076],
+  [77, "MemoryCheckpointAccounting", Migration0077],
+  [78, "MemoryReportLifecycle", Migration0078],
+  [79, "MemoryUsageCounters", Migration0079],
+  [80, "MemoryRevertResults", Migration0080],
+  [81, "HandoffLookupIndex", Migration0081],
+  [82, "MemoryLastReadySpace", Migration0082],
+  [83, "MemoryHubAdministered", Migration0083],
+  [84, "MemoryCheckpointLifecycle", Migration0084],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -213,15 +193,13 @@ const makeMigrationLoader = (throughId?: number) =>
     ),
   );
 
-// V2's schema migrations start at 55 after the legacy schema migrations.
 const FIRST_V2_MIGRATION_ID = 55;
 
 /**
  * Fail before migrating when the migrator would skip one of V2's own
  * migrations. It skips every id up to the highest recorded one, whatever name
  * was recorded, so a database that took a V2 id for another migration would
- * start without V2's schema and fail on first use. Earlier ids keep the
- * warning below: databases with a site-local migration there still work.
+ * start without V2's schema and fail on first use.
  */
 const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function* (
   throughId?: number,
@@ -255,26 +233,12 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
   });
 });
 
-/**
- * Migrator run function - no schema dumping needed
- * Uses the base Migrator.make without platform dependencies
- */
 const run = Migrator.make({});
 
 export interface RunMigrationsOptions {
   readonly toMigrationInclusive?: number | undefined;
 }
 
-/**
- * Run all pending migrations.
- *
- * Creates the migrations tracking table (effect_sql_migrations) if it doesn't exist,
- * then runs any migrations with ID greater than the latest recorded migration.
- *
- * Returns array of [id, name] tuples for migrations that were run.
- *
- * @returns Effect containing array of executed migrations
- */
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
@@ -298,10 +262,6 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     ? Effect.logDebug("Database schema is current")
     : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
 
-  // The migrator keys on migration_id: a database that recorded a different
-  // migration under a shared id (local or fork builds) keeps that id and
-  // silently skips this build's migration at it. Surface the divergence so the
-  // skipped schema change is diagnosable.
   const sql = yield* SqlClient.SqlClient;
   const recorded = yield* sql<{
     readonly migration_id: number;

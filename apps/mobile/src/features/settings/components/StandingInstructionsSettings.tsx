@@ -2,7 +2,7 @@ import { STANDING_INSTRUCTIONS_MAX_CHARS, type ServerSettingsPatch } from "@goat
 import { useRef } from "react";
 import { View } from "react-native";
 
-import { AppText as Text, AppTextInput } from "../../../components/AppText";
+import { AppText as Text, AppTextInput } from "../../../components/ui/AppText";
 import { SettingsSection } from "./SettingsSection";
 
 /** Dispatcher policy put in front of the first message of threads agents launch. */

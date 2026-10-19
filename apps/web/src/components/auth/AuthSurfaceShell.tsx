@@ -6,9 +6,6 @@ import { BrandChannelPill } from "../sidebar/BrandChannelPill";
 import { resolveBrandChannel } from "../sidebar/brandChannel";
 import { StandalonePage } from "../ui/standalone-page";
 
-/**
- * Branded masthead for the CLI-connect authorize and callback pages.
- */
 export function AuthSurfaceShell({ children }: { readonly children: ReactNode }) {
   const channel = resolveBrandChannel(APP_STAGE_LABEL);
 

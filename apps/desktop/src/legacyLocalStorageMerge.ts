@@ -1,10 +1,3 @@
-/**
- * Merges V1 profile localStorage items into the V2 profile. Runs in the preload
- * before the app reads storage, and never overwrites what V2 already holds: a
- * key V2 has written keeps V2's value, except that stashed prompts and unsent
- * drafts are merged entry by entry so neither side's are lost.
- */
-
 import {
   LEGACY_DESKTOP_PROMPT_STASH_KEY,
   LEGACY_DESKTOP_COMPOSER_DRAFTS_KEY,
@@ -22,7 +15,6 @@ const COMPOSER_DRAFTS_KEY = LEGACY_DESKTOP_COMPOSER_DRAFTS_KEY;
 const NOT_IMPORTED_KEYS = new Set([
   // Identifies one running install to the server; two apps must not share it.
   LEGACY_DESKTOP_BACKGROUND_ACTIVITY_CLIENT_ID_KEY,
-  // Resumes a permission setup V1 left mid-flow; V2 would redirect to it on boot.
   LEGACY_DESKTOP_SNAP_SHOT_SETUP_RESUME_KEY,
 ]);
 /** Matches MAX_STASH_ENTRIES in apps/web/src/promptStashStore.ts. */
@@ -47,7 +39,6 @@ function parseObject(raw: string): JsonObject | null {
   }
 }
 
-/** V2 entries first, then V1 entries V2 does not already have, up to the stash cap. */
 function mergePromptStash(current: JsonObject, legacy: JsonObject): JsonObject | null {
   const currentEntries = isObject(current.state) ? current.state.entries : null;
   const legacyEntries = isObject(legacy.state) ? legacy.state.entries : null;
@@ -62,7 +53,6 @@ function mergePromptStash(current: JsonObject, legacy: JsonObject): JsonObject |
   };
 }
 
-/** Adds V1 drafts for threads V2 has no draft for. Shapes must share a version. */
 function mergeComposerDrafts(current: JsonObject, legacy: JsonObject): JsonObject | null {
   if (current.version !== legacy.version) return null;
   if (!isObject(current.state) || !isObject(legacy.state)) return null;
@@ -93,7 +83,6 @@ function mergeValue(key: string, current: string, legacy: string): string | null
   return merged === null ? null : JSON.stringify(merged);
 }
 
-/** Returns false when a write failed, so the caller can retry on a later launch. */
 export function mergeLegacyLocalStorage(
   storage: MergeStorage,
   legacyItems: Readonly<Record<string, string>>,
@@ -112,7 +101,6 @@ export function mergeLegacyLocalStorage(
     try {
       storage.setItem(key, next);
     } catch {
-      // Over quota: skip this key rather than abandon the rest.
       complete = false;
     }
   }

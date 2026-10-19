@@ -28,6 +28,7 @@ import * as Schema from "effect/Schema";
 import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -66,7 +67,14 @@ const layerBase = Layer.mergeAll(
 const layerTest = Layer.mergeAll(
   layerBase,
   ProviderEventIngestor.layer.pipe(
-    Layer.provide(Layer.mergeAll(layerBase, IdAllocator.layer, ThreadCommandExecutor.layer)),
+    Layer.provide(
+      Layer.mergeAll(
+        layerBase,
+        IdAllocator.layer,
+        ThreadCommandExecutor.layer,
+        Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      ),
+    ),
   ),
 );
 const create = (

@@ -14,6 +14,7 @@ import {
   serverOwnerTag,
   SSH_REPLACEMENT_ID_ENV,
 } from "../serverOwnerLock.ts";
+import { awaitLauncherLoss } from "../launcherWatch.ts";
 import { runServer } from "../server.ts";
 import { type CliServerFlags, resolveServerConfig, sharedServerCommandFlags } from "./config.ts";
 
@@ -49,7 +50,16 @@ const runServerCommand = (
           serverRuntimeStatePath: config.serverRuntimeStatePath,
           waitForOwner: launcherContext !== undefined,
         });
-        return yield* runServer.pipe(Effect.provideService(ServerConfig.ServerConfig, config));
+        const run = runServer.pipe(Effect.provideService(ServerConfig.ServerConfig, config));
+        if (config.mode !== "desktop" || config.desktopBootstrapToken === undefined)
+          return yield* run;
+        return yield* Effect.raceFirst(
+          run,
+          awaitLauncherLoss().pipe(
+            // End like SIGTERM does (interrupt-only exit, so the runtime forces process exit).
+            Effect.andThen(Effect.interrupt),
+          ),
+        );
       }),
     ).pipe(
       Effect.catchTags({
@@ -59,7 +69,6 @@ const runServerCommand = (
     );
   });
 
-/** Bare words can name existing directories, but must not create typo projects. */
 export const runDefaultServerCommand = (flags: CliServerFlags) =>
   Effect.gen(function* () {
     if (Option.isSome(flags.cwd)) {

@@ -41,6 +41,8 @@ const state = vi.hoisted(() => ({
   list: null as LegendListRef | null,
   contentLength: 1000,
   scrollToEnd: vi.fn(),
+  // Stable like the real store selectors; a fresh array per render loops the timeline.
+  empty: [] as never[],
 }));
 vi.mock("./ui/toast", () => ({
   toastManager: { add: state.toast },
@@ -123,10 +125,10 @@ vi.mock("../state/entities", async (original) => ({
   useThreadProjection: () => null,
   useThreadStatus: () => null,
   useThreadHistory: () => ({ hasMoreHistory: false }),
-  useThreadVisibleTurnItems: () => [],
-  useThreadRefs: () => [],
-  useEnvironmentThreadRefs: () => [],
-  useChildThreadInputs: () => [],
+  useThreadVisibleTurnItems: () => state.empty,
+  useThreadRefs: () => state.empty,
+  useEnvironmentThreadRefs: () => state.empty,
+  useChildThreadInputs: () => state.empty,
   useEnvironmentSupportsServerBrowser: () => false,
   resolveThreadDetailRef: () => null,
   waitForThreadShell: state.shell,
@@ -150,39 +152,41 @@ vi.mock("./chat/ThreadDetailsPanel", () => ({ ThreadDetailsPanel: () => null }))
 vi.mock("./chat/MessagesTimeline", async () => {
   const React = await import("react");
   const { resolveTimelineIsAtEnd } = await import("./chat/MessagesTimeline.logic");
+  const listsByNode = new WeakMap<HTMLDivElement, LegendListRef>();
   return {
     MessagesTimeline: (props: ComponentProps<typeof MessagesTimeline>) => {
       state.timeline = props;
       const [version, setVersion] = React.useState(0);
       state.mountTimeline = () => setVersion(1);
       state.replaceTimeline = () => setVersion((current) => current + 1);
-      const attach = React.useCallback(
-        (node: HTMLDivElement | null) => {
-          state.scrollNode = node;
-          const list = node
-            ? ({
-                getScrollableNode: () => node,
-                getState: () => ({
-                  data: [0],
-                  scroll: node.scrollTop,
-                  scrollLength: 400,
-                  contentLength: state.contentLength,
-                  positionAtIndex: () => 0,
-                  sizeAtIndex: () => state.contentLength,
-                }),
-                scrollToItem: () => Promise.resolve(),
-                scrollToEnd: () => {
-                  state.scrollToEnd();
-                  node.scrollTop = state.contentLength - 400;
-                },
-              } as unknown as LegendListRef)
-            : null;
-          state.list = list;
-          props.listRef.current = list;
-          props.onScrollableNodeChange?.(node);
-        },
-        [props.listRef, props.onScrollableNodeChange],
-      );
+      // Like LegendList, the ref keeps its identity across re-renders of the same list.
+      const attach = (node: HTMLDivElement | null) => {
+        state.scrollNode = node;
+        const existing = node ? listsByNode.get(node) : undefined;
+        const list = !node
+          ? null
+          : (existing ??
+            ({
+              getScrollableNode: () => node,
+              getState: () => ({
+                data: [0],
+                scroll: node.scrollTop,
+                scrollLength: 400,
+                contentLength: state.contentLength,
+                positionAtIndex: () => 0,
+                sizeAtIndex: () => state.contentLength,
+              }),
+              scrollToItem: () => Promise.resolve(),
+              scrollToEnd: () => {
+                state.scrollToEnd();
+                node.scrollTop = state.contentLength - 400;
+              },
+            } as unknown as LegendListRef));
+        if (node && list) listsByNode.set(node, list);
+        state.list = list;
+        props.listRef.current = list;
+        props.onScrollableNodeChange?.(node);
+      };
       if (!version) return null;
       return (
         <div
@@ -199,7 +203,10 @@ vi.mock("./chat/MessagesTimeline", async () => {
   };
 });
 vi.mock("./chat/DraftHeroHeadline", () => ({ DraftHeroHeadline: () => null }));
-vi.mock("./chat/ExpandedImageDialog", () => ({ ExpandedImageDialog: () => null }));
+vi.mock("./chat/ExpandedImageDialog", () => ({
+  ExpandedImageDialogHost: () => null,
+  openExpandedImagePreview: () => {},
+}));
 vi.mock("./PullRequestThreadDialog", () => ({ PullRequestThreadDialog: () => null }));
 vi.mock("./ThreadTerminalDrawer", () => ({ default: () => null }));
 vi.mock("./ui/sidebar", () => ({

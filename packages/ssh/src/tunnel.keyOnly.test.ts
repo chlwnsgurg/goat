@@ -17,6 +17,7 @@ import {
   testNetService,
   uploadTarget,
   NODE_SCRIPT,
+  isRemoteLaunch,
 } from "./tunnel.fixture.ts";
 
 describe.each([
@@ -56,7 +57,7 @@ describe.each([
           };
         if (args.includes("-N")) return makeRunningProcess(() => undefined);
         return makeSuccessfulProcess(
-          args.includes("--")
+          isRemoteLaunch(args)
             ? '{"status":"ready","remotePort":3773,"selectedVersion":"0.1.0"}'
             : '{"credential":"fixture-pairing"}',
         );

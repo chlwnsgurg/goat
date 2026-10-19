@@ -119,7 +119,7 @@ const outsideSshRunner = (path: string) =>
 
 /** Lint rule ids are listed so that unrelated `t3code/...` paths and branch names stay. */
 const LINT_RULE_IDS =
-  "namespace-node-imports|no-global-process-runtime|no-hermes-unsupported-apis|no-inline-schema-compile|no-manual-effect-runtime-in-tests|no-mobile-uniwind-theme-escape-hatches|no-native-title-tooltip|no-outset-state-indicators|no-raw-mcp-registration|no-raw-resize-observer|no-rpc-permission-bypass|no-test-in-loop|no-unscoped-has|prefer-catch-tags|require-centered-scroll-gutter|require-suppression-reason";
+  "namespace-node-imports|no-global-process-runtime|no-hermes-unsupported-apis|no-hookless-use-function|no-inline-schema-compile|no-low-value-comments|no-manual-effect-runtime-in-tests|no-manual-memo|no-mobile-pull-request-glyph-literals|no-mobile-uniwind-theme-escape-hatches|no-native-title-tooltip|no-outset-state-indicators|no-raw-mcp-registration|no-raw-resize-observer|no-rpc-permission-bypass|no-test-in-loop|no-unscoped-has|prefer-catch-tags|require-centered-scroll-gutter|require-suppression-reason";
 
 export const TEXT_RULES: readonly TextRule[] = [
   {
@@ -641,7 +641,7 @@ export const KEEP_RULES: readonly KeepRule[] = [
   {
     id: "retained-browser-and-device-state",
     pattern:
-      /t3-\$\{(?:hash|generation)|t3-page\.localhost|t3-html-render-overflow|t3:(?=\"navigated)|t3-upload-|t3-pierre-(?:dark|light)|\[t3-\$\{namespace\}/g,
+      /t3-\$\{(?:hash|generation)|t3-page\.localhost|t3-html-render-overflow|t3:(?="navigated)|t3-upload-|t3-pierre-(?:dark|light)|\[t3-\$\{namespace\}/g,
     scope: (path) =>
       path.startsWith("apps/mobile/") ||
       path === "apps/server/src/device/AgentDeviceTarget.ts" ||
@@ -740,7 +740,7 @@ export const KEEP_RULES: readonly KeepRule[] = [
     id: "legacy-cli-package",
     pattern: /\bt3\b|@t3code\/t3-|t3code\/t3|t3code\\\/t3/g,
     scope: (path) =>
-      /(?:invocation|build-npm-platform-packages|package\.json|install\.|npmRelease|versionSkew|legacyCliLauncher)/.test(
+      /(?:invocation|build-npm-launcher|npm-launcher\/|package\.json|install\.|npmRelease|versionSkew)/.test(
         path,
       ),
     reason: "Legacy npm package and CLI alias remain installable and discoverable (D4/D12).",

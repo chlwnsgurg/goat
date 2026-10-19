@@ -19,13 +19,11 @@ interface Props extends Omit<PreviewAddressBarProps, "disabled" | "inputRef"> {
   canGoForward: boolean;
   refreshDisabled: boolean;
   inputDisabled?: boolean | undefined;
-  /** Bumping this value re-focuses and selects the URL input. */
   focusUrlNonce?: number | undefined;
   onBack: () => void;
   onForward: () => void;
   onRefresh: () => void;
   onSubmit: (url: string) => void;
-  /** When provided, renders an "Open in browser" affordance to the right. */
   onOpenInBrowser?: (() => void) | undefined;
   onCapture?: ((record: boolean) => void) | undefined;
   captureDisabled?: boolean | undefined;
@@ -33,25 +31,11 @@ interface Props extends Omit<PreviewAddressBarProps, "disabled" | "inputRef"> {
   onPictureInPicture?: (() => void) | undefined;
   pictureInPicture?: boolean | undefined;
   pictureInPictureDisabled?: boolean | undefined;
-  /**
-   * When provided, renders an annotation-mode toggle button to the right of
-   * the URL input. Pressed while annotation mode is active (button shows in `pressed`
-   * state). Disabled in `pickDisabled` mode.
-   */
   onPickElement?: (() => void) | undefined;
   pickActive?: boolean | undefined;
   pickDisabled?: boolean | undefined;
-  /** Optional reason string surfaced in the disabled tooltip. */
   pickDisabledReason?: string | undefined;
-  /**
-   * Trailing slot rendered after the URL input. Used by the preview view
-   * to mount the three-dot menu (hard reload, devtools, zoom, clear data).
-   */
   trailingActions?: ReactNode;
-  /**
-   * Slot between the nav buttons and the URL input. The preview view uses it
-   * to name the tab's browser profile, which is otherwise invisible.
-   */
   leadingActions?: ReactNode;
 }
 

@@ -24,6 +24,10 @@ export const GOAT_MIGRATION_NAMES: ReadonlySet<string> = new Set([
   "MemoryReportLifecycle",
   "MemoryUsageCounters",
   "MemoryRevertResults",
+  "HandoffLookupIndex",
+  "MemoryLastReadySpace",
+  "MemoryHubAdministered",
+  "MemoryCheckpointLifecycle",
 ]);
 
 type MigrationEntry<E> = readonly [
@@ -32,7 +36,16 @@ type MigrationEntry<E> = readonly [
   migration: Effect.Effect<unknown, E, SqlClient.SqlClient>,
 ];
 
-/** Read-only preflight: preview reconciliation must not mutate incompatible memory sandboxes. */
+/**
+ * Read-only preflight: preview reconciliation must not mutate incompatible memory sandboxes.
+ *
+ * An upstream sync moves every recorded GOAT migration by the same distance, so a released ledger
+ * keeps one offset between its recorded and current GOAT ids and reconciliation can move it. The
+ * migrator also runs them in order, so a released ledger that recorded a memory migration recorded
+ * every GOAT migration before it. A memory ledger with mixed offsets, a gap before a memory row, or
+ * a memory name this build does not know came from an unreleased layout, and its tables may not
+ * match the current schema.
+ */
 export const assertMemoryMigrationsCompatible = Effect.fn("assertMemoryMigrationsCompatible")(
   function* <E>(entries: ReadonlyArray<MigrationEntry<E>>) {
     const sql = yield* SqlClient.SqlClient;
@@ -47,14 +60,33 @@ export const assertMemoryMigrationsCompatible = Effect.fn("assertMemoryMigration
         `
       : [];
     const currentIds = new Map(entries.map(([id, name]) => [name, id]));
-    const incompatibleLedger = history.some(
-      (row) => row.name.startsWith("Memory") && currentIds.get(row.name) !== row.migration_id,
+    const memoryRows = history.filter((row) => row.name.startsWith("Memory"));
+    const goatOffsets = new Set(
+      history.flatMap((row) => {
+        const currentId = currentIds.get(row.name);
+        const goatRow = GOAT_MIGRATION_NAMES.has(row.name) || row.name.startsWith("Memory");
+        return goatRow && currentId !== undefined ? [row.migration_id - currentId] : [];
+      }),
     );
+    const recordedNames = new Set(history.map((row) => row.name));
+    const skipsEarlierGoat = memoryRows.some((row) => {
+      const memoryId = currentIds.get(row.name);
+      return (
+        memoryId !== undefined &&
+        entries.some(
+          ([id, name]) =>
+            GOAT_MIGRATION_NAMES.has(name) && id < memoryId && !recordedNames.has(name),
+        )
+      );
+    });
+    const incompatibleLedger =
+      memoryRows.length > 0 &&
+      (memoryRows.some((row) => !currentIds.has(row.name)) ||
+        goatOffsets.size > 1 ||
+        skipsEarlierGoat);
     const unrecordedMemory =
       tables.some((table) => table.name.startsWith("memory_")) &&
-      !history.some(
-        (row) => row.name === "Memory" && row.migration_id === currentIds.get("Memory"),
-      );
+      !history.some((row) => row.name === "Memory");
     // Preserve the evidence of unreleased memory before any startup reconciliation writes.
     if (incompatibleLedger || unrecordedMemory) {
       return yield* new Migrator.MigrationError({

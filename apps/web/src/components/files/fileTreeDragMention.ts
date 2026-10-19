@@ -13,23 +13,16 @@ export interface FileTreeDragStartEvent {
 }
 
 export interface FileTreeDragMentionHost {
-  /** Convert a tree-relative entry to the destination path used by file opens. */
+  /** The path a dragged row mentions; defaults to the tree path itself. */
+  mentionPath?(treePath: string): string;
   resolvePath?(treePath: string): string;
-  /** Drop the tree's gesture-applied selection of the dragged row. */
-  deselect(treePath: string): void;
 }
 
 export interface FileTreeDragMentionController {
-  /**
-   * True from the moment a row drag starts until it ends. The tree selects
-   * the dragged row as part of the gesture; selection changes made while
-   * this is set are gesture side effects, not requests to open a file.
-   */
   isDragInProgress(): boolean;
-  /** Mirror of the tree's current selection, needed for multi-row drags. */
   handleSelectionChange(selectedPaths: ReadonlyArray<string>): void;
   handleDragStart(event: FileTreeDragStartEvent): void;
-  handleDragEnd(): void;
+  handleDragEnd(deselect: (treePath: string) => void): void;
 }
 
 const itemPathOf = (node: unknown): string | null => {
@@ -40,14 +33,8 @@ const itemPathOf = (node: unknown): string | null => {
   return typeof element.getAttribute === "function" ? element.getAttribute("data-item-path") : null;
 };
 
-/**
- * Tags file-tree drags with the composer mention payload and keeps the drag
- * from acting like a click: while the drag runs, selection changes are
- * suppressed, and when it ends the dragged rows are deselected so nothing is
- * left highlighted and a later click on them still fires a selection change.
- */
 export function createFileTreeDragMentionController(
-  host: FileTreeDragMentionHost,
+  host: FileTreeDragMentionHost = {},
 ): FileTreeDragMentionController {
   let selection: ReadonlyArray<string> = [];
   let draggedPaths: ReadonlyArray<string> = [];
@@ -72,11 +59,16 @@ export function createFileTreeDragMentionController(
       if (itemPath === null) {
         return;
       }
-      // Same rule the tree applies to the drag itself: dragging a row that is
-      // part of the current selection drags the whole selection.
       const dragged = selection.includes(itemPath) ? selection : [itemPath];
       const mentions = dragged
-        .map((path) => composerMentionFromTreePath(host.resolvePath?.(path) ?? path))
+        .map((path) => {
+          const treePath = path.replace(/\/+$/, "");
+          return composerMentionFromTreePath(
+            treePath
+              ? (host.mentionPath?.(treePath) ?? host.resolvePath?.(treePath) ?? path)
+              : path,
+          );
+        })
         .filter((mention): mention is string => mention !== null);
       if (mentions.length === 0) {
         return;
@@ -84,12 +76,12 @@ export function createFileTreeDragMentionController(
       draggedPaths = dragged;
       event.dataTransfer.setData(COMPOSER_MENTION_DRAG_TYPE, mentions.join(" "));
     },
-    handleDragEnd() {
+    handleDragEnd(deselect) {
       if (draggedPaths.length === 0) {
         return;
       }
       for (const path of draggedPaths) {
-        host.deselect(path);
+        deselect(path);
       }
       draggedPaths = [];
     },

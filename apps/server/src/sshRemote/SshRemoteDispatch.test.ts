@@ -46,11 +46,11 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Coordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
 import * as LaunchWatchService from "../mcp/LaunchWatchService.ts";
-import Migration0062 from "../persistence/Migrations/064_RemoteReports.ts";
-import Migration0063 from "../persistence/Migrations/065_RemoteDispatches.ts";
-import Migration0065 from "../persistence/Migrations/067_RemoteDispatchQuestions.ts";
-import Migration0068 from "../persistence/Migrations/069_RemoteReportRelay.ts";
-import Migration0073 from "../persistence/Migrations/074_MemoryTaskGrantCeiling.ts";
+import Migration0062 from "../persistence/Migrations/065_RemoteReports.ts";
+import Migration0063 from "../persistence/Migrations/066_RemoteDispatches.ts";
+import Migration0065 from "../persistence/Migrations/068_RemoteDispatchQuestions.ts";
+import Migration0068 from "../persistence/Migrations/070_RemoteReportRelay.ts";
+import Migration0073 from "../persistence/Migrations/075_MemoryTaskGrantCeiling.ts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";

@@ -1,6 +1,6 @@
 import type { FleetMachine, FleetThread } from "@goat/client-runtime/state/fleet";
 import { Link } from "@tanstack/react-router";
-import { useCallback, useMemo, useState } from "react";
+import { useState } from "react";
 
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
@@ -50,24 +50,24 @@ const machineSubtitle = (machine: FleetMachine) =>
     .filter((part) => part !== null)
     .join(" · ");
 
+function groupThreadsByMachine(threads: ReadonlyArray<FleetThread>) {
+  const grouped = new Map<string, FleetThread[]>();
+  for (const thread of threads) {
+    const list = grouped.get(thread.machineId) ?? [];
+    list.push(thread);
+    grouped.set(thread.machineId, list);
+  }
+  return grouped;
+}
+
 /** Everything running across connected machines, as a graph and a list grouped by machine. */
 export function FleetPage() {
   const { snapshot, loading } = useFleetSnapshot();
   const [selected, setSelected] = useState<string | null>(null);
   const selectedMachine = snapshot.machines.find((machine) => machine.id === selected) ?? null;
-  const toggleMachine = useCallback(
-    (machineId: string) => setSelected((current) => (current === machineId ? null : machineId)),
-    [],
-  );
-  const threadsByMachine = useMemo(() => {
-    const grouped = new Map<string, FleetThread[]>();
-    for (const thread of snapshot.threads) {
-      const list = grouped.get(thread.machineId) ?? [];
-      list.push(thread);
-      grouped.set(thread.machineId, list);
-    }
-    return grouped;
-  }, [snapshot.threads]);
+  const toggleMachine = (machineId: string) =>
+    setSelected((current) => (current === machineId ? null : machineId));
+  const threadsByMachine = groupThreadsByMachine(snapshot.threads);
   const listed = (selectedMachine ? [selectedMachine] : snapshot.machines).filter(isBusy);
   const idle = selectedMachine ? [] : snapshot.machines.filter((machine) => !isBusy(machine));
   const { totals } = snapshot;

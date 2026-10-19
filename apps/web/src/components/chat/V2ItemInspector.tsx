@@ -15,7 +15,7 @@ import {
 import { formatDiffCount } from "@goat/client-runtime/diff-count";
 import { isJavaScriptReplTool } from "@goat/shared/toolActivity";
 import { ExternalLinkIcon, GitBranchIcon, RotateCcwIcon } from "~/components/solar";
-import { memo, Suspense, use, useMemo } from "react";
+import { memo, type ReactNode, Suspense, use } from "react";
 
 import { useTheme } from "../../hooks/useTheme";
 import { cn } from "../../lib/utils";
@@ -27,6 +27,7 @@ import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 import { Button } from "../ui/button";
 import ChatMarkdown, { ChatMarkdownAssetImage } from "../ChatMarkdown";
 import { RenderErrorBoundary } from "../RenderErrorBoundary";
+import { CommandOutputPanel, useCommandOutputStreaming } from "./CommandOutputPanel";
 import { resolveExternalWebLinkHref } from "./externalLinkContextMenu";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ShellCommandBlock } from "./ShellCommandBlock";
@@ -67,14 +68,10 @@ function SyntaxTokens({
 }) {
   const { resolvedTheme } = useTheme();
   const highlighter = use(getSyntaxHighlighterPromise(language));
-  const { tokens } = useMemo(
-    () =>
-      highlighter.codeToTokens(text, {
-        lang: language,
-        theme: resolveDiffThemeName(resolvedTheme),
-      }),
-    [highlighter, text, language, resolvedTheme],
-  );
+  const { tokens } = highlighter.codeToTokens(text, {
+    lang: language,
+    theme: resolveDiffThemeName(resolvedTheme),
+  });
   return tokens.flatMap((line, lineIndex) => [
     lineIndex > 0 ? "\n" : "",
     ...line.map((token) => (
@@ -88,6 +85,16 @@ function SyntaxTokens({
 const monoClassName =
   "font-mono text-(length:--font-size-code,var(--text-2xs)) leading-relaxed whitespace-pre-wrap break-words select-text";
 
+function isJsonText(text: string): boolean {
+  if (!text) return false;
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function StructuredValue({
   value,
   highlightJson = false,
@@ -98,15 +105,7 @@ function StructuredValue({
   readonly language?: "typescript";
 }) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  const isJson = useMemo(() => {
-    if (!highlightJson || !text) return false;
-    try {
-      JSON.parse(text);
-      return true;
-    } catch {
-      return false;
-    }
-  }, [highlightJson, text]);
+  const isJson = highlightJson && isJsonText(text);
   if (!text) return null;
   return (
     <pre className={cn("max-h-80 overflow-auto text-muted-foreground", monoClassName)}>
@@ -123,16 +122,13 @@ function StructuredValue({
   );
 }
 
-/**
- * The item behind a projected row, with the output the timeline withheld
- * fetched while the row is open.
- */
 function useFetchedTurnItem(
   projectedItem: OrchestrationV2ProjectedTurnItem,
   environmentId: EnvironmentId,
+  skip = false,
 ) {
   const wireItem = projectedItem.item;
-  const fetches = turnItemNeedsDetailFetch(wireItem);
+  const fetches = !skip && turnItemNeedsDetailFetch(wireItem);
   const detail = useTurnItemDetail(
     fetches
       ? {
@@ -201,7 +197,6 @@ function ToolOutput(props: ToolOutputState) {
   );
 }
 
-/** Fetched output for rows that show their own plain text instead of the inspector. */
 export function FetchedToolOutput(props: {
   readonly projectedItem: OrchestrationV2ProjectedTurnItem;
   readonly environmentId: EnvironmentId;
@@ -215,13 +210,14 @@ export function FetchedToolOutput(props: {
   );
 }
 
-/** A tool call's body: the call itself in the foreground, its result muted below. */
 function ToolCallBody(
   props: ToolOutputState & {
     readonly command?: string;
     readonly args?: unknown;
     readonly toolName?: string | null;
     readonly exitCode?: number | undefined;
+    /** Replaces the fetched output, e.g. with a command's live output. */
+    readonly outputSlot?: ReactNode;
   },
 ) {
   const call = toolCallLines({ command: props.command, args: props.args });
@@ -243,7 +239,7 @@ function ToolCallBody(
         </div>
       ) : null}
       {call.argsText ? <StructuredValue value={call.argsText} highlightJson /> : null}
-      <ToolOutput {...props} />
+      {props.outputSlot ?? <ToolOutput {...props} />}
       {props.exitCode !== undefined && props.exitCode !== 0 ? (
         <div className="text-destructive">exit {props.exitCode}</div>
       ) : null}
@@ -280,8 +276,8 @@ function FileChangeDetail({
           </span>
           {item.additions !== undefined || item.deletions !== undefined ? (
             <span>
-              <span className="text-success">+{formatDiffCount(item.additions ?? 0)}</span>{" "}
-              <span className="text-destructive">-{formatDiffCount(item.deletions ?? 0)}</span>
+              <span className="text-diff-addition">+{formatDiffCount(item.additions ?? 0)}</span>{" "}
+              <span className="text-diff-deletion">-{formatDiffCount(item.deletions ?? 0)}</span>
             </span>
           ) : null}
           {diffTarget !== null ? (
@@ -298,8 +294,8 @@ function FileChangeDetail({
       {failedDiff !== null ? <StructuredValue value={failedDiff} /> : null}
       {changes.length > 0 ? (
         <ul className="space-y-1 font-mono text-muted-foreground">
-          {changes.map((change, index) => (
-            <li key={`${change.operation}:${change.path}:${index}`}>
+          {changes.map((change) => (
+            <li key={JSON.stringify([change.operation, change.oldPath, change.path])}>
               {change.operation} {change.oldPath ? `${change.oldPath} → ` : ""}
               {formatWorkspaceRelativePath(change.path, workspaceRoot)}
               {change.fileType || change.mimeType
@@ -314,7 +310,11 @@ function FileChangeDetail({
 }
 
 export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspectorProps) {
-  const fetched = useFetchedTurnItem(props.projectedItem, props.environmentId);
+  // Command rows stream their output, including the final output, from the server.
+  const streamsOutput =
+    useCommandOutputStreaming(props.environmentId) &&
+    props.projectedItem.item.type === "command_execution";
+  const fetched = useFetchedTurnItem(props.projectedItem, props.environmentId, streamsOutput);
   const item = fetched.item;
   const outputState = fetched.output;
   const support = useV2ItemSupport({
@@ -344,6 +344,15 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
           exitCode={item.exitCode}
           {...outputState}
           onImageExpand={props.onImageExpand}
+          outputSlot={
+            streamsOutput ? (
+              <CommandOutputPanel
+                environmentId={props.environmentId}
+                threadId={props.projectedItem.sourceThreadId}
+                itemId={props.projectedItem.sourceItemId}
+              />
+            ) : undefined
+          }
         />
       ) : null}
 

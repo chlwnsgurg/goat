@@ -24,16 +24,6 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-/**
- * WorkspaceFileSystem - Effect service contract for workspace file mutations.
- *
- * Owns workspace-root-relative file read/write operations and their associated
- * safety checks and cache invalidation hooks. Reads also accept absolute host
- * paths so clients can show files an agent left outside the workspace; writes
- * never leave the root.
- *
- * @module WorkspaceFileSystem
- */
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 
@@ -56,6 +46,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import * as KnownWorkspaces from "./KnownWorkspaces.ts";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 import { fileHeaderMimeType } from "./fileHeaderMimeType.ts";
@@ -71,6 +62,13 @@ import {
 } from "./atomicWorkspaceWrite.ts";
 
 const PROJECT_READ_FILE_MAX_BYTES = 1024 * 1024;
+
+// Windows also reaches `.git` through trailing dots or spaces, a `:` stream
+// suffix, or the 8.3 short name `GIT~1`. Names compare upcased, as NTFS does.
+const isGitMetadataName = (segment: string) => {
+  const name = (segment.split(":")[0] ?? "").replace(/[. ]+$/, "").toUpperCase();
+  return name === ".GIT" || name === "GIT~1";
+};
 
 export class WorkspaceFileSystemOperationError extends Schema.TaggedError<WorkspaceFileSystemOperationError>()(
   "WorkspaceFileSystemOperationError",
@@ -153,7 +151,6 @@ export const WorkspaceFileSystemError = Schema.Union([
 ]);
 export type WorkspaceFileSystemError = typeof WorkspaceFileSystemError.Type;
 
-/** Service tag for workspace file operations. */
 export class WorkspaceFileSystem extends Context.Service<
   WorkspaceFileSystem,
   {
@@ -161,27 +158,20 @@ export class WorkspaceFileSystem extends Context.Service<
       input: FilesystemGetMetadataInput,
     ) => Effect.Effect<FilesystemGetMetadataResult>;
 
-    /**
-     * Read a UTF-8 text file relative to the workspace root, or any host file by
-     * absolute path.
-     */
     readonly readFile: (
       input: ProjectReadFileInput,
     ) => Effect.Effect<
       ProjectReadFileResult,
       WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
     >;
-    /**
-     * Write a file relative to the workspace root.
-     *
-     * Creates parent directories as needed and rejects paths that escape the
-     * workspace root.
-     */
+    /** Writes inside a known workspace only. */
     readonly writeFile: (
       input: ProjectWriteFileInput,
     ) => Effect.Effect<
       ProjectWriteFileResult,
-      WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
+      | WorkspaceFileSystemError
+      | WorkspacePaths.WorkspacePathOutsideRootError
+      | KnownWorkspaces.UnknownWorkspaceError
     >;
   }
 >()("goat/workspace/WorkspaceFileSystem") {}
@@ -191,6 +181,7 @@ export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+  const knownWorkspaces = yield* KnownWorkspaces.KnownWorkspaces;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
 
   const metadataForPath = Effect.fnUntraced(function* (requestedPath: string) {
@@ -201,8 +192,6 @@ export const make = Effect.gen(function* () {
     if (stat.value.type === "Directory") return { kind: "directory" } as const;
     if (stat.value.type !== "File") return { kind: "other" } as const;
     let mimeType: string | undefined;
-    // Named extensions already choose the icon without a content read. For an
-    // extensionless regular file, read at most 512 bytes, never the whole file.
     if (path.extname(expandedPath) === "" && stat.value.size > 0) {
       mimeType = yield* Effect.tryPromise({
         try: async () => {
@@ -238,10 +227,46 @@ export const make = Effect.gen(function* () {
     return { entries: input.paths.map((value) => byPath.get(value) ?? null) };
   });
 
+  /** Both paths must already be real paths. */
+  const isInsideRealRoot = (realWorkspaceRoot: string, realPath: string) => {
+    const relative = path.relative(realWorkspaceRoot, realPath);
+    return !(
+      relative.startsWith(`..${path.sep}`) ||
+      relative === ".." ||
+      path.isAbsolute(relative)
+    );
+  };
+
   /**
-   * Resolves the file a read targets. Workspace-relative paths must stay inside the
-   * root, symlinks included. An absolute path reads a host file in place, such as a
-   * report an agent wrote to a temp directory; it gets no root check.
+   * Git runs config and hooks from its own folders, so a write never lands in one:
+   * a `.git` entry, or a repository folder under another name such as `.bare`.
+   * Folders are checked upward to a linked worktree's top, which holds a `.git`
+   * file, since worktrees can sit inside a bare repository. `absolutePath` must
+   * be normalized.
+   */
+  const isInGitFolder = async (absolutePath: string) => {
+    if (absolutePath.split(path.sep).some(isGitMetadataName)) return true;
+    for (let folder = path.dirname(absolutePath); ; folder = path.dirname(folder)) {
+      const [head, commondir, objects, refs, dotGit] = await Promise.all(
+        ["HEAD", "commondir", "objects", "refs", ".git"].map((name) =>
+          NodeFSP.lstat(path.join(folder, name)).catch((error: NodeJS.ErrnoException) => {
+            // Any other failure leaves the folder unknown, so the write is refused.
+            if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+            throw error;
+          }),
+        ),
+      );
+      // What git reads as a repository: HEAD, plus objects and refs here or in
+      // the folder a `commondir` file names, as in a linked worktree's git folder.
+      if (head && (commondir || (objects && refs))) return true;
+      if (dotGit?.isFile() || path.dirname(folder) === folder) return false;
+    }
+  };
+
+  /**
+   * Workspace-relative paths must stay inside the root, symlinks included. An
+   * absolute path reads a host file in place, such as a report an agent wrote to a
+   * temp directory; it gets no root check.
    */
   const resolveReadTarget = Effect.fn("WorkspaceFileSystem.resolveReadTarget")(function* (
     input: ProjectReadFileInput,
@@ -269,7 +294,7 @@ export const make = Effect.gen(function* () {
     });
 
     const realWorkspaceRoot = yield* Effect.tryPromise({
-      try: () => NodeFSP.realpath(input.cwd),
+      try: () => NodeFSP.realpath(path.resolve(input.cwd)),
       catch: (cause) =>
         new WorkspaceFileSystemOperationError({
           workspaceRoot: input.cwd,
@@ -292,12 +317,7 @@ export const make = Effect.gen(function* () {
           cause,
         }),
     });
-    const relativeRealPath = path.relative(realWorkspaceRoot, realTargetPath);
-    if (
-      relativeRealPath.startsWith(`..${path.sep}`) ||
-      relativeRealPath === ".." ||
-      path.isAbsolute(relativeRealPath)
-    ) {
+    if (!isInsideRealRoot(realWorkspaceRoot, realTargetPath)) {
       return yield* new WorkspaceFilePathEscapeError({
         workspaceRoot: input.cwd,
         relativePath: input.relativePath,
@@ -428,13 +448,98 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  const writeFile: WorkspaceFileSystem["Service"]["writeFile"] = Effect.fn(
-    "WorkspaceFileSystem.writeFile",
-  )(function* (input) {
+  /**
+   * Resolves the file a write targets. The deepest existing ancestor resolves to
+   * its real path before the root check, so neither the file nor the directories
+   * created for it can follow a symlink out of the root. A dangling symlink is
+   * rejected rather than written through.
+   */
+  const resolveWriteTarget = Effect.fn("WorkspaceFileSystem.resolveWriteTarget")(function* (
+    input: ProjectWriteFileInput,
+  ) {
     const target = yield* workspacePaths.resolveRelativePathWithinRoot({
       workspaceRoot: input.cwd,
       relativePath: input.relativePath,
     });
+    const realWorkspaceRoot = yield* Effect.tryPromise({
+      // Resolve `..` in cwd the way the relative path was resolved, before following links.
+      try: () => NodeFSP.realpath(path.resolve(input.cwd)),
+      catch: (cause) =>
+        new WorkspaceFileSystemOperationError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          resolvedPath: target.absolutePath,
+          operationPath: input.cwd,
+          operation: "realpath-workspace-root",
+          cause,
+        }),
+    });
+
+    // Split the host path, not the display relativePath: on POSIX `\` is a file name character.
+    const segments = path.relative(input.cwd, target.absolutePath).split(path.sep);
+    const realTargetPath = yield* Effect.tryPromise({
+      try: async () => {
+        for (let depth = segments.length; depth > 0; depth--) {
+          const candidate = path.join(realWorkspaceRoot, ...segments.slice(0, depth));
+          try {
+            return path.join(await NodeFSP.realpath(candidate), ...segments.slice(depth));
+          } catch (error) {
+            // Only a missing entry is skipped; one that exists but cannot resolve is a dangling link.
+            const exists = await NodeFSP.lstat(candidate).then(
+              () => true,
+              () => false,
+            );
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT" || exists) throw error;
+          }
+        }
+        return path.join(realWorkspaceRoot, ...segments);
+      },
+      catch: (cause) =>
+        new WorkspaceFileSystemOperationError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          resolvedPath: target.absolutePath,
+          operationPath: target.absolutePath,
+          operation: "realpath-target",
+          cause,
+        }),
+    });
+    // The path as named is checked too: a `.git/config` symlink resolves away the `.git`.
+    const namedTargetPath = path.join(realWorkspaceRoot, ...segments);
+    const inGitFolder = Effect.fn("WorkspaceFileSystem.inGitFolder")((checkedPath: string) =>
+      Effect.tryPromise({
+        try: () => isInGitFolder(checkedPath),
+        catch: (cause) =>
+          new WorkspaceFileSystemOperationError({
+            workspaceRoot: input.cwd,
+            relativePath: input.relativePath,
+            resolvedPath: realTargetPath,
+            operationPath: checkedPath,
+            operation: "stat",
+            cause,
+          }),
+      }),
+    );
+    if (
+      !isInsideRealRoot(realWorkspaceRoot, realTargetPath) ||
+      (yield* inGitFolder(realTargetPath)) ||
+      (yield* inGitFolder(namedTargetPath))
+    ) {
+      return yield* new WorkspaceFilePathEscapeError({
+        workspaceRoot: input.cwd,
+        relativePath: input.relativePath,
+        resolvedWorkspaceRoot: realWorkspaceRoot,
+        resolvedPath: realTargetPath,
+      });
+    }
+    return { relativePath: target.relativePath, absolutePath: target.absolutePath, realTargetPath };
+  });
+
+  const writeFile: WorkspaceFileSystem["Service"]["writeFile"] = Effect.fn(
+    "WorkspaceFileSystem.writeFile",
+  )(function* (input) {
+    yield* knownWorkspaces.assertContains(input.cwd);
+    const target = yield* resolveWriteTarget(input);
 
     const format = input.textFormat;
     if (format && (format.encoding !== "utf-8" || format.lineEnding === "mixed")) {
@@ -452,7 +557,8 @@ export const make = Effect.gen(function* () {
     yield* Effect.tryPromise({
       try: () =>
         atomicWorkspaceWrite({
-          workspaceRoot: input.cwd,
+          // Resolve `..` in cwd by name, as resolveWriteTarget did, before following links.
+          workspaceRoot: path.resolve(input.cwd),
           absolutePath: target.absolutePath,
           contents: bytes,
           ...(input.expectedVersion !== undefined

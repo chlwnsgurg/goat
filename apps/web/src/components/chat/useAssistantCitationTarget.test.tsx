@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { act, useCallback, useLayoutEffect, useState } from "react";
-import { create, type ReactTestRenderer } from "react-test-renderer";
+import { act, useLayoutEffect, useState } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import type { LegendListRef } from "@legendapp/list/react";
 import { EnvironmentId, MessageId, RunId, ThreadId } from "@goat/contracts";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -54,7 +54,7 @@ const foldInput = {
   runlessWorkActive: false,
 };
 let result: ReturnType<typeof useAssistantCitationTarget>;
-let renderer: ReactTestRenderer;
+let root: Root;
 let viewport: HTMLDivElement;
 const listRef = { current: {} as LegendListRef };
 const manualNavigation = vi.fn();
@@ -69,12 +69,12 @@ function Harness({
   hideRows?: boolean;
 }) {
   const [expandedRunIds, setExpandedRunIds] = useState<ReadonlySet<RunId>>(new Set());
-  const onExpandTurn = useCallback((runId: RunId) => {
+  const onExpandTurn = (runId: RunId) => {
     expanded(runId);
     setExpandedRunIds((previous) =>
       previous.has(runId) ? previous : new Set(previous).add(runId),
     );
-  }, []);
+  };
   const rows = hideRows
     ? []
     : deriveMessagesTimelineRows({
@@ -108,12 +108,13 @@ beforeEach(() => {
   expanded.mockClear();
 });
 afterEach(async () => {
-  await act(async () => renderer?.unmount());
+  await act(async () => root?.unmount());
   vi.unstubAllGlobals();
 });
 async function mount(props: Parameters<typeof Harness>[0]) {
   await act(async () => {
-    renderer = create(<Harness {...props} />);
+    root = createRoot(document.createElement("div"));
+    root.render(<Harness {...props} />);
   });
   await act(async () => result.onListLoad());
 }
@@ -127,7 +128,7 @@ it("loads older pages until the cited response mounts and completes positioning"
   expect(load).toHaveBeenCalledTimes(1);
   expect(toast).not.toHaveBeenCalled();
   await act(async () =>
-    renderer.update(
+    root.render(
       <Harness
         entries={[message("newest", "assistant")]}
         history={{ loading: true, cursor: "page-1", onLoadEarlier: load }}
@@ -136,7 +137,7 @@ it("loads older pages until the cited response mounts and completes positioning"
   );
   expect(load).toHaveBeenCalledTimes(1);
   await act(async () =>
-    renderer.update(
+    root.render(
       <Harness
         entries={[message("middle", "assistant"), message("newest", "assistant")]}
         history={{ loading: false, cursor: "page-2", onLoadEarlier: load }}
@@ -145,7 +146,7 @@ it("loads older pages until the cited response mounts and completes positioning"
   );
   expect(load).toHaveBeenCalledTimes(2);
   await act(async () =>
-    renderer.update(
+    root.render(
       <Harness entries={[message("source", "assistant"), message("newest", "assistant")]} />,
     ),
   );
@@ -162,7 +163,7 @@ it("reports unavailable only after older history is exhausted", async () => {
   expect(load).toHaveBeenCalledOnce();
   expect(result.positioning).toBe(true);
   expect(toast).not.toHaveBeenCalled();
-  await act(async () => renderer.update(<Harness entries={[message("other", "assistant")]} />));
+  await act(async () => root.render(<Harness entries={[message("other", "assistant")]} />));
   expect(result.positioning).toBe(false);
   expect(toast).toHaveBeenCalledWith(
     expect.objectContaining({ title: "The cited response is unavailable" }),
@@ -206,7 +207,7 @@ it("ends positioning when a history request fails", async () => {
   const load = vi.fn();
   await mount({ entries: [], history: { loading: false, cursor: "page-1", onLoadEarlier: load } });
   await act(async () =>
-    renderer.update(
+    root.render(
       <Harness
         entries={[]}
         history={{ loading: false, cursor: "page-1", error: "offline", onLoadEarlier: load }}
@@ -224,12 +225,12 @@ it("ends positioning if a settled history request does not advance its cursor", 
   const load = vi.fn();
   await mount({ entries: [], history: { loading: false, cursor: "page-1", onLoadEarlier: load } });
   await act(async () =>
-    renderer.update(
+    root.render(
       <Harness entries={[]} history={{ loading: true, cursor: "page-1", onLoadEarlier: load }} />,
     ),
   );
   await act(async () =>
-    renderer.update(
+    root.render(
       <Harness entries={[]} history={{ loading: false, cursor: "page-1", onLoadEarlier: load }} />,
     ),
   );

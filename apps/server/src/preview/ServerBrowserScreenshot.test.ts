@@ -18,6 +18,8 @@ const png = (width: number, height: number, bytes = 24) => {
 const fixture = ({ width = 1500, height = 4000, deviceScale = 1 } = {}) => {
   const page = {
     on: vi.fn(),
+    mainFrame: () => page,
+    frames: () => [page],
     viewportSize: () => ({ width: 1280, height: 800 }),
     evaluate: vi.fn(async () => ({
       url: "https://example.test",
@@ -45,10 +47,21 @@ const fixture = ({ width = 1500, height = 4000, deviceScale = 1 } = {}) => {
       };
     },
   );
+  // The password readers' isolated-world reads answer here, so `send` sees only capture.
+  const cdp = {
+    send: (method: string, params?: Record<string, unknown>) =>
+      method === "Page.getFrameTree"
+        ? Promise.resolve({ frameTree: { frame: { id: "main" } } })
+        : method === "Page.createIsolatedWorld"
+          ? Promise.resolve({ executionContextId: 1 })
+          : method === "Runtime.evaluate"
+            ? Promise.resolve({ result: { value: [] } })
+            : send(method, params),
+  };
   const take = (fullPage?: boolean) =>
     snapshot({
       page: page as unknown as Page,
-      cdp: { send } as unknown as CDPSession,
+      cdp: cdp as unknown as CDPSession,
       renderScale: deviceScale,
       fullPage,
       consoleEntries: [],
@@ -160,9 +173,11 @@ describe("bounded full-page snapshots", () => {
 
   it("rejects malformed PNGs rather than reporting guessed dimensions", async () => {
     const { take, send } = fixture();
-    send
-      .mockResolvedValueOnce({ cssContentSize: { width: 1500, height: 4000 } })
-      .mockResolvedValueOnce({ data: "invalid" });
+    // A snapshot that fails this way is taken once more, so both attempts get the bad PNG.
+    for (let attempt = 0; attempt < 2; attempt++)
+      send
+        .mockResolvedValueOnce({ cssContentSize: { width: 1500, height: 4000 } })
+        .mockResolvedValueOnce({ data: "invalid" });
     await expect(take(true)).rejects.toThrow(/invalid full-page PNG/);
   });
 
@@ -176,7 +191,7 @@ describe("bounded full-page snapshots", () => {
         started.resolve();
         return captured.promise;
       });
-    page.ariaSnapshot.mockRejectedValueOnce(new Error("document changed"));
+    page.ariaSnapshot.mockRejectedValue(new Error("document changed"));
     let settled = false;
     const result = take(true).catch((error: unknown) => {
       settled = true;

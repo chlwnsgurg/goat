@@ -1,8 +1,3 @@
-/**
- * The built-in transcript formats by provider, for engine and cache tests.
- *
- * @module usageTestFormats
- */
 import type { UsageProviderKind } from "@goat/contracts";
 import type { TranscriptUsageFormat } from "@goat/provider-core/server/usage";
 import { piUsageFormat } from "@goat/provider-pi/server/usage";

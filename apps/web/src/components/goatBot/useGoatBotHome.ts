@@ -1,7 +1,7 @@
 // @effect-diagnostics cryptoRandomUUID:off - browser home claims use the platform UUID source.
 import { createGoatBotHomeSync, resolveGoatBotHomeSelection } from "@goat/client-runtime/goatBot";
 import { AuthSettingsWriteScope, type EnvironmentId, type GoatBotHomeClaim } from "@goat/contracts";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useGlobalAgentStore } from "~/globalAgentStore";
 import { serverEnvironment } from "~/state/server";
@@ -14,30 +14,24 @@ import { useGoatBotEnvironments } from "./goatBotHooks";
 export function useGoatBotHomeSettings() {
   const environments = useGoatBotEnvironments();
   const botRef = useGlobalAgentStore((state) => state.botRef);
-  const home = useMemo(
-    () => resolveGoatBotHomeSelection(environments, botRef),
-    [environments, botRef],
-  );
+  const home = resolveGoatBotHomeSelection(environments, botRef);
   const writableIds = useEnvironmentsWithScope(environments, AuthSettingsWriteScope);
   const persist = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
-  const write = useCallback(
-    async (environmentId: EnvironmentId, claim: GoatBotHomeClaim) => {
-      const target = home.targets.find((entry) => entry.environmentId === environmentId);
-      if (
-        !target?.connected ||
-        !target.supportsHome ||
-        !readEnvironmentScope(environmentId, AuthSettingsWriteScope)
-      )
-        return false;
-      try {
-        const result = await persist({ environmentId, input: { patch: { goatBotHome: claim } } });
-        return result._tag === "Success";
-      } catch {
-        return false;
-      }
-    },
-    [home.targets, persist],
-  );
+  const write = async (environmentId: EnvironmentId, claim: GoatBotHomeClaim) => {
+    const target = home.targets.find((entry) => entry.environmentId === environmentId);
+    if (
+      !target?.connected ||
+      !target.supportsHome ||
+      !readEnvironmentScope(environmentId, AuthSettingsWriteScope)
+    )
+      return false;
+    try {
+      const result = await persist({ environmentId, input: { patch: { goatBotHome: claim } } });
+      return result._tag === "Success";
+    } catch {
+      return false;
+    }
+  };
   return { ...home, environments, writableIds, write };
 }
 

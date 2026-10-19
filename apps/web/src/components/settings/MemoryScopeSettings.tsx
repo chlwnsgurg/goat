@@ -53,18 +53,31 @@ export function MemoryScopeSettings({
   const project = projects.find((p) => p.id === projectId);
   const selectedThreadId = threads.find((t) => t.id === threadId)?.id;
   const generation = useRef(0);
-  useEffect(() => {
-    const token = ++generation.current;
-    // A destination or grant change invalidates the previous remote binding.
-    // eslint-disable-next-line react/set-state-in-effect
+  // A destination or grant change invalidates the previous remote binding.
+  const [request, setRequest] = useState({ project, environmentId, memorySpaceId, canGet, reload });
+  if (
+    request.project !== project ||
+    request.environmentId !== environmentId ||
+    request.memorySpaceId !== memorySpaceId ||
+    request.canGet !== canGet ||
+    request.reload !== reload
+  ) {
+    setRequest({ project, environmentId, memorySpaceId, canGet, reload });
     setBinding(null);
     setBusy(false);
     setConfirm(null);
     setMessage(null);
-    if (project && canGet)
+  }
+  useEffect(() => {
+    const token = ++generation.current;
+    const requested = request.project;
+    if (requested && request.canGet)
       void get({
-        environmentId,
-        input: { memorySpaceId, project: { environmentId, projectId: project.id } },
+        environmentId: request.environmentId,
+        input: {
+          memorySpaceId: request.memorySpaceId,
+          project: { environmentId: request.environmentId, projectId: requested.id },
+        },
       }).then((result) => {
         if (token !== generation.current) return;
         if (result._tag === "Success") setBinding(result.value);
@@ -73,7 +86,7 @@ export function MemoryScopeSettings({
     return () => {
       generation.current++;
     };
-  }, [project, environmentId, memorySpaceId, canGet, reload, get]);
+  }, [request, get]);
   useEffect(() => {
     onChange(
       kind === "user"

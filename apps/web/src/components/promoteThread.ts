@@ -1,7 +1,6 @@
 import type { EnvironmentThreadShell } from "@goat/client-runtime/state/shell";
 import { AuthOrchestrationOperateScope, type ScopedThreadRef } from "@goat/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback } from "react";
 
 import { useServerConfigs } from "../state/entities";
 import { useEnvironmentScope } from "../state/session";
@@ -32,24 +31,21 @@ export function useCanPromoteThread(thread: EnvironmentThreadShell | null | unde
 export function usePromoteThread(): (threadRef: ScopedThreadRef) => Promise<boolean> {
   const promote = useAtomCommand(threadEnvironment.promote, { reportFailure: false });
   const navigate = useNavigate();
-  return useCallback(
-    async (threadRef: ScopedThreadRef) => {
-      const result = await promote({
-        environmentId: threadRef.environmentId,
-        input: { threadId: threadRef.threadId },
+  return async (threadRef: ScopedThreadRef) => {
+    const result = await promote({
+      environmentId: threadRef.environmentId,
+      input: { threadId: threadRef.threadId },
+    });
+    if (result._tag === "Failure") {
+      toastManager.add({
+        type: "error",
+        title: "Could not promote task",
+        description: "It may have been promoted or deleted already.",
       });
-      if (result._tag === "Failure") {
-        toastManager.add({
-          type: "error",
-          title: "Could not promote task",
-          description: "It may have been promoted or deleted already.",
-        });
-        return false;
-      }
-      toastManager.add({ type: "success", title: "Promoted to a thread" });
-      void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(threadRef) });
-      return true;
-    },
-    [navigate, promote],
-  );
+      return false;
+    }
+    toastManager.add({ type: "success", title: "Promoted to a thread" });
+    void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(threadRef) });
+    return true;
+  };
 }

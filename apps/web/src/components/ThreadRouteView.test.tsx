@@ -31,21 +31,20 @@ vi.mock("./chat/draftHeroTransition", () => ({
 vi.mock("./ui/sidebar", () => ({
   SidebarInset: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
 }));
-vi.mock("../state/query", () => ({
-  useEnvironmentQuery: () => ({
-    refresh: refreshShell,
-    data: {
-      status: sync === "live" ? "live" : sync === "error" ? "empty" : "cached",
-      snapshot: { _tag: sync === "error" ? "None" : "Some" },
-    },
-  }),
+vi.mock("@effect/atom-react", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@effect/atom-react")>()),
+  useAtomRefresh: () => refreshShell,
 }));
-vi.mock("../state/shell", () => ({ environmentShell: { stateAtom: () => null } }));
+vi.mock("../state/shell", () => ({
+  environmentShell: { stateAtom: () => null },
+  useEnvironmentShellStatus: () =>
+    sync === "live" ? "live" : sync === "error" ? "empty" : "cached",
+}));
 vi.mock("../state/entities", () => ({
   // Another thread exists in the environment, so a missing ordinary thread redirects home.
   useEnvironmentThreadRefs: () => [{ environmentId: "env", threadId: "other" }],
   useThreadRefs: () => [],
-  useThreadShell: (ref: { threadId: string } | null) =>
+  useQuietThreadShell: (ref: { threadId: string } | null) =>
     ref?.threadId === "worker" ? { deletedAt: null, archivedAt: null } : null,
 }));
 vi.mock("../composerDraftStore", () => {

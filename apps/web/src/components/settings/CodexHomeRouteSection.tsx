@@ -71,14 +71,17 @@ export function CodexHomeRouteSection(props: CodexHomeRouteSectionProps) {
     inFlight.current = true;
     setPending(true);
     setError(null);
-    try {
+    const runAction = async () => {
       await action();
-    } catch (failure) {
-      setError(codexRouteErrorMessage(failure));
-    } finally {
-      inFlight.current = false;
-      setPending(false);
-    }
+    };
+    await runAction()
+      .catch((failure: unknown) => {
+        setError(codexRouteErrorMessage(failure));
+      })
+      .finally(() => {
+        inFlight.current = false;
+        setPending(false);
+      });
   }
   return (
     <SettingsSection title="Model route">

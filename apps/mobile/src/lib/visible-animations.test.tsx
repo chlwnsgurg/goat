@@ -79,7 +79,6 @@ vi.mock("../features/settings/appearance/AppearancePreferencesProvider", () => (
   useAppearancePreferences: () => ({ themeAppearance: "dark", themeVariables: {} }),
 }));
 vi.mock("./mobileTheme", () => ({ themeColorWithAlpha: () => "transparent" }));
-import { LoadingStrip } from "../components/LoadingStrip";
 import { ConnectionStatusDot } from "../features/connection/ConnectionStatusDot";
 
 let root: Root;
@@ -98,12 +97,8 @@ afterEach(() => {
   expect(h.appListeners.size).toBe(0);
   expect(h.motionListeners.size).toBe(0);
 });
-async function mount(kind: string) {
-  await act(async () =>
-    root.render(
-      kind === "dot" ? <ConnectionStatusDot state="reconnecting" pulse /> : <LoadingStrip />,
-    ),
-  );
+async function mount() {
+  await act(async () => root.render(<ConnectionStatusDot state="reconnecting" pulse />));
 }
 function app(state: string) {
   act(() => {
@@ -124,9 +119,9 @@ function motion(value: boolean) {
   });
 }
 
-describe.each(["dot", "strip"])("%s animation lifecycle", (kind) => {
+describe("connection status dot animation lifecycle", () => {
   it("cancels on background/inactive and restarts on active", async () => {
-    await mount(kind);
+    await mount();
     expect(h.running.size).toBe(1);
     const cancellations = h.cancel.mock.calls.length;
     app("background");
@@ -138,14 +133,14 @@ describe.each(["dot", "strip"])("%s animation lifecycle", (kind) => {
     expect(h.running.size).toBe(1);
   });
   it("cancels on blur and restarts on focus", async () => {
-    await mount(kind);
+    await mount();
     focus(false);
     expect(h.running.size).toBe(0);
     focus(true);
     expect(h.running.size).toBe(1);
   });
   it("cancels when reduced motion is enabled and resumes when disabled", async () => {
-    await mount(kind);
+    await mount();
     motion(true);
     expect(h.running.size).toBe(0);
     motion(false);
@@ -155,11 +150,11 @@ describe.each(["dot", "strip"])("%s animation lifecycle", (kind) => {
     h.app = state === "background" ? "background" : "active";
     h.focused = state !== "blur";
     h.reduced = state === "reduced";
-    await mount(kind);
+    await mount();
     expect(h.repeat).not.toHaveBeenCalled();
   });
   it("cancels and removes subscriptions on unmount", async () => {
-    await mount(kind);
+    await mount();
     expect(h.running.size).toBe(1);
     act(() => root.render(null));
     expect(h.running.size).toBe(0);

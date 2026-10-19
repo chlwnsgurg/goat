@@ -2,7 +2,6 @@ import { Box, iconSvgMarkup } from "./solar/nodes";
 
 export const SKILL_CHIP_ICON_SVG = iconSvgMarkup(Box);
 
-/** Keeps both the recognizable beginning and the extension/end of a long attachment name. */
 export function middleTruncateAttachmentName(name: string, maxCharacters = 36): string {
   const characters = Array.from(name);
   if (characters.length <= maxCharacters) return name;

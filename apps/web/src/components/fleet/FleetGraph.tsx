@@ -1,14 +1,5 @@
 import type { FleetMachine, FleetSnapshot, FleetThread } from "@goat/client-runtime/state/fleet";
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent,
-  type PointerEvent,
-} from "react";
+import { memo, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { observeResize } from "../../lib/observeResize";
@@ -99,7 +90,7 @@ function usePullableNodes(
   const frame = useRef<number | null>(null);
   const lastTick = useRef(0);
 
-  const tick = useCallback(function tick(now: number) {
+  const tick = function tick(now: number) {
     const seconds = lastTick.current === 0 ? 1 / 60 : (now - lastTick.current) / 1000;
     lastTick.current = now;
     const next = new Map<string, FleetVector>();
@@ -121,7 +112,7 @@ function usePullableNodes(
     });
     frame.current = springs.current.size > 0 ? requestAnimationFrame(tick) : null;
     if (frame.current === null) lastTick.current = 0;
-  }, []);
+  };
 
   useEffect(
     () => () => {
@@ -130,61 +121,52 @@ function usePullableNodes(
     [],
   );
 
-  const press = useCallback(
-    (key: string, event: PointerEvent<SVGGElement>) => {
-      if (event.button !== 0) return;
-      event.currentTarget.setPointerCapture(event.pointerId);
-      springs.current.delete(key);
-      held.current = {
-        key,
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startY: event.clientY,
-        base: offsets.get(key) ?? ZERO_VECTOR,
-        moved: false,
-      };
-    },
-    [offsets],
-  );
+  const press = (key: string, event: PointerEvent<SVGGElement>) => {
+    if (event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    springs.current.delete(key);
+    held.current = {
+      key,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      base: offsets.get(key) ?? ZERO_VECTOR,
+      moved: false,
+    };
+  };
 
-  const move = useCallback(
-    (event: PointerEvent<SVGGElement>) => {
-      const current = held.current;
-      if (current === null || current.pointerId !== event.pointerId) return;
-      const rect = svg.current?.getBoundingClientRect();
-      const scale = rect && rect.width > 0 ? width / rect.width : 1;
-      const dx = (event.clientX - current.startX) * scale;
-      const dy = (event.clientY - current.startY) * scale;
-      if (!current.moved && Math.hypot(dx, dy) < CLICK_SLOP) return;
-      current.moved = true;
-      const offset = rubberBand({ x: current.base.x + dx, y: current.base.y + dy }, PULL_REACH);
-      setOffsets((previous) => new Map(previous).set(current.key, offset));
-    },
-    [svg, width],
-  );
+  const move = (event: PointerEvent<SVGGElement>) => {
+    const current = held.current;
+    if (current === null || current.pointerId !== event.pointerId) return;
+    const rect = svg.current?.getBoundingClientRect();
+    const scale = rect && rect.width > 0 ? width / rect.width : 1;
+    const dx = (event.clientX - current.startX) * scale;
+    const dy = (event.clientY - current.startY) * scale;
+    if (!current.moved && Math.hypot(dx, dy) < CLICK_SLOP) return;
+    current.moved = true;
+    const offset = rubberBand({ x: current.base.x + dx, y: current.base.y + dy }, PULL_REACH);
+    setOffsets((previous) => new Map(previous).set(current.key, offset));
+  };
 
   /** Returns whether the press was a click rather than a pull. */
-  const release = useCallback(
-    (event: PointerEvent<SVGGElement>): boolean => {
-      const current = held.current;
-      if (current === null || current.pointerId !== event.pointerId) return false;
-      held.current = null;
-      if (!current.moved) return true;
-      const offset = offsets.get(current.key) ?? ZERO_VECTOR;
-      if (reduced) {
-        setOffsets((previous) => {
-          const next = new Map(previous);
-          next.delete(current.key);
-          return next;
-        });
-        return false;
-      }
-      springs.current.set(current.key, { offset, velocity: ZERO_VECTOR });
-      frame.current ??= requestAnimationFrame(tick);
+  const release = (event: PointerEvent<SVGGElement>): boolean => {
+    const current = held.current;
+    if (current === null || current.pointerId !== event.pointerId) return false;
+    held.current = null;
+    if (!current.moved) return true;
+    const offset = offsets.get(current.key) ?? ZERO_VECTOR;
+    if (reduced) {
+      setOffsets((previous) => {
+        const next = new Map(previous);
+        next.delete(current.key);
+        return next;
+      });
       return false;
-    },
-    [offsets, reduced],
-  );
+    }
+    springs.current.set(current.key, { offset, velocity: ZERO_VECTOR });
+    if (frame.current === null) frame.current = requestAnimationFrame(tick);
+    return false;
+  };
 
   return { offsets, press, move, release };
 }
@@ -233,44 +215,34 @@ export const FleetGraph = memo(function FleetGraph(props: {
   const { offsets, press, move, release } = usePullableNodes(svgRef, width, reduced);
   // Below 340 the orbits cannot keep labels apart; see ORBIT_GAP in fleetLayout.
   const height = width < 640 ? 360 : Math.max(340, Math.min(420, Math.round(width * 0.42)));
-  const layout = useMemo(
-    () => (width > 0 ? layoutFleet(snapshot.machines, width, height) : null),
-    [snapshot.machines, width, height],
-  );
-  const machinesById = useMemo(
-    () => new Map(snapshot.machines.map((machine) => [machine.id, machine])),
-    [snapshot.machines],
-  );
+  const layout = width > 0 ? layoutFleet(snapshot.machines, width, height) : null;
+  const machinesById = new Map(snapshot.machines.map((machine) => [machine.id, machine]));
   // Where every node is drawn this frame: its orbit spot plus any pull.
-  const placed = useMemo(() => {
-    if (layout === null) return [];
-    return layout.machines.map((node): PlacedMachine => {
-      const id = node.id ?? "more";
-      const machineOffset = offsets.get(machineKey(id));
-      const at = add(node, machineOffset);
-      return {
-        layout: node,
-        at,
-        edge: machineOffset === undefined ? node.edge : orbitEdge(layout.center, at),
-        agents: node.agents.map((agentNode) => {
-          const key = agentKey(id, agentNode.key);
+  const placed =
+    layout === null
+      ? []
+      : layout.machines.map((node): PlacedMachine => {
+          const id = node.id ?? "more";
+          const machineOffset = offsets.get(machineKey(id));
+          const at = add(node, machineOffset);
           return {
-            key,
-            layout: agentNode,
-            at: add(add(agentNode, machineOffset, AGENT_FOLLOW), offsets.get(key)),
+            layout: node,
+            at,
+            edge: machineOffset === undefined ? node.edge : orbitEdge(layout.center, at),
+            agents: node.agents.map((agentNode) => {
+              const key = agentKey(id, agentNode.key);
+              return {
+                key,
+                layout: agentNode,
+                at: add(add(agentNode, machineOffset, AGENT_FOLLOW), offsets.get(key)),
+              };
+            }),
           };
-        }),
-      };
-    });
-  }, [layout, offsets]);
-  const placedById = useMemo(
-    () =>
-      new Map(
-        placed.flatMap((entry) =>
-          entry.layout.id === null ? [] : [[entry.layout.id, entry] as const],
-        ),
-      ),
-    [placed],
+        });
+  const placedById = new Map(
+    placed.flatMap((entry) =>
+      entry.layout.id === null ? [] : [[entry.layout.id, entry] as const],
+    ),
   );
   const live = snapshot.totals.running + snapshot.totals.attention;
 

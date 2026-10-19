@@ -119,9 +119,6 @@ const stagePackageExtensions = {
   "@electron-webauthn/macos": { peerDependenciesMeta: { typescript: { optional: true } } },
 };
 
-// A minimal stand-in for the Linux CLI release archive: one top-level
-// directory named after the archive stem holding the executable, the web
-// client, and the runtime externals with node-pty built from source.
 const makeLinuxCliArchiveFixture = Effect.fn("test.makeLinuxCliArchiveFixture")(function* (input: {
   readonly root: string;
   readonly stem: string;
@@ -242,9 +239,7 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
     const stem = wslRuntimeArchiveStem(WINDOWS_PAYLOAD_FIXTURE_VERSION, input.targetArch ?? "x64");
     const sourceArchivePath =
       input.wslRuntime === "loose-server-tree"
-        ? // The old hand-rolled runtime: apps/server/dist + node_modules at the
-          // archive root, no single stem directory, no `t3` executable.
-          yield* makeLinuxCliArchiveFixture({
+        ? yield* makeLinuxCliArchiveFixture({
             root: path.join(tempDir, "wsl-runtime"),
             stem: "apps",
             omitMembers: ["apps/goat", "apps/client/index.html"],
@@ -559,8 +554,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         undefined,
       );
 
-      assert.strictEqual(preview.publish, null);
-      assert.strictEqual(previewChannel.publish, null);
+      assert.isNull(preview.publish);
+      assert.isNull(previewChannel.publish);
       assert.deepStrictEqual(release.publish, [
         {
           provider: "github",
@@ -581,6 +576,22 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         ),
       ),
     ),
+  );
+
+  it.effect("disables electron-builder publish detection for local builds", () =>
+    Effect.gen(function* () {
+      const local = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.0.33",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+
+      assert.isNull(local.publish);
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
   it("stages only the desktop main-process externals", () => {
@@ -669,8 +680,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       },
       packageExtensions: stagePackageExtensions,
     });
-    // Windows stages only win32 natives; WSL runs the separately built Linux
-    // CLI archive rather than anything installed here.
     assert.deepStrictEqual(createStageWorkspaceConfig({ platform: "win", arch: "x64" }), {
       supportedArchitectures: {
         os: ["win32"],
@@ -751,9 +760,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       },
     );
 
-    // Empty maps must not be written — pnpm would still require reviewed
-    // packages if allowBuilds is present but incomplete, and omitting empty
-    // patchedDependencies keeps the stage yaml minimal.
     assert.deepStrictEqual(
       createStageWorkspaceConfig({
         platform: "mac",
@@ -774,11 +780,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("limits Electron locales and excludes separately packaged resources", () => {
     assert.deepStrictEqual(DESKTOP_ELECTRON_LANGUAGES, ["en-US"]);
-    // Every platform staging input is emitted once at resources/, so adding one
-    // without its exclusion silently packs a second copy into app.asar. The
-    // snapshot below cannot catch that on its own: adding a resource and
-    // forgetting the exclusion leaves the exclusion list untouched, so it still
-    // matches. Assert the invariant first, where the failure names the culprit.
     for (const resource of [
       ...DESKTOP_EXTRA_RESOURCES,
       ...WSL_RUNTIME_EXTRA_RESOURCES,
@@ -865,8 +866,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         false,
       );
 
-      // Windows unpacks native files explicitly so their JavaScript and metadata
-      // stay archived. Other platforms retain electron-builder's defaults.
       assert.notProperty(mac, "asar");
       assert.notProperty(linux, "asar");
       assert.notProperty(mac, "asarUnpack");
@@ -886,14 +885,11 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         ...WINDOWS_SERVER_EXTRA_RESOURCES,
         ...WSL_RUNTIME_EXTRA_RESOURCES,
       ]);
-      // No Linux CLI archive means staging never writes the runtime, so
-      // listing it here would fail the build on a missing source file.
       assert.deepStrictEqual(winWithoutWslRuntime.extraResources, [
         ...DESKTOP_EXTRA_RESOURCES,
         ...WINDOWS_SERVER_EXTRA_RESOURCES,
       ]);
       assert.deepStrictEqual(win.nsis, { differentialPackage: true });
-      // The Claude SDK platform packages and .bin shims never ship.
       assert.deepStrictEqual(WINDOWS_SERVER_ASAR_IGNORE_GLOBS, [
         "**/node_modules/@cursor/sdk-*",
         "**/node_modules/@cursor/sdk-*/**",
@@ -914,19 +910,14 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         iconSize: 120,
         iconTextSize: 12,
       });
-      // A Linux AppImage build also emits the .deb from the same run.
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).target, ["AppImage", "deb"]);
-      // Linux must register the renderer schemes so the generated .desktop
-      // entry advertises MimeType=x-scheme-handler/goat;... for OAuth deep links.
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).protocols, [
         { name: "GOAT", schemes: ["goat", "goat-dev", "t3code", "t3code-dev"] },
       ]);
-      // macOS also offers itself as a web browser, so it can be chosen as the default.
       assert.deepStrictEqual((mac.mac as Record<string, unknown>).protocols, [
         { name: "GOAT", schemes: ["goat", "goat-dev", "t3code", "t3code-dev"] },
         { name: "Web site URL", schemes: ["http", "https"], role: "Viewer" },
       ]);
-      // macOS lists a default browser only when it also opens web pages as documents.
       const macInfo = (mac.mac as { extendInfo: Record<string, unknown> }).extendInfo;
       assert.strictEqual(macInfo.NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac, true);
       assert.deepStrictEqual(macInfo.CFBundleDocumentTypes, [
@@ -1153,7 +1144,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             path.join(unpackedRoot, "node_modules/node-pty/prebuilds/win32-x64/pty.node"),
           ),
         );
-        // Signed builds sign every unpacked .node, so the ELF prebuild stays packed.
         assert.isFalse(
           yield* fs.exists(path.join(unpackedRoot, "node_modules/node-pty/prebuilds/linux-x64")),
         );
@@ -1838,9 +1828,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     );
 
     return Effect.gen(function* () {
-      // `universal` is a mac-only arch the option type still admits. The helper
-      // script only knows x64 and arm64, so the request maps to x64, the same
-      // concrete target the Linux resource monitor resolves it to.
       yield* stageBrowserSecret({
         repoRoot: "/repo",
         stageResourcesDir: "/stage/resources",
@@ -1881,9 +1868,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     );
 
     return Effect.gen(function* () {
-      // The helper links against the host's libsecret and its build script is
-      // a no-op elsewhere, so a Linux artifact built on macOS would ship
-      // without it and report the keyring as unavailable on every import.
       const error = yield* stageBrowserSecret({
         repoRoot: "/repo",
         stageResourcesDir: "/stage/resources",
@@ -2263,7 +2247,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("grants in-app browser passkey entitlements only when the provisioning profile does", () => {
     const configuration = { appId: "com.t3tools.t3code", teamId: "ABC1234567" };
-    // Profiles are CMS envelopes around a plain XML plist.
     const profile = (entitlements: string, outside = "") =>
       `0\x82\x1f\x9a\x06\t*\x86H<?xml version="1.0"?><plist version="1.0"><dict>${outside}<key>Entitlements</key><dict>${entitlements}</dict></dict></plist>\x00\x01`;
     const teamWildcardGroups = `<key>keychain-access-groups</key>
@@ -2283,8 +2266,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       ),
       { touchIdKeychainAccessGroup: undefined, browserPasskeys: false },
     );
-    // Only real values inside the Entitlements dict count: not comments, not
-    // explicit false, not keys elsewhere in the profile.
     assert.deepStrictEqual(
       resolveMacWebAuthnEntitlements(
         profile(
@@ -2510,8 +2491,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       from: "apps/desktop/prod-resources/wsl-runtime.tar.gz.sha256",
       to: "wsl-runtime.tar.gz.sha256",
     });
-    // Both the staging and the packaging config hang off this one decision:
-    // Windows only, and only when CI handed the build a Linux CLI archive.
     const runtimeArchivePath = "/tmp/goat-1.2.3-linux-x64.tar.gz";
     assert.isTrue(bundlesWslRuntime({ platform: "win", runtimeArchivePath }));
     assert.isFalse(bundlesWslRuntime({ platform: "win", runtimeArchivePath: undefined }));
@@ -2550,8 +2529,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           fs.readFile(archivePath),
         ]);
         assert.deepStrictEqual(staged, source);
-        // The digest both gates installation inside the distro and names the
-        // extracted runtime's cache directory.
         const hash = yield* fs.readFileString(hashPath);
         assert.equal(hash, `${NodeCrypto.createHash("sha256").update(source).digest("hex")}\n`);
       }),
@@ -2793,10 +2770,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   );
 });
 
-// The self-containment check runs the packaged tree in a scratch directory. Its
-// own node_modules holds the sidecar externals and must be ignored, but any
-// node_modules *above* it would let Node's parent walk satisfy an import that is
-// missing from the package, so the probe refuses to run in that case.
 it("lists ancestor node_modules, nearest first, excluding the start directory", () => {
   assert.deepStrictEqual(ancestorNodeModulesPaths("C:\\tmp\\probe\\app", "\\"), [
     "C:\\tmp\\probe\\node_modules",
@@ -2812,9 +2785,6 @@ it("includes the filesystem root for posix paths", () => {
   ]);
 });
 
-// A UNC root must keep its \\server\share prefix. Rebuilding it from segments
-// produced relative paths, which fs.exists resolves against the build cwd, so
-// the guard checked directories that do not exist and silently passed.
 it("keeps the prefix of a UNC path instead of going relative", () => {
   const paths = ancestorNodeModulesPaths("\\\\server\\share\\tmp\\app", "\\");
   for (const candidate of paths) {

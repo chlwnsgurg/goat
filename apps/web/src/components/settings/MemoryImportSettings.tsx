@@ -9,7 +9,7 @@ import {
   type MemoryImportSource,
   type MemoryImportPreviewItem,
 } from "@goat/contracts";
-import { useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { readEnvironmentScope, readPreparedConnection } from "../../state/session";
 import { memoryEnvironment } from "../../state/memory";
 import {
@@ -70,7 +70,7 @@ export function MemoryImportSettings({
   const authorized = useRef(canImport);
   const generation = useRef(0);
   const previousScope = useRef<MemoryScopeSelection | null>(null);
-  const run = useCallback(async (action: () => Promise<unknown>) => {
+  const run = async (action: () => Promise<unknown>) => {
     const token = generation.current;
     setBusy(true);
     setError(null);
@@ -83,7 +83,7 @@ export function MemoryImportSettings({
     if (mounted.current && token === generation.current) {
       setBusy(false);
     }
-  }, []);
+  };
   useEffect(() => {
     mounted.current = true;
     if (canImport) authorized.current = true;
@@ -128,22 +128,19 @@ export function MemoryImportSettings({
       else workflow?.invalidate({ environmentId, memorySpaceId, session: randomUUID() });
     };
   }, [canImport, workflow, run, environmentId, memorySpaceId]);
-  const changeScope = useCallback(
-    (next: MemoryScopeSelection | null) => {
-      const previous = previousScope.current;
-      previousScope.current = next;
-      setScope(next);
-      if (JSON.stringify(previous) === JSON.stringify(next) || !workflow) return;
-      generation.current++;
-      workflow.stop();
-      workflow.invalidate({ environmentId, memorySpaceId, session: randomUUID() });
-      setItems([]);
-      setSelected([]);
-      setBusy(false);
-    },
-    [workflow, environmentId, memorySpaceId],
-  );
-  const invalidateDestination = useCallback(async () => {
+  const changeScope = (next: MemoryScopeSelection | null) => {
+    const previous = previousScope.current;
+    previousScope.current = next;
+    setScope(next);
+    if (JSON.stringify(previous) === JSON.stringify(next) || !workflow) return;
+    generation.current++;
+    workflow.stop();
+    workflow.invalidate({ environmentId, memorySpaceId, session: randomUUID() });
+    setItems([]);
+    setSelected([]);
+    setBusy(false);
+  };
+  const invalidateDestination = async () => {
     generation.current++;
     previousScope.current = null;
     setScope(null);
@@ -155,7 +152,7 @@ export function MemoryImportSettings({
     setItems([]);
     setSelected([]);
     setSources([]);
-  }, [environmentId, memorySpaceId, workflow]);
+  };
   useEffect(() => {
     const unsubscribe = admission?.subscribeInvalidation(() => {
       void invalidateDestination();

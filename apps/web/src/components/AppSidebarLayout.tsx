@@ -7,7 +7,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 
 import { isElectron } from "../env";
 import { getLocalStorageItem, removeLocalStorageItem } from "../hooks/useLocalStorage";
@@ -23,7 +23,6 @@ import { isTerminalFocused } from "../lib/terminalFocus";
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
-import { resolveThreadRouteRef } from "../threadRoutes";
 import { cn, isMacPlatform } from "../lib/utils";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { useLegacySidebarEnabled } from "../hooks/useSettings";
@@ -63,6 +62,7 @@ import {
   useSidebarVisibility,
 } from "./ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { useThreadRouteRef } from "../hooks/useThreadRouteTarget";
 
 const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "var(--desktop-window-controls-inset, 90px)";
 
@@ -73,6 +73,44 @@ function subscribeToViewportWidth(onChange: () => void): () => void {
 
 function readViewportWidth(): number {
   return window.innerWidth;
+}
+
+// getWindowFullscreenState is a synchronous IPC round trip, so the snapshot is cached
+// and only re-read when a subscription starts.
+let windowFullscreenSnapshot: boolean | null = null;
+
+function macosDesktopBridge() {
+  if (!isElectron || !isMacPlatform(navigator.platform)) return null;
+  return window.desktopBridge ?? null;
+}
+
+function subscribeToWindowFullscreen(onChange: () => void): () => void {
+  const bridge = macosDesktopBridge();
+  if (
+    typeof bridge?.getWindowFullscreenState !== "function" ||
+    typeof bridge.onWindowFullscreenStateChange !== "function"
+  ) {
+    return () => {};
+  }
+  const unsubscribe = bridge.onWindowFullscreenStateChange((fullscreen) => {
+    windowFullscreenSnapshot = fullscreen;
+    onChange();
+  });
+  // The window may have changed state between the first render and this subscription.
+  windowFullscreenSnapshot = bridge.getWindowFullscreenState();
+  return () => {
+    unsubscribe();
+    windowFullscreenSnapshot = null;
+  };
+}
+
+function readWindowFullscreen(): boolean {
+  if (windowFullscreenSnapshot === null) {
+    const getWindowFullscreenState = macosDesktopBridge()?.getWindowFullscreenState;
+    windowFullscreenSnapshot =
+      typeof getWindowFullscreenState === "function" ? getWindowFullscreenState() : false;
+  }
+  return windowFullscreenSnapshot;
 }
 
 function readInitialThreadSidebarWidth(): number {
@@ -128,9 +166,7 @@ export function SidebarControl({
       else toggleSidebar();
     };
 
-    // Capture before focused editors consume commands such as Mod+B for rich-text formatting.
     window.addEventListener("keydown", onKeyDown, true);
-    // A focused desktop browser page forwards the chord as a menu action.
     const unsubscribe = window.desktopBridge?.onMenuAction((action) => {
       if (action === "sidebar.toggle") toggleSidebar();
       else if (action === "sidebar.toggleActivity") void toggleActivity();
@@ -142,10 +178,6 @@ export function SidebarControl({
   }, [keybindings, toggleActivity, toggleSidebar, usagePageOpen]);
 
   return (
-    // The right-side layout controls carry mr-px (border compensation inside
-    // the panel), so the trigger mirrors it: both clusters sit one extra pixel
-    // off their edge and the titlebar reads symmetric.
-    // The sheet owns its trigger until its closing transition unmounts it.
     <div
       className={cn(
         "pointer-events-none fixed left-[var(--workspace-controls-left)] top-[var(--workspace-controls-top)] z-50 ml-px flex h-[var(--workspace-topbar-height)] items-center",
@@ -175,13 +207,9 @@ export function SidebarControl({
   );
 }
 
-// Moves through the app's route history like a browser's back/forward buttons.
 function NavigationHistoryShortcuts() {
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const routeThreadRef = useParams({
-    strict: false,
-    select: (params) => resolveThreadRouteRef(params),
-  });
+  const routeThreadRef = useThreadRouteRef();
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -238,9 +266,6 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const projectsSidebar = useLegacySidebarEnabled();
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();
-  // Settings routes show the settings nav in place of whichever thread
-  // sidebar is active.
-  // Seeds server-side visited tracking from this browser's localStorage the
   useThreadVisitedMigration();
   const pathname = useLocation({ select: (location) => location.pathname });
   const panelAnimationsSuppressed = usePanelNavigationSuppression(pathname);
@@ -275,12 +300,10 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
     }
     setSidebarWidth(resolveInitialThreadSidebarWidth(null, viewportWidth - railWidth));
   };
-  const [isWindowFullscreen, setIsWindowFullscreen] = useState(() => {
-    const getWindowFullscreenState = window.desktopBridge?.getWindowFullscreenState;
-    return isMacosDesktop && typeof getWindowFullscreenState === "function"
-      ? getWindowFullscreenState()
-      : false;
-  });
+  const isWindowFullscreen = useSyncExternalStore(
+    subscribeToWindowFullscreen,
+    readWindowFullscreen,
+  );
   const windowControlsInsetStyle = (
     isMacosDesktop && !isWindowFullscreen
       ? { "--workspace-controls-left": MACOS_TRAFFIC_LIGHTS_LEFT_INSET }
@@ -299,23 +322,6 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         }
       : {}),
   } as CSSProperties;
-
-  useEffect(() => {
-    if (!isMacosDesktop) return;
-    const bridge = window.desktopBridge;
-    if (!bridge) return;
-    const { getWindowFullscreenState, onWindowFullscreenStateChange } = bridge;
-    if (
-      typeof getWindowFullscreenState !== "function" ||
-      typeof onWindowFullscreenStateChange !== "function"
-    ) {
-      return;
-    }
-
-    const unsubscribe = onWindowFullscreenStateChange(setIsWindowFullscreen);
-    setIsWindowFullscreen(getWindowFullscreenState());
-    return unsubscribe;
-  }, [isMacosDesktop]);
 
   useEffect(() => {
     const onMenuAction = window.desktopBridge?.onMenuAction;

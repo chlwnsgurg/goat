@@ -124,7 +124,7 @@ const fixture = Effect.fn("test.ghFixture")(function* (
         calls.push("mcp");
         return processHandle('T3_CEILING=default\n{"token":"fixture-session","expiresAt":null}');
       }
-      if (command.args.includes("--")) {
+      if (command.args.some((arg, index) => arg === "-s" && command.args[index + 1] === "--")) {
         calls.push("launch");
         return processHandle(
           JSON.stringify({

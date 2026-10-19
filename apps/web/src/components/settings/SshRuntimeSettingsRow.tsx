@@ -10,7 +10,7 @@ import {
   type EnvironmentId,
   type SshRuntimeUpdateMode,
 } from "@goat/contracts";
-import { useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 
 import { sshRuntime } from "~/state/sshRuntime";
 import { Button } from "../ui/button";
@@ -60,10 +60,7 @@ function SshRuntimeSettingsRowContent({
 }: SshRuntimeSettingsRowProps) {
   const registry = useContext(RegistryContext);
   const { alias, hostname, username, port } = target;
-  const input = useMemo(
-    () => ({ environmentId, target: { alias, hostname, username, port } }),
-    [environmentId, alias, hostname, username, port],
-  );
+  const input = { environmentId, target: { alias, hostname, username, port } };
   const result = useAtomValue(sshRuntime.statusAtom(input));
   const status = result?.status;
   const [confirmOpen, setConfirmOpen] = useState(false);

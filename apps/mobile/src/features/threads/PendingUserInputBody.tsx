@@ -2,7 +2,7 @@ import type { RuntimeRequestId } from "@goat/contracts";
 import type { ThreadUserInputQuestion } from "@goat/client-runtime/state/thread-requests";
 import type { ReactNode } from "react";
 import { Pressable, View } from "react-native";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { cn } from "../../lib/cn";
 import {
   isPendingUserInputOptionSelected,

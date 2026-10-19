@@ -1,5 +1,5 @@
 import { Link, useLocation, useParams } from "@tanstack/react-router";
-import { useCallback, useContext } from "react";
+import { useContext } from "react";
 
 import { GOAT_BOT_PATH, isGoatBotRoute } from "~/globalAgentRoute";
 import { useGlobalAgentStore } from "~/globalAgentStore";
@@ -38,9 +38,9 @@ function GoatBotSidebarObserver() {
   const params = useParams({ strict: false });
   const active = isGoatBotRoute(pathname, resolveThreadRouteTarget(params), botRef);
   const { isMobile, setOpenMobile } = useSidebar();
-  const handleClick = useCallback(() => {
+  const handleClick = () => {
     if (isMobile) setOpenMobile(false);
-  }, [isMobile, setOpenMobile]);
+  };
   return (
     <SidebarGroup className="z-[1]">
       <SidebarMenu>

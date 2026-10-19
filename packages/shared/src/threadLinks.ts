@@ -26,10 +26,6 @@ export function parseThreadLinkHref(href: string): ThreadId | null {
   return Option.getOrNull(decodeThreadId(href.slice(prefix.length)));
 }
 
-/**
- * Agents often percent-encode the id anyway. When the id as written names no thread, clients try
- * this decoded form. Null when decoding changes nothing or fails.
- */
 export function percentDecodedThreadLinkId(threadId: ThreadId): ThreadId | null {
   try {
     const decoded = decodeURIComponent(threadId);
@@ -39,7 +35,6 @@ export function percentDecodedThreadLinkId(threadId: ThreadId): ThreadId | null 
   }
 }
 
-/** A thread link whose label survives Markdown: no brackets, backslashes, or line breaks. */
 export function formatThreadLink(threadId: string, label: string): string {
   const cleaned = label
     .replace(/[[\]\\\r\n]/g, " ")
@@ -52,10 +47,6 @@ export function hasThreadLinks(markdown: string): boolean {
   return THREAD_LINK_HREF_PREFIXES.some((prefix) => markdown.includes(`](${prefix}`));
 }
 
-/**
- * Relabels each thread link with `title(threadId)`, pointing it at the thread that title came from.
- * A link it returns nothing for keeps its label.
- */
 export function relabelThreadLinks(
   markdown: string,
   title: (threadId: ThreadId) => string | undefined,
@@ -66,7 +57,6 @@ export function relabelThreadLinks(
     if (href === undefined) return source;
     const written = parseThreadLinkHref(href);
     if (written === null) return source;
-    // The decoded id only stands in when the id as written names no thread.
     const decoded = percentDecodedThreadLinkId(written);
     const threadId =
       title(written) === undefined && decoded !== null && title(decoded) !== undefined

@@ -61,7 +61,6 @@ export const HtmlPreviewTool = Tool.make(agentSurfaceRegistry["html.preview"].na
 
 // Read-only in the MCP sense: it shows a page in the caller's own thread and
 // touches no workspace, so plan mode and read-only sandboxes can use it.
-// Open-world, since the page may load remote resources, as in a preview.
 const HtmlRenderTool = Tool.make(agentSurfaceRegistry["html.render"].name, {
   description: agentSurfaceRegistry["html.render"].description,
   parameters: Schema.Struct({
@@ -80,6 +79,7 @@ const HtmlRenderTool = Tool.make(agentSurfaceRegistry["html.render"].name, {
       title: Schema.String,
       height: Schema.Number,
       heights: Schema.optional(Schema.Array(Schema.Tuple([Schema.Int, Schema.Int]))),
+      outline: Schema.optional(Schema.String),
     }),
     message: Schema.String,
   }),

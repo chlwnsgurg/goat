@@ -59,7 +59,6 @@ import {
   resolveSidebarThreadDragMode,
   resolveSidebarV2TopStatus,
   resolveThreadLastVisitedAt,
-  resolveThreadRowClassName,
   resolveThreadStatusPill,
   pullRequestMatchesSearchQuery,
   searchSidebarThreads,
@@ -72,7 +71,6 @@ import {
   sortProjectsForSidebar,
   sortScopedProjectsForSidebar,
   sortSidebarV2ProjectGroups,
-  shouldCreateNewThreadInCurrentProject,
   shouldNavigateAfterThreadPark,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
   shouldCancelSidebarThreadDrag,
@@ -82,7 +80,6 @@ import {
   resolveSidebarDropVerb,
 } from "./Sidebar.logic";
 import { threadSearchMatchKey } from "@goat/client-runtime/state/thread-search";
-import { sortSettledThreads } from "@goat/client-runtime/state/thread-sort";
 import {
   EnvironmentId,
   NodeId,
@@ -1646,10 +1643,6 @@ describe("orderItemsByPreferredIds", () => {
   });
 
   it("honors projectOrder physical keys via getProjectOrderKey", async () => {
-    // Regression guard for #1904 / the regression introduced by #2055:
-    // `projectOrder` is populated with physical keys (envId + cwd-derived)
-    // by the store and by drag-end handlers. Readers must identify projects
-    // with the same key format, or manual sort silently snaps back.
     const { getProjectOrderKey } = await import("../logicalProject");
     const projects = [
       {
@@ -2162,9 +2155,80 @@ describe("resolveThreadStatusPill", () => {
       }),
     ).toMatchObject({ label: "Completed", pulse: false });
   });
+
+  it("shows failed, not completed, when the unseen run failed", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          interactionMode: "default",
+          latestRun: { ...makeLatestRun(), status: "failed" },
+          lastVisitedAt: "2026-03-09T10:04:00.000Z",
+          runtime: {
+            ...baseThread.runtime,
+            status: "failed",
+            activeRunId: null,
+            lastError: "Provider turn failed.",
+          },
+        },
+      }),
+    ).toMatchObject({ label: "Failed", pulse: false });
+  });
+
+  it("shows failed for a thread nobody has opened yet", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          interactionMode: "default",
+          latestRun: { ...makeLatestRun(), status: "failed" },
+          lastVisitedAt: null,
+          runtime: { ...baseThread.runtime, status: "failed", activeRunId: null },
+        },
+      }),
+    ).toMatchObject({ label: "Failed" });
+  });
+
+  it("shows failed, not plan ready, when a plan run proposed a plan and then failed", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          hasActionableProposedPlan: true,
+          latestRun: { ...makeLatestRun(), status: "failed" },
+          lastVisitedAt: "2026-03-09T10:04:00.000Z",
+          runtime: { ...baseThread.runtime, status: "failed", activeRunId: null },
+        },
+      }),
+    ).toMatchObject({ label: "Failed" });
+  });
+
+  it("drops the failed pill once the failure has been seen", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          interactionMode: "default",
+          latestRun: { ...makeLatestRun(), status: "failed" },
+          lastVisitedAt: "2026-03-09T10:06:00.000Z",
+          runtime: { ...baseThread.runtime, status: "failed", activeRunId: null },
+        },
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("resolveProjectStatusIndicator", () => {
+  it("ranks a failure above work in progress and completions", () => {
+    expect(
+      resolveProjectStatusIndicator([
+        { label: "Completed", colorClass: "", dotClass: "", pulse: false },
+        { label: "Working", colorClass: "", dotClass: "", pulse: true },
+        { label: "Failed", colorClass: "", dotClass: "", pulse: false },
+      ]),
+    ).toMatchObject({ label: "Failed" });
+  });
+
   it("returns null when no threads have a notable status", () => {
     expect(resolveProjectStatusIndicator([null, null])).toBeNull();
   });
@@ -2514,8 +2578,6 @@ describe("sortProjectsForSidebar", () => {
     "matches the per-comparison %s order on a shuffled list with ties",
     (sortOrder) => {
       const minute = (value: number) => `2026-03-09T10:0${value}:00.000Z`;
-      // (index * 7) % 24 scrambles the input order. Titles repeat, and
-      // projects 16-23 have no threads, so they use their own stamps.
       const projects = Array.from({ length: 24 }, (_, index) => {
         const n = (index * 7) % 24;
         return makeProject({
@@ -2531,8 +2593,6 @@ describe("sortProjectsForSidebar", () => {
         updatedAt: minute(n % 3),
         latestUserMessageAt: n % 4 === 0 ? null : minute(n % 5),
       }));
-      // The comparator this sort replaced: it walked each project's threads
-      // on every call.
       const timestamp = (project: Project) =>
         getProjectSortTimestamp(
           project,
@@ -2728,8 +2788,6 @@ describe("resolveThreadLastVisitedAt", () => {
   });
 
   it("keeps the server watermark authoritative when visited tracking exists", () => {
-    // A rewound server value (mark-unread) must win even over a newer local
-    // watermark left behind by earlier viewing on this device.
     expect(resolveThreadLastVisitedAt("2026-07-30T10:00:00.000Z", "2026-07-30T10:00:05.000Z")).toBe(
       "2026-07-30T10:00:00.000Z",
     );
@@ -2761,8 +2819,6 @@ describe("pinOrderKeyBetween", () => {
   });
 
   it("stays strictly ordered under repeated top insertion", () => {
-    // Every new pin lands at the head of the arranged run; keys must keep
-    // sorting before the previous head without ever bottoming out.
     let head: string | null = null;
     const keys: string[] = [];
     for (let i = 0; i < 100; i += 1) {
@@ -2924,8 +2980,10 @@ describe("Activity sidebar ordering", () => {
       key,
       section,
     });
-    // Pinned p1 | Active a1 a2 | Settled s1
+    // Priority w1 | Pinned p1 | Active a1 a2 | Settled s1
     const items: readonly SidebarListItem[] = [
+      marker("priority-header"),
+      row("w1", "priority"),
       marker("pinned-header"),
       row("p1", "pinned"),
       marker("pinned-divider"),
@@ -2945,9 +3003,33 @@ describe("Activity sidebar ordering", () => {
       expect(resolveSidebarDropVerb("active", "priority")).toBeNull();
     });
 
+    it.each([
+      ["pinned", "p1"],
+      ["active", "a2"],
+      ["settled", "s1"],
+    ] as const)(
+      "does not move a Priority thread into %s when its reference drag ends in the sidebar",
+      (section, overKey) => {
+        const target = resolveSidebarDropTarget(items, "w1", overKey);
+        expect(target).toBeNull();
+        expect(
+          planSidebarThreadDrop({
+            activeKey: "w1",
+            activeSection: "priority",
+            target: { section, pinnedOrder: ["p1"], activeOrder: ["a1", "a2"] },
+            pinnedOrder: ["p1"],
+            pinnedKeysById: new Map([["p1", "m"]]),
+            activeOrder: ["a1", "a2"],
+            activeKeysById: new Map([
+              ["a1", "f"],
+              ["a2", "t"],
+            ]),
+          }),
+        ).toEqual({ kind: "none" });
+      },
+    );
+
     it("arranges the rows it can write when another row's server cannot store an order", () => {
-      // None of the rows has a key yet, so the drop needs keys for its
-      // neighbors too. "offline" sits on a server that cannot take them.
       const plan = planSidebarThreadDrop({
         activeKey: "a2",
         activeSection: "active",
@@ -2972,7 +3054,6 @@ describe("Activity sidebar ordering", () => {
       const [a2, a1] = plan.assignments.map(({ orderKey }) => orderKey);
       expect(a2! < a1!).toBe(true);
 
-      // A keyed row on that server still sorts by its key, so it stays a bound.
       const above = planSidebarThreadDrop({
         activeKey: "a2",
         activeSection: "active",

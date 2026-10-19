@@ -1,12 +1,4 @@
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type ReactNode,
-  type KeyboardEvent,
-} from "react";
+import { memo, useEffect, useRef, useState, type ReactNode, type KeyboardEvent } from "react";
 import { ChevronLeftIcon, ChevronRightIcon, RotateCwIcon, XIcon } from "~/components/solar";
 import { Image as ImageGlyph, Text as TextGlyph } from "~/components/solar/nodes";
 import { Button } from "../ui/button";
@@ -28,6 +20,10 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ZoomableImage, type ZoomableImageHandle } from "./ZoomableImage";
 import { composerFloatingLayerProps } from "./composerEventScope";
 import { useRightPanelStore } from "../../rightPanelStore";
+import { useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/reactivity";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { expandedImageKey } from "./ExpandedImagePreview";
 
 interface ExpandedImageDialogProps {
   preview: ExpandedImagePreview;
@@ -84,7 +80,6 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
     document.activeElement instanceof HTMLElement ? document.activeElement : null,
   );
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  // The offset accumulates without bound, so wrap it into range in both directions:
   // JavaScript `%` keeps the sign of the dividend, and a negative index blanks the dialog.
   const imageCount = preview.images.length;
   const index =
@@ -139,21 +134,24 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
       }
     : source;
 
-  const navigateImage = useCallback((direction: -1 | 1) => {
+  const navigateImage = (direction: -1 | 1) => {
     setImageOffset((current) => current + direction);
-  }, []);
+  };
   const retryImage = async () => {
     if (retryingImage || !imageAsset) return;
     setRetryingImage(true);
-    try {
+    const refreshImage = async () => {
       await refreshImageAssetUrl();
       setFailedImageSrc(null);
       setImageLoadAttempt((attempt) => attempt + 1);
-    } catch {
-      // The placeholder stays available for another retry.
-    } finally {
-      setRetryingImage(false);
-    }
+    };
+    await refreshImage()
+      .catch(() => {
+        // The placeholder stays available for another retry.
+      })
+      .finally(() => {
+        setRetryingImage(false);
+      });
   };
 
   // The element that opened the preview gets focus back on close. Without
@@ -229,7 +227,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
         variant="media"
         showCloseButton={false}
         bottomStickOnMobile={false}
-        className="row-start-1 h-full max-h-[92vh] w-[92vw] max-w-[92vw] items-center justify-center overflow-visible [--media-width:92vw] [--media-height:min(86vh,calc(100vh-160px))] sm:[--media-width:calc(92vw-96px)]"
+        className="row-start-1 h-full max-h-[92vh] w-[92vw] max-w-[92vw] items-center justify-center overflow-visible [--media-width:92vw] [--media-height:min(calc((100vh-var(--native-titlebar-height,0px))*0.86),calc(100vh-var(--native-titlebar-height,0px)-160px))] sm:[--media-width:calc(92vw-96px)]"
         onKeyDown={onKeyDown}
         initialFocus={closeButtonRef}
         finalFocus={() => returnFocusTarget}
@@ -238,7 +236,6 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
         }}
       >
         <DialogTitle className="sr-only">Expanded {mediaLabel} preview</DialogTitle>
-        {/* The stage keeps a fixed size, so the close button stays put whatever the media or caption. */}
         <Button
           type="button"
           ref={closeButtonRef}
@@ -299,6 +296,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
                 key={`${index}:${imageSrc}:${imageLoadAttempt}`}
                 src={imageSrc}
                 name={item.name}
+                mimeType={item.mimeType}
                 onError={() => setFailedImageSrc(imageSrc)}
               />
             )}
@@ -352,3 +350,47 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
     </Dialog>
   );
 });
+
+/**
+ * The chat view's open media preview. It lives outside ChatView so opening or
+ * closing it renders only the dialog host, not the whole chat chrome.
+ */
+const expandedImagePreviewAtom = Atom.make<{
+  readonly threadKey: string;
+  readonly preview: ExpandedImagePreview;
+} | null>(null).pipe(Atom.keepAlive, Atom.withLabel("chat:expanded-image-preview"));
+
+export function openExpandedImagePreview(threadKey: string, preview: ExpandedImagePreview): void {
+  appAtomRegistry.set(expandedImagePreviewAtom, { threadKey, preview });
+}
+
+function closeExpandedImagePreview(): void {
+  appAtomRegistry.set(expandedImagePreviewAtom, null);
+}
+
+function closeExpandedImagePreviewFor(threadKey: string): void {
+  if (appAtomRegistry.get(expandedImagePreviewAtom)?.threadKey === threadKey) {
+    closeExpandedImagePreview();
+  }
+}
+
+export function ExpandedImageDialogHost({ threadKey }: { readonly threadKey: string }) {
+  const state = useAtomValue(expandedImagePreviewAtom);
+  const preview = state?.threadKey === threadKey ? state.preview : null;
+  const item = preview?.images[preview.index];
+  const ownedSrc = item?.ownsSrc === true ? item.src : null;
+  useEffect(() => {
+    if (ownedSrc === null) return;
+    return () => URL.revokeObjectURL(ownedSrc);
+  }, [ownedSrc]);
+  // Leaving the thread (or the chat view) drops its preview.
+  useEffect(() => () => closeExpandedImagePreviewFor(threadKey), [threadKey]);
+  if (preview === null) return null;
+  return (
+    <ExpandedImageDialog
+      key={expandedImageKey(preview)}
+      preview={preview}
+      onClose={closeExpandedImagePreview}
+    />
+  );
+}

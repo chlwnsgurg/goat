@@ -130,6 +130,15 @@ describe("WebSocket RPC contracts", () => {
     });
     expect(Exit.isFailure(decoded)).toBe(true);
   });
+  it("lets the server pick a new worktree's folder", () => {
+    const createWorktree = WsRpcGroup.requests.get(WS_METHODS.vcsCreateWorktree);
+    if (createWorktree === undefined) throw new Error("vcs.createWorktree is not registered");
+    const decode = Schema.decodeUnknownExit(createWorktree.payloadSchema);
+    const request = { cwd: "/repo", refName: "main", newRefName: "feature/x" };
+
+    expect(Exit.isSuccess(decode({ ...request, path: null }))).toBe(true);
+    expect(Exit.isFailure(decode({ ...request, path: "/repo/.git/hooks" }))).toBe(true);
+  });
 });
 
 it("registers only the two SSH workspace methods", () => {

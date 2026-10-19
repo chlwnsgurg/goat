@@ -2,10 +2,10 @@ import { useId, useMemo, useState } from "react";
 import { Image, Pressable, View } from "react-native";
 
 import { FilePreviewLoading } from "./FilePreviewFeedback";
-import { AppText } from "../../components/AppText";
-import { EmptyState } from "../../components/EmptyState";
+import { AppText } from "../../components/ui/AppText";
+import { EmptyState } from "../../components/ui/EmptyState";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
-import { PresentationSource } from "../../components/NativePresentation";
+import { PresentationSource } from "../../components/ui/NativePresentation";
 import { useMediaActions } from "../../state/mediaActions";
 import { type MediaActionsSource } from "../../lib/mediaActionsSource";
 import { MediaActionsMenu } from "../../components/MediaActionsMenu";

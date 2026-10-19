@@ -573,7 +573,6 @@ describe("video asset byte ranges", () => {
         ] as const) {
           const file = yield* openMediaFile(canonicalPath);
           if (!file) throw new Error("Expected an opened media file");
-          // Model a sparse file beyond the native stream's numeric addressing limit.
           const info = yield* Effect.promise(() => file.handle.stat({ bigint: true }));
           info.size = size;
           const statSpy = vi.spyOn(file.handle, "stat").mockResolvedValue(info);

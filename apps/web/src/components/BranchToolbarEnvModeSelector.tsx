@@ -16,6 +16,9 @@ import {
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import { Menu, MenuTrigger, MenuPopup } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { useAtomValue } from "@effect/atom-react";
+import { shortcutLabelForCommand } from "../keybindings";
+import { primaryServerKeybindingsAtom } from "../state/server";
 
 const EMPTY_SSH_OPTIONS: ReadonlyArray<SavedSshWorktreeOption> = [];
 
@@ -46,6 +49,10 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   onSshDestinationChange,
 }: BranchToolbarEnvModeSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
+  const shortcutLabel = shortcutLabelForCommand(
+    useAtomValue(primaryServerKeybindingsAtom),
+    "composer.workspace",
+  );
   const workspaceLabel = resolveSshWorkspaceLabel({
     sshSelected: sshDestination !== null,
     savedLabel: findSavedSshWorktreeOption(sshOptions, sshDestination)?.label ?? null,
@@ -113,7 +120,10 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
           )}
           <ComposerContextLabel collapseWhenCompact={false}>{workspaceLabel}</ComposerContextLabel>
         </TooltipTrigger>
-        <TooltipPopup>{workspaceLabel}</TooltipPopup>
+        <TooltipPopup>
+          {workspaceLabel}
+          {shortcutLabel ? ` · ${shortcutLabel}` : null}
+        </TooltipPopup>
       </Tooltip>
       <MenuPopup align="start" side="top" {...composerFloatingLayerProps}>
         <WorkspaceMenuItems

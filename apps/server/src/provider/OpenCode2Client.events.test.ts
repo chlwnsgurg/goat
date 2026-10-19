@@ -22,7 +22,6 @@ const Entry = Schema.Struct({ type: Schema.String, frame: Schema.optional(Schema
 const decodeEntry = Schema.decodeUnknownSync(Schema.fromJsonString(Entry));
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
-/** The recorded `simple` turn's events, as a newer server would send them. */
 const newerServerStream = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const recorded = (yield* fs.readFileString(RECORDING.pathname))
@@ -39,14 +38,12 @@ const newerServerStream = Effect.gen(function* () {
   const [first] = recorded;
   return [
     ...recorded.slice(0, executionStarted),
-    // An event type this build has never heard of.
     {
       id: "evt_0000000000newtype",
       created: 1,
       type: "session.hologram.projected",
       data: { beams: 3 },
     },
-    // A known event carrying a field added after 2.0.18.
     {
       ...recorded[executionStarted],
       data: { ...(recorded[executionStarted]!.data as object), lane: "fast" },
@@ -167,7 +164,6 @@ describe("OpenCode2Client events", () => {
                     type: "session.hologram.projected",
                     data: { sessionID: "ses_x" },
                   },
-                  // A start is kept as a marker; it never ends anything.
                   {
                     id: "evt_0",
                     created: 1,

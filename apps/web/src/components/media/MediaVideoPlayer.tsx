@@ -1,5 +1,7 @@
+import { settlePromise } from "@goat/client-runtime/state/runtime";
+import { AsyncResult } from "effect/reactivity";
 import { PlayIcon, RotateCwIcon, TriangleAlertIcon } from "~/components/solar";
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 
 import { cn } from "../../lib/utils";
 import { prepareVideoFirstFrame } from "../../lib/videoFirstFrame";
@@ -16,11 +18,9 @@ interface MediaVideoPlayerProps {
   readonly revision?: string | null | undefined;
   readonly preload?: "visible" | "metadata" | undefined;
   readonly autoPlay?: boolean | undefined;
-  /** Presents a still thumbnail whose full surface opens the video in a viewer. */
   readonly onOpen?: (() => void) | undefined;
   readonly className?: string | undefined;
   readonly videoClassName?: string | undefined;
-  /** Styles the loading and failure panels, which otherwise assume an inline light surface. */
   readonly stateClassName?: string | undefined;
   readonly style?: CSSProperties | undefined;
   readonly copyMarkdown?: string | undefined;
@@ -36,7 +36,6 @@ interface PlaybackState {
   readonly playbackRate: number;
 }
 
-/** Keeps native range streaming and playback state consistent across inline and file previews. */
 export function MediaVideoPlayer({
   src: latestSrc,
   label,
@@ -72,6 +71,8 @@ export function MediaVideoPlayer({
   const src = playbackSource?.src ?? latestSrc;
   const failed = src !== null ? failure?.src === src : sourceFailed;
   const videoVisible = src !== null && !failed;
+  // Without IntersectionObserver there is no visibility signal, so preload right away.
+  const preloadReady = preloadedSrc === src || typeof IntersectionObserver === "undefined";
 
   useEffect(() => {
     latestSrcRef.current = latestSrc;
@@ -87,7 +88,7 @@ export function MediaVideoPlayer({
     return () => controller.abort();
   }, [failure]);
 
-  const rememberPlayback = useCallback(() => {
+  const rememberPlayback = () => {
     const video = videoRef.current;
     if (!video) return;
     pendingRestore.current = {
@@ -97,10 +98,10 @@ export function MediaVideoPlayer({
       muted: video.muted,
       playbackRate: video.playbackRate,
     };
-  }, []);
+  };
 
   // Keep a playing range request on its original URL, then adopt the latest signed URL on pause.
-  const refreshPausedRevision = useCallback(() => {
+  const refreshPausedRevision = () => {
     const video = videoRef.current;
     if (
       playbackSource !== null &&
@@ -112,16 +113,12 @@ export function MediaVideoPlayer({
       rememberPlayback();
       setPlaybackSource({ src: latestSrc, revision, latestAtPin: latestSrc });
     }
-  }, [latestSrc, playbackSource, rememberPlayback, revision]);
+  };
   useEffect(refreshPausedRevision, [refreshPausedRevision]);
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!videoVisible || !video || preload === "metadata" || preloadedSrc === src) return;
-    if (typeof IntersectionObserver === "undefined") {
-      setPreloadedSrc(src);
-      return;
-    }
+    if (!videoVisible || !video || preload === "metadata" || preloadReady) return;
     let active = true;
     const observer = new IntersectionObserver(
       (entries) => {
@@ -136,7 +133,7 @@ export function MediaVideoPlayer({
       active = false;
       observer.disconnect();
     };
-  }, [src, preload, preloadedSrc, videoVisible]);
+  }, [src, preload, preloadReady, videoVisible]);
 
   useEffect(() => {
     if (!videoVisible) return;
@@ -163,8 +160,9 @@ export function MediaVideoPlayer({
   const retry = async () => {
     if (retrying) return;
     setRetrying(true);
-    try {
-      const renewed = await onRetry?.();
+    const result = await settlePromise(async () => onRetry?.());
+    if (AsyncResult.isSuccess(result)) {
+      const renewed = result.value;
       setPlaybackSource(
         typeof renewed === "string"
           ? { src: renewed, revision, latestAtPin: latestSrcRef.current }
@@ -175,11 +173,10 @@ export function MediaVideoPlayer({
       autoRefreshUsed.current = false;
       recoveryFrom.current = null;
       recoveryTime.current = null;
-    } catch {
-      if (src !== null) setFailure({ src, format: false });
-    } finally {
-      setRetrying(false);
+    } else if (src !== null) {
+      setFailure({ src, format: false });
     }
+    setRetrying(false);
   };
 
   const player = (
@@ -230,7 +227,7 @@ export function MediaVideoPlayer({
           controls={!onOpen}
           muted={onOpen ? true : undefined}
           playsInline
-          preload={preload === "metadata" || preloadedSrc === src ? "metadata" : "none"}
+          preload={preload === "metadata" || preloadReady ? "metadata" : "none"}
           className={cn(
             "aspect-video max-h-full w-full bg-black object-contain",
             onOpen && "pointer-events-none",

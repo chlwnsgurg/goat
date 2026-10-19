@@ -6,9 +6,14 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as TestClock from "effect/testing/TestClock";
-import * as GitHubApi from "./GitHubApi.ts";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import * as SourceControlRateLimit from "@goat/source-control-core/server/SourceControlRateLimit";
+import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubPullRequestApi from "./GitHubPullRequestApi.ts";
 import * as GitHubPullRequestProvider from "./GitHubPullRequestProvider.ts";
+import * as GitHubQuota from "./GitHubQuota.ts";
+import * as GitHubRequestPolicy from "./GitHubRequestPolicy.ts";
+import * as GitHubRest from "./GitHubRest.ts";
 import { containsSessionUrl, make, summarySection } from "./cloudSessionPullRequest.ts";
 
 const SESSION_URL = "https://claude.ai/code/session_ABC123";
@@ -41,8 +46,8 @@ const commitResponse = (message = "Unrelated", cursor: string | null = null, sha
     },
   });
 const restResponse = (
-  reply: Partial<GitHubApi.GitHubRestResponse> = {},
-): GitHubApi.GitHubRestResponse => ({
+  reply: Partial<GitHubRest.GitHubRestResponse> = {},
+): GitHubRest.GitHubRestResponse => ({
   status: 200,
   headers: {},
   body: "[]",
@@ -50,10 +55,55 @@ const restResponse = (
   invalidUtf8: false,
   ...reply,
 });
+type GraphQlRequest = {
+  readonly query: string;
+  readonly variables: Readonly<Record<string, unknown>>;
+};
+/** GitHub's GraphQL endpoint, answering each request with a raw response body. */
+const graphQlHttp = (answer: (request: GraphQlRequest) => Effect.Effect<string>) =>
+  HttpClient.make((request) =>
+    Effect.gen(function* () {
+      const sent: GraphQlRequest =
+        request.body._tag === "Uint8Array"
+          ? JSON.parse(new TextDecoder().decode(request.body.body))
+          : { query: "", variables: {} };
+      return HttpClientResponse.fromWeb(
+        request,
+        new Response(yield* answer(sent), { headers: { "content-type": "application/json" } }),
+      );
+    }),
+  );
+const transport = (
+  rest: GitHubRest.GitHubRest["Service"]["rest"],
+  graphql: (request: GraphQlRequest) => Effect.Effect<string> = () =>
+    Effect.succeed(commitResponse()),
+) =>
+  Layer.mergeAll(
+    Layer.mock(GitHubRest.GitHubRest)({ rest }),
+    GitHubRequestPolicy.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.succeed(GitHubCredentials.GitHubCredentials, {
+            get: (host) =>
+              Effect.succeed({
+                host,
+                token: Redacted.make("fixture-token"),
+                source: "gh" as const,
+                fingerprint: "fixture-account",
+              }),
+            invalidate: () => Effect.void,
+          }),
+          GitHubQuota.layer,
+          SourceControlRateLimit.layer,
+        ),
+      ),
+    ),
+    Layer.succeed(HttpClient.HttpClient, graphQlHttp(graphql)),
+  );
 const makeLookup = (
-  rest: GitHubApi.GitHubApi["Service"]["rest"],
-  graphql: GitHubApi.GitHubApi["Service"]["graphql"] = () => Effect.succeed(commitResponse()),
-) => make.pipe(Effect.provide(Layer.mock(GitHubApi.GitHubApi)({ rest, graphql })));
+  rest: GitHubRest.GitHubRest["Service"]["rest"],
+  graphql?: (request: GraphQlRequest) => Effect.Effect<string>,
+) => make.pipe(Effect.provide(transport(rest, graphql)));
 const pinned = (fingerprint = "fixture-account", host = input.host) => ({
   host,
   token: Redacted.make("fixture-token"),
@@ -64,7 +114,9 @@ const observe = (
   fingerprint = "fixture-account",
   source = input,
 ) =>
-  find(source).pipe(Effect.provideService(GitHubApi.PinnedGitHubCredential, pinned(fingerprint)));
+  find(source).pipe(
+    Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, pinned(fingerprint)),
+  );
 const nextLink = { link: '<https://api.github.com/next>; rel="next"' };
 const firstPage = Array.from({ length: 100 }, (_, index) => pr(index + 1));
 
@@ -145,8 +197,8 @@ it.effect("reads full commit messages and continues the commit connection", () =
       () => Effect.succeed(restResponse({ body: JSON.stringify([pr()]) })),
       (request) =>
         Effect.sync(() => {
-          expect(request.query).toContain("commit { message }");
-          const after = request.variables?.after;
+          expect(request.query).toContain("commit{message}");
+          const after = request.variables.after;
           cursors.push(after);
           return after === null
             ? commitResponse("Headline", "page-two")
@@ -172,8 +224,8 @@ it.effect(
           ),
         (request) =>
           Effect.sync(() => {
-            const number = Number(request.variables?.number);
-            const after = request.variables?.after;
+            const number = Number(request.variables.number);
+            const after = request.variables.after;
             reads.push({ number, after });
             if (number === 98 && after === null) return commitResponse("Unrelated", "more-98");
             return commitResponse(
@@ -218,8 +270,8 @@ it.effect(
           ),
         (request) =>
           Effect.sync(() => {
-            const number = Number(request.variables?.number);
-            const after = request.variables?.after;
+            const number = Number(request.variables.number);
+            const after = request.variables.after;
             reads.push({ number, after });
             return commitResponse(
               "Unrelated",
@@ -281,11 +333,14 @@ it.effect(
     Effect.gen(function* () {
       const cases = [
         [
-          new GitHubApi.GitHubApiAuthenticationError({ host: input.host, operation: "read" }),
+          new GitHubRequestPolicy.GitHubApiAuthenticationError({
+            host: input.host,
+            operation: "read",
+          }),
           "unauthenticated",
         ],
         [
-          new GitHubApi.GitHubApiRateLimitError({
+          new GitHubRequestPolicy.GitHubApiRateLimitError({
             host: input.host,
             operation: "read",
             retryAt: 123,
@@ -293,16 +348,19 @@ it.effect(
           "rate-limited",
         ],
         [
-          new GitHubApi.GitHubApiRequestError({
+          new GitHubRequestPolicy.GitHubApiRequestError({
             host: input.host,
             operation: "read",
             cause: "private-payload",
           }),
           "failed",
         ],
-        [new GitHubApi.GitHubApiNotFoundError({ host: input.host, operation: "read" }), "failed"],
         [
-          new GitHubApi.GitHubApiResponseError({
+          new GitHubRequestPolicy.GitHubApiNotFoundError({ host: input.host, operation: "read" }),
+          "failed",
+        ],
+        [
+          new GitHubRequestPolicy.GitHubApiResponseError({
             host: input.host,
             operation: "read",
             status: 500,
@@ -329,7 +387,10 @@ it.effect(
       const find = yield* makeLookup(() => Effect.die("Must validate before reading"));
       expect((yield* find(input).pipe(Effect.flip))._tag).toBe("PullRequestProviderError");
       yield* find(input).pipe(
-        Effect.provideService(GitHubApi.PinnedGitHubCredential, pinned("account", "other.host")),
+        Effect.provideService(
+          GitHubRequestPolicy.PinnedGitHubCredential,
+          pinned("account", "other.host"),
+        ),
         Effect.flip,
       );
       for (const source of [
@@ -363,7 +424,7 @@ it.effect("blocked commit pagination stays incomplete while other candidates can
       (request) =>
         Effect.sync(() => {
           reads++;
-          return request.variables?.number === 7
+          return request.variables.number === 7
             ? commitResponse("Unrelated", `cursor-${reads}`)
             : commitResponse(matched ? `Claude-Session: ${SESSION_URL}` : "Unrelated");
         }),
@@ -440,18 +501,21 @@ it.effect(
             viewer: "octocat",
             credentialFingerprint: "verified-account",
           }).pipe(
-            Effect.provideService(GitHubApi.PinnedGitHubCredential, pinned("verified-account")),
+            Effect.provideService(
+              GitHubRequestPolicy.PinnedGitHubCredential,
+              pinned("verified-account"),
+            ),
           ),
       });
-      const api = Layer.mock(GitHubApi.GitHubApi)({
-        rest: () =>
+      const api = transport(
+        () =>
           Effect.gen(function* () {
-            const credential = yield* GitHubApi.PinnedGitHubCredential;
+            const credential = yield* GitHubRequestPolicy.PinnedGitHubCredential;
             expect(credential?.credentialFingerprint).toBe("verified-account");
             return restResponse({ body: JSON.stringify([pr(7, SESSION_URL)]) });
           }),
-        graphql: () => Effect.die("Body result needs no commit read"),
-      });
+        () => Effect.die("Body result needs no commit read"),
+      );
       const provider = yield* GitHubPullRequestProvider.make.pipe(
         Effect.provide(Layer.merge(cli, api)),
       );
@@ -474,7 +538,7 @@ it.effect("rotates a moving head so the next candidate can be observed on the ne
       () => Effect.succeed(restResponse({ body: JSON.stringify([pr(7), pr(8)]) })),
       (request) =>
         Effect.sync(() => {
-          const number = request.variables?.number;
+          const number = request.variables.number;
           numbers.push(number);
           return number === 7
             ? commitResponse("Unrelated", null, "b".repeat(40))

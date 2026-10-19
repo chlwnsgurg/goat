@@ -27,7 +27,6 @@ export function promptLinkFor(
   return buildNewThreadLink({ prompt: trimmed, ...context, origin: configuredHostedAppUrl() });
 }
 
-/** The project's GitHub repository, the only kind a prompt link can name. */
 export function promptLinkRepositoryOf(
   project: Pick<EnvironmentProject, "repositoryIdentity"> | undefined,
 ): PromptLinkRepository | null {
@@ -39,10 +38,6 @@ export function promptLinkRepositoryOf(
     : null;
 }
 
-/**
- * The draft in a composer as a link: its text and, with `withContext`, the project's repository
- * and the model the composer has picked. Null when the composer holds no prompt to share.
- */
 export function composerPromptLink(input: {
   readonly target: ComposerThreadTarget;
   readonly project: EnvironmentProject | undefined;
@@ -67,7 +62,6 @@ export function composerPromptLink(input: {
   });
 }
 
-/** Copies a prompt link and says so. */
 export async function copyPromptLink(link: string): Promise<void> {
   try {
     if (!(await writeTextToClipboard(link))) return;

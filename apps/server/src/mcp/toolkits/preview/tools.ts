@@ -48,7 +48,6 @@ const dependencies = [
   PreviewAutomationBroker.PreviewAutomationBroker,
 ];
 
-/** What a browser action fails with, including the access gate's refusal. */
 const PreviewToolFailure = Schema.Union([PreviewAutomationError, OrchestratorMcpFailure]);
 
 const presentationFields = { toolIcon: Schema.optional(ToolActivityIcon) };

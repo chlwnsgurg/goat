@@ -1,8 +1,8 @@
 import { BRAND_CHANNEL_LABEL, type BrandChannel } from "@goat/shared/brandChannels";
 import { Platform, View } from "react-native";
 
-import { AppText as Text } from "./AppText";
-import { useAndroidControlSizing } from "./useAndroidControlSizing";
+import { AppText as Text } from "./ui/AppText";
+import { useAndroidControlSizing } from "./ui/useAndroidControlSizing";
 
 /** Release-channel identity stays independent of the selected palette. */
 export function BrandChannelPill(props: {

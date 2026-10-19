@@ -7,8 +7,10 @@ import type {
 } from "@goat/contracts";
 
 import { deriveCloudTaskState } from "@goat/client-runtime/state/cloud-task";
+import { useAtomValue } from "@effect/atom-react";
 import { type DraftId, useComposerDraftStore } from "../../composerDraftStore";
-import { useServerConfigs, useThreadProjection, useThreadShell } from "../../state/entities";
+import { useThreadProjection, useThreadShell } from "../../state/entities";
+import { serverEnvironment } from "../../state/server";
 import { type EnvMode, type EnvironmentOption } from "../BranchToolbar.logic";
 import { BranchToolbar } from "../BranchToolbar";
 import BaseGitActionsControl from "../GitActionsControl";
@@ -50,7 +52,6 @@ export interface ThreadDetailsPanelProps
   onAutoEnvironment?: (() => void) | undefined;
   onEnvironmentChange: (environmentId: EnvironmentId) => void;
   onEnvModeChange: (mode: EnvMode) => void;
-  /** The thread's env mode as ChatView resolves it. */
   envMode: EnvMode;
   activeThreadBranchOverride?: string | null;
   onActiveThreadBranchOverrideChange?: (branch: string | null) => void;
@@ -78,9 +79,9 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
       projection?.thread.providerInstanceId ??
       thread?.providerInstanceId,
   );
-  const selectedProvider = useServerConfigs()
-    .get(props.environmentId)
-    ?.providers.find((provider) => provider.instanceId === selectedInstanceId);
+  const selectedProvider = useAtomValue(
+    serverEnvironment.providersValueAtom(props.environmentId),
+  )?.find((provider) => provider.instanceId === selectedInstanceId);
   const { showLocalWorkspace } = deriveCloudTaskState(projection, selectedProvider);
   const branchToolbarProps = {
     showGitControls: props.isGitRepo,

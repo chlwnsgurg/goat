@@ -29,6 +29,11 @@ workspace, and `mod+shift+g` for the Git branch. Choose **Local**, **New
 worktree**, or **Worktree on SSH** (desktop) from the workspace menu. To continue in an existing worktree, use
 **New thread in this worktree** from the branch toolbar.
 
+To change effort one step without opening the picker, bind
+**Composer: Increase Effort** and **Composer: Decrease Effort** in Keybindings.
+Both are unbound by default. Increase wraps from the highest level to the
+lowest, and decrease wraps from the lowest level to the highest.
+
 In the model picker, press Left in an empty search field or Shift+Tab to reach
 the provider list. Use Up/Down to move and Enter to choose. Right returns to
 model search. `mod+shift+up` and `mod+shift+down` switch providers directly and clear the

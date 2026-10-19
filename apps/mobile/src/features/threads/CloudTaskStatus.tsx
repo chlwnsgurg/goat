@@ -1,7 +1,7 @@
 import type { OrchestrationV2CloudTask } from "@goat/contracts";
 import { presentCloudTask } from "@goat/client-runtime/state/cloud-task";
 import { Alert, Linking, Pressable, View } from "react-native";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 
 export function CloudTaskStatus({ task }: { readonly task: OrchestrationV2CloudTask }) {
   const view = presentCloudTask(task);

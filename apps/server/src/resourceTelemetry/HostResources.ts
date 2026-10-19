@@ -102,7 +102,6 @@ const make = Effect.fn("makeHostResources")(function* () {
     };
   });
 
-  // One server-lifetime cache deduplicates simultaneous requests from all sockets.
   const cache = yield* Cache.make({
     capacity: 1,
     lookup: (_key: "host") => sample(),

@@ -56,8 +56,6 @@ const table = (
   ].join("\n");
 };
 
-// ---------------------------------------------------------------- drift scan
-
 interface Mention {
   readonly token: string;
   readonly ref: SourceRef;
@@ -188,8 +186,6 @@ const checkCliMention = (mention: CliMention, cli: ReadonlyArray<CliEntry>): Cli
   return null;
 };
 
-// ---------------------------------------------------------------- analysis
-
 const groupBy = <A>(items: ReadonlyArray<A>, key: (item: A) => string) => {
   const out = new Map<string, Array<A>>();
   for (const item of items) {
@@ -301,8 +297,6 @@ function analyse(inventory: Inventory) {
     actsAsCallerReads,
   };
 }
-
-// ---------------------------------------------------------------- render
 
 function render(inventory: Inventory): string {
   const a = analyse(inventory);
@@ -1089,8 +1083,6 @@ function rankedFixes(
     },
   ];
 }
-
-// ---------------------------------------------------------------- main
 
 const inventory = await collectInventory();
 const output = render(inventory);

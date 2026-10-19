@@ -5,7 +5,7 @@ import {
   squashAtomCommandFailure,
 } from "@goat/client-runtime/state/runtime";
 import type { ScopedThreadRef, ThreadId } from "@goat/contracts";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { ExternalLinkIcon, RotateCcwIcon } from "~/components/solar";
 import { newMessageId, newThreadId } from "~/lib/utils";
@@ -39,13 +39,10 @@ export function SideChatSurface({
   readonly onOpenThread: (ref: ScopedThreadRef) => void;
 }) {
   const environmentId = parent.environmentId;
-  const parentRef = useMemo(
-    () => scopeThreadRef(environmentId, parent.id),
-    [environmentId, parent.id],
-  );
+  const parentRef = scopeThreadRef(environmentId, parent.id);
   const parentKey = scopedThreadKey(parentRef);
   const shells = useThreadShells();
-  const sideThread = useMemo(() => findSideChatThread(shells, parentRef), [shells, parentRef]);
+  const sideThread = findSideChatThread(shells, parentRef);
 
   const forkAsSideChat = useOrchestrationCommand(threadEnvironment.forkAsSideChat, {
     reportFailure: false,
@@ -61,56 +58,57 @@ export function SideChatSurface({
   const [error, setError] = useState<string | null>(null);
   const startingRef = useRef(false);
 
-  const start = useCallback(async () => {
+  const createSideChat = async () => {
+    const title = `Side chat: ${parent.title}`;
+    if (parent.latestRun !== null) {
+      const targetThreadId = newThreadId();
+      const forked = await forkAsSideChat({
+        environmentId,
+        input: { sourceThreadId: parent.id, targetThreadId, title },
+      });
+      if (forked._tag === "Success") {
+        setStartedThreadId(targetThreadId);
+        return;
+      }
+      if (isAtomCommandInterrupted(forked)) return;
+      // No settled turn to fork yet (the first one may still be running): start fresh.
+    }
+    const threadId = newThreadId();
+    const created = await createThread({
+      environmentId,
+      input: {
+        threadId,
+        projectId: parent.projectId,
+        title,
+        modelSelection: parent.modelSelection,
+        runtimeMode: parent.runtimeMode,
+        interactionMode: "default",
+        branch: parent.branch,
+        worktreePath: parent.worktreePath,
+        sideChatOf: parent.id,
+      },
+    });
+    if (created._tag === "Failure") {
+      if (!isAtomCommandInterrupted(created)) {
+        setError(failureMessage(created, "Could not start the side chat."));
+      }
+      return;
+    }
+    setStartedThreadId(threadId);
+  };
+  const start = useEffectEvent(() => {
     if (startingRef.current) return;
     startingRef.current = true;
     setError(null);
-    const title = `Side chat: ${parent.title}`;
-    try {
-      if (parent.latestRun !== null) {
-        const targetThreadId = newThreadId();
-        const forked = await forkAsSideChat({
-          environmentId,
-          input: { sourceThreadId: parent.id, targetThreadId, title },
-        });
-        if (forked._tag === "Success") {
-          setStartedThreadId(targetThreadId);
-          return;
-        }
-        if (isAtomCommandInterrupted(forked)) return;
-        // No settled turn to fork yet (the first one may still be running): start fresh.
-      }
-      const threadId = newThreadId();
-      const created = await createThread({
-        environmentId,
-        input: {
-          threadId,
-          projectId: parent.projectId,
-          title,
-          modelSelection: parent.modelSelection,
-          runtimeMode: parent.runtimeMode,
-          interactionMode: "default",
-          branch: parent.branch,
-          worktreePath: parent.worktreePath,
-          sideChatOf: parent.id,
-        },
-      });
-      if (created._tag === "Failure") {
-        if (!isAtomCommandInterrupted(created)) {
-          setError(failureMessage(created, "Could not start the side chat."));
-        }
-        return;
-      }
-      setStartedThreadId(threadId);
-    } finally {
+    void createSideChat().finally(() => {
       startingRef.current = false;
-    }
-  }, [createThread, environmentId, forkAsSideChat, parent]);
+    });
+  });
 
   const needsThread = sideThread === null && startedThreadId === null && error === null;
   useEffect(() => {
-    if (needsThread) void start();
-  }, [needsThread, start]);
+    if (needsThread) start();
+  }, [needsThread]);
 
   // `/side <question>` asks once the side chat exists.
   const pendingPrompt = useSideChatStore((state) => state.pendingPrompts[parentKey] ?? null);
@@ -135,7 +133,7 @@ export function SideChatSurface({
   }, [environmentId, parent.runtimeMode, parentKey, pendingPrompt, sideThreadId, startThreadTurn]);
 
   // Side chats are disposable: starting over discards this one and forks the thread again.
-  const startOver = useCallback(async () => {
+  const startOver = async () => {
     if (sideThreadId === null) return;
     const result = await deleteThread({ environmentId, input: { threadId: sideThreadId } });
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -144,7 +142,7 @@ export function SideChatSurface({
     }
     setStartedThreadId(null);
     setError(null);
-  }, [deleteThread, environmentId, sideThreadId]);
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-side-chat-surface>

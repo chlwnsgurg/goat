@@ -5,7 +5,7 @@ import { MemoryReportRetrySettings } from "./MemoryReportRetrySettings";
 import { XIcon } from "../solar";
 import { MemoryAdministration } from "./MemorySharingSettings";
 import { randomUUID } from "../../lib/utils";
-import { RegistryContext, useAtom, useAtomValue } from "@effect/atom-react";
+import { RegistryContext, useAtom, useAtomSubscribe, useAtomValue } from "@effect/atom-react";
 import { LegendList } from "@legendapp/list/react";
 import {
   AuthMemoryReadScope,
@@ -47,7 +47,7 @@ import {
 } from "@goat/client-runtime/memory-presentation";
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
-import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useEnvironment, useEnvironments } from "../../state/environments";
 import { useProjects } from "../../state/entities";
 import {
@@ -220,27 +220,35 @@ function MemoryDestinationContent({
   const [sync, setSync] = useState<MemorySyncStatus | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [syncReload, setSyncReload] = useState(0);
-  const refreshSync = useCallback(() => {
+  const refreshSync = () => {
     setSync(null);
     setSyncError(null);
     setSyncReload((value) => value + 1);
-  }, []);
+  };
 
-  useEffect(() => {
-    let current = true;
+  const [syncRequest, setSyncRequest] = useState({ canSync, environmentId, syncReload });
+  if (
+    syncRequest.canSync !== canSync ||
+    syncRequest.environmentId !== environmentId ||
+    syncRequest.syncReload !== syncReload
+  ) {
+    setSyncRequest({ canSync, environmentId, syncReload });
     setSyncError(null);
     if (!canSync) setSync(null);
-    if (canSync)
-      void getSync({ environmentId, input: {} }).then((result) => {
-        if (!current) return;
-        if (result._tag === "Success") setSync(result.value);
-        else setSyncError("Could not load memory sharing status.");
-      });
+  }
+  useEffect(() => {
+    if (!syncRequest.canSync) return;
+    let current = true;
+    void getSync({ environmentId: syncRequest.environmentId, input: {} }).then((result) => {
+      if (!current) return;
+      if (result._tag === "Success") setSync(result.value);
+      else setSyncError("Could not load memory sharing status.");
+    });
     return () => {
       current = false;
     };
-  }, [canSync, environmentId, getSync, syncReload]);
-  const refreshBootstrap = useCallback(() => setSyncReload((value) => value + 1), []);
+  }, [getSync, syncRequest]);
+  const refreshBootstrap = () => setSyncReload((value) => value + 1);
   const readySpace = memoryLocalSpace(sync);
   const [savedSpace, setSavedSpace] = useState<MemorySpaceId | null>(null);
   if (readySpace && readySpace !== savedSpace) setSavedSpace(readySpace);
@@ -343,12 +351,11 @@ function MemoryBootstrapRefresh({
   memorySpaceId: MemorySpaceId;
   onChange: () => void;
 }) {
-  const exposure = useAtomValue(
+  useAtomSubscribe(
     memoryEnvironment.exposureAtom({ environmentId, input: { memorySpaceId } }),
+    onChange,
+    { immediate: true },
   );
-  useEffect(() => {
-    onChange();
-  }, [exposure, onChange]);
   return null;
 }
 

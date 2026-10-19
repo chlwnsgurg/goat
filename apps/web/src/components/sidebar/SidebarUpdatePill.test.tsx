@@ -1,4 +1,4 @@
-import type { DesktopUpdateState } from "@goat/contracts";
+import { EnvironmentId, type DesktopUpdateState } from "@goat/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -91,12 +91,19 @@ describe("sidebar update release notes popover", () => {
   });
 });
 function runMachine(updatesProviders: boolean, updatesServer: boolean): UpdateRunMachine {
+  const environmentId = EnvironmentId.make("environment-1");
   return {
-    environmentId: "environment-1" as UpdateRunMachine["environmentId"],
+    environmentId,
     label: "mini",
     updatesProviders,
-    updatesServer,
+    server: updatesServer
+      ? { environmentId, serverLabel: "mini", selfUpdate: "boot-service", targetVersion: "0.0.50" }
+      : null,
+    handedOffVersion: null,
+    startedAt: 0,
     result: null,
+    failure: null,
+    providerFailure: null,
   };
 }
 

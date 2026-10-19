@@ -25,9 +25,12 @@ vi.mock("../../state/projects", async () => {
   return { environmentProjects: { projectsAtom: Atom.make([]) } };
 });
 vi.mock("../../state/shell", () => ({ environmentShell: {} }));
-vi.mock("../../state/server", async () => {
+vi.mock("../../state/server", async (importOriginal) => {
   const { Atom } = await import("effect/reactivity");
-  return { environmentServerConfigsAtom: Atom.make(new Map()) };
+  return {
+    ...(await importOriginal<typeof import("../../state/server")>()),
+    environmentServerConfigsAtom: Atom.make(new Map()),
+  };
 });
 vi.mock("../../rpc/atomRegistry", () => ({ appAtomRegistry: {} }));
 vi.mock("../../state/memory", async () => {

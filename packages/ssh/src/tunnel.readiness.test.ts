@@ -22,6 +22,7 @@ import {
   PROTOCOL_ARCHIVE,
   testNetService,
   uploadTarget,
+  isRemoteLaunch,
 } from "./tunnel.fixture.ts";
 
 // A server that answers every request after `latencyMs`, like a healthy
@@ -155,7 +156,7 @@ describe("SSH forward readiness", () => {
               kills++;
             });
           }
-          if (args.includes("--"))
+          if (isRemoteLaunch(args))
             return makeDelayedSuccessfulProcess(
               '{"status":"ready","selectedVersion":"1.2.3-preview.20260911.4","remotePort":3773,"serverKind":"managed"}',
               6_000,
@@ -214,7 +215,7 @@ describe("SSH stale forwards", () => {
               kills += 1;
             });
           }
-          if (args.includes("--"))
+          if (isRemoteLaunch(args))
             return makeSuccessfulProcess(
               '{"status":"ready","selectedVersion":"1.2.3-preview.20260911.4","remotePort":3773,"serverKind":"managed"}\n',
             );
@@ -274,7 +275,7 @@ describe("SSH stale forwards", () => {
               isRunning: Effect.sync(() => !exited),
             };
           }
-          if (args.includes("--"))
+          if (isRemoteLaunch(args))
             return makeSuccessfulProcess(
               '{"status":"ready","selectedVersion":"1.2.3-preview.20260911.4","remotePort":3773,"serverKind":"managed"}\n',
             );

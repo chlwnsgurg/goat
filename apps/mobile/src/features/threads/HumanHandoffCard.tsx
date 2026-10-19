@@ -2,7 +2,7 @@ import { codexRouteErrorMessage } from "@goat/client-runtime/state/provider-inst
 import { squashAtomCommandFailure } from "@goat/client-runtime/state/runtime";
 import * as DateTime from "effect/DateTime";
 import { useIsFocused } from "@react-navigation/native";
-import { CopyTextButton } from "../../components/CopyTextButton";
+import { CopyTextButton } from "./CopyTextButton";
 import { AsyncResult } from "effect/reactivity";
 import * as Option from "effect/Option";
 import {
@@ -22,7 +22,7 @@ import {
 } from "@goat/contracts";
 import { useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { AppState, Linking, View } from "react-native";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { useEnvironmentScope } from "../../state/session";
 import { serverEnvironment, sshHost } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";

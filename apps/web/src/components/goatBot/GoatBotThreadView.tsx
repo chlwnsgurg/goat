@@ -1,6 +1,6 @@
 import { scopeThreadRef } from "@goat/client-runtime/environment";
 import type { EnvironmentId, ThreadId } from "@goat/contracts";
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 
 import {
   refreshArchivedThreadsForEnvironment,
@@ -56,10 +56,7 @@ function GoatBotThreadSession({
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
 }) {
-  const threadRef = useMemo(
-    () => scopeThreadRef(environmentId, threadId),
-    [environmentId, threadId],
-  );
+  const threadRef = scopeThreadRef(environmentId, threadId);
   const shell = useThreadShell(threadRef);
   const bootstrapped = useEnvironmentShellsBootstrapped(environmentId);
   const visibleTurnItems = useThreadVisibleTurnItems(
@@ -87,10 +84,10 @@ function GoatBotThreadSession({
     if (resolvedRemoval !== null) setRemoval(null);
   }
   // An archived bot was the bot here, so if it disappears from the archive too it was deleted.
-  const resolveRemoval = useCallback((next: GoatBotRemoval) => {
+  const resolveRemoval = (next: GoatBotRemoval) => {
     if (next === "archived") setShellSeen(true);
     setRemoval(next);
-  }, []);
+  };
   const canOpenCurrentBot = session.confirmedBot !== null && !confirmedHere;
   // Keep the resolved removal while ensure is pending or failed, when confirmedHere is false.
   const removal =

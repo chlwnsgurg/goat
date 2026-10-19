@@ -82,7 +82,7 @@ export function ConnectionCatalogUnreadableAlert() {
       Promise.resolve(window.confirm(message)));
     if (!confirmed) return;
     setStartingFresh(true);
-    try {
+    const replaceCatalog = async () => {
       // An empty catalog, not a removed file: a missing file re-imports legacy environments.
       const stored = await save(encodeCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT), null);
       if (stored === "conflict") {
@@ -93,14 +93,15 @@ export function ConnectionCatalogUnreadableAlert() {
       }
       // The renderer's catalog cache is per page; reload to start from the empty catalog.
       window.location.reload();
-    } catch (error) {
+    };
+    await replaceCatalog().catch((error: unknown) => {
       setStartingFresh(false);
       toastManager.add({
         type: "error",
         title: "Could not start fresh",
         description: error instanceof Error ? error.message : String(error),
       });
-    }
+    });
   };
 
   return (

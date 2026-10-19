@@ -320,7 +320,7 @@ function CloudMachineRow({
     // Resume waits until the machine accepts SSH and refreshes its address and host key.
     if (!(await run("Starting…", () => resume(input), "Could not start the machine"))) return;
     setBusy("Connecting…");
-    try {
+    const connectMachine = async () => {
       const target = await bridge.resolveSshHost(machine.alias);
       const result = await connectSshEnvironment({ target, label: machine.label });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result))
@@ -329,15 +329,18 @@ function CloudMachineRow({
           title: `Could not connect ${machine.label}`,
           description: failureMessage(result, "The SSH connection failed."),
         });
-    } catch (error) {
-      toastManager.add({
-        type: "error",
-        title: `Could not connect ${machine.label}`,
-        description: error instanceof Error ? error.message : String(error),
+    };
+    await connectMachine()
+      .catch((error: unknown) => {
+        toastManager.add({
+          type: "error",
+          title: `Could not connect ${machine.label}`,
+          description: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        setBusy(null);
       });
-    } finally {
-      setBusy(null);
-    }
   };
 
   const confirmDelete = async () => {

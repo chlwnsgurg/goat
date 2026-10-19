@@ -127,16 +127,25 @@ export function useDecisionInbox() {
     }
   }
 
-  useEffect(() => {
+  // Forget removed items during render. Submissions count too: a receipt or failure can
+  // land after projection already dropped its item.
+  const [prunedFor, setPrunedFor] = useState({ snapshot, submissions });
+  if (prunedFor.snapshot !== snapshot || prunedFor.submissions !== submissions) {
     const keep = (id: string) => !isDecisionItemRemoved(snapshot, id);
-    for (const id of inFlight.current) if (!keep(id)) inFlight.current.delete(id);
+    const keptSubmissions = prune(submissions, keep);
+    setPrunedFor({ snapshot, submissions: keptSubmissions });
     setSkippedIds((previous) => {
       const next = previous.filter(keep);
       return next.length === previous.length ? previous : next;
     });
     setDrafts((previous) => prune(previous, keep));
-    setSubmissions((previous) => prune(previous, keep));
-  }, [snapshot, submissions]);
+    if (keptSubmissions !== submissions) setSubmissions(keptSubmissions);
+  }
+  useEffect(() => {
+    for (const id of inFlight.current) {
+      if (isDecisionItemRemoved(snapshot, id)) inFlight.current.delete(id);
+    }
+  }, [snapshot]);
 
   return {
     snapshot,

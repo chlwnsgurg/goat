@@ -105,7 +105,6 @@ function tool(
 
 const GOAT_MCP_SERVER_ALIASES = new Set(["goat", "t3-code", "t3_code", "t3code"]);
 
-// Cards, activity rows, summaries, and provider identity recovery share this inventory.
 const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
   link_pull_request: tool(
     ["Link", "Linking", "Linked", "a pull request"],
@@ -609,7 +608,6 @@ function resolveGoatMcpToolName(value: string): string | null {
   return longest;
 }
 
-/** The bare T3 tool name (`html_render`) for any provider's spelling of it. */
 export function resolveGoatMcpToolId(toolName: string | null | undefined): string | null {
   const name = toolName == null ? null : resolveGoatMcpToolName(toolName);
   return name !== null && GOAT_MCP_TOOL_NAMES.has(name) ? name : null;

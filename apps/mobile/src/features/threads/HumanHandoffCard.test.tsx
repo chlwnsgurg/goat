@@ -61,7 +61,7 @@ vi.mock("../../state/use-atom-command", () => ({
         ? harness.refreshProviders
         : harness.respond,
 }));
-vi.mock("../../components/CopyTextButton", () => ({
+vi.mock("./CopyTextButton", () => ({
   CopyTextButton: ({ accessibilityLabel }: { accessibilityLabel: string }) => (
     <button>{accessibilityLabel}</button>
   ),
@@ -72,7 +72,7 @@ vi.mock("react-native", () => ({
   View: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   Linking: { openURL: vi.fn(async (_url: string) => {}) },
 }));
-vi.mock("../../components/AppText", () => ({
+vi.mock("../../components/ui/AppText", () => ({
   AppText: ({
     children,
     accessibilityRole,

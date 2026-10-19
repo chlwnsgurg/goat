@@ -12,7 +12,7 @@ import { EyeIcon, type IconComponent } from "~/components/solar";
 import type * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { PrimaryEnvironmentHttpClient } from "~/environments/primary/httpClient";
 import { runPrimaryHttp } from "~/lib/runtime";
@@ -38,7 +38,6 @@ const accessConfig: Record<
   ...runtimeModeConfig,
 };
 
-/** A CLI agent's callback is a loopback address; a hosted agent's is its own server. */
 function redirectsToThisComputer(redirectHost: string): boolean {
   return isLoopbackHost(new URL(`http://${redirectHost}`).hostname);
 }
@@ -56,12 +55,6 @@ type Answer<A> =
   | { readonly kind: "redirect"; readonly url: string }
   | { readonly kind: "error"; readonly message: string };
 
-/**
- * Runs an approval call. The server validates the agent's request again on
- * every call and answers what the page asked for, a message to show, or a URL
- * the browser must follow (an approval, a denial, or a protocol error the
- * agent should receive).
- */
 function runApproval<A>(
   call: (
     client: Context.Service.Shape<typeof PrimaryEnvironmentHttpClient>,
@@ -90,13 +83,6 @@ function readAuthorizationRequest(): AuthMcpAuthorizationRequest {
 }
 
 /**
- * /connect-agent: where an outside agent's MCP sign-in lands after the server
- * checks the request. The user picks the most the agent may allow, then
- * approves with a pairing code, or in one click when this browser is already
- * signed in to the environment as an administrator.
- */
-/**
- * Whether this browser's session may approve `access` without a pairing code.
  * A session may only grant access whose scopes it holds itself.
  */
 function oneClickApproves(
@@ -111,7 +97,16 @@ function oneClickApproves(
   );
 }
 
-export function ConnectAgentSurface() {
+function replaceLocation(url: string) {
+  window.location.replace(url);
+}
+
+export function ConnectAgentSurface({
+  redirect = replaceLocation,
+}: {
+  /** Leaves for the agent's callback; tests observe it instead of navigating away. */
+  readonly redirect?: (url: string) => void;
+}) {
   const [authorization] = useState(readAuthorizationRequest);
   const [loaded, setLoaded] = useState<Loaded>({ status: "loading" });
   const [access, setAccess] = useState<AuthMcpClientAccess>("read-only");
@@ -126,7 +121,7 @@ export function ConnectAgentSurface() {
       (answer) => {
         if (cancelled) return;
         if (answer.kind === "redirect") {
-          window.location.replace(answer.url);
+          redirect(answer.url);
           return;
         }
         setLoaded(
@@ -139,32 +134,29 @@ export function ConnectAgentSurface() {
     return () => {
       cancelled = true;
     };
-  }, [authorization]);
+  }, [authorization, redirect]);
 
-  const decide = useCallback(
-    async (choice: "approve" | "deny") => {
-      if (loaded.status !== "ready") return;
-      setPending(choice);
-      setErrorMessage("");
-      const { csrfToken } = loaded.details;
-      const decision: AuthMcpApprovalDecision =
-        choice === "deny"
-          ? { _tag: "deny" }
-          : csrfToken !== undefined && oneClickApproves(loaded.details, access, memoryScopes)
-            ? { _tag: "browser-session", access, csrfToken, memoryScopes }
-            : { _tag: "pairing-code", access, code: pairingCode.trim(), memoryScopes };
-      const answer = await runApproval((client) =>
-        client.mcpOAuth.decision({ payload: { authorization, decision } }),
-      );
-      if (answer.kind === "redirect") {
-        window.location.replace(answer.url);
-        return;
-      }
-      setPending(null);
-      setErrorMessage(answer.kind === "error" ? answer.message : "The sign-in could not continue.");
-    },
-    [access, authorization, loaded, pairingCode, memoryScopes],
-  );
+  const decide = async (choice: "approve" | "deny") => {
+    if (loaded.status !== "ready") return;
+    setPending(choice);
+    setErrorMessage("");
+    const { csrfToken } = loaded.details;
+    const decision: AuthMcpApprovalDecision =
+      choice === "deny"
+        ? { _tag: "deny" }
+        : csrfToken !== undefined && oneClickApproves(loaded.details, access, memoryScopes)
+          ? { _tag: "browser-session", access, csrfToken, memoryScopes }
+          : { _tag: "pairing-code", access, code: pairingCode.trim(), memoryScopes };
+    const answer = await runApproval((client) =>
+      client.mcpOAuth.decision({ payload: { authorization, decision } }),
+    );
+    if (answer.kind === "redirect") {
+      redirect(answer.url);
+      return;
+    }
+    setPending(null);
+    setErrorMessage(answer.kind === "error" ? answer.message : "The sign-in could not continue.");
+  };
 
   if (loaded.status === "loading") {
     return (

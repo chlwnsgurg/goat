@@ -95,7 +95,6 @@ export const GOAT_PIERRE_ICONS = {
     ...Object.fromEntries(
       VIDEO_FILE_EXTENSIONS.map((extension) => [extension, "goat-file-icon-video"]),
     ),
-    // Languages the complete set has no icon for.
     cs: "goat-file-icon-csharp",
     csx: "goat-file-icon-csharp",
     dart: "goat-file-icon-dart",
@@ -150,7 +149,6 @@ export function basenameOfPath(pathValue: string): string {
   return slashIndex === -1 ? pathValue : pathValue.slice(slashIndex + 1);
 }
 
-/** Languages whose files are recognised by name rather than by extension. */
 const LANGUAGE_FILE_NAMES: Record<string, string> = {
   dockerfile: "Dockerfile",
 };

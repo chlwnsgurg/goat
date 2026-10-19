@@ -2,7 +2,7 @@ import { scopeThreadRef } from "@goat/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@goat/client-runtime/state/models";
 import { AuthOrchestrationOperateScope, type ScopedThreadRef } from "@goat/contracts";
 import { BotIcon, SquareIcon } from "~/components/solar";
-import { memo, useCallback } from "react";
+import { memo } from "react";
 import { useNowMinute } from "../../hooks/useNowMinute";
 import { useEnvironmentScope } from "../../state/session";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
@@ -41,39 +41,24 @@ export const SidebarOpenSubagent = memo(function SidebarOpenSubagent(
         : state === "queued"
           ? "queued"
           : formatRelativeTimeLabel(thread.latestRun?.completedAt ?? thread.updatedAt);
-  const open = useCallback(
-    () => onOpen(scopeThreadRef(thread.environmentId, thread.id)),
-    [onOpen, thread.environmentId, thread.id],
-  );
-  const stop = useCallback(
-    () => onStop?.(scopeThreadRef(thread.environmentId, thread.id)),
-    [onStop, thread.environmentId, thread.id],
-  );
-  const contextMenu = useCallback(
-    (event: React.MouseEvent) => {
-      if (!onContextMenu) return;
-      event.preventDefault();
-      event.stopPropagation();
-      onContextMenu(scopeThreadRef(thread.environmentId, thread.id), {
-        x: event.clientX,
-        y: event.clientY,
-      });
-    },
-    [onContextMenu, thread.environmentId, thread.id],
-  );
-  const keyDown = useCallback(
-    (event: React.KeyboardEvent) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      event.stopPropagation();
-      open();
-    },
-    [open],
-  );
-  const stopPointerPropagation = useCallback(
-    (event: React.PointerEvent) => event.stopPropagation(),
-    [],
-  );
+  const open = () => onOpen(scopeThreadRef(thread.environmentId, thread.id));
+  const stop = () => onStop?.(scopeThreadRef(thread.environmentId, thread.id));
+  const contextMenu = (event: React.MouseEvent) => {
+    if (!onContextMenu) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onContextMenu(scopeThreadRef(thread.environmentId, thread.id), {
+      x: event.clientX,
+      y: event.clientY,
+    });
+  };
+  const keyDown = (event: React.KeyboardEvent) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    event.stopPropagation();
+    open();
+  };
+  const stopPointerPropagation = (event: React.PointerEvent) => event.stopPropagation();
 
   return (
     <ul role="group" aria-label="Open subagent" onPointerDown={stopPointerPropagation}>
