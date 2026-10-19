@@ -237,6 +237,9 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       platform,
       arch,
       releaseBaseUrl,
+      // A cached target runs unattended after activation, so its bytes must match the verified
+      // install. Never for the running version, whose directory a mismatch would remove.
+      verifyCachedInstall: targetVersion !== packageJson.version,
       validate: (runtime) =>
         runner
           .run({

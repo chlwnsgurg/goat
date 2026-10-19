@@ -16,6 +16,10 @@ release tag. Installation and preflight happen in staging before publishing an
 immutable runtime. Preflight checks the launcher protocol because a target that
 needs new rollback guarantees cannot safely run under an older launcher. Upgrading
 that launcher requires a local service update.
+Each install records the verified archive digest and the executable's SHA-256 in
+`.install-record`. A server update, which runs the cached build unattended,
+reuses an install only while its executable still matches and otherwise installs again
+from the release with `SHA256SUMS`.
 
 Boot-service updates without `confirmReplacement: true` refuse while the server is
 busy. This includes older clients that omit the field. Admission closes and idle is
