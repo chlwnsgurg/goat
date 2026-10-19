@@ -4,6 +4,7 @@ import * as Option from "effect/Option";
 import type { ConnectionCatalogEntry } from "./catalog.ts";
 import type {
   ConnectionAttemptStage,
+  ConnectionAttemptError,
   ConnectionTarget,
   SupervisorConnectionState,
 } from "./model.ts";
@@ -22,6 +23,12 @@ export interface EnvironmentConnectionPresentation {
   readonly phase: EnvironmentConnectionPhase;
   readonly error: string | null;
   readonly traceId: string | null;
+  readonly failure?: {
+    readonly kind: "blocked" | "retrying";
+    readonly reason: ConnectionAttemptError["reason"];
+    readonly detail: string;
+    readonly traceId?: string;
+  };
   /** The step an attempt in progress has reached. */
   readonly stage?: ConnectionAttemptStage | null;
   /** When the next automatic attempt starts (epoch ms), while waiting to retry. */
@@ -51,17 +58,32 @@ export function presentConnectionState(
   state: SupervisorConnectionState,
 ): EnvironmentConnectionPresentation {
   const unreachable = state.lastFailure?.reason === "host-unreachable";
+  const failure =
+    state.lastFailure === null
+      ? {}
+      : {
+          failure: {
+            kind:
+              state.lastFailure._tag === "ConnectionBlockedError"
+                ? ("blocked" as const)
+                : ("retrying" as const),
+            reason: state.lastFailure.reason,
+            detail: state.lastFailure.detail,
+            ...(state.lastFailure.traceId ? { traceId: state.lastFailure.traceId } : {}),
+          },
+        };
   switch (state.phase) {
     case "available":
       return { phase: "available", error: null, traceId: null };
     case "offline":
-      return { phase: "offline", error: null, traceId: null };
+      return { phase: "offline", error: null, traceId: null, ...failure };
     case "connecting":
       return {
         phase: state.attempt <= 1 && state.lastFailure === null ? "connecting" : "reconnecting",
         error: state.lastFailure?.message ?? null,
         traceId: state.lastFailure?.traceId ?? null,
         stage: state.stage,
+        ...failure,
         ...(unreachable ? { unreachable } : {}),
       };
     case "connected":
@@ -72,6 +94,7 @@ export function presentConnectionState(
         error: state.lastFailure?.message ?? null,
         traceId: state.lastFailure?.traceId ?? null,
         retryAt: state.retryAt,
+        ...failure,
         ...(unreachable ? { unreachable } : {}),
       };
     case "blocked":
@@ -79,6 +102,7 @@ export function presentConnectionState(
         phase: state.lastFailure?.reason === "unsupported" ? "unsupported" : "error",
         error: state.lastFailure?.message ?? null,
         traceId: state.lastFailure?.traceId ?? null,
+        ...failure,
       };
   }
 }

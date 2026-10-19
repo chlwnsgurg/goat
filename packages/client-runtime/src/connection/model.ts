@@ -99,6 +99,7 @@ export class ConnectionBlockedError extends Schema.TaggedError<ConnectionBlocked
     traceId: Schema.optionalKey(Schema.String),
 
     serverUpdateRequired: Schema.optionalKey(Schema.Boolean),
+    localProxyUnavailable: Schema.optionalKey(Schema.Boolean),
   },
 ) {
   override get message(): string {

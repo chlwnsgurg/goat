@@ -67,6 +67,10 @@ not import the server's orchestration modules.
 
 `apps/desktop/src/preload.ts` exposes `window.desktopBridge`. SSH host discovery for the shell is
 `apps/desktop/src/ssh/DesktopSshEnvironment.ts`, which calls `packages/ssh`.
+The shell forwards suspend, resume, and screen-unlock events through
+`DesktopBridge.onSystemWake`: renderer visibility alone cannot detect lid sleep.
+The shared supervisor owns cancellation and retry policy; see
+[SSH reconnect](../docs/internals/ssh-reconnect.md#resuming).
 
 Where the desktop process stores server state is the [state roots](settings-and-storage.md#state-roots)
 contract: `~/.goat/desktop` for a packaged build, `~/.t3` for a development build unless
