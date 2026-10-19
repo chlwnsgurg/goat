@@ -148,13 +148,17 @@ it.effect.each([undefined, "when_idle"] as const)(
     }),
 );
 
-it.effect("journals an SSH update actor", () =>
+it.effect("journals an SSH update actor and what came of it", () =>
   Effect.gen(function* () {
     const f = yield* fixture;
     yield* f.setup.update({ host: "box" }, { kind: "mcp", scope: f.scope });
     const fs = yield* FileSystem.FileSystem;
-    const entry = JSON.parse((yield* fs.readFileString(f.journal)).trim());
-    expect(entry).toMatchObject({
+    const [requested, outcome, ...rest] = (yield* fs.readFileString(f.journal))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(rest).toEqual([]);
+    expect(requested).toMatchObject({
       operation: "ssh-runtime-update",
       operationId: expect.any(String),
       ts: expect.any(String),
@@ -165,6 +169,8 @@ it.effect("journals an SSH update actor", () =>
       mode: "idle",
       outcome: "requested",
     });
+    // The host is still waiting for idle, so the request is accepted but not completed.
+    expect(outcome).toMatchObject({ operationId: requested.operationId, outcome: "accepted" });
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
