@@ -13,13 +13,15 @@ import { cn } from "~/lib/utils";
 export function GoatBotComposer({
   disabled,
   placeholder,
+  initialText = "",
   onSend,
 }: {
   readonly disabled: boolean;
   readonly placeholder: string;
+  readonly initialText?: string;
   readonly onSend: (text: string) => void;
 }) {
-  const [text, setText] = useState("");
+  const [text, setText] = useState(initialText);
   const trimmed = text.trim();
   const submit = () => {
     if (disabled || trimmed.length === 0) return;

@@ -663,8 +663,18 @@ it("keeps target-specific offline, loading and missing history states with summa
 
 it("renders an introduction and three actionable examples when ready and empty", async () => {
   await render();
-  expect(container.textContent).toContain("It answers here and starts the work in its own threads");
-  expect(container.querySelectorAll("ul li")).toHaveLength(3);
+  expect(container.textContent).toContain(
+    "Text it like a person. It answers here and does the work in its own threads.",
+  );
+  expect(
+    [...container.querySelectorAll("button")].filter((button) =>
+      [
+        "Fix the flaky test in my project",
+        "Review the latest changes",
+        "How is the work going?",
+      ].includes(button.textContent ?? ""),
+    ),
+  ).toHaveLength(3);
 });
 
 it("respects permission loss without disabling reading", async () => {

@@ -121,6 +121,7 @@ export type GoatBotRow =
       readonly text: string;
       readonly createdAt: string;
       readonly tone: GoatBotBotTone;
+      readonly proactive: boolean;
       readonly replyTo: string | null;
       /** Answers to pick, only while nothing has been sent since the question. */
       readonly options: ReadonlyArray<string>;
@@ -225,12 +226,16 @@ export function buildGoatBotTimeline(input: {
     if (item.type === "assistant_message") {
       if (item.text.trim().length === 0) continue;
       const presentation = input.readers.message(item);
+      const tone = presentation?.tone ?? "reply";
       committed.push({
         kind: "bot",
         id: item.id,
         text: item.text,
         createdAt: itemCreatedAt(item),
-        tone: presentation?.tone ?? "reply",
+        tone,
+        proactive:
+          !presentation?.replyToKey &&
+          (tone === "status" || tone === "result" || tone === "question"),
         replyTo:
           presentation?.replyToKey && presentation.replyToKey !== previousInputKey
             ? (inputTexts.get(presentation.replyToKey)?.slice(0, 160) ?? null)
@@ -307,7 +312,11 @@ export function buildGoatBotTimeline(input: {
         : Date.parse(row.createdAt) - Date.parse(previous.createdAt);
     const stamp = newDay || !(gap < GOAT_BOT_STAMP_GAP_MS);
     const first =
-      stamp || previous === null || side(previous) !== side(row) || !(gap <= GOAT_BOT_GROUP_GAP_MS);
+      stamp ||
+      previous === null ||
+      side(previous) !== side(row) ||
+      !(gap <= GOAT_BOT_GROUP_GAP_MS) ||
+      (row.kind === "bot" && row.proactive && !(previous?.kind === "bot" && previous.proactive));
     return { stamp, first };
   });
   for (const [index, row] of ordered.entries()) {

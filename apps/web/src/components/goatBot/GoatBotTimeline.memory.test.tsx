@@ -38,6 +38,7 @@ const row = {
   groupPosition: "single",
   text: "A memory conflict was resolved.",
   tone: "result",
+  proactive: false,
   replyTo: null,
   options: [],
   memory: {

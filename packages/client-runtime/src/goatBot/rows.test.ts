@@ -364,6 +364,49 @@ describe("buildGoatBotTimeline", () => {
     expect(content(rows)).toMatchObject([{ id: "b1", kind: "bot", tone: "failure" }]);
   });
 
+  it("marks a direct reply as non-proactive and splits a later work result into a new group", () => {
+    const rows = content(
+      buildGoatBotTimeline({
+        visibleTurnItems: rowsOf([
+          user("u1", "2026-10-12T12:00:00Z", "Fix the test"),
+          bot("b1", "2026-10-12T12:00:01Z", "On it."),
+          bot("b2", "2026-10-12T12:02:00Z", "The test is fixed."),
+        ]),
+        pendingInputs: [],
+        readers: readers({
+          u1: { tone: "reply", readAt: null, requestKey: "request-1" },
+          b1: { tone: "status", readAt: null, requestKey: null, replyToKey: "request-1" },
+          b2: { tone: "result", readAt: null, requestKey: null },
+        }),
+      }),
+    );
+    expect(rows[1]).toMatchObject({ kind: "bot", proactive: false, groupPosition: "single" });
+    expect(rows[2]).toMatchObject({ kind: "bot", proactive: true, groupPosition: "single" });
+  });
+
+  it("groups consecutive proactive updates and excludes failure replies", () => {
+    const rows = content(
+      buildGoatBotTimeline({
+        visibleTurnItems: rowsOf([
+          bot("b1", "2026-10-12T12:00:00Z", "Status"),
+          bot("b2", "2026-10-12T12:01:00Z", "Result"),
+          bot("b3", "2026-10-12T12:02:00Z", "Failed"),
+        ]),
+        pendingInputs: [],
+        readers: readers({
+          b1: { tone: "status", readAt: null, requestKey: null },
+          b2: { tone: "result", readAt: null, requestKey: null },
+          b3: { tone: "failure", readAt: null, requestKey: null },
+        }),
+      }),
+    );
+    expect(rows.map((row) => row.kind === "bot" && [row.proactive, row.groupPosition])).toEqual([
+      [true, "first"],
+      [true, "middle"],
+      [false, "last"],
+    ]);
+  });
+
   it("offers a question's choices only until the user sends something", () => {
     const question = {
       tone: "question",

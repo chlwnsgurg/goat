@@ -248,7 +248,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
   --animate-status-pulse: status-pulse 2s infinite;
   --animate-status-ping: status-ping 2s infinite;
   /* GOAT Bot's replying dots: a short hop, then a long hold, stepped like the status pulses. */
-  --animate-typing-wave: typing-wave 1.4s infinite;
+  --animate-typing-wave: typing-wave 1.4s 6;
   --color-warning-foreground: var(--warning-foreground);
   --color-warning: var(--warning);
   --color-warning-surface: var(--warning-surface);
@@ -657,6 +657,35 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(goat-mob
     background: var(--background);
     border-bottom-right-radius: 10px;
   }
+}
+
+@utility goat-typing-tail {
+  &::before {
+    content: "";
+    position: absolute;
+    left: -2px;
+    bottom: -2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 9999px;
+    background: var(--color-goat-bubble-in);
+  }
+  &::after {
+    content: "";
+    position: absolute;
+    left: -8px;
+    bottom: -8px;
+    width: 5px;
+    height: 5px;
+    border-radius: 9999px;
+    background: var(--color-goat-bubble-in);
+  }
+}
+
+@utility goat-reply-line {
+  border-left: 2px solid var(--color-goat-bubble-in);
+  border-top: 2px solid var(--color-goat-bubble-in);
+  border-top-left-radius: 12px;
 }
 
 @utility visible-animate-spin {

@@ -3,7 +3,7 @@ import {
   goatBotReceiptLabel,
   type GoatBotRow,
 } from "@goat/client-runtime/goatBot";
-import { CircleAlertIcon, MessageCircleQuestionIcon } from "~/components/solar";
+import { BellIcon, CircleAlertIcon, MessageCircleQuestionIcon } from "~/components/solar";
 import {
   Fragment,
   type UIEvent,
@@ -18,7 +18,6 @@ import { cn } from "~/lib/utils";
 import { formatShortTimestamp } from "~/timestampFormat";
 
 import { MemorySettingsEntry } from "../settings/MemorySettings";
-import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { GoatBotTaskChip } from "./GoatBotTaskChip";
 
@@ -154,9 +153,15 @@ export function GoatBotTimeline({
                       index > 1 && (row.firstInGroup ? "mt-2.5" : "mt-0.5"),
                     )}
                   >
+                    {row.proactive && row.firstInGroup ? (
+                      <div className="mb-1.5 flex items-center gap-1 text-2xs text-muted-foreground">
+                        <BellIcon className="size-3" aria-hidden />
+                        GOAT Bot · Update
+                      </div>
+                    ) : null}
                     {row.replyTo ? (
-                      <blockquote className="goat-bubble mb-0.5 bg-goat-bubble-in text-xs text-goat-bubble-in-foreground opacity-60">
-                        {row.replyTo}
+                      <blockquote className="goat-reply-line mb-1 ml-2 max-w-[min(75%,34rem)] px-2 pt-1 text-xs text-muted-foreground">
+                        <span className="block truncate">{row.replyTo}</span>
                       </blockquote>
                     ) : null}
                     <Tooltip>
@@ -198,15 +203,15 @@ export function GoatBotTimeline({
                         className="flex max-w-3/4 flex-wrap gap-1.5"
                       >
                         {row.options.map((option) => (
-                          <Button
+                          <button
+                            type="button"
                             key={option}
-                            size="sm-multiline"
-                            variant="outline"
                             disabled={onPick === undefined}
                             onClick={() => onPick?.(option)}
+                            className="rounded-full border border-goat-bubble-out/40 px-3 py-1 text-sm text-goat-bubble-out hover:bg-goat-bubble-out/8 disabled:opacity-50"
                           >
                             {option}
-                          </Button>
+                          </button>
                         ))}
                       </div>
                     </li>
@@ -222,7 +227,10 @@ export function GoatBotTimeline({
                     index > 1 && (row.firstInGroup ? "mt-2.5" : "mt-0.5"),
                   )}
                 >
-                  <GoatBotTaskChip card={row.card} />
+                  <GoatBotTaskChip
+                    card={row.card}
+                    tail={row.groupPosition === "last" || row.groupPosition === "single"}
+                  />
                 </li>
               );
           }
@@ -232,7 +240,7 @@ export function GoatBotTimeline({
             <div
               role="status"
               aria-label="GOAT Bot is replying"
-              className="flex h-9 items-center gap-1 rounded-2xl bg-secondary px-3.5"
+              className="goat-typing-tail relative flex h-9 items-center gap-1 rounded-2xl bg-goat-bubble-in px-3.5"
             >
               {TYPING_DOT_DELAYS.map((delay) => (
                 <span
