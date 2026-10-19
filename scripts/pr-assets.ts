@@ -97,6 +97,15 @@ export interface BodyFix {
  * of the body is kept. An embed whose file is not on pr-assets is reported,
  * never guessed.
  */
+/** GitHub percent-encodes spaces and non-ASCII in rendered URLs; compare both sides in that form. */
+function normalizeUrl(url: string): string {
+  let decoded = url;
+  try {
+    decoded = decodeURI(url);
+  } catch {}
+  return encodeURI(decoded);
+}
+
 export function planBodyFix(
   body: string,
   options: {
@@ -110,8 +119,12 @@ export function planBodyFix(
 ): BodyFix {
   const replaced: Array<{ from: string; to: string; start: number; end: number }> = [];
   const missing: Array<{ url: string; reason: string }> = [];
+  const rendered = options.rendered ? new Set([...options.rendered].map(normalizeUrl)) : null;
+  const located = new Set<string>();
   for (const embed of gate.extractImageEmbeds(body)) {
-    if (options.rendered && !options.rendered.has(embed.url)) continue;
+    const key = normalizeUrl(embed.url);
+    if (rendered && !rendered.has(key)) continue;
+    located.add(key);
     const problem = gate.staticEmbedProblem(embed.url);
     if (!problem) continue;
     const github = gate.parseGithubContentUrl(embed.url);
@@ -133,6 +146,13 @@ export function planBodyFix(
       start: embed.start,
       end: embed.end,
     });
+  }
+  // A broken image GitHub renders but the source scan did not find must not pass as fixed.
+  for (const url of options.rendered ?? []) {
+    const problem = gate.staticEmbedProblem(url);
+    if (problem && !located.has(normalizeUrl(url))) {
+      missing.push({ url, reason: problem + "; could not locate it in the description source" });
+    }
   }
   let next = body;
   for (const edit of [...replaced].sort((a, b) => b.start - a.start)) {

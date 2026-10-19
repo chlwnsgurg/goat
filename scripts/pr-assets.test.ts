@@ -109,6 +109,31 @@ describe("planBodyFix", () => {
       missing: [],
     });
   });
+
+  it("matches GitHub's percent-encoded rendering and reports images it cannot locate", () => {
+    const korean = new Set(["457/한글 화면.png"]);
+    const body = "![ko](<pr-assets/한글 화면.png>)\n";
+    const fix = planBodyFix(body, {
+      pr: 457,
+      repo: REPO,
+      sha: SHA,
+      assets: korean,
+      rendered: new Set([encodeURI("pr-assets/한글 화면.png"), "pr-assets/elsewhere.png"]),
+    });
+    expect(fix.body).toBe("![ko](<" + rawAssetUrl(REPO, SHA, "457/한글 화면.png") + ">)\n");
+    expect(fix.missing).toEqual([
+      {
+        url: "pr-assets/elsewhere.png",
+        reason: expect.stringContaining("could not locate it"),
+      },
+    ]);
+  });
+
+  it("ignores source embeds GitHub does not render", () => {
+    const body = "Example:\n\n    ![ready](pr-assets/ready.png)\n";
+    const fix = planBodyFix(body, { pr: 457, repo: REPO, sha: SHA, assets, rendered: new Set() });
+    expect(fix).toEqual({ body, replaced: [], missing: [] });
+  });
 });
 
 describe("waitForImages", () => {

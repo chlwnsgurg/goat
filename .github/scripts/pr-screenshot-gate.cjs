@@ -36,10 +36,16 @@ const MARKDOWN_REFERENCE_DEF_RE = /^[ \t]*\[([^\]]+)\]:[ \t]*(?:\n[ \t]*)?(?:<([
 /** Inline code spans: a backtick run closed by a run of the same length, within one paragraph. */
 const INLINE_CODE_RE =
   /(?<!\x60)(\x60+)(?!\x60)(?:[^\r\n]|\r?\n(?![ \t]*\r?\n))*?(?<!\x60)\1(?!\x60)/g;
-/** An <img> tag in GitHub's rendered HTML. */
-const RENDERED_IMG_RE = /<img\b[^>]*>/gi;
-/** HTML image with a non-empty src. */
-const HTML_IMAGE_RE = /<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>"']+))[^>]*>/dgi;
+/** An <img> tag; a quoted attribute value may contain ">". */
+const IMG_TAG_RE = /<img\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi;
+/** One attribute inside a tag, with its double-quoted, single-quoted, or bare value. */
+const ATTRIBUTE_RE = /([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>\x60]+)))?/dg;
+/**
+ * HTML comments and inline code in one left-to-right pass: whichever opens
+ * first hides the other, as in GitHub's renderer, so a backtick inside a
+ * comment never pairs with one outside it, and "<!--" inside code opens nothing.
+ */
+const HIDDEN_INLINE_RE = new RegExp(HTML_COMMENT_RE.source + "|" + INLINE_CODE_RE.source, "g");
 
 const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
 const IMAGE_CHECK_TIMEOUT_MS = 5000;
@@ -81,10 +87,28 @@ function isChangedFileListTruncated(changedFilesCount, listedLength) {
  */
 function maskNonRenderedRegions(body) {
   const blank = (region) => region.replace(/[^\n]/g, " ");
-  return body
-    .replace(FENCED_CODE_RE, blank)
-    .replace(INLINE_CODE_RE, blank)
-    .replace(HTML_COMMENT_RE, blank);
+  return body.replace(FENCED_CODE_RE, blank).replace(HIDDEN_INLINE_RE, blank);
+}
+
+/**
+ * Attributes of one tag by lowercase name, the first occurrence winning as in
+ * HTML, each with its value and the value's offset within the tag.
+ */
+function tagAttributes(tag) {
+  const attributes = new Map();
+  const inner = tag.slice(4, -1);
+  for (const match of inner.matchAll(ATTRIBUTE_RE)) {
+    const name = match[1].toLowerCase();
+    if (attributes.has(name)) continue;
+    const value = capture(match, [2, 3, 4]);
+    attributes.set(
+      name,
+      value
+        ? { text: value.text, start: value.start + 4, end: value.end + 4 }
+        : { text: "", start: -1, end: -1 },
+    );
+  }
+  return attributes;
 }
 
 /** GitHub decodes &amp; in every image URL before the browser requests it. */
@@ -123,14 +147,15 @@ function extractImageEmbeds(body) {
       end: url.end,
     });
   }
-  for (const match of visible.matchAll(HTML_IMAGE_RE)) {
-    const url = capture(match, [1, 2, 3]);
+  for (const match of visible.matchAll(IMG_TAG_RE)) {
+    const url = tagAttributes(match[0]).get("src");
+    if (!url?.text) continue;
     embeds.push({
       kind: "html",
       source: match[0],
       url: decodeAmpersands(url.text),
-      start: url.start,
-      end: url.end,
+      start: match.index + url.start,
+      end: match.index + url.end,
     });
   }
   const definitions = new Map();
@@ -163,17 +188,14 @@ function extractImageEmbeds(body) {
  */
 function renderedImages(html) {
   if (typeof html !== "string") return [];
-  const attribute = (tag, name) => {
-    const match = tag.match(new RegExp("\\s" + name + "\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)')", "i"));
-    return match ? decodeAmpersands(match[1] ?? match[2]) : "";
-  };
   const images = [];
-  for (const [tag] of html.matchAll(RENDERED_IMG_RE)) {
-    const src = attribute(tag, "src");
+  for (const [tag] of html.matchAll(IMG_TAG_RE)) {
+    const attributes = tagAttributes(tag);
+    const src = decodeAmpersands(attributes.get("src")?.text ?? "");
     if (!src) continue;
     images.push({
       kind: "rendered",
-      url: attribute(tag, "data-canonical-src") || src,
+      url: decodeAmpersands(attributes.get("data-canonical-src")?.text ?? "") || src,
       fetchUrl: src,
     });
   }

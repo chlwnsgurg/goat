@@ -130,6 +130,32 @@ describe("checkEmbeds", () => {
     );
   });
 
+  it("keeps comments and code spans from hiding each other's neighbours", () => {
+    const body = [
+      "<!-- \x60 -->",
+      "![real](pr-assets/real.png)",
+      "<!-- \x60 -->",
+      "\x60<!--\x60 ![after](pr-assets/after.png)",
+    ].join("\n");
+    assert.deepEqual(
+      extractImageEmbeds(body).map((embed) => embed.url),
+      ["pr-assets/real.png", "pr-assets/after.png"],
+    );
+  });
+
+  it("reads src as an attribute, never from inside another attribute's value", () => {
+    const tag =
+      '<img alt="example src=\'https://example.com/ok.png\' > x" src="pr-assets/broken.png">';
+    assert.deepEqual(
+      extractImageEmbeds(tag).map((embed) => [embed.url, tag.slice(embed.start, embed.end)]),
+      [["pr-assets/broken.png", "pr-assets/broken.png"]],
+    );
+    assert.deepEqual(
+      renderedImages(tag).map((image) => image.url),
+      ["pr-assets/broken.png"],
+    );
+  });
+
   it("reads GitHub's rendering, keeping the written URL and the proxied fetch URL", () => {
     const html = [
       "<pre><code>![code](https://example.com/a.png)</code></pre>",
