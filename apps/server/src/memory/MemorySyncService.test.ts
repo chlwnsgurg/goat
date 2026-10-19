@@ -2150,6 +2150,7 @@ it.effect.each([
               [82, "MemoryLastReadySpace"],
               [83, "MemoryHubAdministered"],
               [84, "MemoryCheckpointLifecycle"],
+              [85, "FleetHealth"],
             ]);
             const adapter = yield* statusRuntime;
             const result = yield* Effect.scoped(

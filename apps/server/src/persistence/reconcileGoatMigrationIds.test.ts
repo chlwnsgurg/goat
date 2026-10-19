@@ -84,6 +84,7 @@ describe("GOAT migration ids", () => {
         [82, "MemoryLastReadySpace"],
         [83, "MemoryHubAdministered"],
         [84, "MemoryCheckpointLifecycle"],
+        [85, "FleetHealth"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -116,6 +117,7 @@ describe("GOAT migration ids", () => {
         [82, "MemoryLastReadySpace"],
         [83, "MemoryHubAdministered"],
         [84, "MemoryCheckpointLifecycle"],
+        [85, "FleetHealth"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -155,6 +157,7 @@ describe("GOAT migration ids", () => {
           [82, "MemoryLastReadySpace"],
           [83, "MemoryHubAdministered"],
           [84, "MemoryCheckpointLifecycle"],
+          [85, "FleetHealth"],
         ]);
         assert.deepStrictEqual(yield* history, migrationManifest);
         assert.deepStrictEqual(yield* runMigrations(), []);
@@ -307,6 +310,7 @@ it.effect("restarts the current WP5 registry without rewriting lineage or accoun
         [82, "MemoryLastReadySpace"],
         [83, "MemoryHubAdministered"],
         [84, "MemoryCheckpointLifecycle"],
+        [85, "FleetHealth"],
       ],
     );
     assert.deepStrictEqual(yield* runMigrations(), []);
