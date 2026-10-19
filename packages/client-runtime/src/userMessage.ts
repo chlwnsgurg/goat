@@ -28,7 +28,6 @@ interface PresentedUserMessage {
  */
 export function resolveUserMessagePresentation(message: PresentedUserMessage): {
   readonly text: string;
-  /** Who sent a user-role message the user did not type. */
   readonly attribution: "automation" | "agent" | "t3code" | null;
   readonly scheduledTaskId: ScheduledTaskId | undefined;
   readonly standingInstructions: StandingInstructionsBlock | null;
@@ -71,7 +70,6 @@ function resolveSender(message: PresentedUserMessage): {
   }
   return {
     text: message.text,
-    // Restart continuations were sent as the agent before they became notices.
     attribution:
       message.createdBy !== "agent"
         ? null

@@ -61,20 +61,36 @@ const testState = vi.hoisted(() => {
     },
   };
 });
-vi.mock("@effect/atom-react", () => ({
-  useAtomValue: () =>
-    new Map([
-      [
-        "environment-primary",
-        {
-          settings: {
-            ...testState.settings,
-            newWorktreesStartFromOrigin: !testState.settings.newWorktreesStartFromOrigin,
-          },
+
+const testServerConfigs = () =>
+  new Map([
+    [
+      "environment-primary",
+      {
+        settings: {
+          ...testState.settings,
+          newWorktreesStartFromOrigin: !testState.settings.newWorktreesStartFromOrigin,
         },
-      ],
-      ["environment-ssh", { settings: testState.settings }],
-    ]),
+      },
+    ],
+    ["environment-ssh", { settings: testState.settings }],
+  ]);
+
+vi.mock("../rpc/atomRegistry", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../rpc/atomRegistry")>();
+  const { environmentServerConfigsAtom } = await import("../state/server");
+  const get = actual.appAtomRegistry.get.bind(actual.appAtomRegistry);
+  return {
+    ...actual,
+    appAtomRegistry: Object.assign(Object.create(actual.appAtomRegistry), {
+      get: (atom: Parameters<typeof get>[0]) =>
+        atom === environmentServerConfigsAtom ? testServerConfigs() : get(atom),
+    }),
+  };
+});
+
+vi.mock("@effect/atom-react", () => ({
+  useAtomValue: () => testServerConfigs(),
 }));
 vi.mock("@goat/shared/projectSettings", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@goat/shared/projectSettings")>()),

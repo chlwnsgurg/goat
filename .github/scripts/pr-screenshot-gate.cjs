@@ -189,7 +189,9 @@ async function labelWaiver({ repoPath, number, labels, options, log }) {
     if (isMaintainerPermission(permission)) return true;
     log("ignoring " + WAIVER_LABEL + ": applied by " + actor + ", who is not a maintainer");
   } catch (error) {
-    throw new Error("could not verify who applied " + WAIVER_LABEL + ": " + error.message);
+    throw new Error("could not verify who applied " + WAIVER_LABEL + ": " + error.message, {
+      cause: error,
+    });
   }
   return false;
 }

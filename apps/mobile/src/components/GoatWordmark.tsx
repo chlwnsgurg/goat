@@ -12,7 +12,6 @@ import { withUniwind } from "uniwind";
 const ThemedPath = withUniwind(Path);
 const { x, y, width, height } = GOAT_MARK_INK_BOX;
 
-/** The GOAT mark. Width follows the visible ink's aspect ratio. */
 export function GoatWordmark(props: {
   readonly height: number;
   readonly color?: ColorValue;

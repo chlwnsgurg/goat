@@ -9,7 +9,7 @@ import {
   getQuestionAnswerText,
   getQuestionAnswerAttribution,
 } from "@goat/client-runtime/work-log/user-input";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { assetImageSource } from "../../lib/assetImageSource";
 import { useAssetUrl } from "../../state/assets";
 

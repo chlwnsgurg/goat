@@ -89,7 +89,6 @@ describe("DesktopWslServerTree", () => {
           }),
           () =>
             Effect.gen(function* () {
-              // Give every task in the current batch a chance to overlap.
               yield* Effect.yieldNow;
               if (node.depth === 4) return [];
               return Array.from({ length: 8 }, (_, index) => ({
@@ -216,7 +215,6 @@ describe("DesktopWslServerTree", () => {
         });
         assert.isTrue(first.ok);
 
-        // Mutate the source; a reused tree must keep the first copy.
         yield* fileSystem.writeFileString(
           path.join(serverRoot, "apps/server/dist/bin.mjs"),
           "v2-should-not-appear",
@@ -316,8 +314,6 @@ describe("DesktopWslServerTree", () => {
         });
         yield* fileSystem.writeFileString(path.join(serverRoot, "apps/server/dist/bin.mjs"), "x");
 
-        // GOAT_HOME is set to tempDir, so the desktop state dir resolves to
-        // <tempDir>/userdata (no .t3 segment).
         const treeRoot = path.join(tempDir, "userdata", "wsl-server-tree");
         yield* fileSystem.makeDirectory(path.join(treeRoot, "1.0.0"), { recursive: true });
         yield* fileSystem.makeDirectory(path.join(treeRoot, "1.2.3.partial"), { recursive: true });
@@ -363,7 +359,6 @@ describe("DesktopWslServerTree", () => {
         assert.include(root, "1.2.4");
         const entry = yield* fileSystem.readFileString(path.join(root, "apps/server/dist/bin.mjs"));
         assert.equal(entry, "new");
-        // The previous version's tree is gone.
         const treeRoot = path.dirname(root);
         assert.isFalse(yield* fileSystem.exists(path.join(treeRoot, "1.2.3")));
       }),
@@ -468,7 +463,6 @@ describe("DesktopWslServerTree", () => {
         const path = yield* Path.Path;
         const result = yield* ensureWith({
           baseDir: tempDir,
-          // resources dir exists but server.asar does not
           resourcesPath: path.join(tempDir, "resources"),
         });
         assert.isFalse(result.ok);

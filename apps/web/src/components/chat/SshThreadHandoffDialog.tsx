@@ -40,12 +40,13 @@ export function SshThreadHandoffDialog(props: {
     if (pendingRef.current || reason !== null || option === null) return;
     pendingRef.current = true;
     setPending(true);
-    try {
+    const submitHandoff = async () => {
       if (await props.onSubmit(option, instructions)) props.onClose();
-    } finally {
+    };
+    await submitHandoff().finally(() => {
       pendingRef.current = false;
       setPending(false);
-    }
+    });
   };
   return (
     <Dialog

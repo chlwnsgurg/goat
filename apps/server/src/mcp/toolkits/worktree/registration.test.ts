@@ -3,9 +3,9 @@ import * as SshHostSetup from "../../../sshRemote/SshHostSetup.ts";
 import * as CloudMachineService from "../../../cloudMachines/CloudMachineService.ts";
 import * as SshWorkspaceSync from "../../../sshRemote/SshWorkspaceSync.ts";
 import * as ConnectionCatalogBroker from "../../../connections/ConnectionCatalogBroker.ts";
-import Migration0062 from "../../../persistence/Migrations/064_RemoteReports.ts";
-import Migration0063 from "../../../persistence/Migrations/065_RemoteDispatches.ts";
-import Migration0065 from "../../../persistence/Migrations/067_RemoteDispatchQuestions.ts";
+import Migration0062 from "../../../persistence/Migrations/065_RemoteReports.ts";
+import Migration0063 from "../../../persistence/Migrations/066_RemoteDispatches.ts";
+import Migration0065 from "../../../persistence/Migrations/068_RemoteDispatchQuestions.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as RemoteDispatchCoordinator from "../../../remoteReports/RemoteDispatchCoordinator.ts";
 import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
@@ -185,8 +185,6 @@ it.effect("production mcp layer lists worktree tools over http", () =>
       expect(toolNames).toContain("goat_worktree_inventory");
       expect(toolNames).toContain("goat_worktree_remove");
       expect(toolNames).toContain("goat_worktree_cleanup");
-      // The worktree registration merges alongside the other toolkits rather
-      // than replacing them.
       expect(toolNames).toContain("preview_status");
       expect(toolNames).toContain("delegate_task");
       expect(toolNames).toContain("goat_connection_list");
@@ -194,9 +192,6 @@ it.effect("production mcp layer lists worktree tools over http", () =>
       expect(toolNames).toContain("goat_connection_remove");
       expect(toolNames).toContain("goat_ssh_thread_handoff");
 
-      // The handoff tool mutates thread state, reaches the network (origin
-      // fetch), and runs project setup scripts, so its MCP hints must not
-      // promise a read-only, closed-world, non-destructive tool.
       const handoff = tools.find((tool) => tool.name === "goat_worktree_handoff");
       expect(handoff?.annotations?.readOnlyHint).toBe(false);
       expect(handoff?.annotations?.destructiveHint).toBe(true);

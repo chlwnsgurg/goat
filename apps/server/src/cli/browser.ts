@@ -1,15 +1,3 @@
-/**
- * `goat browser setup` - prepares a Linux host for GOAT's headless browser, which
- * server browser tabs and HTML render previews share. It is the fix every
- * browser host error names, so it does the whole job in one run:
- *
- * - installs the AppArmor profile that lets Chrome's sandbox run where the host
- *   restricts unprivileged user namespaces (Ubuntu 23.10+), and
- * - installs the Debian packages for any libraries the browser cannot load.
- *
- * Both need root. Without it, the command prints what it would change and the
- * `sudo` line to run. It is safe to run again; it skips what is already done.
- */
 import * as HostProcess from "@goat/shared/HostProcess";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
@@ -36,7 +24,6 @@ export class BrowserSetupStepError extends Schema.TaggedError<BrowserSetupStepEr
   }
 }
 
-/** Runs one setup command, streaming its output, and fails with its exit code. */
 const runStep = Effect.fn("browserSetup.runStep")(function* (
   step: string,
   command: string,
@@ -73,7 +60,6 @@ export const setupBaseDir = Effect.fn("browserSetup.baseDir")(function* (
   return home ? yield* resolveGoatHome(home, "userdata") : yield* resolveBaseDir(undefined);
 });
 
-/** Whether apt has an installable candidate for `name`. */
 const aptOffers = Effect.fn("browserSetup.aptOffers")(function* (name: string) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const policy = yield* spawner
@@ -83,7 +69,6 @@ const aptOffers = Effect.fn("browserSetup.aptOffers")(function* (name: string) {
   return candidate !== undefined && candidate !== "(none)";
 });
 
-/** The installed browser in this GOAT home, if any, to check its libraries. */
 const installedBrowser = Effect.fn("browserSetup.installedBrowser")(function* (baseDir: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -113,6 +98,12 @@ const browserSetupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe
       const fs = yield* FileSystem.FileSystem;
       const isRoot = (yield* HostProcess.UserId) === 0;
       const setupCommand = yield* resolveRootCliCommand(PreviewBrowserHost.SETUP_SUBCOMMAND);
+      // Root, unless sudo came from another user, is likely the server's own account.
+      const env = yield* HostProcess.Environment;
+      const rootWarning =
+        isRoot && (env.SUDO_USER ?? "root") === "root" && !PreviewBrowserHost.sandboxDisabled(env)
+          ? new PreviewBrowserHost.PreviewBrowserRootError().message
+          : undefined;
 
       const needsProfile = yield* PreviewBrowserHost.sandboxBlocked;
       // Only root can move a pre-rename profile; without root it keeps working as is.
@@ -129,9 +120,10 @@ const browserSetupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe
 
       if (!needsProfile && !replacesLegacyProfile && missing.length === 0) {
         return yield* Console.log(
-          Option.isSome(browser)
-            ? "This host is ready for GOAT's browser."
-            : "Chrome's sandbox is allowed here. GOAT's browser installs on first use; if it then reports missing libraries, run this again.",
+          rootWarning ??
+            (Option.isSome(browser)
+              ? "This host is ready for GOAT's browser."
+              : "Chrome's sandbox is allowed here. GOAT's browser installs on first use; if it then reports missing libraries, run this again."),
         );
       }
 
@@ -207,7 +199,7 @@ const browserSetupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe
         yield* Console.log("Installed the browser's libraries.");
       }
 
-      yield* Console.log("This host is ready for GOAT's browser.");
+      yield* Console.log(rootWarning ?? "This host is ready for GOAT's browser.");
     }),
   ),
 );

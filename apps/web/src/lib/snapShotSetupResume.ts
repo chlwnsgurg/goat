@@ -6,9 +6,7 @@ export function readSnapShotSetupResume(): { wasEnabled: boolean } | null {
   try {
     const value = migratingStorage(window.localStorage).getItem(STORAGE_KEY);
     if (value === "enabled" || value === "disabled") return { wasEnabled: value === "enabled" };
-  } catch {
-    // Permission setup still works when local storage is unavailable.
-  }
+  } catch {}
   return null;
 }
 

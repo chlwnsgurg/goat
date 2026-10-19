@@ -27,7 +27,12 @@ function reactAttributes(attrs: IconNode[number][1], key: number) {
 
 /** Builds a lucide-compatible component that draws one Solar Linear glyph. */
 function solarIcon(node: IconNode, displayName: string): IconComponent {
+  // Built on first draw and shared by every instance of this icon.
   let children: ReactNode[] | undefined;
+  const glyph = () =>
+    (children ??= node.map(([tag, attrs], index) =>
+      createElement(tag, reactAttributes(attrs, index)),
+    ));
   const Icon: IconComponent = ({
     size = 24,
     strokeWidth: _strokeWidth,
@@ -35,9 +40,6 @@ function solarIcon(node: IconNode, displayName: string): IconComponent {
     children: extraChildren,
     ...props
   }) => {
-    children ??= node.map(([tag, attrs], index) =>
-      createElement(tag, reactAttributes(attrs, index)),
-    );
     const labelled =
       props["aria-label"] !== undefined ||
       props["aria-labelledby"] !== undefined ||
@@ -54,7 +56,7 @@ function solarIcon(node: IconNode, displayName: string): IconComponent {
         data-icon={displayName}
         {...props}
       >
-        {children}
+        {glyph()}
         {extraChildren}
       </svg>
     );

@@ -209,8 +209,6 @@ const ThreadReadTool = Tool.make(agentSurfaceRegistry["thread.read"].name, {
   failureMode: "return",
   dependencies: hostThreadResultDependencies,
 })
-
-  // Strict so a misspelled paging param fails instead of silently reading from position 0.
   .annotate(Tool.Strict, true)
   .annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["thread.read"]));
 

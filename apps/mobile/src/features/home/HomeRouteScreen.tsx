@@ -1,3 +1,4 @@
+import { Toolbar } from "../../components/ui/Toolbar";
 import { use } from "react";
 import {
   NativePrimaryColumnContext,
@@ -12,16 +13,16 @@ import { Platform, useWindowDimensions } from "react-native";
 import type { EnvironmentThreadShell } from "@goat/client-runtime/state/shell";
 import { resolveScratchProjectScopeKey } from "@goat/client-runtime/state/project-grouping";
 
-import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
+import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useProjects } from "../../state/entities";
 import { environmentThreadShells } from "../../state/threads";
 import { usePendingNewTasks } from "../../state/use-pending-new-tasks";
 import { useWorkspaceState } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
-import { useNativeColumnLayoutMetrics } from "../../native/native-layout-metrics";
+import { useDeviceType, useNativeColumnLayoutMetrics } from "../../native/native-layout-metrics";
 import { WorkspaceEmptyDetail } from "../layout/WorkspaceEmptyDetail";
-import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
+import { AndroidScreenHeader } from "../../components/ui/AndroidScreenHeader";
 import { checkForAppUpdateOnLaunch, startAppUpdateForegroundRecheck } from "../updates/app-updates";
 import { AndroidHomeFabLayout } from "./AndroidHomeFab";
 import { HomeScreen } from "./HomeScreen";
@@ -37,12 +38,11 @@ import { GoatBotScreen } from "../goat-bot/GoatBotScreen";
 import { useMobileGoatBotModeButton } from "../goat-bot/useMobileGoatBotHomeMode";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 
-/* ─── Route screen ───────────────────────────────────────────────────── */
-
 export function HomeRouteScreen() {
   const { width: windowWidth } = useWindowDimensions();
   const nativePrimaryColumn = use(NativePrimaryColumnContext);
   const columnMetrics = useNativeColumnLayoutMetrics();
+  const deviceType = useDeviceType();
   const headerWidth = nativePrimaryColumn ? (columnMetrics?.width ?? windowWidth) : windowWidth;
   const { layout, panes, primarySidebarSearchQuery, setPrimarySidebarSearchQuery } =
     useAdaptiveWorkspaceLayout();
@@ -160,15 +160,12 @@ export function HomeRouteScreen() {
       })),
     [listOptions.projectGroupingMode, projects, selectedEnvironmentId],
   );
-  // A saved project stays selected while its environment is offline or filtered out.
   const selectedProjectKey = projectFilterOptions.some(
     (project) => project.key === resolvedProjectKey,
   )
     ? resolvedProjectKey
     : null;
 
-  // In split layouts the persistent sidebar IS the thread list — Home becomes
-  // an empty detail pane so selecting a thread never transitions layouts.
   if (layout.usesSplitView && !nativePrimaryColumn) {
     return (
       <>
@@ -180,7 +177,6 @@ export function HomeRouteScreen() {
                   title: botHome.mode === "bot" ? "GOAT Bot" : "",
                   headerTitle: botHome.mode === "bot" ? "GOAT Bot" : "",
                   unstable_headerLeftItems: () => [],
-                  // Options survive layout changes; search and settings now belong to the sidebar.
                   headerSearchBarOptions: undefined,
                   unstable_headerRightItems: () => [],
                   unstable_headerToolbarItems: () => [],
@@ -188,20 +184,20 @@ export function HomeRouteScreen() {
           }
         />
         {Platform.OS === "ios" ? (
-          <NativeHeaderToolbar placement="left">
+          <Toolbar placement="left">
             {botHome.known ? (
-              <NativeHeaderToolbar.Button
+              <Toolbar.Button
                 accessibilityLabel={botHome.mode === "bot" ? "Show threads" : "Show GOAT Bot"}
                 icon={botHome.mode === "bot" ? "list.bullet" : "bubble.left.and.bubble.right"}
                 onPress={botHome.toggle}
               />
             ) : null}
-            <NativeHeaderToolbar.Button
+            <Toolbar.Button
               accessibilityLabel="New task"
               icon="square.and.pencil"
               onPress={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
             />
-          </NativeHeaderToolbar>
+          </Toolbar>
         ) : null}
         {Platform.OS === "android" ? (
           <AndroidScreenHeader
@@ -294,8 +290,7 @@ export function HomeRouteScreen() {
     >
       <>
         {/* Restore the header after leaving split view; screen options are
-            shallow-merged. The brand slot also doubles as the connection
-            status surface while an environment reconnects. */}
+            shallow-merged. */}
         {workspace !== null && Platform.OS === "ios" ? null : (
           <NativeStackScreenOptions
             optionsVersion={headerWidth}
@@ -303,8 +298,7 @@ export function HomeRouteScreen() {
               ...getConnectionAwareBrandHeaderOptions({
                 headerWidth,
                 trailingItemCount:
-                  (nativePrimaryColumn && Platform.OS === "ios" && Platform.isPad ? 2 : 1) +
-                  (botHome.known ? 1 : 0),
+                  (nativePrimaryColumn && deviceType === "pad" ? 2 : 1) + (botHome.known ? 1 : 0),
                 onOpenEnvironments: () =>
                   navigation.navigate("SettingsSheet", {
                     screen: "SettingsContent",

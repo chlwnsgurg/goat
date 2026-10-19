@@ -7,7 +7,11 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import * as GitHubApi from "./GitHubApi.ts";
+import { GraphQLClient, GraphQLClientError } from "effect/graphql";
+import { CloudSessionPullRequestGraphQLGroup } from "./cloudSessionPullRequest.graphql.ts";
+import * as GitHubGraphQlClient from "./gitHubGraphQlClient.ts";
+import * as GitHubRequestPolicy from "./GitHubRequestPolicy.ts";
+import * as GitHubRest from "./GitHubRest.ts";
 
 const OPERATION = "findCloudSessionPullRequest";
 const MAX_REQUESTS = 100;
@@ -26,37 +30,7 @@ const Pulls = Schema.Array(
     head: Schema.Struct({ ref: Schema.String, sha: Schema.String }),
   }),
 );
-const CommitPage = Schema.Struct({
-  data: Schema.Struct({
-    repository: Schema.NullOr(
-      Schema.Struct({
-        pullRequest: Schema.NullOr(
-          Schema.Struct({
-            headRefOid: Schema.String,
-            commits: Schema.Struct({
-              nodes: Schema.Array(
-                Schema.Struct({ commit: Schema.Struct({ message: Schema.String }) }),
-              ),
-              pageInfo: Schema.Struct({
-                hasNextPage: Schema.Boolean,
-                endCursor: Schema.NullOr(Schema.String),
-              }),
-            }),
-          }),
-        ),
-      }),
-    ),
-  }),
-});
 const decodePulls = Schema.decodeEffect(Schema.fromJsonString(Pulls));
-const decodeCommits = Schema.decodeEffect(Schema.fromJsonString(CommitPage));
-const COMMITS_QUERY = `query CloudSessionCommits($owner: String!, $name: String!, $number: Int!, $after: String) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) { headRefOid commits(first: 100, after: $after) {
-      nodes { commit { message } } pageInfo { hasNextPage endCursor }
-    } }
-  }
-}`;
 
 /** Match a whole canonical token, including a full-message trailer, rather than a URL prefix. */
 export function containsSessionUrl(text: string, expected: string): boolean {
@@ -90,7 +64,10 @@ type Scan = {
 };
 
 export const make = Effect.gen(function* () {
-  const api = yield* GitHubApi.GitHubApi;
+  const api = yield* GitHubRest.GitHubRest;
+  const graphql = yield* GraphQLClient.make(
+    CloudSessionPullRequestGraphQLGroup.middleware(GitHubGraphQlClient.GitHubGraphQlAuth),
+  ).pipe(Effect.provide(GitHubGraphQlClient.layer));
   const scans = new Map<string, Scan>();
   const find = Effect.fn(OPERATION)(function* (
     input: Parameters<NonNullable<PullRequestProviderApi["findCloudSessionPullRequest"]>>[0],
@@ -110,7 +87,7 @@ export const make = Effect.gen(function* () {
     ) {
       return yield* fail("Invalid repository or canonical cloud session URL.");
     }
-    const pinned = yield* GitHubApi.PinnedGitHubCredential;
+    const pinned = yield* GitHubRequestPolicy.PinnedGitHubCredential;
     if (pinned === null || pinned.host !== input.host) {
       return yield* fail("PR observation needs this project's verified, pinned credential.");
     }
@@ -233,19 +210,19 @@ export const make = Effect.gen(function* () {
       while (scan.pending.length > 0) {
         const pr = scan.pending[0]!;
         yield* checkBudget();
-        const raw = yield* api.graphql({
-          host: input.host,
-          operation: OPERATION,
-          query: COMMITS_QUERY,
-          variables: { owner, name, number: pr.number, after: pr.cursor },
-          maxResponseBytes: MAX_RESPONSE_BYTES,
-        });
-        const response = yield* decodeCommits(raw).pipe(
-          Effect.mapError((cause) =>
-            fail("GitHub returned an unreadable full-commit page.", cause),
-          ),
-        );
-        const connection = response.data.repository?.pullRequest;
+        const response = yield* graphql
+          .CloudSessionCommits({ owner: owner!, name: name!, number: pr.number, after: pr.cursor })
+          .pipe(
+            GitHubGraphQlClient.call({
+              host: input.host,
+              operation: OPERATION,
+              maxResponseBytes: MAX_RESPONSE_BYTES,
+            }),
+            Effect.catchIf(GraphQLClientError.isGraphQLClientError, (cause) =>
+              Effect.fail(fail("GitHub returned an unreadable full-commit page.", cause)),
+            ),
+          );
+        const connection = response.repository?.pullRequest;
         if (connection == null || connection.headRefOid !== pr.head.sha) {
           scan.pending.shift();
           scan.pending.push({ ...pr, cursor: null, pages: 0 });
@@ -253,12 +230,13 @@ export const make = Effect.gen(function* () {
             "The PR head changed or is unavailable; its cursor needs revalidation.",
           );
         }
-        if (connection.commits.nodes.length > 100) {
+        const nodes = connection.commits.nodes ?? [];
+        if (nodes.length > 100) {
           return yield* fail("GitHub exceeded the full-commit page bound.");
         }
         if (
-          connection.commits.nodes.some((entry) =>
-            containsSessionUrl(entry.commit.message, input.sessionUrl),
+          nodes.some(
+            (entry) => entry !== null && containsSessionUrl(entry.commit.message, input.sessionUrl),
           )
         ) {
           return yield* result(pr);

@@ -1,7 +1,8 @@
+// @vitest-environment jsdom
 import { EnvironmentId, type EditorId } from "@goat/contracts";
 import * as NodeAssert from "node:assert/strict";
-import { createElement, useEffect } from "react";
-import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import { act, createElement, useEffect } from "react";
+import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
@@ -57,9 +58,9 @@ it.each(["src/index.ts", "logs/build:2026"])(
       }, [contextMenu]);
       return null;
     }
-    let renderer: ReactTestRenderer | undefined;
+    const root = createRoot(document.createElement("div"));
     await act(async () => {
-      renderer = create(createElement(Harness));
+      root.render(createElement(Harness));
     });
     try {
       NodeAssert.ok(menu);
@@ -79,7 +80,7 @@ it.each(["src/index.ts", "logs/build:2026"])(
       await menu.activate("editor:vscode", BASE_TARGET);
       expect(state.openEditor).not.toHaveBeenCalled();
     } finally {
-      await act(async () => renderer?.unmount());
+      await act(async () => root.unmount());
     }
   },
 );

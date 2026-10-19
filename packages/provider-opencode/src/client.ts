@@ -1,9 +1,3 @@
-/**
- * OpenCode's client definition: settings form, label, and glyph.
- * Browser- and React Native-safe.
- *
- * @module provider-opencode/client
- */
 import { ProviderDriverKind } from "@goat/contracts";
 import { defineProviderClient } from "@goat/provider-core/client";
 

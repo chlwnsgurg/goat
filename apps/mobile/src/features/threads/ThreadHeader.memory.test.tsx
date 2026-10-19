@@ -26,9 +26,9 @@ vi.mock("./ThreadGitControls", () => ({
   useThreadGitCenterHeaderItems: () => [],
   useThreadGitRightHeaderItems: () => [],
 }));
-vi.mock("../../components/ScreenHeaderButton", () => ({ ScreenHeaderButton: () => null }));
-vi.mock("../../components/ScreenHeader", () => ({
-  ScreenHeader: (props: {
+vi.mock("../../components/ui/ScreenHeaderButton", () => ({ ScreenHeaderButton: () => null }));
+vi.mock("../../components/ui/AppBar", () => ({
+  AppBar: (props: {
     options: {
       unstable_headerRightItems?: () => Array<{ identifier: string; onPress: () => void }>;
     };

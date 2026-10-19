@@ -14,7 +14,6 @@ import { museClient } from "@goat/provider-muse/client";
 import { openCodeClient } from "@goat/provider-opencode/client";
 import { piClient } from "@goat/provider-pi/client";
 
-/** The provider client definitions this web build ships, in presentation order. */
 export const providerClients = makeProviderClientRegistry([
   {
     driverKind: ProviderDriverKind.make("codex"),

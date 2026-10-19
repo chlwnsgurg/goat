@@ -13,12 +13,8 @@ import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopState from "../app/DesktopState.ts";
-import { HttpClient } from "effect/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
-
-/** Shared DesktopUpdates test harness: a fully stubbed updater layer whose
-    electron-updater events are driven by hand via `emit`. Used by
-    DesktopUpdates.test.ts and DesktopRemoteUpdates.test.ts. */
 
 export const flushCallbacks = Effect.yieldNow;
 
@@ -40,11 +36,10 @@ export interface UpdatesHarnessOptions {
   readonly quitAndInstall?: Effect.Effect<void, ElectronUpdater.ElectronUpdaterQuitAndInstallError>;
   readonly stopBackend?: Effect.Effect<void>;
   readonly startBackend?: Effect.Effect<void>;
+  readonly backendDesiredRunning?: boolean;
   readonly env?: Record<string, string | undefined>;
   readonly platform?: NodeJS.Platform;
-  /** Contents of the resources/package-type marker a Linux package ships. */
   readonly packageType?: string | undefined;
-  /** Contents of the install record a previous run left behind. */
   readonly installRecord?: string | undefined;
 }
 
@@ -145,21 +140,47 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     syncAllAppearance: () => Effect.void,
   } satisfies ElectronWindow.ElectronWindow["Service"]);
 
+  let backendDesiredRunning = options.backendDesiredRunning ?? true;
+  const backendConfig = {
+    executablePath: "node",
+    entryPath: "/server/bin.mjs",
+    cwd: "/server",
+    args: [],
+    env: {},
+    extendEnv: true,
+    bootstrap: {
+      mode: "desktop" as const,
+      noBrowser: true,
+      port: 4444,
+      host: "127.0.0.1",
+      desktopBootstrapToken: "token",
+      tailscaleServeEnabled: false,
+      tailscaleServePort: 443,
+    },
+    bootstrapDelivery: "fd3" as const,
+    httpBaseUrl: new URL("http://127.0.0.1:4444"),
+    captureOutput: false,
+    preflightFailure: Option.none(),
+  };
   const stubBackendInstance: DesktopBackendPool.DesktopBackendInstance = {
     id: DesktopBackendPool.PRIMARY_INSTANCE_ID,
     label: Effect.succeed("Windows"),
     start: Effect.sync(() => {
+      backendDesiredRunning = true;
       installSteps.push("startBackend");
     }).pipe(Effect.andThen(options.startBackend ?? Effect.void)),
-    stop: () => options.stopBackend ?? Effect.void,
-    currentConfig: Effect.succeedNone,
-    snapshot: Effect.succeed({
-      desiredRunning: false,
-      ready: false,
-      activePid: Option.none(),
+    stop: () =>
+      Effect.sync(() => {
+        backendDesiredRunning = false;
+      }).pipe(Effect.andThen(options.stopBackend ?? Effect.void)),
+    currentConfig: Effect.succeedSome(backendConfig),
+    snapshot: Effect.sync(() => ({
+      desiredRunning: backendDesiredRunning,
+      ready: backendDesiredRunning,
+      activePid: backendDesiredRunning ? Option.some(42) : Option.none(),
       restartAttempt: 0,
       restartScheduled: false,
-    }),
+    })),
     waitForReady: () => Effect.succeed(true),
   };
   const layerBackend = DesktopBackendPool.layerTest(
@@ -245,10 +266,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     applyWslWindowsFallbackInMemory: Effect.die("unexpected WSL Windows fallback"),
   } satisfies DesktopAppSettings.DesktopAppSettings["Service"]);
 
-  // Tracks the restart markers and install records installs leave, so
-  // installs stay free of real disk I/O that would outrun the tests' settle loops.
   const updateRestartMarkers = new Set<string>();
-  // Contents of the install record, by path once an install writes one.
   const installRecords = new Map<string, string>();
   let previousInstallRecord = options.installRecord;
   const isInstallRecord = (path: string) =>
@@ -288,7 +306,15 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     Layer.provide(
       Layer.succeed(
         HttpClient.HttpClient,
-        options.httpClient ?? HttpClient.make(() => Effect.die("unexpected activity request")),
+        options.httpClient ??
+          HttpClient.make((request) =>
+            Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                Response.json({ activity: "idle", pid: 42, serverVersion: "1.2.3" }),
+              ),
+            ),
+          ),
       ),
     ),
     Layer.provide(layerFileSystem),
@@ -317,7 +343,6 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     installSteps,
     updateRestartMarkers,
     installRecords,
-    /** The record the test started with, until the app removes it. */
     previousInstallRecord: () => previousInstallRecord,
     downloadCount: () => downloadCount,
     feedUrls: (): ElectronUpdater.ElectronUpdaterFeedUrl[] => feedUrls,

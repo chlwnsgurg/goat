@@ -43,6 +43,8 @@ vi.mock("../../state/server", async () => {
       forgetSshHost: vi.fn(),
       updateStateAtom: () => Atom.make({ status: "idle" }),
     },
+    environmentUpdateStatesAtom: (key: string) =>
+      Atom.make(key === "" ? [] : key.split("\n").map(() => ({ status: "idle" }))),
   };
 });
 vi.mock("../../state/query", () => ({

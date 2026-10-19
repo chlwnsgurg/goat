@@ -49,6 +49,7 @@ import {
   nativeScripts,
   nativeScriptsBatch,
   installArchivePsDouble,
+  isRemoteLaunch,
 } from "./tunnel.fixture.ts";
 import { nextVersion, shell, fixture } from "./tunnel.runnerSwitch.fixture.ts";
 
@@ -64,7 +65,7 @@ describe("ssh tunnel scripts", () => {
       for (const scripts of generated) {
         assert.include(scripts.runner, "GOAT_NODE_SCRIPT_PATH=");
         assert.include(scripts.runner, "T3_NODE_SCRIPT_PATH=");
-        assert.notMatch(scripts.runner, /\$[\{]?T3_/);
+        assert.notMatch(scripts.runner, /\$[{]?T3_/);
         for (const script of Object.values(scripts)) {
           if (script === null) continue;
           const child = yield* spawner.spawn(
@@ -638,7 +639,7 @@ describe("ssh tunnel scripts", () => {
                 kills++;
               });
             }
-            if (args.includes("--")) {
+            if (isRemoteLaunch(args)) {
               launches++;
               if (launches === 2 && mode === "failed reconnect")
                 return {
@@ -718,7 +719,7 @@ describe("ssh tunnel scripts", () => {
               kills++;
             });
           }
-          if (args.includes("--")) {
+          if (isRemoteLaunch(args)) {
             stale = false;
             return makeSuccessfulProcess(
               '{"status":"ready","selectedVersion":"0.1.0","remotePort":3773,"serverKind":"managed"}',
@@ -785,7 +786,7 @@ describe("ssh tunnel scripts", () => {
               tunnelKillCount += 1;
             });
           }
-          if (args.includes("sh") && args.includes("--")) {
+          if (args.includes("sh") && isRemoteLaunch(args)) {
             return makeSuccessfulProcess(
               '{"status":"ready","selectedVersion":"1.2.3-preview.20260911.4","remotePort":3773}\n',
             );
@@ -834,6 +835,7 @@ describe("ssh tunnel scripts", () => {
         assert.include(firstTunnelArgs, "ControlMaster=no");
         assert.include(firstTunnelArgs, "ControlPath=none");
         assert.include(firstTunnelArgs, "ControlPersist=no");
+        assert.deepEqual(firstTunnelArgs?.slice(-2), ["--", "julius@devbox"]);
 
         const disconnected = yield* Effect.result(manager.disconnectEnvironment(target));
         if (mode === "failed stop") {
@@ -912,7 +914,7 @@ describe("ssh tunnel scripts", () => {
               }
               return tunnel;
             }
-            if (args.includes("--")) {
+            if (isRemoteLaunch(args)) {
               if (isTarget) {
                 launches += 1;
                 remoteRunning = true;
@@ -1251,7 +1253,7 @@ else {
         const args = command.args;
         if (args.includes("-c")) uploads++;
         const remoteArgs = args.slice(args.indexOf("sh") + 1).filter((arg) => arg !== "-l");
-        const stdin = args.includes("--")
+        const stdin = isRemoteLaunch(args)
           ? Stream.make(encoder.encode(scripts.launch))
           : args.includes("-l")
             ? command.options.stdin
@@ -1318,7 +1320,7 @@ else {
           assert.equal(command._tag, "StandardCommand");
           if (command._tag !== "StandardCommand") return makeSuccessfulProcess("");
           const args = command.args;
-          const kind = args.includes("-c") ? "upload" : args.includes("--") ? "launch" : "probe";
+          const kind = args.includes("-c") ? "upload" : isRemoteLaunch(args) ? "launch" : "probe";
           calls.push(kind);
           auth.push({
             secret: command.options.env?.T3_SSH_AUTH_SECRET,
@@ -1470,7 +1472,7 @@ else {
             return makeSuccessfulProcess('{"stopped":true}');
           const kind = args.includes("-c")
             ? "upload"
-            : args.includes("--")
+            : isRemoteLaunch(args)
               ? "launch"
               : args.includes("-l")
                 ? "probe"

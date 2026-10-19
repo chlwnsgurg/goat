@@ -93,6 +93,10 @@ export function commandArgs(command: ChildProcess.Command): ReadonlyArray<string
   return command._tag === "StandardCommand" ? command.args : [];
 }
 
+/** Every ssh command ends its options with `--`; only the remote launch passes args after `sh -s --`. */
+export const isRemoteLaunch = (args: ReadonlyArray<string>): boolean =>
+  args.some((arg, index) => arg === "-s" && args[index + 1] === "--");
+
 export const ARCHIVE = { archiveVersion: "1.2.3-preview.20260911.4" } as const;
 // Protocol-only cases explicitly select the mirror compatibility path.
 export const PROTOCOL_ARCHIVE = { ...ARCHIVE, releaseBaseUrl: "https://example.invalid/mirror" };

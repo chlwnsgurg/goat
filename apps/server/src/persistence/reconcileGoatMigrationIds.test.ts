@@ -9,7 +9,7 @@ import { migrationEntries, migrationManifest, runMigrations } from "./Migrations
 
 // GOAT builds record GOAT's own migrations right after the last upstream one they knew:
 // at 61 before the sync that added PullRequestReviewGuides, at 62 before the one that
-// added ThreadFailureLookupIndex.
+// added ThreadFailureLookupIndex, at 63 before the one that added DropUnusedV1Projections.
 const seedGoatLedger = (names: ReadonlyArray<string>, firstGoatId = 61) =>
   Effect.gen(function* () {
     yield* runMigrations({ toMigrationInclusive: firstGoatId - 1 });
@@ -42,6 +42,18 @@ const hasReviewGuides = Effect.gen(function* () {
 });
 
 describe("GOAT migration ids", () => {
+  it.effect("moves a released memory ledger past DropUnusedV1Projections", () =>
+    Effect.gen(function* () {
+      yield* seedGoatLedger(
+        migrationEntries.filter(([id]) => id > 63).map(([, name]) => name),
+        63,
+      );
+      assert.deepStrictEqual(yield* runMigrations(), [[63, "DropUnusedV1Projections"]]);
+      assert.deepStrictEqual(yield* history, migrationManifest);
+      assert.deepStrictEqual(yield* runMigrations(), []);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
   it.effect("runs the upstream migration a GOAT ledger skipped and moves GOAT's ids up", () =>
     Effect.gen(function* () {
       yield* seedGoatLedger([
@@ -58,19 +70,20 @@ describe("GOAT migration ids", () => {
       assert.deepStrictEqual(yield* runMigrations(), [
         [61, "PullRequestReviewGuides"],
         [62, "ThreadFailureLookupIndex"],
-        [71, "Memory"],
-        [72, "MemoryHubSync"],
-        [73, "MemorySearchCounters"],
-        [74, "MemoryTaskGrantCeiling"],
-        [75, "MemoryImportLineage"],
-        [76, "MemoryCheckpointAccounting"],
-        [77, "MemoryReportLifecycle"],
-        [78, "MemoryUsageCounters"],
-        [79, "MemoryRevertResults"],
-        [80, "HandoffLookupIndex"],
-        [81, "MemoryLastReadySpace"],
-        [82, "MemoryHubAdministered"],
-        [83, "MemoryCheckpointLifecycle"],
+        [63, "DropUnusedV1Projections"],
+        [72, "Memory"],
+        [73, "MemoryHubSync"],
+        [74, "MemorySearchCounters"],
+        [75, "MemoryTaskGrantCeiling"],
+        [76, "MemoryImportLineage"],
+        [77, "MemoryCheckpointAccounting"],
+        [78, "MemoryReportLifecycle"],
+        [79, "MemoryUsageCounters"],
+        [80, "MemoryRevertResults"],
+        [81, "HandoffLookupIndex"],
+        [82, "MemoryLastReadySpace"],
+        [83, "MemoryHubAdministered"],
+        [84, "MemoryCheckpointLifecycle"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -84,24 +97,25 @@ describe("GOAT migration ids", () => {
       assert.deepStrictEqual(yield* runMigrations(), [
         [61, "PullRequestReviewGuides"],
         [62, "ThreadFailureLookupIndex"],
-        [66, "ChannelLedger"],
-        [67, "RemoteDispatchQuestions"],
-        [68, "ThreadRunResults"],
-        [69, "RemoteReportRelay"],
-        [70, "ProjectionTurnItemRequestIndex"],
-        [71, "Memory"],
-        [72, "MemoryHubSync"],
-        [73, "MemorySearchCounters"],
-        [74, "MemoryTaskGrantCeiling"],
-        [75, "MemoryImportLineage"],
-        [76, "MemoryCheckpointAccounting"],
-        [77, "MemoryReportLifecycle"],
-        [78, "MemoryUsageCounters"],
-        [79, "MemoryRevertResults"],
-        [80, "HandoffLookupIndex"],
-        [81, "MemoryLastReadySpace"],
-        [82, "MemoryHubAdministered"],
-        [83, "MemoryCheckpointLifecycle"],
+        [63, "DropUnusedV1Projections"],
+        [67, "ChannelLedger"],
+        [68, "RemoteDispatchQuestions"],
+        [69, "ThreadRunResults"],
+        [70, "RemoteReportRelay"],
+        [71, "ProjectionTurnItemRequestIndex"],
+        [72, "Memory"],
+        [73, "MemoryHubSync"],
+        [74, "MemorySearchCounters"],
+        [75, "MemoryTaskGrantCeiling"],
+        [76, "MemoryImportLineage"],
+        [77, "MemoryCheckpointAccounting"],
+        [78, "MemoryReportLifecycle"],
+        [79, "MemoryUsageCounters"],
+        [80, "MemoryRevertResults"],
+        [81, "HandoffLookupIndex"],
+        [82, "MemoryLastReadySpace"],
+        [83, "MemoryHubAdministered"],
+        [84, "MemoryCheckpointLifecycle"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -127,19 +141,20 @@ describe("GOAT migration ids", () => {
         );
         assert.deepStrictEqual(yield* runMigrations(), [
           [62, "ThreadFailureLookupIndex"],
-          [71, "Memory"],
-          [72, "MemoryHubSync"],
-          [73, "MemorySearchCounters"],
-          [74, "MemoryTaskGrantCeiling"],
-          [75, "MemoryImportLineage"],
-          [76, "MemoryCheckpointAccounting"],
-          [77, "MemoryReportLifecycle"],
-          [78, "MemoryUsageCounters"],
-          [79, "MemoryRevertResults"],
-          [80, "HandoffLookupIndex"],
-          [81, "MemoryLastReadySpace"],
-          [82, "MemoryHubAdministered"],
-          [83, "MemoryCheckpointLifecycle"],
+          [63, "DropUnusedV1Projections"],
+          [72, "Memory"],
+          [73, "MemoryHubSync"],
+          [74, "MemorySearchCounters"],
+          [75, "MemoryTaskGrantCeiling"],
+          [76, "MemoryImportLineage"],
+          [77, "MemoryCheckpointAccounting"],
+          [78, "MemoryReportLifecycle"],
+          [79, "MemoryUsageCounters"],
+          [80, "MemoryRevertResults"],
+          [81, "HandoffLookupIndex"],
+          [82, "MemoryLastReadySpace"],
+          [83, "MemoryHubAdministered"],
+          [84, "MemoryCheckpointLifecycle"],
         ]);
         assert.deepStrictEqual(yield* history, migrationManifest);
         assert.deepStrictEqual(yield* runMigrations(), []);
@@ -151,13 +166,13 @@ describe("GOAT migration ids", () => {
 describe("unreleased memory DB", () => {
   it.effect("rejects an old memory ledger before moving any GOAT ids", () =>
     Effect.gen(function* () {
-      yield* runMigrations({ toMigrationInclusive: 70 });
+      yield* runMigrations({ toMigrationInclusive: 71 });
       const sql = yield* SqlClient.SqlClient;
-      yield* sql`UPDATE effect_sql_migrations SET migration_id = 169 WHERE name = 'RemoteReportRelay'`;
-      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (70 + 100, 'Memory')`;
+      yield* sql`UPDATE effect_sql_migrations SET migration_id = 170 WHERE name = 'RemoteReportRelay'`;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (71 + 100, 'Memory')`;
       // The old Memory id may collide with dev's index, so model the actual pre-sync ledger.
       yield* sql`DELETE FROM effect_sql_migrations WHERE name = 'ProjectionTurnItemRequestIndex'`;
-      yield* sql`UPDATE effect_sql_migrations SET migration_id = 70 WHERE name = 'Memory'`;
+      yield* sql`UPDATE effect_sql_migrations SET migration_id = 71 WHERE name = 'Memory'`;
       const before = yield* history;
       const result = yield* Effect.flip(runMigrations());
       assert.strictEqual(result._tag, "MigrationError");
@@ -170,10 +185,10 @@ describe("unreleased memory DB", () => {
 
   it.effect("rejects old memory when other GOAT ids already match", () =>
     Effect.gen(function* () {
-      yield* runMigrations({ toMigrationInclusive: 70 });
+      yield* runMigrations({ toMigrationInclusive: 71 });
       const sql = yield* SqlClient.SqlClient;
       yield* sql`DELETE FROM effect_sql_migrations WHERE name = 'ProjectionTurnItemRequestIndex'`;
-      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (70, 'Memory')`;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (71, 'Memory')`;
       const before = yield* history;
       const result = yield* Effect.flip(reconcileGoatMigrationIds(migrationEntries));
       if (result._tag !== "MigrationError") return yield* result;
@@ -202,7 +217,7 @@ describe("unreleased memory DB", () => {
 
   it.effect("rejects unrecorded memory tables in an ordinary dev ledger", () =>
     Effect.gen(function* () {
-      yield* runMigrations({ toMigrationInclusive: 70 });
+      yield* runMigrations({ toMigrationInclusive: 71 });
       const sql = yield* SqlClient.SqlClient;
       yield* sql`CREATE TABLE memory_payloads (body TEXT)`;
       const before = yield* history;
@@ -215,13 +230,13 @@ describe("unreleased memory DB", () => {
 
   it.effect("upgrades an ordinary dev DB without memory and restarts normally", () =>
     Effect.gen(function* () {
-      yield* runMigrations({ toMigrationInclusive: 70 });
+      yield* runMigrations({ toMigrationInclusive: 71 });
       const sql = yield* SqlClient.SqlClient;
       yield* sql`CREATE TABLE unrelated_state (value TEXT)`;
       yield* sql`INSERT INTO unrelated_state VALUES ('keep')`;
       assert.deepStrictEqual(
         yield* runMigrations(),
-        migrationManifest.filter(([id]) => id > 70),
+        migrationManifest.filter(([id]) => id > 71),
       );
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT value FROM unrelated_state`, [{ value: "keep" }]);
@@ -250,8 +265,8 @@ it.effect("validates later Memory migrations against the registry without a fixe
 
 // WP5 names are stable registration keys; old ordinals must never migrate data.
 it.effect.each([
-  { name: "MemoryImportLineage", oldId: 74 },
-  { name: "MemoryCheckpointAccounting", oldId: 75 },
+  { name: "MemoryImportLineage", oldId: 75 },
+  { name: "MemoryCheckpointAccounting", oldId: 76 },
 ] as const)(
   "rejects the old $name ordinal $oldId without changing schema or ledger",
   ({ name, oldId }) =>
@@ -281,17 +296,17 @@ it.effect("restarts the current WP5 registry without rewriting lineage or accoun
       yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`;
     const schema = yield* sql`SELECT name,sql FROM sqlite_master ORDER BY name`;
     assert.deepStrictEqual(
-      migrationManifest.filter(([id]) => id >= 75),
+      migrationManifest.filter(([id]) => id >= 76),
       [
-        [75, "MemoryImportLineage"],
-        [76, "MemoryCheckpointAccounting"],
-        [77, "MemoryReportLifecycle"],
-        [78, "MemoryUsageCounters"],
-        [79, "MemoryRevertResults"],
-        [80, "HandoffLookupIndex"],
-        [81, "MemoryLastReadySpace"],
-        [82, "MemoryHubAdministered"],
-        [83, "MemoryCheckpointLifecycle"],
+        [76, "MemoryImportLineage"],
+        [77, "MemoryCheckpointAccounting"],
+        [78, "MemoryReportLifecycle"],
+        [79, "MemoryUsageCounters"],
+        [80, "MemoryRevertResults"],
+        [81, "HandoffLookupIndex"],
+        [82, "MemoryLastReadySpace"],
+        [83, "MemoryHubAdministered"],
+        [84, "MemoryCheckpointLifecycle"],
       ],
     );
     assert.deepStrictEqual(yield* runMigrations(), []);

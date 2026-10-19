@@ -2,7 +2,7 @@ import { useState } from "react";
 import { TextInput, View } from "react-native";
 import type { EnvironmentId, ProjectId } from "@goat/contracts";
 import { useProjects } from "../../state/entities";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { SettingsActionRow } from "./components/SettingsActionRow";
 
 const PAGE_SIZE = 20;

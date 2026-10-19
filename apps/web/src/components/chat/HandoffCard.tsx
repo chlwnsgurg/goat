@@ -9,7 +9,7 @@ import {
   type Handoff,
   type HandoffHuman,
 } from "@goat/contracts";
-import { useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import * as DateTime from "effect/DateTime";
 import { useEnvironmentScope } from "../../state/session";
 import { serverEnvironment, sshHost } from "../../state/server";
@@ -152,7 +152,7 @@ function HandoffCardContent(props: HandoffCardProps) {
     setBusy(true);
     setError(null);
     const input = { threadId: handoff.requestedBy.threadId, handoffId: handoff.handoffId };
-    try {
+    const runAction = async () => {
       if (action === "opened") {
         const result = await open({ environmentId: props.environmentId, input });
         if (generation !== lifetime.current) return;
@@ -177,10 +177,11 @@ function HandoffCardContent(props: HandoffCardProps) {
               : "Could not update this handoff. It may already be resolved or expired.",
           );
       }
-    } finally {
+    };
+    await runAction().finally(() => {
       inFlight.current = false;
       setBusy(false);
-    }
+    });
   };
   return (
     <section
@@ -319,14 +320,11 @@ function VisibleSshHandoffProgress({
 }) {
   const registry = useContext(RegistryContext);
   const [copyError, setCopyError] = useState<string | null>(null);
-  const target = useMemo(
-    () => ({
-      environmentId,
-      input: { threadId: handoff.requestedBy.threadId, handoffId: handoff.handoffId },
-      targetPath: handoff.target.path,
-    }),
-    [environmentId, handoff.requestedBy.threadId, handoff.handoffId, handoff.target.path],
-  );
+  const target = {
+    environmentId,
+    input: { threadId: handoff.requestedBy.threadId, handoffId: handoff.handoffId },
+    targetPath: handoff.target.path,
+  };
   const query = useAtomValue(sshHost.handoffProgress(target));
   const progress = query._tag === "Failure" ? null : Option.getOrNull(AsyncResult.value(query));
   const approvalFresh =

@@ -1,5 +1,5 @@
 import type { ScopedThreadRef } from "@goat/contracts";
-import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
 import { useOpenLink } from "~/browser/useOpenLink";
 import { ChevronLeftIcon, ChevronRightIcon, XIcon } from "~/components/solar";
 import { Input } from "~/components/ui/input";
@@ -128,20 +128,14 @@ function PdfDocument(props: {
     );
   }, []);
 
-  const pages = useMemo(() => layoutPages(sizes, container, zoom), [sizes, container, zoom]);
+  const pages = layoutPages(sizes, container, zoom);
   const current = pages.length ? pageAtOffset(pages, top + 16) : 0;
   const scale = pages[current]?.scale ?? 1;
-  const visible = useMemo(
-    () => (container.width > 0 ? visiblePages(pages, top, container.height) : []),
-    [pages, top, container],
-  );
+  const visible = container.width > 0 ? visiblePages(pages, top, container.height) : [];
   const height = pages.length
     ? pages[pages.length - 1]!.top + pages[pages.length - 1]!.height + 16
     : 0;
-  const width = useMemo(
-    () => pages.reduce((max, page) => Math.max(max, page.width + 32), container.width),
-    [pages, container.width],
-  );
+  const width = pages.reduce((max, page) => Math.max(max, page.width + 32), container.width);
 
   // Preserve the logical page and its vertical offset across zoom and resize.
   useLayoutEffect(() => {
@@ -176,10 +170,7 @@ function PdfDocument(props: {
     return () => controller.abort();
   }, [findOpen, props.document, texts, searchError]);
 
-  const matches = useMemo(
-    () => (findOpen && texts ? findPdfMatches(texts, query) : []),
-    [findOpen, texts, query],
-  );
+  const matches = findOpen && texts ? findPdfMatches(texts, query) : [];
   const selected = matches[matchIndex];
   const revealMatch = useEffectEvent((number: number) => navigate(number));
   useLayoutEffect(() => {

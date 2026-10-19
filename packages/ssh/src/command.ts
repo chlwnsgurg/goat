@@ -259,6 +259,7 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
     }),
     ...SSH_KEEPALIVE_ARGS,
     ...(input.preHostArgs ?? []),
+    "--",
     hostSpec,
     ...(input.remoteCommandArgs ?? []),
   ];

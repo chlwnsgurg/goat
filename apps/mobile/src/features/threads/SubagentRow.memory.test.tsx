@@ -10,7 +10,7 @@ import {
   nativeEnv,
   type NativeMemoryHarness,
 } from "../../testing/memoryNativeHarness";
-vi.mock("../../components/AppSymbol", () => ({ SymbolView: () => null }));
+vi.mock("../../components/ui/AppSymbol", () => ({ SymbolView: () => null }));
 vi.mock("../../components/ProviderIcon", () => ({ ProviderIcon: () => null }));
 vi.mock("./SubagentStatusDot", () => ({
   SubagentStatusDot: () => null,

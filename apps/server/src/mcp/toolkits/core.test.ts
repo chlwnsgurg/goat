@@ -107,7 +107,6 @@ import { htmlRenderFromToolItem } from "@goat/shared/toolOutput";
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 
-// Registration asks for every service the thread tools declare; these cases call none that use them.
 const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
@@ -152,9 +151,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
       names.add(tool.name);
       const schema = Tool.getJsonSchema(tool);
       expect(schema).toMatchObject({ type: "object" });
-      // The published tool catalog must also work with providers without $ref support.
       expect(JSON.stringify(schema), tool.name).not.toContain('"$ref"');
-      // Every published tool must have labels for its lifecycle, branding, and a summary.
       const definition = resolveGoatMcpToolDefinition(tool.name);
       expect(definition, tool.name).not.toBeNull();
       expect(
@@ -450,11 +447,9 @@ it.effect("returns an HTML render reference that Codex and Claude tool rows both
         Layer.provide(PreviewBrowser.layer),
         Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "goat-mcp-html-render-" })),
         Layer.provide(NodeServices.layer),
-        // The preview browser is not installed in a fresh home, so nothing downloads.
         Layer.provide(FetchHttpClient.layer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
-            // A live run: publishing stores a page, so it needs the caller's active turn.
             getThreadShell: () =>
               Effect.succeed({
                 id: threadId,
@@ -1077,8 +1072,6 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
     const refused = yield* call("goat_attachment_discard", { attachmentId }, otherThread);
     expect(declaredFailure(refused)).toMatchObject({ code: "invalid_request" });
 
-    // Another prepare a day later keeps it: the file outlives its URL's 24 hours
-    // by as long as the upload took, up to the URL's own lifetime.
     yield* TestClock.adjust(24 * 60 * 60 * 1000 + 5 * 60_000);
     yield* call(
       "goat_attachment_prepare_upload",
@@ -1086,7 +1079,6 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
       scope,
     );
 
-    // A new provider session of the same thread still owns the upload.
     const discarded = yield* call(
       "goat_attachment_discard",
       { attachmentId },

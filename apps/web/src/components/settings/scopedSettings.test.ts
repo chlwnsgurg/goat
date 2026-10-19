@@ -158,6 +158,7 @@ describe("scoped settings writes", () => {
           mode: "custom",
           rules: {
             worktreeAfterDays: 12,
+            worktreeSettledAfterDays: null,
             worktreeOnDelete: true,
             worktreeOnMerge: true,
             worktreeUnchanged: false,
@@ -182,6 +183,7 @@ describe("scoped settings writes", () => {
     expect(policies).toEqual([
       {
         worktreeAfterDays: 12,
+        worktreeSettledAfterDays: null,
         worktreeOnDelete: false,
         worktreeOnMerge: true,
         worktreeUnchanged: false,
@@ -189,6 +191,7 @@ describe("scoped settings writes", () => {
       },
       {
         worktreeAfterDays: null,
+        worktreeSettledAfterDays: null,
         worktreeOnDelete: false,
         worktreeOnMerge: false,
         worktreeUnchanged: false,
@@ -231,7 +234,6 @@ describe("scoped settings writes", () => {
   });
 
   describe("an environment that saves but drops keys it does not know", () => {
-    // Laptop knows every key; Server is an older build that keeps its settings as they were.
     const upgradedLaptop = (saved: Partial<ServerSettings>) =>
       vi.fn(async ({ environmentId }: { environmentId: EnvironmentId }) => ({
         _tag: "Success" as const,
@@ -417,6 +419,7 @@ describe("scoped settings writes", () => {
               mode: "custom",
               rules: {
                 worktreeAfterDays: 8,
+                worktreeSettledAfterDays: null,
                 worktreeOnDelete: false,
                 worktreeOnMerge: true,
                 worktreeUnchanged: false,
@@ -430,6 +433,15 @@ describe("scoped settings writes", () => {
     const plan = planScopedSettingsPatch(project, [machine, customized], {
       worktreeCleanup: { mode: "custom", rules: { worktreeOnDelete: true } },
     });
+    const settledPlan = planScopedSettingsPatch(project, [machine, customized], {
+      worktreeCleanup: { mode: "custom", rules: { worktreeSettledAfterDays: 0 } },
+    });
+    expect(
+      settledPlan.serverWrites.map((write) => write.patch.projectSettingsOverrides),
+    ).toMatchObject([
+      { [projectId]: { worktreeCleanup: { rules: { worktreeSettledAfterDays: 0 } } } },
+      { [laptopProjectId]: { worktreeCleanup: { rules: { worktreeSettledAfterDays: 0 } } } },
+    ]);
     expect(plan.serverWrites.map((write) => write.patch.projectSettingsOverrides)).toEqual([
       {
         [projectId]: {
@@ -438,6 +450,7 @@ describe("scoped settings writes", () => {
             mode: "custom",
             rules: {
               worktreeAfterDays: 8,
+              worktreeSettledAfterDays: null,
               worktreeOnDelete: true,
               worktreeOnMerge: true,
               worktreeUnchanged: false,
@@ -452,6 +465,7 @@ describe("scoped settings writes", () => {
             mode: "custom",
             rules: {
               worktreeAfterDays: 30,
+              worktreeSettledAfterDays: null,
               worktreeOnDelete: true,
               worktreeOnMerge: false,
               worktreeUnchanged: false,

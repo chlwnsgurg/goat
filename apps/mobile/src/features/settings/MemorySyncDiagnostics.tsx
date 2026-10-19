@@ -5,7 +5,7 @@ import type { EnvironmentId, MemoryHubDiagnostics, MemorySyncStatus } from "@goa
 import { AsyncResult } from "effect/reactivity";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { memoryEnvironment as memory } from "../../state/memory";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";

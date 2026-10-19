@@ -33,15 +33,17 @@ vi.mock("react-native", () => ({
   ),
   StyleSheet: { absoluteFill: {} },
 }));
-vi.mock("../../components/AppText", () => ({ AppText: "span" }));
-vi.mock("../../components/AppActivityIndicator", () => ({ AppActivityIndicator: () => "Loading" }));
+vi.mock("../../components/ui/AppText", () => ({ AppText: "span" }));
+vi.mock("../../components/ui/AppActivityIndicator", () => ({
+  AppActivityIndicator: () => "Loading",
+}));
 vi.mock("../../components/FilePreviewGallery", () => ({
   useFilePreviewGallery: () => (source: unknown) => source,
 }));
 vi.mock("../../components/MediaActionsMenu", () => ({
   MediaActionsMenu: ({ children }: { children: ReactNode }) => children,
 }));
-vi.mock("../../components/NativePresentation", () => ({
+vi.mock("../../components/ui/NativePresentation", () => ({
   PresentationSource: ({ children }: { children: ReactNode }) => children,
 }));
 vi.mock("../../state/mediaActions", () => ({ useMediaActions: () => ({ actions: [] }) }));

@@ -2,7 +2,7 @@ import type { EnvironmentId, GoatBotHomeClaim } from "@goat/contracts";
 import { useRef, useState } from "react";
 import { Text } from "react-native";
 
-import { ScreenScrollView } from "../../components/ScreenScrollView";
+import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
 import { uuidv4 } from "../../lib/uuid";
 import { useMobileGoatBotHomeSettings } from "../goat-bot/useMobileGoatBotHomeSettings";
 import { SettingsRow } from "./components/SettingsRow";

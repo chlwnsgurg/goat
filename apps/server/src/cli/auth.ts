@@ -1,5 +1,4 @@
 import {
-  AuthAdministrativeScopes,
   AuthOrchestrationApproveScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -176,7 +175,7 @@ const pairingCommand = Command.make("pairing").pipe(
 
 const sessionIssueCommand = Command.make("issue", {
   ...authLocationFlags,
-  scopes: authScopesFlag(AuthAdministrativeScopes),
+  scopes: authScopesFlag(AuthStandardClientScopes),
   ttl: ttlFlag,
   label: labelFlag,
   subject: subjectFlag,

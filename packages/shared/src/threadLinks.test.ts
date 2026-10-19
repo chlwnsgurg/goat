@@ -29,7 +29,6 @@ describe("thread links", () => {
     ).toBe(
       "[Decoded](goat-thread://v1/thread:project:1) [Literal escape](goat-thread://v1/provider%3A1)",
     );
-    // A thread with an empty title still exists, so its link is not redirected.
     const untitled = new Map([
       ["a%3A1", ""],
       ["a:1", "Other"],

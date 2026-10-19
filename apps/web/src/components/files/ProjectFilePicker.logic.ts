@@ -78,7 +78,6 @@ export function resolveProjectFilePickerPath(query: string, platform: string, ho
 }
 
 /**
- * First ordered subsequence of `query` inside `value`, as highlight indices.
  * Returns null when `value` does not contain the subsequence at all — the
  * entry still renders (the server matched it), just without highlights.
  */
@@ -100,10 +99,9 @@ function findMatchIndices(value: string, query: string): number[] | null {
 }
 
 /**
- * Maps server search results to picker rows. Server ordering is preserved —
- * ranking already happened there; this pass keeps empty-query recents file-only and
- * computes highlight positions with the same query normalization the server
- * applied.
+ * Server ordering is preserved — ranking already happened there; this pass keeps
+ * empty-query recents file-only and computes highlight positions with the same
+ * query normalization the server applied.
  */
 export function getProjectFilePickerMatches(
   entries: ReadonlyArray<ProjectEntry>,

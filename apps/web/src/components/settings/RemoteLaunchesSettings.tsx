@@ -12,7 +12,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { connectSshEnvironment as connectSshEnvironmentAtom } from "~/connection/onboarding";
 import { useThreadShells } from "~/state/entities";
@@ -74,28 +74,24 @@ export function RemoteLaunchesSettings() {
   const { environments } = useEnvironments();
   const listed = useAtomValue(remoteLaunchesAtom);
   const shells = useThreadShells();
-  const dispatchers = useMemo(
-    () =>
-      listed.flatMap((entry) => {
-        const dispatcher = environments.find(
-          (environment) => environment.environmentId === entry.environmentId,
-        );
-        if (dispatcher === undefined) return [];
-        return [
-          {
-            dispatcher,
-            truncated: entry.truncated,
-            count: entry.launches.length,
-            groups: presentRemoteLaunches({
-              dispatcherEnvironmentId: entry.environmentId,
-              launches: entry.launches,
-              shells,
-            }),
-          },
-        ];
-      }),
-    [environments, listed, shells],
-  );
+  const dispatchers = listed.flatMap((entry) => {
+    const dispatcher = environments.find(
+      (environment) => environment.environmentId === entry.environmentId,
+    );
+    if (dispatcher === undefined) return [];
+    return [
+      {
+        dispatcher,
+        truncated: entry.truncated,
+        count: entry.launches.length,
+        groups: presentRemoteLaunches({
+          dispatcherEnvironmentId: entry.environmentId,
+          launches: entry.launches,
+          shells,
+        }),
+      },
+    ];
+  });
   if (dispatchers.length === 0) return null;
   const total = dispatchers.reduce((sum, entry) => sum + entry.count, 0);
   const { id, title } = searchableSetting("remote-launches");

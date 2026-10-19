@@ -13,7 +13,6 @@ import {
   CircleIcon,
   MessageCircleQuestionIcon,
 } from "~/components/solar";
-import { useMemo } from "react";
 
 import { usePrimarySettings } from "~/hooks/useSettings";
 import { formatShortTimestamp } from "~/timestampFormat";
@@ -97,10 +96,7 @@ function GoatBotThreadTarget({
 }: {
   readonly target: Extract<GoatBotCardTarget, { kind: "thread" }>;
 }) {
-  const threadRef = useMemo(
-    () => scopeThreadRef(target.environmentId, target.threadId),
-    [target.environmentId, target.threadId],
-  );
+  const threadRef = scopeThreadRef(target.environmentId, target.threadId);
   const shell = useThreadShell(threadRef);
   const bootstrapped = useEnvironmentShellsBootstrapped(target.environmentId);
   const connected = useConnectedEnvironmentIds().includes(target.environmentId);

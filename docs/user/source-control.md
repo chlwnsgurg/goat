@@ -315,8 +315,9 @@ thread details card, click a watched pull request's eye to stop it. Asking the a
 `unwatch_pull_request`, which stops either an automatic or explicit watch and keeps the PR linked.
 Watching also ends when the PR merges or closes, after 10 wakes in a row that bring only comments,
 after 8 failed reads in a row, or when you press Stop, settle, or archive the thread. A rate limit
-only pauses watching. Unsettle the thread before starting a new watch. Subagents cannot watch pull
-requests; the thread that delegated to them does.
+only pauses watching. Unsettle the thread before starting a new watch. Watching a pull request
+again does not repeat check or conflict news its last watch already reported; unlinking the pull
+request clears that. Subagents cannot watch pull requests; the thread that delegated to them does.
 
 An explicitly watched thread does not auto-settle. On web and desktop, it appears in **Priority** at
 the top of **Activity**; on mobile, it stays in **Working** when that section is enabled. **Mark all

@@ -54,7 +54,6 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
       const copy = path.join(root, "copy/goat");
       const foreign = path.join(root, "foreign/goat");
       const elsewhere = path.join(root, "elsewhere/goat");
-      // Another install's versions tree: same shape, different home.
       const otherHome = path.join(root, "other/runtime/goat/versions/1.0.0/goat");
       const otherLauncher = path.join(root, "other/bin/goat");
       for (const file of [newExe, copy, elsewhere, otherHome]) {

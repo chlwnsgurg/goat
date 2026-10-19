@@ -2,10 +2,10 @@ import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { ScrollView, View } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
-import { EmptyState } from "../../components/EmptyState";
-import { MaterialScreenContent } from "../../components/MaterialScreenContent";
-import { ScreenHeader } from "../../components/ScreenHeader";
+import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
+import { EmptyState } from "../../components/ui/EmptyState";
+import { ScreenContent } from "../../components/ui/ScreenContent";
+import { AppBar } from "../../components/ui/AppBar";
 import { useThreadShell } from "../../state/entities";
 import { useSavedRemoteConnection } from "../../state/use-remote-environment-registry";
 import { PendingApprovalCard } from "../threads/PendingApprovalCard";
@@ -19,7 +19,7 @@ export function DecisionsRouteScreen() {
   const session = useDecisionInboxSessionState();
   return (
     <View collapsable={false} className="flex-1 bg-sheet">
-      <ScreenHeader
+      <AppBar
         title="Decisions"
         sidebar={false}
         onBack={() => (navigation.canGoBack() ? navigation.goBack() : navigation.navigate("Home"))}
@@ -60,7 +60,7 @@ function FocusedDecisionsContent(props: {
   const userInput = current?.kind === "user_input" ? current.request : null;
   const partial = state.loadingRefs.length > 0 || state.errors.length > 0;
   return (
-    <MaterialScreenContent>
+    <ScreenContent>
       <KeyboardAvoidingView automaticOffset behavior="padding" className="flex-1">
         <ScrollView
           className="flex-1"
@@ -197,6 +197,6 @@ function FocusedDecisionsContent(props: {
           ) : null}
         </ScrollView>
       </KeyboardAvoidingView>
-    </MaterialScreenContent>
+    </ScreenContent>
   );
 }

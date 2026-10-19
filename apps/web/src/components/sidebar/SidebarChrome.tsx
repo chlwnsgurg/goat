@@ -1,6 +1,6 @@
 import { ArrowLeftIcon, ChartNoAxesColumnIcon, SettingsIcon } from "~/components/solar";
 import type { ReactNode } from "react";
-import { memo, useCallback } from "react";
+import { memo } from "react";
 import { Link, useLocation, useNavigate, useParams } from "@tanstack/react-router";
 
 import { useGlobalAgentStore } from "../../globalAgentStore";
@@ -51,7 +51,6 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   const showChannel = environmentIdentificationMode === "pill" && channel !== "stable";
 
   return (
-    // The titlebar row, not a padded SidebarHeader: it aligns to the window controls.
     <div
       className={cn(
         "relative flex h-[var(--workspace-topbar-height)] shrink-0 flex-row items-center gap-2 pr-3",
@@ -75,8 +74,6 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
           aria-label="Toggle main sidebar"
         />
       </div>
-      {/* One visible line: the pill wraps onto the clipped second line once it no longer fits.
-          The padding keeps the brand's focus ring inside the clip. */}
       <div className="relative z-10 flex h-8 min-w-0 flex-1 flex-wrap content-start items-center gap-x-2 overflow-hidden py-0.5">
         <SidebarBrand />
         {showChannel ? (
@@ -90,8 +87,6 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   );
 });
 
-// Measures the brand at its titlebar inset, plus the header's right padding and the
-// sidebar border, so the sidebar minimum follows font size, zoom and macOS window controls.
 export function SidebarBrandWidthProbe({
   onWidthChange,
 }: {
@@ -100,14 +95,11 @@ export function SidebarBrandWidthProbe({
   const priorityCount = useSidebarPriorityCount();
   const channel = useBrandChannel();
   const showChannel = useEnvironmentIdentificationMode() === "pill" && channel !== "stable";
-  const observeWidth = useCallback(
-    (probe: HTMLDivElement) => {
-      return observeResize(probe, ([entry]) => {
-        if (entry) onWidthChange(entry.borderBoxSize[0]?.inlineSize ?? probe.offsetWidth);
-      });
-    },
-    [onWidthChange],
-  );
+  const observeWidth = (probe: HTMLDivElement) => {
+    return observeResize(probe, ([entry]) => {
+      if (entry) onWidthChange(entry.borderBoxSize[0]?.inlineSize ?? probe.offsetWidth);
+    });
+  };
 
   return (
     <div
@@ -175,14 +167,10 @@ export function SidebarCollapsedBrand({
 }) {
   const channel = useBrandChannel();
   const showChannel = useEnvironmentIdentificationMode() === "pill" && channel !== "stable";
-  const observeWidth = useCallback(
-    (probe: HTMLDivElement) => {
-      return observeResize(probe, ([entry]) => {
-        if (entry) onWidthChange(entry.borderBoxSize[0]?.inlineSize ?? probe.offsetWidth);
-      });
-    },
-    [onWidthChange],
-  );
+  const observeWidth = (probe: HTMLDivElement) =>
+    observeResize(probe, ([entry]) => {
+      if (entry) onWidthChange(entry.borderBoxSize[0]?.inlineSize ?? probe.offsetWidth);
+    });
 
   return (
     <div
@@ -276,34 +264,34 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   const pullRequestsSupported = usePullRequestsSupported();
   // The destination rail carries Home, Settings, Pull requests, Usage and the update button.
   const railVisible = useDestinationRailVisible();
-  const closeMobileSidebar = useCallback(() => {
+  const closeMobileSidebar = () => {
     if (isMobile) {
       setOpenMobile(false);
     }
-  }, [isMobile, setOpenMobile]);
-  const handlePullRequestsClick = useCallback(() => {
+  };
+  const handlePullRequestsClick = () => {
     closeMobileSidebar();
     void navigate({
       to: "/pull-requests",
       search: readPullRequestListPreferences(),
     });
-  }, [closeMobileSidebar, navigate]);
-  const handleSettingsClick = useCallback(() => {
+  };
+  const handleSettingsClick = () => {
     closeMobileSidebar();
     void navigate({ to: "/settings" });
-  }, [closeMobileSidebar, navigate]);
+  };
 
-  const handleUsageClick = useCallback(() => {
+  const handleUsageClick = () => {
     if (isMobile) {
       setOpenMobile(false);
     }
     void navigate({ to: "/usage" });
-  }, [isMobile, navigate, setOpenMobile]);
+  };
 
-  const handleBackClick = useCallback(() => {
+  const handleBackClick = () => {
     closeMobileSidebar();
     void navigateToMainApp();
-  }, [closeMobileSidebar, navigateToMainApp]);
+  };
 
   if (railVisible) return null;
 

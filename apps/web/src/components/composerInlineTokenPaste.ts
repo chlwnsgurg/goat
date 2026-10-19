@@ -6,7 +6,6 @@ import {
   formatComposerContextReference,
   replaceComposerContextReferences,
 } from "@goat/shared/composerContextReferences";
-/** Clipboard records referenced by the copied text, including dependent screenshots. */
 export function readPastedComposerContext(
   clipboardData: Pick<DataTransfer, "getData">,
 ): ComposerContextClipboardFragment | null {
@@ -34,7 +33,6 @@ export function readPastedComposerContext(
   };
 }
 
-/** Imports the same structured clipboard payload for focused paste and paste-to-focus. */
 export function importPastedComposerText(
   clipboardData: Pick<DataTransfer, "getData">,
   importContextFragment?: (

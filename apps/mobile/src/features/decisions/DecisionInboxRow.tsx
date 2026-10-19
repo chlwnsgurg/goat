@@ -1,7 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { Pressable, View } from "react-native";
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { decisionInbox } from "../../state/threads";
 
 export function DecisionInboxRow(props: { readonly onPress: () => void }) {

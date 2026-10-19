@@ -62,20 +62,30 @@ function Diagnostics({
       mounted.current = false;
     };
   }, []);
-  useEffect(() => {
-    let current = true;
+  // Each new request starts from an empty result.
+  const [request, setRequest] = useState({ canRead, environmentId, reload, sync });
+  if (
+    request.canRead !== canRead ||
+    request.environmentId !== environmentId ||
+    request.reload !== reload ||
+    request.sync !== sync
+  ) {
+    setRequest({ canRead, environmentId, reload, sync });
     setDiagnostics(null);
     setError(false);
-    if (canRead)
-      void getDiagnostics({ environmentId, input: {} }).then((result) => {
-        if (!current) return;
-        if (result._tag === "Success") setDiagnostics(result.value);
-        else setError(true);
-      });
+  }
+  useEffect(() => {
+    if (!request.canRead) return;
+    let current = true;
+    void getDiagnostics({ environmentId: request.environmentId, input: {} }).then((result) => {
+      if (!current) return;
+      if (result._tag === "Success") setDiagnostics(result.value);
+      else setError(true);
+    });
     return () => {
       current = false;
     };
-  }, [canRead, environmentId, getDiagnostics, reload, sync]);
+  }, [getDiagnostics, request]);
   const view = presentMemorySync(sync, {
     capabilities,
     ...(canRead && diagnostics ? { diagnostics } : {}),
@@ -87,8 +97,12 @@ function Diagnostics({
   const permission = useRef({ canRead, allowed });
   useEffect(() => {
     permission.current = { canRead, allowed };
-    if (!canRead || !allowed) setMessage(null);
   }, [canRead, allowed]);
+  const [messagePermission, setMessagePermission] = useState({ canRead, allowed });
+  if (messagePermission.canRead !== canRead || messagePermission.allowed !== allowed) {
+    setMessagePermission({ canRead, allowed });
+    if (!canRead || !allowed) setMessage(null);
+  }
   async function submit() {
     if (
       !canRead ||

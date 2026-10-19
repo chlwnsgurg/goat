@@ -11,6 +11,7 @@
 | 004 | [SSH tunnel 테스트 이식](./10.004_t3_chase_ssh_tunnel_port.md)         | `ssh-runtime`, `ci` | P2     | ✅ PR 반영   |
 | 005 | [사이클 261013 머지](./10.005_t3_chase_cycle_261013.md)                | 전체                | **P1** | 🟡 PR 리뷰   |
 | 006 | [사이클 261014 머지](./10.006_t3_chase_cycle_261014.md)                | 전체                | **P1** | 🟡 PR 리뷰   |
+| 007 | [사이클 261019 머지](./10.007_t3_chase_cycle_261019.md)                | 전체                | **P1** | 🟡 PR 리뷰   |
 
 머지 순서: 005 PR(002-004 포함) goat-ci green → dev에 merge commit으로 랜딩 → 000 기준선 갱신, 카드 `_fin` 이동.
 

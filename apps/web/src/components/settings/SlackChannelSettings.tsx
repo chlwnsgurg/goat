@@ -11,7 +11,7 @@ import {
 } from "@goat/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 
 import { requestConfirmDialog } from "~/confirmDialog";
 import { channelEnvironment } from "~/state/channels";
@@ -131,10 +131,7 @@ function SlackConnectionForm(props: {
   const configure = useAtomCommand(channelEnvironment.slackConfigure, { reportFailure: false });
   const disconnect = useAtomCommand(channelEnvironment.slackDisconnect, { reportFailure: false });
   const allProjects = useProjects();
-  const projects = useMemo(
-    () => allProjects.filter((project) => project.environmentId === environmentId),
-    [allProjects, environmentId],
-  );
+  const projects = allProjects.filter((project) => project.environmentId === environmentId);
   // Untouched fields follow the latest saved settings; only the user's edits are kept locally.
   const [edits, setEdits] = useState<Partial<SlackSettingsDraft>>({});
   const draft: SlackSettingsDraft = { ...slackSettingsDraft(connection), ...edits };

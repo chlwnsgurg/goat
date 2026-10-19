@@ -1,5 +1,5 @@
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "../ui/button";
 import {
   Combobox,
@@ -28,15 +28,11 @@ export function MemoryScopePicker({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const list = useRef<LegendListRef | null>(null);
-  const titles = useMemo(() => new Map(items.map((item) => [item.id, item.title])), [items]);
-  const ids = useMemo(() => items.map((item) => item.id), [items]);
-  const filtered = useMemo(
-    () =>
-      items
-        .filter((item) => item.title.toLowerCase().includes(query.toLowerCase()))
-        .map((item) => item.id),
-    [items, query],
-  );
+  const titles = new Map(items.map((item) => [item.id, item.title]));
+  const ids = items.map((item) => item.id);
+  const filtered = items
+    .filter((item) => item.title.toLowerCase().includes(query.toLowerCase()))
+    .map((item) => item.id);
   function select(id: string) {
     onChange(id);
     setOpen(false);

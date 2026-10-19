@@ -1,8 +1,9 @@
 import { describe, expect, it } from "@effect/vitest";
-import type {
-  DesktopBridge,
-  DesktopSshEnvironmentTarget,
-  DesktopSshRuntimePendingResult,
+import {
+  EnvironmentId,
+  type DesktopBridge,
+  type DesktopSshEnvironmentTarget,
+  type DesktopSshRuntimePendingResult,
 } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import {
@@ -19,7 +20,14 @@ const messages = {
   contended: "Another client is replacing the remote runtime.",
 };
 describe.each([
-  { label: "existing SSH connection", consumer: prepareDesktopSshEnvironment },
+  {
+    label: "existing SSH connection",
+    consumer: (bridge: DesktopBridge, target: DesktopSshEnvironmentTarget) =>
+      prepareDesktopSshEnvironment(bridge, {
+        target,
+        expectedEnvironmentId: EnvironmentId.make("environment-ssh"),
+      }),
+  },
   { label: "new SSH connection", consumer: provisionDesktopSshEnvironment },
 ])("$label", ({ consumer }) => {
   it.effect("connects to a busy runtime whose replacement is scheduled", () =>

@@ -1,12 +1,12 @@
 import { useAtomValue } from "@effect/atom-react";
 import { BellIcon, SearchIcon } from "~/components/solar";
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 
 import { excludeGlobalAgentThreads } from "../../globalAgentRoute";
 import { openCommandPalette } from "../../commandPaletteBus";
 import { useGlobalAgentStore } from "../../globalAgentStore";
 import { useNowMinute } from "../../hooks/useNowMinute";
-import { useLegacySidebarEnabled, useUpdateClientSettings } from "../../hooks/useSettings";
+import { updateClientSettings, useLegacySidebarEnabled } from "../../hooks/useSettings";
 import { shortcutLabelForCommand } from "../../keybindings";
 import { useThreadShells } from "../../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../../state/server";
@@ -24,11 +24,10 @@ import { requestSidebarSearchFocus } from "./sidebarSearchFocus";
 
 export function useSidebarActivityToggle() {
   const projectsSidebar = useLegacySidebarEnabled();
-  const updateClientSettings = useUpdateClientSettings();
-  const toggleActivity = useCallback(async () => {
+  const toggleActivity = async () => {
     if (projectsSidebar === null) return;
     await updateClientSettings({ legacySidebarEnabled: !projectsSidebar });
-  }, [projectsSidebar, updateClientSettings]);
+  };
   return { activityActive: projectsSidebar === false, toggleActivity };
 }
 
@@ -46,33 +45,23 @@ export function useSidebarPriorityCount() {
   const localLastVisitedAtByKey = useUiStateStore((state) => state.threadLastVisitedAtById);
   const globalAgentRef = useGlobalAgentStore((state) => state.ref);
   const botRef = useGlobalAgentStore((state) => state.botRef);
-  return useMemo(() => {
-    if (publishedPriorityCount !== null) return publishedPriorityCount;
-    const index = buildSidebarSubagentIndex(threads);
-    const visible = excludeGlobalAgentThreads(
-      filterSidebarV2VisibleThreads(threads, null, new Set(index.attentionByOwnerKey.keys())),
-      globalAgentRef,
-      botRef,
-    );
-    return countVisibleSidebarPriorityThreads({
-      threads: visible,
-      now: `${nowMinute}:00.000Z`,
-      localLastVisitedAtByKey,
-      attentionByOwnerKey: index.attentionByOwnerKey,
-      supportsSnooze: (environmentId) =>
-        serverConfigs.get(environmentId)?.environment.capabilities.threadSnooze === true,
-      supportsSettlement: (environmentId) =>
-        serverConfigs.get(environmentId)?.environment.capabilities.threadSettlement === true,
-    });
-  }, [
-    botRef,
+  if (publishedPriorityCount !== null) return publishedPriorityCount;
+  const index = buildSidebarSubagentIndex(threads);
+  const visible = excludeGlobalAgentThreads(
+    filterSidebarV2VisibleThreads(threads, null, new Set(index.attentionByOwnerKey.keys())),
     globalAgentRef,
+    botRef,
+  );
+  return countVisibleSidebarPriorityThreads({
+    threads: visible,
+    now: `${nowMinute}:00.000Z`,
     localLastVisitedAtByKey,
-    nowMinute,
-    publishedPriorityCount,
-    serverConfigs,
-    threads,
-  ]);
+    attentionByOwnerKey: index.attentionByOwnerKey,
+    supportsSnooze: (environmentId) =>
+      serverConfigs.get(environmentId)?.environment.capabilities.threadSnooze === true,
+    supportsSettlement: (environmentId) =>
+      serverConfigs.get(environmentId)?.environment.capabilities.threadSettlement === true,
+  });
 }
 
 /** The header and its width probe subscribe to the same count and measure the same badge. */

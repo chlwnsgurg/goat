@@ -25,13 +25,14 @@ afterwards, that directory is not on your `PATH` yet; the installer prints the
 line to add. Set `GOAT_CHANNEL=nightly` to install the nightly train, or
 `GOAT_VERSION` to pin an exact version.
 
-| Task                                             | Command                                                     |
-| ------------------------------------------------ | ----------------------------------------------------------- |
-| Start the server and open the web app            | `goat`                                                      |
-| Start the server without a browser               | `goat serve`                                                |
-| Keep it running in the background (macOS, Linux) | `goat service install` ([details](./background-service.md)) |
-| Move to the newest release                       | `goat update`                                               |
-| Remove it again                                  | `goat uninstall`                                            |
+| Task                                             | Command                                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------- |
+| Start the server and open the web app            | `goat`                                                                    |
+| Start the server without a browser               | `goat serve`                                                              |
+| Keep it running in the background (macOS, Linux) | `goat service install` ([details](./background-service.md))               |
+| Move to the newest release                       | `goat update`                                                             |
+| Reclaim database space                           | `goat doctor` ([details](./background-service.md#reclaim-database-space)) |
+| Remove it again                                  | `goat uninstall`                                                          |
 
 Run `goat help` or `goat --help` for the full reference. To start in a new working
 directory, use an explicit path such as `goat ./my-project`. A bare directory name
@@ -102,12 +103,12 @@ Install GOAT from the
 The phone connects to a server on another machine. Follow
 [remote access](./remote-access.md) to link it through T3 Connect or a pairing URL.
 
-Nightly builds need the beta app. The store apps cannot connect to them. A Nightly build also
-shows these links as QR codes in **Settings → General → Mobile app**.
+Store links and QR codes are also available in **Settings → General → Mobile app**
+on web and desktop. The store apps work with both stable and Nightly servers. Test builds are optional:
 
-- **iPhone and iPad:** join the [TestFlight beta](https://testflight.apple.com/join/XgaxaRtd).
-- **Android:** download and install the APK from the
-  [Android beta release](https://github.com/pingdotgg/t3code/releases/tag/android-nightly).
+- **iPhone and iPad:** TestFlight is invite-only.
+- **Android:** download an APK from the
+  [Android beta releases](https://github.com/pingdotgg/t3code/releases?q=android-beta-).
 
 If the app crashes during launch, open Settings → Diagnostics on the next launch
 that succeeds. It lists startup crashes from the last 7 days with the error and

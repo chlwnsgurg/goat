@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 // The production component exports these decisions; native view modules are not needed here.
 vi.mock("react-native", () => ({ Alert: { alert: vi.fn() }, View: "View" }));
-vi.mock("../../components/AppText", () => ({ AppText: "Text" }));
+vi.mock("../../components/ui/AppText", () => ({ AppText: "Text" }));
 vi.mock("../../state/server", () => ({ serverEnvironment: {} }));
 vi.mock("../../state/session", () => ({
   readEnvironmentScope: vi.fn(),

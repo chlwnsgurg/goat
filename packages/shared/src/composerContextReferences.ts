@@ -31,6 +31,39 @@ const CONTEXT_LINK = new RegExp(
   "g",
 );
 
+/**
+ * 64 bits of digest, because the slug in front of it is truncated: two long producer
+ * ids that agree on their first 48 characters are told apart by this alone.
+ */
+function fnv1a64(value: string): string {
+  let forward = 0x811c9dc5;
+  let reverse = 0x9dc5811c;
+  for (let index = 0; index < value.length; index += 1) {
+    forward ^= value.charCodeAt(index);
+    forward = Math.imul(forward, 0x01000193) >>> 0;
+    reverse ^= value.charCodeAt(value.length - 1 - index);
+    reverse = Math.imul(reverse, 0x01000193) >>> 0;
+  }
+  return `${forward.toString(16).padStart(8, "0")}${reverse.toString(16).padStart(8, "0")}`;
+}
+
+export function toComposerContextId(producerId: string): ComposerContextId {
+  if (CONTEXT_ID_PATTERN.test(producerId)) return producerId as ComposerContextId;
+  const slug = producerId
+    .replace(/[^a-z0-9_-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return `${slug || "ctx"}-${fnv1a64(producerId)}` as ComposerContextId;
+}
+
+export function toKindScopedComposerContextId(
+  kind: ComposerContextKind,
+  producerId: string,
+): ComposerContextId {
+  const prefix = `${kind}_`;
+  return toComposerContextId(`${prefix}${producerId}`);
+}
+
 export function formatComposerContextHref(kind: ComposerContextKind, contextId: ComposerContextId) {
   return `${COMPOSER_CONTEXT_HREF_PREFIX}${kind}/${contextId}`;
 }
@@ -48,7 +81,6 @@ export function parseComposerContextHref(
   return { kind, contextId: contextId as ComposerContextId };
 }
 
-/** Labels must survive a Markdown link: no brackets or line breaks, bounded, never empty. */
 export function sanitizeComposerContextLabel(label: string, kind: ComposerContextKind): string {
   const cleaned = label
     .replace(/[[\]\\\r\n]/g, " ")
@@ -72,7 +104,6 @@ export interface ComposerContextReferenceOccurrence {
   kind: ComposerContextKind;
   contextId: ComposerContextId;
   label: string;
-  /** Whether the occurrence used the `![...]` image form. */
   image: boolean;
   source: string;
   start: number;
@@ -101,11 +132,9 @@ export function collectComposerContextReferences(
   return occurrences;
 }
 
-/** Text sent in place of an empty prompt when a message is attachments only. */
 export const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]";
 
-/** Whether `text` is image references and nothing else, which is how an image-only prompt reads. */
 export function isImageReferencesOnly(text: string): boolean {
   const references = collectComposerContextReferences(text);
   return (
@@ -128,10 +157,6 @@ export function replaceComposerContextReferences(
   return result + text.slice(cursor);
 }
 
-// ---------------------------------------------------------------------------
-// Provider projection
-// ---------------------------------------------------------------------------
-
 const CONTEXT_ENVELOPE_TAG = GOAT_CONTEXT_ENVELOPE_TAG;
 const CONTEXT_ENTRY_TAG = "context";
 
@@ -140,7 +165,6 @@ function kindDisplayName(kind: ComposerContextKind): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-/** `[Image: shot.png; ref=ctx_1]` — readable in place, with the id the payload is keyed by. */
 export function formatComposerContextProviderMarker(
   kind: ComposerContextKind,
   label: string,
@@ -154,8 +178,8 @@ export function formatComposerContextProviderMarker(
 }
 
 /**
- * Captured text is data. A terminal line or PR comment that contains `</t3_context>` or
- * `</context>` must not be able to close the envelope and forge a record.
+ * A terminal line or PR comment that contains `</t3_context>` or `</context>`
+ * must not be able to close the envelope and forge a record.
  */
 function escapeComposerContextPayloadText(text: string): string {
   return text.replace(
@@ -204,7 +228,6 @@ function formatElementDetails(element: ElementContextDetails): string[] {
   return lines;
 }
 
-/** Body lines for one payload, including authoritative paths and names behind display labels. */
 function formatComposerContextProviderPayload(record: KnownComposerContextRecord): string {
   switch (record.kind) {
     case "image":
@@ -291,11 +314,6 @@ function formatEnvelopeEntry(
   return `${open}>\n${escapeComposerContextPayloadText(body)}\n</${CONTEXT_ENTRY_TAG}>`;
 }
 
-/**
- * What the provider reads: every reference becomes an in-place marker, and each unique
- * referenced payload appears once in a trailing envelope, in first-reference order.
- * Unreferenced records are not emitted. Binary attachments travel on their own channel.
- */
 export function projectComposerContextForProvider(input: {
   text: string;
   records: ReadonlyArray<ComposerContextRecord>;
@@ -304,7 +322,6 @@ export function projectComposerContextForProvider(input: {
   if (occurrences.length === 0) return input.text;
   const recordsById = new Map<ComposerContextId, ComposerContextRecord | undefined>();
   for (const record of input.records) {
-    // Even callers that bypass the wire schema must not silently select an ambiguous payload.
     recordsById.set(record.contextId, recordsById.has(record.contextId) ? undefined : record);
   }
   const body = replaceComposerContextReferences(input.text, (occurrence) =>
@@ -331,7 +348,6 @@ export function projectComposerContextForProvider(input: {
   return `${body}\n\n<${CONTEXT_ENVELOPE_TAG} version="1">\n${entries.join("\n")}\n</${CONTEXT_ENVELOPE_TAG}>`;
 }
 
-/** Preserve context bindings when uploads become thread-owned attachments. */
 export function remapComposerContextAttachments(
   context: import("@goat/contracts").OrchestrationMessageContext | undefined,
   before: ReadonlyArray<{ readonly id?: string | undefined }>,

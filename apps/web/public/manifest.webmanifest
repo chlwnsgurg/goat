@@ -1,5 +1,7 @@
 {
   "id": "/",
+  "name": "GOAT",
+  "short_name": "GOAT",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

@@ -294,7 +294,15 @@ const FIND_ACTIONS = new Set([
   "-fprintf",
   "-fls",
 ]);
-const FIND_NAME_TESTS = ["-name", "-iname", "-path", "-ipath", "-wholename", "-regex", "-iregex"];
+const FIND_NAME_TESTS = new Set([
+  "-name",
+  "-iname",
+  "-path",
+  "-ipath",
+  "-wholename",
+  "-regex",
+  "-iregex",
+]);
 const SED_PRINT_SCRIPT = /^(?:\d+|\$)(?:,(?:\d+|\$))?p(?:;(?:\d+|\$)(?:,(?:\d+|\$))?p)*;?$/u;
 
 function grepLike(args: readonly string[], recursiveFlags: readonly string[] | null) {
@@ -406,7 +414,7 @@ function classifySimpleCommand(words: readonly string[]): OrchestrationV2Command
       const paths = firstExpression < 0 ? args : args.slice(0, firstExpression);
       const expression = firstExpression < 0 ? [] : args.slice(firstExpression);
       if (expression.some((arg) => FIND_ACTIONS.has(arg))) return null;
-      const nameIndex = expression.findIndex((arg) => FIND_NAME_TESTS.includes(arg));
+      const nameIndex = expression.findIndex((arg) => FIND_NAME_TESTS.has(arg));
       const query = nameIndex < 0 ? undefined : expression[nameIndex + 1];
       return query === undefined ? list(paths.slice(0, 1)) : search(query, paths[0]);
     }

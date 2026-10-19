@@ -16,7 +16,6 @@ function shortHash(value: string): string {
 }
 
 /**
- * Returns the local-only socket address shared by the desktop shell and CLI.
  * The state directory is hashed so custom GOAT homes cannot exceed Unix socket
  * path limits.
  */

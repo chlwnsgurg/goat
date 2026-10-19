@@ -15,8 +15,8 @@ vi.mock("~/components/ui/toast", () => ({ toastManager: { add: mocks.toast } }))
 import {
   __resetClientSettingsPersistenceForTests,
   __setClientSettingsForTests,
+  updateClientSettings,
   useClientSettings,
-  useUpdateClientSettings,
 } from "./useSettings";
 
 let root: Root;
@@ -25,11 +25,10 @@ let result: boolean | undefined;
 let save: Promise<void>;
 function Probe() {
   const settings = useClientSettings();
-  const update = useUpdateClientSettings();
   return (
     <button
       onClick={() => {
-        save = update({ wordWrap: false }).then((saved) => {
+        save = updateClientSettings({ wordWrap: false }).then((saved) => {
           result = saved;
         });
       }}

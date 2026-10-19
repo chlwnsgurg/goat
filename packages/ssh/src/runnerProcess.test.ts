@@ -106,7 +106,6 @@ server.listen(Number(process.env.GOAT_TEST_PORT ?? 0), "127.0.0.1", () => {
                 ),
               ),
             );
-            // A failed PID assertion must still close the owned fixture server.
             yield* Effect.addFinalizer(() =>
               Effect.gen(function* () {
                 if (yield* child.isRunning) {
@@ -189,7 +188,6 @@ server.listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0
               detached: false,
             }),
           );
-          // A failed assertion must still stop this captured fixture process.
           yield* Effect.addFinalizer(() =>
             child.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore),
           );

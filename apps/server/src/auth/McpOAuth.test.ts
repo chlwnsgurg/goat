@@ -2,7 +2,7 @@ import * as MemoryToolkitFixture from "../mcp/toolkits/memory/handlers.testkit.t
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
-  AuthAdministrativeScopes,
+  AuthStandardClientScopes,
   type AuthCreatePairingCredentialInput,
   type AuthEnvironmentScope,
   EnvironmentHttpApi,
@@ -40,7 +40,6 @@ const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
   Layer.provideMerge(ServerEnvironment.layerIdentity),
   Layer.provide(layerConfig),
 );
-// Each router gets its own database; the capture hands that router's EnvironmentAuth to its test.
 const makeLayerRoutes = (capture: (auth: EnvironmentAuth.EnvironmentAuth["Service"]) => void) =>
   Layer.mergeAll(
     Layer.effectDiscard(
@@ -67,10 +66,8 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const ORIGIN = "https://box.example.ts.net";
 const REDIRECT = "http://localhost/callback";
 const verifier = "a".repeat(43) + "-verifier-for-tests";
-/** base64url(SHA-256(verifier)), the S256 challenge for `verifier`. */
 const challenge = "DeB41nTVkPwpbbYecrnqtVq7VXLezustdHAK4SWt13c";
 
-/** Requests as they arrive behind an https proxy: plain http with the public Host. */
 const at = (path: string, init?: RequestInit) =>
   new Request(`http://127.0.0.1${path}`, {
     ...init,
@@ -99,7 +96,6 @@ const withRoutes = <A, E>(
       (web) =>
         Effect.gen(function* () {
           const handler: Handler = (request) => Effect.promise(() => web.handler(request, context));
-          // The router builds its layer on first request; a metadata read warms it.
           yield* handler(at("/.well-known/oauth-authorization-server"));
           return yield* use(handler, routerAuth!);
         }),
@@ -116,7 +112,6 @@ const postJson = (path: string, body: unknown, cookie?: string) =>
     body: encodeJson(body),
   });
 
-/** What the approval page posts: the agent's request plus the user's choice. */
 const decide = (
   handler: Handler,
   authorization: Record<string, string>,
@@ -258,7 +253,6 @@ it.live("registers loopback and https clients and never redirects for an unverif
       expect(unregistered.status).toBe(400);
       expect(unregistered.headers.get("location")).toBeNull();
 
-      // A valid request is handed to the web app's approval page, query intact.
       const query = new URLSearchParams(authorizeParams(clientId)).toString();
       const handoff = yield* handler(at(`/oauth/mcp/authorize?${query}`));
       expect(handoff.status).toBe(302);
@@ -272,7 +266,6 @@ it.live("registers loopback and https clients and never redirects for an unverif
         environmentHost: "box.example.ts.net",
       });
 
-      // The approval endpoints re-check the request: a forged client gets a message, not a URL.
       const forgedDetails = yield* handler(
         postJson("/oauth/mcp/approval", authorizeParams(`${clientId.split(".")[0]}.forged`)),
       );
@@ -331,7 +324,6 @@ it.live("signs in with a pairing code and issues a token only /mcp accepts", () 
       };
       expect(token.scope).toBe("orchestration:read orchestration:operate");
 
-      // Codes are single use.
       expect((yield* exchange(verifier)).status).toBe(400);
 
       const client = yield* auth.authenticateMcpClient(
@@ -341,7 +333,6 @@ it.live("signs in with a pairing code and issues a token only /mcp accepts", () 
       );
       expect(client).toMatchObject({ label: "Claude Code", access: "auto" });
 
-      // The same token is refused by the rest of the environment.
       const session = yield* handler(
         at("/api/auth/session", { headers: { authorization: `Bearer ${token.access_token}` } }),
       );
@@ -377,7 +368,6 @@ it.live("signs in a hosted agent with an https callback that asked for a client 
         client_id: string;
         token_endpoint_auth_method: string;
       };
-      // Registered as a public client: PKCE, not a secret, proves it at the token endpoint.
       expect(client.token_endpoint_auth_method).toBe("none");
 
       const params = authorizeParams(client.client_id, callbackUrl);
@@ -403,7 +393,6 @@ it.live("signs in a hosted agent with an https callback that asked for a client 
             code: callback.searchParams.get("code")!,
             redirect_uri: callbackUrl,
             client_id: client.client_id,
-            // Sent by a client that asked for one; there is none to check.
             client_secret: "unused",
             code_verifier: verifier,
           }),
@@ -470,7 +459,6 @@ it.live(
         const approveWith = (code: string) =>
           decide(handler, params, { _tag: "pairing-code", access: "auto", code });
 
-        // A T3 Connect code is bound to a device key: refused, and still usable by its device.
         const bound = yield* auth.createPairingLink({
           proofKeyThumbprint: "device-key-thumbprint",
         });
@@ -502,7 +490,6 @@ it.live(
         });
         expect(operatorFull.status).toBe(400);
 
-        // A read-only code can approve read-only access.
         const readOnlyCode = yield* auth.issuePairingCredential({ scopes: ["orchestration:read"] });
         const readOnlyApproval = yield* decide(handler, params, {
           _tag: "pairing-code",
@@ -539,7 +526,6 @@ it.live("one-click approves only access the browser session holds the scopes for
     Effect.gen(function* () {
       const clientId = yield* registeredClientId(handler);
       const params = authorizeParams(clientId);
-      // Signs a browser in through the real route and returns its session cookie.
       const browserCookie = (scopes: NonNullable<AuthCreatePairingCredentialInput["scopes"]>) =>
         Effect.gen(function* () {
           const pairing = yield* auth.issuePairingCredential({ scopes });
@@ -563,7 +549,7 @@ it.live("one-click approves only access the browser session holds the scopes for
           ),
         );
 
-      const admin = yield* browserCookie([...AuthAdministrativeScopes]);
+      const admin = yield* browserCookie([...AuthStandardClientScopes]);
       const adminDetails = yield* details(admin);
       expect(adminDetails.oneClickMemoryScopes).toEqual(["memory:read", "memory:write"]);
       expect(adminDetails.csrfToken).toEqual(expect.any(String));
@@ -587,7 +573,6 @@ it.live("one-click approves only access the browser session holds the scopes for
       );
       expect(new URL(oneClick.redirectTo!).searchParams.get("code")).toEqual(expect.any(String));
 
-      // access:write alone cannot hand an agent thread control it does not hold.
       const accessOnly = yield* browserCookie(["access:read", "access:write"]);
       expect((yield* details(accessOnly)).csrfToken).toBeUndefined();
       const forged = yield* decide(
@@ -599,7 +584,6 @@ it.live("one-click approves only access the browser session holds the scopes for
       expect(forged.status).toBe(400);
       expect(forged.message).toContain("Enter a pairing code instead");
 
-      // A session that can read but not operate threads may approve read-only access only.
       const reader = yield* browserCookie(["access:write", "orchestration:read"]);
       const readerDetails = yield* details(reader);
       expect(readerDetails.oneClickMemoryScopes).toEqual([]);
@@ -617,7 +601,6 @@ it.live("one-click approves only access the browser session holds the scopes for
       expect(memoryTooBroad.status).toBe(400);
       expect(memoryTooBroad.redirectTo).toBeUndefined();
       expect(readerDetails.csrfToken).toEqual(expect.any(String));
-      // The page shows the pairing-code field for anything above read only.
       expect(readerDetails.oneClickAccess).toEqual(["read-only"]);
       const tooBroad = yield* decide(
         handler,
@@ -701,7 +684,7 @@ it.live.each([
       Effect.gen(function* () {
         const params = authorizeParams(yield* registeredClientId(handler));
         const pairing = yield* auth.issuePairingCredential({
-          scopes: [...AuthAdministrativeScopes],
+          scopes: [...AuthStandardClientScopes],
         });
         const approved = yield* decide(handler, params, {
           _tag: "pairing-code",

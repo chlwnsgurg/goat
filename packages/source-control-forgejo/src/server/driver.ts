@@ -1,10 +1,4 @@
 import { SourceControlProviderKind } from "@goat/contracts";
-/**
- * The Forgejo / Gitea driver: repository operations, discovery, and pull requests through
- * `fj` or `tea`.
- *
- * @module source-control-forgejo/server/driver
- */
 import { defineSourceControlDriver } from "@goat/source-control-core/server/driver";
 import * as Effect from "effect/Effect";
 

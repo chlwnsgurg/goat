@@ -108,30 +108,31 @@ export function useGoatBotWaitingCount() {
           return;
         }
         pending = true;
-        void (async () => {
-          try {
-            const seenAtRequest = useGlobalAgentStore.getState().botRef;
-            const result = await readGoatBotWaiting({
-              port,
-              environmentId,
-              supportsStatus,
-              alive: () => alive,
-            });
-            if (result === null || !alive) return;
-            if (result.bot !== null) rememberGoatBotFromStatus(result.bot, seenAtRequest);
-            useCounts.setState((state) => ({
-              counts: new Map(state.counts).set(environmentId, result.count),
-            }));
-          } catch {
+        const readWaiting = async () => {
+          const seenAtRequest = useGlobalAgentStore.getState().botRef;
+          const result = await readGoatBotWaiting({
+            port,
+            environmentId,
+            supportsStatus,
+            alive: () => alive,
+          });
+          if (result === null || !alive) return;
+          if (result.bot !== null) rememberGoatBotFromStatus(result.bot, seenAtRequest);
+          useCounts.setState((state) => ({
+            counts: new Map(state.counts).set(environmentId, result.count),
+          }));
+        };
+        void readWaiting()
+          .catch(() => {
             // Keep the previous complete result, including an unknown first result.
-          } finally {
+          })
+          .finally(() => {
             pending = false;
             if (refreshAgain && alive) {
               refreshAgain = false;
               refresh();
             }
-          }
-        })();
+          });
       };
       const interval = window.setInterval(refresh, 60_000);
       window.addEventListener("focus", refresh);

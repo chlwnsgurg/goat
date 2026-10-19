@@ -2,7 +2,6 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
 import {
-  AuthAdministrativeScopes,
   AuthMcpApprovalDecision,
   AuthMcpApprovalDetails,
   AuthEnvironmentScopes,
@@ -187,12 +186,10 @@ describe("memory permissions", () => {
       permissions: ["memory:read", "memory:write", "memory:sync"],
     });
   });
-  it("includes read and write but excludes sync in default client and administrative grants", () => {
-    for (const grants of [AuthStandardClientScopes, AuthAdministrativeScopes]) {
-      expect(grants).toContain("memory:read");
-      expect(grants).toContain("memory:write");
-      expect(grants).not.toContain("memory:sync");
-    }
+  it("includes read and write but excludes sync in default client grants", () => {
+    expect(AuthStandardClientScopes).toContain("memory:read");
+    expect(AuthStandardClientScopes).toContain("memory:write");
+    expect(AuthStandardClientScopes).not.toContain("memory:sync");
   });
   it("does not upgrade stored old grants", () => {
     const stored = Schema.decodeSync(AuthGrantScopes)(["orchestration:operate"]);

@@ -2,10 +2,6 @@ import type { EnvironmentConnectionPhase } from "@goat/client-runtime/connection
 import type { EnvironmentShellStatus } from "@goat/client-runtime/state/shell";
 import type { EnvironmentThreadStatus } from "@goat/client-runtime/state/threads";
 
-/**
- * Reports whether the route-local projections can still yield the requested
- * thread. Explicit terminal outcomes win over unrelated synchronization.
- */
 export function threadRouteIsHydrating(input: {
   readonly isLoadingConnections: boolean;
   readonly connectionState: EnvironmentConnectionPhase;

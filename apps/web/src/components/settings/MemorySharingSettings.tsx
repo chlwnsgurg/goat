@@ -78,7 +78,6 @@ export function MemoryAdministration({
   const [hub, setHub] = useState<MemoryHubSettingsView | null>(null);
   const [owner, setOwner] = useState<MemoryOwnerSourceReadPolicyView | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [reload, setReload] = useState(0);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<"hub" | "owner" | "device" | null>(null);
   const [device, setDevice] = useState<EnvironmentId | null>(null);
@@ -146,35 +145,47 @@ export function MemoryAdministration({
       e.connection.phase === "connected" &&
       isMemoryEnvironmentAvailable(e.serverConfig?.environment.capabilities),
   );
-  useEffect(() => {
-    let current = true;
+  // A newer load supersedes this one, and isCurrent ends it on unmount or a new environment.
+  const loadSettings = (isCurrent: () => boolean) => {
     const generation = ++loadGeneration.current;
-    setError(null);
     void (async () => {
       const result = await getHub({ environmentId, input: {} });
-      if (!current || generation !== loadGeneration.current) return;
+      if (!isCurrent() || generation !== loadGeneration.current) return;
       if (result._tag === "Success") setHub(result.value);
       else setError("Could not load sharing settings.");
       if (registry.get(memoryEnvironment.ownerSourceReadPolicyGet.permissionAtom(environmentId))) {
         const policy = await getOwner({ environmentId, input: {} });
-        if (!current || generation !== loadGeneration.current) return;
+        if (!isCurrent() || generation !== loadGeneration.current) return;
         if (policy._tag === "Success") setOwner(policy.value);
         else setError("Could not load original conversation access.");
       }
     })();
+  };
+  const reloadSettings = () => {
+    setError(null);
+    loadSettings(() => mounted.current);
+  };
+  const [loadedEnvironmentId, setLoadedEnvironmentId] = useState(environmentId);
+  if (loadedEnvironmentId !== environmentId) {
+    setLoadedEnvironmentId(environmentId);
+    setError(null);
+  }
+  useEffect(() => {
+    let current = true;
+    loadSettings(() => current);
     return () => {
       current = false;
     };
-  }, [environmentId, getHub, getOwner, registry, reload]);
+  }, [loadSettings]);
   useEffect(() => {
     const refresh = () => {
       if (pending !== null || busy || recovery) return;
-      setReload((n) => n + 1);
+      reloadSettings();
       onSharingRefresh?.();
     };
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
-  }, [pending, busy, recovery, onSharingRefresh]);
+  }, [pending, busy, recovery, onSharingRefresh, reloadSettings]);
   async function saveHub(input: MemoryHubSettingsUpdateInput) {
     if (busy || !live() || !writable(environmentId)) return;
     loadGeneration.current += 1;
@@ -264,7 +275,8 @@ export function MemoryAdministration({
     setBusy(true);
     setError(null);
     const generation = attemptGeneration.current;
-    try {
+    // Promise handlers replace try/catch/finally, which the React Compiler cannot compile.
+    const setUpDevice = async () => {
       if (!flow.current) {
         const deviceConnection = readPreparedConnection(device)!;
         deviceAttempt.current = { connection: deviceConnection, deviceId: device, generation };
@@ -314,7 +326,8 @@ export function MemoryAdministration({
       setConfirm(null);
       setDevice(null);
       onSharingRefresh?.();
-    } catch (failure) {
+    };
+    const onSetupFailure = (failure: unknown) => {
       if (generation !== attemptGeneration.current) return;
       const attempt = deviceAttempt.current;
       if (attempt && readPreparedConnection(attempt.deviceId) !== attempt.connection) {
@@ -347,9 +360,12 @@ export function MemoryAdministration({
         setError(
           "Device setup did not finish. Retry to continue. If you reload, use Replace key on the device row to recover, or Remove to clean up.",
         );
-    } finally {
-      if (live() && generation === attemptGeneration.current) setBusy(false);
-    }
+    };
+    await setUpDevice()
+      .catch(onSetupFailure)
+      .finally(() => {
+        if (live() && generation === attemptGeneration.current) setBusy(false);
+      });
   }
   const policy = owner ? presentMemoryOwnerPolicy(owner) : null;
   function picker(
@@ -479,8 +495,7 @@ export function MemoryAdministration({
                       setRecovery(false);
                       setHub(null);
                       setOwner(null);
-                      setError(null);
-                      setReload((n) => n + 1);
+                      reloadSettings();
                       onSharingRefresh?.();
                     } else if (flow.current)
                       void addDevice(
@@ -489,7 +504,7 @@ export function MemoryAdministration({
                     else if (intent.current) void saveHub(intent.current);
                     else if (ownerIntent.current) void saveOwner(environmentId, true);
                     else {
-                      setReload((n) => n + 1);
+                      reloadSettings();
                       onSharingRefresh?.();
                     }
                   }}

@@ -30,6 +30,7 @@ vi.mock("@react-navigation/native", () => ({ useIsFocused: () => true }));
 vi.mock("expo", async () => {
   const { useEffect, useState } = await import("react");
   return {
+    requireOptionalNativeModule: () => null,
     useEvent: (_player: unknown, event: string, initial: Record<string, unknown>) => {
       const [state, setState] = useState(initial);
       useEffect(() => {
@@ -44,6 +45,7 @@ vi.mock("expo", async () => {
 });
 vi.mock("expo-video", () => ({ useVideoPlayer: () => mock.player, VideoView: () => <video /> }));
 vi.mock("react-native", () => ({
+  Platform: { OS: "ios" },
   View: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   Pressable: ({
     children,
@@ -60,9 +62,9 @@ vi.mock("react-native", () => ({
   ),
   AppState: { currentState: "active", addEventListener: () => ({ remove() {} }) },
 }));
-vi.mock("./AppText", () => ({ AppText: "span" }));
-vi.mock("./AppSymbol", () => ({ SymbolView: () => null }));
-vi.mock("./AppActivityIndicator", () => ({ AppActivityIndicator: () => "Loading video" }));
+vi.mock("./ui/AppText", () => ({ AppText: "span" }));
+vi.mock("./ui/AppSymbol", () => ({ SymbolView: () => null }));
+vi.mock("./ui/AppActivityIndicator", () => ({ AppActivityIndicator: () => "Loading video" }));
 vi.mock("./VideoThumbnailImage", () => ({ VideoThumbnailImage: () => null }));
 vi.mock("./MediaActionsMenu", () => ({
   MediaActionsMenu: ({ children }: { children: ReactNode }) => children,

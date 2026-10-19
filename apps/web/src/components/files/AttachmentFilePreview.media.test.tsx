@@ -14,7 +14,7 @@ vi.mock("~/hooks/useCopyToClipboard", () => ({
 }));
 vi.mock("~/hooks/useSettings", () => ({
   useClientSettings: () => true,
-  useUpdateClientSettings: () => vi.fn(),
+  updateClientSettings: vi.fn(async () => true),
 }));
 vi.mock("~/components/ui/toast", () => ({ toastManager: { add: vi.fn() } }));
 vi.mock("~/components/ChatMarkdown", () => ({ default: () => null }));

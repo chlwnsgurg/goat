@@ -185,6 +185,7 @@ function InputHost(props: HostProps) {
   );
 }
 vi.mock("react-native", () => ({
+  useWindowDimensions: () => ({ width: 390, height: 844, scale: 1, fontScale: 1 }),
   View: Box,
   Text: TextHost,
   Pressable: PressHost,
@@ -200,10 +201,10 @@ vi.mock("react-native", () => ({
   },
   StyleSheet: { create: <A,>(value: A) => value, hairlineWidth: 1, absoluteFillObject: {} },
 }));
-vi.mock("../../components/AppText", () => ({ AppText: TextHost, AppTextInput: InputHost }));
-vi.mock("../../components/AppSymbol", () => ({ SymbolView: () => null }));
-vi.mock("../../components/ScreenHeader", () => ({
-  ScreenHeader: (props: { title: string; onBack: () => void }) => (
+vi.mock("../../components/ui/AppText", () => ({ AppText: TextHost, AppTextInput: InputHost }));
+vi.mock("../../components/ui/AppSymbol", () => ({ SymbolView: () => null }));
+vi.mock("../../components/ui/AppBar", () => ({
+  AppBar: (props: { title: string; onBack: () => void }) => (
     <header>
       <button onClick={props.onBack}>Back</button>
       {props.title}
@@ -245,16 +246,19 @@ vi.mock("react-native-reanimated", () => ({
   useSharedValue: (value: number) => ({ value }),
   withTiming: (value: number) => value,
 }));
-vi.mock("../../components/ControlPill", () => ({
+vi.mock("../../components/ui/ControlPill", () => ({
   ControlPill: PressHost,
-  ControlPillMenu: () => null,
 }));
+vi.mock("../../components/ui/Menu", () => ({ Menu: Box }));
 vi.mock("../../native/SelectableMarkdownText", () => ({
   SelectableMarkdownText: (props: { readonly markdown: string }) => (
     <TextHost>{props.markdown}</TextHost>
   ),
 }));
-vi.mock("../../native/useOpenPullRequest", () => ({ useOpenPullRequest: () => () => {} }));
+vi.mock("../../native/useOpenPullRequest", () => ({
+  useOpenPullRequest: () => () => {},
+  useNavigateToPullRequest: () => () => {},
+}));
 vi.mock("../files/FileMarkdownPreview", () => ({
   useMarkdownPreviewStyles: () => ({ nativeTextStyle: {} }),
 }));
@@ -965,16 +969,16 @@ vi.mock("../../native/NativeWorkspaceColumns", () => ({
   useNativeWorkspaceColumnsSupported: () => false,
 }));
 vi.mock("../../native/StackHeader", () => ({ NativeStackScreenOptions: () => null }));
-vi.mock("../../components/useAndroidControlSizing", () => ({
+vi.mock("../../components/ui/useAndroidControlSizing", () => ({
   useAndroidControlSizing: () => ({ fabClearance: 80, smallIconSize: 16 }),
 }));
-vi.mock("../../components/useMaterialToolbarLayout", () => ({
-  useMaterialToolbarLayout: () => ({ height: 56, paddingTop: 0, paddingBottom: 0 }),
+vi.mock("../../components/ui/useToolbarLayout", () => ({
+  useToolbarLayout: () => ({ height: 56, paddingTop: 0, paddingBottom: 0 }),
 }));
-vi.mock("../../components/MaterialFloatingActionButton", () => ({
-  MaterialFloatingActionButton: () => null,
+vi.mock("../../components/ui/FloatingActionButton", () => ({
+  FloatingActionButton: () => null,
 }));
-vi.mock("../../components/AppActivityIndicator", () => ({ AppActivityIndicator: () => null }));
+vi.mock("../../components/ui/AppActivityIndicator", () => ({ AppActivityIndicator: () => null }));
 vi.mock("../../components/CompactBrandTitle", () => ({ CompactBrandTitle: () => null }));
 vi.mock("../../state/queries", () => ({
   useThreadSearch: () => ({ matches: [], isPending: false }),
@@ -1027,7 +1031,7 @@ vi.mock("../home/thread-swipe-actions", () => ({
   SwipeableScrollGateProvider: Box,
   useSwipeableScrollGate: () => ({ swipeEnabled: false, scrollGateHandlers: {} }),
 }));
-vi.mock("../home/MaterialFabScrollContext", () => ({ useMaterialFabScroll: () => () => {} }));
+vi.mock("../home/FabScrollContext", () => ({ useFabScroll: () => () => {} }));
 vi.mock("../workspace/WorkspaceTabsContext", () => ({ useWorkspaceTabs: () => null }));
 vi.mock("../home/ThreadListFilters", () => ({ ThreadListFilters: () => null }));
 vi.mock("../settings/appearance/AppearancePreferencesProvider", () => ({
@@ -1072,7 +1076,7 @@ vi.mock("../home/WorkspaceConnectionTitle", () => ({
   WorkspaceConnectionTitle: Box,
 }));
 vi.mock("../threads/sidebar-header-actions", () => ({ SidebarHeaderActions: () => null }));
-vi.mock("../home/MaterialThreadListToolbar", () => ({ MaterialThreadListToolbar: () => null }));
+vi.mock("../home/ThreadListToolbar", () => ({ ThreadListToolbar: () => null }));
 vi.mock("../threads/sidebar-filter-button", () => ({ SidebarFilterButton: () => null }));
 vi.mock("../threads/sidebar-native-header-items", () => ({ createSidebarHeaderItems: () => [] }));
 vi.mock("../threads/sidebar-navigation-shell", () => ({ SidebarNavigationShell: Box }));
@@ -1168,6 +1172,7 @@ function NavigationHarness(props: { surface: "home" | "sidebar" | "direct" }) {
       onOpenDecisions={open}
       onOpenSettings={noop}
       onOpenEnvironmentSettings={noop}
+      onOpenThreadPullRequests={noop}
       onNewThreadOnBranch={noop}
       onNewThreadInProject={noop}
       onSearchQueryChange={noop}

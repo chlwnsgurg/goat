@@ -49,9 +49,9 @@ import * as Option from "effect/Option";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { AppState, Modal, FlatList, Pressable, TextInput, View } from "react-native";
 import * as Crypto from "expo-crypto";
-import { AppText as Text } from "../../components/AppText";
-import { ControlPillMenu } from "../../components/ControlPillMenu";
-import { ScreenScrollView } from "../../components/ScreenScrollView";
+import { AppText as Text } from "../../components/ui/AppText";
+import { Menu } from "../../components/ui/Menu";
+import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
 import { memoryEnvironment as memory } from "../../state/memory";
 import { useThreadShell, useProjects } from "../../state/entities";
 import { serverEnvironment } from "../../state/server";
@@ -538,7 +538,7 @@ function MemoryBrowser({
     !projects.some((project) => `project:${project.id}` === selection);
   const scopePicker = (
     <SettingsSection title="Memory scope">
-      <ControlPillMenu
+      <Menu
         title="Memory scope"
         actions={[
           { id: "user", title: "User", state: selection === "user" ? "on" : "off" },
@@ -579,7 +579,7 @@ function MemoryBrowser({
                 : projects.find((project) => `project:${project.id}` === selection)?.title
           }
         />
-      </ControlPillMenu>
+      </Menu>
       {!canGetBinding && projects.length > 0 ? (
         <Copy>Project scope requires memory write permission to look up its shared key.</Copy>
       ) : null}

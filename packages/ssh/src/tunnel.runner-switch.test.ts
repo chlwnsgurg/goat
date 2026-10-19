@@ -23,6 +23,7 @@ import {
   arch,
   makeProtocolTestSpawner,
   nativeScripts,
+  isRemoteLaunch,
 } from "./tunnel.fixture.ts";
 import {
   stateKey,
@@ -61,7 +62,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
                 return makeRunningProcess(() => {
                   forwardKills++;
                 });
-              if (args.includes("--")) {
+              if (isRemoteLaunch(args)) {
                 return makeSuccessfulProcess(
                   '{"status":"ready","selectedVersion":"1.2.3-preview.20260911.4","remotePort":3773,"serverKind":"managed"}',
                 );

@@ -1,14 +1,10 @@
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
-import {
-  type EnvironmentId,
-  type ProjectScript,
-  type ResolvedKeybindingsConfig,
-} from "@goat/contracts";
+import { type EnvironmentId, type ProjectScript } from "@goat/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@goat/shared/keybindings";
 import { projectScriptMenuLabel } from "@goat/shared/projectScripts";
 import { ChevronDownIcon, PlusIcon, SettingsIcon, WrenchIcon } from "~/components/solar";
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useState } from "react";
 
 import { commandForProjectScript, primaryProjectScript } from "~/projectScripts";
 import { shortcutLabelForCommand } from "~/keybindings";
@@ -91,13 +87,9 @@ export default function ProjectScriptsControl({
   }
   const [editorRequest, setEditorRequest] = useState<ProjectScriptEditorRequest | null>(null);
 
-  const primaryScript = useMemo(() => {
-    if (preferredScriptId) {
-      const preferred = scripts.find((script) => script.id === preferredScriptId);
-      if (preferred) return preferred;
-    }
-    return primaryProjectScript(scripts);
-  }, [preferredScriptId, scripts]);
+  const primaryScript =
+    (preferredScriptId ? scripts.find((script) => script.id === preferredScriptId) : undefined) ??
+    primaryProjectScript(scripts);
 
   const openAddDialog = () => {
     setEditorRequest({ scriptId: null, initial: EMPTY_PROJECT_SCRIPT_INPUT });
@@ -109,11 +101,8 @@ export default function ProjectScriptsControl({
     setEditorRequest(editorRequestForScript(script, keybindings));
   };
 
-  const submitScript = useCallback(
-    (scriptId: string | null, input: NewProjectScriptInput) =>
-      scriptId === null ? onAddScript(input) : onUpdateScript(scriptId, input),
-    [onAddScript, onUpdateScript],
-  );
+  const submitScript = (scriptId: string | null, input: NewProjectScriptInput) =>
+    scriptId === null ? onAddScript(input) : onUpdateScript(scriptId, input);
 
   const scriptItems = (
     <>
@@ -137,7 +126,6 @@ export default function ProjectScriptsControl({
                 (presentation === "menu" ? (
                   <MenuShortcut className="ms-0 mr-7">{shortcutLabel}</MenuShortcut>
                 ) : (
-                  // The shortcut yields its slot to the edit button on hover.
                   <span className="transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0">
                     <MenuShortcut className="ms-0">{shortcutLabel}</MenuShortcut>
                   </span>
@@ -373,8 +361,6 @@ export default function ProjectScriptsControl({
                 panel={isPanel}
                 className={isPanel ? undefined : "w-7 sm:w-6 @3xl/header-actions:w-auto!"}
                 aria-label={isPanel ? "Add project script" : "Add action"}
-                // The tooltip wrapper replaces data-slot="button", so themed
-                // toolbar styling needs its own hook.
                 data-toolbar-control=""
                 onClick={openAddDialog}
               />
