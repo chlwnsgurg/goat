@@ -12,8 +12,6 @@
  * @module ChannelDispatcher
  */
 import {
-  CHANNEL_HOST_WORKSPACE_LABEL,
-  CHANNEL_RECEPTION_MAX_OPTIONS,
   type ChannelDispatchTarget,
   type ChannelTask,
   type ChannelTaskId,
@@ -50,6 +48,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { lowerRuntimeMode } from "./ChannelGateway.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRemoteWorkers from "./ChannelRemoteWorkers.ts";
+import { makeChannelProjectChoices } from "./channelProjectChoices.ts";
 import { type ChannelBotFiles, channelBotFilesFor } from "./channelBotNotes.ts";
 import {
   answerForwardIdsFor,
@@ -204,46 +203,7 @@ const make = Effect.gen(function* () {
       );
     });
 
-  /**
-   * The project choice to offer when none was named: the project of the most recently active
-   * thread first, then the others, then the bot's workspace for work about the machine itself.
-   */
-  const projectChoices = (
-    allowed: ReadonlyArray<{ readonly id: string; readonly title: string }>,
-    hostWorkspace: boolean,
-  ) =>
-    Effect.gen(function* () {
-      const recent = yield* threads
-        .listProjectThreads({ projectId: undefined, includeSubagents: false })
-        .pipe(Effect.orElseSucceed(() => []));
-      const allowedIds = new Set(allowed.map((shell) => shell.id));
-      const recentFirst: ReadonlyArray<string> = [
-        ...new Set(
-          recent
-            .filter((shell) => shell.archivedAt === null && allowedIds.has(shell.projectId))
-            .map((shell) => shell.projectId),
-        ),
-      ];
-      const ordered = [
-        ...recentFirst.flatMap((id) => allowed.filter((shell) => shell.id === id)),
-        ...allowed.filter((shell) => !recentFirst.includes(shell.id)),
-      ];
-      const room = CHANNEL_RECEPTION_MAX_OPTIONS - (hostWorkspace ? 1 : 0);
-      const choices = [
-        ...ordered.slice(0, room).map((shell) => shell.title),
-        ...(hostWorkspace ? [CHANNEL_HOST_WORKSPACE_LABEL] : []),
-      ];
-      const recommended = recentFirst.length > 0 ? ordered[0]?.title : undefined;
-      const text =
-        "Which project should I use?" +
-        (recommended === undefined
-          ? ""
-          : " I'd go with " + recommended + ", where you worked most recently.") +
-        (ordered.length > room
-          ? " All projects: " + ordered.map((shell) => shell.title).join(", ")
-          : "");
-      return { type: "question" as const, text, choices };
-    });
+  const projectChoices = (yield* makeChannelProjectChoices).question;
 
   /** Whether this machine has the provider instance and, when it lists models, that model. */
   const modelOffered = (selection: ModelSelection) =>

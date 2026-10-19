@@ -23,6 +23,7 @@ import { GoatBotChatView } from "./GoatBotChatView";
 import { resolveGoatBotRemoval, type GoatBotRemoval } from "@goat/client-runtime/goatBot";
 import { GoatBotChannelContext } from "./goatBotChannelPort";
 import { useLegacyGlobalAgentRoute } from "./goatBotHooks";
+import { useGoatBotHomeSettings } from "./useGoatBotHome";
 import { useGoatBotSession } from "./useGoatBotSession";
 import { refreshGoatBotWaitingCount } from "./useGoatBotWaitingCount";
 
@@ -64,6 +65,8 @@ function GoatBotThreadSession({
     resolveThreadDetailRef(threadRef, { shellExists: shell !== null, waitForShell: true }),
   );
   const session = useGoatBotSession(visibleTurnItems);
+  const homeSettings = useGoatBotHomeSettings();
+  const moveTarget = homeSettings.moveTarget;
   const chipRevision = visibleTurnItems
     .flatMap(({ item }) =>
       item.type === "notification" && item.ledgerTask
@@ -115,6 +118,16 @@ function GoatBotThreadSession({
       ) : null}
       <GoatBotChatView
         {...session}
+        homeMove={
+          moveTarget
+            ? {
+                label: moveTarget.label,
+                busy: homeSettings.busy,
+                onMove: () => homeSettings.changeHome(moveTarget.environmentId),
+              }
+            : undefined
+        }
+        homeMoveError={homeSettings.error}
         rows={removal === null ? session.rows : NO_PENDING}
         removal={removal}
         canOpenCurrentBot={canOpenCurrentBot}
