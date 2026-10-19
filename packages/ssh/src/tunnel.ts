@@ -5231,6 +5231,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       "type" in result ? result.pending.liveVersion : result.selectedRuntime.version;
     const requestedVersion = pending?.requestedVersion ?? runner?.archiveVersion?.trim() ?? "";
     const base = { host, runtimeVersion, requestedVersion };
+    const observed = statuses.get(key);
     const drainAttached =
       !("type" in result) &&
       result.attachmentInvalidated !== true &&
@@ -5247,6 +5248,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       (generations.get(key) ?? 0) !== generation ||
       pendingReplacements.get(key) !== intent ||
       (!("type" in result) && tunnels.get(key) !== result) ||
+      (drainAttached &&
+        (result.attachmentInvalidated === true || statuses.get(key) !== observed)) ||
       setupTerminalFailure(key)
     )
       return;

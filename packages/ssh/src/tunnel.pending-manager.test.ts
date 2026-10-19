@@ -1732,6 +1732,60 @@ it.effect("terminal setup failure fences drain publication across the forward-st
   }).pipe(Effect.scoped),
 );
 
+it.effect.each([
+  { name: "foreign owner", probe: { liveOwned: false } },
+  { name: "identity absent", probe: { identityAbsent: true } },
+])(
+  "status invalidation of $name fences drain publication across the forward-state read",
+  ({ probe }) =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.setMode("drain-attached");
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        yield* manager.ensureEnvironment(uploadTarget);
+        const publicationGate = yield* f.holdNextForwardState;
+        const retry = yield* TestClock.adjust("10 minutes").pipe(Effect.forkChild);
+        yield* Deferred.await(publicationGate.entered);
+        f.setProbe(probe);
+        assert.equal((yield* manager.status(uploadTarget)).status?.state, "update_blocked");
+
+        // Observe the blocked snapshot before publication resumes, so a new probe cannot mask an overwrite.
+        const probeGate = yield* f.holdNextProbe;
+        const status = yield* manager.status(uploadTarget).pipe(Effect.forkChild);
+        yield* Deferred.await(probeGate.entered);
+        yield* Deferred.succeed(publicationGate.release, undefined);
+        yield* Deferred.await(f.published[1]!);
+        yield* Fiber.join(retry);
+        yield* Deferred.succeed(probeGate.release, undefined);
+        const result = yield* Fiber.join(status);
+        assert.equal(result.status?.state, "update_blocked");
+        assert.isUndefined(result.status?.refreshDeferred);
+        assert.isTrue(
+          Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+        );
+        assert.isTrue(
+          Result.isFailure(
+            yield* Effect.result(
+              manager.issueMcpClientSession(uploadTarget, {
+                requireReady: true,
+                label: "invalidated-publication",
+                ttl: "1h",
+                runtimeModeCeiling: null,
+              }),
+            ),
+          ),
+        );
+        assert.equal(f.count.launches, 2);
+        assert.equal(f.count.forwards, 1);
+      }).pipe(
+        Effect.provide(f.layer),
+        Effect.provideService(Tracer.Tracer, f.tracer),
+        Effect.scoped,
+      );
+    }).pipe(Effect.scoped),
+);
+
 it.effect.each(
   [false, true].flatMap((liveDrain) => [
     { name: "foreign owner", probe: { liveOwned: false }, liveDrain },
