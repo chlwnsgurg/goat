@@ -5,6 +5,7 @@ import {
   WS_METHODS,
 } from "@goat/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -44,6 +45,7 @@ import {
   withoutEnvironmentThemes,
 } from "../state/serverConfigProjection.ts";
 import { environmentMismatchError } from "../connection/errors.ts";
+import { logSshConnectionTiming } from "../connection/sshTiming.ts";
 
 const SOCKET_OPEN_TIMEOUT = "15 seconds";
 
@@ -171,10 +173,17 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     });
 
     const connected = yield* Deferred.make<void>();
+    const ssh = connection.target._tag === "SshConnectionTarget";
+    const openingStartedAt = yield* Clock.monotonicTimeNanos;
+    const openedAt = yield* Ref.make(openingStartedAt);
     const disconnected = yield* Deferred.make<never, ConnectionTransientError>();
     const pingTimedOut = yield* Ref.make(false);
     const hooks = RpcClient.ConnectionHooks.of({
-      onConnect: Deferred.succeed(connected, undefined).pipe(Effect.asVoid),
+      onConnect: Effect.gen(function* () {
+        yield* Ref.set(openedAt, yield* Clock.monotonicTimeNanos);
+        if (ssh) yield* logSshConnectionTiming("websocket-open", openingStartedAt);
+        yield* Deferred.succeed(connected, undefined);
+      }),
       onDisconnect: Effect.all([Deferred.isDone(connected), Ref.get(pingTimedOut)]).pipe(
         Effect.flatMap(([wasConnected, timedOut]) =>
           Deferred.fail(
@@ -265,7 +274,9 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
             yield* PubSub.publish(serverConfigUpdates, buffered.value);
           }
           if (event.type === "snapshot") {
-            yield* Deferred.succeed(initialConfigDeferred, event.config);
+            const first = yield* Deferred.succeed(initialConfigDeferred, event.config);
+            if (ssh && first)
+              yield* logSshConnectionTiming("initial-snapshot", yield* Ref.get(openedAt));
           }
         }),
       ),

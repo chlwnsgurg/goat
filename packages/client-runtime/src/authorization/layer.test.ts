@@ -38,8 +38,8 @@ const DESCRIPTOR = {
   environmentId: ENVIRONMENT_ID,
   label: "Remote environment",
   platform: {
-    os: "linux",
-    arch: "x64",
+    os: "linux" as const,
+    arch: "x64" as const,
   },
   serverVersion: "0.0.0-test",
   capabilities: {
@@ -238,6 +238,82 @@ const makeHarness = Effect.fn("TestRemoteAuthorization.makeHarness")(function* (
 });
 
 describe("RemoteEnvironmentAuthorization", () => {
+  it.effect("uses this attempt's verified SSH identity without another descriptor request", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ responses: [websocketTicket("ssh-ticket")] });
+      const verifiedSshEndpoint = { httpBaseUrl: ENDPOINT.httpBaseUrl, descriptor: DESCRIPTOR };
+      const authorized = yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        return yield* remote.authorizeBearer({
+          expectedEnvironmentId: ENVIRONMENT_ID,
+          ...ENDPOINT,
+          bearerToken: "ssh-token",
+          connectionMethod: "ssh",
+          verifiedSshEndpoint,
+        });
+      }).pipe(Effect.provide(harness.layer));
+      expect(authorized.verifiedEndpoint).toEqual(verifiedSshEndpoint);
+      expect(harness.fetch.calls.map(([url]) => String(url))).toEqual([
+        `${ENDPOINT.httpBaseUrl}/api/auth/websocket-ticket`,
+      ]);
+    }),
+  );
+
+  it.effect.each(["wrong-environment", "wrong-endpoint"] as const)(
+    "rejects %s SSH evidence before sending a bearer",
+    (scenario) =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ responses: [] });
+        const failure = yield* Effect.gen(function* () {
+          const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+          return yield* remote.authorizeBearer({
+            expectedEnvironmentId: ENVIRONMENT_ID,
+            ...ENDPOINT,
+            bearerToken: "ssh-token",
+            connectionMethod: "ssh",
+            verifiedSshEndpoint: {
+              httpBaseUrl:
+                scenario === "wrong-endpoint" ? "http://127.0.0.1:4999" : ENDPOINT.httpBaseUrl,
+              descriptor: {
+                ...DESCRIPTOR,
+                environmentId:
+                  scenario === "wrong-environment" ? EnvironmentId.make("other") : ENVIRONMENT_ID,
+              },
+            },
+          });
+        }).pipe(Effect.provide(harness.layer), Effect.flip);
+        expect(failure).toMatchObject({ reason: "configuration" });
+        expect(harness.fetch.calls).toHaveLength(0);
+      }),
+  );
+
+  it.effect("does not let SSH evidence replace direct route identity validation", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        responses: [
+          Response.json({
+            ...DESCRIPTOR,
+            environmentId: EnvironmentId.make("other"),
+          }),
+        ],
+      });
+      const failure = yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        return yield* remote.authorizeBearer({
+          expectedEnvironmentId: ENVIRONMENT_ID,
+          ...ENDPOINT,
+          bearerToken: "ssh-token",
+          connectionMethod: "direct",
+          verifiedSshEndpoint: { httpBaseUrl: ENDPOINT.httpBaseUrl, descriptor: DESCRIPTOR },
+        });
+      }).pipe(Effect.provide(harness.layer), Effect.flip);
+      expect(failure).toMatchObject({ reason: "configuration" });
+      expect(harness.fetch.calls.map(([url]) => String(url))).toEqual([
+        `${ENDPOINT.httpBaseUrl}/.well-known/goat/environment`,
+      ]);
+    }),
+  );
+
   it.effect("reuses a validated bearer descriptor while issuing fresh websocket tickets", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({

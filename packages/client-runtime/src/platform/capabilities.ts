@@ -9,10 +9,12 @@ import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 
 import type { ConnectionAttemptError } from "../connection/model.ts";
+import type { VerifiedSshEndpoint } from "../environment/descriptor.ts";
 
 export interface PreparedSshEnvironment {
   readonly bootstrap: DesktopSshEnvironmentBootstrap;
   readonly bearerToken: string;
+  readonly verifiedEndpoint?: VerifiedSshEndpoint;
 }
 
 export interface ProvisionedSshEnvironment extends PreparedSshEnvironment {

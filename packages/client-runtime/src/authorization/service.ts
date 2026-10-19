@@ -23,7 +23,10 @@ import {
   ConnectionTransientError,
   type ConnectionAttemptError,
 } from "../connection/model.ts";
-import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
+import {
+  fetchRemoteEnvironmentDescriptor,
+  type VerifiedSshEndpoint,
+} from "../environment/descriptor.ts";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
@@ -51,6 +54,7 @@ export interface AuthorizedRemoteEnvironment {
   readonly httpBaseUrl: string;
   readonly socketUrl: string;
   readonly httpAuthorization: PreparedHttpAuthorization;
+  readonly verifiedEndpoint?: VerifiedSshEndpoint;
 }
 
 export interface AuthorizedRemoteHttpEnvironment {
@@ -69,6 +73,7 @@ export class RemoteEnvironmentAuthorization extends Context.Service<
       readonly wsBaseUrl: string;
       readonly bearerToken: string;
       readonly connectionMethod: ClientConnectionMethod;
+      readonly verifiedSshEndpoint?: VerifiedSshEndpoint;
     }) => Effect.Effect<AuthorizedRemoteEnvironment, ConnectionAttemptError>;
     readonly authorizeDpop: (input: {
       readonly expectedEnvironmentId: EnvironmentId;
@@ -185,39 +190,49 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const authorizeBearer = Effect.fn("clientRuntime.connection.remote.authorizeBearer")(
-    function* (input: {
-      readonly expectedEnvironmentId: Parameters<
-        RemoteEnvironmentAuthorization["Service"]["authorizeBearer"]
-      >[0]["expectedEnvironmentId"];
-      readonly httpBaseUrl: string;
-      readonly wsBaseUrl: string;
-      readonly bearerToken: string;
-      readonly connectionMethod: ClientConnectionMethod;
-    }) {
-      const descriptor = yield* verifyDirectEndpoint(input);
-      const socketUrl = yield* resolveRemoteWebSocketConnectionUrl({
-        wsBaseUrl: input.wsBaseUrl,
-        httpBaseUrl: input.httpBaseUrl,
-        bearerToken: input.bearerToken,
-        clientMetadata: presentation.metadata,
-        connectionMethod: input.connectionMethod,
-      }).pipe(
-        Effect.mapError(mapRemoteEnvironmentError),
-        Effect.provideService(HttpClient.HttpClient, httpClient),
-      );
-      return {
-        environmentId: descriptor.environmentId,
-        label: descriptor.label,
-        httpBaseUrl: input.httpBaseUrl,
-        socketUrl,
-        httpAuthorization: {
-          _tag: "Bearer" as const,
-          token: input.bearerToken,
-        },
-      };
-    },
-  );
+  const authorizeBearer = Effect.fn("clientRuntime.connection.remote.authorizeBearer")(function* (
+    input: Parameters<RemoteEnvironmentAuthorization["Service"]["authorizeBearer"]>[0],
+  ) {
+    // Only the SSH gateway supplies attempt-local evidence. A descriptor from another
+    // forward cannot authorize this URL; direct and relay routes keep their own checks.
+    const verified = input.connectionMethod === "ssh" ? input.verifiedSshEndpoint : undefined;
+    if (verified !== undefined && verified.httpBaseUrl !== input.httpBaseUrl) {
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail: "SSH identity was verified on a different endpoint. Reconnect to verify it again.",
+      });
+    }
+    const descriptor = verified?.descriptor ?? (yield* verifyDirectEndpoint(input));
+    if (descriptor.environmentId !== input.expectedEnvironmentId) {
+      return yield* environmentMismatchError({
+        expected: input.expectedEnvironmentId,
+        actual: descriptor.environmentId,
+      });
+    }
+    const socketUrl = yield* resolveRemoteWebSocketConnectionUrl({
+      wsBaseUrl: input.wsBaseUrl,
+      httpBaseUrl: input.httpBaseUrl,
+      bearerToken: input.bearerToken,
+      clientMetadata: presentation.metadata,
+      connectionMethod: input.connectionMethod,
+    }).pipe(
+      Effect.mapError(mapRemoteEnvironmentError),
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+    );
+    return {
+      environmentId: descriptor.environmentId,
+      label: descriptor.label,
+      httpBaseUrl: input.httpBaseUrl,
+      socketUrl,
+      httpAuthorization: {
+        _tag: "Bearer" as const,
+        token: input.bearerToken,
+      },
+      ...(input.connectionMethod === "ssh"
+        ? { verifiedEndpoint: { httpBaseUrl: input.httpBaseUrl, descriptor } }
+        : {}),
+    };
+  });
 
   const createDpopSocketUrl = Effect.fn("clientRuntime.connection.remote.createDpopSocketUrl")(
     function* (

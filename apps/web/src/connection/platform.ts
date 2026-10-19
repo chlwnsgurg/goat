@@ -17,6 +17,7 @@ import {
   PrimaryConnectionRegistration,
   PrimaryConnectionTarget,
   sshPreparationFailure,
+  withSshConnectionTiming,
   Wakeups,
 } from "@goat/client-runtime/connection";
 import { bootstrapRemoteBearerSession } from "@goat/client-runtime/authorization";
@@ -338,7 +339,7 @@ export const provisionDesktopSshEnvironment = Effect.fn(
         issuePairingToken: true,
       }),
     catch: sshPreparationFailure,
-  });
+  }).pipe(withSshConnectionTiming("ensure"));
   if ("type" in bootstrap) return yield* sshRuntimePendingError(bootstrap.pending);
   const pairingToken = bootstrap.pairingToken;
   if (pairingToken === null) {
@@ -350,7 +351,7 @@ export const provisionDesktopSshEnvironment = Effect.fn(
   const descriptor = yield* Effect.tryPromise({
     try: () => bridge.fetchSshEnvironmentDescriptor(bootstrap.httpBaseUrl),
     catch: sshPreparationFailure,
-  });
+  }).pipe(withSshConnectionTiming("descriptor"));
   if (expectedEnvironmentId !== undefined && descriptor.environmentId !== expectedEnvironmentId) {
     return yield* new ConnectionBlockedError({
       reason: "configuration",
@@ -360,7 +361,7 @@ export const provisionDesktopSshEnvironment = Effect.fn(
   const access = yield* Effect.tryPromise({
     try: () => bridge.bootstrapSshBearerSession(bootstrap.httpBaseUrl, pairingToken),
     catch: sshPreparationFailure,
-  });
+  }).pipe(withSshConnectionTiming("pairing"));
   // Reconnects look the record up by the resolved target the bridge returns, which is also
   // what the saved profile keeps.
   const grantKey = pairingGrantKey(descriptor, bootstrap.target);
@@ -371,6 +372,7 @@ export const provisionDesktopSshEnvironment = Effect.fn(
     label: descriptor.label,
     bootstrap,
     bearerToken: access.access_token,
+    verifiedEndpoint: { httpBaseUrl: bootstrap.httpBaseUrl, descriptor },
   };
 });
 
@@ -412,14 +414,14 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
             ...progressOptions,
           }),
         catch: sshPreparationFailure,
-      });
+      }).pipe(withSshConnectionTiming("ensure"));
       if ("type" in bootstrap) return yield* sshRuntimePendingError(bootstrap.pending);
       // Stop without sending the saved token, or pairing, when the forward
       // reaches a different environment.
       const descriptor = yield* Effect.tryPromise({
         try: () => bridge.fetchSshEnvironmentDescriptor(bootstrap.httpBaseUrl),
         catch: sshPreparationFailure,
-      });
+      }).pipe(withSshConnectionTiming("descriptor"));
       if (descriptor.environmentId !== input.expectedEnvironmentId) {
         return yield* new ConnectionBlockedError({
           reason: "configuration",
@@ -429,7 +431,7 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       const session = yield* Effect.tryPromise({
         try: () => bridge.fetchSshSessionState(bootstrap.httpBaseUrl, bearerToken),
         catch: sshPreparationFailure,
-      });
+      }).pipe(withSshConnectionTiming("session"));
       // Servers never widen a stored grant, so a token from before the standard
       // scopes grew is replaced by pairing again, unless this runtime grants no more.
       const granted = session.permissions ?? session.scopes ?? [];
@@ -439,7 +441,11 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
           granted.includes(scope),
         )
       ) {
-        return { bootstrap, bearerToken };
+        return {
+          bootstrap,
+          bearerToken,
+          verifiedEndpoint: { httpBaseUrl: bootstrap.httpBaseUrl, descriptor },
+        };
       }
     }
     // The cloud machine was readied above; pairing again must not ready it twice.
@@ -451,7 +457,11 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       () => Effect.void,
       grants,
     );
-    return { bootstrap: provisioned.bootstrap, bearerToken: provisioned.bearerToken };
+    return {
+      bootstrap: provisioned.bootstrap,
+      bearerToken: provisioned.bearerToken,
+      verifiedEndpoint: provisioned.verifiedEndpoint,
+    };
   },
   Effect.scoped,
 );

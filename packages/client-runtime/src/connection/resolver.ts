@@ -46,6 +46,7 @@ import {
 } from "./compatibility.ts";
 import { credentialConnectionId } from "./routes.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
+import { withSshConnectionTiming } from "./sshTiming.ts";
 
 export class ConnectionResolver extends Context.Service<
   ConnectionResolver,
@@ -255,21 +256,29 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
       yield* permissions.forget(target.environmentId);
     }
     yield* profiles.put(preparedProfile);
-    const authorized = yield* remote.authorizeBearer({
-      expectedEnvironmentId: target.environmentId,
-      httpBaseUrl: prepared.bootstrap.httpBaseUrl,
-      wsBaseUrl: prepared.bootstrap.wsBaseUrl,
-      bearerToken: prepared.bearerToken,
-      connectionMethod: "ssh",
-    });
+    const authorized = yield* remote
+      .authorizeBearer({
+        expectedEnvironmentId: target.environmentId,
+        httpBaseUrl: prepared.bootstrap.httpBaseUrl,
+        wsBaseUrl: prepared.bootstrap.wsBaseUrl,
+        bearerToken: prepared.bearerToken,
+        connectionMethod: "ssh",
+        ...(prepared.verifiedEndpoint === undefined
+          ? {}
+          : { verifiedSshEndpoint: prepared.verifiedEndpoint }),
+      })
+      .pipe(withSshConnectionTiming("authorization"));
     return {
-      environmentId: authorized.environmentId,
-      label: authorized.label,
-      httpBaseUrl: authorized.httpBaseUrl,
-      socketUrl: authorized.socketUrl,
-      httpAuthorization: authorized.httpAuthorization,
-      target,
-    } satisfies PreparedConnection;
+      prepared: {
+        environmentId: authorized.environmentId,
+        label: authorized.label,
+        httpBaseUrl: authorized.httpBaseUrl,
+        socketUrl: authorized.socketUrl,
+        httpAuthorization: authorized.httpAuthorization,
+        target,
+      } satisfies PreparedConnection,
+      verifiedEndpoint: authorized.verifiedEndpoint,
+    };
   });
 });
 
@@ -290,24 +299,33 @@ export const make = Effect.gen(function* () {
       "connection.environment.id": target.environmentId,
       "connection.target.kind": target._tag,
     });
-    const prepared = yield* (() => {
+    const { prepared, verifiedEndpoint } = yield* (() => {
       switch (target._tag) {
         case "PrimaryConnectionTarget":
-          return primary(target);
+          return primary(target).pipe(
+            Effect.map((prepared) => ({ prepared, verifiedEndpoint: undefined })),
+          );
         case "BearerConnectionTarget":
-          return bearer({ ...entry, target });
+          return bearer({ ...entry, target }).pipe(
+            Effect.map((prepared) => ({ prepared, verifiedEndpoint: undefined })),
+          );
         case "RelayConnectionTarget":
-          return relay(target);
+          return relay(target).pipe(
+            Effect.map((prepared) => ({ prepared, verifiedEndpoint: undefined })),
+          );
         case "SshConnectionTarget":
           return ssh({ ...entry, target }, onHostAnswered);
       }
     })();
-    const descriptor = yield* fetchRemoteEnvironmentDescriptor({
-      httpBaseUrl: prepared.httpBaseUrl,
-    }).pipe(
-      Effect.mapError(mapRemoteEnvironmentError),
-      Effect.provideService(HttpClient.HttpClient, httpClient),
-    );
+    const descriptor =
+      verifiedEndpoint?.httpBaseUrl === prepared.httpBaseUrl
+        ? verifiedEndpoint.descriptor
+        : yield* fetchRemoteEnvironmentDescriptor({
+            httpBaseUrl: prepared.httpBaseUrl,
+          }).pipe(
+            Effect.mapError(mapRemoteEnvironmentError),
+            Effect.provideService(HttpClient.HttpClient, httpClient),
+          );
     if (descriptor.environmentId !== target.environmentId) {
       return yield* environmentMismatchError({
         expected: target.environmentId,
