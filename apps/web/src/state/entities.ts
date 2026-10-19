@@ -29,6 +29,7 @@ import {
   allEnvironmentProjectSnapshotsReadyAtom,
   allEnvironmentShellsBootstrappedAtom,
   environmentShell,
+  pendingEnvironmentShellIdsAtom,
 } from "./shell";
 import { environmentThreadDetails, environmentThreadShells } from "./threads";
 import { waitForAtomValue } from "./waitForAtomValue";
@@ -108,6 +109,10 @@ export function useThreadShells(enabled = true): ReadonlyArray<EnvironmentThread
 
 export function useAllEnvironmentShellsBootstrapped(): boolean {
   return useAtomValue(allEnvironmentShellsBootstrappedAtom);
+}
+
+export function usePendingEnvironmentShellIds(): ReadonlyArray<EnvironmentId> | null {
+  return useAtomValue(pendingEnvironmentShellIdsAtom);
 }
 
 const environmentShellsBootstrappedAtom = Atom.family((environmentId: EnvironmentId | null) =>

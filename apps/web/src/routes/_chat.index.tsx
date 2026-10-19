@@ -24,6 +24,8 @@ import {
   readThreadShell,
   readProject,
   useAllEnvironmentShellsBootstrapped,
+  useEnvironmentShellsBootstrapped,
+  usePendingEnvironmentShellIds,
   useProjects,
   useThreadShell,
   useThreadShells,
@@ -60,6 +62,9 @@ function IndexDraftLanding() {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const { scratchEnvironmentId, openScratchProject } = useScratchProject();
   const globalAgentRef = useGlobalAgentStore((state) => state.ref);
+  const refEnvironmentBootstrapped = useEnvironmentShellsBootstrapped(
+    globalAgentRef?.environmentId ?? null,
+  );
   const setGlobalAgentRef = useGlobalAgentStore((state) => state.setRef);
   const globalThreadRef =
     globalAgentRef === null
@@ -108,6 +113,7 @@ function IndexDraftLanding() {
   const readScratchEnvironmentId = useEffectEvent(() => preferredScratchEnvironmentId);
   const resolution = resolveGlobalAgent({
     bootstrapped,
+    refEnvironmentBootstrapped,
     ref: globalAgentRef,
     threadShell: globalThreadShell,
     draftState: globalDraftState,
@@ -238,9 +244,7 @@ function IndexDraftLanding() {
     targetThreadId,
   ]);
 
-  if (!bootstrapped) {
-    return null;
-  }
+  if (resolutionKind === "wait") return <IndexWaitingState />;
   if (startState.failed) {
     return (
       <DraftStartError
@@ -262,6 +266,30 @@ function IndexDraftLanding() {
     return <NoProjectsHero />;
   }
   return null;
+}
+
+function IndexWaitingState() {
+  const pendingIds = usePendingEnvironmentShellIds();
+  const { presentationById } = useEnvironments();
+  const pendingLabels = pendingIds?.map(
+    (environmentId) => presentationById.get(environmentId)?.entry.target.label ?? environmentId,
+  );
+
+  return (
+    <SidebarInset>
+      <div className="flex h-dvh min-h-0 min-w-0 flex-1 flex-col overflow-hidden overscroll-y-none bg-background">
+        <WorkspacePageHeader electron={isElectron} className="border-b border-border" />
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>Waiting for your machines</EmptyTitle>
+            {pendingLabels?.length ? (
+              <EmptyDescription>Still loading: {pendingLabels.join(", ")}.</EmptyDescription>
+            ) : null}
+          </EmptyHeader>
+        </Empty>
+      </div>
+    </SidebarInset>
+  );
 }
 
 function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
