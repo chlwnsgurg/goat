@@ -4,8 +4,13 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Result from "effect/Result";
+import { ChildProcessSpawner } from "effect/process";
+import { REMOTE_RUNTIME_STATE_KEY } from "./command.ts";
+import { uploadTarget } from "./tunnel.fixture.ts";
 import { makeProtocolFixture } from "./tunnel.protocol.fixture.ts";
+import { prepareRemoteRuntime } from "./tunnel.ts";
 
 const current = {
   ssh: SSH_RUNTIME_PROTOCOL_VERSION,
@@ -40,6 +45,12 @@ const launch = (f: Fixture) =>
     assert.equal(result.success.status, "ready");
     assert.equal(result.success.port, f.port);
   });
+
+const probe = (f: Fixture) =>
+  prepareRemoteRuntime(uploadTarget, {}, f.runner, REMOTE_RUNTIME_STATE_KEY).pipe(
+    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+    Effect.provideService(FileSystem.FileSystem, f.observedFs),
+  );
 
 const liveFixture = makeProtocolFixture({
   live: true,
@@ -111,17 +122,104 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host facts
   );
 
   it.live(
-    "records nothing for an executable written within the last 2 s",
+    "records and reuses a freshly installed executable on the first probe",
     () =>
       Effect.gen(function* () {
         const f = yield* liveFixture;
-        yield* f.shiftHostClock(-60);
-        yield* launch(f);
+        yield* f.shiftHostClock(0, true);
+        yield* probe(f);
         const first = yield* recordableAsks(f);
+        assert.isAbove(first.own, 0);
+        yield* probe(f);
+        assert.deepEqual(yield* recordableAsks(f), first);
+        const names = yield* f.fs.readDirectory(`${f.home}/.goat/ssh-launch/facts`);
+        assert.include(names, "version.1.2.2.exe");
         yield* launch(f);
-        const second = yield* recordableAsks(f);
-        assert.equal(second.own, first.own * 2);
-        assert.isFalse(yield* f.fs.exists(`${f.home}/.goat/ssh-launch/facts`));
+        const afterLaunch = yield* recordableAsks(f);
+        yield* launch(f);
+        assert.deepEqual(yield* recordableAsks(f), afterLaunch);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    LAUNCHES_TIMEOUT_MS,
+  );
+
+  it.live(
+    "a same-size rewrite within the same second misses recorded answers",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* liveFixture;
+        yield* f.shiftHostClock(0, true);
+        yield* probe(f);
+        const first = yield* recordableAsks(f);
+        const executable = `${f.old}/goat`;
+        const source = yield* f.fs.readFileString(executable);
+        const rebuilt = source.replace("1.2.2", "1.2.1");
+        assert.notEqual(rebuilt, source);
+        assert.equal(rebuilt.length, source.length);
+        yield* f.fs.writeFileString(executable, rebuilt);
+        const selected = yield* probe(f);
+        assert.isAbove((yield* recordableAsks(f)).own, first.own);
+        assert.notEqual(selected.source, "retained");
+        const fact = yield* f.fs.readFileString(
+          `${f.home}/.goat/ssh-launch/facts/version.1.2.2.exe`,
+        );
+        assert.include(fact, "\ngoat v1.2.1\n");
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    LAUNCHES_TIMEOUT_MS,
+  );
+
+  it.live(
+    "prunes only facts of removed versions without following symlinks",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* liveFixture;
+        yield* f.shiftHostClock(60);
+        yield* probe(f);
+        const facts = `${f.home}/.goat/ssh-launch/facts`;
+        const versions = `${f.home}/.goat/runtime/goat/versions`;
+        const removed = `${versions}/1.0.0`;
+        yield* f.fs.makeDirectory(removed);
+        const kinds = ["version", "own", "commit", "scopes", "live", "compat"];
+        const stale = kinds.flatMap((kind) =>
+          ["exe", "runner"].map((via) => `${kind}.1.0.0.${via}`),
+        );
+        for (const name of stale) yield* f.fs.writeFileString(`${facts}/${name}`, "obsolete\n");
+        // Directory existence protects incomplete installs too; neither link is traversed.
+        yield* f.fs.makeDirectory(`${versions}/1.0.1`);
+        yield* f.fs.symlink(`${f.home}/absent`, `${versions}/1.0.2`);
+        const preserved = ["own.1.0.1.exe", "own.1.0.2.exe", "unknown.1.0.0.exe", "own.bad.exe"];
+        for (const name of preserved) yield* f.fs.writeFileString(`${facts}/${name}`, "keep\n");
+        yield* f.fs.symlink(`${f.test}/events`, `${facts}/own.1.0.3.exe`);
+        yield* f.fs.makeDirectory(`${facts}/own.1.0.4.exe`);
+        const installed = yield* f.fs.readFileString(`${facts}/version.1.2.2.exe`);
+        yield* f.fs.remove(removed, { recursive: true });
+        yield* probe(f);
+        const names = yield* f.fs.readDirectory(facts);
+        for (const name of stale) assert.notInclude(names, name);
+        for (const name of [...preserved, "own.1.0.3.exe", "own.1.0.4.exe"])
+          assert.include(names, name);
+        assert.equal(yield* f.fs.readFileString(`${facts}/version.1.2.2.exe`), installed);
+        assert.isAbove((yield* recordableAsks(f)).own, 0);
+        const movedFacts = `${f.test}/moved-facts`;
+        yield* f.fs.rename(facts, movedFacts);
+        yield* f.fs.symlink(movedFacts, facts);
+        yield* f.fs.writeFileString(`${movedFacts}/own.1.0.0.exe`, "keep behind link\n");
+        yield* probe(f);
+        assert.equal(
+          yield* f.fs.readFileString(`${movedFacts}/own.1.0.0.exe`),
+          "keep behind link\n",
+        );
+        yield* f.fs.remove(facts);
+        yield* f.fs.rename(movedFacts, facts);
+        const movedVersions = `${f.test}/moved-versions`;
+        yield* f.fs.rename(versions, movedVersions);
+        yield* f.fs.symlink(movedVersions, versions);
+        yield* probe(f);
+        assert.equal(yield* f.fs.readFileString(`${facts}/own.1.0.0.exe`), "keep behind link\n");
+        yield* f.fs.remove(versions);
+        yield* f.fs.rename(movedVersions, versions);
+        f.setScriptPrefix("rm() { return 1; }\n");
+        yield* probe(f);
+        assert.equal(yield* f.fs.readFileString(`${facts}/own.1.0.0.exe`), "keep behind link\n");
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     LAUNCHES_TIMEOUT_MS,
   );

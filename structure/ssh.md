@@ -72,10 +72,12 @@ server's state and every client sees them.
 Each start of `goat` costs about 0.4 s on a host, and the probe, launch, and pairing scripts ask
 the same questions before every use. They record each successful answer in
 `~/.goat/ssh-launch/facts`: an executable's version, protocol, commit time, and memory-scope
-support under its path, inode, size, and times (only once it is 2 s old), and a live server's
-protocol and compatibility under its runtime record and the start times of the PIDs it names.
+support under its path, inode, size, and times (plus a content digest while younger than 2 s),
+and a live server's protocol and compatibility under its runtime record and the start times of
+the PIDs it names.
 A changed, reinstalled, or removed executable, or a replaced or restarted server, misses and is
-asked again, so the rechecks still guard every step. Windows hosts record nothing.
+asked again, so the rechecks still guard every step. The probe prunes facts only when their
+version path is absent, preserving installed versions and symlinks. Windows hosts record nothing.
 
 The runner keeps `run-t3.sh` because independently updated clients and retained supervisors
 use that path for reuse, replacement, and rollback. Its shell variables use `GOAT_*`;

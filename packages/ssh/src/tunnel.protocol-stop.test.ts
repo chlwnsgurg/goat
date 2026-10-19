@@ -83,8 +83,10 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             ssh: SSH_RUNTIME_PROTOCOL_VERSION,
             orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
-          // Each MCP attempt must ask goat again; recorded answers are covered by tunnel.facts.test.ts.
-          yield* f.shiftHostClock(-60);
+          // This case needs real MCP rechecks; a linked facts directory prevents recording.
+          const unrecordedFacts = `${f.test}/unrecorded-facts`;
+          yield* f.fs.makeDirectory(unrecordedFacts);
+          yield* f.fs.symlink(unrecordedFacts, `${f.home}/.goat/ssh-launch/facts`);
           let current = { ...f.runner, archiveVersion: String(f.runner.archiveVersion) };
           const layer = Layer.mergeAll(
             NodeServices.layer,

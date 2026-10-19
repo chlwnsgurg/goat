@@ -245,8 +245,8 @@ file_sig() {
   printf '%s' "$sig_value"
 }
 # Sets FACT_NAME and FACT_KEY for running goat as $1: an installed executable, or an archive
-# runner, which execs one. An executable changed less than 2 s ago is not keyed: a second write
-# within the same second would leave its ctime unchanged.
+# runner, which execs one. Young executables need a digest too: a second write within the
+# same second can leave inode, size and both timestamps unchanged.
 exec_fact_key() {
   FACT_NAME=; FACT_KEY=
   [ -n "$GOAT_FACTS_DIR" ] && [ -f "$1" ] || return 1
@@ -262,12 +262,36 @@ exec_fact_key() {
   fact_version="\${fact_exe%/goat}"; fact_version="\${fact_version##*/}"
   valid_version "$fact_version" && [ "$fact_exe" = "$fact_versions/$fact_version/goat" ] || return 1
   fact_sig="$(file_sig "$fact_exe")" || return 1
-  [ "$(( $(date +%s) - \${fact_sig##*:} ))" -ge 2 ] || return 1
+  if [ "$(( $(date +%s) - \${fact_sig##*:} ))" -lt 2 ]; then
+    fact_sha="$(runner_sha256 "$fact_exe" 2>/dev/null)" || return 1
+    [ "$(file_sig "$fact_exe")" = "$fact_sig" ] || return 1
+    fact_sig="$fact_sig:$fact_sha"
+  fi
   # A runner installs a version without its marker instead of running it.
   [ "$(cat "$fact_versions/$fact_version/.install-complete" 2>/dev/null)" = "$fact_version" ] || return 1
   case "$fact_via" in exe) FACT_NAME="$fact_version.exe" ;; *) FACT_NAME="$fact_version.runner" ;; esac
   FACT_KEY="$fact_exe $fact_sig $fact_via"
 }
+prune_removed_facts() (
+  [ -n "$GOAT_FACTS_DIR" ] || exit 0
+  # A missing version is enough to discard answers; incomplete installs and links are not.
+  for fact_parent in "$HOME" "$HOME/.goat" "$HOME/.goat/ssh-launch" "$GOAT_FACTS_DIR" \
+    "$HOME/.goat/runtime" "$HOME/.goat/runtime/goat" "$HOME/.goat/runtime/goat/versions"; do
+    [ ! -L "$fact_parent" ] && [ -d "$fact_parent" ] && [ -r "$fact_parent" ] && [ -x "$fact_parent" ] || exit 0
+  done
+  set +f
+  for fact_file in "$GOAT_FACTS_DIR"/*; do
+    [ ! -L "$fact_file" ] && [ -f "$fact_file" ] || continue
+    fact_base="\${fact_file##*/}"
+    case "$fact_base" in version.*|own.*|commit.*|scopes.*|live.*|compat.*) ;; *) continue ;; esac
+    case "$fact_base" in *.exe|*.runner) ;; *) continue ;; esac
+    fact_version="\${fact_base#*.}"; fact_version="\${fact_version%.*}"
+    valid_version "$fact_version" || continue
+    fact_dir="$HOME/.goat/runtime/goat/versions/$fact_version"
+    [ ! -L "$fact_dir" ] && [ ! -e "$fact_dir" ] || continue
+    rm -f "$fact_file" || true
+  done
+) 2>/dev/null || true
 # A recorded value must parse as an answer of its kind (the name's first word); anything else,
 # such as a damaged file, is a miss and is asked again.
 fact_valid() {
@@ -2532,6 +2556,7 @@ state_key=${shellSingleQuote(stateKey ?? "")}
 state="$HOME/.goat/ssh-launch/$state_key"
 runtime_file="$HOME/.goat/userdata/server-runtime.json"
 ${REMOTE_PROTOCOL_TOKEN_SCRIPT}
+prune_removed_facts
 ready_version() {
   valid_version "$1" && [ -x "$HOME/.goat/runtime/goat/versions/$1/goat" ] &&
     [ "$(cat "$HOME/.goat/runtime/goat/versions/$1/.install-complete" 2>/dev/null)" = "$1" ]

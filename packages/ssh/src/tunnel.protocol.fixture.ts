@@ -3,6 +3,7 @@ import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { assert } from "@effect/vitest";
 import * as NetService from "@goat/shared/Net";
 import * as Crypto from "effect/Crypto";
+import * as Clock from "effect/Clock";
 import * as Hex from "effect/encoding/Hex";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -526,19 +527,35 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
       Effect.result,
     );
   };
-  // Host facts are recorded only for executables older than 2 s. Shifting the host clock makes
-  // this fixture's just-written files old (positive seconds) or new (negative) without waiting.
-  const shiftHostClock = (seconds: number) =>
+  // A frozen clock and file times model two same-second writes even when a fixture takes
+  // seconds to run. Inode and size still come from the real file.
+  const shiftHostClock = (seconds: number, freezeFileTimes = false) =>
     Effect.gen(function* () {
       const bin = `${test}/clock`;
+      const second = Math.floor((yield* Clock.currentTimeMillis) / 1000);
       yield* fs.makeDirectory(bin, { recursive: true });
       yield* fs.writeFileString(
         `${bin}/date`,
         `#!/bin/sh
-if [ "$#" = 1 ] && [ "$1" = +%s ]; then echo $(( $(/bin/date +%s) + (${seconds}) )); else exec /bin/date "$@"; fi
+if [ "$#" = 1 ] && [ "$1" = +%s ]; then echo $(( ${freezeFileTimes ? second : "$(/bin/date +%s)"} + (${seconds}) )); else exec /bin/date "$@"; fi
 `,
       );
       yield* fs.chmod(`${bin}/date`, 0o700);
+      if (freezeFileTimes) {
+        yield* fs.writeFileString(
+          `${bin}/stat`,
+          `#!/bin/sh
+case "$2" in
+  '%d:%i:%z:%m:%c'|'%d:%i:%s:%Y:%Z')
+    sig="$(/usr/bin/stat "$@")" || exit 1
+    sig="\${sig%:*}"; sig="\${sig%:*}"
+    printf '%s:${second}:${second}\\n' "$sig" ;;
+  *) exec /usr/bin/stat "$@" ;;
+esac
+`,
+        );
+        yield* fs.chmod(`${bin}/stat`, 0o700);
+      }
       setRemotePath(`${bin}:${remotePath}`);
     });
   const snapshot = Effect.gen(function* () {
