@@ -498,6 +498,11 @@ export class ChannelRemoteWorkers extends Context.Service<
      * the latest copy of its work. Starts the next generation, so the machine it leaves can
      * never report into the task again; that machine's own work is left where it is.
      */
+    /** Stops a stopped task's worker on its machine; the forward is done once it is stopped. */
+    readonly stop: (
+      pending: ChannelLedger.ChannelPendingEvent,
+      owner: string,
+    ) => Effect.Effect<void, ChannelLedger.ChannelLedgerError>;
     readonly move: (input: {
       readonly taskId: ChannelTaskId;
       readonly host: string;
@@ -2169,6 +2174,50 @@ const make = Effect.gen(function* () {
       yield* ledger.completeForward({ owner, sequence: pending.sequence });
     });
 
+  const stop: ChannelRemoteWorkers["Service"]["stop"] = (pending, owner) =>
+    background(
+      "stop:" + pending.event.eventId,
+      serialized(pending.event.taskId)(
+        Effect.gen(function* () {
+          const stored = yield* ledger.getTask(pending.event.taskId);
+          const worker = stored?.task.worker;
+          const state = yield* readState(pending.event.taskId);
+          if (
+            stored === undefined ||
+            worker?.host === undefined ||
+            state === undefined ||
+            state.remoteThreadId !== worker.threadId
+          ) {
+            return yield* ledger.completeForward({ owner, sequence: pending.sequence });
+          }
+          // The remote interrupt stops the run; its subagents stop with it there.
+          const stopped = yield* callHost(
+            {
+              host: state.host,
+              tool: "goat_thread_interrupt",
+              arguments: {
+                threadId: worker.threadId,
+                reason: "Stopped from GOAT Bot.",
+                clientRequestId: "channel-stop:" + pending.event.eventId,
+              },
+              writes: true,
+              timeoutMs: SEND_TIMEOUT_MS,
+            },
+            authorityFor(stored.task.taskId, stored.task.generation, owner),
+          ).pipe(Effect.result);
+          if (stopped._tag === "Failure" && remoteCode(stopped.failure) !== "thread_not_found") {
+            // Unreachable or refused for now: left pending, so the next pass stops it.
+            yield* Effect.logWarning("channel remote worker stop failed; retrying", {
+              taskId: stored.task.taskId,
+              host: state.host,
+            });
+            return;
+          }
+          yield* ledger.completeForward({ owner, sequence: pending.sequence });
+        }),
+      ),
+    );
+
   const forward: ChannelRemoteWorkers["Service"]["forward"] = (pending, owner) =>
     background(
       "forward:" + pending.event.eventId,
@@ -2481,6 +2530,7 @@ const make = Effect.gen(function* () {
     launch,
     dispatch,
     forward,
+    stop,
     ensure,
     attemptedElsewhere,
     move,

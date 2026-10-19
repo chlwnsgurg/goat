@@ -30,6 +30,7 @@ import {
   ChannelTask,
   ChannelTaskEvent,
   ChannelTaskLedgerExportRow,
+  ChannelWorkerRun,
   type ChannelTaskBrief,
   type ChannelTaskExportInput,
   type ChannelTaskExportResult,
@@ -280,6 +281,19 @@ export class ChannelLedger extends Context.Service<
     readonly listPendingForwards: (
       limit: number,
     ) => Effect.Effect<ReadonlyArray<ChannelPendingEvent>, ChannelLedgerError>;
+    /** Records one worker run as it stands now; the newest write for a run wins. */
+    readonly upsertWorkerRun: (run: ChannelWorkerRun) => Effect.Effect<void, ChannelLedgerError>;
+    /** The recorded runs of these tasks, oldest first per task. */
+    readonly listWorkerRuns: (
+      taskIds: ReadonlyArray<ChannelTaskId>,
+    ) => Effect.Effect<ReadonlyArray<ChannelWorkerRun>, ChannelLedgerError>;
+    /**
+     * How each task's outcome (result, failure or stop) reached its requester: the state of the
+     * newest outcome delivery to where the work came from, or none when nothing was sent yet.
+     */
+    readonly outcomeDeliveries: (
+      taskIds: ReadonlyArray<ChannelTaskId>,
+    ) => Effect.Effect<ReadonlyMap<string, string>, ChannelLedgerError>;
     /** Whether any recorded answer or follow-up for this task is still waiting to be sent. */
     readonly hasPendingForward: (
       taskId: ChannelTaskId,
@@ -443,6 +457,8 @@ const decodeRequester = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelRe
 const encodeDecision = Schema.encodeSync(Schema.fromJsonString(ChannelReceptionResult));
 const decodeDecision = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelReceptionResult));
 const encodeTask = Schema.encodeSync(Schema.fromJsonString(ChannelTask));
+const encodeWorkerRun = Schema.encodeSync(Schema.fromJsonString(ChannelWorkerRun));
+const decodeWorkerRun = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelWorkerRun));
 const decodeTask = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelTask));
 const encodeEvent = Schema.encodeSync(Schema.fromJsonString(ChannelTaskEvent));
 const decodeEvent = Schema.decodeUnknownSync(Schema.fromJsonString(ChannelTaskEvent));
@@ -724,6 +740,8 @@ const make = Effect.gen(function* () {
         )
       `;
     });
+
+  const workerRunKey = (taskId: string, runId: string) => "worker-run:" + taskId + ":" + runId;
 
   const upsertCursor = (cursor: number, now: string) => sql`
     INSERT INTO channel_runtime_state (key, value_json, updated_at)
@@ -1264,6 +1282,53 @@ const make = Effect.gen(function* () {
         ),
         Effect.mapError(toLedgerError("listPendingForwards")),
       ),
+
+    upsertWorkerRun: (run) =>
+      sql`
+        INSERT INTO channel_runtime_state (key, value_json, updated_at)
+        VALUES (${workerRunKey(run.taskId, run.runId)}, ${encodeWorkerRun(run)}, ${run.updatedAt})
+        ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+      `.pipe(Effect.asVoid, Effect.mapError(toLedgerError("upsertWorkerRun"))),
+
+    listWorkerRuns: (taskIds) =>
+      taskIds.length === 0
+        ? Effect.succeed([])
+        : Effect.forEach(
+            taskIds,
+            (taskId) =>
+              sql<{ readonly value_json: string }>`
+              SELECT value_json FROM channel_runtime_state
+              WHERE key >= ${"worker-run:" + taskId + ":"} AND key < ${"worker-run:" + taskId + ";"}
+            `,
+          ).pipe(
+            Effect.map((pages) =>
+              pages
+                .flat()
+                .map((row) => decodeWorkerRun(row.value_json))
+                .toSorted((left, right) =>
+                  left.taskId === right.taskId
+                    ? left.startedAt.localeCompare(right.startedAt)
+                    : left.taskId.localeCompare(right.taskId),
+                ),
+            ),
+            Effect.mapError(toLedgerError("listWorkerRuns")),
+          ),
+
+    outcomeDeliveries: (taskIds) =>
+      taskIds.length === 0
+        ? Effect.succeed(new Map())
+        : sql<{ readonly task_id: string; readonly state: string }>`
+            SELECT task_id, state FROM channel_outbox
+            WHERE task_id IN ${sql.in(taskIds)}
+              AND kind IN ('result', 'failure')
+              AND cause_key LIKE 'narration:%:origin'
+            ORDER BY created_at
+          `.pipe(
+            // Later rows overwrite earlier ones: the newest outcome delivery decides.
+            Effect.map((rows) => new Map(rows.map((row) => [row.task_id, row.state]))),
+            Effect.mapError(toLedgerError("outcomeDeliveries")),
+          ),
 
     hasPendingForward: (taskId) =>
       sql<{ readonly found: number }>`

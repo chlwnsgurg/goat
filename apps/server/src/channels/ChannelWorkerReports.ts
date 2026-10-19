@@ -23,7 +23,9 @@ import {
   channelWorkerObservationEquals,
   CommandId,
   type ChannelTaskEventId,
+  type ChannelTask,
   type ChannelTaskReportInput,
+  type ChannelWorkerRunStatus,
   type OrchestrationV2Run,
   type ThreadId,
 } from "@goat/contracts";
@@ -48,6 +50,24 @@ import {
   usageLimitWait,
   type UsageLimitWait,
 } from "./channelWorkerObservation.ts";
+
+/** A worker run's own state, apart from the task it serves. */
+const workerRunStatus = (
+  status: OrchestrationV2Run["status"],
+  needsYou: boolean,
+): ChannelWorkerRunStatus => {
+  switch (status) {
+    case "completed":
+      return "finished";
+    case "cancelled":
+      return "stopped";
+    case "failed":
+    case "interrupted":
+      return "failed";
+    default:
+      return needsYou ? "waiting" : "running";
+  }
+};
 
 const TERMINAL_RUN_STATUSES = new Set([
   "completed",
@@ -134,6 +154,46 @@ const make = Effect.gen(function* () {
     });
 
   /** One task against its worker's current runs. True when the ledger changed. */
+  /**
+   * Records the task's runs from the one it is bound to onward, each with its own state. A run is
+   * written only when its state changed, so a quiet worker costs no writes.
+   */
+  const recordRuns = (
+    task: ChannelTask,
+    runs: ReadonlyArray<OrchestrationV2Run>,
+    floor: number,
+    needsYou: boolean,
+  ) =>
+    Effect.gen(function* () {
+      const worker = task.worker;
+      if (worker === undefined) return;
+      const known = new Map(
+        (yield* ledger.listWorkerRuns([task.taskId])).map((run) => [run.runId, run]),
+      );
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const latestOrdinal = runs.at(-1)?.ordinal;
+      for (const run of runs) {
+        if (run.ordinal < floor) continue;
+        // Only the newest run can be waiting on a person; earlier ones have ended.
+        const status = workerRunStatus(run.status, needsYou && run.ordinal === latestOrdinal);
+        const before = known.get(run.id);
+        if (before?.status === status) continue;
+        const ended = status === "running" || status === "waiting" ? undefined : now;
+        yield* ledger.upsertWorkerRun({
+          runId: run.id,
+          taskId: task.taskId,
+          generation: worker.generation,
+          threadId: worker.threadId,
+          status,
+          startedAt: before?.startedAt ?? DateTime.formatIso(run.requestedAt),
+          updatedAt: now,
+          ...(ended === undefined ? {} : { endedAt: before?.endedAt ?? ended }),
+        });
+      }
+    }).pipe(
+      Effect.catch((cause) => Effect.logWarning("channel worker run not recorded", { cause })),
+    );
+
   const reconcileTask = (stored: ChannelLedger.ChannelStoredTask, owner: string) =>
     Effect.gen(function* () {
       const task = stored.task;
@@ -214,6 +274,8 @@ const make = Effect.gen(function* () {
         if (reread.task.version !== wrote.version) return true;
         latest = reread;
       }
+
+      yield* recordRuns(latest.task, runs, bound?.ordinal ?? 0, observed.needsYou.length > 0);
 
       if (!TERMINAL_RUN_STATUSES.has(current.status)) return latest !== stored;
       // A follow-up or answer recorded but not yet sent belongs to this work; the run read above

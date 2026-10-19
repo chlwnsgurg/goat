@@ -83,6 +83,12 @@ export const answerForwardIdsFor = (eventId: ChannelTaskEventId) => ({
   messageId: MessageId.make(stableId("channel-answer-message", [eventId])),
 });
 
+/** Stopping a task's worker and its subagents for one recorded stop; a replay stops once. */
+export const stopIdsFor = (eventId: ChannelTaskEventId) => ({
+  interrupt: CommandId.make(stableId("channel-stop", [eventId])),
+  subagents: CommandId.make(stableId("channel-stop-subagents", [eventId])),
+});
+
 /**
  * A follow-up sent to the worker already doing its work; a retried input sends it once. The
  * "queued" attempt is the second and last one, used only after the orchestrator rejected the

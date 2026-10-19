@@ -80,6 +80,8 @@ import {
   threadDigest,
 } from "./channelBotRecall.ts";
 import { CHANNEL_COPY } from "./channelCopy.ts";
+import { isOpenItem, pendingDigest, workItemState } from "./channelWorkQueue.ts";
+import { sameRequester, WORKERS_PER_REQUESTER } from "./ChannelDispatcher.ts";
 import {
   answerForwardIdsFor,
   deliveryIdFor,
@@ -344,6 +346,11 @@ const make = Effect.gen(function* () {
       );
     });
 
+  /** Work that holds one of a person's worker slots. */
+  const busyWork = ledger
+    .listTasksByStatus(["dispatching", "running", "waiting_input"])
+    .pipe(Effect.map((stored) => stored.map((entry) => entry.task)));
+
   /** The owner's newest tasks this requester may see. */
   const visibleTasks = (viewer: ChannelRequester, conversationId: ChannelConversationId) =>
     ledger
@@ -513,6 +520,36 @@ const make = Effect.gen(function* () {
               })),
               RECALL_RESULT_CHARS - digest.length - 1,
             )
+          );
+        }
+        case "pending": {
+          const visible = yield* visibleTasks(viewer, conversationId);
+          const deliveries = yield* ledger.outcomeDeliveries(visible.map((task) => task.taskId));
+          const items = visible.map((task) => ({
+            task,
+            state: workItemState(task, deliveries.get(task.taskId)),
+          }));
+          const open = items.filter((item) => isOpenItem(item.state));
+          const runs = yield* ledger.listWorkerRuns(open.map((item) => item.task.taskId));
+          const busy = yield* busyWork;
+          return pendingDigest(
+            open.map((item) => ({
+              ...item,
+              runs: runs.filter((run) => run.taskId === item.task.taskId),
+              ...(item.state === "queued" &&
+              busy.filter((other) => sameRequester(other.requester, item.task.requester)).length >=
+                WORKERS_PER_REQUESTER
+                ? {
+                    note:
+                      "waiting for one of the " +
+                      WORKERS_PER_REQUESTER +
+                      " running for " +
+                      item.task.requester.displayName +
+                      " to finish",
+                  }
+                : {}),
+            })),
+            DateTime.toEpochMillis(yield* DateTime.now),
           );
         }
         case "conversation": {
@@ -887,6 +924,15 @@ const make = Effect.gen(function* () {
             ),
           };
           if (bot !== undefined) deliveries.push(chipDelivery(task, bot));
+          const running = (yield* busyWork).filter((other) =>
+            sameRequester(other.requester, requester),
+          ).length;
+          if (running >= WORKERS_PER_REQUESTER) {
+            replyText +=
+              " It's queued: " +
+              running +
+              " of your things are running, and it starts when one finishes.";
+          }
         }
       }
 
@@ -972,6 +1018,59 @@ const make = Effect.gen(function* () {
             finalDecision = { replyText, action: { type: "report_only" } };
           }
         }
+      }
+
+      // Stopping records each stop with the reply; the dispatcher then stops the worker and its
+      // subagents from the ledger, so a crash after the reply still stops them.
+      if (action.type === "stop_work") {
+        const sender = requester.originKind === "mcp" ? undefined : yield* judgedNow;
+        const viewer = yield* viewerNow(requester, message.connectionId);
+        const candidates =
+          action.taskId === undefined
+            ? yield* visibleTasks(viewer, conversationId)
+            : (yield* visibleTasks(viewer, conversationId)).filter(
+                (task) => task.taskId === action.taskId,
+              );
+        const stoppable = candidates.filter(
+          (task) =>
+            (task.status === "received" ||
+              task.status === "dispatching" ||
+              task.status === "running" ||
+              task.status === "waiting_input") &&
+            sender !== undefined &&
+            mayAnswerFor(sender, task.requester),
+        );
+        const stopped: Array<string> = [];
+        for (const task of stoppable) {
+          const storedTask = yield* ledger.getTask(task.taskId);
+          if (storedTask === undefined) continue;
+          const prepared = prepareTransition(
+            storedTask,
+            {
+              type: "task.cancelled",
+              payload: { reason: "Stopped by " + sender!.displayName + "." },
+            },
+            now,
+            bot,
+            {
+              actor: "user",
+              eventId: taskEventIdFor(storedTask.task.taskId, storedTask.task.version + 1),
+              narrate: true,
+              forward: true,
+            },
+          );
+          if (!prepared.ok) continue;
+          taskEvents.push(prepared.write);
+          deliveries.push(...prepared.deliveries);
+          stopped.push(storedTask.task.title);
+        }
+        replyText =
+          sender === undefined
+            ? CHANNEL_COPY.agentCannotStopWork
+            : stopped.length === 0
+              ? "There's nothing running that you can stop."
+              : "Stopping " + stopped.join(", ") + ".";
+        finalDecision = { replyText, action };
       }
 
       if (action.type === "move_task") {

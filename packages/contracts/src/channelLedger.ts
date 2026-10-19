@@ -181,6 +181,34 @@ export const ChannelTaskMove = Schema.Struct({
 export type ChannelTaskMove = typeof ChannelTaskMove.Type;
 
 /**
+ * One run of a task's worker thread, recorded apart from the task it serves. A task is the
+ * requested work; its runs are who did it and how each ended. A run finishing does not finish the
+ * task: the task is done when its outcome was delivered.
+ */
+export const ChannelWorkerRunStatus = Schema.Literals([
+  "running",
+  "waiting",
+  "finished",
+  "failed",
+  "stopped",
+]);
+export type ChannelWorkerRunStatus = typeof ChannelWorkerRunStatus.Type;
+
+export const ChannelWorkerRun = Schema.Struct({
+  runId: TrimmedNonEmptyString,
+  taskId: ChannelTaskId,
+  generation: PositiveInt,
+  threadId: TrimmedNonEmptyString,
+  /** The machine it runs on when it is not this one. */
+  host: Schema.optional(TrimmedNonEmptyString),
+  status: ChannelWorkerRunStatus,
+  startedAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  endedAt: Schema.optional(IsoDateTime),
+});
+export type ChannelWorkerRun = typeof ChannelWorkerRun.Type;
+
+/**
  * "work" starts a coding thread wherever the requester asks. A "turn" is GOAT Bot itself
  * looking into a message with tools: it runs on this machine in the bot's own workspace, on the
  * bot's model, and its result is the bot's answer.

@@ -15,6 +15,7 @@ import {
   CHANNEL_HOST_WORKSPACE_LABEL,
   CHANNEL_RECEPTION_MAX_OPTIONS,
   type ChannelDispatchTarget,
+  type ChannelRequester,
   type ChannelTask,
   type ChannelTaskId,
   type MemoryTaskGrantCeiling,
@@ -54,6 +55,7 @@ import { type ChannelBotFiles, channelBotFilesFor } from "./channelBotNotes.ts";
 import {
   answerForwardIdsFor,
   questionIdFor,
+  stopIdsFor,
   turnSteerIdsFor,
   workerLaunchIdsFor,
 } from "./channelIds.ts";
@@ -97,6 +99,12 @@ const workerInstruction = (task: ChannelTask, files: ChannelBotFiles) =>
   ].join("\n");
 
 const MEMORY_CEILING_RANK = { none: 0, read: 1, read_write: 2 } as const;
+
+/** How many pieces of one person's work run at once before more wait in the queue. */
+export const WORKERS_PER_REQUESTER = 4;
+
+export const sameRequester = (left: ChannelRequester, right: ChannelRequester) =>
+  left.ownerId === right.ownerId && left.principalId === right.principalId;
 
 /**
  * The most a GOAT Bot turn may do on its own, whatever the requester may: read and search freely
@@ -676,6 +684,14 @@ const make = Effect.gen(function* () {
         return yield* launch(stored, owner);
       }
       if (stored.task.status !== "received") return;
+      // At most this many pieces of a person's work run at once; the rest wait as received and
+      // the runtime, going oldest first, dispatches them as earlier work ends.
+      const busy = (yield* ledger.listTasksByStatus([
+        "dispatching",
+        "running",
+        "waiting_input",
+      ])).filter((other) => sameRequester(other.task.requester, stored.task.requester)).length;
+      if (busy >= WORKERS_PER_REQUESTER) return;
       if (stored.task.host !== undefined) {
         return yield* remoteWorkers.dispatch(taskId, owner, yield* remoteHints(stored));
       }
@@ -870,12 +886,62 @@ const make = Effect.gen(function* () {
       yield* ledger.completeForward({ owner, sequence: pending.sequence });
     });
 
+  /**
+   * Stops the worker of a task a person stopped from chat: its running run, then every subagent
+   * it started. The ids come from the stop event, so replaying the forward after a crash stops
+   * once. A worker on another machine is stopped there. Failures stay pending and are retried.
+   */
+  const stopWorker = (pending: ChannelLedger.ChannelPendingEvent, owner: string) =>
+    Effect.gen(function* () {
+      const stored = yield* ledger.getTask(pending.event.taskId);
+      const worker = stored?.task.worker;
+      const projectId = stored?.task.target?.projectId;
+      if (worker?.host !== undefined) return yield* remoteWorkers.stop(pending, owner);
+      if (stored === undefined || worker === undefined || projectId === undefined) {
+        // Nothing was launched yet: the stop in the ledger is the whole stop.
+        yield* ledger.completeForward({ owner, sequence: pending.sequence });
+        return;
+      }
+      const ids = stopIdsFor(pending.event.eventId);
+      const stopped = yield* Effect.all([
+        threads.interruptThread({
+          projectId: ProjectId.make(projectId),
+          commandId: ids.interrupt,
+          threadId: worker.threadId,
+          reason: "Stopped from GOAT Bot.",
+        }),
+        threads.stopDelegatedTasks({
+          threadId: worker.threadId,
+          commandId: ids.subagents,
+          reason: "Stopped from GOAT Bot.",
+        }),
+      ]).pipe(Effect.result);
+      if (stopped._tag === "Failure") {
+        // A command id the orchestrator refused for good has nothing left to stop.
+        const tag = (stopped.failure as { readonly _tag?: string })._tag;
+        if (
+          tag === "OrchestratorCommandRejectedError" ||
+          tag === "OrchestratorCommandPreviouslyRejectedError"
+        ) {
+          yield* ledger.completeForward({ owner, sequence: pending.sequence });
+          return;
+        }
+        yield* Effect.logWarning("channel worker stop failed; retrying", {
+          taskId: stored.task.taskId,
+          cause: stopped.failure,
+        });
+        return;
+      }
+      yield* ledger.completeForward({ owner, sequence: pending.sequence });
+    });
+
   const forward: ChannelDispatcher["Service"]["forward"] = (pending, owner) =>
     Effect.gen(function* () {
       const event = pending.event;
       if (event.type === "task.followup.received") {
         return yield* forwardFollowUp(pending, event, owner);
       }
+      if (event.type === "task.cancelled") return yield* stopWorker(pending, owner);
       const stored = yield* ledger.getTask(event.taskId);
       const worker = stored?.task.worker;
       if (worker?.host !== undefined) return yield* remoteWorkers.forward(pending, owner);

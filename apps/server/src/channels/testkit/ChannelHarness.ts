@@ -118,6 +118,9 @@ export class WorkerWorld {
   readonly dispatchFailures = new Set<string>();
   readonly launches: Array<ThreadLaunch.ThreadLaunchInput> = [];
   readonly sends: Array<ThreadManagement.ThreadManagementSendInput> = [];
+  /** Interrupts and subagent stops sent to worker threads, by thread id. */
+  readonly interrupts: Array<string> = [];
+  readonly subagentStops: Array<string> = [];
   /** Follow-ups that joined a running run, by message id, and the run they joined. */
   readonly steered = new Map<string, RunId>();
   /** Sends to fail, by message id, with the error the orchestrator would give. */
@@ -446,6 +449,20 @@ export function makeHarness(
           return Effect.succeed({ run, delivery: "started" } as never);
         },
         delegatedTaskResultPending: () => Effect.succeed(false),
+        interruptThread: (input) => {
+          if (!isWorker(input.threadId)) return real.interruptThread(input);
+          world.interrupts.push(input.threadId);
+          const latest = world.latestRun(input.threadId);
+          if (latest !== undefined && latest.status === "running") {
+            world.setStatus(input.threadId, latest.ordinal, "cancelled");
+          }
+          return Effect.succeed({ type: "no_active_run" } as const);
+        },
+        stopDelegatedTasks: (input) => {
+          if (!isWorker(input.threadId)) return real.stopDelegatedTasks(input);
+          world.subagentStops.push(input.threadId);
+          return Effect.void;
+        },
       });
     }),
   ).pipe(Layer.provide(layerRealThreads));

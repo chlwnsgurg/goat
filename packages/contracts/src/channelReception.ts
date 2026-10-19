@@ -97,6 +97,7 @@ export const ChannelReceptionReadKind = Schema.Literals([
   "work",
   "thread",
   "conversation",
+  "pending",
 ]);
 export type ChannelReceptionReadKind = typeof ChannelReceptionReadKind.Type;
 
@@ -203,6 +204,14 @@ export const ChannelReceptionAction = Schema.Union([
     /** The message adds to or corrects running work listed in this conversation; it joins it. */
     type: Schema.Literal("follow_up"),
     taskId: ChannelTaskId,
+  }),
+  Schema.Struct({
+    /**
+     * Stop work: the one task named, or, with no taskId, every open piece of work the person may
+     * stop. Workers and the subagents they started are stopped too.
+     */
+    type: Schema.Literal("stop_work"),
+    taskId: Schema.optional(ChannelTaskId),
   }),
   Schema.Struct({
     type: Schema.Literal("status"),

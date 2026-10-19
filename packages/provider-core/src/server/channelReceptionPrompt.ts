@@ -26,6 +26,7 @@ export const ChannelReceptionModelOutput = Schema.Struct({
     "create_task",
     "run_turn",
     "follow_up",
+    "stop_work",
     "read",
     "move_task",
     "status",
@@ -107,6 +108,14 @@ function toActionResult(
           ...(output.notesChangeRequested.trim() === ""
             ? {}
             : { notesChangeRequested: output.notesChangeRequested.trim() }),
+        },
+      });
+    case "stop_work":
+      return decodeResult({
+        replyText,
+        action: {
+          type: "stop_work",
+          ...(output.taskId.trim() === "" ? {} : { taskId: output.taskId }),
         },
       });
     case "follow_up":
@@ -232,7 +241,7 @@ export function buildChannelReceptionPrompt(input: ChannelReceptionInput) {
       ? [
           "- Questions about past work (what happened with something, what a thread did, whether a pull request merged, what was decided earlier) or about what you remember: when the facts below do not already answer, choose read instead of starting a coding agent. Up to " +
             CHANNEL_RECEPTION_MAX_READS +
-            " reads, each a kind and a query: memory (words to look for), work (words, a task id, or a pull request number or URL), thread (a task id or title, for what its coding thread said last), conversation (words from an earlier message). You answer after the results come back; replyText may be empty.",
+            " reads, each a kind and a query: memory (words to look for), work (words, a task id, or a pull request number or URL), thread (a task id or title, for what its coding thread said last), conversation (words from an earlier message), pending (what is still open: queued, running, waiting on the person, or not delivered yet; any query). You answer after the results come back; replyText may be empty.",
         ]
       : []),
     "- The machine facts describe the computer running GOAT and its agents. The person may be typing from another device, such as a phone or Slack; say which one you mean when it matters.",
@@ -258,6 +267,7 @@ export function buildChannelReceptionPrompt(input: ChannelReceptionInput) {
     "- create_task: work that needs a coding agent. Fill title (short, in the person's language) and instruction (complete and self-contained: the goal, the context from this conversation, relevant standing notes, and what to report back). Set projectId to one listed below whenever one fits. Set host only when the person asks for the work to run on one of the other machines listed below.",
     "- run_turn: you look into it yourself with tools and answer when done. Fill title (short, in the person's language) and instruction (the question, the context from this conversation, and what the answer should cover). To change or forget a note this way, copy the exact words asking for it into notesChangeRequested.",
     "- follow_up: the message belongs to running work listed below. Fill taskId; say in replyText that you passed it on.",
+    '- stop_work: the person asks to stop work. Fill taskId for one listed task; leave it empty for "stop everything" or "cancel all". The server stops what they may stop and writes the reply.',
     ...(readsAllowed
       ? [
           "- read: look things up before answering, as described above. Fill reads; leave the other keys empty.",
