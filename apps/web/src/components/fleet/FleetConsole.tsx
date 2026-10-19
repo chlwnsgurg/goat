@@ -479,17 +479,22 @@ function FleetConsoleExpanded(props: {
             ) : (
               <ul className="flex flex-col gap-0.5">
                 {alerts.slice(0, 3).map((alert) => (
-                  <li key={alert.key} className="flex min-w-0 items-center gap-1.5 text-xs">
+                  <li
+                    key={alert.key}
+                    data-fleet-alert
+                    className="flex min-w-0 items-start gap-1.5 text-xs leading-4"
+                  >
                     <span
                       aria-hidden
-                      className={cn("size-1.5 shrink-0 rounded-full", ALERT_DOT[alert.tone])}
+                      className={cn("mt-1.5 size-1.5 shrink-0 rounded-full", ALERT_DOT[alert.tone])}
                     />
                     <span className="shrink-0 font-medium">{alert.label}</span>
+                    {/* Versions and SSH errors run long: two lines, broken anywhere, then the tooltip. */}
                     <Tooltip>
                       <TooltipTrigger
                         render={
                           <span
-                            className="truncate text-muted-foreground outline-hidden"
+                            className="line-clamp-2 min-w-0 text-muted-foreground wrap-anywhere outline-hidden"
                             tabIndex={0}
                           />
                         }

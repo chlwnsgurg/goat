@@ -26,13 +26,21 @@ const host: HostStatusEntry = {
 };
 
 const hostStatus = vi.hoisted(() => ({ reads: 0 }));
+// Longer than two alert lines at 320px, so the wrap and the clamp are both exercised.
+const LONG_VERSION = "0.1.0-dev.1791900000.g1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5";
+const box: HostStatusEntry = {
+  ...host,
+  host: "box",
+  versionMismatch: true,
+  serverVersion: LONG_VERSION,
+};
 vi.mock(import("./fleetConsoleTelemetry"), async () => {
   const { Atom } = await import("effect/reactivity");
   return {
     fleetConsoleTelemetryAtom: Atom.make(() => {
       hostStatus.reads += 1;
       return {
-        reports: new Map([[environmentId, [host]]]),
+        reports: new Map([[environmentId, [host, box]]]),
         history: new Map(),
         lastSeen: new Map(),
         loading: false,
@@ -179,5 +187,25 @@ describe("FleetConsoleSlot", () => {
     await mounted();
     expect(console_()!.textContent).toContain("91%");
     expect(container.querySelector(".fleet-console-sweep")).toBeNull();
+  });
+
+  it("wraps a long alert to two lines, keeps its full text, and does not grow the panel", async () => {
+    const version = LONG_VERSION;
+    container.style.width = "320px";
+    await render();
+    const reserved = placeholder()!.getBoundingClientRect().height;
+    await mounted();
+
+    const alert = [...container.querySelectorAll<HTMLElement>("[data-fleet-alert]")].find((item) =>
+      item.textContent?.includes(version),
+    )!;
+    const detail = alert.querySelector<HTMLElement>("[tabindex]")!;
+    expect(detail.textContent).toBe("Runs GOAT " + version);
+    const line = Number.parseFloat(getComputedStyle(detail).lineHeight);
+    const height = detail.getBoundingClientRect().height;
+    expect(height).toBeGreaterThan(line * 1.5);
+    expect(height).toBeLessThanOrEqual(line * 2 + 1);
+    expect(detail.scrollWidth).toBeLessThanOrEqual(detail.clientWidth);
+    expect(console_()!.getBoundingClientRect().height).toBe(reserved);
   });
 });
