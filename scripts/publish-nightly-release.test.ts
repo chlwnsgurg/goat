@@ -49,6 +49,7 @@ const fixture = (
     const files = new Map<string, Uint8Array>([
       ["install.sh", new TextEncoder().encode("#!/bin/sh\necho GOAT\n")],
       ["install.ps1", new TextEncoder().encode("Write-Host GOAT\n")],
+      ["install-goat-server.sh", new TextEncoder().encode("#!/bin/sh\necho GOAT server\n")],
       ["THIRD_PARTY_NOTICES.md", new TextEncoder().encode("Notices\n")],
       ["GOAT-arm64.dmg", new TextEncoder().encode("macos artifact")],
     ]);
@@ -193,7 +194,7 @@ describe("publish nightly release", () => {
         expect(state.calls.filter((call) => call.host === "uploads.github.com")).toHaveLength(
           state.files.size,
         );
-        expect(state.calls.filter((call) => call.method === "PUT")).toHaveLength(3);
+        expect(state.calls.filter((call) => call.method === "PUT")).toHaveLength(4);
         expect(state.calls.find((call) => call.method === "PATCH")!.body).toEqual({
           draft: false,
           prerelease: true,

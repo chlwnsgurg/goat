@@ -442,6 +442,7 @@ export function requiredReleaseAssets(version: string): string[] {
     "nightly-linux-arm64.yml",
     "install.sh",
     "install.ps1",
+    "install-goat-server.sh",
     "THIRD_PARTY_NOTICES.md",
     "LICENSE-T3CODE.txt",
   ];

@@ -56,6 +56,32 @@ node apps/server/dist/bin.mjs
 `goat update` and the background service do not apply to a server run this way;
 update it with `git pull` and a rebuild.
 
+### A server-only machine
+
+For a machine you only reach from other devices, such as a VPS or a spare Mac,
+install just the server. It needs no desktop app, browser or Node.js:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/goat-si/goat-releases/main/install-goat-server.sh | sh -s -- --tailscale
+```
+
+This installs the `goat` command, keeps the server running as a
+[background service](./background-service.md), and prints two pairing links.
+Paste the first into **Settings → Connections** on your other device, or scan
+its QR code, to see the machine's threads there. Give the second to an agent in
+your main GOAT so it can
+[link the machine](./remote-access.md#link-a-goat-server-for-agents-without-ssh)
+and start, read and message threads on it. The second link only grants agent
+access. Each link works once and expires after five minutes; run `goat pair`
+on the machine for new ones.
+
+`--tailscale` publishes the server on your tailnet so other devices can reach
+it. Leave it out when you reach the machine another way, such as
+[T3 Connect](./remote-access.md#t3-connect). Pass `--no-service` to skip the
+background service and run `goat serve` yourself. To install a CLI archive you
+already downloaded, for example on a machine without internet access, pass
+`--archive goat-<version>-<platform>-<arch>.tar.gz`.
+
 ## Desktop app
 
 Download a release from [GitHub Releases](https://github.com/goat-si/goat-releases/releases).
