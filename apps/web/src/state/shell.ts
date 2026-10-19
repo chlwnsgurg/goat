@@ -1,6 +1,7 @@
 import {
   AVAILABLE_CONNECTION_STATE,
   connectionProjectionPhase,
+  type SupervisorConnectionState,
 } from "@goat/client-runtime/connection";
 import {
   createEnvironmentShellAtoms,
@@ -49,28 +50,44 @@ export function useEnvironmentShellHasSnapshot(environmentId: EnvironmentId | nu
   );
 }
 
-export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {
-  const catalog = AsyncResult.value(get(environmentCatalog.catalogAtom));
-  if (Option.isNone(catalog)) {
-    return false;
-  }
-  for (const environmentId of enabledEnvironmentIds(catalog.value)) {
-    if (Option.isSome(get(environmentShell.stateValueAtom(environmentId)).snapshot)) {
-      continue;
+export function createPendingEnvironmentShellIdsAtom(input: {
+  readonly catalogAtom: Atom.Atom<AsyncResult.AsyncResult<EnvironmentCatalogState, unknown>>;
+  readonly shellStateValueAtom: (environmentId: EnvironmentId) => Atom.Atom<EnvironmentShellState>;
+  readonly connectionStateAtom: (
+    environmentId: EnvironmentId,
+  ) => Atom.Atom<AsyncResult.AsyncResult<SupervisorConnectionState, unknown>>;
+}) {
+  return Atom.make((get): ReadonlyArray<EnvironmentId> | null => {
+    const catalog = AsyncResult.value(get(input.catalogAtom));
+    if (Option.isNone(catalog)) return null;
+    const pending: EnvironmentId[] = [];
+    for (const environmentId of enabledEnvironmentIds(catalog.value)) {
+      if (Option.isSome(get(input.shellStateValueAtom(environmentId)).snapshot)) continue;
+      const connection = Option.getOrElse(
+        AsyncResult.value(get(input.connectionStateAtom(environmentId))),
+        () => AVAILABLE_CONNECTION_STATE,
+      );
+      if (
+        connectionProjectionPhase(connection) !== "disconnected" ||
+        (connection.phase === "backoff" && connection.desired && connection.attempt <= 2)
+      ) {
+        pending.push(environmentId);
+      }
     }
-    const connection = Option.getOrElse(
-      AsyncResult.value(get(environmentCatalog.stateAtom(environmentId))),
-      () => AVAILABLE_CONNECTION_STATE,
-    );
-    if (connectionProjectionPhase(connection) !== "disconnected") {
-      return false;
-    }
-    if (connection.phase === "backoff" && connection.desired && connection.attempt <= 2) {
-      return false;
-    }
-  }
-  return true;
-}).pipe(Atom.withLabel("web-all-environment-shells-bootstrapped"));
+    return pending;
+  }).pipe(Atom.withLabel("web-pending-environment-shell-ids"));
+}
+
+export const pendingEnvironmentShellIdsAtom = createPendingEnvironmentShellIdsAtom({
+  catalogAtom: environmentCatalog.catalogAtom,
+  shellStateValueAtom: environmentShell.stateValueAtom,
+  connectionStateAtom: environmentCatalog.stateAtom,
+});
+
+export const allEnvironmentShellsBootstrappedAtom = Atom.map(
+  pendingEnvironmentShellIdsAtom,
+  (ids) => ids !== null && ids.length === 0,
+).pipe(Atom.withLabel("web-all-environment-shells-bootstrapped"));
 
 /**
  * The persisted catalog can emit before platform discovery registers the primary environment.
