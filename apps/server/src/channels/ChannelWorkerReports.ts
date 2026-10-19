@@ -69,8 +69,11 @@ const workerRunStatus = (
   }
 };
 
-/** How long after a task ends its runs are still read into history. */
-const RUN_HISTORY_HOURS = 1;
+/** How far back, and how many per pass, finished tasks have their runs read into history. */
+const RUN_HISTORY_DAYS = 7;
+const RUN_HISTORY_PER_PASS = 20;
+/** How long a finished task without a thread waits for a launch that may still land. */
+const NO_THREAD_GRACE_MS = 120_000;
 
 const TERMINAL_RUN_STATUSES = new Set([
   "completed",
@@ -387,24 +390,40 @@ const make = Effect.gen(function* () {
       for (const stored of active) {
         if (yield* reconcileTask(stored, owner)) changed += 1;
       }
-      // A task that ended before its runs were ever recorded (stopped, or settled by the
-      // worker's own report first) still gets its runs into history, for an hour after.
-      const hourAgo = DateTime.formatIso(
-        DateTime.subtract(yield* DateTime.now, { hours: RUN_HISTORY_HOURS }),
-      );
-      for (const finished of yield* ledger.listRecentlyFinished(hourAgo)) {
-        const worker = finished.worker;
-        if (worker === undefined || worker.host !== undefined) continue;
+      // A finished task's runs are read into history until all of them have ended, even when
+      // the task ended first (stopped, or settled by the worker's own report) or its launch
+      // never bound a worker, in which case its thread is the one the generation derives.
+      const now = yield* DateTime.now;
+      const since = DateTime.formatIso(DateTime.subtract(now, { days: RUN_HISTORY_DAYS }));
+      for (const finished of yield* ledger.listUnsettledRunHistory({
+        since,
+        limit: RUN_HISTORY_PER_PASS,
+      })) {
+        const generation = finished.worker?.generation ?? finished.generation;
+        const ids = workerLaunchIdsFor(finished.taskId, generation);
+        const worker = finished.worker ?? {
+          environmentId: finished.target!.environmentId,
+          threadId: ids.threadId,
+          generation,
+        };
+        const settle = ledger.settleRunHistory({
+          taskId: finished.taskId,
+          now: DateTime.formatIso(now),
+        });
         const records = yield* threads
           .getThreadRecords(worker.threadId, ["runs"])
           .pipe(Effect.option);
-        if (records._tag === "None") continue;
+        if (records._tag === "None") {
+          // No thread: the launch never landed, so there is no run to record.
+          if (DateTime.toEpochMillis(now) - Date.parse(finished.updatedAt) > NO_THREAD_GRACE_MS) {
+            yield* settle;
+          }
+          continue;
+        }
         const runs = records.value.runs.toSorted((left, right) => left.ordinal - right.ordinal);
-        const launched = runs.find(
-          (run) =>
-            run.userMessageId === workerLaunchIdsFor(finished.taskId, worker.generation).messageId,
-        );
-        yield* recordRuns(finished, runs, launched?.ordinal ?? 0, false);
+        const launched = runs.find((run) => run.userMessageId === ids.messageId);
+        yield* recordRuns({ ...finished, worker }, runs, launched?.ordinal ?? 0, false);
+        if (runs.every((run) => TERMINAL_RUN_STATUSES.has(run.status))) yield* settle;
       }
       // Runs recorded as running or waiting whose task has ended (stopped, or settled by the
       // worker's own report) still end on their own; record how.

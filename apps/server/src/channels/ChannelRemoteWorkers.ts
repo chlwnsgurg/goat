@@ -2188,13 +2188,14 @@ const make = Effect.gen(function* () {
           if (threadId === undefined) {
             // The launch may have been in flight when the stop was asked, and its binding never
             // committed here. The remote stores the binding before it creates the thread, so
-            // ask it. Unreachable keeps the stop pending; a binding still missing after the
-            // grace means no launch landed.
+            // ask it; a binding it still does not know after the grace means no launch landed.
             const seen = yield* probe(state, authorize).pipe(Effect.result);
             if (seen._tag === "Success") {
               threadId = seen.success.threadId;
             } else {
-              if (seen.failure instanceof Superseded || isUnreachable(seen.failure)) return;
+              // Only the remote saying there is no such binding shows no launch landed; any
+              // other failure says nothing, so the stop keeps looking.
+              if (remoteCode(seen.failure) !== "thread_not_found") return;
               const age = (yield* Clock.currentTimeMillis) - Date.parse(pending.event.occurredAt);
               if (age > 120_000) yield* done;
               return;

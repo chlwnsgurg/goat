@@ -294,10 +294,27 @@ export class ChannelLedger extends Context.Service<
     readonly listUndeliveredOutcomes: (
       ownerId: string,
     ) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
-    /** Local tasks that finished since `since`, for recording how their runs ended. */
-    readonly listRecentlyFinished: (
-      since: string,
-    ) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
+    /**
+     * Local tasks claimed for a launch that finished since `since` and whose runs are not yet
+     * all recorded as ended, newest first, at most `limit`.
+     */
+    readonly listUnsettledRunHistory: (input: {
+      readonly since: string;
+      readonly limit: number;
+    }) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
+    /** Marks a finished task's runs as all recorded as ended. */
+    readonly settleRunHistory: (input: {
+      readonly taskId: ChannelTaskId;
+      readonly now: string;
+    }) => Effect.Effect<void, ChannelLedgerError>;
+    /** Which attempt a recorded stop is on; it starts at 0. */
+    readonly stopAttempt: (eventId: string) => Effect.Effect<number, ChannelLedgerError>;
+    /** Moves a stop to its next attempt after the orchestrator refused the current one. */
+    readonly advanceStopAttempt: (input: {
+      readonly eventId: string;
+      readonly from: number;
+      readonly now: string;
+    }) => Effect.Effect<void, ChannelLedgerError>;
     /** Recorded runs still running or waiting, across tasks, for reconciliation. */
     readonly listOpenWorkerRuns: () => Effect.Effect<
       ReadonlyArray<ChannelWorkerRun>,
@@ -1361,16 +1378,49 @@ const make = Effect.gen(function* () {
         Effect.mapError(toLedgerError("listUndeliveredOutcomes")),
       ),
 
-    listRecentlyFinished: (since) =>
+    listUnsettledRunHistory: (input) =>
       sql<TaskRow>`
         SELECT owner_id, task_json, pending_answer_message_id, completion_hold FROM channel_tasks
-        WHERE status IN ('completed', 'failed', 'cancelled') AND updated_at >= ${since}
-          AND worker_thread_id IS NOT NULL
+        WHERE status IN ('completed', 'failed', 'cancelled') AND updated_at >= ${input.since}
+          AND json_extract(task_json, '$.target') IS NOT NULL
+          AND json_extract(task_json, '$.target.remote') IS NULL
           AND json_extract(task_json, '$.worker.host') IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM channel_runtime_state WHERE key = 'runs-final:' || channel_tasks.task_id
+          )
+        ORDER BY updated_at DESC LIMIT ${input.limit}
       `.pipe(
         Effect.map((rows) => rows.map((row) => storedTask(row).task)),
-        Effect.mapError(toLedgerError("listRecentlyFinished")),
+        Effect.mapError(toLedgerError("listUnsettledRunHistory")),
       ),
+
+    settleRunHistory: (input) =>
+      sql`
+        INSERT INTO channel_runtime_state (key, value_json, updated_at)
+        VALUES (${"runs-final:" + input.taskId}, '{}', ${input.now})
+        ON CONFLICT (key) DO NOTHING
+      `.pipe(Effect.asVoid, Effect.mapError(toLedgerError("settleRunHistory"))),
+
+    stopAttempt: (eventId) =>
+      sql<{ readonly value_json: string }>`
+        SELECT value_json FROM channel_runtime_state WHERE key = ${"stop-attempt:" + eventId}
+      `.pipe(
+        Effect.map((rows) =>
+          rows[0] === undefined
+            ? 0
+            : (JSON.parse(rows[0].value_json) as { attempt: number }).attempt,
+        ),
+        Effect.mapError(toLedgerError("stopAttempt")),
+      ),
+
+    advanceStopAttempt: (input) =>
+      sql`
+        INSERT INTO channel_runtime_state (key, value_json, updated_at)
+        VALUES (${"stop-attempt:" + input.eventId}, ${JSON.stringify({ attempt: input.from + 1 })}, ${input.now})
+        ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+        WHERE json_extract(channel_runtime_state.value_json, '$.attempt') = ${input.from}
+      `.pipe(Effect.asVoid, Effect.mapError(toLedgerError("advanceStopAttempt"))),
 
     listOpenWorkerRuns: () =>
       sql<{ readonly value_json: string }>`

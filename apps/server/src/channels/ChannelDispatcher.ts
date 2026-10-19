@@ -112,6 +112,15 @@ const withoutKey = <V>(map: ReadonlyMap<string, V>, key: string) => {
   return next;
 };
 
+/** Run states that have ended; anything else may still start or run. */
+const ENDED_RUN_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+  "rolled_back",
+]);
+
 /** How long a stop keeps looking for a worker whose launch was in flight when it was asked. */
 const STOP_LAUNCH_GRACE_MS = 120_000;
 
@@ -899,9 +908,8 @@ const make = Effect.gen(function* () {
         if (age > STOP_LAUNCH_GRACE_MS) yield* done;
         return;
       }
-      const live = records.value.runs.findLast(
-        (run) => run.status === "running" || run.status === "queued",
-      );
+      // Anything not yet ended is alive: queued, preparing, starting, running, waiting.
+      const live = records.value.runs.findLast((run) => !ENDED_RUN_STATUSES.has(run.status));
       const stopThread = (commandId: CommandId) =>
         threads
           .dispatch({ type: "thread.stop", commandId, threadId, reason: "Stopped from GOAT Bot." })
@@ -913,10 +921,20 @@ const make = Effect.gen(function* () {
           tag === "OrchestratorCommandPreviouslyRejectedError"
         );
       };
-      let stopped = yield* stopThread(ids.interrupt);
-      // Refused, yet something still runs: a new command for the run that is alive now.
+      // A refused command id is refused for good, so each refusal while something still runs
+      // moves the stop to a new attempt id; the next pass tries that one.
+      const attempt = yield* ledger.stopAttempt(pending.event.eventId);
+      const stopped = yield* stopThread(
+        attempt === 0
+          ? ids.interrupt
+          : stopIdsFor(pending.event.eventId, "attempt-" + attempt).interrupt,
+      );
       if (stopped._tag === "Failure" && refusedFor(stopped.failure) && live !== undefined) {
-        stopped = yield* stopThread(stopIdsFor(pending.event.eventId, live.id).interrupt);
+        yield* ledger.advanceStopAttempt({
+          eventId: pending.event.eventId,
+          from: attempt,
+          now: DateTime.formatIso(yield* DateTime.now),
+        });
       }
       if (stopped._tag === "Failure") {
         // A refused stop is done only if nothing is left running there.

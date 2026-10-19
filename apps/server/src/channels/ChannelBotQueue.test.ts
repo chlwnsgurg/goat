@@ -298,7 +298,7 @@ describe("GOAT Bot worker slots", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.effect("tries a refused stop again under a new id while its run still runs", () => {
+  it.effect("tries a refused stop again under a new attempt each time while its run runs", () => {
     const { harness } = queueHarness();
     return Effect.gen(function* () {
       yield* setupBot;
@@ -314,8 +314,17 @@ describe("GOAT Bot worker slots", () => {
       const reception = yield* ChannelReceptionService.ChannelReceptionService;
       yield* reception.receive(input!, runtime.ownerToken);
       const [stop] = yield* ledger.listPendingForwards(10);
+      // The first id and the first retry were both refused for good while the run kept going.
       harness.world.rejectedCommands.add(stopIdsFor(stop!.event.eventId).interrupt);
+      harness.world.rejectedCommands.add(stopIdsFor(stop!.event.eventId, "attempt-1").interrupt);
       yield* runtime.drain;
+      yield* runtime.drain;
+      // The stop that went through was the third attempt, under its own id.
+      const stops = harness.world.commands.filter((command) => command.type === "thread.stop");
+      assert.deepStrictEqual(
+        stops.map((command) => command.commandId),
+        [stopIdsFor(stop!.event.eventId, "attempt-2").interrupt],
+      );
       assert.deepStrictEqual(harness.world.interrupts, [task!.worker!.threadId]);
       assert.lengthOf(yield* ledger.listPendingForwards(10), 0);
     }).pipe(Effect.provide(harness.layer));

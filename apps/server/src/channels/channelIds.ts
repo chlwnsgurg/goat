@@ -85,11 +85,11 @@ export const answerForwardIdsFor = (eventId: ChannelTaskEventId) => ({
 
 /**
  * Stopping a task's worker and its subagents for one recorded stop; a replay stops once. A stop
- * the orchestrator refused for good is tried again under ids keyed by the run still alive, so a
- * retry is a new command rather than the refused one replayed.
+ * the orchestrator refused for good is tried again under ids keyed by its attempt, so a retry is
+ * a new command rather than the refused one replayed.
  */
-export const stopIdsFor = (eventId: ChannelTaskEventId, liveRunId?: string) => {
-  const key = liveRunId === undefined ? [eventId] : [eventId, liveRunId];
+export const stopIdsFor = (eventId: ChannelTaskEventId, attempt?: string) => {
+  const key = attempt === undefined ? [eventId] : [eventId, attempt];
   return {
     interrupt: CommandId.make(stableId("channel-stop", key)),
     subagents: CommandId.make(stableId("channel-stop-subagents", [eventId])),
