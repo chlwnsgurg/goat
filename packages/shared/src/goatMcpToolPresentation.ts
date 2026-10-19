@@ -398,6 +398,12 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     "environment-update",
   ),
   goat_host_status: tool(["Read", "Reading", "Read", "host status"], "host-status"),
+  goat_scheduler_status: tool(["Read", "Reading", "Read", "scheduler status"], "host-status"),
+  goat_fallback_chain_get: tool(["Read", "Reading", "Read", "fallback chains"], "environment-read"),
+  goat_fallback_chain_set: tool(
+    ["Set", "Setting", "Set", "a fallback chain"],
+    "environment-update",
+  ),
   goat_provider_home_request: tool(
     ["Request", "Requesting", "Requested", "Codex Home approval"],
     "provider-diagnose",

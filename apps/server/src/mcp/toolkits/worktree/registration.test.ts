@@ -24,6 +24,8 @@ import { HttpBody, HttpClient, HttpRouter } from "effect/http";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as GitWorkflowService from "../../../git/GitWorkflowService.ts";
 import * as GitManager from "../../../git/GitManager.ts";
+import * as FleetFallback from "../../../fleet/resources/Fallback.ts";
+import * as FleetPlacement from "../../../fleet/resources/Placement.ts";
 import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
@@ -124,6 +126,8 @@ it.effect("production mcp layer lists worktree tools over http", () =>
     Effect.gen(function* () {
       const layerRoutes = McpHttpServer.layer.pipe(
         Layer.provide(McpHttpServer.layerHostStatusService),
+        Layer.provide(Layer.mock(FleetFallback.FallbackChains)({})),
+        Layer.provide(Layer.mock(FleetPlacement.Placement)({})),
         Layer.provide(McpSessionRegistry.layer),
         Layer.provide(RemoteDispatchCoordinator.layer),
         Layer.provide(LaunchWatchService.layer),

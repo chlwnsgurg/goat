@@ -144,6 +144,8 @@ import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceR
 import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
+import * as FleetFallback from "./fleet/resources/Fallback.ts";
+import * as FleetPlacement from "./fleet/resources/Placement.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
@@ -1260,10 +1262,15 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
 ).pipe(
-  // One instance for the goat_host_status tool and the server.getHostStatus RPC.
+  // One instance for the goat_host_status tool and the server.getHostStatus RPC; fleet
+  // placement reads the same one.
   Layer.provide(
-    McpHttpServer.layerHostStatusService.pipe(
-      Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+    Layer.mergeAll(FleetPlacement.layer, FleetFallback.layerChains).pipe(
+      Layer.provideMerge(
+        McpHttpServer.layerHostStatusService.pipe(
+          Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+        ),
+      ),
     ),
   ),
   Layer.provide(CloudTaskSource.layer.pipe(Layer.provide(GitVcsDriver.layer))),
