@@ -224,7 +224,7 @@ jobs:
         run: >-
           vp test run build-desktop-artifact.test.ts check-release-version.test.ts
           resolve-nightly-release.test.ts goat-workflow-guard.test.ts lib/release-notices.test.ts
-          lib/release-version.test.ts vendored-gitlinks.test.ts
+          lib/release-version.test.ts vendored-gitlinks.test.ts install-goat-server.test.ts
 
       - name: Test CI scripts
         if: matrix.task == 'test'

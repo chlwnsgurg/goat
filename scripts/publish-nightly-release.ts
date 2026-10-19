@@ -31,6 +31,7 @@ export class NightlyPublishError extends Schema.TaggedError<NightlyPublishError>
 export const REPOSITORY_RELEASE_FILES = [
   "install.sh",
   "install.ps1",
+  "install-goat-server.sh",
   "THIRD_PARTY_NOTICES.md",
 ] as const;
 export type PublishOutcome = "published" | "superseded" | "already-published";

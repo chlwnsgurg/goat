@@ -1,0 +1,122 @@
+// @effect-diagnostics nodeBuiltinImport:off - Drives the real shell script against a fake goat CLI archive.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import { afterEach, describe, expect, it } from "vite-plus/test";
+
+const script = NodePath.resolve(import.meta.dirname, "install-goat-server.sh");
+const platformKey = `${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`;
+
+/** A goat that records each call and prints what goat pair prints. */
+const FAKE_GOAT = `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_GOAT_LOG"
+case "$1" in
+  --version) echo "goat v1.2.3" ;;
+  service) ;;
+  pair)
+    n=$(wc -l < "$FAKE_GOAT_LOG" | tr -d ' ')
+    echo "Pairing with test (http://box.test:3773)."
+    echo "Pairing URL: http://box.test:3773/pair#token=CODE$n"
+    echo "Token: CODE$n"
+    ;;
+esac
+`;
+
+const roots: Array<string> = [];
+afterEach(async () => {
+  await Promise.all(
+    roots.splice(0).map((root) => NodeFSP.rm(root, { recursive: true, force: true })),
+  );
+});
+
+const makeArchive = async (root: string, key: string) => {
+  const stem = `goat-1.2.3-nightly.20261019.1-${key}`;
+  await NodeFSP.mkdir(NodePath.join(root, stem));
+  await NodeFSP.writeFile(NodePath.join(root, stem, "goat"), FAKE_GOAT, { mode: 0o755 });
+  NodeChildProcess.execFileSync("tar", [
+    "-czf",
+    NodePath.join(root, `${stem}.tar.gz`),
+    "-C",
+    root,
+    stem,
+  ]);
+  return NodePath.join(root, `${stem}.tar.gz`);
+};
+
+const run = async (args: ReadonlyArray<string>) => {
+  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-server-install-"));
+  roots.push(root);
+  const log = NodePath.join(root, "calls.log");
+  await NodeFSP.writeFile(log, "");
+  const env = {
+    ...process.env,
+    GOAT_HOME: NodePath.join(root, "home"),
+    GOAT_INSTALL_BIN_DIR: NodePath.join(root, "bin"),
+    FAKE_GOAT_LOG: log,
+    // Never reach a real installer from a test.
+    GOAT_INSTALLER_URL: "http://127.0.0.1:9/install.sh",
+  };
+  const resolved = await Promise.all(
+    args.map(async (arg) =>
+      arg.startsWith("archive:") ? ["--archive", await makeArchive(root, arg.slice(8))] : [arg],
+    ),
+  );
+  const result = NodeChildProcess.spawnSync("sh", [script, ...resolved.flat()], {
+    env,
+    encoding: "utf8",
+  });
+  return {
+    root,
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    calls: (await NodeFSP.readFile(log, "utf8")).trim().split("\n").filter(Boolean),
+  };
+};
+
+describe("install-goat-server.sh", () => {
+  it("installs a CLI archive, starts the service and prints an app link and an agent-only link", async () => {
+    const result = await run([`archive:${platformKey}`]);
+    expect(result.stderr).toContain("Installed GOAT 1.2.3-nightly.20261019.1");
+    expect(result.status).toBe(0);
+    const installed = NodePath.join(
+      result.root,
+      "home/runtime/goat/versions/1.2.3-nightly.20261019.1",
+    );
+    expect(await NodeFSP.readFile(NodePath.join(installed, ".install-complete"), "utf8")).toBe(
+      "1.2.3-nightly.20261019.1\n",
+    );
+    expect(await NodeFSP.realpath(NodePath.join(result.root, "bin/goat"))).toBe(
+      await NodeFSP.realpath(NodePath.join(installed, "goat")),
+    );
+    expect(result.calls).toEqual([
+      "--version",
+      "service install",
+      "pair --label GOAT app",
+      "pair --label Agent link --scope orchestration:read --scope orchestration:operate",
+    ]);
+    expect(result.stdout).toContain("Pairing URL: http://box.test:3773/pair#token=CODE3");
+    expect(result.stdout).toMatch(/Link http:\/\/box\.test:3773\/pair#token=CODE4 as \S+/);
+  });
+
+  it("publishes over Tailscale and skips the service when asked", async () => {
+    const result = await run([`archive:${platformKey}`, "--tailscale", "--no-service"]);
+    expect(result.status).toBe(0);
+    expect(result.calls).toEqual([
+      "--version",
+      "pair --tailscale --label GOAT app",
+      "pair --tailscale --label Agent link --scope orchestration:read --scope orchestration:operate",
+    ]);
+    expect(result.stderr).toContain("goat serve");
+  });
+
+  it("refuses an archive built for another platform and installs nothing", async () => {
+    const other = platformKey.startsWith("linux") ? "darwin-arm64" : "linux-x64";
+    const result = await run([`archive:${other}`]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`is built for ${other}`);
+    expect(result.calls).toEqual([]);
+    await expect(NodeFSP.access(NodePath.join(result.root, "bin/goat"))).rejects.toThrow();
+  });
+});
