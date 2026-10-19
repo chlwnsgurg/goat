@@ -588,7 +588,8 @@ if [ "$#" = 1 ] && [ "$1" = +%s ]; then echo $(( ${freezeFileTimes ? '$(cat "$HO
           `#!/bin/sh
 printf '%s\\n' "$1" >> "$HOME/.test/clock/waits"
 second="$(cat "$HOME/.test/clock/second")"
-echo $(( second + $1 )) > "$HOME/.test/clock/second"
+wait_seconds="\${1%%.*}"
+echo $(( second + wait_seconds )) > "$HOME/.test/clock/second"
 `,
         );
         yield* fs.chmod(`${bin}/sleep`, 0o700);
