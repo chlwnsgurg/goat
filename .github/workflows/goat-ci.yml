@@ -91,7 +91,7 @@ jobs:
     timeout-minutes: ${{ matrix.task == 'test-memory-growth' && 90 || 60 }}
     strategy:
       fail-fast: false
-      # Tasks: check, typecheck, test, test-desktop, test-contracts, test-client-runtime,
+      # Tasks: check, typecheck, test, test-ssh, test-desktop, test-contracts, test-client-runtime,
       # test-mobile-memory, test-shared, test-memory-growth, build, and test-server in
       # duration-balanced shards (apps/server runs one file at a time): four for the whole suite, or
       # one to four for the related files goat-scope picked. Each entry carries its job title.
@@ -177,13 +177,19 @@ jobs:
             exit 1
           fi
 
-      # ssh and web stay here. The other suites are their own matrix tasks so a
+      # web stays here. The other suites are their own matrix tasks so a
       # slow server shard does not block them. `check` above is still the aggregate.
       - name: Test
         if: matrix.task == 'test'
-        run: |
-          vp run --filter @goat/ssh test
-          vp run --filter @goat/web test
+        run: vp run --filter @goat/web test
+
+      # The ssh tests start real shells, servers and sshd, and several wait a fixed
+      # 2 seconds for a process to stop. Two workers leave a 4-vCPU runner room for them.
+      - name: Test ssh
+        if: matrix.task == 'test-ssh'
+        env:
+          VITEST_MAX_WORKERS: "2"
+        run: vp run --filter @goat/ssh test
 
       - name: Test provider core
         if: matrix.task == 'test'
