@@ -16,6 +16,7 @@ import {
   PREPARED_TIMEOUT_MS,
   PROBATION_MS,
   SMOKE_TIMEOUT_MS,
+  smokeProbeHostname,
   type BackupSpaceProbe,
   readServiceState,
   writeServiceState,
@@ -54,6 +55,14 @@ const writeSparseFile = (filePath: string, size: number) =>
     yield* fileSystem.writeFileString(filePath, "");
     yield* fileSystem.truncate(filePath, size);
   });
+
+it("probes a wildcard listener on loopback of its family and a specific address directly", () => {
+  assert.equal(smokeProbeHostname(undefined), "127.0.0.1");
+  assert.equal(smokeProbeHostname("0.0.0.0"), "127.0.0.1");
+  assert.equal(smokeProbeHostname("::"), "::1");
+  assert.equal(smokeProbeHostname("::1"), "::1");
+  assert.equal(smokeProbeHostname("100.64.0.7"), "100.64.0.7");
+});
 
 it("accepts only exact semantic versions", () => {
   for (const version of ["0.0.0", "1.2.3", "1.2.3-alpha.1", "1.2.3-0", "1.2.3+001"]) {
@@ -1037,6 +1046,7 @@ const healthFixture = (
     readonly failStart?: boolean;
     readonly hang?: boolean;
     readonly legacy?: boolean;
+    readonly listenHost?: string;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -1072,7 +1082,7 @@ import { dirname } from "node:path";
 import { tryAcquireServerOwnerLock } from ${lockModuleUrl};
 const context = JSON.parse(process.env.GOAT_SERVICE_LAUNCHER_CONTEXT);
 const dbPath = ${JSON.stringify(dbPath)};
-const lock = tryAcquireServerOwnerLock(dirname(dbPath), context.update.status === "pending" ? "service-trial:" + context.update.id : "service-active:restart");
+const lock = tryAcquireServerOwnerLock(dirname(dbPath), context.update.status === "pending" ? "service-trial:" + context.update.id : context.probation === true ? "service-probation:" + context.update.id : "service-active:restart");
 process.on("message", message => {
   if (message.type === "test-exit") process.exit(message.code ?? 42);
   if (message.type === "test-signal") process.kill(process.pid, "SIGTERM");
@@ -1096,7 +1106,7 @@ if (context.update.status === "committed") {
     response.write(${JSON.stringify(JSON.stringify(input.descriptor ?? validSmokeDescriptor))});
     ${input.hang ? 'process.send({ type: "test-probing" });' : "response.end();"}
   });
-  server.listen(0, "127.0.0.1", () => process.send({ type: "prepared", updateId: context.update.id, ${input.legacy ? "" : "port: server.address().port"} }));
+  server.listen(0, ${JSON.stringify(input.listenHost ?? "127.0.0.1")}, () => process.send({ type: "prepared", updateId: context.update.id, ${input.legacy ? "" : "port: server.address().port, host: server.address().address"} }));
 }
 `,
     );
@@ -1161,6 +1171,18 @@ if (context.update.status === "committed") {
   });
 
 it.layer(NodeServices.layer)("post-update health", (it) => {
+  // An IPv6-only listener is unreachable on 127.0.0.1, so a probe of the wrong family rolls back.
+  it.effect.each(["::1", "127.0.0.1"])("smoke-probes the address the trial bound (%s)", (host) =>
+    Effect.gen(function* () {
+      const f = yield* healthFixture({ listenHost: host });
+      yield* f.start({ now: () => 1000 });
+      yield* f.wait("test-committed");
+      const state = yield* Effect.promise(() => readServiceState(f.statePath));
+      assert.equal(state.update?.status, "committed");
+      assert.equal(state.activeVersion, "1.1.0");
+    }),
+  );
+
   it.effect.each([
     { name: "failed start", input: { failStart: true }, reason: "candidate-exited:17" },
     {
@@ -1298,16 +1320,20 @@ it.layer(NodeServices.layer)("post-update health", (it) => {
         yield* Effect.promise(() => restarted.running);
         const final = yield* Effect.promise(() => readServiceState(f.statePath));
         assert.equal(final.update?.status, expired ? "committed" : "rolled-back");
-        // The restarted server is another owner. Its writes must survive probation rollback.
+        // A target restarted during probation is still this update, so rollback restores the
+        // snapshot instead of leaving the old build on the migrated database.
         if (!expired)
           assert.equal(
             final.update?.status === "rolled-back" ? final.update.reason : undefined,
-            "probation-exit:42;db-kept-for-other-server",
+            "probation-exit:42",
           );
         assert.isFalse(
           yield* f.fs.exists(f.path.join(f.root, "runtime", "db-backup", f.pending.id)),
         );
-        assert.equal(yield* f.fs.readFileString(f.dbPath), "committed writes");
+        assert.equal(
+          yield* f.fs.readFileString(f.dbPath),
+          expired ? "committed writes" : "original database",
+        );
       }),
   );
 

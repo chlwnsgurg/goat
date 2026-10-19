@@ -7,6 +7,17 @@ function completed(input: unknown, output?: unknown): GoatToolSummaryCall {
 }
 
 describe("summarizeGoatToolCalls", () => {
+  it("says GOAT Bot moved only when the claim won", () => {
+    const claim = (claimed: boolean) =>
+      completed({}, { claimed, home: { environmentId: "env", claimedAt: 1, claimId: "c" } });
+    expect(summarizeGoatToolCalls("channel-bot-home-claim", [claim(true)]).label).toBe(
+      "Moved GOAT Bot to this machine",
+    );
+    expect(summarizeGoatToolCalls("channel-bot-home-claim", [claim(false)]).label).toBe(
+      "Tried to move GOAT Bot to this machine",
+    );
+  });
+
   it("describes continuing work on another machine", () => {
     expect(
       summarizeGoatToolCalls("channel-task-move", [completed({ taskId: "task-1", host: "mini" })])

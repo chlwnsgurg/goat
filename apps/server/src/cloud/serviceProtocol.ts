@@ -42,6 +42,9 @@ export interface ServiceLauncherContext {
   readonly protocol: typeof SERVICE_LAUNCHER_PROTOCOL;
   readonly childVersion: string;
   readonly update?: ServiceUpdateRecord;
+  /** Set for a committed target the launcher restarts while its update is on probation, so the
+      child records itself as part of that update and a probation rollback still restores. */
+  readonly probation?: true;
 }
 
 export type ServiceLauncherChildMessage =
@@ -54,6 +57,8 @@ export type ServiceLauncherChildMessage =
       readonly type: "prepared";
       readonly updateId: string;
       readonly port?: number;
+      /** The address the trial bound, so the smoke probe reaches it on the right interface. */
+      readonly host?: string;
     };
 
 export type ServiceLauncherParentMessage =
@@ -259,6 +264,9 @@ export function decodeServiceLauncherContext(value: string): ServiceLauncherCont
     protocol: SERVICE_LAUNCHER_PROTOCOL,
     childVersion: parsed.childVersion,
     ...(update === undefined ? {} : { update }),
+    ...(parsed.probation === true && update?.status === "committed"
+      ? { probation: true as const }
+      : {}),
   };
 }
 
@@ -284,6 +292,9 @@ export function decodeServiceLauncherChildMessage(
         type: value.type,
         updateId: value.updateId,
         ...(typeof value.port === "number" ? { port: value.port } : {}),
+        ...(typeof value.host === "string" && value.host.length > 0 && value.host.length <= 255
+          ? { host: value.host }
+          : {}),
       }
     : undefined;
 }

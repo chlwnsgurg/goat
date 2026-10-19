@@ -91,6 +91,7 @@ const OWNER_GENERATION_FILE = "owner-generation";
 // the userdata between an update's backup and its restore.
 const launcherOwner = (updateId: string) => `service-launcher:${updateId}`;
 const trialOwner = (updateId: string) => `service-trial:${updateId}`;
+const probationOwner = (updateId: string) => `service-probation:${updateId}`;
 const ownerLockDir = (pending: PendingServiceUpdate) => NodePath.dirname(pending.dbPath);
 
 const databaseBackupDir = (baseDir: string, updateId: string) =>
@@ -368,7 +369,11 @@ async function restoreDatabaseBackup(
         "utf8",
       ).catch(() => "");
       const generation = Number.parseInt(recorded, 10);
-      const ours = new Set([launcherOwner(pending.id), trialOwner(pending.id)]);
+      const ours = new Set([
+        launcherOwner(pending.id),
+        trialOwner(pending.id),
+        probationOwner(pending.id),
+      ]);
       // A backup without a recorded generation cannot prove nobody else wrote.
       if (
         !Number.isSafeInteger(generation) ||
@@ -504,7 +509,18 @@ const stopMarkerPath = (baseDir: string) =>
 const restartPendingPath = (baseDir: string) =>
   NodePath.join(baseDir, "runtime", SERVICE_RESTART_PENDING_FILE);
 
-function smokeProbe(port: number, targetVersion: string): Promise<string | undefined> {
+/** A wildcard listener answers on loopback of its family; a specific address only on itself. */
+export function smokeProbeHostname(host: string | undefined): string {
+  if (host === undefined || host === "0.0.0.0" || host === "localhost") return "127.0.0.1";
+  if (host === "::" || host === "::0") return "::1";
+  return host;
+}
+
+function smokeProbe(
+  port: number,
+  host: string | undefined,
+  targetVersion: string,
+): Promise<string | undefined> {
   return new Promise((resolve) => {
     const finish = (reason?: string) => {
       clearTimeout(timeout);
@@ -512,7 +528,7 @@ function smokeProbe(port: number, targetVersion: string): Promise<string | undef
       resolve(reason);
     };
     const request = NodeHttp.get(
-      { hostname: "127.0.0.1", port, path: GOAT_ENVIRONMENT_PATH, agent: false },
+      { hostname: smokeProbeHostname(host), port, path: GOAT_ENVIRONMENT_PATH, agent: false },
       (response) => {
         if (response.statusCode !== 200) {
           finish(`http-${response.statusCode}`);
@@ -761,6 +777,9 @@ export class Launcher {
       protocol: SERVICE_LAUNCHER_PROTOCOL,
       childVersion: version,
       ...(update === undefined ? {} : { update }),
+      ...(role === "active" && update?.status === "committed" && this.#state.probation !== undefined
+        ? { probation: true as const }
+        : {}),
     };
     const spawnArguments = runtimeSpawnArguments(paths);
     const child = NodeChildProcess.spawn(spawnArguments.command, spawnArguments.args, {
@@ -813,7 +832,7 @@ export class Launcher {
       await this.#handleUpdateRequest(child, message);
       return;
     }
-    await this.#handlePrepared(child, message.updateId, message.port);
+    await this.#handlePrepared(child, message.updateId, message.port, message.host);
   }
 
   async #handleUpdateRequest(
@@ -898,7 +917,12 @@ export class Launcher {
     await this.#startTrial(pending);
   }
 
-  async #handlePrepared(child: ManagedChild, updateId: string, port?: number): Promise<void> {
+  async #handlePrepared(
+    child: ManagedChild,
+    updateId: string,
+    port?: number,
+    host?: string,
+  ): Promise<void> {
     const pending = this.#state.update;
     if (
       child.role !== "trial" ||
@@ -914,7 +938,7 @@ export class Launcher {
     }
     this.#clearTimer();
     if (port !== undefined) {
-      const failure = await smokeProbe(port, pending.targetVersion);
+      const failure = await smokeProbe(port, host, pending.targetVersion);
       if (failure !== undefined) {
         await this.#returnToPrevious(pending, "rolled-back", `smoke-failed:${failure}`, child);
         return;

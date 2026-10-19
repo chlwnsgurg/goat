@@ -25,6 +25,7 @@ import {
 } from "@goat/contracts";
 import * as Semaphore from "effect/Semaphore";
 import * as NetService from "@goat/shared/Net";
+import { isWindowsShellOs, toWindowsHostPath, windowsHostPathKey } from "@goat/shared/path";
 import { targetConnectionKey } from "@goat/ssh/command";
 import * as SshAuth from "@goat/ssh/auth";
 import { discoverSshHosts } from "@goat/ssh/config";
@@ -483,11 +484,18 @@ export function linkedHostFolder(alias: string, cwd: string): SshBrowseResult | 
   };
 }
 
-/** Finds the project registered at the browsed folder, by either form of its path. */
+/**
+ * Finds the project registered at the browsed folder, by either form of its path. A Windows
+ * host compares either shell form, any slash, and any case, as NTFS does by default.
+ */
 export function matchRemoteProject(
   projects: ReadonlyArray<RemoteProject>,
   folder: { readonly path: string; readonly realPath: string; readonly os: string | null },
 ): RemoteProject | undefined {
+  if (isWindowsShellOs(folder.os)) {
+    const keys = new Set([windowsHostPathKey(folder.path), windowsHostPathKey(folder.realPath)]);
+    return projects.find((project) => keys.has(windowsHostPathKey(project.workspaceRoot)));
+  }
   const candidates = new Set([
     normalizeRemotePath(folder.path),
     normalizeRemotePath(folder.realPath),
@@ -1482,13 +1490,22 @@ const make = Effect.gen(function* () {
         };
         break;
       }
-      case "existing_worktree":
+      case "existing_worktree": {
+        // The browse already gave native folder paths; an agent may still pass the shell form.
+        const given = input.workspace.worktreePath.trim();
+        const expanded =
+          folder.home !== null && /^~(?:[\\/]|$)/u.test(given)
+            ? folder.home + given.slice(1)
+            : given;
         workspaceStrategy = {
           type: "existing_worktree",
-          worktreePath: input.workspace.worktreePath,
+          worktreePath: isWindowsShellOs(folder.os)
+            ? toWindowsHostPath(expanded)
+            : input.workspace.worktreePath,
           ...(input.workspace.branch ? { branch: input.workspace.branch } : {}),
         };
         break;
+      }
     }
 
     const bootstrap = Option.isSome(linked)
@@ -1563,7 +1580,9 @@ const make = Effect.gen(function* () {
         arguments: {
           title:
             input.projectTitle?.trim() ||
-            folder.path.split("/").findLast((part) => part.length > 0) ||
+            folder.path
+              .split(/[\\/]/u)
+              .findLast((part) => part.length > 0 && !part.endsWith(":")) ||
             folder.path,
           workspaceRoot: folder.path,
           ...(input.scripts === undefined ? {} : { scripts: input.scripts }),

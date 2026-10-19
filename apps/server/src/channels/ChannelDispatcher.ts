@@ -12,9 +12,9 @@
  * @module ChannelDispatcher
  */
 import {
-  CHANNEL_HOST_WORKSPACE_LABEL,
-  CHANNEL_RECEPTION_MAX_OPTIONS,
   type ChannelDispatchTarget,
+  type CommandId,
+  type ChannelRequester,
   type ChannelTask,
   type ChannelTaskId,
   type MemoryTaskGrantCeiling,
@@ -50,10 +50,12 @@ import * as ServerSettings from "../serverSettings.ts";
 import { lowerRuntimeMode } from "./ChannelGateway.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRemoteWorkers from "./ChannelRemoteWorkers.ts";
+import { makeChannelProjectChoices } from "./channelProjectChoices.ts";
 import { type ChannelBotFiles, channelBotFilesFor } from "./channelBotNotes.ts";
 import {
   answerForwardIdsFor,
   questionIdFor,
+  stopIdsFor,
   turnSteerIdsFor,
   workerLaunchIdsFor,
 } from "./channelIds.ts";
@@ -61,6 +63,8 @@ import { choosePlacement, type PlacementCandidate } from "./channelPlacement.ts"
 import { channelNotesRevision, freezeChannelBrief } from "./channelBriefs.ts";
 import { commitTransition } from "./channelTaskWrites.ts";
 import { channelWorkerRules, workerHeader } from "./channelWorkerBrief.ts";
+import { isThreadMissing } from "./channelWorkerObservation.ts";
+import { derivePendingBackgroundWork } from "@goat/shared/orchestrationV2PendingBackgroundWork";
 import * as SlackChannelSettings from "./SlackChannelSettings.ts";
 
 export class ChannelDispatcher extends Context.Service<
@@ -97,6 +101,30 @@ const workerInstruction = (task: ChannelTask, files: ChannelBotFiles) =>
   ].join("\n");
 
 const MEMORY_CEILING_RANK = { none: 0, read: 1, read_write: 2 } as const;
+
+/** How many pieces of one person's work run at once before more wait in the queue. */
+export const WORKERS_PER_REQUESTER = 4;
+
+export const sameRequester = (left: ChannelRequester, right: ChannelRequester) =>
+  left.ownerId === right.ownerId && left.principalId === right.principalId;
+
+const withoutKey = <V>(map: ReadonlyMap<string, V>, key: string) => {
+  const next = new Map(map);
+  next.delete(key);
+  return next;
+};
+
+/** Run states that have ended; anything else may still start or run. */
+const ENDED_RUN_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+  "rolled_back",
+]);
+
+/** How long a stop keeps looking for a worker whose launch was in flight when it was asked. */
+const STOP_LAUNCH_GRACE_MS = 120_000;
 
 /**
  * The most a GOAT Bot turn may do on its own, whatever the requester may: read and search freely
@@ -147,6 +175,8 @@ const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const remoteWorkers = yield* ChannelRemoteWorkers.ChannelRemoteWorkers;
+  /** Remote dispatches handed off but not yet claimed, by task, with whose work they are. */
+  const remoteReservations = yield* Ref.make<ReadonlyMap<string, ChannelRequester>>(new Map());
   const slackSettings = yield* SlackChannelSettings.SlackChannelSettings;
   const botFiles = channelBotFilesFor(path, (yield* ServerConfig.ServerConfig).stateDir);
 
@@ -204,46 +234,7 @@ const make = Effect.gen(function* () {
       );
     });
 
-  /**
-   * The project choice to offer when none was named: the project of the most recently active
-   * thread first, then the others, then the bot's workspace for work about the machine itself.
-   */
-  const projectChoices = (
-    allowed: ReadonlyArray<{ readonly id: string; readonly title: string }>,
-    hostWorkspace: boolean,
-  ) =>
-    Effect.gen(function* () {
-      const recent = yield* threads
-        .listProjectThreads({ projectId: undefined, includeSubagents: false })
-        .pipe(Effect.orElseSucceed(() => []));
-      const allowedIds = new Set(allowed.map((shell) => shell.id));
-      const recentFirst: ReadonlyArray<string> = [
-        ...new Set(
-          recent
-            .filter((shell) => shell.archivedAt === null && allowedIds.has(shell.projectId))
-            .map((shell) => shell.projectId),
-        ),
-      ];
-      const ordered = [
-        ...recentFirst.flatMap((id) => allowed.filter((shell) => shell.id === id)),
-        ...allowed.filter((shell) => !recentFirst.includes(shell.id)),
-      ];
-      const room = CHANNEL_RECEPTION_MAX_OPTIONS - (hostWorkspace ? 1 : 0);
-      const choices = [
-        ...ordered.slice(0, room).map((shell) => shell.title),
-        ...(hostWorkspace ? [CHANNEL_HOST_WORKSPACE_LABEL] : []),
-      ];
-      const recommended = recentFirst.length > 0 ? ordered[0]?.title : undefined;
-      const text =
-        "Which project should I use?" +
-        (recommended === undefined
-          ? ""
-          : " I'd go with " + recommended + ", where you worked most recently.") +
-        (ordered.length > room
-          ? " All projects: " + ordered.map((shell) => shell.title).join(", ")
-          : "");
-      return { type: "question" as const, text, choices };
-    });
+  const projectChoices = (yield* makeChannelProjectChoices).question;
 
   /** Whether this machine has the provider instance and, when it lists models, that model. */
   const modelOffered = (selection: ModelSelection) =>
@@ -676,7 +667,26 @@ const make = Effect.gen(function* () {
         return yield* launch(stored, owner);
       }
       if (stored.task.status !== "received") return;
+      // At most this many pieces of a person's work hold a worker at once; the rest wait as
+      // received and the runtime, going oldest first, dispatches them as earlier work ends. A
+      // remote dispatch claims the task only after it resolves the machine, so the ones handed
+      // off but not yet claimed count too.
+      const requester = stored.task.requester;
+      let inFlight = 0;
+      for (const [reservedId, who] of yield* Ref.get(remoteReservations)) {
+        if (reservedId === taskId || !sameRequester(who, requester)) continue;
+        const current = yield* ledger.getTask(reservedId as ChannelTaskId);
+        if (current?.task.status === "received") inFlight += 1;
+        else yield* Ref.update(remoteReservations, (map) => withoutKey(map, reservedId));
+      }
+      const busy =
+        (yield* ledger.countBusyTasks({
+          ownerId: requester.ownerId,
+          principalId: requester.principalId,
+        })) + inFlight;
+      if (busy >= WORKERS_PER_REQUESTER) return;
       if (stored.task.host !== undefined) {
+        yield* Ref.update(remoteReservations, (map) => new Map(map).set(taskId, requester));
         return yield* remoteWorkers.dispatch(taskId, owner, yield* remoteHints(stored));
       }
       const resolved = yield* resolveTarget(stored);
@@ -870,12 +880,125 @@ const make = Effect.gen(function* () {
       yield* ledger.completeForward({ owner, sequence: pending.sequence });
     });
 
+  /**
+   * Stops the worker of a task a person stopped from chat: a full thread stop, which also holds
+   * anything queued behind the run, then every subagent the worker started. The ids come from the
+   * stop event, so replaying the forward after a crash stops once. A worker on another machine is
+   * stopped there. A launch that was in flight when the stop was asked lands on the thread id the
+   * task's generation derives, so that thread is stopped too once it exists. Each step that fails
+   * stays pending and is retried.
+   */
+  const stopWorker = (pending: ChannelLedger.ChannelPendingEvent, owner: string) =>
+    Effect.gen(function* () {
+      const stored = yield* ledger.getTask(pending.event.taskId);
+      const done = ledger.completeForward({ owner, sequence: pending.sequence });
+      if (stored === undefined) return yield* done;
+      const task = stored.task;
+      if (task.worker?.host !== undefined || task.target?.remote !== undefined) {
+        return yield* remoteWorkers.stop(pending, owner);
+      }
+      // Never claimed for a launch: the ledger write was the whole stop.
+      if (task.target === undefined) return yield* done;
+      const threadId =
+        task.worker?.threadId ?? workerLaunchIdsFor(task.taskId, task.generation).threadId;
+      const ids = stopIdsFor(pending.event.eventId);
+      const read = yield* threads
+        .getThreadRecords(threadId, ["runs", "providerThreads", "turnItems"], {
+          turnItemStatuses: ["pending", "running", "waiting"],
+        })
+        .pipe(Effect.result);
+      if (read._tag === "Failure") {
+        // A read that failed says nothing; only a thread that does not exist may be a launch
+        // that never landed, and only once the grace for one in flight has passed.
+        if (!isThreadMissing(read.failure)) return;
+        const age =
+          DateTime.toEpochMillis(yield* DateTime.now) - Date.parse(pending.event.occurredAt);
+        if (age > STOP_LAUNCH_GRACE_MS) yield* done;
+        return;
+      }
+      const records = { value: read.success };
+      // Anything not yet ended is alive: queued, preparing, starting, running, waiting, or a
+      // finished run whose provider still works in the background or in the cloud.
+      const runs = records.value.runs;
+      const latestRun = runs.findLast((run) => run.status !== "queued");
+      const background =
+        latestRun !== undefined &&
+        derivePendingBackgroundWork({
+          latestRun,
+          providerThreads: records.value.providerThreads,
+          turnItems: records.value.turnItems,
+          activeProviderThreadId: records.value.thread.activeProviderThreadId,
+          runs,
+        }).length > 0;
+      // A cloud task still running or being submitted keeps working whatever the runs say, as
+      // the orchestrator's own stop treats it.
+      const cloud = records.value.providerThreads.some(
+        (thread) =>
+          thread.cloudTask?.status === "running" || thread.cloudTask?.status === "submitting",
+      );
+      const live =
+        runs.findLast((run) => !ENDED_RUN_STATUSES.has(run.status)) ??
+        (background || cloud ? latestRun : undefined);
+      const stopThread = (commandId: CommandId) =>
+        threads
+          .dispatch({ type: "thread.stop", commandId, threadId, reason: "Stopped from GOAT Bot." })
+          .pipe(Effect.result);
+      const refusedFor = (failure: unknown) => {
+        const tag = (failure as { readonly _tag?: string })._tag;
+        return (
+          tag === "OrchestratorCommandRejectedError" ||
+          tag === "OrchestratorCommandPreviouslyRejectedError"
+        );
+      };
+      // A refused command id is refused for good, so each refusal while something still runs
+      // moves the stop to a new attempt id; the next pass tries that one.
+      const attempt = yield* ledger.stopAttempt(pending.event.eventId);
+      const stopped = yield* stopThread(
+        attempt === 0
+          ? ids.interrupt
+          : stopIdsFor(pending.event.eventId, "attempt-" + attempt).interrupt,
+      );
+      if (stopped._tag === "Failure" && refusedFor(stopped.failure) && live !== undefined) {
+        yield* ledger.advanceStopAttempt({
+          eventId: pending.event.eventId,
+          from: attempt,
+          now: DateTime.formatIso(yield* DateTime.now),
+        });
+      }
+      if (stopped._tag === "Failure") {
+        // A refused stop is done only if nothing is left running there.
+        if (!refusedFor(stopped.failure) || live !== undefined) {
+          yield* Effect.logWarning("channel worker stop failed; retrying", {
+            taskId: task.taskId,
+            cause: stopped.failure,
+          });
+          return;
+        }
+      }
+      const subagents = yield* threads
+        .stopDelegatedTasks({
+          threadId,
+          commandId: ids.subagents,
+          reason: "Stopped from GOAT Bot.",
+        })
+        .pipe(Effect.result);
+      if (subagents._tag === "Failure") {
+        yield* Effect.logWarning("channel subagent stop failed; retrying", {
+          taskId: task.taskId,
+          cause: subagents.failure,
+        });
+        return;
+      }
+      yield* done;
+    });
+
   const forward: ChannelDispatcher["Service"]["forward"] = (pending, owner) =>
     Effect.gen(function* () {
       const event = pending.event;
       if (event.type === "task.followup.received") {
         return yield* forwardFollowUp(pending, event, owner);
       }
+      if (event.type === "task.cancelled") return yield* stopWorker(pending, owner);
       const stored = yield* ledger.getTask(event.taskId);
       const worker = stored?.task.worker;
       if (worker?.host !== undefined) return yield* remoteWorkers.forward(pending, owner);

@@ -62,6 +62,7 @@ const result = { text: "Synthetic result", assertionKind: "inference" as const, 
 import {
   buildMemoryConflictPrompt,
   buildMemorySummaryPrompt,
+  MemorySummaryModelOutput,
   partitionMemorySummary,
   MEMORY_GENERATION_PROMPT_MAX_UTF8_BYTES,
 } from "./memoryGenerationPrompts.ts";
@@ -183,7 +184,7 @@ describe("memory generation prompts", () => {
       expect(chunks.flatMap((chunk) => chunk.input.messages)).toEqual(messages);
       for (const chunk of chunks) {
         const result = yield* buildMemorySummaryPrompt(chunk.input);
-        expect(result.outputSchema).toBe(M.GenerateMemorySummaryResult);
+        expect(result.outputSchema).toBe(MemorySummaryModelOutput);
         expect(new TextEncoder().encode(result.prompt).length).toBeLessThanOrEqual(
           MEMORY_GENERATION_PROMPT_MAX_UTF8_BYTES,
         );

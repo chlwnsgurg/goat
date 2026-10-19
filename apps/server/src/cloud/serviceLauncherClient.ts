@@ -99,6 +99,12 @@ export const ServiceLauncherPort = Context.Reference<number | undefined>(
   { defaultValue: () => undefined },
 );
 
+/** The hostname the HTTP server bound, reported with the port for the launcher's smoke probe. */
+export const ServiceLauncherHost = Context.Reference<string | undefined>(
+  "goat/cloud/serviceLauncherHost",
+  { defaultValue: () => undefined },
+);
+
 export class ServiceLauncherClient extends Context.Service<
   ServiceLauncherClient,
   {
@@ -151,6 +157,7 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
 }) {
   const { host, context, managed } = yield* resolveStartup(options);
   const port = yield* ServiceLauncherPort;
+  const boundHost = yield* ServiceLauncherHost;
 
   const exchange = (
     message: ServiceLauncherChildMessage,
@@ -232,7 +239,12 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
   const prepareTrial =
     pending !== undefined
       ? exchange(
-          { type: "prepared", updateId: pending.id, ...(port === undefined ? {} : { port }) },
+          {
+            type: "prepared",
+            updateId: pending.id,
+            ...(port === undefined ? {} : { port }),
+            ...(port === undefined || boundHost === undefined ? {} : { host: boundHost }),
+          },
           (reply) => reply.type === "committed" && reply.updateId === pending.id,
           // The launcher may spend 30 seconds probing HTTP before its durable commit.
           60_000,

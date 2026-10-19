@@ -1314,12 +1314,24 @@ const layerMakeServer = Layer.unwrap(
     const routesReady = yield* Deferred.make<void>();
     const layerLauncher = ServiceLauncherClient.layer.pipe(
       Layer.provide(
-        Layer.effect(
-          ServiceLauncherClient.ServiceLauncherPort,
-          Effect.map(HttpServer.HttpServer, (server) =>
-            typeof server.address === "string" || !("port" in server.address)
-              ? undefined
-              : server.address.port,
+        Layer.mergeAll(
+          Layer.effect(
+            ServiceLauncherClient.ServiceLauncherPort,
+            Effect.map(HttpServer.HttpServer, (server) =>
+              typeof server.address === "string" || !("port" in server.address)
+                ? undefined
+                : server.address.port,
+            ),
+          ),
+          Layer.effect(
+            ServiceLauncherClient.ServiceLauncherHost,
+            Effect.map(HttpServer.HttpServer, (server) =>
+              typeof server.address !== "string" &&
+              "hostname" in server.address &&
+              typeof server.address.hostname === "string"
+                ? server.address.hostname
+                : undefined,
+            ),
           ),
         ),
       ),

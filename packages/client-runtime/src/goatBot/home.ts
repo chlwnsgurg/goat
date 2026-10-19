@@ -1,8 +1,11 @@
 import {
   compareGoatBotHomeClaims,
+  newGoatBotHomeClaim,
   type EnvironmentId,
   type GoatBotHomeClaim,
 } from "@goat/contracts";
+
+export { newGoatBotHomeClaim } from "@goat/contracts";
 
 export interface GoatBotHomeTarget {
   readonly environmentId: EnvironmentId;
@@ -19,6 +22,7 @@ export type GoatBotHomeResolution =
   | {
       readonly state: "claimed";
       readonly claim: GoatBotHomeClaim;
+      readonly homeKnown: boolean;
       readonly homeConnected: boolean;
       readonly homeSupportsBot: boolean;
       readonly staleTargetIds: ReadonlyArray<EnvironmentId>;
@@ -46,6 +50,7 @@ export function resolveGoatBotHome({
   return {
     state: "claimed",
     claim: winner,
+    homeKnown: home !== undefined,
     homeConnected: home?.connected ?? false,
     homeSupportsBot: home?.supportsBot ?? false,
     staleTargetIds: targets
@@ -59,28 +64,6 @@ export function resolveGoatBotHome({
             target.home.environmentId !== winner.environmentId),
       )
       .map((target) => target.environmentId),
-  };
-}
-
-/** Advance the observed logical clock so moving home still works after clock rollback. */
-export function newGoatBotHomeClaim({
-  environmentId,
-  now,
-  observedMax,
-  randomId,
-}: {
-  environmentId: EnvironmentId;
-  now: number;
-  observedMax: GoatBotHomeClaim | null;
-  randomId: () => string;
-}): GoatBotHomeClaim {
-  return {
-    environmentId,
-    claimedAt: Math.min(
-      Number.MAX_SAFE_INTEGER,
-      Math.max(0, Math.trunc(now), (observedMax?.claimedAt ?? -1) + 1),
-    ),
-    claimId: randomId(),
   };
 }
 
@@ -194,4 +177,87 @@ export function planGoatBotHomeSync({
     }
   }
   return { writes, nextWakeAt };
+}
+
+/** Keep the latest issued clock even when only part of the cluster accepted it. */
+export function planGoatBotHomeChange(input: {
+  readonly environmentId: EnvironmentId;
+  readonly targets: ReadonlyArray<GoatBotHomeTarget>;
+  readonly writableIds: ReadonlySet<EnvironmentId>;
+  readonly currentClaim: GoatBotHomeClaim | null;
+  readonly observedMax: GoatBotHomeClaim | null;
+  readonly now: number;
+  readonly randomId: () => string;
+}) {
+  const target = input.targets.find((entry) => entry.environmentId === input.environmentId);
+  if (
+    !target?.connected ||
+    !target.supportsHome ||
+    !target.supportsBot ||
+    !input.writableIds.has(target.environmentId)
+  )
+    return null;
+  const observed =
+    input.currentClaim !== null &&
+    (input.observedMax === null ||
+      compareGoatBotHomeClaims(input.currentClaim, input.observedMax) > 0)
+      ? input.currentClaim
+      : input.observedMax;
+  if (
+    observed?.environmentId === input.environmentId &&
+    input.currentClaim?.environmentId === input.environmentId
+  )
+    return null;
+  return {
+    claim: newGoatBotHomeClaim({
+      environmentId: target.environmentId,
+      now: input.now,
+      observedMax: observed,
+      randomId: input.randomId,
+    }),
+    targetIds: input.targets
+      .filter(
+        (entry) =>
+          entry.connected && entry.supportsHome && input.writableIds.has(entry.environmentId),
+      )
+      .map((entry) => entry.environmentId),
+  };
+}
+
+export async function writeGoatBotHomeChange(
+  change: NonNullable<ReturnType<typeof planGoatBotHomeChange>>,
+  write: (environmentId: EnvironmentId, claim: GoatBotHomeClaim) => Promise<boolean>,
+): Promise<boolean> {
+  const results = await Promise.all(
+    change.targetIds.map(async (environmentId) => {
+      try {
+        return await write(environmentId, change.claim);
+      } catch {
+        return false;
+      }
+    }),
+  );
+  return results.every(Boolean);
+}
+
+export function pickGoatBotHomeMoveTarget({
+  targets,
+  writableIds,
+  primaryEnvironmentId,
+}: {
+  targets: ReadonlyArray<GoatBotHomeTarget>;
+  writableIds: ReadonlySet<EnvironmentId>;
+  primaryEnvironmentId: EnvironmentId | null;
+}): EnvironmentId | null {
+  const eligible = targets.filter(
+    (target) =>
+      target.connected &&
+      target.supportsHome &&
+      target.supportsBot &&
+      writableIds.has(target.environmentId),
+  );
+  return (
+    (eligible.find((target) => target.environmentId === primaryEnvironmentId) ?? eligible[0])
+      ?.environmentId ?? null
+  );
 }
