@@ -63,5 +63,10 @@ describe("DesktopUpdateStateSchema", () => {
     expect(state.installPolicy).toBe("restart-when-idle");
     expect(state.pendingUpdate).toBeNull();
     expect(state.recoveryStatus).toBeNull();
+    expect(state.installationNotice).toBeUndefined();
+    expect(
+      decodeDesktopUpdateState({ ...legacy, installationNotice: "Ask an administrator." })
+        .installationNotice,
+    ).toBe("Ask an administrator.");
   });
 });

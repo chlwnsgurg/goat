@@ -20,8 +20,62 @@ import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
+import { getDesktopUpdateInstallationMessage } from "./updateInstallation.ts";
 
 describe("DesktopUpdates", () => {
+  for (const scenario of [
+    {
+      bundle: "/private/var/AppTranslocation/id/d/GOAT.app",
+      unwritablePaths: [],
+      reason: "translocated",
+    },
+    {
+      bundle: "/Volumes/GOAT/GOAT.app",
+      unwritablePaths: ["/Volumes/GOAT/GOAT.app", "/Volumes/GOAT"],
+      reason: "read-only-volume",
+    },
+    {
+      bundle: "/Applications/GOAT.app",
+      unwritablePaths: ["/Applications/GOAT.app"],
+      reason: "needs-admin",
+    },
+    { bundle: "/Applications/GOAT.app", unwritablePaths: ["/Applications"], reason: "needs-admin" },
+    { bundle: "/Applications/GOAT.app", unwritablePaths: [], reason: null },
+    { bundle: "/Volumes/External/GOAT.app", unwritablePaths: [], reason: null },
+  ] as const) {
+    it.effect(
+      `reports ${scenario.reason ?? "writable installation"} for ${scenario.bundle} (${scenario.unwritablePaths.join(",")})`,
+      () => {
+        const harness = makeHarness({
+          appPath: `${scenario.bundle}/Contents/Resources/app.asar`,
+          unwritablePaths: scenario.unwritablePaths,
+        });
+        return Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          const state = yield* updates.getState;
+          const disabled =
+            scenario.reason === "translocated" || scenario.reason === "read-only-volume";
+          const message = scenario.reason
+            ? getDesktopUpdateInstallationMessage(scenario.reason)
+            : null;
+          assert.equal(state.enabled, !disabled);
+          assert.equal(state.status, disabled ? "disabled" : "idle");
+          assert.equal(Option.getOrNull(yield* updates.disabledReason), disabled ? message : null);
+          assert.equal(state.message, disabled ? message : null);
+          assert.equal(
+            state.installationNotice,
+            scenario.reason === "needs-admin" ? message : undefined,
+          );
+          const check = yield* updates.check("manual");
+          assert.equal(check.checked, !disabled);
+          assert.equal(harness.checkCount(), disabled ? 0 : 1);
+          assert.equal((yield* updates.getState).installationNotice, state.installationNotice);
+        }).pipe(Effect.scoped, Effect.provide(harness.layer));
+      },
+    );
+  }
+
   it("preserves complete causes for update poller and event failures", () => {
     const cause = Cause.combine(
       Cause.fail(new Error("updater failed")),

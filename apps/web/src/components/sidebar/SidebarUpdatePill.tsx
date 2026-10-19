@@ -297,7 +297,14 @@ function SidebarUpdateControl({ placement }: { placement: SidebarUpdatePlacement
         ? getDesktopUpdateButtonTooltip(state)
         : "Update available"
       : null;
-  const tooltip = detail === null ? heading : `${heading}\n${detail}`;
+  const installationDetail = state?.installationNotice ?? (!state?.enabled ? state?.message : null);
+  const tooltip = [
+    heading,
+    detail,
+    installationDetail && !detail?.includes(installationDetail) ? installationDetail : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
   const ariaLabel = detail === null ? heading : `${heading}: ${detail.split("\n")[0]}`;
   const disabled = showCheckIcon
     ? true
