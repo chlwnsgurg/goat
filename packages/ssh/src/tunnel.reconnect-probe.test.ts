@@ -8,6 +8,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -692,9 +693,14 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               f.setScriptPrefix("");
             }
             if (action === "rejected attachment") {
-              f.setScriptPrefix(
-                `printf '%s\\n' '{"status":"pending","pending":{"reason":"busy","replacement":"incompatible","requestedVersion":"1.2.3","liveVersion":"1.2.3"}}'\nexit 0\n`,
-              );
+              f.setScriptPrefix(`sh() {
+  if [ "\${3:-}" = runtime ]; then
+    printf '%s\\n' '{"status":"pending","pending":{"reason":"busy","replacement":"incompatible","requestedVersion":"1.2.3","liveVersion":"1.2.3"}}'
+    return 0
+  fi
+  command sh "$@"
+}
+`);
               const rejected = yield* manager.ensureEnvironment(uploadTarget, {
                 refreshRuntime: true,
               });
@@ -703,7 +709,10 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             }
             if (action === "uncertain drain" || action === "rejected attachment") {
               const status = yield* manager.status(uploadTarget);
-              assert.equal(status.status?.state, "ready");
+              assert.equal(
+                status.status?.state,
+                action === "uncertain drain" ? "ready" : "update_waiting",
+              );
               assert.equal(
                 (yield* Effect.result(manager.readyEnvironment(uploadTarget)))._tag,
                 "Failure",
@@ -746,10 +755,116 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             assert.isFalse("type" in result);
             assert.equal(f.remoteCommands.length - before, 2);
             assert.deepEqual(yield* f.snapshot, snapshot);
-            yield* manager.readyEnvironment(uploadTarget);
+            if (action === "uncertain drain" || action === "rejected attachment")
+              yield* manager.readyEnvironment(uploadTarget);
           }).pipe(Effect.provide(layer), Effect.scoped);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
       180_000,
+    );
+
+    it.live("rechecks a managed pin after master setup before using captured wake proof", () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.shiftHostClock(60);
+        const directory = `${f.home}/.ssh/goat-hosts`;
+        const pinPath = `${directory}/devbox.known_hosts`;
+        yield* f.fs.makeDirectory(directory, { recursive: true });
+        yield* f.fs.writeFileString(pinPath, "devbox ssh-ed25519 AAAA\n");
+        yield* f.fs.writeFileString(
+          `${directory}/devbox.conf`,
+          `Host devbox\n  HostName devbox.example.com\n  User julius\n  Port 2222\n  HostKeyAlias devbox\n  UserKnownHostsFile "${pinPath}"\n  GlobalKnownHostsFile /dev/null\n  StrictHostKeyChecking yes\n  UpdateHostKeys no\n  HostKeyAlgorithms ssh-ed25519\n`,
+        );
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let pause = false;
+        let afterMaster = false;
+        let alive = true;
+        const tracer = Tracer.make({
+          span(options) {
+            const span = new Tracer.NativeSpan(options);
+            const end = span.end.bind(span);
+            span.end = (at, exit) => {
+              end(at, exit);
+              if (options.name === "ssh/master.ensure") afterMaster = pause;
+            };
+            return span;
+          },
+        });
+        const fs = FileSystem.FileSystem.of({
+          ...f.observedFs,
+          readFileString: (file) =>
+            Effect.gen(function* () {
+              if (file === pinPath && pause && afterMaster) {
+                pause = false;
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(release);
+              }
+              return yield* f.observedFs.readFileString(file);
+            }),
+        });
+        const transport = ChildProcessSpawner.make((command) => {
+          if (command._tag === "StandardCommand" && command.args.includes("-G"))
+            return Effect.succeed(
+              makeSuccessfulProcess(
+                `hostname devbox.example.com\nuser julius\nport 2222\nhostkeyalias devbox\nuserknownhostsfile ${pinPath}\nglobalknownhostsfile /dev/null\nstricthostkeychecking yes\nupdatehostkeys no\nhostkeyalgorithms ssh-ed25519\n`,
+              ),
+            );
+          if (command._tag === "StandardCommand" && command.args.includes("-N")) {
+            alive = true;
+            return Effect.succeed({
+              ...makeRunningProcess(() => undefined),
+              isRunning: Effect.sync(() => alive),
+            });
+          }
+          return f.transport.spawn(command);
+        });
+        const layer = Layer.mergeAll(
+          NodeServices.layer,
+          ConfigProvider.layer(ConfigProvider.fromUnknown({ HOME: f.home })),
+          Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, transport),
+          Layer.succeed(FileSystem.FileSystem, fs),
+          Layer.succeed(HttpClient.HttpClient, testHttpClient),
+          Layer.succeed(NetService.NetService, testNetService),
+          SshAuth.SshPasswordPrompt.disabledLayer,
+          SshEnvironmentManager.layer({
+            resolveCliRunner: Effect.succeed(f.runner),
+            leaveRemoteServerRunning: true,
+          }),
+        );
+        yield* Effect.gen(function* () {
+          const manager = yield* SshEnvironmentManager;
+          yield* manager.ensureEnvironment(uploadTarget);
+          alive = false;
+          yield* manager.revalidateTunnels();
+          pause = true;
+          afterMaster = false;
+          const cost = {
+            active: true,
+            spawns: 0,
+            authentications: 0,
+            steps: {} as Record<string, number>,
+          };
+          const reconnect = yield* Effect.forkChild(
+            Effect.result(manager.ensureEnvironment(uploadTarget)).pipe(
+              Effect.provideService(SshReconnectCost, cost),
+            ),
+          );
+          yield* Deferred.await(entered);
+          yield* f.fs.writeFileString(pinPath, "devbox ssh-ed25519 BBBB\n");
+          const before = f.remoteCommands.length;
+          yield* Deferred.succeed(release, undefined);
+          const result = yield* Fiber.join(reconnect);
+          assert.equal(result._tag, "Failure");
+          assert.equal(f.remoteCommands.length - before, 2);
+          assert.notProperty(cost.steps, "runtime-probe-folded");
+          assert.equal(
+            (yield* Effect.result(manager.readyEnvironment(uploadTarget)))._tag,
+            "Failure",
+          );
+          if (result._tag === "Failure")
+            assert.include(result.failure.message, "Managed SSH host key changed.");
+        }).pipe(Effect.provide(layer), Effect.provideService(Tracer.Tracer, tracer), Effect.scoped);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
     it.live.each(["failed refresh", "superseded ensure", "changed config"] as const)(

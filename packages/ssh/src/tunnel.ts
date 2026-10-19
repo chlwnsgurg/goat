@@ -4915,6 +4915,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     reconnectSelections.delete(key);
     const entry = tunnels.get(key);
     if (entry !== undefined) delete entry.reconnectSelection;
+    const intent = pendingReplacements.get(key);
+    if (intent !== undefined) intent.reconnectSelection = undefined;
   };
   const firstConnectionDecisions = new Set<string>();
   const generations = new Map<string, number>();
@@ -5327,6 +5329,12 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       | { pending?: never; archiveFailure: SshHostFailure }
     )
   >();
+  const takePendingReconnectSelection = (key: string) => {
+    const intent = pendingReplacements.get(key);
+    const selection = intent?.reconnectSelection;
+    if (intent !== undefined) intent.reconnectSelection = undefined;
+    return selection;
+  };
   let retryStarted = false;
   let closed = false;
   const pendingResult = (
@@ -6031,11 +6039,9 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
   > {
     const entry = tunnels.get(key);
     const retainedSelection = takeReconnectSelection(key);
+    const pendingSelection = takePendingReconnectSelection(key);
     const selection =
-      entry?.reconnectSelection ??
-      retainedSelection ??
-      capturedSelection ??
-      pendingReplacements.get(key)?.reconnectSelection;
+      entry?.reconnectSelection ?? retainedSelection ?? capturedSelection ?? pendingSelection;
     if (entry !== undefined) delete entry.reconnectSelection;
     const managedPin = yield* validateManagedPin(resolvedTarget);
     keyOnly = keyOnly || managedPin !== undefined;
@@ -6253,7 +6259,9 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     const requestGeneration = generations.get(knownKey) ?? 0;
     const knownEntry = tunnels.get(knownKey);
     const retainedSelection = takeReconnectSelection(knownKey);
-    const reconnectSelection = knownEntry?.reconnectSelection ?? retainedSelection;
+    const pendingSelection = takePendingReconnectSelection(knownKey);
+    const reconnectSelection =
+      knownEntry?.reconnectSelection ?? retainedSelection ?? pendingSelection;
     if (knownEntry !== undefined) delete knownEntry.reconnectSelection;
     if (requestOptions?.refreshRuntime === true || requestOptions?.confirmReplacement === true)
       invalidateReconnectSelection(knownKey);
