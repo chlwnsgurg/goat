@@ -164,6 +164,8 @@ export class LinkedHosts extends Context.Service<
       readonly code?: string | undefined;
       readonly access: AuthMcpClientAccess;
       readonly clientName: string;
+      /** Shown instead of the host's own label. */
+      readonly label?: string | undefined;
       readonly beforeSave: Effect.Effect<void, E, R>;
       /** Validates the exchanged identity under the write lock before replacing a link. */
       readonly acceptDescriptor?: (
@@ -358,6 +360,7 @@ export const make = Effect.gen(function* () {
     readonly code?: string | undefined;
     readonly access: AuthMcpClientAccess;
     readonly clientName: string;
+    readonly label?: string | undefined;
     readonly beforeSave: Effect.Effect<void, E, R>;
     readonly acceptDescriptor?: (
       descriptor: ExecutionEnvironmentDescriptor,
@@ -378,7 +381,7 @@ export const make = Effect.gen(function* () {
         name,
         baseUrl: target.baseUrl,
         environmentId: descriptor.environmentId,
-        label: descriptor.label,
+        label: input.label?.trim() || descriptor.label,
         serverVersion: descriptor.serverVersion,
         access: input.access,
         token: token.access_token,

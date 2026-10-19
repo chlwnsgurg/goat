@@ -227,6 +227,7 @@ export const make = Effect.gen(function* () {
           ...(input.code === undefined ? {} : { code: input.code }),
           access: input.access,
           clientName: "GOAT hub",
+          label: input.label,
           beforeSave: options.beforeSave,
           acceptDescriptor: (descriptor) =>
             descriptor.environmentId === before.hubEnvironmentId

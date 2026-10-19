@@ -282,6 +282,27 @@ describe("LinkedHosts", () => {
     }),
   );
 
+  it.live("keeps a label the caller chose over the host's own", () =>
+    Effect.gen(function* () {
+      const { result } = yield* withHost((hostAuth) =>
+        Effect.gen(function* () {
+          const links = yield* LinkedHosts.LinkedHosts;
+          yield* links.link({
+            name: "box",
+            url: `https://${HOST}`,
+            code: yield* pairingCode(hostAuth),
+            access: "read-only",
+            clientName: "GOAT",
+            label: "Mac Studio",
+            beforeSave: Effect.void,
+          });
+          return (yield* links.list).find((host) => host.name === "box")?.label;
+        }),
+      );
+      expect(result).toBe("Mac Studio");
+    }),
+  );
+
   it.live("replaces a link by name and forgets it on unlink", () =>
     Effect.gen(function* () {
       const { result } = yield* withHost((hostAuth) =>
