@@ -172,6 +172,16 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           assert.isString(second.selectedRuntime.reconnectProbe);
           assert.deepEqual(yield* f.snapshot, snapshot);
           assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"self-stop"');
+          const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
+          const owner = "other-host|0|1|old|fixture";
+          yield* f.fs.symlink(owner, lock);
+          const beforeContended = f.remoteCommands.length;
+          const contended = yield* launch(f, second.selectedRuntime);
+          assert.equal(contended.status, "pending");
+          assert.equal(contended.pending?.reason, "contended");
+          assert.equal(f.remoteCommands.length - beforeContended, 1);
+          assert.equal(yield* f.fs.readLink(lock), owner);
+          assert.deepEqual(yield* f.snapshot, snapshot);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
       180_000,
     );
@@ -460,6 +470,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             assert.isFalse("type" in result);
             if ("type" in result) return;
             assert.equal(result.remotePort, f.port);
+            assert.isUndefined(result.pendingReplacement);
             assert.equal(forwards, 2);
             assert.equal(f.remoteCommands.length - commands, 1);
             assert.property(cost.steps, "runtime-probe-folded");
