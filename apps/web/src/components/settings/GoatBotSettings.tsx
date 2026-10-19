@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { useGoatBotHomeSettings } from "../goatBot/useGoatBotHome";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { GoatBotModelSettings } from "./GoatBotModelSettings";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 
@@ -86,6 +87,7 @@ export function GoatBotSettings() {
           </Select>
         }
       />
+      <GoatBotModelSettings />
     </SettingsSection>
   );
 }

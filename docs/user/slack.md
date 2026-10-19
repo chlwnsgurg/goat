@@ -38,8 +38,8 @@ GOAT Bot screen shows only a chip for the work and its final report.
   disk, what several threads concluded, something on the web), GOAT Bot says
   it is on it and looks into it itself, then answers in the same conversation.
   Messages you send while it works are added to what it is doing. It uses the
-  default model for new threads, and asks before running commands its provider
-  treats as risky.
+  model chosen under **Settings → GOAT Bot** (by default, the default model for
+  new threads), and asks before running commands its provider treats as risky.
 - Ask GOAT Bot about earlier work ("did the login PR merge?", "what did the
   docs thread do?", "when did I mention the lighthouse score?") and it looks
   it up itself and answers, without starting a coding agent. It reads the work
