@@ -20,12 +20,14 @@ import {
   type GitHubReleasesClient,
 } from "./lib/github-releases.ts";
 
-// goat-nightly hands build outputs between jobs through a per-run draft release in
-// goat-si/goat instead of Actions artifacts: release assets do not count toward the
-// Actions and Packages storage quota. Each hand-off is one tar stream split into
-// parts below GitHub's 2 GiB per-asset limit, plus a manifest uploaded last that
-// records every part's size and SHA-256. A consumer only trusts a hand-off whose
-// manifest exists and whose parts match it.
+// goat-nightly hands build outputs between jobs through draft releases in goat-si/goat
+// instead of Actions artifacts: release assets do not count toward the Actions and
+// Packages storage quota. Each hand-off is its own draft, tagged
+// goat-nightly-staging-<run id>--<name>, so parallel jobs never upload into the same
+// release. A hand-off is one tar stream split into parts below GitHub's 2 GiB
+// per-asset limit, plus a manifest uploaded last that records every part's size and
+// SHA-256. A consumer only trusts a hand-off whose manifest exists and whose parts
+// match it.
 
 export class NightlyStagingError extends Schema.TaggedError<NightlyStagingError>()(
   "NightlyStagingError",
@@ -52,8 +54,19 @@ const encodeManifest = Schema.encodeEffect(Schema.fromJsonString(StagingManifest
 
 const fail = (message: string) => Effect.fail(new NightlyStagingError({ message }));
 
+/** A run's staging tag, goat-nightly-staging-<run id>. */
 export function isStagingTag(tag: string) {
   return /^goat-nightly-staging-\d+$/.test(tag);
+}
+
+export function handoffTag(tag: string, name: string) {
+  return `${tag}--${name}`;
+}
+
+/** The run tag and hand-off name of a hand-off draft's tag. */
+export function parseHandoffTag(tag: string) {
+  const match = /^(goat-nightly-staging-\d+)--([A-Za-z0-9][A-Za-z0-9._-]*)$/.exec(tag);
+  return match ? { run: match[1]!, name: match[2]! } : undefined;
 }
 
 export function partAssetName(name: string, index: number) {
@@ -90,7 +103,7 @@ const validPath = (path: string) =>
   !NodePath.isAbsolute(path) &&
   !path.split(/[\\/]/).includes("..");
 
-/** The run's staging draft; the lowest id wins if a retry ever created two. */
+/** The draft with this tag; the lowest id wins if a retry ever created two. */
 export function findStagingRelease(releases: ReadonlyArray<GitHubRelease>, tag: string) {
   return releases
     .filter((release) => release.draft && release.tag_name === tag)
@@ -224,7 +237,6 @@ export interface PutOptions {
   readonly name: string;
   readonly dir: string;
   readonly paths: ReadonlyArray<string>;
-  readonly create: boolean;
   readonly partBytes?: number;
 }
 
@@ -246,19 +258,17 @@ export const putHandoff = Effect.fn("putHandoff")(function* (
     if (empty) return yield* fail(`${full} is missing or empty; nothing to hand off.`);
   }
 
-  let release = findStagingRelease(yield* client.listReleases(), options.tag);
+  const draftTag = handoffTag(options.tag, options.name);
+  let release = findStagingRelease(yield* client.listReleases(), draftTag);
   if (release === undefined) {
-    if (!options.create)
-      return yield* fail(`No staging draft ${options.tag}; JS bundle creates it.`);
-    release = yield* client.createStagingDraft(options.tag, options.target);
-    yield* Console.log(`Created staging draft ${options.tag} (${release.id}).`);
+    release = yield* client.createStagingDraft(draftTag, options.target);
+    yield* Console.log(`Created staging draft ${draftTag} (${release.id}).`);
   }
   const releaseId = release.id;
 
-  // Remove the manifest first so a consumer never trusts a half-replaced hand-off.
-  const stale = (yield* client.listAssets(releaseId)).filter(
-    (asset) => handoffOfAsset(asset.name) === options.name,
-  );
+  // A re-run replaces the whole hand-off. Remove the manifest first so a consumer
+  // never trusts a half-replaced one.
+  const stale = yield* client.listAssets(releaseId);
   for (const asset of stale.toSorted(
     (a, b) => Number(b.name.endsWith(MANIFEST_SUFFIX)) - Number(a.name.endsWith(MANIFEST_SUFFIX)),
   )) {
@@ -280,12 +290,20 @@ export const putHandoff = Effect.fn("putHandoff")(function* (
   const manifestText = yield* encodeManifest(manifest).pipe(
     Effect.mapError(() => new NightlyStagingError({ message: "Cannot encode manifest." })),
   );
-  yield* uploadVerified(
-    client,
-    releaseId,
-    `${options.name}${MANIFEST_SUFFIX}`,
-    new TextEncoder().encode(manifestText),
-  );
+  const manifestBytes = new TextEncoder().encode(manifestText);
+  const manifestName = `${options.name}${MANIFEST_SUFFIX}`;
+  yield* uploadVerified(client, releaseId, manifestName, manifestBytes);
+
+  // Read back what GitHub stored, so a lost upload fails this job and not a consumer.
+  const stored = new Map((yield* client.listAssets(releaseId)).map((asset) => [asset.name, asset]));
+  for (const expected of [...parts, { asset: manifestName, size: manifestBytes.byteLength }]) {
+    const asset = stored.get(expected.asset);
+    if (asset?.state !== "uploaded" || asset.size !== expected.size) {
+      return yield* fail(
+        `${expected.asset} is not stored in ${draftTag} after upload (${asset?.state ?? "absent"}).`,
+      );
+    }
+  }
   return manifest;
 }, Effect.scoped);
 
@@ -293,59 +311,89 @@ export interface GetOptions {
   readonly tag: string;
   readonly names: ReadonlyArray<string>;
   readonly dir: string;
+  /** Delay before listing a hand-off's assets again when a part is not there yet. */
+  readonly retryDelayMs?: number;
 }
+
+/** This run's hand-off drafts by name; the lowest id wins for a duplicated tag. */
+function handoffDrafts(releases: ReadonlyArray<GitHubRelease>, tag: string) {
+  const drafts = new Map<string, GitHubRelease>();
+  for (const release of releases.toSorted((left, right) => right.id - left.id)) {
+    const parsed = parseHandoffTag(release.tag_name);
+    if (release.draft && parsed?.run === tag) drafts.set(parsed.name, release);
+  }
+  return drafts;
+}
+
+/** The manifest and parts of one hand-off, or why it is incomplete. */
+const readHandoff = Effect.fn("readHandoff")(function* (
+  client: GitHubReleasesClient,
+  release: GitHubRelease,
+  name: string,
+) {
+  const assets = yield* client.listAssets(release.id);
+  const byName = new Map<string, GitHubReleaseAsset>(assets.map((asset) => [asset.name, asset]));
+  const manifestAsset = byName.get(`${name}${MANIFEST_SUFFIX}`);
+  if (manifestAsset?.state !== "uploaded") {
+    return { problem: `${name} has no complete manifest (${manifestAsset?.state ?? "absent"}).` };
+  }
+  const manifest = yield* decodeManifest(
+    new TextDecoder().decode(yield* client.downloadAsset(manifestAsset.id)),
+  ).pipe(
+    Effect.mapError(() => new NightlyStagingError({ message: `Malformed manifest for ${name}.` })),
+  );
+  if (manifest.name !== name) return yield* fail(`Manifest ${name} names ${manifest.name}.`);
+  const parts: Array<{ asset: GitHubReleaseAsset; size: number; sha256: string }> = [];
+  for (const part of manifest.parts) {
+    if (handoffOfAsset(part.asset) !== name) {
+      return yield* fail(`Manifest ${name} lists a foreign part ${part.asset}.`);
+    }
+    const asset = byName.get(part.asset);
+    if (asset?.state !== "uploaded") {
+      const present = assets.map((item) => `${item.name}=${item.state ?? "?"}`).join(", ");
+      return {
+        problem: `${name} is missing part ${part.asset} (${asset?.state ?? "absent"}; release holds ${present}).`,
+      };
+    }
+    parts.push({ asset, size: part.size, sha256: part.sha256 });
+  }
+  return { manifest, parts };
+});
 
 export const getHandoffs = Effect.fn("getHandoffs")(function* (
   client: GitHubReleasesClient,
   options: GetOptions,
 ) {
-  const release = findStagingRelease(yield* client.listReleases(), options.tag);
-  if (release === undefined) return yield* fail(`No staging draft ${options.tag}.`);
-  const assets = yield* client.listAssets(release.id);
-  const byName = new Map<string, GitHubReleaseAsset>(assets.map((asset) => [asset.name, asset]));
-  const handoffs = assets
-    .filter((asset) => asset.name.endsWith(MANIFEST_SUFFIX) && asset.state === "uploaded")
-    .map((asset) => asset.name.slice(0, -MANIFEST_SUFFIX.length))
-    .toSorted();
+  const drafts = handoffDrafts(yield* client.listReleases(), options.tag);
+  const handoffs = [...drafts.keys()].toSorted();
   const selected = new Set<string>();
   for (const glob of options.names) {
     const matches = handoffs.filter(globMatcher(glob));
-    if (matches.length === 0)
-      return yield* fail(`No complete hand-off matches ${glob} in ${options.tag}.`);
+    if (matches.length === 0) return yield* fail(`No hand-off matches ${glob} in ${options.tag}.`);
     for (const match of matches) selected.add(match);
   }
   NodeFS.mkdirSync(options.dir, { recursive: true });
   const fetched: string[] = [];
   for (const name of [...selected].toSorted()) {
-    const manifestAsset = byName.get(`${name}${MANIFEST_SUFFIX}`)!;
-    const manifest = yield* decodeManifest(
-      new TextDecoder().decode(yield* client.downloadAsset(manifestAsset.id)),
-    ).pipe(
-      Effect.mapError(
-        () => new NightlyStagingError({ message: `Malformed manifest for ${name}.` }),
-      ),
-    );
-    if (manifest.name !== name) return yield* fail(`Manifest ${name} names ${manifest.name}.`);
+    let read = yield* readHandoff(client, drafts.get(name)!, name);
+    for (let attempt = 1; "problem" in read && attempt < 4; attempt++) {
+      yield* Console.log(`${read.problem} Listing again (${attempt}/3).`);
+      yield* Effect.sleep(options.retryDelayMs ?? 5_000);
+      read = yield* readHandoff(client, drafts.get(name)!, name);
+    }
+    if ("problem" in read) return yield* fail(read.problem);
     const { file } = yield* temporaryFile(`${name}.tar`);
     let total = 0;
-    for (const part of manifest.parts) {
-      const asset = byName.get(part.asset);
-      if (
-        asset === undefined ||
-        asset.state !== "uploaded" ||
-        handoffOfAsset(part.asset) !== name
-      ) {
-        return yield* fail(`${name} is missing part ${part.asset}.`);
-      }
-      const bytes = yield* client.downloadAsset(asset.id);
+    for (const part of read.parts) {
+      const bytes = yield* client.downloadAsset(part.asset.id);
       if (bytes.byteLength !== part.size || sha256(bytes) !== part.sha256) {
-        return yield* fail(`${part.asset} does not match its manifest size and SHA-256.`);
+        return yield* fail(`${part.asset.name} does not match its manifest size and SHA-256.`);
       }
       NodeFS.appendFileSync(file, bytes);
       total += bytes.byteLength;
     }
-    if (total !== manifest.size)
-      return yield* fail(`${name} is ${total} bytes, manifest says ${manifest.size}.`);
+    if (total !== read.manifest.size)
+      return yield* fail(`${name} is ${total} bytes, manifest says ${read.manifest.size}.`);
     yield* runTar(["-xf", "-"], options.dir, { stdin: file });
     yield* Console.log(`Restored ${name} (${total} bytes) into ${options.dir}.`);
     fetched.push(name);
@@ -360,8 +408,8 @@ export interface CleanupOptions {
 }
 
 /**
- * Deletes this run's staging draft, or only the hand-offs outside keep, and any
- * other staging draft older than maxAgeHours (a run whose cleanup never ran).
+ * Deletes this run's hand-off drafts, except the hand-offs keep names, and any other
+ * staging draft older than maxAgeHours (a run whose cleanup never ran).
  */
 export const cleanupStaging = Effect.fn("cleanupStaging")(function* (
   client: GitHubReleasesClient,
@@ -371,19 +419,17 @@ export const cleanupStaging = Effect.fn("cleanupStaging")(function* (
   const cutoff = now - options.maxAgeHours * 3_600_000;
   const keep = options.keep.map(globMatcher);
   for (const release of yield* client.listReleases()) {
-    if (!release.draft || !isStagingTag(release.tag_name)) continue;
-    if (release.tag_name === options.tag) {
-      if (keep.length === 0) {
-        yield* Console.log(`Deleting staging draft ${release.tag_name} (${release.id}).`);
-        yield* client.deleteRelease(release.id);
+    if (!release.draft) continue;
+    const parsed = parseHandoffTag(release.tag_name);
+    const run = parsed?.run ?? (isStagingTag(release.tag_name) ? release.tag_name : undefined);
+    if (run === undefined) continue;
+    if (run === options.tag) {
+      if (parsed !== undefined && keep.some((matches) => matches(parsed.name))) {
+        yield* Console.log(`Kept ${release.tag_name} for inspection.`);
         continue;
       }
-      for (const asset of yield* client.listAssets(release.id)) {
-        const handoff = handoffOfAsset(asset.name);
-        if (handoff !== undefined && keep.some((matches) => matches(handoff))) continue;
-        yield* client.deleteAsset(asset.id);
-      }
-      yield* Console.log(`Kept ${options.keep.join(", ")} in ${release.tag_name} for inspection.`);
+      yield* Console.log(`Deleting staging draft ${release.tag_name} (${release.id}).`);
+      yield* client.deleteRelease(release.id);
       continue;
     }
     const created = release.created_at === undefined ? Number.NaN : Date.parse(release.created_at);
@@ -405,7 +451,6 @@ const put = Command.make(
     name: Flag.String("name"),
     dir: Flag.String("dir"),
     paths: Flag.String("paths").pipe(Flag.withDefault(".")),
-    create: Flag.Boolean("create").pipe(Flag.withDefault(false)),
   },
   (options) =>
     Effect.gen(function* () {

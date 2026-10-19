@@ -13,6 +13,8 @@ import {
   getHandoffs,
   globMatcher,
   handoffOfAsset,
+  handoffTag,
+  parseHandoffTag,
   partAssetName,
   putHandoff,
 } from "./nightly-staging.ts";
@@ -39,6 +41,8 @@ interface FakeRelease {
 
 function fakeGitHub(releases: FakeRelease[] = []) {
   let nextId = 1000;
+  // Uploads GitHub acknowledges but does not keep.
+  const dropUploads = new Set<string>();
   const calls: string[] = [];
   const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
   const assetView = ({ bytes: _bytes, ...asset }: FakeAsset) => asset;
@@ -72,7 +76,7 @@ function fakeGitHub(releases: FakeRelease[] = []) {
       if (release.assets.some((asset) => asset.name === name)) return json({}, 422);
       const bytes = new Uint8Array(init.body as Uint8Array);
       const asset = { id: nextId++, name, size: bytes.byteLength, state: "uploaded", bytes };
-      release.assets.push(asset);
+      if (!dropUploads.has(name)) release.assets.push(asset);
       return json(assetView(asset), 201);
     }
     if ((match = /^\/releases\/assets\/(\d+)$/.exec(path))) {
@@ -91,7 +95,7 @@ function fakeGitHub(releases: FakeRelease[] = []) {
     }
     return json({ path }, 404);
   };
-  return { fetch, releases, calls };
+  return { fetch, releases, calls, dropUploads };
 }
 
 const clientFor = (fetch: typeof globalThis.fetch) =>
@@ -113,11 +117,18 @@ function writeTree(root: string, files: Record<string, string>) {
 }
 
 describe("nightly staging names", () => {
-  it("maps parts and manifests back to their hand-off", () => {
+  it("maps parts, manifests and draft tags back to their hand-off", () => {
     expect(partAssetName("cli-linux-x64", 7)).toBe("cli-linux-x64.tar.007");
     expect(handoffOfAsset("cli-linux-x64.tar.007")).toBe("cli-linux-x64");
     expect(handoffOfAsset("verify-cli-linux-x64.manifest.json")).toBe("verify-cli-linux-x64");
     expect(handoffOfAsset("stray.zip")).toBeUndefined();
+    expect(handoffTag(tag, "cli-linux-x64")).toBe("goat-nightly-staging-42--cli-linux-x64");
+    expect(parseHandoffTag("goat-nightly-staging-42--js-bundle")).toEqual({
+      run: tag,
+      name: "js-bundle",
+    });
+    expect(parseHandoffTag("goat-nightly-staging-4--x")?.run).not.toBe(tag);
+    expect(parseHandoffTag("v1.0.0")).toBeUndefined();
   });
 
   it("anchors globs so cli-* never matches verify-cli-*", () => {
@@ -128,6 +139,10 @@ describe("nightly staging names", () => {
     expect(globMatcher("js-bundle")("js-bundle.x")).toBe(false);
   });
 });
+
+const sha = "a".repeat(40);
+const draftOf = (github: ReturnType<typeof fakeGitHub>, name: string) =>
+  github.releases.find((release) => release.tag_name === handoffTag(tag, name))!;
 
 describe("nightly staging hand-off", () => {
   it.effect("splits a hand-off into verified parts and restores it byte for byte", () =>
@@ -143,16 +158,16 @@ describe("nightly staging hand-off", () => {
       });
       const manifest = yield* putHandoff(client, {
         tag,
-        target: "a".repeat(40),
+        target: sha,
         name: "js-bundle",
         dir: source,
         paths: ["server/dist", "desktop/dist-electron"],
-        create: true,
         partBytes: 2048,
       });
       expect(manifest.parts.length).toBeGreaterThan(2);
-      const names = github.releases[0]!.assets.map((asset) => asset.name);
-      expect(names.at(-1)).toBe("js-bundle.manifest.json");
+      const draft = draftOf(github, "js-bundle");
+      expect(draft.draft).toBe(true);
+      expect(draft.assets.map((asset) => asset.name).at(-1)).toBe("js-bundle.manifest.json");
 
       const dest = tempDir();
       expect(yield* getHandoffs(client, { tag, names: ["js-bundle"], dir: dest })).toEqual([
@@ -166,114 +181,118 @@ describe("nightly staging hand-off", () => {
     }),
   );
 
-  it.effect("merges every hand-off a glob selects and replaces a re-staged hand-off", () =>
-    Effect.gen(function* () {
-      const github = fakeGitHub();
-      const client = yield* clientFor(github.fetch);
-      for (const key of ["linux-x64", "win32-x64"]) {
-        const dir = tempDir();
-        writeTree(dir, { [`goat-${key}.tar.gz`]: key });
+  it.effect(
+    "keeps each hand-off in its own draft, merges glob matches and replaces a re-stage",
+    () =>
+      Effect.gen(function* () {
+        const github = fakeGitHub();
+        const client = yield* clientFor(github.fetch);
+        for (const key of ["linux-x64", "win32-x64"]) {
+          const dir = tempDir();
+          writeTree(dir, { [`goat-${key}.tar.gz`]: key });
+          yield* putHandoff(client, { tag, target: sha, name: `cli-${key}`, dir, paths: [] });
+          const reports = tempDir();
+          writeTree(reports, { [`verify-cli-${key}.json`]: "{}" });
+          yield* putHandoff(client, {
+            tag,
+            target: sha,
+            name: `verify-cli-${key}`,
+            dir: reports,
+            paths: [],
+          });
+        }
+        const again = tempDir();
+        writeTree(again, { "goat-linux-x64.tar.gz": "rebuilt" });
         yield* putHandoff(client, {
           tag,
-          target: "a".repeat(40),
-          name: `cli-${key}`,
-          dir,
+          target: sha,
+          name: "cli-linux-x64",
+          dir: again,
           paths: [],
-          create: true,
         });
-        const reports = tempDir();
-        writeTree(reports, { [`verify-cli-${key}.json`]: "{}" });
-        yield* putHandoff(client, {
-          tag,
-          target: "a".repeat(40),
-          name: `verify-cli-${key}`,
-          dir: reports,
-          paths: [],
-          create: false,
-        });
-      }
-      const again = tempDir();
-      writeTree(again, { "goat-linux-x64.tar.gz": "rebuilt" });
-      yield* putHandoff(client, {
-        tag,
-        target: "a".repeat(40),
-        name: "cli-linux-x64",
-        dir: again,
-        paths: [],
-        create: false,
-      });
-      expect(github.releases).toHaveLength(1);
+        expect(github.releases.map((release) => release.tag_name).toSorted()).toEqual(
+          ["cli-linux-x64", "cli-win32-x64", "verify-cli-linux-x64", "verify-cli-win32-x64"].map(
+            (name) => handoffTag(tag, name),
+          ),
+        );
+        expect(draftOf(github, "cli-linux-x64").assets.map((asset) => asset.name)).toEqual([
+          "cli-linux-x64.tar.000",
+          "cli-linux-x64.manifest.json",
+        ]);
 
-      const dest = tempDir();
-      expect(yield* getHandoffs(client, { tag, names: ["cli-*"], dir: dest })).toEqual([
-        "cli-linux-x64",
-        "cli-win32-x64",
-      ]);
-      expect(NodeFS.readdirSync(dest).toSorted()).toEqual([
-        "goat-linux-x64.tar.gz",
-        "goat-win32-x64.tar.gz",
-      ]);
-      expect(NodeFS.readFileSync(NodePath.join(dest, "goat-linux-x64.tar.gz"), "utf8")).toBe(
-        "rebuilt",
-      );
-    }),
+        const dest = tempDir();
+        expect(yield* getHandoffs(client, { tag, names: ["cli-*"], dir: dest })).toEqual([
+          "cli-linux-x64",
+          "cli-win32-x64",
+        ]);
+        expect(NodeFS.readdirSync(dest).toSorted()).toEqual([
+          "goat-linux-x64.tar.gz",
+          "goat-win32-x64.tar.gz",
+        ]);
+        expect(NodeFS.readFileSync(NodePath.join(dest, "goat-linux-x64.tar.gz"), "utf8")).toBe(
+          "rebuilt",
+        );
+      }),
   );
 
-  it.effect("refuses tampered parts, missing hand-offs, missing drafts and empty inputs", () =>
+  it.effect("refuses tampered and missing parts, unknown hand-offs and empty inputs", () =>
     Effect.gen(function* () {
       const github = fakeGitHub();
       const client = yield* clientFor(github.fetch);
       const dir = tempDir();
       writeTree(dir, { "a.txt": "a".repeat(3000) });
-      expect(
-        (yield* putHandoff(client, {
-          tag,
-          target: "a".repeat(40),
-          name: "x",
-          dir,
-          paths: [],
-          create: false,
-        }).pipe(Effect.flip)).message,
-      ).toContain("No staging draft");
-      yield* putHandoff(client, {
-        tag,
-        target: "a".repeat(40),
-        name: "x",
-        dir,
-        paths: [],
-        create: true,
-        partBytes: 1024,
-      });
+      yield* putHandoff(client, { tag, target: sha, name: "x", dir, paths: [], partBytes: 1024 });
       expect(
         (yield* getHandoffs(client, { tag, names: ["desktop-*"], dir: tempDir() }).pipe(
           Effect.flip,
         )).message,
-      ).toContain("No complete hand-off matches desktop-*");
-      github.releases[0]!.assets[1]!.bytes = new Uint8Array(1024);
+      ).toContain("No hand-off matches desktop-*");
+      const draft = draftOf(github, "x");
+      draft.assets[1]!.bytes = new Uint8Array(1024);
       expect(
         (yield* getHandoffs(client, { tag, names: ["x"], dir: tempDir() }).pipe(Effect.flip))
           .message,
       ).toContain("does not match its manifest");
+      draft.assets.splice(1, 1);
+      const missing = yield* getHandoffs(client, {
+        tag,
+        names: ["x"],
+        dir: tempDir(),
+        retryDelayMs: 0,
+      }).pipe(Effect.flip);
+      expect(missing.message).toContain("x is missing part x.tar.001 (absent; release holds");
       expect(
         (yield* putHandoff(client, {
           tag,
-          target: "a".repeat(40),
+          target: sha,
           name: "y",
           dir: tempDir(),
           paths: [],
-          create: false,
         }).pipe(Effect.flip)).message,
       ).toContain("missing or empty");
       expect(
-        (yield* putHandoff(client, {
-          tag,
-          target: "a".repeat(40),
-          name: "y",
-          dir,
-          paths: ["../etc"],
-          create: false,
-        }).pipe(Effect.flip)).message,
+        (yield* putHandoff(client, { tag, target: sha, name: "y", dir, paths: ["../etc"] }).pipe(
+          Effect.flip,
+        )).message,
       ).toContain("must be relative");
+    }),
+  );
+
+  it.effect("fails the producer when GitHub does not keep an uploaded part", () =>
+    Effect.gen(function* () {
+      const github = fakeGitHub();
+      github.dropUploads.add("lost.tar.000");
+      const client = yield* clientFor(github.fetch);
+      const dir = tempDir();
+      writeTree(dir, { "a.txt": "a" });
+      const error = yield* putHandoff(client, {
+        tag,
+        target: sha,
+        name: "lost",
+        dir,
+        paths: [],
+      }).pipe(Effect.flip);
+      expect(error.message).toContain("lost.tar.000 is not stored in");
     }),
   );
 });
@@ -288,48 +307,37 @@ describe("nightly staging cleanup", () => {
     created_at: created,
     assets: [],
   });
-  const asset = (id: number, name: string) => ({
-    id,
-    name,
-    size: 1,
-    state: "uploaded",
-    bytes: new Uint8Array(1),
-  });
 
-  it.effect("deletes this run's draft and stale staging drafts only", () =>
+  it.effect("deletes this run's drafts and stale staging drafts only", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(now);
       const github = fakeGitHub([
-        draft(1, tag, "2026-10-18T23:00:00Z"),
-        draft(2, "goat-nightly-staging-7", "2026-10-15T00:00:00Z"),
-        draft(3, "goat-nightly-staging-8", "2026-10-18T12:00:00Z"),
-        draft(4, "goat-nightly-staging-9", "2026-10-01T00:00:00Z", false),
-        draft(5, "v1.0.0", "2026-10-01T00:00:00Z"),
+        draft(1, handoffTag(tag, "js-bundle"), "2026-10-18T23:00:00Z"),
+        draft(2, tag, "2026-10-18T23:00:00Z"),
+        draft(3, "goat-nightly-staging-7--cli-linux-x64", "2026-10-15T00:00:00Z"),
+        draft(4, "goat-nightly-staging-8--js-bundle", "2026-10-18T12:00:00Z"),
+        draft(5, "goat-nightly-staging-9", "2026-10-01T00:00:00Z", false),
+        draft(6, "v1.0.0", "2026-10-01T00:00:00Z"),
       ]);
       const client = yield* clientFor(github.fetch);
       yield* cleanupStaging(client, { tag, keep: [], maxAgeHours: 72 });
-      expect(github.releases.map((release) => release.id)).toEqual([3, 4, 5]);
+      expect(github.releases.map((release) => release.id)).toEqual([4, 5, 6]);
       yield* cleanupStaging(client, { tag, keep: [], maxAgeHours: 72 });
-      expect(github.releases.map((release) => release.id)).toEqual([3, 4, 5]);
+      expect(github.releases.map((release) => release.id)).toEqual([4, 5, 6]);
     }),
   );
 
   it.effect("keeps only the selected hand-offs of a dry run", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(now);
-      const release = draft(1, tag, "2026-10-18T23:00:00Z");
-      release.assets = [
-        asset(10, "release-assets.tar.000"),
-        asset(11, "release-assets.manifest.json"),
-        asset(12, "js-bundle.tar.000"),
-        asset(13, "js-bundle.manifest.json"),
-      ];
-      const github = fakeGitHub([release]);
+      const github = fakeGitHub([
+        draft(1, handoffTag(tag, "release-assets"), "2026-10-18T23:00:00Z"),
+        draft(2, handoffTag(tag, "js-bundle"), "2026-10-18T23:00:00Z"),
+      ]);
       const client = yield* clientFor(github.fetch);
       yield* cleanupStaging(client, { tag, keep: ["release-assets"], maxAgeHours: 72 });
-      expect(github.releases[0]!.assets.map((item) => item.name)).toEqual([
-        "release-assets.tar.000",
-        "release-assets.manifest.json",
+      expect(github.releases.map((release) => release.tag_name)).toEqual([
+        handoffTag(tag, "release-assets"),
       ]);
     }),
   );
