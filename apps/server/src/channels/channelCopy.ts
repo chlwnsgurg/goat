@@ -32,7 +32,13 @@ export const CHANNEL_COPY = {
   agentCannotCreateWork:
     "Only people can start new work. I can tell you how existing work is going.",
   agentCannotMoveWork: "Only people with access to run work can move it to another machine.",
+  agentCannotStopWork: "Only the people who may run this work can stop it.",
   answerForwarded: "Thanks. I passed your answer on.",
   answerNotAllowed:
     "I can't pass that on: answering this task's question needs the same access as the person who asked for it.",
+  approvalNotAllowed:
+    "I can't pass that on: answering this approval needs the same access as the person who asked for the work.",
+  approvalAlreadyAnswered: "That approval was already answered.",
+  approvalFailed:
+    "I couldn't pass that approval on. Open the work's thread in GOAT to answer it there.",
 } as const;

@@ -59,6 +59,7 @@ interface World {
   readonly escalationMessages: Set<string>;
   readonly escalationReads: Array<ReadonlyArray<string>>;
   readonly assistantMessages: Array<{ runId: RunId; text: string }>;
+  providerThreads: Array<{ cloudTask?: { attach?: string; tracking: string } }>;
   requests: Array<{ id: string; status: string; kind: string }>;
   subagents: Array<{ origin: string; childThreadId: ThreadId }>;
   /** Failures for the next dispatches, used up in order. */
@@ -122,6 +123,7 @@ const makeWorld = Effect.gen(function* () {
     escalationMessages: new Set(),
     escalationReads: [],
     assistantMessages: [],
+    providerThreads: [],
     requests: [],
     subagents: [],
     dispatchFailures: [],
@@ -209,6 +211,7 @@ const layerFor = (world: World, baseDir: string) =>
                   .map((message) => ({ ...message, role: "assistant" })),
                 runtimeRequests: world.requests,
                 subagents: world.subagents,
+                providerThreads: world.providerThreads,
               } as never;
             }),
           dispatch: (command) => dispatchIn(world, command),
@@ -1279,6 +1282,30 @@ describe("LaunchWatchService", () => {
         excerpt: "Fixed the flake; tests pass.",
         prUrl: "https://github.com/acme/app/pull/7",
       });
+    }),
+  );
+
+  it.effect("wakes the launcher but posts no run.completed for a link-only registered run", () =>
+    Effect.gen(function* () {
+      const world = yield* makeWorld;
+      world.providerThreads = [{ cloudTask: { attach: "registered", tracking: "link-only" } }];
+      const baseDir = yield* tempDir;
+      yield* withService(world, baseDir, (service) =>
+        Effect.gen(function* () {
+          yield* service.register({
+            ...local,
+            projectId,
+            title: null,
+            runId: run1,
+            notifyWebhook: true,
+          });
+          yield* Queue.offer(world.waits, finished(run1));
+          yield* advanceUntil(Queue.take(world.delivered));
+          yield* service.list(launcher);
+        }),
+      );
+      expect(world.attempts).toHaveLength(1);
+      expect(world.webhookReports).toEqual([]);
     }),
   );
 

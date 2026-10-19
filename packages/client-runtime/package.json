@@ -347,6 +347,10 @@
       "types": "./src/state/fleet.ts",
       "default": "./src/state/fleet.ts"
     },
+    "./state/fleet-cloud-agents": {
+      "types": "./src/state/fleetCloudAgents.ts",
+      "default": "./src/state/fleetCloudAgents.ts"
+    },
     "./state/fleet-heat": {
       "types": "./src/state/fleetHeat.ts",
       "default": "./src/state/fleetHeat.ts"

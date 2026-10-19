@@ -102,6 +102,13 @@ export interface ProviderTurnStartServiceV2Shape {
   }) => Effect.Effect<void, ProviderTurnStartError>;
 }
 
+/** A registered cloud task whose first run has not started: that run attaches, never submits. */
+export const isRegisteredAttach = (thread: OrchestrationV2ProviderThread | undefined) =>
+  thread?.cloudTask?.attach === "registered" &&
+  thread.firstRunOrdinal === null &&
+  thread.nativeThreadRef !== null &&
+  (thread.cloudTask.status === "running" || thread.cloudTask.status === "submitting");
+
 export class ProviderTurnStartServiceV2 extends Context.Service<
   ProviderTurnStartServiceV2,
   ProviderTurnStartServiceV2Shape
@@ -275,6 +282,8 @@ export const layer: Layer.Layer<
       readonly willRetry?: boolean;
       readonly workspaceLeaseDeadline?: DateTime.Utc;
       readonly reattach?: boolean;
+      /** Called once this start attaches a registered cloud task instead of submitting. */
+      readonly onAttach?: () => void;
     }) {
       const { runId } = input;
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
@@ -308,6 +317,11 @@ export const layer: Layer.Layer<
           cause: "No persisted cloud task to attach.",
         });
       }
+      // A registered task was launched outside GOAT: its first run only observes it.
+      const attachRegistered =
+        input.reattach !== true && cloud && isRegisteredAttach(providerThread);
+      const observeOnly = input.reattach === true || attachRegistered;
+      if (attachRegistered) input.onAttach?.();
       let cloudSource:
         | {
             source: import("@goat/contracts").OrchestrationV2CloudTask["source"];
@@ -776,7 +790,7 @@ export const layer: Layer.Layer<
         });
       let effectiveHandoffs = cloud ? [] : handoffs;
       const loadedProviderThread = yield* Effect.gen(function* () {
-        if (input.reattach === true) return providerThread;
+        if (observeOnly) return providerThread;
         if (nativeForkTransfer !== undefined) {
           const sourceProjection = yield* projectionStore.getThreadRecords(
             nativeForkTransfer.sourceThreadId,
@@ -1001,19 +1015,25 @@ export const layer: Layer.Layer<
               cloudTask:
                 input.reattach === true
                   ? providerThread.cloudTask
-                  : {
-                      ...(acceptedCloudTask ?? {
-                        taskId: run.id,
-                        tracking: "live" as const,
-                        source: cloudSource.source,
-                        localChangesExcluded: cloudSource.localChangesExcluded,
-                        ...(cloudSource.localChangesIncluded === undefined
-                          ? {}
-                          : { localChangesIncluded: cloudSource.localChangesIncluded }),
-                      }),
-                      status: "submitting" as const,
-                      updatedAt: DateTime.formatIso(now),
-                    },
+                  : attachRegistered && providerThread.cloudTask !== undefined
+                    ? {
+                        ...providerThread.cloudTask,
+                        acceptedAppRunId: run.id,
+                        updatedAt: DateTime.formatIso(now),
+                      }
+                    : {
+                        ...(acceptedCloudTask ?? {
+                          taskId: run.id,
+                          tracking: "live" as const,
+                          source: cloudSource.source,
+                          localChangesExcluded: cloudSource.localChangesExcluded,
+                          ...(cloudSource.localChangesIncluded === undefined
+                            ? {}
+                            : { localChangesIncluded: cloudSource.localChangesIncluded }),
+                        }),
+                        status: "submitting" as const,
+                        updatedAt: DateTime.formatIso(now),
+                      },
             }),
         contextUsage: handoffUsage,
         id: providerThread.id,
@@ -1434,8 +1454,8 @@ export const layer: Layer.Layer<
         ...(cloudSource?.launchSource === undefined
           ? {}
           : { cloudLaunchSource: cloudSource.launchSource }),
-        reattach: input.reattach === true,
-        ...(input.reattach === true
+        reattach: observeOnly,
+        ...(observeOnly
           ? {}
           : {
               refreshMemoryContext: makeRefreshMemoryContext(input.threadId, runId),
@@ -1493,10 +1513,18 @@ export const layer: Layer.Layer<
                   (run) => run.id === input.runId,
                 )?.activeAttemptId
               : undefined;
-          return yield* start(input).pipe(
+          let attaching = false;
+          return yield* start({
+            ...input,
+            onAttach: () => {
+              attaching = true;
+            },
+          }).pipe(
             Effect.catch((cause) =>
               Effect.gen(function* () {
-                if (input.reattach !== true || input.willRetry === true)
+                // A retried start finds the attach run already running and returns, so an
+                // attach settles on its first failure.
+                if (input.reattach === true ? input.willRetry === true : !attaching)
                   return yield* Effect.fail(cause);
                 const current = yield* projectionStore.getTurnStartContext(
                   input.threadId,
@@ -1510,9 +1538,15 @@ export const layer: Layer.Layer<
                   (candidate) => candidate.id === run?.activeAttemptId,
                 );
                 const root = current.nodes.find((candidate) => candidate.id === run?.rootNodeId);
+                const attached =
+                  input.reattach !== true &&
+                  thread?.cloudTask?.attach === "registered" &&
+                  thread.cloudTask.acceptedAppRunId === input.runId &&
+                  thread.firstRunOrdinal === run?.ordinal;
                 if (
+                  (input.reattach !== true && !attached) ||
                   run?.status !== "running" ||
-                  run.activeAttemptId !== originalAttemptId ||
+                  (input.reattach === true && run.activeAttemptId !== originalAttemptId) ||
                   !thread?.cloudTask ||
                   !attempt ||
                   !root
@@ -1520,19 +1554,29 @@ export const layer: Layer.Layer<
                   return yield* Effect.fail(cause);
                 }
                 const now = yield* DateTime.now;
-                const reason =
-                  "Cloud tracking could not be reattached. Open the task link; remote work may continue.";
+                const reason = attached
+                  ? "This environment's sign-in cannot follow this cloud run, so GOAT keeps only its link. Open the link for its progress."
+                  : "Cloud tracking could not be reattached. Open the task link; remote work may continue.";
                 const updated = {
                   ...thread,
                   status: "idle" as const,
                   updatedAt: now,
-                  cloudTask: {
-                    ...thread.cloudTask,
-                    status: "unknown" as const,
-                    error: reason,
-                    updatedAt: DateTime.formatIso(now),
-                  },
+                  cloudTask: attached
+                    ? {
+                        ...thread.cloudTask,
+                        tracking: "link-only" as const,
+                        error: reason,
+                        updatedAt: DateTime.formatIso(now),
+                      }
+                    : {
+                        ...thread.cloudTask,
+                        status: "unknown" as const,
+                        error: reason,
+                        updatedAt: DateTime.formatIso(now),
+                      },
                 };
+                // A link-only registration ends its attach run without claiming a result.
+                const settled = attached ? ("completed" as const) : ("failed" as const);
                 const allocateEventId = () =>
                   idAllocator.allocate.event({ threadId: input.threadId });
                 const cloudResultEvents = yield* makeCloudResultEvents({
@@ -1556,15 +1600,15 @@ export const layer: Layer.Layer<
                         { type: "provider-thread.updated" as const, payload: updated },
                         {
                           type: "run.updated" as const,
-                          payload: { ...run, status: "failed" as const, completedAt: now },
+                          payload: { ...run, status: settled, completedAt: now },
                         },
                         {
                           type: "run-attempt.updated" as const,
-                          payload: { ...attempt, status: "failed" as const, completedAt: now },
+                          payload: { ...attempt, status: settled, completedAt: now },
                         },
                         {
                           type: "node.updated" as const,
-                          payload: { ...root, status: "failed" as const, completedAt: now },
+                          payload: { ...root, status: settled, completedAt: now },
                         },
                       ],
                       (event) =>

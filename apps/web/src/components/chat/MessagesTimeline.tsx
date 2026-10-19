@@ -297,6 +297,8 @@ import {
   formatUpcomingTimestamp,
 } from "../../timestampFormat";
 import { FetchedToolOutput, V2ItemInspector, fileChangeDiffTarget } from "./V2ItemInspector";
+import { FileChangeInlineDiff } from "./FileChangeInlineDiff";
+import { fileChangeRowLabel, fileChangeTargetPaths } from "./fileChangeInlineDiff.logic";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import {
@@ -5426,7 +5428,12 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       ? workEntry.toolLifecycleStatus === "inProgress"
         ? "Thinking"
         : "Thought"
-      : questionHeading || (displayLabel ?? workEntryDisplayLabel(workEntry, workspaceRoot));
+      : questionHeading ||
+        (displayLabel ??
+          // Like Codex: verb and file name; the tooltip keeps every full path.
+          (workEntry.projectedItem?.item.type === "file_change"
+            ? fileChangeRowLabel(workEntry.projectedItem.item)
+            : workEntryDisplayLabel(workEntry, workspaceRoot)));
   const answerPreview =
     workEntry.questionAnswer && hasQuestionAnswer(workEntry.questionAnswer)
       ? getQuestionAnswerPreview(workEntry.questionAnswer)
@@ -5434,15 +5441,24 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
   const lineCounts = fileChangeLineCounts(workEntry.structuredPayload);
   const projectedFileChange =
     workEntry.projectedItem?.item.type === "file_change" ? workEntry.projectedItem.item : null;
+  // A failed edit keeps the inspector: its diffStr holds the provider's error.
+  const inlineDiffRunId =
+    projectedFileChange !== null && projectedFileChange.status !== "failed" && threadRef
+      ? projectedFileChange.runId
+      : null;
   // Expanded edit rows carry Open diff themselves, so the inspector below skips its summary.
   const fileChangeDiff =
     expanded && projectedFileChange !== null ? fileChangeDiffTarget(projectedFileChange) : null;
   // The label truncates and "+N more" hides the rest; the tooltip names every edited file.
-  const changedFilesTooltip =
+  const tooltipPaths =
     workEntry.changedFiles !== undefined && workEntry.changedFiles.length > 0
       ? workEntry.changedFiles
-          .map((path) => formatWorkspaceRelativePath(path, workspaceRoot))
-          .join("\n")
+      : projectedFileChange !== null
+        ? fileChangeTargetPaths(projectedFileChange)
+        : [];
+  const changedFilesTooltip =
+    tooltipPaths.length > 0
+      ? tooltipPaths.map((path) => formatWorkspaceRelativePath(path, workspaceRoot)).join("\n")
       : null;
   const viewedImagePath = workEntryViewedImagePath(workEntry);
   const payload = workEntry.structuredPayload;
@@ -5704,9 +5720,22 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         <QuestionAnswerHistory answer={workEntry.questionAnswer} />
       ) : null}
       {expanded && isReasoning ? <ReasoningTraceContent entries={[workEntry]} /> : null}
+      {expanded && inlineDiffRunId !== null && projectedFileChange !== null && threadRef ? (
+        <WorkLogDetails kind="panel">
+          <FileChangeInlineDiff
+            threadRef={threadRef}
+            runId={inlineDiffRunId}
+            paths={fileChangeTargetPaths(projectedFileChange)}
+            workspaceRoot={workspaceRoot}
+            resolvedTheme={ctx.resolvedTheme}
+            onOpenTurnDiff={ctx.onOpenTurnDiff}
+          />
+        </WorkLogDetails>
+      ) : null}
       {expanded &&
       !isReasoning &&
       !workEntry.questionAnswer &&
+      inlineDiffRunId === null &&
       canExpandProjectedItem &&
       (expandedBody ||
         plainOutputFetches ||

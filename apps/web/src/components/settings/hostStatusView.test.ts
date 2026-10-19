@@ -157,4 +157,52 @@ describe("hostCards", () => {
   it("passes quota through for the usage-limit rows", () => {
     expect(cards[0]?.quotas.map((quota) => quota.instanceId)).toEqual(["codex"]);
   });
+
+  it("warns from the compatibility verdict, never from a different version alone", () => {
+    const [nightly, legacy, broken, oldClient] = hostCards(
+      [
+        {
+          host: "mini",
+          reachability: "ok",
+          serverVersion: "0.1.0-nightly.20261019.195",
+          versionMismatch: true,
+          compatibility: "compatible",
+          message: "should not be shown",
+        },
+        {
+          host: "legacy",
+          reachability: "ok",
+          versionMismatch: true,
+          compatibility: "degraded",
+          message: "legacy runs an older GOAT that does not report its version.",
+        },
+        {
+          host: "ancient",
+          reachability: "ok",
+          serverVersion: "0.0.9",
+          versionMismatch: true,
+          compatibility: "incompatible",
+          message: "They cannot work together. Update GOAT on ancient.",
+        },
+        // A server from before verdicts: version mismatch only, which is not a warning.
+        { host: "prior", reachability: "ok", serverVersion: "0.1.0", versionMismatch: true },
+      ],
+      now,
+      "Studio",
+    );
+    expect(nightly).toMatchObject({
+      tone: "ok",
+      status: "Reachable",
+      message: null,
+      version: "GOAT 0.1.0-nightly.20261019.195",
+    });
+    expect(legacy).toMatchObject({ tone: "stale", status: "Compatibility unknown", version: null });
+    expect(legacy?.message).toContain("does not report its version");
+    expect(broken).toMatchObject({
+      tone: "unavailable",
+      status: "Incompatible",
+      message: "They cannot work together. Update GOAT on ancient.",
+    });
+    expect(oldClient).toMatchObject({ tone: "ok", status: "Reachable", message: null });
+  });
 });

@@ -119,7 +119,11 @@ const make = Effect.gen(function* () {
     for (const inputId of yield* ledger.listPendingInputs(100)) {
       if (yield* startReception(inputId)) started += 1;
     }
-    for (const stored of yield* ledger.listTasksByStatus(["received", "dispatching"])) {
+    // Oldest request first, so work held back by the per-person cap starts in arrival order.
+    const waiting = (yield* ledger.listTasksByStatus(["received", "dispatching"])).toSorted(
+      (left, right) => left.task.createdAt.localeCompare(right.task.createdAt),
+    );
+    for (const stored of waiting) {
       yield* dispatcher.dispatch(stored.task.taskId, owner);
       started += 1;
     }

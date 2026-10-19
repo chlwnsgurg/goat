@@ -31,10 +31,23 @@ names (`t3code.service`, `com.t3tools.t3code.service`) that serves the same home
 new names by a started install or a restart, and put back if the new unit fails to start. A legacy
 unit serving another home belongs to another install and is never touched.
 
+## Updates
+
 Self-update admission and requester attribution live in `cloud/selfUpdate.ts` and
 `maintenance/MaintenanceAudit.ts`. Boot-service activation closes `RuntimeAdmission`
 and requires idle unless explicitly confirmed; its fsynced journal is outside SQLite
 rollback. SSH setup records requests through that same journal service.
+
+Compatibility between two GOAT builds comes from the protocol ranges each serves, never from their
+release strings. `goat_host_status` reports the ranges every machine serves (`protocol`), and the
+machine that fans out judges each reachable remote with `hostCompatibilityOf` in
+`packages/shared/src/sshRuntimeProtocol.ts` (`markHostCompatibility` in
+`apps/server/src/mcp/hostStatusModel.ts`): `compatible` when its ranges include every protocol
+this machine speaks, `incompatible` when they miss one (the message names the side to update), and
+`degraded` when it does not report valid ranges. `versionMismatch` only marks a different build;
+clients warn from `compatibility`.
+
+> Decision record: [ADR-0019](decisions/ADR-0019-update-compatibility.md)
 
 ## Command commit
 
@@ -146,6 +159,9 @@ releases observation without cancelling remote work. Unknown submission outcomes
 must never retry a create operation. See the optional `resumeTurn` contract in
 `packages/provider-core/src/server/ProviderAdapter.ts` and the read-only source service
 in `apps/server/src/orchestration-v2/CloudTaskSourceService.ts`.
+`apps/server/src/cloudAgents/CloudAgentService.ts` routes cloud launches to an environment that
+holds the provider's sign-in and registers runs other agents started; a registered task's first run
+attaches through `resumeTurn` and never submits. See `docs/internals/cloud-credential-holders.md`.
 `docs/internals/providers.md` and `docs/internals/adding-a-provider.md` are the contributor
 procedures. This page is the inventory.
 

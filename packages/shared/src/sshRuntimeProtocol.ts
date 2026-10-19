@@ -89,3 +89,37 @@ export const compareRuntimeProtocols = (
   }
   return verdict;
 };
+
+export type HostCompatibility = "compatible" | "degraded" | "incompatible";
+
+export interface HostCompatibilityVerdict {
+  readonly compatibility: HostCompatibility;
+  /** The side that has to update, or null when neither has to. */
+  readonly update: "host" | "this-machine" | null;
+}
+
+/**
+ * How a reachable host relates to the machine reading it, from the protocol ranges the host
+ * serves. Release strings never enter: two builds of different channels that serve the same
+ * protocols are compatible. A host that does not advertise both ranges, or advertises malformed
+ * ones, answered but cannot show compatibility, so it is `degraded` and the host is the side to
+ * update.
+ */
+export const hostCompatibilityOf = (
+  client: RuntimeProtocolRanges,
+  host: { readonly protocol?: Partial<RuntimeProtocolRanges> | undefined },
+): HostCompatibilityVerdict => {
+  if (host.protocol?.ssh === undefined || host.protocol.orchestration === undefined) {
+    return { compatibility: "degraded", update: "host" };
+  }
+  switch (compareRuntimeProtocols(client, { protocol: host.protocol })) {
+    case "compatible":
+      return { compatibility: "compatible", update: null };
+    case "update-required":
+      return { compatibility: "incompatible", update: "host" };
+    case "client-too-old":
+      return { compatibility: "incompatible", update: "this-machine" };
+    case "unknown":
+      return { compatibility: "degraded", update: "host" };
+  }
+};

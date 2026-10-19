@@ -49,6 +49,22 @@ GOAT Bot screen shows only a chip for the work and its final report.
   in, work you asked for, and, if your link may read GOAT's threads, the rest.
 - With every message GOAT Bot also sees a short journal of the latest work
   you may see: what was asked, how it ended, and its pull requests.
+- Ask GOAT Bot "what's pending?" to see everything still open: queued,
+  running, waiting on you, or finished but not yet reported to you. Say "stop
+  everything" (or name one piece of work) to stop it, including anything it
+  handed to subagents. Work running on another machine stops its current turn
+  there; subagents it started there finish on their own.
+- GOAT Bot runs up to four pieces of your work at once. More wait in order and
+  start as earlier ones finish; the reply says when something is queued.
+- Work counts as waiting on you when the agent working on it, or a subagent it
+  started in GOAT, needs your approval or an answer. Subagents that run on
+  another service are not counted yet.
+- When work on this machine needs an approval, GOAT Bot sends a card saying
+  what the agent wants to do. Tap Approve or Deny in GOAT, or reply "approve"
+  or "deny" in Slack or iMessage. If several approvals are waiting, add the
+  card's code, such as "approve A2". Only people with the same
+  access as whoever asked for the work can answer. Approvals for work on other
+  machines are still answered in that thread in GOAT.
 - Ask GOAT Bot to remember a standing rule ("always reply in Korean") and it
   follows it from then on, in Slack and in GOAT. It keeps a note only when the
   message you send asks for it, and each note names the message it came from.

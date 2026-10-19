@@ -319,6 +319,40 @@ describe("matchRemoteProject", () => {
     expect(matchRemoteProject([root], folder)).toBe(root);
     expect(matchRemoteProject([], folder)).toBeUndefined();
   });
+
+  it.each([
+    "C:\\Users\\super\\Developer\\goat",
+    "c:\\users\\SUPER\\developer\\goat\\",
+    "C:/Users/super/Developer/goat",
+    "/c/Users/super/Developer/goat/",
+    "/cygdrive/c/Users/super/Developer/goat",
+  ])("matches %s on a Git Bash host by either shell form, slash, and case", (workspaceRoot) => {
+    const windows = { id: "windows", workspaceRoot };
+    expect(
+      matchRemoteProject([windows], {
+        path: "C:\\Users\\super\\Developer\\goat",
+        realPath: "C:\\Users\\super\\Developer\\goat",
+        os: "MINGW64_NT-10.0-26200",
+      }),
+    ).toBe(windows);
+  });
+
+  it("keeps drives and sibling folders apart on a Git Bash host", () => {
+    const folder = {
+      path: "C:\\Users\\super\\Developer\\goat",
+      realPath: "C:\\Users\\super\\Developer\\goat",
+      os: "CYGWIN_NT-10.0",
+    };
+    expect(
+      matchRemoteProject(
+        [
+          { id: "d", workspaceRoot: "D:\\Users\\super\\Developer\\goat" },
+          { id: "sibling", workspaceRoot: "C:\\Users\\super\\Developer\\goat-other" },
+        ],
+        folder,
+      ),
+    ).toBeUndefined();
+  });
 });
 
 describe("readRemoteToolResult", () => {
@@ -1151,6 +1185,9 @@ const withLaunchRemote = <A, E>(
     refusal?: boolean;
     projectReply?: unknown;
     broad?: boolean;
+    /** What the browse script prints, in place of a Linux listing of launchInput.cwd. */
+    browseStdout?: string;
+    projects?: ReadonlyArray<{ id: string; workspaceRoot: string }>;
     registrationAccess?: boolean;
     declaresMemoryCeiling?: boolean;
     beforeSessionIssue?: (scopes: ReadonlyArray<string>) => Effect.Effect<void, SshCommandError>;
@@ -1201,7 +1238,9 @@ const withLaunchRemote = <A, E>(
           record.targets.push(target);
           const path = options.broad ? "/home/agent" : launchInput.cwd;
           return {
-            stdout: `T3B\t1\nHOME\t/home/agent\nOS\tLinux\nPATH\t${path}\nREAL\t${path}\nGITROOT\t${path}\n`,
+            stdout:
+              options.browseStdout ??
+              `T3B\t1\nHOME\t/home/agent\nOS\tLinux\nPATH\t${path}\nREAL\t${path}\nGITROOT\t${path}\n`,
             stderr: "",
           };
         }),
@@ -1285,9 +1324,9 @@ const withLaunchRemote = <A, E>(
           const value =
             name === "goat_project_list"
               ? {
-                  projects: options.existing
-                    ? [{ id: "existing", workspaceRoot: launchInput.cwd }]
-                    : [],
+                  projects:
+                    options.projects ??
+                    (options.existing ? [{ id: "existing", workspaceRoot: launchInput.cwd }] : []),
                   nextCursor: null,
                 }
               : name === "goat_project_create"
@@ -1437,6 +1476,68 @@ it.effect("scripts reach new remote project creation", () =>
     }),
   ),
 );
+
+const gitBashBrowse = [
+  "T3B\t1",
+  "HOME\t/c/Users/super",
+  "OS\tMINGW64_NT-10.0-26200",
+  "PATH\t/c/Users/super/Developer/goat",
+  "REAL\t/c/Users/super/Developer/goat",
+  "GITROOT\tC:/Users/super/Developer/goat",
+  "BRANCH\tdev",
+  "",
+].join("\n");
+it.effect("a Git Bash host gets its new project and worktree paths in native Windows form", () =>
+  withLaunchRemote({ browseStdout: gitBashBrowse }, (record) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const result = yield* dispatch.launchThread(
+        {
+          ...launchInput,
+          cwd: "/c/Users/super/Developer/goat",
+          workspace: {
+            type: "existing_worktree",
+            worktreePath: "/c/Users/super/.goat/worktrees/goat/x/",
+          },
+        },
+        Effect.void,
+      );
+      expect(record.tools.find((call) => call.name === "goat_project_create")?.args).toMatchObject({
+        title: "goat",
+        workspaceRoot: "C:\\Users\\super\\Developer\\goat",
+      });
+      expect(
+        record.tools.find((call) => call.name === "goat_thread_launch")?.args.workspaceStrategy,
+      ).toEqual({
+        type: "existing_worktree",
+        worktreePath: "C:\\Users\\super\\.goat\\worktrees\\goat\\x",
+      });
+      expect(result.cwd).toBe("C:\\Users\\super\\Developer\\goat");
+    }),
+  ),
+);
+it.effect("a Git Bash host reuses its project stored in Windows form", () =>
+  withLaunchRemote(
+    {
+      browseStdout: gitBashBrowse,
+      projects: [{ id: "windows", workspaceRoot: "c:\\users\\Super\\Developer\\goat\\" }],
+    },
+    (record) =>
+      Effect.gen(function* () {
+        const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+        const result = yield* dispatch.launchThread(
+          { ...launchInput, cwd: "C:\\Users\\super\\Developer\\goat" },
+          Effect.void,
+        );
+        expect(result.projectId).toBe("windows");
+        expect(record.tools.map((call) => call.name)).toEqual([
+          "goat_project_list",
+          "goat_thread_launch",
+        ]);
+      }),
+  ),
+);
+
 it.effect("existing remote project retains scripts", () =>
   withLaunchRemote({ existing: true }, (record) =>
     Effect.gen(function* () {
@@ -3802,7 +3903,7 @@ describe("SSH launcher transport", () => {
       }
       if (result._tag === "Success")
         expect(result.success.notes).toContain(
-          `GOAT on box runs 0.0.1-older; this machine runs ${packageJson.version}. Tools and launch options can differ between them; update GOAT on the older machine if this thread misbehaves.`,
+          `GOAT on box runs 0.0.1-older; this machine runs ${packageJson.version}. Both speak the same protocols, but a tool or launch option added in the newer build can be missing on the older one.`,
         );
       expect(creates).toBe(scenario.success || scenario.name === "ambiguous" ? 1 : 0);
     }),

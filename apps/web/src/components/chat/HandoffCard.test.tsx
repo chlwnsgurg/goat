@@ -53,6 +53,33 @@ vi.mock("../../state/server", async () => {
   };
 });
 vi.mock("../../state/session", () => ({ useEnvironmentScope: () => harness.scopeAllowed }));
+vi.mock("../../state/environments", () => ({ useEnvironment: () => ({ label: "VPS" }) }));
+// The add-provider wizard talks to the environment; this stand-in reports how setup ended.
+vi.mock("../settings/AddProviderInstanceDialog", () => ({
+  AddProviderInstanceDialog: (props: {
+    environmentId: string;
+    initialDriver?: string;
+    initialInstanceId?: string;
+    onOpenChange: (open: boolean) => void;
+    onFinished?: (result: { instanceId: string; signedIn: boolean }) => void;
+  }) => (
+    <div role="dialog">
+      {`setup ${props.environmentId} ${props.initialInstanceId ?? "-"} ${props.initialDriver ?? "-"}`}
+      {[true, false].map((signedIn) => (
+        <button
+          key={String(signedIn)}
+          type="button"
+          onClick={() => {
+            props.onFinished?.({ instanceId: "claudeAgent", signedIn });
+            props.onOpenChange(false);
+          }}
+        >
+          {signedIn ? "Finish signed in" : "Skip sign-in"}
+        </button>
+      ))}
+    </div>
+  ),
+}));
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: { label: string }) =>
     command.label === "openHandoff"
@@ -511,4 +538,66 @@ describe("OpenCodex Home approval", () => {
       expect(harness.refresh).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("provider setup request", () => {
+  const request = {
+    ...handoff,
+    kind: "approval" as const,
+    title: "Set up Claude",
+    state: "pending" as const,
+    target: { environmentId: EnvironmentId.make("vps"), path: "provider.setup" },
+  };
+  const completed = {
+    environmentId,
+    input: {
+      threadId: handoff.requestedBy.threadId,
+      handoffId: handoff.handoffId,
+      action: "completed",
+    },
+  };
+  const openSetup = async () => {
+    harness.open.mockResolvedValue({
+      _tag: "Success",
+      value: {
+        human: {
+          location: "Sign in to Claude on vps",
+          providerSetup: { instanceId: "claudeAgent" },
+        },
+      },
+    });
+    await render(request);
+    await click("Review request");
+    await click("Open setup");
+    await vi.waitFor(() => expect(container.querySelector('[role="dialog"]')).not.toBeNull());
+  };
+
+  it("opens the add-provider popup on the requested instance and completes once signed in", async () => {
+    await openSetup();
+    expect(container.querySelector('[role="dialog"]')?.textContent).toContain(
+      "setup vps claudeAgent -",
+    );
+
+    await click("Finish signed in");
+    expect(harness.respond).toHaveBeenCalledWith(completed);
+  });
+
+  it("leaves the request open when setup ends without a sign-in", async () => {
+    await openSetup();
+    await click("Skip sign-in");
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(harness.respond).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Decline");
+  });
+
+  it("needs permission to manage providers on the target", async () => {
+    await act(async () => harness.manage(registry, false));
+    await render(request);
+
+    const review = [...container.querySelectorAll("button")].find(
+      (node) => node.textContent === "Review request",
+    );
+    expect(review?.disabled).toBe(true);
+  });
 });

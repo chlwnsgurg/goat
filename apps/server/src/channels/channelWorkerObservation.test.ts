@@ -2,18 +2,26 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   type ChannelTaskNeedsYou,
   type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2Subagent,
   ProviderThreadId,
   RunId,
+  RuntimeRequestId,
+  ThreadId,
   ThreadPullRequestLink,
 } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
   completionHoldCount,
+  newApprovals,
   needsYouFromRuntimeRequests,
   observesUsageLimit,
   pullRequestsFromLinks,
+  SUBAGENT_DEPTH,
+  SUBAGENT_THREADS,
+  subagentRequests,
   usageLimitWait,
 } from "./channelWorkerObservation.ts";
 
@@ -49,7 +57,12 @@ const request = (
   kind: OrchestrationV2RuntimeRequest["kind"],
   status: OrchestrationV2RuntimeRequest["status"] = "pending",
   at = "2026-10-17T09:30:00.000Z",
-) => ({ kind, status, createdAt: DateTime.makeUnsafe(at) });
+) => ({
+  id: RuntimeRequestId.make("request:" + kind + ":" + status + ":" + at),
+  kind,
+  status,
+  createdAt: DateTime.makeUnsafe(at),
+});
 
 const completedRun = { id: RunId.make("run-1"), ordinal: 1, status: "completed" as const };
 
@@ -69,6 +82,25 @@ describe("needsYouFromRuntimeRequests", () => {
         { kind: "approval", since: "2026-10-17T09:31:00.000Z" },
       ],
     );
+  });
+
+  it("names the request and thread of an approval only when asked to", () => {
+    const worker = ThreadId.make("thread:worker");
+    const pending = request("command");
+    const named = needsYouFromRuntimeRequests([pending, request("user_input")], () => worker);
+    assert.deepStrictEqual(named, [
+      {
+        kind: "approval",
+        since: "2026-10-17T09:30:00.000Z",
+        approval: { requestId: pending.id, threadId: worker },
+      },
+      { kind: "question", since: "2026-10-17T09:30:00.000Z" },
+    ]);
+    // Only approvals not listed before get a card.
+    const later = request("file-change", "pending", "2026-10-17T09:40:00.000Z");
+    const next = needsYouFromRuntimeRequests([pending, later], () => worker);
+    assert.deepStrictEqual(newApprovals(named, next), [{ requestId: later.id, threadId: worker }]);
+    assert.deepStrictEqual(newApprovals(next, next), []);
   });
 });
 
@@ -199,4 +231,74 @@ describe("usageLimitWait", () => {
     );
     assert.isFalse(observesUsageLimit(undefined));
   });
+});
+
+describe("subagentRequests", () => {
+  const request = (id: string) =>
+    ({ id, kind: "command", status: "pending", createdAt: NOW }) as never;
+  const child = (
+    childThreadId: string | null,
+    status: OrchestrationV2Subagent["status"] = "running",
+    extra: Partial<OrchestrationV2Subagent> = {},
+  ) =>
+    ({
+      childThreadId,
+      status,
+      origin: "app_owned",
+      ...extra,
+    }) as unknown as OrchestrationV2Subagent;
+
+  it.effect("reads each live local child once, skipping remote, promoted and ended ones", () =>
+    Effect.gen(function* () {
+      const reads: Array<string> = [];
+      const tree: Record<
+        string,
+        { runtimeRequests: never[]; subagents: OrchestrationV2Subagent[] }
+      > = {
+        a: { runtimeRequests: [request("a")], subagents: [child("b"), child("a")] },
+        b: { runtimeRequests: [request("b")], subagents: [] },
+      };
+      const found = yield* subagentRequests(
+        [
+          child("a"),
+          child("a"),
+          child(null, "running", { remote: { host: "mini" } as never }),
+          child("promoted", "running", { promotedAt: NOW }),
+          child("done", "completed"),
+        ],
+        (threadId) =>
+          Effect.sync(() => {
+            reads.push(threadId);
+            return tree[threadId]!;
+          }),
+      );
+      assert.deepStrictEqual(reads, ["a", "b"]);
+      assert.deepStrictEqual(
+        found.map((item) => (item as unknown as { id: string }).id),
+        ["a", "b"],
+      );
+    }),
+  );
+
+  it.effect("stops at the depth and thread limits", () =>
+    Effect.gen(function* () {
+      const reads: Array<string> = [];
+      const wide = Array.from({ length: SUBAGENT_THREADS + 5 }, (_, index) => child("t" + index));
+      yield* subagentRequests(wide, (threadId) =>
+        Effect.sync(() => {
+          reads.push(threadId);
+          return { runtimeRequests: [], subagents: [child(threadId + "-deeper")] };
+        }),
+      );
+      assert.strictEqual(reads.length, SUBAGENT_THREADS);
+      const deep: Array<string> = [];
+      yield* subagentRequests([child("d0")], (threadId) =>
+        Effect.sync(() => {
+          deep.push(threadId);
+          return { runtimeRequests: [], subagents: [child(threadId + "x")] };
+        }),
+      );
+      assert.strictEqual(deep.length, SUBAGENT_DEPTH);
+    }),
+  );
 });

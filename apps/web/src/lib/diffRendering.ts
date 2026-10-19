@@ -211,6 +211,58 @@ export function resolveFileDiffPreviousPath(fileDiff: FileDiffMetadata): string 
   return fileDiff.prevName ?? fileDiff.name ?? "";
 }
 
+function normalizeDiffPath(path: string): string {
+  return path
+    .replaceAll("\\", "/")
+    .replace(/^\.\/+/, "")
+    .replace(/\/+$/, "");
+}
+
+function isAbsoluteDiffPath(path: string): boolean {
+  return path.startsWith("/") || /^[A-Za-z]:\//.test(path);
+}
+
+/**
+ * The patch file a provider-reported path names. Providers report absolute paths on the host
+ * that ran the edit, while checkpoint patches are repository-relative. Inside the thread's
+ * workspace the path is compared relative to it, so a reverted `src/index.ts` cannot pick a
+ * changed root `index.ts`; the patch may still carry a prefix when the workspace is a
+ * subdirectory of its repository. Outside it, the longest patch path the target ends with wins.
+ */
+export function findPatchFile<T extends FileDiffMetadata>(
+  files: ReadonlyArray<T>,
+  targetPath: string,
+  workspaceRoot?: string | undefined,
+): T | null {
+  const target = normalizeDiffPath(targetPath);
+  const root = workspaceRoot ? normalizeDiffPath(workspaceRoot) : null;
+  const relative =
+    root !== null && target.startsWith(`${root}/`)
+      ? target.slice(root.length + 1)
+      : isAbsoluteDiffPath(target)
+        ? null
+        : target;
+  const matches = (candidate: string) =>
+    candidate.length > 0 &&
+    (relative !== null
+      ? candidate === relative || candidate.endsWith(`/${relative}`)
+      : target === candidate || target.endsWith(`/${candidate}`));
+  let best: T | null = null;
+  let bestLength = -1;
+  for (const file of files) {
+    for (const path of [resolveFileDiffPath(file), resolveFileDiffPreviousPath(file)]) {
+      const candidate = normalizeDiffPath(path);
+      // A relative match prefers the shortest prefix; a suffix match the longest patch path.
+      const length = relative !== null ? -candidate.length : candidate.length;
+      if ((best === null || length > bestLength) && matches(candidate)) {
+        best = file;
+        bestLength = length;
+      }
+    }
+  }
+  return best;
+}
+
 /**
  * A type change (regular file to symlink) arrives as a deletion and an addition
  * of the same path, so the change type is part of the identity.

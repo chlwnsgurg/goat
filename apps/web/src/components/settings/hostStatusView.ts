@@ -19,8 +19,13 @@ export interface HostCardView {
   readonly local: boolean;
   readonly label: string;
   readonly platform: string | null;
+  /** `GOAT <version>`, or null when the host does not report one. */
+  readonly version: string | null;
   readonly tone: "ok" | "stale" | "unavailable";
-  /** `Reachable`, `Last known 4m ago`, `Unreachable`, or `Update GOAT to report status`. */
+  /**
+   * `Reachable`, `Incompatible`, `Compatibility unknown`, `Last known 4m ago`, `Unreachable`,
+   * or `Update GOAT to report status`.
+   */
   readonly status: string;
   readonly message: string | null;
   /** Null when the host sent no sample at all: unsupported, or unreachable before its first answer. */
@@ -85,7 +90,14 @@ function statusOf(entry: HostStatusEntry, now: number): Pick<HostCardView, "tone
   if (entry.reachability === "unsupported") {
     return { tone: "unavailable", status: "Update GOAT to report status" };
   }
-  if (entry.reachability === "ok") return { tone: "ok", status: "Reachable" };
+  if (entry.reachability === "ok") {
+    // A different version alone is fine; only the protocol verdict warns.
+    if (entry.compatibility === "incompatible")
+      return { tone: "unavailable", status: "Incompatible" };
+    if (entry.compatibility === "degraded")
+      return { tone: "stale", status: "Compatibility unknown" };
+    return { tone: "ok", status: "Reachable" };
+  }
   if (entry.lastKnown === true && entry.metrics !== undefined) {
     const age = formatElapsedDurationLabel(new Date(entry.metrics.sampledAt).toISOString(), now);
     return {
@@ -109,8 +121,14 @@ export function hostCards(
       local: entry.host === null,
       label: entry.host ?? localLabel,
       platform: platformLabel(metrics?.platform),
+      version: entry.serverVersion === undefined ? null : `GOAT ${entry.serverVersion}`,
       ...statusOf(entry, now),
-      message: entry.reachability === "ok" ? null : (entry.message ?? null),
+      message:
+        entry.reachability !== "ok" ||
+        entry.compatibility === "incompatible" ||
+        entry.compatibility === "degraded"
+          ? (entry.message ?? null)
+          : null,
       meters: metrics === undefined ? null : hostMeters(metrics),
       loadAverage: metrics === undefined ? null : formatLoadAverage(metrics.loadAvg),
       threads: metrics?.threads ?? null,

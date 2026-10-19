@@ -85,6 +85,72 @@ the running turn and give the bot thread runs it was built never to have.
   the path answers to worker questions already take. Other conversations, and messages the bot
   answers directly, never wait on running work.
 
+## Work items, worker runs, and stopping
+
+A worker blocked on a person counts the same whether it or one of its subagents asked. Worker
+reconciliation reads the pending requests of the live subagents a worker started, and of theirs,
+up to three levels and twenty threads, and adds them to the task's `observed.needsYou`, so the
+chip, the waiting count and "what's pending" show a subagent's approval as the work waiting on
+the person. Subagents with no GOAT child thread (cloud or other remote children) are not read;
+see issue #475.
+
+A local approval also names its request and thread (`needsYou[].approval`), and the observation
+that first lists it narrates one approve/deny card to the work's origin conversation, keyed by the
+request id so a later pass never sends it twice. The open cards are exactly the approvals the
+task's observation lists, so an approval answered in its thread disappears on the next pass with
+no card state to clean up. A reply that starts with an approve or deny word (English or Korean,
+short messages only) is matched to a card before the reception model runs: an approval must not
+depend on how a model read a message. A bare word answers the only open card; with several open
+it asks which. Otherwise only the card's code picks one, never words from a task title: "approve
+the PR" must not approve whatever command that task waits on. The ledger issues codes per
+conversation in order (`A1`, `A2`, …, in `channel_runtime_state`) and never reuses one, so a
+code, and an old card's button, names one request for good; a hash would let a stale button
+collide with a newer request. A code whose request is no longer open says it was already
+answered. Open cards come from every running task in the conversation that needs a person, past
+the recent-task window reception otherwise reads. The answer is a
+`runtime-request.respond` with a command id derived from the input, so a reception rerun after a
+restart cannot answer twice, from a `client` responder naming the person and channel for the
+thread's audit. The person must pass `mayAnswerFor` against the work's requester as their link
+stands now. MCP requesters get no cards, since agents never answer approvals, and approvals on
+other machines are not carried in their reports yet (#475).
+
+A task is a work item: what a person asked for. Its worker runs are separate records, one per
+run of the task's worker thread, kept as `worker-run:<task>:<run>` rows in
+`channel_runtime_state` (a `ChannelWorkerRun`) rather than a new table, so no migration
+competes with other work for an id. Worker reconciliation writes a run's row when its state
+changes: running, waiting (on a person), finished, failed or stopped. A run finishing never
+finishes its item. The item's state comes from the task and from its newest outcome delivery to
+where the work came from (`channelWorkQueue.ts`): finished work stays open as "result not sent
+yet" or "result not delivered" until that delivery is recorded delivered. Workers on other
+machines report through their host, so their runs are not recorded here.
+
+- **What's pending.** A `pending` read lists the open items the requester may see, newest
+  first, with their runs, open questions and age; every open task is read, however old,
+  including finished ones whose outcome has not reached the person. An item's
+  outcome delivery is the narration of its newest terminal event, so a retried task is not
+  closed by its earlier delivery. Runs still recorded as running after their item ended keep being
+  reconciled until they end, and a task that ended within the last hour has its thread's runs
+  read into history even if none were recorded while it ran.
+- **At most four at once.** The dispatcher leaves a person's fifth item received while four of
+  their items hold a worker: dispatching, running, or waiting on them with a worker. Stopped items
+  keep their slot until their stop has gone through. Questions asked before any worker exists
+  hold none. Remote dispatches handed off but not yet claimed are
+  reserved in the dispatcher so they count too. The runtime dispatches received tasks oldest
+  first by creation, so the queue drains in arrival order as items end. The reply to the queued request and "what's
+  pending" both say it is waiting for a free worker.
+- **Stopping.** `stop_work` (one task, or everything the person may stop) records a
+  `task.cancelled` per item in the same commit as the reply, with its narration and a pending
+  forward. The forward sends the worker thread a `thread.stop`, which ends its run and holds anything
+  queued behind it, then stops the subagents it started, with ids derived from the stop event, so
+  a crash after the reply still stops each once. A refused stop is tried once more under ids keyed by
+  the run still alive, since a refused command id is refused for good, and counts as done only
+  when nothing is left running there. A launch in flight when the stop came lands on the thread id the task's
+  generation derives, so the forward waits up to two minutes for that thread and stops it. Work
+  never claimed for a launch is stopped by the ledger write alone. A worker on another machine is
+  interrupted there through `goat_thread_interrupt`, found through its report binding when its
+  launch was still in flight; its async subagents run on until they end,
+  since GOAT has no remote thread stop.
+
 An owner has one bot, in the Scratch project, and one bot conversation keyed by the owner rather
 than the thread. Where Scratch is off because the data directory is inside a Git work tree, the bot
 gets a project of its own under the data directory instead: the bot never runs a provider or
