@@ -70,7 +70,9 @@ function HostCard({
     <EnvironmentRow
       kind={kind}
       label={card.label}
-      subtitle={card.platform ?? "Platform not reported"}
+      subtitle={[card.platform ?? "Platform not reported", card.version]
+        .filter((part) => part !== null)
+        .join(" · ")}
       detail={
         <div className="flex flex-col gap-3 text-xs empty:hidden">
           {card.message ? (

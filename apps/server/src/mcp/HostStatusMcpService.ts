@@ -1,11 +1,16 @@
 import {
   GoatHostStatusResult,
+  ORCHESTRATION_PROTOCOL_VERSION,
   OrchestratorMcpFailure,
   type EnvironmentId,
   type GoatHostStatusInput,
   type HostStatusEntry,
 } from "@goat/contracts";
 import * as HostProcess from "@goat/shared/HostProcess";
+import {
+  ownRuntimeProtocolRanges,
+  servedRuntimeProtocolRanges,
+} from "@goat/shared/sshRuntimeProtocol";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -25,7 +30,7 @@ import {
   HOST_STATUS_QUOTA_REFRESH_INTERVAL_MS,
   hostStatusQuotas,
   isUnsupportedHostStatusMessage,
-  markVersionMismatch,
+  markHostCompatibility,
   quotaRefreshDue,
   tagRemoteHostStatus,
   unreachableHostStatus,
@@ -39,6 +44,12 @@ import {
 export const HOST_STATUS_REMOTE_TIMEOUT_MS = 10_000;
 
 const decodeStatus = Schema.decodeUnknownEffect(GoatHostStatusResult);
+
+/** This machine reads every host as a client, so it compares the protocols it speaks. */
+const LOCAL_COMPATIBILITY = {
+  version: packageJson.version,
+  speaks: ownRuntimeProtocolRanges(ORCHESTRATION_PROTOCOL_VERSION),
+};
 
 const failure = (code: OrchestratorMcpFailure["code"], message: string) =>
   new OrchestratorMcpFailure({ code, message });
@@ -129,6 +140,7 @@ const make = Effect.gen(function* () {
       host: null,
       reachability: "ok" as const,
       serverVersion: packageJson.version,
+      protocol: servedRuntimeProtocolRanges(),
       metrics: {
         ...snapshot,
         platform,
@@ -190,7 +202,7 @@ const make = Effect.gen(function* () {
       if (input.host !== undefined)
         return {
           hosts: [
-            markVersionMismatch(yield* readRemote(scope, input.host, true), packageJson.version),
+            markHostCompatibility(yield* readRemote(scope, input.host, true), LOCAL_COMPATIBILITY),
           ],
         };
       const aliases = [...(yield* dispatch.connectedHosts)].toSorted();
@@ -202,7 +214,7 @@ const make = Effect.gen(function* () {
         { concurrency: "unbounded" },
       );
       return {
-        hosts: [local, ...remote.map((entry) => markVersionMismatch(entry, packageJson.version))],
+        hosts: [local, ...remote.map((entry) => markHostCompatibility(entry, LOCAL_COMPATIBILITY))],
       };
     },
   );

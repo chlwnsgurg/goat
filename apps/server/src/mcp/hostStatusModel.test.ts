@@ -1,4 +1,4 @@
-import { expect, it } from "@effect/vitest";
+import { describe, expect, it } from "@effect/vitest";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
@@ -8,7 +8,10 @@ import {
   type ServerProvider,
   type ServerProviderUsageLimits,
 } from "@goat/contracts";
+import { GoatHostStatusResult, type RuntimeProtocolRanges } from "@goat/contracts";
+import { ownRuntimeProtocolRanges } from "@goat/shared/sshRuntimeProtocol";
 import * as DateTime from "effect/DateTime";
+import * as Schema from "effect/Schema";
 
 import { liveThreadShell } from "./McpToolAccess.testkit.ts";
 import {
@@ -17,6 +20,7 @@ import {
   countHostThreads,
   hostStatusQuotas,
   isUnsupportedHostStatusMessage,
+  markHostCompatibility,
   quotaRefreshDue,
   tagRemoteHostStatus,
   unreachableHostStatus,
@@ -198,4 +202,114 @@ it("refreshes stale quota and skips accounts that cannot report it", () => {
       fromCache: false,
     },
   ]);
+});
+
+describe("markHostCompatibility", () => {
+  const speaks = ownRuntimeProtocolRanges(1001);
+  const VERSIONS = {
+    stable: "0.1.0",
+    nightly: "0.1.0-nightly.20261019.195",
+    preview: "0.1.0-preview.20261019.3",
+    dev: "0.1.0-dev.1792420473.g7b523f265",
+    pr: "0.1.0-pr.456.12",
+  } as const;
+  const PROTOCOLS = {
+    same: speaks,
+    newerRange: {
+      ssh: { min: 1001, max: 1002 },
+      orchestration: { min: 1001, max: 1004 },
+    },
+    tooOld: { ssh: speaks.ssh, orchestration: { min: 1, max: 1000 } },
+    tooNew: { ssh: speaks.ssh, orchestration: { min: 1002, max: 1002 } },
+    unreported: undefined,
+  } as const;
+  const EXPECTED = {
+    same: "compatible",
+    newerRange: "compatible",
+    tooOld: "incompatible",
+    tooNew: "incompatible",
+    unreported: "degraded",
+  } as const;
+
+  // Every pairing of local and remote build strings gets the verdict its protocols give.
+  const matrix = Object.entries(VERSIONS).flatMap(([localName, localVersion]) =>
+    Object.entries(VERSIONS).flatMap(([remoteName, remoteVersion]) =>
+      Object.keys(PROTOCOLS).map((protocolName) => ({
+        name: `${localName} here, ${remoteName} there, ${protocolName} protocols`,
+        localVersion,
+        remoteVersion,
+        key: protocolName as keyof typeof PROTOCOLS,
+      })),
+    ),
+  );
+  it.each(matrix)("$name", ({ localVersion, remoteVersion, key }) => {
+    const protocol = PROTOCOLS[key];
+    const marked = markHostCompatibility(
+      {
+        host: "box",
+        reachability: "ok",
+        serverVersion: remoteVersion,
+        ...(protocol === undefined ? {} : { protocol }),
+      },
+      { version: localVersion, speaks },
+    );
+    expect(marked.compatibility).toBe(EXPECTED[key]);
+    expect(marked.versionMismatch).toBe(localVersion === remoteVersion ? undefined : true);
+    expect(marked.message === undefined).toBe(EXPECTED[key] === "compatible");
+  });
+
+  it("names the side to update", () => {
+    const local = { version: VERSIONS.dev, speaks };
+    const host = (protocol: RuntimeProtocolRanges) =>
+      markHostCompatibility(
+        { host: "mini", reachability: "ok", serverVersion: VERSIONS.nightly, protocol },
+        local,
+      ).message;
+    expect(host(PROTOCOLS.tooOld)).toMatch(/Update GOAT on mini\.$/);
+    expect(host(PROTOCOLS.tooNew)).toMatch(/Update GOAT on this machine\.$/);
+  });
+
+  it("leaves this machine, unreachable, and unsupported hosts alone", () => {
+    const local = { version: VERSIONS.stable, speaks };
+    const self = { host: null, reachability: "ok" as const, serverVersion: "9.9.9" };
+    expect(markHostCompatibility(self, local)).toBe(self);
+    const away = unreachableHostStatus("box", "timed out", undefined);
+    expect(markHostCompatibility(away, local)).toBe(away);
+    const old = unsupportedHostStatus("box");
+    expect(markHostCompatibility(old, local)).toBe(old);
+  });
+});
+
+describe("older host-status payloads", () => {
+  const decode = Schema.decodeUnknownSync(GoatHostStatusResult);
+
+  it("decodes an answer from a host that predates versions and protocols", () => {
+    expect(
+      decode({ hosts: [{ host: "box", reachability: "ok", versionMismatch: true }] }).hosts[0],
+    ).toEqual({ host: "box", reachability: "ok", versionMismatch: true });
+  });
+
+  it("decodes the shape the previous release sent, message included", () => {
+    const entry = decode({
+      hosts: [
+        {
+          host: "mini",
+          reachability: "ok",
+          serverVersion: "0.1.0-nightly.20261019.195",
+          versionMismatch: true,
+          message: "mini runs GOAT 0.1.0-nightly.20261019.195; this machine runs GOAT 0.1.0.",
+        },
+      ],
+    }).hosts[0];
+    expect(entry?.compatibility).toBeUndefined();
+    expect(entry?.protocol).toBeUndefined();
+    expect(entry?.versionMismatch).toBe(true);
+  });
+
+  it("drops a verdict this build does not know instead of failing the answer", () => {
+    const entry = decode({
+      hosts: [{ host: "box", reachability: "ok", compatibility: "partially-compatible" }],
+    }).hosts[0];
+    expect(entry).toEqual({ host: "box", reachability: "ok" });
+  });
 });

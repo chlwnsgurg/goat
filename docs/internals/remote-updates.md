@@ -109,6 +109,10 @@ Precedents that shaped specific rules:
   calendar. Raising the minimum is a deliberate breaking release.
 - The SSH helper protocol uses the same comparator
   (`compareRuntimeProtocols`); clients compare with their own single protocol.
+- Host status (`goat_host_status`, Settings > Hosts) shows the same verdict as a
+  `compatibility` of `compatible`, `incompatible` or `degraded` (the host does not
+  report its ranges). Two builds that serve the same protocols show no warning,
+  whatever their versions or channels.
 - Inside a compatible range, features are gated individually by
   `capabilities`. A missing capability disables that action only.
 - Verdicts map to one state each:
