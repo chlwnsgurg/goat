@@ -214,6 +214,11 @@ export interface PreparedRemoteRuntime {
   readonly reconnectProbe?: string;
   readonly reconnectPending?: SshRuntimePendingReplacement;
   readonly hostPlatform?: "darwin" | "linux" | "win32";
+  /**
+   * Set for a published fallback chosen because the host had no GOAT data. Launch refuses to
+   * start it if data appeared meanwhile, since that data may come from a newer build.
+   */
+  readonly requireFreshHost?: boolean;
 }
 const requestedRuntime = (runner: RemoteGoatRunnerOptions | undefined): PreparedRemoteRuntime => ({
   runner: { ...runner },
@@ -2259,6 +2264,13 @@ elif [ "$LIVE_STATUS" = live ]; then
   publish_selected_runner
   reuse_live_server
 else
+  if [ "@@GOAT_REQUIRE_FRESH_HOST@@" = 1 ]; then
+    for fresh_db in "$DEFAULT_SERVER_HOME/userdata/statev2.sqlite" "$DEFAULT_SERVER_HOME/userdata/state.sqlite"; do
+      if [ -e "$fresh_db" ] || [ -L "$fresh_db" ]; then
+        printf 'GOAT data appeared on this host while it was being set up; reconnect.\\n' >&2; exit 1
+      fi
+    done
+  fi
   publish_selected_runner
 fi
 LAUNCH_ATTEMPTS=0
@@ -2648,6 +2660,7 @@ export function buildRemoteLaunchScript(
     GOAT_READY_TIMEOUT_MS: String(REMOTE_READY_TIMEOUT_MS),
     GOAT_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
     GOAT_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
+    GOAT_REQUIRE_FRESH_HOST: selection.requireFreshHost === true ? "1" : "0",
   });
 }
 
@@ -3139,7 +3152,7 @@ const runtimePreparationError = (cause: unknown) =>
       });
 
 /** A failure to read or fetch the archive itself: supplying another archive is the remedy. */
-const archiveSupplyError = (cause: unknown) => {
+const archiveSupplyError = (cause: unknown, action?: string) => {
   const error = runtimePreparationError(cause);
   return error instanceof SshLaunchError && error.reason === undefined
     ? new SshLaunchError({
@@ -3147,6 +3160,7 @@ const archiveSupplyError = (cause: unknown) => {
         message: error.message,
         stdout: error.stdout,
         ...(error.acquisition === undefined ? {} : { acquisition: error.acquisition }),
+        ...(action === undefined ? {} : { action }),
         cause: error.cause,
       })
     : error;
@@ -3469,12 +3483,21 @@ export const prepareRemoteRuntime = (
             : yield* source(
                 "bundle",
                 readLocalRuntimeArchive(bundleDirectory, version, platformKey, true),
-              ).pipe(Effect.mapError(archiveSupplyError));
+              ).pipe(
+                Effect.mapError((cause) =>
+                  archiveSupplyError(cause, "Reinstall this app, then reconnect."),
+                ),
+              );
         const localArchive =
           bundledArchive !== null || directory === ""
             ? null
             : yield* source("cache", readLocalRuntimeArchive(directory, version, platformKey)).pipe(
-                Effect.mapError(archiveSupplyError),
+                Effect.mapError((cause) =>
+                  archiveSupplyError(
+                    cause,
+                    `Remove ${cliArchiveFileName(version, platformKey)} from ${directory}, then reconnect.`,
+                  ),
+                ),
               );
         if (bundledArchive === null && localArchive === null && mirror !== "") {
           sourcesTried.push("mirror");
@@ -3491,6 +3514,7 @@ export const prepareRemoteRuntime = (
               reason: "archive-unavailable",
               message: `Cannot acquire ${cliArchiveFileName(version, platformKey)} for ${target.alias}: no writable user archive cache distinct from the bundle (${directory || "<not configured>"}). Configure archiveDirectory for ${CLI_RELEASE_REPOSITORY} release v${version} or rebuild the packaged archives.`,
               stdout: "",
+              action: "Reinstall this app, then reconnect.",
             });
           }
         }
@@ -3747,7 +3771,7 @@ export const prepareRemoteRuntime = (
           ),
         );
       return Effect.gen(function* () {
-        const gate = (mode: "fresh" | "capable", candidate = "") =>
+        const gate = (mode: "fresh" | "capable" | "discard", candidate = "") =>
           runSshCommand(target, {
             ...authOptions,
             remoteCommandArgs: ["sh", "-s", "--", mode, candidate],
@@ -3765,6 +3789,7 @@ export const prepareRemoteRuntime = (
         const search = yield* findPublishedRuntime({
           platformKey: key,
           requestedVersion: version,
+          exclude: rejectedPublishedRuntimes.get(publishedRejectionKey(target)) ?? new Set(),
         }).pipe(
           Effect.catchCause((cause) =>
             Effect.succeed({ miss: "unreachable" as const, rejected: [Cause.pretty(cause)] }),
@@ -3813,17 +3838,26 @@ export const prepareRemoteRuntime = (
         );
         const order =
           installed === undefined ? undefined : compareRuntimeBuilds(installed, requestedBuild);
+        const quiet = after.liveStatus !== "live" && after.liveStatus !== "unknown";
         if (
           installed === undefined ||
           order === undefined ||
-          after.liveStatus === "live" ||
-          after.liveStatus === "unknown" ||
+          !quiet ||
           !(yield* gate("capable", published.version))
-        )
+        ) {
+          // Left installed, a rejected runtime would be picked up by installed-runtime recovery on
+          // the next connection, and offered again by the search. Remove it and remember it.
+          const hostKey = publishedRejectionKey(target);
+          rejectedPublishedRuntimes.set(
+            hostKey,
+            new Set([...(rejectedPublishedRuntimes.get(hostKey) ?? []), published.version]),
+          );
+          if (quiet) yield* gate("discard", published.version);
           return yield* giveUp(
             "none",
             `GOAT ${published.version} was installed but cannot serve this app (protocol, build order or capability).`,
           );
+        }
         const selected = yield* selectInstalled(published.version, after);
         // Older than this app: say so and keep retrying the requested build. Newer: nothing to wait for.
         const failure = order < 0 ? archiveFailure(requestedError) : undefined;
@@ -3831,6 +3865,7 @@ export const prepareRemoteRuntime = (
           ...selected,
           mayUpgradeOwnedServer: false,
           refreshIfIdle: false,
+          requireFreshHost: true,
           ...(failure === undefined
             ? {}
             : {
@@ -3900,9 +3935,27 @@ case "$1" in
     exe="$HOME/.goat/runtime/goat/versions/$2/goat"
     [ -x "$exe" ] || { echo no; exit 0; }
     case "$("$exe" auth session issue --help 2>/dev/null)" in *memory:read*) echo yes ;; *) echo no ;; esac ;;
+  discard)
+    case "$2" in '' | */* | . | ..) exit 2 ;; esac
+    dir="$HOME/.goat/runtime/goat/versions/$2"
+    [ -d "$dir" ] || { echo yes; exit 0; }
+    # Never remove a runtime that a runner names or a process runs from.
+    if grep -qsF "$dir/" "$HOME"/.goat/ssh-launch/*/run-t3.sh ||
+       ps -eo args 2>/dev/null | awk -v d="$dir/" 'index($0, d) == 1 { found = 1 } END { exit !found }'; then
+      echo no; exit 0
+    fi
+    trash="$dir.discard.$$"
+    mv "$dir" "$trash" && rm -rf "$trash" && echo yes ;;
   *) exit 2 ;;
 esac
 `;
+
+/** Published runtimes this process installed on a host and then refused, per host. */
+const rejectedPublishedRuntimes = new Map<string, ReadonlySet<string>>();
+/** Test seam: forget refused published runtimes. */
+export const resetPublishedRuntimeRejections = () => rejectedPublishedRuntimes.clear();
+const publishedRejectionKey = (target: DesktopSshEnvironmentTarget) =>
+  `${target.username ?? ""}@${target.hostname}:${target.port ?? ""}`;
 
 /** The single next step for a host that has no runtime this app can start. */
 function missAction(miss: PublishedRuntimeMiss, asset: string, directory: string): string {

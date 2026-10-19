@@ -35,6 +35,7 @@ const base = cliReleaseDownloadBaseUrl(PUBLISHED);
 afterEach(() => {
   vi.unstubAllGlobals();
   resetPublishedRuntimeIndexCache();
+  SshTunnel.resetPublishedRuntimeRejections();
 });
 
 type Release = "pre-manifest" | "manifest" | "manifest-tampered" | "manifest-newer-protocol";
@@ -50,6 +51,10 @@ const prepare = (input: {
   hostData?: boolean;
   index?: "ok" | "down";
   publishedFallback?: boolean;
+  /** Another client writes GOAT data while this one is searching for a runtime. */
+  dataDuringSearch?: boolean;
+  /** Launch the server too, as a connection does. */
+  launch?: boolean;
 }) =>
   Effect.gen(function* () {
     const f = yield* makeProtocolFixture({
@@ -129,6 +134,15 @@ const prepare = (input: {
     const requests: string[] = [];
     vi.stubGlobal("fetch", async (url: string | URL) => {
       requests.push(String(url));
+      if (input.dataDuringSearch && String(url).startsWith("https://api.github.com")) {
+        await Effect.runPromise(
+          f.fs
+            .makeDirectory(`${f.home}/.goat/userdata`, { recursive: true })
+            .pipe(
+              Effect.andThen(f.fs.writeFileString(`${f.home}/.goat/userdata/statev2.sqlite`, "")),
+            ),
+        );
+      }
       const body = routes.get(String(url));
       if (input.index === "down" && String(url).startsWith("https://api.github.com"))
         return new Response(null, { status: 503 });
@@ -142,24 +156,37 @@ const prepare = (input: {
           })
         : f.transport.spawn(command),
     );
-    const result = yield* Effect.result(
-      SshTunnel.prepareRemoteRuntime(
-        uploadTarget,
-        {},
-        {
-          ...f.runner,
-          archiveDirectory: `${f.home}/archives`,
-          archiveCommitTime: 2_000,
-          publishedFallback: input.publishedFallback ?? true,
-        },
-        REMOTE_RUNTIME_STATE_KEY,
-        true,
-      ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, transport)),
-    );
-    const installed = yield* f.fs.exists(
+    const runner = {
+      ...f.runner,
+      archiveDirectory: `${f.home}/archives`,
+      archiveCommitTime: 2_000,
+      publishedFallback: input.publishedFallback ?? true,
+    };
+    const attempt = Effect.result(
+      input.launch
+        ? SshTunnel.launchOrReuseRemoteServer(uploadTarget, {}, runner).pipe(
+            Effect.map((launched) =>
+              "selectedRuntime" in launched ? launched.selectedRuntime : (launched as never),
+            ),
+          )
+        : SshTunnel.prepareRemoteRuntime(uploadTarget, {}, runner, REMOTE_RUNTIME_STATE_KEY, true),
+    ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, transport));
+    const result = yield* attempt;
+    const installed = f.fs.exists(
       `${f.home}/.goat/runtime/goat/versions/${PUBLISHED}/.install-complete`,
     );
-    return { result, requests, installed, uploads: f.counters().uploads };
+    return {
+      result,
+      requests,
+      installed: yield* installed,
+      uploads: f.counters().uploads,
+      /** Connects again to the same host, as the next reconnect would. */
+      again: Effect.gen(function* () {
+        requests.length = 0;
+        const next = yield* attempt;
+        return { result: next, requests, installed: yield* installed };
+      }),
+    };
   });
 
 const failureOf = (result: Result.Result<SshTunnel.PreparedRemoteRuntime, unknown>) => {
@@ -232,13 +259,19 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     it.live.each([
       ["incompatible protocol", { ssh: 99_999 }],
       ["no memory scopes", { memoryScopes: false }],
-    ] as const)("fails closed when an installed pre-manifest runtime has %s", ([, binary]) =>
-      Effect.gen(function* () {
-        const { result, installed } = yield* prepare({ release: "pre-manifest", binary });
-        const failure = failureOf(result);
-        assert.isTrue(installed);
-        assert.equal(failure.reason, "archive-unavailable");
-      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    ] as const)(
+      "fails closed when an installed pre-manifest runtime has %s, and stays closed",
+      ([, binary]) =>
+        Effect.gen(function* () {
+          const first = yield* prepare({ release: "pre-manifest", binary });
+          assert.equal(failureOf(first.result).reason, "archive-unavailable");
+          // Removed, so installed-runtime recovery cannot pick it up on the next connection.
+          assert.isFalse(first.installed);
+          const second = yield* first.again;
+          failureOf(second.result);
+          assert.isFalse(second.installed);
+          assert.notInclude(second.requests, `${base}/${asset}`);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
     it.live("never puts another build on a host that has GOAT data", () =>
@@ -263,6 +296,27 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         const second = yield* prepare({ release: "manifest", index: "down" });
         failureOf(second.result);
         assert.isFalse(second.requests.some((url) => url.startsWith("https://api.github.com")));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("launches the published runtime it installed", () =>
+      Effect.gen(function* () {
+        const { result } = yield* prepare({ release: "manifest", launch: true });
+        assert.isTrue(Result.isSuccess(result));
+        if (Result.isSuccess(result)) assert.equal(result.success.version, PUBLISHED);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("refuses to start it when GOAT data appeared during setup", () =>
+      Effect.gen(function* () {
+        const { result } = yield* prepare({
+          release: "manifest",
+          launch: true,
+          dataDuringSearch: true,
+        });
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result))
+          assert.include(String((result.failure as Error).message), "GOAT data appeared");
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 

@@ -145,10 +145,12 @@ replacement needs a person's confirmation bound to that environment and target.
   in October 2026), and source builds never publish. When the exact archive is
   missing, a live compatible server stays attached; with nothing running, the
   host starts the newest compatible runtime that is either the retained one or one
-  GOAT recorded installing. Recorded installs carry the archive and executable
+  installed on the host. Recorded installs carry the archive and executable
   digests, and the executable is hashed before anything in that directory runs.
-  Directories without a record, including hand-extracted ones, are never
-  candidates. Each fallback logs `ssh.runtime.upgrade.skipped` with the reason.
+  A directory without a record qualifies only when its completion marker, binary
+  and directory are not symlinks and its own binary reports its exact version
+  and both protocols (#412). Each fallback logs `ssh.runtime.upgrade.skipped`
+  with the reason.
 - **Nothing on the host.** A host that has never run GOAT (no runtime installed,
   nothing running, no database under `~/.goat/userdata`) gets the newest published
   runtime that is compatible with the client, nightlies first, then stable. This

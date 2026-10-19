@@ -166,6 +166,8 @@ const readIndex = Effect.fn("ssh.runtime.published.index")(function* (fetchImpl:
 export const findPublishedRuntime = Effect.fn("ssh.runtime.published.find")(function* (input: {
   readonly platformKey: CliArchivePlatformKey;
   readonly requestedVersion: string;
+  /** Versions this client already installed on the host and then refused. */
+  readonly exclude?: ReadonlySet<string>;
   readonly fetchImpl?: typeof fetch;
 }) {
   const fetchImpl = input.fetchImpl ?? fetch;
@@ -198,12 +200,15 @@ export const findPublishedRuntime = Effect.fn("ssh.runtime.published.find")(func
       const manifestName = runtimeManifestAssetName(release.version);
       if (!release.assets.has(manifestName)) {
         if (channelHasManifests) continue;
+        // Only the newest: an older pre-manifest release proves nothing the newest did not.
+        if (input.exclude?.has(release.version)) break;
         return {
           found: { version: release.version, channel },
           rejected,
         } satisfies PublishedRuntimeSearch;
       }
       if (inspected++ >= MAX_INSPECTED_PER_CHANNEL) break;
+      if (input.exclude?.has(release.version)) continue;
       const base = cliReleaseDownloadBaseUrl(release.version);
       const fetched = yield* Effect.all([
         fetchSmall(fetchImpl, `${base}/${CLI_RELEASE_CHECKSUMS_FILE}`),
