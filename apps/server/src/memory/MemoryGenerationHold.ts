@@ -71,7 +71,11 @@ export class MemoryGenerationHeld extends Schema.TaggedError<MemoryGenerationHel
 }
 
 const isTextGenerationError = Schema.is(M.TextGenerationError);
-const encodeSelection = Schema.encodeSync(Schema.fromJsonString(M.MemoryModelSelection));
+const encodeKey = Schema.encodeSync(
+  Schema.fromJsonString(
+    Schema.Tuple([Schema.String, Schema.String, Schema.Array(Schema.String), Schema.String]),
+  ),
+);
 
 /** The deterministic failure kind behind an error, looking through wrappers' `cause`. */
 export function deterministicFailure(error: unknown): MemoryGenerationHoldReason | undefined {
@@ -125,7 +129,16 @@ export const make = Effect.gen(function* () {
         : ((yield* providers.value.getProviders).find(
             (provider) => provider.instanceId === selection.instanceId,
           )?.version ?? null);
-      return encodeSelection(selection) + "@" + (version ?? "unknown");
+      // Settings and queued work may spell the same selection differently (absent vs empty
+      // options), so the key uses its parts.
+      return encodeKey([
+        selection.instanceId,
+        selection.model,
+        [...(selection.options ?? [])]
+          .map((option) => option.id + "=" + String(option.value))
+          .toSorted(),
+        version ?? "unknown",
+      ]);
     });
 
   const isHeld = (key: string) =>
