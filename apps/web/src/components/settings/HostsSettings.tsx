@@ -17,6 +17,7 @@ import { EnvironmentRow } from "./EnvironmentRow";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { type HostCardView, type HostMeterView, hostCards, NOT_AVAILABLE } from "./hostStatusView";
 import { providerClients } from "./providerDriverMeta";
+import { ProviderHostMatrixSection } from "./ProviderHostMatrixSection";
 import { searchableSetting } from "./settingsSearch";
 
 /** Each read samples CPU for 200ms and asks every SSH host; quota refresh is capped server-side. */
@@ -188,8 +189,11 @@ export function HostsSettings({
 }) {
   const { id, title } = searchableSetting("hosts");
   return (
-    <FoldedSettingsSection id={id} title={title} summary="This machine and connected SSH hosts">
-      <HostsPanel environmentId={environmentId} localLabel={localLabel} localKind={localKind} />
-    </FoldedSettingsSection>
+    <>
+      <FoldedSettingsSection id={id} title={title} summary="This machine and connected SSH hosts">
+        <HostsPanel environmentId={environmentId} localLabel={localLabel} localKind={localKind} />
+      </FoldedSettingsSection>
+      <ProviderHostMatrixSection environmentId={environmentId} />
+    </>
   );
 }
