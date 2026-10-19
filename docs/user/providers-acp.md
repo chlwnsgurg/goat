@@ -37,7 +37,7 @@ without expanding shell expressions.
 ## Where agents run
 
 Registry agents always run on the machine that hosts your GOAT server. That stays true when you
-connect through `app.t3.codes`, T3 Connect, or a relay.
+connect from another device through direct pairing, Tailscale, or SSH.
 
 Agents install under `tools/<agent-id>/<version>/` inside GOAT home. GOAT verifies SHA-256 when the Registry entry
 provides one; entries without a checksum retain the Registry's HTTPS distribution guarantee.

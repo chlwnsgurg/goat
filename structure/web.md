@@ -12,6 +12,7 @@ Routes live under `apps/web/src/routes/`. Pairing is `apps/web/src/routes/pair.t
 The socket is not implemented in the web app. `apps/web/src/connection/runtime.ts` wires
 `@goat/client-runtime/connection`, and `packages/client-runtime/src/rpc/session.ts` opens the
 WebSocket RPC session. `apps/web/src/lib/runtime.ts` supplies the browser socket constructor.
+GOAT Connect is coming soon; `apps/web/src/cloud/publicConfig.ts` disables cloud config through `@goat/shared/goatConnect`.
 
 `apps/web/src/branding.ts` sets `APP_BASE_NAME` to `"GOAT"` unless the desktop preload injected a
 branding object. `apps/web/src/env.ts` treats the page as Electron when `window.desktopBridge` is

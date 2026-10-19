@@ -7,6 +7,7 @@ The exports that the rest of this map depends on:
 
 | Export                            | File                                                                | Role                                                                                                            |
 | --------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `@goat/shared/goatConnect`        | `packages/shared/src/goatConnect.ts`                                | `GOAT_CONNECT_ENABLED=false` across server and clients; shared coming-soon copy and Tailscale guide             |
 | `@goat/shared/serverSettings`     | `packages/shared/src/serverSettings.ts`                             | Patch and merge helpers for `ServerSettings`, including `goatBotHome` monotonic merge                           |
 | `@goat/shared/devHome`            | `packages/shared/src/devHome.ts`                                    | `resolveWorktreeHome` and `resolveGitWorktreePath`                                                              |
 | `@goat/shared/mobileAppIdentity`  | `packages/shared/src/mobileAppIdentity.ts`                          | `MOBILE_APP_IDENTITY` for the GOAT mobile variants                                                              |

@@ -102,12 +102,13 @@
       "path": "shared.md",
       "tier": 2,
       "title": "Shared",
-      "scope": "Subpath helpers for settings merge, worktree homes, mobile identity, SSH failure classification, and runtime archives.",
+      "scope": "Subpath helpers for settings merge, worktree homes, mobile identity, the Connect gate, SSH failure classification, and runtime archives.",
       "documents": [
         "packages/shared",
         "packages/shared/package.json",
         "packages/shared/src/serverSettings.ts",
         "packages/shared/src/devHome.ts",
+        "packages/shared/src/goatConnect.ts",
         "packages/shared/src/mobileAppIdentity.ts",
         "packages/shared/src/sshRuntimeProtocol.ts",
         "packages/shared/src/sshFailure.ts",
@@ -325,7 +326,8 @@
         "apps/desktop/src/preload.ts",
         "apps/web/src/components/goatBot/",
         "packages/client-runtime/src/goatBot/",
-        "apps/web/src/components/settings/GoatBotSettings.tsx"
+        "apps/web/src/components/settings/GoatBotSettings.tsx",
+        "apps/web/src/cloud/publicConfig.ts"
       ]
     },
     {
@@ -347,7 +349,8 @@
         "apps/desktop/src/backend/DesktopBackendManager.ts",
         "apps/desktop/src/preload.ts",
         "apps/desktop/src/ssh/DesktopSshEnvironment.ts",
-        "packages/ssh"
+        "packages/ssh",
+        "apps/desktop/src/app/DesktopClerk.ts"
       ]
     },
     {
@@ -364,7 +367,8 @@
         "packages/shared/src/mobileAppIdentity.ts",
         "apps/mobile/src/features/goat-bot/GoatBotScreen.tsx",
         "apps/mobile/src/features/goat-bot/goatBotHomeMode.ts",
-        "apps/mobile/README.md"
+        "apps/mobile/README.md",
+        "apps/mobile/src/features/cloud/publicConfig.ts"
       ]
     },
     {

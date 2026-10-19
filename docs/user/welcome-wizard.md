@@ -1,7 +1,7 @@
 # Welcome wizard
 
-GOAT shows a setup flow when you open a new installation or connect to the
-hosted app for the first time. Existing workspaces skip this flow.
+GOAT shows a setup flow when you open a new installation or pair a browser
+for the first time. Existing workspaces skip this flow.
 
 ## Connect your computers
 
@@ -10,19 +10,13 @@ server or the desktop app, that computer is already connected and selected.
 It is identified by its name, which may differ from the device running your
 browser.
 
-You can add more computers before continuing:
+Use **Add a computer** to connect directly to a server on your network or tailnet.
+Start the server with `goat serve`, then run `goat pair --tailscale` and paste
+the pairing link. You can also run `goat serve --host <address>` and use
+`goat pair` when the server is already reachable on your network.
 
-- **T3 Connect** connects computers that are signed in to your account.
-  [Install the CLI](./install.md#command-line) and run `goat connect` on each
-  computer you want to add, then start GOAT or run `goat serve` so the
-  computer stays available.
-- **Add a computer** connects directly to a server on your network or tailnet.
-  Start the server with `goat serve`, then run `goat pair --tailscale` and paste
-  the pairing link. You can also run `goat serve --host <address>` and use
-  `goat pair` when the server is already reachable on your network.
-
-Saved computers and computers discovered through T3 Connect are selected by
-default. Uncheck any you do not want to set up; this does not disconnect them.
+Saved computers with an available route are selected by default. Uncheck any
+you do not want to set up; this does not disconnect them.
 Continue when your selected computers are connected. Setup checks
 agents across the selected computers, then offers project import grouped by computer.
 

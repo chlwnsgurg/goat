@@ -6,6 +6,7 @@ Navigation: `apps/mobile/src/App.tsx` builds `createStaticNavigation(RootStack)`
 `apps/mobile/src/features/connection/`, using `apps/mobile/src/features/connection/pairing.ts`.
 The connection commands go through `@goat/client-runtime/connection`, the same package the web
 app uses. See [`client-runtime.md`](client-runtime.md).
+GOAT Connect is coming soon; `apps/mobile/src/features/cloud/publicConfig.ts` disables cloud config through `@goat/shared/goatConnect`.
 
 `apps/mobile/app.config.ts` is the Expo config. `slug` is `"goat"`. Names, URL schemes, and store
 ids come from `MOBILE_APP_IDENTITY` in `packages/shared/src/mobileAppIdentity.ts`:

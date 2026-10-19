@@ -1,5 +1,19 @@
 # T3 Connect
 
+> **Status:** T3 Connect is disabled in every build by `GOAT_CONNECT_ENABLED=false`
+> in [`@goat/shared/goatConnect`](../../packages/shared/src/goatConnect.ts).
+> GOAT Connect is coming soon. The remainder describes the dormant implementation
+> retained for that work. Previously linked servers keep their stored link without
+> restoring a tunnel and start normally.
+
+The gate must apply at service construction, not just to visible controls or public
+configuration. A saved link otherwise restores a managed Cloudflare tunnel at server
+startup (see [DesiredLinkReconcile](../../apps/server/src/cloud/DesiredLinkReconcile.ts)),
+and clients keep using cached DPoP tokens and saved relay routes even when sign-in is
+hidden (see [the route predicate](../../packages/client-runtime/src/connection/routes.ts)).
+Saved relay-only environments stay unavailable and can be forgotten; direct pairing,
+Tailscale, and SSH are unaffected.
+
 T3 Connect uses Clerk for cloud identity. The relay manages environment links,
 credentials for reaching environments, and managed tunnel allocations. After
 bootstrap, clients send application traffic through the environment's tunnel

@@ -78,7 +78,7 @@ on the machine for new ones.
 
 `--tailscale` publishes the server on your tailnet so other devices can reach
 it. Leave it out when you reach the machine another way, such as
-[T3 Connect](./remote-access.md#t3-connect). Pass `--no-service` to skip the
+[direct pairing over your LAN](./remote-access.md#pair-over-a-lan-or-private-network). Pass `--no-service` to skip the
 background service and run `goat serve` yourself. To install a CLI archive you
 already downloaded, for example on a machine without internet access, pass
 `--archive goat-<version>-<platform>-<arch>.tar.gz`.
@@ -127,7 +127,7 @@ Install GOAT from the
 [App Store](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824) or
 [Google Play](https://play.google.com/store/apps/details?id=com.t3tools.t3code).
 The phone connects to a server on another machine. Follow
-[remote access](./remote-access.md) to link it through T3 Connect or a pairing URL.
+[remote access](./remote-access.md) to pair it directly or over Tailscale.
 
 Store links and QR codes are also available in **Settings → General → Mobile app**
 on web and desktop. The store apps work with both stable and Nightly servers. Test builds are optional:

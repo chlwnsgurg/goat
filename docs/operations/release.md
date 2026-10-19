@@ -54,8 +54,8 @@ This document covers the unified release workflow for stable and nightly desktop
 
 ## Pull request macOS previews
 
-Labeling a PR `preview:mac` publishes a signed, notarized Apple Silicon DMG with T3 Connect enabled
-to the rolling `desktop-preview` prerelease, and works for fork PRs. The label is a one-shot request
+Labeling a PR `preview:mac` publishes a signed, notarized Apple Silicon DMG with T3 Connect public configuration
+(the feature itself stays off until GOAT Connect ships) to the rolling `desktop-preview` prerelease, and works for fork PRs. The label is a one-shot request
 for the commit it is applied to: the trusted workflow removes it once the build is in hand, and later
 pushes do not build until a maintainer applies it again. Every signed preview is therefore a
 per-commit maintainer decision, which matters because the result carries the Developer ID signature.

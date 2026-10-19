@@ -1,13 +1,23 @@
 # T3 Connect setup
 
+> **Status:** T3 Connect (Clerk sign-in, hosted relay, and managed Cloudflare
+> tunnels) is disabled in every build by `GOAT_CONNECT_ENABLED=false` in
+> [`@goat/shared/goatConnect`](../../packages/shared/src/goatConnect.ts).
+> GOAT Connect is coming soon. Public configuration does not enable it. This
+> runbook retains setup details for the dormant implementation; use
+> [direct pairing, Tailscale, or SSH](../user/remote-access.md) for current access.
+> `goat connect` and its subcommands print the coming-soon message and exit 0.
+> Stored links are retained without tunnel restoration; previously linked servers
+> start normally.
+
 Deployment and client configuration for T3 Connect. The [architecture note](../internals/t3-connect.md)
 explains the trust boundaries; the [relay README](../../infra/relay/README.md#deployment) owns relay
 provisioning instructions.
 
 ## Public application configuration
 
-T3 Connect is disabled in a fresh clone. To build against the production deployment, copy the
-repository-root example:
+The following public settings are retained for future Connect work and do not
+activate Connect while the shared gate is off. The repository-root example is:
 
 ```sh
 cp .env.example .env
