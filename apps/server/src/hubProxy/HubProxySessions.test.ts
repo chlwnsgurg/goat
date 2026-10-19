@@ -243,6 +243,35 @@ it.effect("S2: limit reports SSH rights without acquiring an endpoint or issuing
   }).pipe(Effect.scoped),
 );
 
+it.effect("a read-only refresh keeps a linked node's operate session for uploads", () =>
+  Effect.gen(function* () {
+    const baseUrl = "https://node.invalid";
+    const nodes = yield* makeNodes({ ...sshNode, routes: [{ kind: "linked", baseUrl }] });
+    const secrets = makeSecrets();
+    const sessions = yield* makeSessions(nodes.service, makeSsh(baseUrl).service, secrets.service);
+    yield* nodes.subscribed;
+    const operate = ["orchestration:read", "orchestration:operate"] as const;
+    yield* secrets.service.set(
+      enrollmentSecretName("node-1"),
+      new TextEncoder().encode(
+        JSON.stringify({
+          version: 1,
+          nodeId: "node-1",
+          baseUrl,
+          token: "linked-token",
+          scopes: operate,
+          expiresAt: null,
+        }),
+      ),
+    );
+    yield* sessions.open("node-1", operate);
+    // What the snapshot refresher does while a relay is open.
+    yield* sessions.open("node-1", readScopes);
+    const forUpload = yield* sessions.peek("node-1", "orchestration:operate");
+    expect(Option.getOrNull(forUpload)?.scopes).toEqual(operate);
+  }).pipe(Effect.scoped),
+);
+
 it.effect("S2: limit stops advertising a linked enrollment once it expires", () =>
   Effect.gen(function* () {
     const baseUrl = "https://node.invalid";
