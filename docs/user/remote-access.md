@@ -230,9 +230,13 @@ runtime running as before. Agents can request an update that runs when the
 runtime is idle. If the new version fails to start, GOAT restores the previous one.
 
 Runtime archives come from published GOAT releases or a configured release mirror.
-If the matching archive is unavailable, use a published GOAT release or the mirror
-suggested by the error. GOAT does not replace a newer runtime; update the machine
-that owns the SSH connection instead.
+If this app's own version has no archive (a development build, for example) and
+the host has never run GOAT, GOAT installs the newest published runtime that works
+with this app instead. The connection then shows **Running <version> · Upgrade to
+<version> deferred** and GOAT retries the upgrade every 10 minutes. A host that
+already has GOAT data never gets a different version this way. When nothing
+usable exists, the status says so and names the one thing to do. GOAT does not
+replace a newer runtime; update the machine that owns the SSH connection instead.
 
 A server that GOAT cannot confirm it launched, or that cannot restart itself,
 is left running. GOAT keeps using it if it is compatible; otherwise, stop it on

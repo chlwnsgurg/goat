@@ -200,6 +200,12 @@ desktop and the server's SSH dispatch (`resolveSshCliRunner` in
   The usable connection reports its actual version as ready (or providers_not_ready) with
   `refreshDeferred`, preserves provider diagnosis, and retries the requested release every
   10 minutes. `ssh.runtime.upgrade.skipped` logs the selected version and reason.
+- A host with nothing installed, nothing running and no GOAT database gets the newest published
+  runtime that is compatible with the client when the exact archive cannot be acquired
+  (`publishedFallback`, set by the same two callers; `packages/ssh/src/runtimePublished.ts`).
+  Release manifests (`packages/shared/src/runtimeManifest.ts`) prefilter by protocol and
+  capability; the installed binary decides. See
+  [Remote updates](../docs/internals/remote-updates.md) for the pre-manifest rule.
 - With an older compatible server running, the first connection of each manager drains it once it
   answers `idle` (see [Replacement](#replacement)). While it is busy, the client attaches to it,
   logs `ssh.runtime.refresh.deferred` with the reason, and retries every 10 minutes.

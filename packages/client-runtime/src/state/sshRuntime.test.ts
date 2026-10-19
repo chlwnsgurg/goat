@@ -313,9 +313,7 @@ describe("Desktop SSH runtime state", () => {
         },
       };
       expect(sshRuntimeRecoveryText(status)).toBe(
-        reason === "archive_unavailable"
-          ? "This build has no published server archive. Install a published GOAT release, or set a release mirror."
-          : null,
+        reason === "archive_unavailable" ? "One recovery action" : null,
       );
       expect(sshRuntimeStatusText(status)).not.toContain("Ready");
     }
@@ -329,7 +327,7 @@ describe("Desktop SSH runtime state", () => {
           fix: { actor: "human", instruction: "Use a release" },
         },
       }),
-    ).toBe("GOAT 1.2.3 for Linux (x64) isn't available to install.");
+    ).toBe("No GOAT runtime for Linux (x64) that works with GOAT 1.2.3 could be installed.");
   });
 });
 
@@ -371,7 +369,7 @@ it.each([
 it.each(["ready", "providers_not_ready"] as const)(
   "explains deferred refresh on %s without hiding provider recovery",
   (state) => {
-    const detail = "Refresh deferred: archive for 0.4.3 unavailable";
+    const detail = "Upgrade to 0.4.3 deferred";
     const status: SshHostStatus = {
       host: "box",
       state,
@@ -389,10 +387,12 @@ it.each(["ready", "providers_not_ready"] as const)(
         : {}),
     };
     expect(sshRuntimeStatusText(status)).toBe(
-      `${state === "providers_not_ready" ? "Providers need attention · " : ""}Runtime 0.4.2 · ${detail}`,
+      state === "providers_not_ready"
+        ? `Providers need attention · Runtime 0.4.2 · ${detail}`
+        : `Running 0.4.2 · ${detail}`,
     );
     expect(sshRuntimeRecoveryText(status)).toBe(
-      `${state === "providers_not_ready" ? "Sign in " : ""}GOAT is connected. It will retry the refresh every 10 minutes.`,
+      `${state === "providers_not_ready" ? "Sign in " : ""}GOAT is connected. It retries the upgrade every 10 minutes.`,
     );
     const exact = {
       host: status.host,
