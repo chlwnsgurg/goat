@@ -108,6 +108,13 @@ export type GoatBotRow =
   | {
       readonly kind: "user";
       readonly id: string;
+      /** This client's key for a message it is still sending; null once the server row exists. */
+      readonly sendKey: string | null;
+      /**
+       * The server's input id. A pending row gets it when the server accepts the message and the
+       * committed row carries the same id, which lets a view follow one message across both.
+       */
+      readonly requestKey: string | null;
       readonly text: string;
       readonly createdAt: string;
       readonly delivery: GoatBotDelivery;
@@ -251,6 +258,8 @@ export function buildGoatBotTimeline(input: {
       committed.push({
         kind: "user",
         id: item.id,
+        sendKey: null,
+        requestKey: presentation?.requestKey ?? null,
         text: item.text,
         createdAt: itemCreatedAt(item),
         delivery: presentation?.readAt
@@ -309,6 +318,8 @@ export function buildGoatBotTimeline(input: {
     .map((entry) => ({
       kind: "user",
       id: `pending:${entry.clientKey}`,
+      sendKey: entry.clientKey,
+      requestKey: entry.requestKey,
       text: entry.text,
       createdAt: entry.createdAt,
       delivery:

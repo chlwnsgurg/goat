@@ -15,6 +15,8 @@ let container: HTMLDivElement;
 const createdAt = "2026-10-12T09:40:00Z";
 const user = (id: string, failed = false): GoatBotRow => ({
   kind: "user",
+  sendKey: null,
+  requestKey: null,
   id,
   text: id,
   createdAt,

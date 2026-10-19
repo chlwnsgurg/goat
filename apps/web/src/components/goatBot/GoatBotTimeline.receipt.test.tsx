@@ -30,6 +30,8 @@ const user = (
   showReceipt: boolean,
 ): GoatBotRow => ({
   kind: "user",
+  sendKey: null,
+  requestKey: null,
   id,
   text: id,
   createdAt: "2026-10-12T09:40:00Z",

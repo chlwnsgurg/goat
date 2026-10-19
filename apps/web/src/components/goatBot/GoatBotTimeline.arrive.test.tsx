@@ -13,8 +13,14 @@ import { GoatBotTimeline } from "./GoatBotTimeline";
 let root: Root;
 let container: HTMLDivElement;
 const createdAt = "2026-10-12T09:40:00Z";
-const user = (id: string): GoatBotRow => ({
+const user = (
+  id: string,
+  sendKey: string | null = null,
+  requestKey: string | null = null,
+): GoatBotRow => ({
   kind: "user",
+  sendKey,
+  requestKey,
   id,
   text: id,
   createdAt,
@@ -69,16 +75,42 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-it("animates only the local pending send and keeps its keyed element on rerender", async () => {
-  const rows = [user("pending:a"), user("committed"), bot, task];
-  await act(() => root.render(<GoatBotTimeline rows={rows} onRetry={() => {}} />));
+it("plays the send motion once on the element that survives the acknowledgement", async () => {
+  await act(() => root.render(<GoatBotTimeline rows={[bot, task]} onRetry={() => {}} />));
+  expect(container.querySelector("li.goat-arrive")).toBeNull();
+
+  await act(() =>
+    root.render(
+      <GoatBotTimeline rows={[bot, task, user("pending:a", "a", null)]} onRetry={() => {}} />,
+    ),
+  );
   const animated = container.querySelector("li.goat-arrive");
   expect(animated?.textContent).toContain("pending:a");
-  expect(container.querySelectorAll("li.goat-arrive")).toHaveLength(1);
-  await act(() => root.render(<GoatBotTimeline rows={[...rows]} onRetry={() => {}} />));
+
+  // The server accepts the send, then its own row replaces the pending row with the same input id.
+  await act(() =>
+    root.render(
+      <GoatBotTimeline rows={[bot, task, user("pending:a", "a", "input-1")]} onRetry={() => {}} />,
+    ),
+  );
   expect(container.querySelector("li.goat-arrive")).toBe(animated);
   await act(() =>
-    root.render(<GoatBotTimeline rows={[user("committed"), bot, task]} onRetry={() => {}} />),
+    root.render(
+      <GoatBotTimeline rows={[bot, task, user("item-1", null, "input-1")]} onRetry={() => {}} />,
+    ),
+  );
+  expect(container.querySelector("li.goat-arrive")).toBe(animated);
+  expect(container.querySelectorAll("li.goat-arrive")).toHaveLength(1);
+});
+
+it("does not animate committed history, bot replies or task cards on mount", async () => {
+  await act(() =>
+    root.render(
+      <GoatBotTimeline
+        rows={[user("item-1", null, "input-1"), user("item-2"), bot, task]}
+        onRetry={() => {}}
+      />,
+    ),
   );
   expect(container.querySelector("li.goat-arrive")).toBeNull();
 });

@@ -49,6 +49,32 @@ export function GoatBotTimeline({
 }) {
   const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Messages sent while this view is mounted, by send key, and the server id each one received.
+  // A committed row reuses its pending row's element, so the send motion plays once and never
+  // on history or reload.
+  const [sentHere, setSentHere] = useState<ReadonlyMap<string, string | null>>(() => new Map());
+  const pendingSends = rows.flatMap((row) =>
+    row.kind === "user" && row.sendKey !== null ? [[row.sendKey, row.requestKey] as const] : [],
+  );
+  if (
+    pendingSends.some(
+      ([sendKey, requestKey]) =>
+        !sentHere.has(sendKey) || (requestKey !== null && sentHere.get(sendKey) !== requestKey),
+    )
+  ) {
+    setSentHere((previous) => {
+      const next = new Map(previous);
+      for (const [sendKey, requestKey] of pendingSends) {
+        if (requestKey !== null || !next.has(sendKey)) next.set(sendKey, requestKey);
+      }
+      return next;
+    });
+  }
+  const sendKeyByRequest = new Map<string, string>();
+  for (const [sendKey, requestKey] of [...sentHere, ...pendingSends]) {
+    if (requestKey !== null) sendKeyByRequest.set(requestKey, sendKey);
+  }
+
   const wrapperRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLOListElement>(null);
   const timePrefix = useId();
@@ -124,14 +150,18 @@ export function GoatBotTimeline({
                 const delivery = row.delivery;
                 const failed = delivery.state === "failed";
                 const timeId = `${timePrefix}-time-${row.id}`;
+                const sendKey =
+                  row.sendKey ??
+                  (row.requestKey === null ? undefined : sendKeyByRequest.get(row.requestKey));
+                const arrives = sendKey !== undefined;
                 return (
                   <li
-                    key={row.id}
+                    key={sendKey === undefined ? row.id : `send:${sendKey}`}
                     tabIndex={failed ? undefined : 0}
                     aria-describedby={failed ? undefined : timeId}
                     className={cn(
                       "goat-message-row group flex flex-col items-end outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-                      row.id.startsWith("pending:") && "goat-arrive",
+                      arrives && "goat-arrive",
                       index > 1 && (row.firstInGroup ? "mt-3" : "mt-1"),
                     )}
                   >
