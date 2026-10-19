@@ -128,6 +128,8 @@ describe("local SSH proxy failures", () => {
     ["Tailscale is stopped.", "Start Tailscale"],
     ["failed to connect to local tailscaled; is it running?", "Start Tailscale"],
     ["tailscale: logged out.", "Sign in to Tailscale"],
+    ["Tailscale proxy status: Machine is not yet approved by tailnet admin.", "approve"],
+    ["/bin/sh: cloudflared: not found", "ProxyCommand"],
     ["posix_spawn: No such file or directory", "ProxyCommand"],
     ["zsh:1: no such file or directory: /nonexistent/goat-proxy", "ProxyCommand"],
     ["/bin/sh: tailscale: command not found", "ProxyCommand"],
@@ -136,7 +138,11 @@ describe("local SSH proxy failures", () => {
     ["/bin/bash: line 1: /missing/tailscale: No such file or directory", "ProxyCommand"],
   ])("blocks local proxy failure before generic closure: %s", (diagnostic, fix) => {
     const failure = sshPreparationFailure(`${diagnostic}\nConnection closed by UNKNOWN port 65535`);
-    expect(failure).toMatchObject({ _tag: "ConnectionBlockedError", reason: "configuration" });
+    expect(failure).toMatchObject({
+      _tag: "ConnectionBlockedError",
+      reason: "configuration",
+      localProxyUnavailable: true,
+    });
     expect(failure.detail).toContain(fix);
   });
   it("keeps runtime download errors out of SSH login classification", () => {

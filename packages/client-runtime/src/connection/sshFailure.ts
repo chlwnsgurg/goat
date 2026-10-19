@@ -42,6 +42,7 @@ function cleanMessage(cause: unknown): string {
  * - Rejected credentials, an unverifiable host key, and a runtime that refuses
  *   this client are blocked. They wait for the user, a wake, or a network change
  *   instead of retrying on a timer.
+ * - Local proxy configuration failures are marked for a quiet periodic check.
  * - Anything else is a transient failure of the remote side.
  */
 export function sshPreparationFailure(cause: unknown): ConnectionAttemptError {
@@ -54,6 +55,7 @@ export function sshPreparationFailure(cause: unknown): ConnectionAttemptError {
   if (proxy !== undefined) {
     return new ConnectionBlockedError({
       reason: "configuration",
+      localProxyUnavailable: true,
       detail: `${proxy.fix} (${message})`,
     });
   }

@@ -1133,12 +1133,12 @@ export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
 /**
- * The machine woke from sleep (`resume`) or the user unlocked the screen.
+ * The machine is suspending, woke from sleep, or the user unlocked the screen.
  * `asleepMs` is how long the machine was suspended before a resume. It is
- * null for an unlock, or when the desktop did not see the matching suspend.
+ * null for suspend/unlock, or when the desktop did not see the matching suspend.
  */
 export interface DesktopSystemWakeEvent {
-  readonly reason: "resume" | "unlock-screen";
+  readonly reason: "suspend" | "resume" | "unlock-screen";
   readonly asleepMs: number | null;
 }
 
