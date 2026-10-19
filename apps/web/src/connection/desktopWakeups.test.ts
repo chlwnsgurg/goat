@@ -135,4 +135,25 @@ describe("desktop wakeups", () => {
         yield* Fiber.interrupt(fiber);
       }),
   );
+
+  it.effect("still reports a second real sleep that starts right after a wake", () =>
+    Effect.gen(function* () {
+      const shell = makeDesktopShell();
+      const seen: Array<DesktopWakeup> = [];
+      const fiber = yield* desktopWakeups(shell.sources).pipe(
+        Stream.runForEach((wakeup) => Effect.sync(() => seen.push(wakeup))),
+        Effect.forkChild,
+      );
+      yield* settle;
+
+      // Lid opens after a long sleep, closes a second later, and opens 5 s after that.
+      shell.wake({ reason: "resume", asleepMs: 5 * 60_000 });
+      shell.advance(6_000);
+      shell.wake({ reason: "resume", asleepMs: 5_000 });
+      yield* settle;
+      expect(seen).toEqual(["application-active-reconnect", "application-active-probe"]);
+
+      yield* Fiber.interrupt(fiber);
+    }),
+  );
 });

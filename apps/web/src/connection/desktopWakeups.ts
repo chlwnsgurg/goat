@@ -59,7 +59,13 @@ export function desktopWakeups(sources: DesktopWakeupSources): Stream.Stream<Des
         const unsubscribe = sources.onSystemWake((event) => {
           const now = sources.nowMs();
           const wakeup = desktopSystemWakeup(event);
+          // A resume whose suspend came after the last wake is a new sleep, never a duplicate.
+          const sleptSinceLastWake =
+            event.reason === "resume" &&
+            event.asleepMs !== null &&
+            event.asleepMs <= now - lastSystemWakeAtMs;
           if (
+            !sleptSinceLastWake &&
             now - lastSystemWakeAtMs < DESKTOP_SLEEP_RECONNECT_AFTER_MS &&
             (lastSystemWakeup === "application-active-reconnect" || lastSystemWakeup === wakeup)
           ) {
