@@ -29,8 +29,12 @@ const recordableAsks = (f: Fixture) =>
       .trim()
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as { type: string; live?: boolean });
+      .map((line) => JSON.parse(line) as { type: string; live?: boolean; args?: string[] });
     return {
+      compat: events.filter(
+        (event) =>
+          event.type === "exec" && event.args?.[0] === "__ssh-helper" && event.args[1] === "compat",
+      ).length,
       own: events.filter(
         (event) => event.type === "version" || (event.type === "protocol" && !event.live),
       ).length,
@@ -57,6 +61,7 @@ const liveFixture = makeProtocolFixture({
   kind: "managed",
   oldVersion: "1.2.2",
   commitTime: 1_700_000_000,
+  drain: true,
   ...current,
 });
 
@@ -74,6 +79,75 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host facts
         yield* launch(f);
         // Probe, candidate checks and every live recheck reuse the recorded answers.
         assert.deepEqual(yield* recordableAsks(f), first);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    LAUNCHES_TIMEOUT_MS,
+  );
+
+  it.live.each(["compatible 0 -", "unknown 0 -", "failure"])(
+    "%s is re-asked and never becomes a compat fact",
+    (response) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          drain: true,
+          ...current,
+        });
+        yield* f.shiftHostClock(60, true);
+        yield* f.setCompat([response]);
+        yield* launch(f);
+        const first = yield* recordableAsks(f);
+        assert.isAbove(first.compat, 0);
+        // The probe uses the same compat facts as launch without repeating readiness and guards.
+        yield* probe(f);
+        assert.isAbove((yield* recordableAsks(f)).compat, first.compat);
+        const facts = yield* f.fs.readDirectory(`${f.home}/.goat/ssh-launch/facts`);
+        assert.isFalse(facts.some((name) => name.startsWith("compat.")));
+        const before = yield* f.snapshot;
+        yield* f.setCompat(["real"]);
+        yield* probe(f);
+        assert.deepEqual(yield* f.snapshot, before);
+        const positive = yield* recordableAsks(f);
+        const recoveredFacts = yield* f.fs.readDirectory(`${f.home}/.goat/ssh-launch/facts`);
+        assert.isTrue(recoveredFacts.some((name) => name.startsWith("compat.")));
+        yield* probe(f);
+        assert.equal((yield* recordableAsks(f)).compat, positive.compat);
+        const refreshed = yield* f.run("launch", false, {
+          refreshOwnedRuntimeOnFirstConnection: true,
+        });
+        if (Result.isFailure(refreshed)) throw refreshed.failure;
+        assert.equal(refreshed.success.refresh, "replaced");
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    LAUNCHES_TIMEOUT_MS,
+  );
+
+  it.live.each(["compatible 0 -", "unknown 0 -"])(
+    "ignores a pre-U2 %s record under the same valid key",
+    (negative) =>
+      Effect.gen(function* () {
+        const f = yield* liveFixture;
+        yield* f.shiftHostClock(60, true);
+        yield* launch(f);
+        const file = `${f.home}/.goat/ssh-launch/facts/compat.1.2.2.exe`;
+        const record = yield* f.fs.readFileString(file);
+        const key = record.split("\n")[0]!;
+        yield* f.fs.writeFileString(file, `${key}\n${negative}\n`);
+        yield* f.setCompat(["compatible 0 -"]);
+        const before = yield* recordableAsks(f);
+        yield* launch(f);
+        assert.isAbove((yield* recordableAsks(f)).compat, before.compat);
+        assert.equal((yield* f.fs.readFileString(file)).split("\n")[0], key);
+        const retained = yield* f.snapshot;
+        yield* f.setCompat(["real"]);
+        yield* launch(f);
+        assert.deepEqual(yield* f.snapshot, retained);
+        const recovered = yield* f.fs.readFileString(file);
+        assert.equal(recovered.split("\n")[0], key);
+        assert.match(recovered.split("\n")[1]!, /^compatible 1 [A-Za-z0-9-]+$/u);
+        const positive = yield* recordableAsks(f);
+        yield* launch(f);
+        assert.equal((yield* recordableAsks(f)).compat, positive.compat);
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     LAUNCHES_TIMEOUT_MS,
   );
@@ -129,12 +203,18 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host facts
           live: false,
           kind: "managed",
           oldVersion: "1.2.2",
-          candidateSignals: { ...current, commitTime: 1_700_000_001 },
+          candidateSignals: { ...current, drain: true, commitTime: 1_700_000_001 },
           ...current,
         });
         yield* f.fs.remove(f.old, { recursive: true });
         yield* f.fs.remove(`${f.state}/run-t3.sh`);
         yield* f.shiftHostClock(age, true);
+        // Launch also polls its listener; measure the cleanup age gate on its own command.
+        f.setBeforeCommand((script) =>
+          script.includes("warm_runtime_facts()")
+            ? f.fs.remove(`${f.test}/clock/waits`, { force: true })
+            : Effect.void,
+        );
         // Warming starts a dozen fixture node processes; a loaded CI runner can exceed the 10 s default.
         const installed = yield* f.run("launch", false, { cleanupTimeoutMs: LAUNCHES_TIMEOUT_MS });
         if (Result.isFailure(installed)) throw installed.failure;
