@@ -111,6 +111,84 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
+    it.live.each([false, true])(
+      "a folded second client waits in-command before attaching (replacement=%s)",
+      (replace) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            drain: true,
+            ...current,
+            candidateSignals: { ...current, drain: true },
+          });
+          const launch = (refresh: boolean, previous?: SshTunnel.PreparedRemoteRuntime) =>
+            SshTunnel.launchOrReuseRemoteServer(
+              uploadTarget,
+              {},
+              {
+                ...f.runner,
+                refreshOwnedRuntimeOnFirstConnection: refresh,
+              },
+              undefined,
+              previous,
+            ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport));
+          yield* f.shiftHostClock(60);
+          yield* f.fs.writeFileString(`${f.test}/activity`, "busy");
+          const baseline = yield* launch(true);
+          assert.equal(baseline.status, "ready");
+          if (baseline.status !== "ready") return;
+          assert.isString(baseline.selectedRuntime.reconnectProbe);
+          if (replace) yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
+          yield* pauseFirstLock(f, "replacement.lock");
+          const fifo = yield* f.realSpawner.spawn(
+            ChildProcess.make("mkfifo", [`${f.test}/wait-release`]),
+          );
+          assert.equal(Number(yield* fifo.exitCode), 0);
+          f.setScriptPrefix(`sleep() {
+  printf waiting > "$HOME/.test/waiting"
+  read -r release < "$HOME/.test/wait-release"
+}
+`);
+          const first = yield* Effect.forkChild(launch(true));
+          yield* fileMilestone(`${f.test}/lock-acquired`);
+          const before = f.remoteCommands.length;
+          const second = yield* Effect.forkChild(launch(false, baseline.selectedRuntime));
+          yield* fileMilestone(`${f.test}/waiting`);
+          // The waiter has not probed or run readiness while the other owner could drain.
+          assert.equal(f.remoteCommands.length - before, 1);
+          yield* f.fs.writeFileString(`${f.test}/lock-release`, "release\n");
+          const firstResult = yield* Fiber.join(first);
+          assert.equal(firstResult.status, "ready");
+          if (firstResult.status !== "ready") return;
+          assert.equal(firstResult.refresh, replace ? "replaced" : undefined);
+          if (replace) {
+            const runtime = JSON.parse(
+              yield* f.fs.readFileString(`${f.home}/.goat/userdata/server-runtime.json`),
+            ) as { pid: number; port: number };
+            yield* installArchivePsDouble(
+              f.home,
+              runtime.pid,
+              runtime.port,
+              ARCHIVE.archiveVersion,
+            );
+          }
+          yield* f.fs.writeFileString(`${f.test}/wait-release`, "release\n");
+          const attached = yield* Fiber.join(second);
+          assert.equal(attached.status, "ready");
+          if (attached.status !== "ready") return;
+          assert.equal(
+            attached.selectedRuntime.version,
+            replace ? ARCHIVE.archiveVersion : "1.2.2",
+          );
+          assert.deepEqual(attached.pending, replace ? undefined : baseline.pending);
+          assert.equal(f.remoteCommands.length - before, 1);
+          assert.isString(attached.selectedRuntime.reconnectProbe);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      180_000,
+    );
+
     it.live("cancelled legacy drain rolls back identity while holding the replacement lock", () =>
       Effect.gen(function* () {
         const f = yield* makeProtocolFixture({

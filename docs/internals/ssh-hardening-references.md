@@ -221,9 +221,10 @@ round 4 on 2026-10-19 and 2026-10-20 against the same runtimes
 | `macmini-cf` | token reuse (#413)    | 20.5 s | 12.1 s | 2        | 1             | 0        | 5/5           |
 | `macmini-cf` | round 4 (#428)        | 14.0 s | 7.2 s  | 1        | 1             | 0        | 5/5           |
 
-`mac-studio` runs other clients' agents, so its `goat` counts are noisy. When
-another client holds the replacement lock, this app's refresh of an older
-runtime is deferred and that reconnect probes separately, as before folding.
+`mac-studio` runs other clients' agents, so its `goat` counts are noisy. A cached
+deferred refresh now reconnects in one command. That command waits briefly for
+a competing replacement and verifies attachment under the replacement mutex;
+an unresolved lock returns pending without admitting a draining runtime.
 Behind `cloudflared` every removed
 command saves about 2 s. The first reconnect after an install starts `goat`
 once instead of about 10 times (#415, #419), counted in the real-shell
@@ -243,8 +244,5 @@ waiting at 197 s.
 - **Pairing grants are kept in memory.** A runtime older than the app's
   standard scopes is paired once per app launch, because the record of what
   it grants is not persisted.
-- **Competing refreshes.** Two clients that both want to replace an older
-  runtime take turns on the replacement lock; while a refresh is deferred, the
-  reconnect does not fold its probe.
 - **Sleep and wake.** Not measured on a real sleep: the measuring Mac has
   `SleepDisabled` set and no non-interactive `sudo` to schedule a wake.
