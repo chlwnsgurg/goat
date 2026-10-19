@@ -380,3 +380,17 @@ describe("Git action targets across thread navigation", () => {
     expect(commits()).toBe(3);
   });
 });
+
+describe("Live branch sync", () => {
+  it("keeps a local draft on the checked-out branch when it switches back", async () => {
+    state.shell = null;
+    state.draft = { branch: "main", worktreePath: null, envMode: "local" };
+    await render();
+
+    for (const branch of ["feature/foo", "main"]) {
+      state.branch = branch;
+      await render();
+      await vi.waitFor(() => expect(state.draft?.branch).toBe(branch));
+    }
+  });
+});

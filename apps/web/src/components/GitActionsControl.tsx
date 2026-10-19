@@ -21,7 +21,7 @@ import type {
 } from "@goat/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
-import { type MouseEvent, useEffect, useEffectEvent, useRef, useState } from "react";
+import { type MouseEvent, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import {
   CheckIcon,
@@ -100,6 +100,7 @@ import {
   useVcsPullAction,
 } from "~/lib/sourceControlActions";
 import { useSshWorkspaceFetchBack } from "~/hooks/useSshWorkspaceFetchBack";
+import { useStableCallback } from "~/hooks/useStableCallback";
 import { useThreadProjection, useQuietThreadShell } from "~/state/entities";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useEnvironmentQuery } from "~/state/query";
@@ -1061,7 +1062,8 @@ export default function GitActionsControl({
           (activeDraftThread.branch ? "manual" : "auto")),
     });
   };
-  const persistLiveThreadBranch = useEffectEvent((branch: string | null) => {
+  // ThreadDetailsPanel memoizes this component, where useEffectEvent stays stale.
+  const persistLiveThreadBranch = useStableCallback((branch: string | null) => {
     persistThreadBranchSync(branch);
   });
 
@@ -1131,6 +1133,7 @@ export default function GitActionsControl({
     gitStatusForActions,
     isGitActionRunning,
     isSelectingWorktreeBase,
+    persistLiveThreadBranch,
   ]);
 
   const isDefaultRef = gitStatusForActions?.isDefaultRef ?? false;
