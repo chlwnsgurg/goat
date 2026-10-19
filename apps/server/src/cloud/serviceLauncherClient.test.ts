@@ -178,3 +178,25 @@ it.effect("reports the bound port and allows the launcher's complete smoke deadl
     expect(yield* Fiber.join(prepared)).toMatchObject({ status: "committed", id: "smoke-update" });
   }),
 );
+
+it.effect.each(["failed", "rolled-back"] as const)(
+  "exposes the last %s update without sending IPC",
+  (status) =>
+    Effect.gen(function* () {
+      const update = {
+        id: "update-1",
+        fromVersion: "1.0.0",
+        targetVersion: "1.1.0",
+        status,
+        reason: "failed trial",
+      };
+      const host = new FakeLauncherProcess({
+        protocol: SERVICE_LAUNCHER_PROTOCOL,
+        childVersion: "1.0.0",
+        update,
+      });
+      const client = yield* makeClient(host, "1.0.0");
+      expect(client.lastUpdate).toEqual(update);
+      expect(host.sent).toEqual([]);
+    }),
+);

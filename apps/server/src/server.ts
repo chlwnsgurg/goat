@@ -214,6 +214,7 @@ import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts"
 import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
 import * as MaintenanceAudit from "./maintenance/MaintenanceAudit.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
+import * as ServerAutoUpdate from "./cloud/autoUpdate.ts";
 import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
@@ -1208,6 +1209,12 @@ const layerSshWorkspace = SshWorkspaceSync.layer.pipe(
 );
 
 const layerMakeRoutes = Layer.mergeAll(
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const autoUpdate = yield* ServerAutoUpdate.ServerAutoUpdate;
+      yield* ServerActivation.forkParked(autoUpdate.run);
+    }).pipe(Effect.provide(ServerAutoUpdate.layer)),
+  ),
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
       Layer.provide(AuthHttp.layer),

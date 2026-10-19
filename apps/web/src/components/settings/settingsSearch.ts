@@ -519,6 +519,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     scope: "environment-defaults",
   },
   {
+    id: "automatic-server-updates",
+    title: "Automatic server updates",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["background service stable nightly channel idle automatic update"],
+  },
+  {
     id: "continue-threads-after-server-update",
     title: "Continue threads after restarts",
     to: "/settings/general",
