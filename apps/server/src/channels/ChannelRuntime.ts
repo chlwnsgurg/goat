@@ -102,7 +102,16 @@ const make = Effect.gen(function* () {
     });
 
   const runPass = Effect.gen(function* () {
-    let started = yield* imessage.pollDue(owner);
+    let started = yield* imessage.pollDue(owner).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("iMessage poll failed", {
+          category: error.detail.startsWith("iMessage database ")
+            ? error.detail.slice("iMessage database ".length)
+            : error.reason,
+          detail: error.detail,
+        }).pipe(Effect.as(0)),
+      ),
+    );
     for (const inputId of yield* ledger.listPendingInputs(100)) {
       if (yield* startReception(inputId)) started += 1;
     }

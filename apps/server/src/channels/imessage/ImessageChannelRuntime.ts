@@ -15,7 +15,12 @@ import * as ChannelGateway from "../ChannelGateway.ts";
 import * as ChannelLedger from "../ChannelLedger.ts";
 import * as ChannelTransport from "../ChannelTransport.ts";
 import { deliveryIdFor } from "../channelIds.ts";
-import { openImessageChatDb, type ImessageChatDb } from "./imessageChatDb.ts";
+import {
+  classifyImessageDbError,
+  ImessageDbError,
+  openImessageChatDb,
+  type ImessageChatDb,
+} from "./imessageChatDb.ts";
 import { loadImessageSettings, type ImessageSettings } from "./ImessageChannelSettings.ts";
 import { admitImessageRow, classifyImessageText, toImessageInbound } from "./imessageRowMapping.ts";
 import { makeImessageTransport, makeOsascriptImessageSender } from "./imessageSender.ts";
@@ -53,6 +58,11 @@ interface RuntimeInput {
 
 const failure = (detail: string) =>
   new ChannelLedger.ChannelLedgerError({ reason: "persistence", detail });
+const databaseFailure = (cause: unknown) =>
+  failure(
+    "iMessage database " +
+      (cause instanceof ImessageDbError ? cause.category : classifyImessageDbError(cause)),
+  );
 
 export function makeImessageChannelRuntime(input: RuntimeInput): ImessageChannelRuntime["Service"] {
   let nextDue = 0;
@@ -161,13 +171,13 @@ export function makeImessageChannelRuntime(input: RuntimeInput): ImessageChannel
       nextDue = now() + POLL_MS;
       const db = yield* Effect.try({
         try: () => openDb(input.dbPath),
-        catch: () => failure("iMessage database unavailable"),
+        catch: databaseFailure,
       });
       return yield* Effect.gen(function* () {
         const initial = yield* input.ledger.getImessageCursor(current.connectionId);
         const max = yield* Effect.try({
           try: () => db.maxRowId(),
-          catch: () => failure("iMessage database query failed"),
+          catch: databaseFailure,
         });
         if (initial === undefined) {
           yield* checkpoint(owner, current, undefined, { cursor: max, pendingRowIds: [] });
@@ -179,7 +189,7 @@ export function makeImessageChannelRuntime(input: RuntimeInput): ImessageChannel
         for (const id of cursor.pendingRowIds) {
           const row = yield* Effect.try({
             try: () => db.rowById(id),
-            catch: () => failure("iMessage pending row query failed"),
+            catch: databaseFailure,
           });
           if (row === undefined) return yield* failure("iMessage pending row missing");
           const result = yield* ingestRow(row, current);
@@ -198,7 +208,7 @@ export function makeImessageChannelRuntime(input: RuntimeInput): ImessageChannel
         }
         const rows = yield* Effect.try({
           try: () => db.rowsAfter(cursor.cursor, BATCH),
-          catch: () => failure("iMessage row query failed"),
+          catch: databaseFailure,
         });
         for (const row of rows) {
           const result = yield* ingestRow(row, current);
@@ -223,25 +233,30 @@ export function makeImessageChannelRuntime(input: RuntimeInput): ImessageChannel
   return ImessageChannelRuntime.of({ pollDue });
 }
 
-export const layerLive = Layer.effect(
-  ImessageChannelRuntime,
-  Effect.gen(function* () {
-    const config = yield* ServerConfig.ServerConfig;
-    const ledger = yield* ChannelLedger.ChannelLedger;
-    const gateway = yield* ChannelGateway.ChannelGateway;
-    const home = yield* ChannelBotHome.ChannelBotHome;
-    const registry = yield* ChannelTransport.ChannelTransportRegistry;
-    const platform = yield* HostProcess.Platform;
-    const scope = yield* Effect.scope;
-    return makeImessageChannelRuntime({
-      stateDir: config.stateDir,
-      platform,
-      dbPath: NodePath.join(NodeOS.homedir(), "Library/Messages/chat.db"),
-      ledger,
-      gateway,
-      home,
-      registry,
-      scope,
-    });
-  }),
-);
+export const makeLayerLive = (
+  dbPath = NodePath.join(NodeOS.homedir(), "Library/Messages/chat.db"),
+) =>
+  Layer.effect(
+    ImessageChannelRuntime,
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const home = yield* ChannelBotHome.ChannelBotHome;
+      const registry = yield* ChannelTransport.ChannelTransportRegistry;
+      const platform = yield* HostProcess.Platform;
+      const scope = yield* Effect.scope;
+      return makeImessageChannelRuntime({
+        stateDir: config.stateDir,
+        platform,
+        dbPath,
+        ledger,
+        gateway,
+        home,
+        registry,
+        scope,
+      });
+    }),
+  );
+
+export const layerLive = makeLayerLive();

@@ -55,7 +55,6 @@ export function makeOsascriptImessageSender(
         let done = false;
         let started = false;
         let stderr = "";
-        let timedOut = false;
         const finish = (result: { readonly acceptedAt: string } | ImessageSendFailure) => {
           if (done) return;
           done = true;
@@ -64,8 +63,12 @@ export function makeOsascriptImessageSender(
         };
         // @effect-diagnostics-next-line globalTimers:off -- this Promise owns one spawned process and clears its timer on completion.
         const timer = NodeTimers.setTimeout(() => {
-          timedOut = true;
-          child.kill();
+          finish({ outcome: "unknown", code: "timeout" });
+          try {
+            child.kill();
+          } catch {
+            // The send outcome is already ambiguous; process termination is best effort.
+          }
         }, input.timeoutMs ?? 15_000);
         child.once("spawn", () => {
           started = true;
@@ -81,10 +84,7 @@ export function makeOsascriptImessageSender(
           finish({ outcome: started ? "unknown" : "not_sent", code: "unknown" }),
         );
         child.once("close", (code) => {
-          if (timedOut) {
-            finish({ outcome: "unknown", code: "timeout" });
-            return;
-          }
+          if (done) return;
           if (code === 0) {
             finish({ acceptedAt: DateTime.formatIso(DateTime.nowUnsafe()) });
             return;

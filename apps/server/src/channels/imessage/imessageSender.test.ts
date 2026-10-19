@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- fake child streams never start osascript.
 import * as NodeEvents from "node:events";
 import * as NodeStream from "node:stream";
+import * as NodeTimers from "node:timers";
 import type * as NodeChildProcess from "node:child_process";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -79,6 +80,41 @@ describe("iMessage sender", () => {
       code: "chat_not_found",
     });
     expect(await outcome("unclassified", 1)).toEqual({ outcome: "unknown", code: "unknown" });
+  });
+  it("settles an ambiguous timeout even if the captured child never closes", async () => {
+    const child = new NodeEvents.EventEmitter() as NodeEvents.EventEmitter & {
+      stdin: NodeStream.PassThrough;
+      stdout: NodeStream.PassThrough;
+      stderr: NodeStream.PassThrough;
+      kill: () => boolean;
+    };
+    child.stdin = new NodeStream.PassThrough();
+    child.stdout = new NodeStream.PassThrough();
+    child.stderr = new NodeStream.PassThrough();
+    let kills = 0;
+    child.kill = () => {
+      kills += 1;
+      return false;
+    };
+    const spawnProcess = (() => {
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    }) as unknown as typeof NodeChildProcess.spawn;
+    const sender = makeOsascriptImessageSender({ spawnProcess, timeoutMs: 1 });
+    const send = sender.sendText({ chatGuid: "guid", text: "hello" });
+    let watchdog: NodeJS.Timeout;
+    const result = await Promise.race([
+      send,
+      new Promise<"deadline missed">((resolve) => {
+        // @effect-diagnostics-next-line globalTimers:off -- the watchdog makes a missing timeout settlement fail promptly.
+        watchdog = NodeTimers.setTimeout(() => resolve("deadline missed"), 100);
+      }),
+    ]);
+    NodeTimers.clearTimeout(watchdog!);
+    expect(result).toEqual({ outcome: "unknown", code: "timeout" });
+    expect(kills).toBe(1);
+    child.emit("close", 0);
+    expect(await send).toEqual({ outcome: "unknown", code: "timeout" });
   });
   it("passes user data as argv and a fixed script on stdin", async () => {
     const child = new NodeEvents.EventEmitter() as NodeEvents.EventEmitter & {

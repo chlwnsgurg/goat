@@ -105,10 +105,10 @@ export const makeLayerServices = <E, R>(
 export const layerServices = makeLayerServices(SlackChannelSettings.layerUnavailable);
 
 /** Every channel service with the live Slack runtime, over whatever `SlackSdk` is provided. */
-export const layerServicesWithSlack = makeLayerServices(
-  layerSlackLive,
-  ImessageChannelRuntime.layerLive,
-);
+export const makeLayerServicesWithSlack = (imessageLayer = ImessageChannelRuntime.layerLive) =>
+  makeLayerServices(layerSlackLive, imessageLayer);
+
+export const layerServicesWithSlack = makeLayerServicesWithSlack();
 
 /** Every channel service, the live Slack connection, and the background owner loop. */
 export const layer = ChannelRuntime.layerBackground.pipe(
