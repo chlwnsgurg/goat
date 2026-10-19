@@ -4,6 +4,8 @@ import {
   type GoatBotHomeClaim,
 } from "@goat/contracts";
 
+export { newGoatBotHomeClaim } from "@goat/contracts";
+
 export interface GoatBotHomeTarget {
   readonly environmentId: EnvironmentId;
   readonly supportsHome: boolean;
@@ -59,28 +61,6 @@ export function resolveGoatBotHome({
             target.home.environmentId !== winner.environmentId),
       )
       .map((target) => target.environmentId),
-  };
-}
-
-/** Advance the observed logical clock so moving home still works after clock rollback. */
-export function newGoatBotHomeClaim({
-  environmentId,
-  now,
-  observedMax,
-  randomId,
-}: {
-  environmentId: EnvironmentId;
-  now: number;
-  observedMax: GoatBotHomeClaim | null;
-  randomId: () => string;
-}): GoatBotHomeClaim {
-  return {
-    environmentId,
-    claimedAt: Math.min(
-      Number.MAX_SAFE_INTEGER,
-      Math.max(0, Math.trunc(now), (observedMax?.claimedAt ?? -1) + 1),
-    ),
-    claimId: randomId(),
   };
 }
 

@@ -87,26 +87,11 @@ const requireOrchestration = McpInvocationContext.McpInvocationContext.pipe(
 
 /**
  * Cloud machines bill the user's Boat account, so changing them needs what changing settings
- * needs: a live settings:write grant that is reconfirmed for this call (as memory's settings tools).
+ * needs.
  */
-export const requireSettingsWrite = McpInvocationContext.McpInvocationContext.pipe(
-  Effect.flatMap((scope) => {
-    const deny = () =>
-      new OrchestratorMcpFailure({
-        code: "capability_denied",
-        message:
-          "Changing cloud machines needs a caller allowed to change this machine's settings.",
-      });
-    if (
-      scope.readOnly ||
-      scope.client?.access === "read-only" ||
-      !scope.grantedScopes?.includes("settings:write") ||
-      !scope.reauthorize
-    )
-      return Effect.fail(deny());
-    return scope.reauthorize(["settings:write"]).pipe(Effect.mapError(deny));
-  }),
-);
+const requireSettingsWrite = McpToolAccess.requireSettingsWrite(
+  "Changing cloud machines needs a caller allowed to change this machine's settings.",
+).pipe(Effect.asVoid);
 
 const toCloudFailure = (error: CloudMachineError) =>
   new OrchestratorMcpFailure({

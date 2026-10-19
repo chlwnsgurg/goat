@@ -2,10 +2,12 @@ import {
   type ChannelGatewayError,
   type ChannelInboundMessage,
   OrchestratorMcpFailure,
+  ServerSettingsError,
 } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
+import * as ChannelBotHome from "../../../channels/ChannelBotHome.ts";
 import * as ChannelGateway from "../../../channels/ChannelGateway.ts";
 import * as ChannelTaskExport from "../../../channels/ChannelTaskExport.ts";
 import * as ChannelLedger from "../../../channels/ChannelLedger.ts";
@@ -36,9 +38,16 @@ const failureFor = (error: ChannelGatewayError | ChannelLedger.ChannelLedgerErro
         ? error.message +
           (error.homeEnvironmentId === undefined
             ? ""
-            : " Home environment: " + error.homeEnvironmentId)
+            : " Home environment: " + error.homeEnvironmentId + ".") +
+          " If that machine is gone, call channel_bot_home_claim on the machine that should run GOAT Bot."
         : error.message,
   });
+
+/** Marks the failure of a grant revoked while the claim waited for the settings write lock. */
+const HOME_CLAIM_REVOKED = "<goat-bot-home-claim-revoked>";
+
+const HOME_CLAIM_DENIAL =
+  "Moving GOAT Bot needs a caller allowed to change this machine's settings.";
 
 const ownerIdOf = McpInvocationContext.McpInvocationContext.pipe(
   Effect.map((scope) => channelOwnerIdFor(scope.environmentId)),
@@ -195,6 +204,43 @@ export const layer = McpToolAccess.toLayer(
           const reports = yield* ChannelWorkerReports.ChannelWorkerReports;
           yield* reports.report(input, scope.thread?.threadId).pipe(Effect.mapError(failureFor));
           return {};
+        }),
+      ),
+      channel_bot_home: McpToolAccess.reads(() =>
+        Effect.gen(function* () {
+          const home = yield* ChannelBotHome.ChannelBotHome;
+          return yield* home.read.pipe(Effect.mapError(failureFor));
+        }),
+      ),
+      channel_bot_home_claim: McpToolAccess.writes(() =>
+        Effect.gen(function* () {
+          const reauthorize = yield* McpToolAccess.requireSettingsWrite(HOME_CLAIM_DENIAL);
+          const home = yield* ChannelBotHome.ChannelBotHome;
+          return yield* home
+            .claimHere(
+              reauthorize.pipe(
+                Effect.mapError(
+                  () =>
+                    new ServerSettingsError({
+                      settingsPath: HOME_CLAIM_REVOKED,
+                      operation: "normalize",
+                    }),
+                ),
+              ),
+            )
+            .pipe(
+              Effect.mapError((error) =>
+                error.settingsPath === HOME_CLAIM_REVOKED
+                  ? new OrchestratorMcpFailure({
+                      code: "capability_denied",
+                      message: HOME_CLAIM_DENIAL,
+                    })
+                  : new OrchestratorMcpFailure({
+                      code: "orchestration_error",
+                      message: "Could not save GOAT Bot's home on this machine.",
+                    }),
+              ),
+            );
         }),
       ),
     } satisfies McpToolAccess.Handlers<typeof ChannelToolkit.tools>;

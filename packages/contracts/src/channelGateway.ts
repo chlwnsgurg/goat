@@ -26,6 +26,7 @@ import {
 } from "./channelCommon.ts";
 import { ChannelBotRef, ChannelTask, ChannelTaskChip, ChannelTaskStatus } from "./channelLedger.ts";
 import { RuntimeMode } from "./providerPolicy.ts";
+import { GoatBotHomeClaim } from "./settings.ts";
 
 /**
  * The one door channel input comes through. Every transport (the GOAT bot, Slack, MCP agents)
@@ -321,6 +322,25 @@ export type ChannelTaskMoveResult = typeof ChannelTaskMoveResult.Type;
 
 export const ChannelGetInputInput = Schema.Struct({ inputId: ChannelInputId });
 export type ChannelGetInputInput = typeof ChannelGetInputInput.Type;
+
+/** Where GOAT Bot lives, as this server's settings record it. */
+export const ChannelBotHomeStatus = Schema.Struct({
+  /** The winning claim this server holds; null until some client or agent claims a home. */
+  home: Schema.NullOr(GoatBotHomeClaim),
+  /** This server's environment. */
+  environmentId: EnvironmentId,
+  /** Whether this server may run GOAT Bot: it is the home, or no home is claimed yet. */
+  isHome: Schema.Boolean,
+});
+export type ChannelBotHomeStatus = typeof ChannelBotHomeStatus.Type;
+
+export const ChannelBotHomeClaimResult = Schema.Struct({
+  /** False when a newer claim, written meanwhile, still names another machine. */
+  claimed: Schema.Boolean,
+  home: GoatBotHomeClaim,
+  environmentId: EnvironmentId,
+});
+export type ChannelBotHomeClaimResult = typeof ChannelBotHomeClaimResult.Type;
 
 export const CHANNEL_GATEWAY_WS_METHODS = {
   ensureBot: "channel.ensureBot",
