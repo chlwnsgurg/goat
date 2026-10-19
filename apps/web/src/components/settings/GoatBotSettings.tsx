@@ -1,7 +1,3 @@
-// @effect-diagnostics cryptoRandomUUID:off - browser home claims use the platform UUID source.
-import { newGoatBotHomeClaim } from "@goat/client-runtime/goatBot/home";
-import { useState } from "react";
-
 import { useGoatBotHomeSettings } from "../goatBot/useGoatBotHome";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
@@ -9,10 +5,8 @@ import { searchableSetting } from "./settingsSearch";
 
 /** The bot's cluster-wide home, independent of the settings page's selected environment. */
 export function GoatBotSettings() {
-  const { supported, resolution, targets, environments, writableIds, write } =
+  const { supported, resolution, targets, environments, writableIds, busy, error, changeHome } =
     useGoatBotHomeSettings();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   if (!supported) return null;
   const options = targets.filter(
     (target) => target.connected && target.supportsHome && target.supportsBot,
@@ -25,34 +19,11 @@ export function GoatBotSettings() {
       ? "Loading…"
       : claim === null
         ? "Not chosen yet"
-        : resolution.state === "claimed" && !resolution.homeConnected
-          ? `Waiting for ${label(claim.environmentId)}`
-          : label(claim.environmentId);
-  function changeHome(value: string | null) {
-    const target = options.find((entry) => entry.environmentId === value);
-    if (!target || !writableIds.has(target.environmentId) || value === claim?.environmentId) return;
-    const next = newGoatBotHomeClaim({
-      environmentId: target.environmentId,
-      // oxlint-disable-next-line react/purity -- Select invokes this callback on user selection.
-      now: Date.now(),
-      observedMax: claim,
-      randomId: () => crypto.randomUUID(),
-    });
-    setBusy(true);
-    setError(null);
-    void Promise.all(
-      targets
-        .filter(
-          (entry) => entry.connected && entry.supportsHome && writableIds.has(entry.environmentId),
-        )
-        .map((entry) => write(entry.environmentId, next)),
-    )
-      .then((results) => {
-        if (results.some((success) => !success))
-          setError("Could not save on every computer. Reconnect to sync the choice.");
-      })
-      .finally(() => setBusy(false));
-  }
+        : resolution.state === "claimed" && !resolution.homeKnown
+          ? `Not connected (${claim.environmentId.slice(0, 8)})`
+          : resolution.state === "claimed" && !resolution.homeConnected
+            ? `Waiting for ${label(claim.environmentId)}`
+            : label(claim.environmentId);
   return (
     <SettingsSection id="goat-bot" title="GOAT Bot">
       <SettingsRow
@@ -67,7 +38,10 @@ export function GoatBotSettings() {
               resolution.state === "unknown" ||
               !options.some((target) => writableIds.has(target.environmentId))
             }
-            onValueChange={changeHome}
+            onValueChange={(value) => {
+              const target = options.find((entry) => entry.environmentId === value);
+              if (target) changeHome(target.environmentId);
+            }}
           >
             <SelectTrigger size="sm" aria-label="GOAT Bot runs on">
               <SelectValue>{valueLabel}</SelectValue>
