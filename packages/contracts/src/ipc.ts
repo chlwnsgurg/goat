@@ -298,6 +298,7 @@ export interface DesktopUpdateState {
   errorContext: "check" | "download" | "install" | null;
   canRetry: boolean;
   notAppliedVersion?: string;
+  installationNotice?: string;
 }
 
 export interface DesktopUpdateReleaseNote {
@@ -353,6 +354,7 @@ export const DesktopUpdateStateSchema = Schema.Struct({
   errorContext: Schema.NullOr(Schema.Literals(["check", "download", "install"])),
   canRetry: Schema.Boolean,
   notAppliedVersion: Schema.optionalKey(Schema.String),
+  installationNotice: Schema.optionalKey(Schema.String),
 });
 
 export const DesktopCliCommandStateSchema = Schema.Struct({

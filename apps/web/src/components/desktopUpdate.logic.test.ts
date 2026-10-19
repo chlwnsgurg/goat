@@ -389,6 +389,30 @@ describe("canCheckForUpdate", () => {
 });
 
 describe("getDesktopUpdateButtonTooltip", () => {
+  it("keeps administrator advice next to the app action without blocking checks", () => {
+    const state: DesktopUpdateState = {
+      ...baseState,
+      status: "downloaded",
+      downloadedVersion: "1.2.4",
+      installationNotice: "Ask an administrator. Servers can still update independently.",
+    };
+    expect(getDesktopUpdateButtonTooltip(state)).toContain("Click to restart and install");
+    expect(getDesktopUpdateButtonTooltip(state)).toContain(state.installationNotice);
+    expect(canCheckForUpdate(state)).toBe(true);
+    expect(resolveDesktopUpdateButtonAction(state)).toBe("install");
+  });
+
+  it("shows the installation restriction instead of a generic disabled status", () => {
+    const state: DesktopUpdateState = {
+      ...baseState,
+      enabled: false,
+      status: "disabled",
+      message: "Move GOAT to Applications. Servers can still update independently.",
+    };
+    expect(getDesktopUpdateButtonTooltip(state)).toBe(state.message);
+    expect(getDesktopUpdateStatusText(state)).toBe(state.message);
+    expect(canCheckForUpdate(state)).toBe(false);
+  });
   it("returns 'Up to date' for non-actionable states", () => {
     expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "idle" })).toBe("Up to date");
     expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "up-to-date" })).toBe(

@@ -91,6 +91,12 @@ export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState):
 }
 
 export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string {
+  if (!state.enabled) return state.message ?? "Automatic updates are disabled.";
+  const actionTooltip = getDesktopUpdateActionTooltip(state);
+  return state.installationNotice ? `${actionTooltip}\n${state.installationNotice}` : actionTooltip;
+}
+
+function getDesktopUpdateActionTooltip(state: DesktopUpdateState): string {
   if (
     state.notAppliedVersion !== undefined &&
     (state.status === "available" || state.status === "downloaded") &&
@@ -151,7 +157,7 @@ export function canCheckForUpdate(state: DesktopUpdateState | null): boolean {
 
 /** Describes the app-owned automatic install policy and pending recovery. */
 export function getDesktopUpdateStatusText(state: DesktopUpdateState): string {
-  if (!state.enabled) return "Automatic updates are disabled.";
+  if (!state.enabled) return state.message ?? "Automatic updates are disabled.";
   if (state.errorContext === "download" && state.message) return state.message;
   if (state.installPolicy === "paused")
     return "Automatic downloads and installation are paused. You can still check, download, and install manually.";

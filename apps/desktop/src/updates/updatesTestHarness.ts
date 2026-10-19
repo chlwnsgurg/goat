@@ -39,6 +39,8 @@ export interface UpdatesHarnessOptions {
   readonly backendDesiredRunning?: boolean;
   readonly env?: Record<string, string | undefined>;
   readonly platform?: NodeJS.Platform;
+  readonly appPath?: string;
+  readonly unwritablePaths?: ReadonlyArray<string>;
   readonly packageType?: string | undefined;
   readonly installRecord?: string | undefined;
 }
@@ -193,7 +195,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     platform: options.platform ?? "darwin",
     processArch: "x64",
     appVersion: "1.2.3",
-    appPath: "/repo",
+    appPath: options.appPath ?? "/repo",
     isPackaged: true,
     resourcesPath: "/missing/resources",
     runningUnderArm64Translation: false,
@@ -272,6 +274,17 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   const isInstallRecord = (path: string) =>
     path.endsWith(DesktopUpdates.DESKTOP_UPDATE_INSTALL_RECORD_FILE);
   const layerFileSystem = FileSystem.layerNoop({
+    access: (path, accessOptions) =>
+      accessOptions?.writable && options.unwritablePaths?.includes(path)
+        ? Effect.fail(
+            PlatformError.systemError({
+              module: "FileSystem",
+              method: "access",
+              _tag: "PermissionDenied",
+              pathOrDescriptor: path,
+            }),
+          )
+        : Effect.void,
     readFileString: (path) => {
       const installRecord = isInstallRecord(path)
         ? (installRecords.get(path) ?? previousInstallRecord)

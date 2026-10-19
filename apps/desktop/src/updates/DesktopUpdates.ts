@@ -40,6 +40,10 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import { normalizeDesktopUpdateReleaseNotes } from "./releaseNotes.ts";
 import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
 import {
+  classifyDesktopUpdateInstallation,
+  getDesktopUpdateInstallationMessage,
+} from "./updateInstallation.ts";
+import {
   createInitialDesktopUpdateState,
   reduceDesktopUpdateStateOnCheckFailure,
   reduceDesktopUpdateStateOnCheckStart,
@@ -353,6 +357,30 @@ export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
 
+  const installationReason = yield* Effect.gen(function* () {
+    if (environment.platform !== "darwin" || !environment.isPackaged) return null;
+    // Electron's app path points inside the bundle (usually app.asar), not at the bundle.
+    const bundlePath = environment.appPath.match(/^(.*?\.app)(?:\/|$)/)?.[1];
+    if (!bundlePath) return null;
+    const [bundleWritable, parentWritable] = yield* Effect.all([
+      fileSystem.access(bundlePath, { writable: true }).pipe(Effect.isSuccess),
+      fileSystem
+        .access(environment.path.dirname(bundlePath), { writable: true })
+        .pipe(Effect.isSuccess),
+    ]);
+    return classifyDesktopUpdateInstallation({
+      platform: environment.platform,
+      appBundlePath: bundlePath,
+      bundleWritable,
+      parentWritable,
+      // DMGs mount under /Volumes; a writable external installation remains updateable.
+      readOnlyVolume: bundlePath.startsWith("/Volumes/") && (!bundleWritable || !parentWritable),
+    });
+  });
+  const installationMessage = installationReason
+    ? getDesktopUpdateInstallationMessage(installationReason)
+    : null;
+
   const appUpdateYmlConfigRef = yield* Ref.make<Option.Option<AppUpdateYmlConfig>>(Option.none());
   const activeUpdateActionRef = yield* Ref.make<Option.Option<UpdateAction>>(Option.none());
   const installRunningBackendsRef = yield* Ref.make<
@@ -459,7 +487,7 @@ export const make = Effect.gen(function* () {
         isDebPackage,
         disabledByEnv: config.disableAutoUpdate,
         hasUpdateFeedConfig: hasFeedConfig,
-      }),
+      }) ?? (installationReason !== "needs-admin" ? installationMessage : null),
     );
   });
 
@@ -738,15 +766,21 @@ export const make = Effect.gen(function* () {
   );
 
   const baseUpdateState = (channel: DesktopUpdateChannel, enabled: boolean) =>
-    Ref.get(notAppliedVersionRef).pipe(
-      Effect.map((notAppliedVersion) => ({
+    Effect.gen(function* () {
+      const notAppliedVersion = yield* Ref.get(notAppliedVersionRef);
+      const disabledReason = yield* resolveDisabledReason;
+      return {
         ...createBaseUpdateState(channel, enabled, environment),
+        message: Option.getOrNull(disabledReason),
+        ...(installationReason === "needs-admin" && installationMessage
+          ? { installationNotice: installationMessage }
+          : {}),
         ...Option.match(notAppliedVersion, {
           onNone: () => ({}),
           onSome: (version) => ({ notAppliedVersion: version }),
         }),
-      })),
-    );
+      };
+    });
 
   const resetInstallAction = Effect.all(
     [

@@ -433,9 +433,12 @@ function AboutVersionSection() {
   const buttonLabel =
     actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates";
   const description =
-    action === "download" || action === "install"
-      ? "Update available."
-      : "Current version of the application.";
+    updateState?.installationNotice ??
+    (updateState && !updateState.enabled
+      ? getDesktopUpdateStatusText(updateState)
+      : action === "download" || action === "install"
+        ? "Update available."
+        : "Current version of the application.");
 
   return (
     <>
