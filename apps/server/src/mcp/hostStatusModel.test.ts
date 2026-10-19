@@ -306,6 +306,26 @@ describe("older host-status payloads", () => {
     expect(entry?.versionMismatch).toBe(true);
   });
 
+  it("keeps a host with partial or malformed ranges reachable, and judges it degraded", () => {
+    const speaks = ownRuntimeProtocolRanges(1001);
+    for (const protocol of [
+      { orchestration: { min: 1001, max: 1001 } },
+      { ssh: { min: 0, max: 1001 }, orchestration: { min: 1001, max: 1001 } },
+      "1001",
+    ]) {
+      const [entry] = decode({
+        hosts: [{ host: "box", reachability: "ok", serverVersion: "0.1.0", protocol }],
+      }).hosts;
+      expect(entry?.reachability).toBe("ok");
+      expect(entry?.protocol).toBeUndefined();
+      expect(
+        entry === undefined
+          ? undefined
+          : markHostCompatibility(entry, { version: "0.1.0", speaks }),
+      ).toMatchObject({ compatibility: "degraded" });
+    }
+  });
+
   it("drops a verdict this build does not know instead of failing the answer", () => {
     const entry = decode({
       hosts: [{ host: "box", reachability: "ok", compatibility: "partially-compatible" }],

@@ -97,8 +97,9 @@ export const HostStatusEntry = Schema.Struct({
   metrics: Schema.optional(HostStatusMetrics),
   /** GOAT version that machine runs. Older hosts omit it. */
   serverVersion: Schema.optional(TrimmedNonEmptyString),
-  /** Protocol ranges that machine serves. Older hosts omit it. */
-  protocol: Schema.optional(RuntimeProtocolRanges),
+  /** Protocol ranges that machine serves. Older hosts omit it. Partial or malformed ranges decode
+      away, so a host that sends them stays reachable and is judged `degraded`. */
+  protocol: ForwardCompatibleOptional(RuntimeProtocolRanges),
   /**
    * The host runs a different GOAT build than the machine that fanned out, or does not say
    * which. Informational: builds of different versions work together while `compatibility`
