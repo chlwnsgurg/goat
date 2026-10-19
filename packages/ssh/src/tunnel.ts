@@ -149,6 +149,8 @@ export interface RemoteGoatRunnerOptions {
   readonly bundledArchiveDirectory?: string | null;
   /** Local gh executable used for authenticated acquisition; defaults to PATH lookup. */
   readonly ghCommand?: string | undefined;
+  /** Deadline for the best-effort post-install cleanup and fact warming round trip; 10 s by default. */
+  readonly cleanupTimeoutMs?: number | undefined;
   /**
    * Reuse the remote's existing `run-t3.sh` instead of replacing it. Pairing and
    * MCP-session helpers set it so remote CLI commands run with the binary that
@@ -3451,7 +3453,7 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
           ...input,
           // The trailing word is only $1 to the script; it names this call in traces and tests.
           remoteCommandArgs: ["sh", "-l", "-s", "goat-runtime-cleanup"],
-          timeoutMs: 10_000,
+          timeoutMs: runner?.cleanupTimeoutMs ?? 10_000,
           stdin: `set -eu
 DEFAULT_SERVER_HOME="$HOME/.goat"
 STATE_DIR="$DEFAULT_SERVER_HOME/ssh-launch/${stateKey}"

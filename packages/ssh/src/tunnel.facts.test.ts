@@ -135,7 +135,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host facts
         yield* f.fs.remove(f.old, { recursive: true });
         yield* f.fs.remove(`${f.state}/run-t3.sh`);
         yield* f.shiftHostClock(age, true);
-        const installed = yield* f.run("launch");
+        // Warming starts a dozen fixture node processes; a loaded CI runner can exceed the 10 s default.
+        const installed = yield* f.run("launch", false, { cleanupTimeoutMs: LAUNCHES_TIMEOUT_MS });
         if (Result.isFailure(installed)) throw installed.failure;
         assert.equal(installed.success.status, "ready");
         assert.isAbove(installed.success.port, 0);
