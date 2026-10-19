@@ -155,7 +155,7 @@ describe("Windows SSH host", () => {
         );
         yield* fs.writeFileString(
           `${bin}/wget`,
-          `#!/bin/sh\nurl=""; out=""\nwhile [ $# -gt 0 ]; do\n  case "$1" in -O) out="$2"; shift 2 ;; http*) url="$1"; shift ;; *) shift ;; esac\ndone\ncp "${release}/$(basename "$url")" "$out"\n`,
+          `#!/bin/sh\nif [ "$1" = --help ]; then echo --retry-on-http-error; exit 0; fi\nurl=""; out=""\nwhile [ $# -gt 0 ]; do\n  case "$1" in -O) out="$2"; shift 2 ;; http*) url="$1"; shift ;; *) shift ;; esac\ndone\ncp "${release}/$(basename "$url")" "$out"\n`,
         );
         for (const file of [`${bin}/uname`, `${bin}/cygpath`, `${sys32}/tar.exe`, `${bin}/wget`]) {
           yield* fs.chmod(file, 0o755);
@@ -230,6 +230,12 @@ describe("Windows SSH host", () => {
       instruction: "Install tar on devbox, then try again.",
     },
     {
+      name: "Git Bash host missing tar.exe on PATH",
+      stderr: "bash: tar.exe: command not found\n",
+      reason: "missing_tools",
+      instruction: "Install tar on devbox, then try again.",
+    },
+    {
       name: "32-bit Git Bash host without a release archive",
       stderr: "Remote host i686 has no GOAT release archive.\n",
       reason: "unsupported_platform",
@@ -273,6 +279,52 @@ describe("Windows SSH host", () => {
       assert.equal(result.status?.failure?.reason, reason);
       assert.equal(result.status?.failure?.fix.actor, "human");
       assert.equal(result.status?.failure?.fix.instruction, instruction);
+    }).pipe(Effect.provide(layer), Effect.scoped);
+  });
+
+  it.effect("does not misclassify a missing archive file opened by tar as missing_tools", () => {
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.succeed(
+        command._tag === "StandardCommand" && command.args.includes("-G")
+          ? makeSuccessfulProcess("hostname devbox.example.com\nuser julius\nport 2222\n")
+          : ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(123),
+              stdout: Stream.empty,
+              stderr: Stream.make(
+                new TextEncoder().encode(
+                  "tar: /tmp/missing.tar.gz: Cannot open: No such file or directory\n",
+                ),
+              ),
+              all: Stream.empty,
+              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(2)),
+              isRunning: Effect.succeed(false),
+              kill: () => Effect.void,
+              stdin: Sink.drain,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
+              unref: Effect.succeed(Effect.void),
+            }),
+      ),
+    );
+    const layer = Layer.mergeAll(
+      NodeServices.layer,
+      Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Layer.succeed(HttpClient.HttpClient, testHttpClient),
+      Layer.succeed(NetService.NetService, testNetService),
+      SshAuth.SshPasswordPrompt.disabledLayer,
+      SshEnvironmentManager.layer({
+        resolveCliRunner: Effect.succeed(ARCHIVE),
+        leaveRemoteServerRunning: true,
+      }),
+    );
+    return Effect.gen(function* () {
+      const manager = yield* SshEnvironmentManager;
+      const result = yield* manager.status(uploadTarget);
+      assert.equal(result.kind, "error");
+      if (result.kind === "error") {
+        assert.equal(result.code, "operation_failed");
+        assert.notInclude(result.fix?.instruction ?? "", "Install tar");
+      }
     }).pipe(Effect.provide(layer), Effect.scoped);
   });
 });

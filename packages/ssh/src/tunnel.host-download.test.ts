@@ -39,23 +39,39 @@ case "$url" in
 esac
 `;
 
-const fakeWget = (cache: string, log: string, flagsLog: string, mode: string) => `#!/bin/sh
+const fakeWget = (
+  cache: string,
+  log: string,
+  flagsLog: string,
+  mode: "modern" | "legacy",
+) => `#!/bin/sh
+mode='${mode}'
+if [ "$1" = --help ]; then
+  printf 'GNU Wget 1.%s\\n  -q,  --quiet\\n       --timeout=SECONDS\\n  -t,  --tries=NUMBER\\n       --waitretry=SECONDS\\n  -O,  --output-document=FILE\\n' "$([ "$mode" = modern ] && echo 21.4 || echo 18)"
+  if [ "$mode" = modern ]; then
+    printf '       --retry-on-http-error=ERRORS\\n'
+  fi
+  exit 0
+fi
 printf "%s\\n" "$*" >> '${flagsLog}'
 url=""; out=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    -q|--timeout=*|--tries=*|--waitretry=*) shift ;;
+    --retry-on-http-error=*)
+      if [ "$mode" != modern ]; then
+        printf "wget: unrecognized option '%s'\\n" "$1" >&2
+        exit 2
+      fi
+      shift ;;
     -O) out="$2"; shift 2 ;;
     http*) url="$1"; shift ;;
-    *) shift ;;
+    *) printf "wget: unrecognized option '%s'\\n" "$1" >&2; exit 2 ;;
   esac
 done
 printf '%s\\n' "$(basename "$url")" >> '${log}'
-mode='${mode}'
-if [ "$mode" = offline ]; then exit 4; fi
 case "$url" in
-  */SHA256SUMS)
-    if [ "$mode" = corrupt ]; then printf '%s  %s\\n' "$(printf 'f%.0s' $(seq 64))" '${stem}.tar.gz' > "$out"
-    else cp '${cache}/${stem}.tar.gz.sha256' "$out"; fi ;;
+  */SHA256SUMS) cp '${cache}/${stem}.tar.gz.sha256' "$out" ;;
   *) cp '${cache}/${stem}.tar.gz' "$out" ;;
 esac
 `;
@@ -147,7 +163,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host downl
   );
 
   it.live(
-    "uses wget with transient-error retries on a wget-only host and falls back to upload when neither curl nor wget is present",
+    "uses wget on a wget-only host across modern and legacy GNU wget and falls back to upload when neither curl nor wget is present",
     () =>
       Effect.gen(function* () {
         const f = yield* makeProtocolFixture({
@@ -165,7 +181,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host downl
         yield* f.fs.makeDirectory(wgetBin, { recursive: true });
         yield* f.fs.writeFileString(
           `${wgetBin}/wget`,
-          fakeWget(f.runner.archiveDirectory, log, flagsLog, "serve"),
+          fakeWget(f.runner.archiveDirectory, log, flagsLog, "modern"),
         );
         yield* f.fs.chmod(`${wgetBin}/wget`, 0o755);
         yield* f.fs.writeFileString(log, "");
@@ -189,10 +205,47 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host downl
         assert.equal(wgetRecord.trim().split(" ")[3], "https");
         assert.equal(f.counters().uploads, 0);
         assert.deepEqual(wgetFetched, ["SHA256SUMS", `${stem}.tar.gz`]);
+        assert.lengthOf(wgetFlags, 2);
         for (const line of wgetFlags) {
           assert.include(line, "--tries=3");
           assert.include(line, "--waitretry=2");
           assert.include(line, "--retry-on-http-error=408,429,500,502,503,504");
+        }
+
+        // Reinstall against legacy GNU wget (< 1.19.1) that rejects --retry-on-http-error.
+        yield* f.fs.remove(`${f.home}/.goat/runtime/goat/versions/${ARCHIVE.archiveVersion}`, {
+          recursive: true,
+        });
+        yield* f.fs.writeFileString(
+          `${wgetBin}/wget`,
+          fakeWget(f.runner.archiveDirectory, log, flagsLog, "legacy"),
+        );
+        yield* f.fs.chmod(`${wgetBin}/wget`, 0o755);
+        yield* f.fs.writeFileString(log, "");
+        yield* f.fs.writeFileString(flagsLog, "");
+
+        const legacyResult = yield* SshTunnel.prepareRemoteRuntime(
+          uploadTarget,
+          {},
+          { ...f.runner, hostDownload: true },
+          REMOTE_RUNTIME_STATE_KEY,
+          true,
+        ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, f.transport));
+        const legacyRecord = yield* f.fs.readFileString(
+          `${f.home}/.goat/runtime/goat/versions/${ARCHIVE.archiveVersion}/.install-record`,
+        );
+        const legacyFetched = (yield* f.fs.readFileString(log)).split("\n").filter(Boolean);
+        const legacyFlags = (yield* f.fs.readFileString(flagsLog)).split("\n").filter(Boolean);
+        assert.equal(legacyResult.version, ARCHIVE.archiveVersion);
+        assert.isTrue(legacyResult.uploaded);
+        assert.equal(legacyRecord.trim().split(" ")[3], "https");
+        assert.equal(f.counters().uploads, 0);
+        assert.deepEqual(legacyFetched, ["SHA256SUMS", `${stem}.tar.gz`]);
+        assert.lengthOf(legacyFlags, 2);
+        for (const line of legacyFlags) {
+          assert.include(line, "--tries=3");
+          assert.include(line, "--waitretry=2");
+          assert.notInclude(line, "--retry-on-http-error");
         }
 
         // Remove the installed version and wget so neither curl nor wget is on the login PATH.

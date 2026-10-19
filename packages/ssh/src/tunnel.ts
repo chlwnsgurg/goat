@@ -2596,7 +2596,11 @@ const REMOTE_HOST_FETCH_FUNCTION = `  goat_host_fetch() {
     if command -v curl >/dev/null 2>&1; then
       curl -fsSL --connect-timeout 10 --retry 2 --max-time "$3" "$1" -o "$2" && return 0
     elif command -v wget >/dev/null 2>&1; then
-      wget -q --timeout=30 --tries=3 --waitretry=2 --retry-on-http-error=408,429,500,502,503,504 "$1" -O "$2" && return 0
+      if wget --help 2>&1 | grep -q -- --retry-on-http-error; then
+        wget -q --timeout=30 --tries=3 --waitretry=2 --retry-on-http-error=408,429,500,502,503,504 "$1" -O "$2" && return 0
+      else
+        wget -q --timeout=30 --tries=3 --waitretry=2 "$1" -O "$2" && return 0
+      fi
     else
       printf 'Remote host needs curl or wget to download %s.\\n' "$GOAT_ARCHIVE" >&2
       return 1
@@ -4606,7 +4610,7 @@ function runtimeFailureResult(
     });
   }
   if (
-    /Remote host is missing node on PATH|Install shasum or sha256sum|Remote host needs curl or wget|tar(?:\.exe)?:.*(?:not found|not recognized|No such file or directory)|'sh' is not recognized as an internal or external command|\bsh\s*:\s*The term 'sh' is not recognized/iu.test(
+    /Remote host is missing node on PATH|Install shasum or sha256sum|Remote host needs curl or wget|tar(?:\.exe)?:.*(?:not found|not recognized)|[/\\]tar\.exe:\s*No such file or directory|'sh' is not recognized as an internal or external command|\bsh\s*:\s*The term 'sh' is not recognized/iu.test(
       source,
     )
   ) {
