@@ -1,7 +1,13 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { DesktopSshHostStatusInputSchema, DesktopSshRuntimeUpdateInputSchema } from "./ipc.ts";
+import {
+  DesktopSshHostStatusInputSchema,
+  DesktopSshRuntimeUpdateInputSchema,
+  SshRuntimePendingReplacementSchema,
+  DesktopSshRuntimePendingResultSchema,
+  DesktopSshEnvironmentBootstrapSchema,
+} from "./ipc.ts";
 import {
   SshHostErrorCode,
   SshHostAddInput,
@@ -47,6 +53,9 @@ const decodeStatus = Schema.decodeUnknownSync(SshHostStatus);
 const decodeResult = Schema.decodeUnknownSync(SshHostResult);
 const decodeStatusInput = Schema.decodeUnknownSync(SshHostStatusInput);
 const decodeDesktopStatusInput = Schema.decodeUnknownSync(DesktopSshHostStatusInputSchema);
+const decodePendingReplacement = Schema.decodeUnknownSync(SshRuntimePendingReplacementSchema);
+const decodeDesktopBootstrap = Schema.decodeUnknownSync(DesktopSshEnvironmentBootstrapSchema);
+const decodeDesktopPending = Schema.decodeUnknownSync(DesktopSshRuntimePendingResultSchema);
 const decodeAdd = Schema.decodeUnknownSync(SshHostAddInput);
 const decodeAlias = Schema.decodeUnknownSync(SshHostAlias);
 const decodePrepare = Schema.decodeUnknownSync(SshHostPrepareInput);
@@ -575,28 +584,66 @@ const refreshDeferred = {
   requestedVersion: stopped.requestedVersion,
   detail: "Refresh deferred: archive for 0.4.3 unavailable",
 } as const;
-it.each(["ready", "providers_not_ready"] as const)(
-  "round-trips a usable %s deferred refresh",
-  (state) => {
-    const status = {
+it.each(
+  (["archive_unavailable", "drain_unavailable"] as const).flatMap((reason) =>
+    (["ready", "providers_not_ready"] as const).map((state) => ({ reason, state })),
+  ),
+)("round-trips a usable $state $reason deferred refresh", ({ state, reason }) => {
+  const status = {
+    ...stopped,
+    state,
+    refreshDeferred: { ...refreshDeferred, reason },
+    ...(state === "providers_not_ready" ? { providers } : {}),
+  };
+  const decoded = decodeStatus(status);
+  const result = { kind: "ok", status: decoded } as const;
+  expect(decodeResultWire(encodeResultWire(result))).toEqual(result);
+  expect(decodeStatus({ ...stopped, state: "ready" }).refreshDeferred).toBeUndefined();
+});
+it.each(
+  (["archive_unavailable", "drain_unavailable"] as const).flatMap((reason) =>
+    [
+      { state: "stopped" },
+      { state: "failed", failure: { reason: "archive_unavailable", archive, fix } },
+      { runtimeVersion: null },
+      { failure: { reason: "archive_unavailable", archive, fix } },
+      { refreshDeferred: { ...refreshDeferred, reason: "operation_failed" } },
+      { refreshDeferred: { ...refreshDeferred, requestedVersion: "other" } },
+    ].map((invalid) => ({ reason, invalid })),
+  ),
+)("rejects an unusable or inconsistent $reason snapshot $invalid", ({ reason, invalid }) => {
+  expect(() =>
+    decodeStatus({
       ...stopped,
-      state,
-      refreshDeferred,
-      ...(state === "providers_not_ready" ? { providers } : {}),
+      state: "ready",
+      refreshDeferred: { ...refreshDeferred, reason },
+      ...invalid,
+    }),
+  ).toThrow();
+});
+
+it.each(["recovery-stale", "drain-unavailable"])(
+  "round-trips pending detail %s in desktop envelopes",
+  (detail) => {
+    const pending = {
+      reason: "unknown",
+      replacement: "older",
+      detail,
+      requestedVersion: "0.4.3",
+      liveVersion: "0.4.2",
     };
-    const decoded = decodeStatus(status);
-    const result = { kind: "ok", status: decoded } as const;
-    expect(decodeResultWire(encodeResultWire(result))).toEqual(result);
-    expect(decodeStatus({ ...stopped, state: "ready" }).refreshDeferred).toBeUndefined();
+    const target = { alias: "box", hostname: "box", username: null, port: null };
+    const bootstrap = {
+      target,
+      httpBaseUrl: "http://127.0.0.1:3773/",
+      wsBaseUrl: "ws://127.0.0.1:3773/",
+      pairingToken: null,
+      pendingReplacement: pending,
+    };
+    expect(decodePendingReplacement(pending)).toEqual(pending);
+    expect(decodeDesktopBootstrap(bootstrap)).toEqual(bootstrap);
+    const result = { type: "ssh-runtime-pending", target, pending };
+    expect(decodeDesktopPending(result)).toEqual(result);
+    expect(() => decodePendingReplacement({ ...pending, detail: "other" })).toThrow();
   },
 );
-it.each([
-  { state: "stopped" },
-  { state: "failed", failure: { reason: "archive_unavailable", archive, fix } },
-  { runtimeVersion: null },
-  { failure: { reason: "archive_unavailable", archive, fix } },
-  { refreshDeferred: { ...refreshDeferred, reason: "operation_failed" } },
-  { refreshDeferred: { ...refreshDeferred, requestedVersion: "other" } },
-])("rejects an unusable or inconsistent deferred snapshot %j", (invalid) => {
-  expect(() => decodeStatus({ ...stopped, state: "ready", refreshDeferred, ...invalid })).toThrow();
-});

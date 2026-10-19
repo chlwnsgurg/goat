@@ -60,7 +60,7 @@ export const SshHostFailure = Schema.Struct({
 export type SshHostFailure = typeof SshHostFailure.Type;
 
 export const SshRefreshDeferred = Schema.Struct({
-  reason: Schema.Literals(["archive_unavailable"]),
+  reason: Schema.Literals(["archive_unavailable", "drain_unavailable"]),
   requestedVersion: Schema.String,
   detail: Schema.String,
 });

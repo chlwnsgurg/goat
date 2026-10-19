@@ -109,6 +109,30 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH runtime ca
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
+  it.live("no drain defers an unorderable capability refresh and allows ordinary sessions", () =>
+    Effect.gen(function* () {
+      const f = yield* host({ live: true, memoryScopes: false, drain: false });
+      const before = yield* f.snapshot;
+      const result = yield* f.run("launch", false, owningLaunch());
+      if (Result.isFailure(result)) throw result.failure;
+      assert.equal(result.success.status, "ready");
+      assert.deepEqual(result.success.pending, {
+        reason: "unknown",
+        detail: "drain-unavailable",
+        replacement: "capability",
+        requestedVersion: ARCHIVE.archiveVersion,
+        liveVersion: SHA_BUILD,
+      });
+      const session = yield* f.run("mcp", true);
+      if (Result.isFailure(session)) throw session.failure;
+      assert.equal(session.success.version, SHA_BUILD);
+      assert.deepEqual(yield* f.snapshot, before);
+      const events = yield* f.fs.readFileString(`${f.test}/events`);
+      for (const type of ["drain", "self-stop", "supervise", "stop", "activity"])
+        assert.notInclude(events, `"type":"${type}"`);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it.live("a kept runtime refuses a memory session with a reason the client shows", () =>
     Effect.gen(function* () {
       // Without drain support the runtime is attach-only, so it is kept.
