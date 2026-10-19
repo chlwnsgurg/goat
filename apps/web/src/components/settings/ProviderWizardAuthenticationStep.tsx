@@ -119,6 +119,9 @@ export function ProviderWizardAuthenticationStep({
               )}
               <SettingsRow title="Account" description="Sign in after the install finishes." />
             </>
+          ) : provider && plan.kind === "signedIn" && provider.setup?.canAuthenticate !== true ? (
+            // Signed in through the provider's own CLI: there is no in-app flow to query.
+            <SettingsRow title="Account" description={`Signed in on ${environmentLabel}.`} />
           ) : provider && (plan.kind === "signIn" || plan.kind === "signedIn") ? (
             <ProviderAuthenticationSection
               environmentId={environmentId}
