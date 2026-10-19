@@ -501,9 +501,8 @@ describe("FallbackChains", () => {
     );
   });
 
-  it.effect("keeps a chain and default another writer saved while this edit was in flight", () => {
-    const world = makeWorld();
-    return withClock(
+  it.effect("keeps a chain and default another writer saved while this edit was in flight", () =>
+    withClock(
       Effect.gen(function* () {
         const chains = yield* Fallback.FallbackChains;
         const saved = yield* chains.set({ id: "mine", chain: { steps: [opus] } });
@@ -517,6 +516,6 @@ describe("FallbackChains", () => {
           ),
         ),
       ),
-    );
-  });
+    ),
+  );
 });
