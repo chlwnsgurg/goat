@@ -1172,7 +1172,7 @@ const encodeContextTransferPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2ContextTransferJsonSchema),
 );
 
-const decodeThreadPayload = Schema.decodeUnknownEffect(
+export const decodeThreadPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJsonSchema),
 );
 const decodeRunPayload = Schema.decodeUnknownEffect(
@@ -1190,7 +1190,7 @@ const decodeSubagentPayload = Schema.decodeUnknownEffect(
 const decodeProviderSessionPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2ProviderSessionJsonSchema),
 );
-const decodeProviderThreadPayload = Schema.decodeUnknownEffect(
+export const decodeProviderThreadPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2ProviderThreadJsonSchema),
 );
 const decodeProviderTurnPayload = Schema.decodeUnknownEffect(
@@ -1585,6 +1585,9 @@ export function threadShellFromProjection(
     ...(projection.thread.launchedBy === undefined
       ? {}
       : { launchedBy: projection.thread.launchedBy }),
+    ...(projection.thread.externalLauncher === undefined
+      ? {}
+      : { externalLauncher: projection.thread.externalLauncher }),
     ...(projection.thread.sideChatOf == null ? {} : { sideChatOf: projection.thread.sideChatOf }),
     ...(projection.thread.linkedPullRequest === undefined
       ? {}
@@ -1846,6 +1849,9 @@ function shellFromState(input: {
     ...(input.state.thread.launchedBy === undefined
       ? {}
       : { launchedBy: input.state.thread.launchedBy }),
+    ...(input.state.thread.externalLauncher === undefined
+      ? {}
+      : { externalLauncher: input.state.thread.externalLauncher }),
     ...(input.state.thread.sideChatOf == null ? {} : { sideChatOf: input.state.thread.sideChatOf }),
     ...(input.state.thread.linkedPullRequest === undefined
       ? {}
