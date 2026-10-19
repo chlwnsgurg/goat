@@ -15,22 +15,51 @@ import { fleetEnvironmentsAtom, fleetPageAtom, fleetPageEnvironmentsAtom } from 
 import { primaryEnvironmentIdAtom } from "./primaryEnvironment";
 import { HOST_STATUS_REFRESH_MS, hostStatusAtom, refreshHostStatus } from "./hostStatus";
 
-/** Every connected environment's read, by environment. Mounting this starts the reads. */
-const fleetHostStatusAtoms = Atom.make((get) => {
-  const primary = get(primaryEnvironmentIdAtom);
-  return get(fleetEnvironmentsAtom).map(({ environmentId }) => ({
-    environmentId,
-    atom: hostStatusAtom(environmentId, primary),
-  }));
-}).pipe(Atom.withLabel("fleet-host-status-atoms"));
+/** A failed refresh keeps its last answer; show it as last known, never as live. */
+const asLastKnown = (hosts: ReadonlyArray<HostStatusEntry>): ReadonlyArray<HostStatusEntry> =>
+  hosts.map((entry) =>
+    entry.metrics === undefined
+      ? { ...entry, reachability: "unreachable" }
+      : { ...entry, reachability: "unreachable", lastKnown: true },
+  );
 
-const fleetHostReportsAtom = Atom.make((get) => {
+/**
+ * Each connected environment's host-status answer, by environment. The primary
+ * answers for itself and every SSH host it holds open; another environment is
+ * read only when that answer does not cover it, since each read samples CPU and
+ * fans out to that machine's own SSH hosts. Sources lists every environment
+ * read, answered or not, for refreshing. Mounting this starts the reads.
+ */
+export const fleetHostReportsAtom = Atom.make((get) => {
+  const environments = get(fleetEnvironmentsAtom);
+  const primary = get(primaryEnvironmentIdAtom);
   const reports = new Map<EnvironmentId, ReadonlyArray<HostStatusEntry>>();
-  for (const { environmentId, atom } of get(fleetHostStatusAtoms)) {
-    const value = Option.getOrNull(AsyncResult.value(get(atom)));
-    if (value !== null) reports.set(environmentId, value.hosts);
+  const sources: EnvironmentId[] = [];
+  /** Null while the first answer is on its way. */
+  const read = (environmentId: EnvironmentId): ReadonlyArray<HostStatusEntry> | null => {
+    sources.push(environmentId);
+    const result = get(hostStatusAtom(environmentId));
+    const hosts = Option.getOrNull(AsyncResult.value(result))?.hosts ?? null;
+    if (hosts === null) return AsyncResult.isFailure(result) ? [] : null;
+    const answer = AsyncResult.isFailure(result) ? asLastKnown(hosts) : hosts;
+    reports.set(environmentId, answer);
+    return answer;
+  };
+  const hasPrimary = environments.some((environment) => environment.environmentId === primary);
+  const primaryHosts = hasPrimary && primary !== null ? read(primary) : null;
+  for (const environment of environments) {
+    if (environment.environmentId === primary) continue;
+    // Wait for the primary before asking anyone it may already cover.
+    if (hasPrimary && primaryHosts === null) continue;
+    const covered = primaryHosts?.some(
+      (entry) =>
+        entry.reachability === "ok" &&
+        entry.host !== null &&
+        environment.sshAliases.includes(entry.host),
+    );
+    if (covered !== true) read(environment.environmentId);
   }
-  return reports;
+  return { reports, sources } as const;
 }).pipe(Atom.withLabel("fleet-host-reports"));
 
 /**
@@ -48,7 +77,7 @@ const fleetHeatAtom = Atom.make((get): ReadonlyMap<string, FleetMachineHeat> => 
         environment.sshAliases,
       ]),
     ),
-    reports: get(fleetHostReportsAtom),
+    reports: get(fleetHostReportsAtom).reports,
     primaryEnvironmentId: get(primaryEnvironmentIdAtom),
   });
   const previous = Option.getOrNull(get.self<ReadonlyMap<string, FleetMachineHeat>>());
@@ -75,7 +104,9 @@ export function useFleetHostMetrics(): ReadonlyMap<string, FleetMachineHeat> {
   const heat = useAtomValue(fleetHeatAtom);
   useLiveRefresh(
     () => {
-      for (const { atom } of registry.get(fleetHostStatusAtoms)) refreshHostStatus(registry, atom);
+      for (const environmentId of registry.get(fleetHostReportsAtom).sources) {
+        refreshHostStatus(registry, hostStatusAtom(environmentId));
+      }
     },
     { key: "fleet-host-status", intervalMs: HOST_STATUS_REFRESH_MS },
   );

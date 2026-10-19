@@ -12,6 +12,7 @@ import {
   fleetHeatSignals,
   fleetHeatTier,
   fleetMachineHeat,
+  fleetMachineHeatEqual,
   matchFleetHostEntries,
   type FleetHeatSignals,
 } from "./fleetHeat.ts";
@@ -41,7 +42,7 @@ const signals = (overrides: Partial<FleetHeatSignals> = {}): FleetHeatSignals =>
   ...overrides,
 });
 
-const quota = (usedPercent: number, unavailable = false) => ({
+const quotaOf = (usedPercent: number, unavailable = false) => ({
   instanceId: ProviderInstanceId.make("codex"),
   driver: ProviderDriverKind.make("codex"),
   displayName: "Codex",
@@ -65,7 +66,7 @@ describe("fleetHeatSignals", () => {
           cpuCount: 10,
           loadAvg: { oneMinute: 17, fiveMinutes: 9, fifteenMinutes: 5 },
           availableMemoryBytes: 16 * GIB,
-          quotas: [quota(82)],
+          quotas: [quotaOf(82)],
         }),
       ),
     ).toEqual({
@@ -83,7 +84,7 @@ describe("fleetHeatSignals", () => {
           cpuUtilization: null,
           loadAvg: null,
           totalMemoryBytes: 0,
-          quotas: [quota(99, true)],
+          quotas: [quotaOf(99, true)],
         }),
       ),
     ).toEqual({ cpuPercent: null, loadPerCore: null, memoryPercent: null, quota: null });
@@ -213,6 +214,21 @@ describe("fleetMachineHeat", () => {
   });
 });
 
+describe("fleetMachineHeatEqual", () => {
+  it("sees a changed reading even when the summary text does not change", () => {
+    const entry = (quota: number): HostStatusEntry => ({
+      host: null,
+      reachability: "ok",
+      metrics: metrics({ quotas: [quotaOf(quota)] }),
+    });
+    const low = fleetMachineHeat(entry(10));
+    const higher = fleetMachineHeat(entry(60));
+    expect(higher.summary).toBe(low.summary);
+    expect(fleetMachineHeatEqual(low, higher)).toBe(false);
+    expect(fleetMachineHeatEqual(low, fleetMachineHeat(entry(10)))).toBe(true);
+  });
+});
+
 describe("matchFleetHostEntries", () => {
   const primary = EnvironmentId.make("primary");
   const studio = EnvironmentId.make("studio");
@@ -285,6 +301,20 @@ describe("matchFleetHostEntries", () => {
     });
     expect(matched.has("m")).toBe(false);
     expect(matched.has("s")).toBe(true);
+  });
+
+  it("does not match a label two machines share", () => {
+    const other = EnvironmentId.make("other-mini");
+    const matched = matchFleetHostEntries({
+      machines: [machine("m", "mini", mini), machine("o", "Mini", other)],
+      sshAliases: new Map([
+        [mini, []],
+        [other, []],
+      ]),
+      reports: new Map([[primary, [at(null, 0.1), at("mini", 0.9)]]]),
+      primaryEnvironmentId: primary,
+    });
+    expect(matched.size).toBe(0);
   });
 
   it("never gives the primary's own entry to another machine", () => {

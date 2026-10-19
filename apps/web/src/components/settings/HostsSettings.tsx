@@ -134,8 +134,7 @@ function HostsPanel({
   readonly localKind: EnvironmentMachineKind;
 }) {
   const registry = useContext(RegistryContext);
-  // Settings shows the primary environment, whose read fans out like Fleet's.
-  const atom = hostStatusAtom(environmentId, environmentId);
+  const atom = hostStatusAtom(environmentId);
   const result = useAtomValue(atom);
   const reachesHosts = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   useLiveRefresh(() => refreshHostStatus(registry, atom), {

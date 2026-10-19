@@ -181,8 +181,25 @@ export function fleetMachineHeat(
   return { tier, status: "live", signals, reasons, summary };
 }
 
+const signalsEqual = (left: FleetHeatSignals | null, right: FleetHeatSignals | null) =>
+  left === right ||
+  (left !== null &&
+    right !== null &&
+    left.cpuPercent === right.cpuPercent &&
+    left.loadPerCore === right.loadPerCore &&
+    left.memoryPercent === right.memoryPercent &&
+    left.quota?.label === right.quota?.label &&
+    left.quota?.usedPercent === right.quota?.usedPercent);
+
+/** Same tier, status, text, and readings, so a consumer showing any of them can keep the old value. */
 export function fleetMachineHeatEqual(left: FleetMachineHeat, right: FleetMachineHeat): boolean {
-  return left.tier === right.tier && left.status === right.status && left.summary === right.summary;
+  return (
+    left.tier === right.tier &&
+    left.status === right.status &&
+    left.summary === right.summary &&
+    left.reasons.join("|") === right.reasons.join("|") &&
+    signalsEqual(left.signals, right.signals)
+  );
 }
 
 /**
@@ -192,7 +209,7 @@ export function fleetMachineHeatEqual(left: FleetMachineHeat, right: FleetMachin
  * 2. Otherwise the primary environment's entry for one of the SSH aliases this
  *    client reaches that environment through.
  * 3. Otherwise the primary's entry whose alias equals the machine's label, when
- *    exactly one does and no other environment claims that alias.
+ *    exactly one entry and one such machine match and no environment claims that alias.
  * 4. An SSH or cloud host a dispatcher reported is that dispatcher's entry for
  *    the same alias.
  */
@@ -213,6 +230,12 @@ export function matchFleetHostEntries(input: {
           (entry) => entry.host !== null,
         );
   const claimed = new Set([...input.sshAliases.values()].flat());
+  const labelCount = new Map<string, number>();
+  for (const machine of input.machines) {
+    if (machine.sshHost !== null || machine.environmentId === null) continue;
+    const label = machine.label.toLowerCase();
+    labelCount.set(label, (labelCount.get(label) ?? 0) + 1);
+  }
   for (const machine of input.machines) {
     if (machine.sshHost !== null) {
       const { via, alias } = machine.sshHost;
@@ -236,7 +259,7 @@ export function matchFleetHostEntries(input: {
     const byLabel = relayed.filter(
       (entry) => entry.host!.toLowerCase() === label && !claimed.has(entry.host!),
     );
-    if (byLabel.length === 1) matched.set(machine.id, byLabel[0]!);
+    if (byLabel.length === 1 && labelCount.get(label) === 1) matched.set(machine.id, byLabel[0]!);
   }
   return matched;
 }

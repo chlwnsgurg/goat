@@ -7,18 +7,12 @@ import { serverEnvironment } from "./server";
 export const HOST_STATUS_REFRESH_MS = 15_000;
 
 /**
- * The host-status read for an environment. The primary fans out to its SSH hosts,
- * the same atom Settings' Hosts section reads; any other environment reports
- * only itself, since its SSH hosts are not this client's.
+ * An environment's host-status read: that machine plus every SSH host it holds
+ * open. Settings' Hosts section, the Fleet graph, and the Fleet console all read
+ * through this one atom per environment, so they share its answer and its refresh.
  */
-export function hostStatusAtom(
-  environmentId: EnvironmentId,
-  primaryEnvironmentId: EnvironmentId | null,
-) {
-  return serverEnvironment.hostStatus({
-    environmentId,
-    input: environmentId === primaryEnvironmentId ? {} : { local: true },
-  });
+export function hostStatusAtom(environmentId: EnvironmentId) {
+  return serverEnvironment.hostStatus({ environmentId, input: {} });
 }
 
 const lastRefreshedAt = new WeakMap<Atom.Atom<unknown>, number>();
