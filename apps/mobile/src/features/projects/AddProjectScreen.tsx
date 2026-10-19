@@ -1,4 +1,5 @@
 import * as Dialog from "../../components/ui/Dialog";
+import { useConnectHubEntryLabel } from "../connection/useConnectHubEntryLabel";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { NavigationRow } from "../../components/ui/NavigationRow";
 import { SettingsScreen } from "../settings/components/SettingsScreen";
@@ -439,6 +440,7 @@ function useSelectedEnvironment(): {
 
 function EmptyEnvironmentState() {
   const navigation = useNavigation();
+  const connectHubLabel = useConnectHubEntryLabel();
 
   return (
     <View className="items-center gap-3 rounded-2xl bg-grouped-card px-5 py-8">
@@ -450,7 +452,7 @@ function EmptyEnvironmentState() {
         onPress={() => navigation.dispatch(StackActions.replace("ConnectionsNew"))}
         className="mt-1 rounded-full bg-primary px-4 py-2.5 active:opacity-70"
       >
-        <Text className="text-sm font-goat-bold text-primary-foreground">Add environment</Text>
+        <Text className="text-sm font-goat-bold text-primary-foreground">{connectHubLabel}</Text>
       </Pressable>
     </View>
   );
