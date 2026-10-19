@@ -24,7 +24,14 @@ import { REMOTE_RUNTIME_STATE_KEY } from "./command.ts";
 import { SshLaunchError } from "./errors.ts";
 import { resetPublishedRuntimeIndexCache } from "./runtimePublished.ts";
 import * as SshTunnel from "./tunnel.ts";
-import { ARCHIVE, arch, makeSuccessfulProcess, platform, uploadTarget } from "./tunnel.fixture.ts";
+import {
+  ARCHIVE,
+  arch,
+  commandArgs,
+  makeSuccessfulProcess,
+  platform,
+  uploadTarget,
+} from "./tunnel.fixture.ts";
 import { makeProtocolFixture, protocolExecutable } from "./tunnel.protocol.fixture.ts";
 
 const PUBLISHED = "1.2.3-nightly.20260910.7";
@@ -51,7 +58,7 @@ const prepare = (input: {
   hostData?: boolean;
   index?: "ok" | "down";
   publishedFallback?: boolean;
-  /** Another client writes GOAT data while this one is searching for a runtime. */
+  /** Another client writes GOAT data after the host was found empty. */
   dataDuringSearch?: boolean;
   /** Launch the server too, as a connection does. */
   launch?: boolean;
@@ -134,27 +141,24 @@ const prepare = (input: {
     const requests: string[] = [];
     vi.stubGlobal("fetch", async (url: string | URL) => {
       requests.push(String(url));
-      if (input.dataDuringSearch && String(url).startsWith("https://api.github.com")) {
-        await Effect.runPromise(
-          f.fs
-            .makeDirectory(`${f.home}/.goat/userdata`, { recursive: true })
-            .pipe(
-              Effect.andThen(f.fs.writeFileString(`${f.home}/.goat/userdata/statev2.sqlite`, "")),
-            ),
-        );
-      }
       const body = routes.get(String(url));
       if (input.index === "down" && String(url).startsWith("https://api.github.com"))
         return new Response(null, { status: 503 });
       return body === undefined ? new Response(null, { status: 404 }) : new Response(body);
     });
+    // Another client's data lands after this one checked the host was empty, before launch.
+    const writeData = f.fs
+      .makeDirectory(`${f.home}/.goat/userdata`, { recursive: true })
+      .pipe(Effect.andThen(f.fs.writeFileString(`${f.home}/.goat/userdata/statev2.sqlite`, "")));
     const transport = ChildProcessSpawner.make((command) =>
       command._tag === "StandardCommand" && command.command === "gh"
         ? Effect.succeed({
             ...makeSuccessfulProcess("release not found"),
             exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
           })
-        : f.transport.spawn(command),
+        : input.dataDuringSearch && commandArgs(command).includes("capable")
+          ? writeData.pipe(Effect.orDie, Effect.andThen(f.transport.spawn(command)))
+          : f.transport.spawn(command),
     );
     const runner = {
       ...f.runner,

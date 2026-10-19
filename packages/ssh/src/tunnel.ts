@@ -3739,11 +3739,12 @@ export const prepareRemoteRuntime = (
     )
       return yield* acquireRequested;
     return yield* acquireRequested.pipe(
-      Effect.catchTag("SshLaunchError", (error) =>
-        error.reason === "archive-unavailable"
-          ? installPublishedRuntime(platformKey, error)
-          : Effect.fail(error),
-      ),
+      Effect.catchTags({
+        SshLaunchError: (error) =>
+          error.reason === "archive-unavailable"
+            ? installPublishedRuntime(platformKey, error)
+            : Effect.fail(error),
+      }),
     );
 
     function installPublishedRuntime(key: CliArchivePlatformKey, requestedError: SshLaunchError) {
@@ -3778,11 +3779,12 @@ export const prepareRemoteRuntime = (
             stdin: REMOTE_PUBLISHED_RUNTIME_GATE_SCRIPT,
           }).pipe(
             Effect.map((result) => result.stdout.trim() === "yes"),
-            Effect.catchTag("SshCommandError", (error) =>
-              error.exitCode === null || error.exitCode === 255
-                ? Effect.fail(error)
-                : Effect.succeed(false),
-            ),
+            Effect.catchTags({
+              SshCommandError: (error) =>
+                error.exitCode === null || error.exitCode === 255
+                  ? Effect.fail(error)
+                  : Effect.succeed(false),
+            }),
           );
         if (!(yield* gate("fresh")))
           return yield* giveUp("none", "The host has GOAT data but no runtime this app can start.");
@@ -3807,11 +3809,12 @@ export const prepareRemoteRuntime = (
         });
         yield* Effect.annotateCurrentSpan("goat.runtime.published", published.version);
         yield* acquireVersion(published.version, true).pipe(
-          Effect.catchTag("SshLaunchError", (error) =>
-            error.reason === "archive-unavailable"
-              ? giveUp("unreachable", error.message)
-              : Effect.fail(error),
-          ),
+          Effect.catchTags({
+            SshLaunchError: (error) =>
+              error.reason === "archive-unavailable"
+                ? giveUp("unreachable", error.message)
+                : Effect.fail(error),
+          }),
         );
         // The installed binary, not the release, has the last word: its own protocol answer,
         // a proven build order, and positive evidence of every required capability.
