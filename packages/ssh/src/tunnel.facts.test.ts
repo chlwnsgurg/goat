@@ -125,4 +125,50 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host facts
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     LAUNCHES_TIMEOUT_MS,
   );
+
+  it.live(
+    "a damaged record is asked again instead of trusted",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* liveFixture;
+        yield* f.shiftHostClock(60);
+        yield* launch(f);
+        const first = yield* recordableAsks(f);
+        const facts = `${f.home}/.goat/ssh-launch/facts`;
+        for (const name of yield* f.fs.readDirectory(facts)) {
+          const [key] = (yield* f.fs.readFileString(`${facts}/${name}`)).split("\n");
+          yield* f.fs.writeFileString(`${facts}/${name}`, `${key}\nlive garbled\n`);
+        }
+        yield* launch(f);
+        const second = yield* recordableAsks(f);
+        assert.isAbove(second.own, first.own);
+        assert.isAbove(second.live, first.live);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    LAUNCHES_TIMEOUT_MS,
+  );
+
+  it.live(
+    "records no live answer when the record does not name the answering process",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* liveFixture;
+        yield* f.shiftHostClock(60);
+        const record = `${f.home}/.goat/userdata/server-runtime.json`;
+        // A record from before versions were persisted grants the helper no PID, so whatever
+        // listens on its port could change while every recorded input stays the same.
+        const { serverVersion: _version, ...historical } = JSON.parse(
+          yield* f.fs.readFileString(record),
+        ) as Record<string, unknown>;
+        yield* f.fs.writeFileString(record, JSON.stringify(historical));
+        yield* launch(f);
+        const first = yield* recordableAsks(f);
+        yield* launch(f);
+        assert.isAbove((yield* recordableAsks(f)).live, first.live);
+        const names = yield* f.fs.readDirectory(`${f.home}/.goat/ssh-launch/facts`);
+        assert.isFalse(
+          names.some((name) => name.startsWith("live.") || name.startsWith("compat.")),
+        );
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    LAUNCHES_TIMEOUT_MS,
+  );
 });

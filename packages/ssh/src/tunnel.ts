@@ -268,10 +268,28 @@ exec_fact_key() {
   case "$fact_via" in exe) FACT_NAME="$fact_version.exe" ;; *) FACT_NAME="$fact_version.runner" ;; esac
   FACT_KEY="$fact_exe $fact_sig $fact_via"
 }
+# A recorded value must parse as an answer of its kind (the name's first word); anything else,
+# such as a damaged file, is a miss and is asked again.
+fact_valid() {
+  case "$1" in
+    version) case "$2" in "goat v"*) valid_version "\${2#goat v}" ;; *) return 1 ;; esac ;;
+    own) (set -f; set -- $2; valid_own_tokens "$@") ;;
+    commit) valid_positive "$2" ;;
+    scopes) case "$2" in has|lacks|unknown) ;; *) return 1 ;; esac ;;
+    live) (set -f; set -- $2; valid_live_tokens "$@" && [ "$1" = live ] && valid_positive "$5") ;;
+    compat)
+      (set -f; set -- $2
+        [ "$#" = 3 ] || exit 1
+        case "$1" in compatible|update-required|client-too-old|unknown) ;; *) exit 1 ;; esac
+        case "$2" in 0|1) ;; *) exit 1 ;; esac
+        case "$3" in -|*[!A-Za-z0-9-]*) [ "$3" = - ] ;; *) ;; esac) ;;
+    *) return 1 ;;
+  esac
+}
 fact_get() {
   [ -n "$1" ] && [ -n "$2" ] && [ -f "$GOAT_FACTS_DIR/$1" ] && [ ! -L "$GOAT_FACTS_DIR/$1" ] || return 1
   { IFS= read -r fact_recorded && IFS= read -r fact_value; } <"$GOAT_FACTS_DIR/$1" || return 1
-  [ "$fact_recorded" = "$2" ] || return 1
+  [ "$fact_recorded" = "$2" ] && fact_valid "\${1%%.*}" "$fact_value" || return 1
   printf '%s\\n' "$fact_value"
 }
 fact_put() {
@@ -304,6 +322,8 @@ live_fact_key() {
   [ -f "$2" ] && fact_record="$(tr '\\n' ' ' <"$2")" && [ -n "$fact_record" ] || return 1
   fact_pid="$(printf '%s\\n' "$fact_record" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p')"
   valid_positive "$fact_pid" || return 1
+  fact_record_port="$(printf '%s\\n' "$fact_record" | sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p')"
+  valid_positive "$fact_record_port" || return 1
   fact_start="$(LC_ALL=C TZ=UTC ps -o lstart= -p "$fact_pid" 2>/dev/null)" && [ -n "$fact_start" ] || return 1
   fact_port="$(cat "$3" 2>/dev/null || true)"; fact_remembered="$(cat "$4" 2>/dev/null || true)"
   fact_remembered_start=
@@ -312,29 +332,36 @@ live_fact_key() {
   fi
   FACT_KEY="$fact_live|$fact_record|$fact_start|$fact_port|$fact_remembered|$fact_remembered_start"
 }
+# True when live PID $1 and port $2 are the record's own: only then does the record's process
+# identify the server that answered. A historical or service-managed record answers PID 0, and
+# whatever listens on its port may change without changing the key.
+fact_bound() {
+  [ "$1" = "$fact_pid" ] && [ "$2" = "$fact_record_port" ]
+}
 # Live protocol tokens from goat $1 for runtime record $2, port file $3 and PID file $4.
-# Only a live answer is recorded; none and unknown are asked again.
+# Only a live answer from the record's own process is recorded; anything else is asked again.
 live_fact() {
   live_fact_key "$1" "$2" "$3" "$4" || FACT_KEY=
   fact_name="live.$FACT_NAME"; fact_key="$FACT_KEY"
   if fact_get "$fact_name" "$fact_key"; then return 0; fi
   fact_out="$("$1" __ssh-helper protocol --runtime-file "$2" --port-file "$3" --pid-file "$4" --shell)" || return 1
-  case "$fact_out" in
-    "live "*)
-      if [ -n "$fact_key" ] && live_fact_key "$1" "$2" "$3" "$4" && [ "$FACT_KEY" = "$fact_key" ]; then
-        fact_put "$fact_name" "$fact_key" "$fact_out"
-      fi ;;
-  esac
+  fact_answer="$(set -f; set -- $fact_out; printf '%s %s' "\${5:-}" "\${6:-}")"
+  if [ -n "$fact_key" ] && live_fact_key "$1" "$2" "$3" "$4" && [ "$FACT_KEY" = "$fact_key" ] &&
+     fact_valid live "$fact_out" && fact_bound "\${fact_answer% *}" "\${fact_answer#* }"; then
+    fact_put "$fact_name" "$fact_key" "$fact_out"
+  fi
   printf '%s\\n' "$fact_out"
 }
 # Compatibility tokens from goat $1 for the server on port $2, keyed like live_fact by $3-$5.
+# $6 is the PID the live answer named; it is recorded only for the record's own process.
 compat_fact() {
   live_fact_key "$1" "$3" "$4" "$5" || FACT_KEY=
   fact_name="compat.$FACT_NAME"; fact_key="$FACT_KEY"
   [ -z "$fact_key" ] || fact_key="$fact_key|$2"
   if fact_get "$fact_name" "$fact_key"; then return 0; fi
   fact_out="$("$1" __ssh-helper compat --port "$2")" || return 1
-  if [ -n "$fact_key" ] && live_fact_key "$1" "$3" "$4" "$5" && [ "$FACT_KEY|$2" = "$fact_key" ]; then
+  if [ -n "$fact_key" ] && live_fact_key "$1" "$3" "$4" "$5" && [ "$FACT_KEY|$2" = "$fact_key" ] &&
+     fact_valid compat "$fact_out" && fact_bound "$6" "$2"; then
     fact_put "$fact_name" "$fact_key" "$fact_out"
   fi
   printf '%s\\n' "$fact_out"
@@ -1337,7 +1364,7 @@ read_live_compat() {
   # The pinned helper applies the one protocol-range comparator. A helper that
   # predates it, or a server without integers, falls back to exact fields.
   compat_version="$1"; compat_ssh="$2"; compat_orchestration="$3"
-  if compat_tokens="$(compat_fact "$RUNNER_CANDIDATE_FILE.pin" "$LIVE_PORT" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" 2>/dev/null)"; then
+  if compat_tokens="$(compat_fact "$RUNNER_CANDIDATE_FILE.pin" "$LIVE_PORT" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" "$LIVE_PID" 2>/dev/null)"; then
     set -f; set -- $compat_tokens
     if [ "$#" = 3 ]; then
       case "$1" in
@@ -2644,7 +2671,7 @@ probe_live() {
       fi
     fi
     # Only a server that drains for its own replacement may be replaced; others are attach-only.
-    if valid_port "$6" && live_compat="$(compat_fact "$exe" "$6" "$runtime_file" "$state/port" "$state/pid" 2>/dev/null)"; then
+    if valid_port "$6" && live_compat="$(compat_fact "$exe" "$6" "$runtime_file" "$state/port" "$state/pid" "$5" 2>/dev/null)"; then
       set -f; set -- $live_compat
       if [ "$#" = 3 ] && [ "$2" = 1 ]; then live_fields="$live_fields,\\"liveDrain\\":true"; fi
     fi

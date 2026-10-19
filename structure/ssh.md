@@ -69,6 +69,14 @@ session, stop, and log scripts keep their ownership records (`pid`, `port`, `man
 finds a compatible live server attaches to it, so threads started from any client live in that
 server's state and every client sees them.
 
+Each start of `goat` costs about 0.4 s on a host, and the probe, launch, and pairing scripts ask
+the same questions before every use. They record each successful answer in
+`~/.goat/ssh-launch/facts`: an executable's version, protocol, commit time, and memory-scope
+support under its path, inode, size, and times (only once it is 2 s old), and a live server's
+protocol and compatibility under its runtime record and the start times of the PIDs it names.
+A changed, reinstalled, or removed executable, or a replaced or restarted server, misses and is
+asked again, so the rechecks still guard every step. Windows hosts record nothing.
+
 The runner keeps `run-t3.sh` because independently updated clients and retained supervisors
 use that path for reuse, replacement, and rollback. Its shell variables use `GOAT_*`;
 only literal `T3_ARCHIVE_VERSION` and `T3_NODE_SCRIPT_PATH` declarations remain as metadata
