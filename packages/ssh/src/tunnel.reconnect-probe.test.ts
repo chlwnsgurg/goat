@@ -624,6 +624,106 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       180_000,
     );
 
+    it.effect.each(["verified", "rejected", "uncertain drain"] as const)(
+      "long-wake no-drain attachment reconnects with %s status proof",
+      (proof) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+          });
+          yield* f.shiftHostClock(60);
+          let alive = true;
+          let forwards = 0;
+          const transport = ChildProcessSpawner.make((command) => {
+            if (command._tag === "StandardCommand" && command.args.includes("-N")) {
+              alive = true;
+              forwards++;
+              return Effect.succeed({
+                ...makeRunningProcess(() => undefined),
+                isRunning: Effect.sync(() => alive),
+              });
+            }
+            return f.transport.spawn(command);
+          });
+          const layer = Layer.mergeAll(
+            NodeServices.layer,
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, transport),
+            Layer.succeed(FileSystem.FileSystem, f.observedFs),
+            Layer.succeed(HttpClient.HttpClient, testHttpClient),
+            Layer.succeed(NetService.NetService, testNetService),
+            SshAuth.SshPasswordPrompt.disabledLayer,
+            SshEnvironmentManager.layer({
+              resolveCliRunner: Effect.succeed({
+                ...f.runner,
+                refreshOwnedRuntimeOnFirstConnection: true,
+              }),
+              leaveRemoteServerRunning: true,
+            }),
+          );
+          yield* Effect.gen(function* () {
+            const manager = yield* SshEnvironmentManager;
+            const first = yield* manager.ensureEnvironment(uploadTarget);
+            if ("type" in first) throw new Error("Expected no-drain attachment");
+            assert.equal(first.pendingReplacement?.refreshCause, "drain_unavailable");
+            yield* TestClock.adjust("9 minutes");
+            const ownership = yield* f.fs.readFileString(`${f.state}/managed`);
+            if (proof === "rejected")
+              yield* f.fs.writeFileString(`${f.state}/managed`, "external\n");
+            if (proof === "uncertain drain") {
+              f.setScriptPrefix(`sh() {
+  if [ "\${3:-}" = runtime ]; then return 23; fi
+  command sh "$@"
+}
+`);
+              assert.equal(
+                (yield* Effect.result(
+                  manager.ensureEnvironment(uploadTarget, { refreshRuntime: true }),
+                ))._tag,
+                "Failure",
+              );
+              f.setScriptPrefix("");
+            }
+            const status = yield* manager.status(uploadTarget);
+            assert.equal(status.status?.state, proof === "verified" ? "ready" : "update_blocked");
+            if (proof === "verified") {
+              assert.equal(status.status?.refreshDeferred?.refreshCause, "drain_unavailable");
+              yield* manager.readyEnvironment(uploadTarget);
+            } else {
+              assert.isUndefined(status.status?.refreshDeferred);
+              assert.equal(
+                (yield* Effect.result(manager.readyEnvironment(uploadTarget)))._tag,
+                "Failure",
+              );
+            }
+            if (proof === "rejected") yield* f.fs.writeFileString(`${f.state}/managed`, ownership);
+            const snapshot = yield* f.snapshot;
+            alive = false;
+            yield* manager.revalidateTunnels();
+            const before = f.remoteCommands.length;
+            const second = yield* manager.ensureEnvironment(uploadTarget);
+            if ("type" in second) throw new Error("Expected reattached no-drain runtime");
+            assert.equal(f.remoteCommands.length - before, proof === "verified" ? 1 : 2);
+            assert.equal(forwards, 2);
+            assert.equal(second.remoteServerVersion, "1.2.2");
+            if (proof === "verified") {
+              assert.deepEqual(second.pendingReplacement, first.pendingReplacement);
+              const reconnected = yield* manager.status(uploadTarget);
+              assert.equal(reconnected.status?.state, "ready");
+              assert.equal(reconnected.status?.refreshDeferred?.refreshCause, "drain_unavailable");
+              yield* manager.readyEnvironment(uploadTarget);
+            }
+            assert.deepEqual(yield* f.snapshot, snapshot);
+            const events = yield* f.fs.readFileString(`${f.test}/events`);
+            assert.notInclude(events, '"type":"drain"');
+            assert.notInclude(events, '"type":"stop"');
+          }).pipe(Effect.provide(layer), Effect.scoped);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
     it.live.each([
       "disconnect",
       "forget",
@@ -711,7 +811,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               const status = yield* manager.status(uploadTarget);
               assert.equal(
                 status.status?.state,
-                action === "uncertain drain" ? "ready" : "update_waiting",
+                action === "uncertain drain" ? "update_blocked" : "update_waiting",
               );
               assert.equal(
                 (yield* Effect.result(manager.readyEnvironment(uploadTarget)))._tag,
