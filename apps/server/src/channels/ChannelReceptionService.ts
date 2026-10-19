@@ -705,13 +705,21 @@ const make = Effect.gen(function* () {
                 // may see; a second request to read is answered with what the pass wrote.
                 // The first pass can take most of a minute; judge the link again before reading.
                 const reader = yield* viewerNow(requester, message.connectionId);
-                const readResults = yield* runReads(
+                const results = yield* runReads(
                   first.value.action.reads,
                   reader,
                   conversationId,
                   message.connectionId,
                   inputId,
                 );
+                // The first pass wrote its queries from what it could see then. When the link
+                // narrowed since, a query may quote work the person can no longer see.
+                const narrowed =
+                  reader.principalId !== viewer.principalId ||
+                  viewer.grantedScopes.some((scope) => !reader.grantedScopes.includes(scope));
+                const readResults = narrowed
+                  ? results.map((result) => ({ ...result, query: "(withheld)" }))
+                  : results;
                 const journalNow = journalFor(
                   yield* visibleTasks(reader, conversationId).pipe(
                     Effect.orElseSucceed((): ReadonlyArray<ChannelTask> => []),

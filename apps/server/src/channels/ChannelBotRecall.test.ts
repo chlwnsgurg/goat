@@ -665,7 +665,8 @@ describe("GOAT Bot judges the link again after its first pass", () => {
               replyText: "",
               action: {
                 type: "read" as const,
-                reads: [{ kind: "work" as const, query: "payroll" }],
+                // A query copied from what the first pass could still see.
+                reads: [{ kind: "work" as const, query: "fix payroll export" }],
               },
             }),
           );
