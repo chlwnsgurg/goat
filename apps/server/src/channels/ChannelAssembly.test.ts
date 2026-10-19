@@ -5,7 +5,12 @@
  */
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { ProjectId, ProviderInstanceId, type SlackChannelDefaultTarget } from "@goat/contracts";
+import {
+  ProjectId,
+  ProviderInstanceId,
+  type ChannelInboundMessage,
+  type SlackChannelDefaultTarget,
+} from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -24,6 +29,7 @@ import * as ChannelLayers from "./ChannelLayers.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRuntime from "./ChannelRuntime.ts";
 import * as ChannelTransport from "./ChannelTransport.ts";
+import { makeImessageTransport } from "./imessage/imessageSender.ts";
 import * as SlackChannelSettings from "./SlackChannelSettings.ts";
 import { channelMention, directMessage, eventCallback } from "./slack/slackChannelTestSupport.ts";
 import { makeFakeSlackSdk, type FakeSlackSdk } from "./slack/slackSdkFake.ts";
@@ -41,6 +47,66 @@ import {
 } from "./testkit/ChannelHarness.ts";
 
 const missingInstance = ProviderInstanceId.make("missing");
+
+describe("iMessage transport assembly", () => {
+  it.effect("requires the trusted transport caller and a linked requester", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const connectionId = "imessage-000000000001";
+      const message: ChannelInboundMessage = {
+        kind: "imessage",
+        connectionId,
+        conversationKey: "iMessage;-;+15550000000",
+        externalMessageId: "guid-1",
+        idempotencyKey: connectionId + ":1",
+        actor: { externalActorId: "+15550000000" },
+        replyAddress: { kind: "imessage", connectionId, chatGuid: "iMessage;-;+15550000000" },
+        text: "hello",
+        attachments: [],
+        receivedAt: "2026-10-19T00:00:00.000Z",
+        intent: "message",
+      };
+      const context = {
+        ...owner,
+        caller: { type: "transport" as const, kind: "imessage" as const, connectionId },
+      };
+      const accepted = yield* gateway.ingest(message, context);
+      assert.strictEqual(accepted.state, "rejected");
+      assert.isUndefined((yield* ledger.getInput(accepted.inputId))?.requester);
+      const wrongKind = yield* Effect.result(
+        gateway.ingest(
+          { ...message, idempotencyKey: connectionId + ":2" },
+          { ...owner, caller: { type: "transport", kind: "slack", connectionId } },
+        ),
+      );
+      assert.strictEqual(wrongKind._tag, "Failure");
+      const wrongConnection = yield* Effect.result(
+        gateway.ingest(
+          { ...message, idempotencyKey: connectionId + ":3" },
+          { ...owner, caller: { type: "transport", kind: "imessage", connectionId: "other" } },
+        ),
+      );
+      assert.strictEqual(wrongConnection._tag, "Failure");
+    }).pipe(Effect.provide(harness.layer));
+  });
+  it.effect("registers only for its scope and releases on close", () =>
+    Effect.gen(function* () {
+      const registry = yield* ChannelTransport.ChannelTransportRegistry;
+      const scope = yield* Scope.make();
+      const transport = makeImessageTransport({
+        connectionId: "imessage-000000000001",
+        sender: { sendText: async () => ({ acceptedAt: "2026-10-19T00:00:00.000Z" }) },
+        isActive: () => Effect.succeed(true),
+      });
+      yield* registry.register(transport).pipe(Effect.provideService(Scope.Scope, scope));
+      assert.isTrue(Option.isSome(yield* registry.resolve("imessage")));
+      yield* Scope.close(scope, Exit.void);
+      assert.isTrue(Option.isNone(yield* registry.resolve("imessage")));
+    }).pipe(Effect.provide(ChannelTransport.layer)),
+  );
+});
 const serverModel = { instanceId: ProviderInstanceId.make("codex"), model: "server-default" };
 /** What the fake providers list; anything else counts as not offered. */
 const offeredModels = ["gpt-6.1-sol", "gpt-other", "server-default"];

@@ -14,6 +14,7 @@
 import * as Layer from "effect/Layer";
 
 import * as MemoryStore from "../memory/MemoryStore.ts";
+import * as ServerConfig from "../config.ts";
 import * as ChannelBotHome from "./ChannelBotHome.ts";
 import * as ChannelBotDirectory from "./ChannelBotDirectory.ts";
 import * as ChannelBotRegistry from "./ChannelBotRegistry.ts";
@@ -34,6 +35,7 @@ import * as SlackChannelSettings from "./SlackChannelSettings.ts";
 import * as SlackChannelRuntime from "./slack/SlackChannelRuntime.ts";
 import * as SlackChannelSettingsLive from "./slack/SlackChannelSettings.live.ts";
 import * as SlackSdk from "./slack/SlackSdk.ts";
+import * as ImessageChannelRuntime from "./imessage/ImessageChannelRuntime.ts";
 
 const layerFoundation = Layer.mergeAll(
   ChannelLedger.layer,
@@ -63,6 +65,15 @@ const layerSlackLive = SlackChannelSettingsLive.layer.pipe(
  */
 export const makeLayerServices = <E, R>(
   layerSlack: Layer.Layer<SlackChannelSettings.SlackChannelSettings, E, R>,
+  layerImessage: Layer.Layer<
+    ImessageChannelRuntime.ImessageChannelRuntime,
+    never,
+    | ServerConfig.ServerConfig
+    | ChannelLedger.ChannelLedger
+    | ChannelGateway.ChannelGateway
+    | ChannelBotHome.ChannelBotHome
+    | ChannelTransport.ChannelTransportRegistry
+  > = ImessageChannelRuntime.layerUnavailable,
 ) => {
   const layerWorkers = Layer.mergeAll(
     ChannelReceptionService.layer,
@@ -78,9 +89,11 @@ export const makeLayerServices = <E, R>(
   // Build the exporter inside the same graph as the workers so it captures the shared EventSink.
   return Layer.mergeAll(ChannelRuntime.layer, ChannelTaskExport.layer).pipe(
     Layer.provideMerge(
-      Layer.mergeAll(ChannelBotTimeline.layerGoatTransport, ChannelGateway.layerMcpMailbox).pipe(
-        Layer.provideMerge(layerWorkers),
-      ),
+      Layer.mergeAll(
+        ChannelBotTimeline.layerGoatTransport,
+        ChannelGateway.layerMcpMailbox,
+        layerImessage,
+      ).pipe(Layer.provideMerge(layerWorkers)),
     ),
   );
 };
@@ -92,7 +105,10 @@ export const makeLayerServices = <E, R>(
 export const layerServices = makeLayerServices(SlackChannelSettings.layerUnavailable);
 
 /** Every channel service with the live Slack runtime, over whatever `SlackSdk` is provided. */
-export const layerServicesWithSlack = makeLayerServices(layerSlackLive);
+export const layerServicesWithSlack = makeLayerServices(
+  layerSlackLive,
+  ImessageChannelRuntime.layerLive,
+);
 
 /** Every channel service, the live Slack connection, and the background owner loop. */
 export const layer = ChannelRuntime.layerBackground.pipe(

@@ -110,6 +110,56 @@ const claimOwner = (token: string, now: string, staleBefore: string) =>
     Effect.flatMap((ledger) => ledger.claimOwnership({ token, now, staleBefore })),
   );
 
+describe("iMessage cursor fence", () => {
+  it.effect("commits cursor and pending atomically under the current owner", () =>
+    Effect.gen(function* () {
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      yield* claimOwner("owner-a", NOW, "2026-10-11T00:00:00.000Z");
+      const first = { cursor: 9, pendingRowIds: [8] };
+      yield* ledger.checkpointImessageCursor({
+        owner: "owner-a",
+        connectionId: "imessage-000000000001",
+        expected: undefined,
+        next: first,
+        now: NOW,
+      });
+      assert.deepEqual(yield* ledger.getImessageCursor("imessage-000000000001"), first);
+      const stale = yield* Effect.result(
+        ledger.checkpointImessageCursor({
+          owner: "owner-a",
+          connectionId: "imessage-000000000001",
+          expected: undefined,
+          next: { cursor: 10, pendingRowIds: [] },
+          now: NOW,
+        }),
+      );
+      assert.strictEqual(stale._tag, "Failure");
+      const lost = yield* Effect.result(
+        ledger.checkpointImessageCursor({
+          owner: "owner-b",
+          connectionId: "imessage-000000000001",
+          expected: first,
+          next: { cursor: 10, pendingRowIds: [] },
+          now: NOW,
+        }),
+      );
+      assert.strictEqual(lost._tag, "Failure");
+      assert.deepEqual(yield* ledger.getImessageCursor("imessage-000000000001"), first);
+      yield* ledger.checkpointImessageCursor({
+        owner: "owner-a",
+        connectionId: "imessage-000000000001",
+        expected: first,
+        next: { cursor: 10, pendingRowIds: [] },
+        now: NOW,
+      });
+      assert.deepEqual(yield* ledger.getImessageCursor("imessage-000000000001"), {
+        cursor: 10,
+        pendingRowIds: [],
+      });
+    }).pipe(Effect.provide(TestLayer)),
+  );
+});
+
 const newTask = (inputId: string, conversationId: string, bindingId: string) => {
   const taskId = taskIdFor(inputId as never, 0);
   const task = decodeTask({
