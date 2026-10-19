@@ -97,6 +97,7 @@ export const ChannelReceptionReadKind = Schema.Literals([
   "work",
   "thread",
   "conversation",
+  "pending",
 ]);
 export type ChannelReceptionReadKind = typeof ChannelReceptionReadKind.Type;
 
@@ -205,6 +206,14 @@ export const ChannelReceptionAction = Schema.Union([
     taskId: ChannelTaskId,
   }),
   Schema.Struct({
+    /**
+     * Stop work: the one task named, or, with no taskId, every open piece of work the person may
+     * stop. Workers and the subagents they started are stopped too.
+     */
+    type: Schema.Literal("stop_work"),
+    taskId: Schema.optional(ChannelTaskId),
+  }),
+  Schema.Struct({
     type: Schema.Literal("status"),
     taskId: Schema.optional(ChannelTaskId),
   }),
@@ -219,6 +228,8 @@ export const ChannelReceptionAction = Schema.Union([
     question: TrimmedNonEmptyString,
     /** Short answers the person can pick instead of typing one. */
     options: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+    /** The question picks a project; the server words it from the projects it would offer. */
+    about: Schema.optional(Schema.Literal("project")),
   }),
   Schema.Struct({ type: Schema.Literal("report_only") }),
 ]);

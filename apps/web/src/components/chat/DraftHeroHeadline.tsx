@@ -3,7 +3,7 @@ import { composerDraftHasUserContent, useComposerDraftStore } from "~/composerDr
 import { resolveEnvironmentMachineKind, type ScopedProjectRef } from "@goat/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@goat/client-runtime/environment";
 import { isScratchProject } from "@goat/client-runtime/state/projects";
-import { ChevronDownIcon, FolderPlusIcon } from "~/components/solar";
+import { ChevronDownIcon, FolderPlusIcon, MessageSquareDashedIcon } from "~/components/solar";
 import { useAtomValue } from "@effect/atom-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -44,6 +44,8 @@ import { DraftProjectName } from "./DraftProjectName";
 import { resolveProjectSettings } from "@goat/shared/projectSettings";
 import { prefetchGoatProjectFiles } from "~/lib/goatProjectFileDefaults";
 
+// Values of the two action rows that lead the picker; project rows use logical project keys.
+const NO_PROJECT_VALUE = "no-project";
 const ADD_PROJECT_VALUE = "add-project";
 
 interface PickerItem {
@@ -133,6 +135,7 @@ export function DraftHeroHeadline({
   const shouldShowProjectMenu = canChooseProject;
   const menuEntries = projectPickerEntries.filter(
     ({ targetProject }) =>
+      targetProject.isScratch !== true &&
       !isScratchProject(targetProject, scratchWorkspaceRootFor(targetProject.environmentId)),
   );
   const activeProject =
@@ -150,9 +153,14 @@ export function DraftHeroHeadline({
   const isScratchDraft =
     activeProject !== null && isScratchProject(activeProject, scratchWorkspaceRoot);
 
+  // Scratch folders are reached through the leading "No project" row, never as project rows.
+  // "Add project" is an action, so search hides it.
+  const noProjectItem: PickerItem | null =
+    scratchTargetEnvironmentId === null ? null : { value: NO_PROJECT_VALUE, label: "No project" };
   const pickerItems: readonly PickerItem[] = [
-    ...menuEntries.map(({ group }) => ({ value: group.projectKey, label: group.displayName })),
+    ...(noProjectItem ? [noProjectItem] : []),
     { value: ADD_PROJECT_VALUE, label: "Add project" },
+    ...menuEntries.map(({ group }) => ({ value: group.projectKey, label: group.displayName })),
   ];
   const pickerSearch = pickerQuery.trim();
   const filteredPickerItems =
@@ -163,7 +171,9 @@ export function DraftHeroHeadline({
             item.value !== ADD_PROJECT_VALUE &&
             pickerFilter.contains(item, pickerSearch, (candidate) => candidate.label),
         );
-  const selectedPickerItem = pickerItems.find((item) => item.value === activeProjectKey) ?? null;
+  const selectedPickerItem = isScratchDraft
+    ? noProjectItem
+    : (pickerItems.find((item) => item.value === activeProjectKey) ?? null);
 
   // The picker can change the draft's target while the no-project home is
   // still being opened; a stale continuation must not retarget it again.
@@ -253,6 +263,10 @@ export function DraftHeroHeadline({
           openAddProject();
           return;
         }
+        if (item.value === NO_PROJECT_VALUE) {
+          void startScratch();
+          return;
+        }
         const entry = projectEntryByKey.get(item.value);
         if (!entry || item.value === activeProjectKey) {
           return;
@@ -299,7 +313,9 @@ export function DraftHeroHeadline({
             const entry = projectEntryByKey.get(item.value);
             return (
               <ComboboxItem key={item.value} hideIndicator value={item}>
-                {item.value === ADD_PROJECT_VALUE ? (
+                {item.value === NO_PROJECT_VALUE ? (
+                  <MessageSquareDashedIcon className="size-4 shrink-0" />
+                ) : item.value === ADD_PROJECT_VALUE ? (
                   <FolderPlusIcon className="size-4 shrink-0" />
                 ) : entry ? (
                   <ProjectFavicon project={entry.group} className="size-4 shrink-0" />
