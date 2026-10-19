@@ -44,6 +44,8 @@ export const protocolExecutable = (
     commitTime?: number;
     /** The CLI lists memory scopes in `auth session issue --help`; builds before memory do not. */
     memoryScopes?: boolean;
+    contestedPort?: number;
+    contestedAttempts?: number;
   },
   state: string,
 ) => {
@@ -122,13 +124,19 @@ console.log((value.status ? value.status + " " : "") + [value.serverVersion ?? "
   event("supervise", { status: result.status });
   fs.writeFileSync(flag("--result"), result.status + " " + (result.pid ?? 0) + " " + (result.version ?? "-") + "\\n");
 } else if (args[0] === "__ssh-helper" && args[1] === "pick-port") {
+  const contestedPort = ${JSON.stringify(signals.contestedPort ?? null)};
+  const picked = path.join(test, "contested-picked");
+  const pickCount = fs.existsSync(picked) ? Number(fs.readFileSync(picked, "utf8")) : 0;
+  if (contestedPort !== null && pickCount < ${JSON.stringify(signals.contestedAttempts ?? 1)}) {
+    fs.writeFileSync(picked, String(pickCount + 1)); console.log(contestedPort); return;
+  }
   const socket = net.createServer(); socket.listen(0, "127.0.0.1", () => {
 const port = socket.address().port; socket.close(() => console.log(port));
   });
 } else if (args[0] === "__ssh-helper" && args[1] === "wait-ready") {
   // Fixture readiness uses an event, not polling or a delay.
   let record = fs.existsSync(runtimeFile) ? JSON.parse(fs.readFileSync(runtimeFile, "utf8")) : null;
-  if (!record || !fs.existsSync(path.join(test, "accepted-ready-" + record.pid))) {
+  if (${JSON.stringify(signals.contestedPort === undefined)} && (!record || !fs.existsSync(path.join(test, "accepted-ready-" + record.pid)))) {
 const fd = fs.openSync(path.join(test, "ready.fifo"), "r");
 fs.readSync(fd, Buffer.alloc(32), 0, 32, null); fs.closeSync(fd);
 record = JSON.parse(fs.readFileSync(runtimeFile, "utf8"));
@@ -206,7 +214,7 @@ if (args.includes("--test-seed") || process.env.T3_TEST_SEED === "1") {
   console.log(JSON.stringify(record));
 }
 else if (process.env.FIXTURE_SUPERVISED === "1") fs.writeFileSync(path.join(test, "accepted-ready-" + process.pid), "ready");
-else if (!${JSON.stringify(signals.nodeReadiness ?? false)}) { const fd = fs.openSync(path.join(test, "ready.fifo"), "w"); fs.writeSync(fd, "ready\\n"); fs.closeSync(fd); }
+else if (!${JSON.stringify((signals.nodeReadiness ?? false) || signals.contestedPort !== undefined)}) { const fd = fs.openSync(path.join(test, "ready.fifo"), "w"); fs.writeSync(fd, "ready\\n"); fs.closeSync(fd); }
   });
 } else process.exit(97);
 })().catch(error => { console.error(error); process.exitCode = 1; });
@@ -225,6 +233,8 @@ export const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* 
   liveTokens?: string;
   descriptor404?: boolean;
   nodeMode?: boolean;
+  contestedPort?: number;
+  contestedAttempts?: number;
   homePrefix?: string;
   /** The live server drains for a replacement (servers before #119 do not). */
   drain?: boolean;
