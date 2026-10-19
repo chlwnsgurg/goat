@@ -102,14 +102,18 @@ const make = Effect.gen(function* () {
     });
 
   const runPass = Effect.gen(function* () {
+    // A Messages read failure must not stall other channels, but a lost owner or cursor fence
+    // means this process no longer owns the workers, so it stops the pass like any other write.
     let started = yield* imessage.pollDue(owner).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("iMessage poll failed", {
-          category: error.detail.startsWith("iMessage database ")
-            ? error.detail.slice("iMessage database ".length)
-            : error.reason,
-          detail: error.detail,
-        }).pipe(Effect.as(0)),
+      Effect.catchIf(
+        (error) => error.reason !== "ownership_lost" && error.reason !== "version_conflict",
+        (error) =>
+          Effect.logWarning("iMessage poll failed", {
+            category: error.detail.startsWith("iMessage database ")
+              ? error.detail.slice("iMessage database ".length)
+              : error.reason,
+            detail: error.detail,
+          }).pipe(Effect.as(0)),
       ),
     );
     for (const inputId of yield* ledger.listPendingInputs(100)) {

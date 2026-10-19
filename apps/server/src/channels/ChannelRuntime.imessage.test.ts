@@ -90,4 +90,42 @@ describe("iMessage poll isolation", () => {
       assert.strictEqual((yield* ledger.getInput(input.inputId))?.snapshot.state, "replied");
     }).pipe(Effect.provide(harness.layer));
   });
+  it.effect.each(["ownership_lost", "version_conflict"] as const)(
+    "stops the pass when the iMessage poll loses its %s fence",
+    (reason) => {
+      const channelsLayer = ChannelLayers.makeLayerServices(
+        SlackChannelSettings.layerUnavailable,
+        Layer.succeed(
+          ImessageChannelRuntime.ImessageChannelRuntime,
+          ImessageChannelRuntime.ImessageChannelRuntime.of({
+            pollDue: () =>
+              Effect.fail(new ChannelLedger.ChannelLedgerError({ reason, detail: "fence" })),
+          }),
+        ),
+      );
+      const harness = makeHarness({ channelsLayer });
+      return Effect.gen(function* () {
+        yield* setupBot;
+        yield* linkSlackUser();
+        const gateway = yield* ChannelGateway.ChannelGateway;
+        const ledger = yield* ChannelLedger.ChannelLedger;
+        const runtime = yield* ChannelRuntime.ChannelRuntime;
+        const input = yield* gateway.ingest(
+          slackInput("hello", "imsg-fence-" + reason),
+          slackContext,
+        );
+        const now = DateTime.formatIso(yield* DateTime.now);
+        yield* ledger.claimOwnership({
+          token: runtime.ownerToken,
+          now,
+          staleBefore: DateTime.formatIso(
+            DateTime.subtractDuration(yield* DateTime.now, "30 seconds"),
+          ),
+        });
+        const result = yield* Effect.exit(runtime.runPass);
+        assert.isTrue(result._tag === "Failure");
+        assert.notStrictEqual((yield* ledger.getInput(input.inputId))?.snapshot.state, "replied");
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 });
