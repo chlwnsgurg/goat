@@ -43,10 +43,18 @@ export type FleetShell = Pick<
   | "deletedAt"
   | "sideChatOf"
   | "lineage"
+  | "createdAt"
   | "updatedAt"
 > & { readonly source: Pick<OrchestrationV2ThreadShell, "launchedBy"> };
 
 /**
+ * Whether a thread is in the Fleet now; null means it has finished or never
+ * counts. A thread stays while its run is active (preparing, queued, starting,
+ * running, waiting), while it waits on the user (a pending approval, question,
+ * or a subagent's request), and while background work holds an idle run open.
+ * It leaves once nothing holds it: completed, failed, interrupted, or idle.
+ * A new run brings it back.
+ *
  * Only top-level threads count. Subagents (delegate_task children and
  * provider-native subagents) are their parent's work, so a parent waiting on a
  * subagent's request needs the user. Threads started with goat_thread_launch or
@@ -216,7 +224,8 @@ export interface FleetThread {
   readonly agentLabel: string;
   readonly agentDriver: ProviderDriverKind | null;
   readonly state: FleetThreadState | "reported";
-  readonly updatedAt: string;
+  /** When the thread was created; null for reported work, which has no start time. */
+  readonly createdAt: string | null;
   /** The dispatching environment's label, for reported work. */
   readonly reportedBy: string | null;
 }
@@ -240,7 +249,19 @@ export interface FleetRemoteSource {
 
 const UNKNOWN_AGENT = "unknown";
 const UNKNOWN_AGENT_LABEL = "Unknown agent";
-const STATE_ORDER: Record<FleetThread["state"], number> = { attention: 0, running: 1, reported: 2 };
+
+/**
+ * Oldest first, so a new thread joins at the end and a status change or a
+ * streamed update never moves a row. Reported work has no start time and
+ * follows in the order its dispatcher listed it.
+ */
+export function compareFleetThreads(left: FleetThread, right: FleetThread): number {
+  if (left.createdAt === null || right.createdAt === null) {
+    return (left.createdAt === null ? 1 : 0) - (right.createdAt === null ? 1 : 0);
+  }
+  if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? -1 : 1;
+  return left.key < right.key ? -1 : left.key > right.key ? 1 : 0;
+}
 
 type MutableAgent = { -readonly [K in keyof FleetAgent]: FleetAgent[K] };
 type MutableMachine = Omit<{ -readonly [K in keyof FleetMachine]: FleetMachine[K] }, "agents"> & {
@@ -326,7 +347,7 @@ export function buildFleet(input: {
       agentLabel,
       agentDriver,
       state,
-      updatedAt: shell.updatedAt,
+      createdAt: shell.createdAt,
       reportedBy: null,
     });
   }
@@ -404,18 +425,14 @@ export function buildFleet(input: {
           agentLabel: UNKNOWN_AGENT_LABEL,
           agentDriver: null,
           state: "reported",
-          updatedAt: launch.updatedAt,
+          createdAt: null,
           reportedBy: dispatcherLabel,
         });
       });
     });
   }
 
-  threads.sort(
-    (left, right) =>
-      STATE_ORDER[left.state] - STATE_ORDER[right.state] ||
-      (left.updatedAt < right.updatedAt ? 1 : left.updatedAt > right.updatedAt ? -1 : 0),
-  );
+  threads.sort(compareFleetThreads);
   const list = [...machines.values()].map(({ agents, ...machine }): FleetMachine => ({
     ...machine,
     agents: [...agents.values()],

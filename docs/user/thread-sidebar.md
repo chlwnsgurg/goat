@@ -161,8 +161,11 @@ On web and desktop, **Fleet** in the rail beside the thread sidebar shows how ma
 running or need you across every connected machine; hover it for a count per machine. Open it,
 or search for it in the command palette, for a graph of your machines and the agents working on
 each, and a list of those threads grouped by machine; select a machine to show only its threads.
-Subagents count; archived threads do not. Work an environment started on an SSH host you are not
-connected to appears as last reported by that environment.
+The list keeps threads in the order they started, so rows stay put while they work. A thread
+leaves once it finishes and stays while it needs an approval or answer; open finished threads
+from the sidebar. Only top-level threads count: subagents are part of their parent's work, and
+archived threads do not count. Work an environment started on an SSH host you are not connected
+to appears as last reported by that environment.
 
 Below the list, **Connections** shows your saved machines with the same controls as
 **Settings → Connections**: switch one off, check its routes and permissions, remove it, or pair
