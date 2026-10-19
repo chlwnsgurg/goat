@@ -204,6 +204,14 @@ page or mobile app may have been frozen: it restarts the silence budget so
 queued replies can arrive before the resumed session is judged unresponsive.
 HTTP checks run on reuse and resume; they are not a second periodic heartbeat.
 
+The server closes an RPC `/ws` connection after 120 s without inbound transport
+traffic, across local, SSH, relay, and tunnel connections. The budget tolerates
+minute-aligned heartbeat throttling in hidden browser tabs. All shipped RPC
+clients use the 5 s ping interval, including during long-running streams;
+server output alone does not keep an abandoned connection alive. Control
+frames and message fragments also reset the budget. The server destroys the
+TCP socket rather than waiting for an unreachable peer's close handshake.
+
 On POSIX hosts, each local forward runs in a dedicated supervised process
 group. A pipe held by the owning GOAT process fences its lifetime: EOF kills
 that group even when the owner crashes or receives SIGKILL, and removes that

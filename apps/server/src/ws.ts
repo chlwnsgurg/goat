@@ -33,6 +33,7 @@ import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import { rpcInitialItems } from "./rpcInitialItems.ts";
+import { withWebSocketIdleTimeout } from "./wsIdleTimeout.ts";
 import { subscribeChatGptHandoff } from "./provider/CodexChatGptHandoff.ts";
 import { subscribeCodexAuthCallback } from "./provider/CodexAuthCallback.ts";
 import {
@@ -3495,7 +3496,7 @@ export const layer = Layer.unwrap(
             Effect.forkScoped,
           );
           // @effect-diagnostics-next-line returnEffectInGen:off
-          return httpEffect;
+          return withWebSocketIdleTimeout(httpEffect);
         }).pipe(
           Effect.provide(
             layerWsRpc(
