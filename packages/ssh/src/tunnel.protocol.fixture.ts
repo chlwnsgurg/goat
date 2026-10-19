@@ -44,6 +44,8 @@ export const protocolExecutable = (
     commitTime?: number;
     /** The CLI lists memory scopes in `auth session issue --help`; builds before memory do not. */
     memoryScopes?: boolean;
+    /** Exit code of `auth session issue --help` after it prints; 0 when absent. */
+    scopeHelpExit?: number;
     contestedPort?: number;
     contestedAttempts?: number;
   },
@@ -77,6 +79,9 @@ if (args[0] === "--version") {
 } else if (args[0] === "__ssh-helper" && args[1] === "protocol") {
   if (${JSON.stringify(signals.missingCommand ?? false)}) process.exit(2);
   const at = args.indexOf("--runtime-file");
+  // A test writes this file to make another client's server look live from now on.
+  const liveFile = path.join(test, "live-tokens-" + version);
+  if (at >= 0 && args.includes("--shell") && fs.existsSync(liveFile)) { console.log(fs.readFileSync(liveFile, "utf8").trim()); return; }
   const value = at < 0 ? fields : await (await import(${JSON.stringify(helperUrl)})).readLiveSshRuntimeProtocol(args[at+1], flag("--port-file"), flag("--pid-file"));
   event("protocol", { live: at >= 0, status: value.status });
   if (args.includes("--shell")) {
@@ -149,6 +154,7 @@ res.resume(); res.on("end", () => process.exit(res.statusCode === 200 ? 0 : 1));
 } else if (args[0] === "auth" && args.includes("--help")) {
   console.log("  --scope choice  Authorization scope to grant. (choices: " +
     (${JSON.stringify(signals.memoryScopes ?? true)} ? "memory:read, memory:write, " : "") + "orchestration:read, orchestration:operate)");
+  process.exitCode = ${JSON.stringify(signals.scopeHelpExit ?? 0)};
 } else if (args[0] === "auth") {
   event("auth", { args });
   if (fs.existsSync(path.join(test, "pairing-fail"))) process.exit(2);

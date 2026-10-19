@@ -53,7 +53,9 @@ type Release = "pre-manifest" | "manifest" | "manifest-tampered" | "manifest-new
 const prepare = (input: {
   release: Release;
   /** The published runtime's own protocol and capability answers. */
-  binary?: { ssh?: number; memoryScopes?: boolean; commitTime?: number };
+  binary?: { ssh?: number; memoryScopes?: boolean; scopeHelpExit?: number; commitTime?: number };
+  /** Another client finishes setting the host up just before this one verifies its install. */
+  raced?: boolean;
   hostData?: boolean;
   index?: "ok" | "down";
   publishedFallback?: boolean;
@@ -92,6 +94,7 @@ const prepare = (input: {
           drain: true,
           commitTime: input.binary?.commitTime ?? 1_000,
           memoryScopes: input.binary?.memoryScopes ?? true,
+          scopeHelpExit: input.binary?.scopeHelpExit ?? 0,
         },
         f.state,
       ),
@@ -148,6 +151,23 @@ const prepare = (input: {
         return new Response(null, { status: 503 });
       return body === undefined ? new Response(null, { status: 404 }) : new Response(body);
     });
+    const held = `${f.home}/.goat/runtime/goat/held/${PUBLISHED}`;
+    let raceFired = false;
+    if (input.raced)
+      // The post-install probe is the only probe that runs while this setup holds the version.
+      // Just before it, the other client's server is up (its launch cleared the hold).
+      f.setBeforeCommand((script) =>
+        Effect.gen(function* () {
+          if (raceFired || !script.includes('"installedCandidates":[%s]')) return;
+          if (!(yield* f.fs.exists(held))) return;
+          raceFired = true;
+          yield* f.fs.remove(held);
+          yield* f.fs.writeFileString(
+            `${f.test}/live-tokens-${PUBLISHED}`,
+            `live ${PUBLISHED} ${SSH_RUNTIME_PROTOCOL_VERSION} ${ORCHESTRATION_PROTOCOL_VERSION} ${process.pid} 1`,
+          );
+        }),
+      );
     // Another client's data lands after this one checked the host was empty, before launch.
     const writeData = f.fs
       .makeDirectory(`${f.home}/.goat/userdata`, { recursive: true })
@@ -279,6 +299,36 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           failureOf(second.result);
           assert.notInclude(second.requests, `${base}/${asset}`);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("a setup that loses a race never rejects the runtime the other client started", () =>
+      Effect.gen(function* () {
+        const first = yield* prepare({ release: "manifest", raced: true });
+        assert.include(failureOf(first.result).message, "at the same time");
+        const f = first.fixture;
+        assert.isFalse(yield* f.fs.exists(`${f.home}/.goat/runtime/goat/held/${PUBLISHED}`));
+        // The other client's server stops; the data it wrote stays.
+        yield* f.fs.remove(`${f.test}/live-tokens-${PUBLISHED}`);
+        yield* f.fs.makeDirectory(`${f.home}/.goat/userdata`, { recursive: true });
+        yield* f.fs.writeFileString(`${f.home}/.goat/userdata/statev2.sqlite`, "");
+        const second = yield* first.again;
+        assert.isTrue(Result.isSuccess(second.result));
+        if (Result.isSuccess(second.result)) assert.equal(second.result.success.version, PUBLISHED);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("does not take scope help from a failing command as evidence of a capability", () =>
+      Effect.gen(function* () {
+        const { result, fixture: f } = yield* prepare({
+          release: "manifest",
+          binary: { scopeHelpExit: 1 },
+        });
+        failureOf(result);
+        assert.equal(
+          (yield* f.fs.readFileString(`${f.home}/.goat/runtime/goat/held/${PUBLISHED}`)).trim(),
+          "rejected",
+        );
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
     it.live("a torn hold marker still holds a refused runtime", () =>

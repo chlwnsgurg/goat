@@ -3803,17 +3803,21 @@ export const prepareRemoteRuntime = (
           runSshCommand(target, {
             ...authOptions,
             remoteCommandArgs: ["sh", "-s", "--", mode, candidate],
-            stdin: REMOTE_PUBLISHED_RUNTIME_GATE_SCRIPT,
+            stdin: buildPublishedRuntimeGateScript(stateKey ?? REMOTE_RUNTIME_STATE_KEY),
           }).pipe(
-            Effect.map((result) => result.stdout.trim() === "yes"),
+            Effect.map((result) => result.stdout.trim()),
             Effect.catchTags({
               SshCommandError: (error) =>
                 error.exitCode === null || error.exitCode === 255
                   ? Effect.fail(error)
-                  : Effect.succeed(false),
+                  : Effect.succeed("no"),
             }),
           );
-        if (!(yield* gate("fresh")))
+        const raced = new SshLaunchError({
+          message: `Another GOAT client set up ${target.alias} at the same time. Reconnect to use it.`,
+          stdout: "",
+        });
+        if ((yield* gate("fresh")) !== "yes")
           return yield* giveUp("none", "The host has GOAT data but no runtime this app can start.");
         const search = yield* findPublishedRuntime({
           platformKey: key,
@@ -3847,8 +3851,8 @@ export const prepareRemoteRuntime = (
         yield* Effect.annotateCurrentSpan("goat.runtime.published", published.version);
         // Held from before installation until launch confirms the host still has no data, so
         // installed-runtime recovery never starts it unverified, here or from another client.
-        if (!(yield* gate("hold", published.version)))
-          return yield* giveUp("none", `Could not hold GOAT ${published.version} on the host.`);
+        // "no": data appeared since the check above; "busy": another client holds the lock.
+        if ((yield* gate("hold", published.version)) !== "yes") return yield* raced;
         yield* acquireVersion(published.version, true).pipe(
           Effect.catchTags({
             SshLaunchError: (error) =>
@@ -3875,7 +3879,7 @@ export const prepareRemoteRuntime = (
           Effect.mapError(runtimePreparationError),
         );
         // A launch that failed after publishing the runner left this version retained.
-        const installed = [
+        const listed = [
           ...(after.installedCandidates ?? []),
           ...(after.retainedVersion === undefined || after.retainedSignals === undefined
             ? []
@@ -3887,23 +3891,22 @@ export const prepareRemoteRuntime = (
                   held: after.retainedHeld,
                 },
               ]),
-        ].find(
-          (candidate) =>
-            candidate.version === published.version &&
-            candidate.signals.serverVersion === candidate.version &&
-            matchesSignals(candidate.signals, version),
-        );
-        const order =
-          installed === undefined ? undefined : compareRuntimeBuilds(installed, requestedBuild);
+        ].find((candidate) => candidate.version === published.version);
+        // Another client set the host up meanwhile, or the probe could not see the install. Neither
+        // says anything against this runtime, so it is neither rejected nor started here.
+        if (listed === undefined || after.liveStatus === "live" || after.liveStatus === "unknown")
+          return yield* raced;
+        const order = compareRuntimeBuilds(listed, requestedBuild);
         if (
-          installed === undefined ||
-          installed.held === "rejected" ||
+          listed.held === "rejected" ||
+          listed.signals.serverVersion !== listed.version ||
+          !matchesSignals(listed.signals, version) ||
           order === undefined ||
-          after.liveStatus === "live" ||
-          after.liveStatus === "unknown" ||
-          !(yield* gate("capable", published.version))
+          (yield* gate("capable", published.version)) !== "yes"
         ) {
           // Stays installed but held for good: recovery skips it and the search never offers it.
+          // The gate refuses once the host has data, so a runtime another client already
+          // started is never rejected.
           yield* gate("reject", published.version);
           return yield* giveUp(
             "none",
@@ -3974,25 +3977,43 @@ export const prepareRemoteRuntime = (
 
 /**
  * `fresh`: prints yes when the host has no GOAT database. `capable <version>`: prints yes
- * when that installed runtime lists `memory:read` among the scopes it can issue (#285).
+ * when that installed runtime's `auth session issue --help` succeeds and lists `memory:read`
+ * (#285); partial output from a failing command is not evidence.
  * `hold <version>` / `reject <version>`: marks it held (`pending`) or refused for good. The
  * probe reports the mark, installed and retained recovery skip held runtimes, and launch
  * clears a `pending` mark once the server it started on a host without data is ready.
+ * Marks change only under the launch's replacement lock and only while the host has no data,
+ * so a setup that lost a race to another client can never hold or reject the runtime that
+ * client started.
  */
 const REMOTE_PUBLISHED_RUNTIME_GATE_SCRIPT = `set -u
+DEFAULT_SERVER_HOME="$HOME/.goat"
+STATE_DIR="$HOME/.goat/ssh-launch/@@GOAT_STATE_KEY@@"
+has_data() {
+  for db in "$DEFAULT_SERVER_HOME/userdata/statev2.sqlite" "$DEFAULT_SERVER_HOME/userdata/state.sqlite"; do
+    if [ -e "$db" ] || [ -L "$db" ]; then return 0; fi
+  done
+  return 1
+}
 case "$1" in
   fresh)
-    for db in "$HOME/.goat/userdata/statev2.sqlite" "$HOME/.goat/userdata/state.sqlite"; do
-      if [ -e "$db" ] || [ -L "$db" ]; then echo no; exit 0; fi
-    done
-    echo yes ;;
+    if has_data; then echo no; else echo yes; fi ;;
   capable)
     exe="$HOME/.goat/runtime/goat/versions/$2/goat"
     [ -x "$exe" ] || { echo no; exit 0; }
-    case "$("$exe" auth session issue --help 2>/dev/null)" in *memory:read*) echo yes ;; *) echo no ;; esac ;;
+    scope_help="$("$exe" auth session issue --help 2>/dev/null)" || { echo no; exit 0; }
+    case "$scope_help" in *memory:read*) echo yes ;; *) echo no ;; esac ;;
   hold | reject)
     case "$2" in '' | */* | . | ..) exit 2 ;; esac
     if [ "$1" = hold ]; then state=pending; else state=rejected; fi
+    mkdir -p "$STATE_DIR"
+@@GOAT_PROTOCOL_TOKENS@@
+@@GOAT_REPLACEMENT_LOCK@@
+    trap 'release_recovery_lock; release_replacement_lock' EXIT
+    if ! acquire_replacement_lock; then
+      if ! wait_for_replacement_lock || ! acquire_replacement_lock; then echo busy; exit 0; fi
+    fi
+    if has_data; then echo no; exit 0; fi
     held_dir="$HOME/.goat/runtime/goat/held"
     # Replace atomically: a torn write must never read as anything but held.
     mkdir -p "$held_dir" &&
@@ -4001,6 +4022,14 @@ case "$1" in
   *) exit 2 ;;
 esac
 `;
+
+function buildPublishedRuntimeGateScript(stateKey: string): string {
+  return applyScriptPlaceholders(REMOTE_PUBLISHED_RUNTIME_GATE_SCRIPT, {
+    GOAT_STATE_KEY: stateKey,
+    GOAT_PROTOCOL_TOKENS: REMOTE_PROTOCOL_TOKEN_SCRIPT,
+    GOAT_REPLACEMENT_LOCK: REMOTE_REPLACEMENT_LOCK_SCRIPT,
+  });
+}
 
 /** The single next step for a host that has no runtime this app can start. */
 function missAction(miss: PublishedRuntimeMiss, asset: string, directory: string): string {
