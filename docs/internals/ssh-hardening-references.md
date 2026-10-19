@@ -44,8 +44,7 @@ from their cursor, and an in-flight mutation fails rather than replaying.
 
 The gaps are narrower: what happens in the first seconds after wake, how many
 SSH handshakes one reconnect costs, how a blocked state recovers when its cause
-is fixed outside GOAT, what the remote server does with sockets a sleeping
-client abandoned, and whether recovery from a stalled (not closed) link is
+is fixed outside GOAT, and whether recovery from a stalled (not closed) link is
 covered by automated tests.
 
 ## What the references do
@@ -172,7 +171,7 @@ are relative to the bundle's `snapshots/vite-build-beautified/`.
 | Blocked recovery             | waits for wake, network change, or click (`supervisor.ts:972`)                                                           | herdr re-checks every 30 s                                      | P1 (local proxy only) |
 | SSH handshakes per reconnect | every step spawns its own ssh (11 `runSshCommand` sites in `tunnel.ts`); the forward disables sharing (`tunnel.ts:3372`) | one scoped master per host in cmux, herdr, herdr-web-ui (POSIX) | P1, measure first     |
 | Stalled link                 | ServerAlive + RPC silence budget; one manual frozen-relay run in #378; no automated stall test                           | cmux blocked-write and carrier-cut fixtures                     | P0                    |
-| Abandoned server sockets     | not measured; the server sets no idle option (`apps/server/src/ws.ts:3430`)                                              | herdr bridge idles out at 60 s; cmux lease evicts older bridges | P1, measure first     |
+| Abandoned server sockets     | 60 s inbound idle timeout; clients ping every 5 s (`apps/server/src/wsIdleTimeout.ts`)                                   | herdr bridge idles out at 60 s; cmux lease evicts older bridges | none                  |
 | Git over SSH                 | `GIT_SSH_COMMAND` has no keepalive; 120 s transfer cap (`apps/server/src/sshRemote/SshWorkspaceSync.ts:116`)             | every other SSH path carries ServerAlive                        | P2                    |
 | Error detail                 | tooltip; menu copies a trace ID only (`ConnectionEnvironmentsSection.tsx:675`)                                           | cmux Copy SSH Error; herdr-web-ui last 8 lines                  | P2                    |
 | Frozen timers (web, mobile)  | long-resume path replaces the session                                                                                    | herdr-web-ui treats a late deadline as a freeze                 | P2, verify            |
@@ -319,22 +318,6 @@ Real app: rerun P0-2 and P0-1; the PR states spawn and auth counts before and
 after, and that killing the master by its captured PID reconnects within the
 P0-1 baseline.
 
-**P1-4. Find out whether the server keeps abandoned sockets.**
-Problem: when a laptop sleeps with a forward open, sshd on the host may hold
-the forwarded connection to GOAT's port until TCP keepalive gives up, by
-default hours. Each wake opens a new session, so stale sockets and their
-subscriptions may accumulate on the host.
-Evidence: when both ends support it, herdr's remote bridge exits after 60 s of
-silence (`herdr:src/platform/remote_bridge.rs:8`); cmux evicts older bridges by
-lease (`persistent_bridge_lease.go:54`); GOAT's RPC server sets no idle option
-(`apps/server/src/ws.ts:3430`) and relies on client pings.
-Change: measure first. If sockets accumulate, close a WebSocket that has sent
-no frame for 60 s; client pings every 5 s keep healthy sessions alive.
-Files: `apps/server/src/ws.ts` if needed.
-Test: a server test that a silent socket is closed and a pinging one is not.
-Real app: on `mac-studio`, `lsof -nP -iTCP:<goat port> -sTCP:ESTABLISHED`
-before and after five sleep/wake cycles of this Mac; report the counts.
-
 ### P2
 
 **P2-1. Cancel attempts on suspend.** herdr stops in-flight connects when the
@@ -383,7 +366,5 @@ the baseline numbers the others report against.
    [SSH reconnect](ssh-reconnect.md).
 3. **Scoped SSH master** (P1-3, P2-2). `packages/ssh` only, plus
    `SshWorkspaceSync` keepalive; land after bundle 1 shows the cost.
-4. **Server socket hygiene** (P1-4). Measurement, then the idle close if the
-   counts justify it.
-5. **Diagnostic copy and late timers** (P2-3, P2-4). UI plus a verified-only
+4. **Diagnostic copy and late timers** (P2-3, P2-4). UI plus a verified-only
    mobile fix.

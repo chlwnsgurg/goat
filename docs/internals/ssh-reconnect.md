@@ -180,6 +180,13 @@ The connected RPC session also checks liveness: pings run every 5 s with a
 of the last received frame. HTTP checks run on reuse and resume; they are not
 a second periodic heartbeat.
 
+The server closes an RPC `/ws` connection after 60 s without inbound transport
+traffic, across local, SSH, relay, and tunnel connections. All shipped RPC
+clients use the 5 s ping interval, including during long-running streams;
+server output alone does not keep an abandoned connection alive. Control
+frames and message fragments also reset the budget. The server destroys the
+TCP socket rather than waiting for an unreachable peer's close handshake.
+
 On POSIX hosts, each local forward runs in a dedicated supervised process
 group. A pipe held by the owning GOAT process fences its lifetime: EOF kills
 that group even when the owner crashes or receives SIGKILL, and removes that
