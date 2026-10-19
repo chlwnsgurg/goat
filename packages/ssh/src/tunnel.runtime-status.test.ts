@@ -607,9 +607,11 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("read-only stat
           .split("\n")
           .filter(Boolean);
         assert.isTrue(
-          log.every((line) =>
-            ["version", "protocol"].includes((JSON.parse(line) as { type: string }).type),
-          ),
+          log
+            .map((line) => (JSON.parse(line) as { type: string }).type)
+            // The fixture records every invocation as "exec" before its specific event.
+            .filter((type) => type !== "exec")
+            .every((type) => ["version", "protocol"].includes(type)),
         );
         assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
