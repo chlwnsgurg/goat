@@ -1724,6 +1724,37 @@ describe("who may do what (scenario 4)", () => {
     },
   );
 
+  it.effect("words a project question from real projects, not the model's options", () => {
+    const harness = makeHarness({ projects: 2 });
+    harness.script.current = (input) =>
+      input.mode === "input"
+        ? Effect.succeed({
+            replyText: "Which project? goat-si, jun, or developer?",
+            action: {
+              type: "clarify" as const,
+              question: "Which project? goat-si, jun, or developer?",
+              options: ["goat-si", "jun", "developer"],
+              about: "project" as const,
+            },
+          })
+        : defaultScript(input);
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const receipt = yield* gateway.ingest(
+        goatInput("fix the flaky test", "project-q"),
+        rpcContext,
+      );
+      yield* runtime.drain;
+      const reply = (yield* ledger.getInput(receipt.inputId))?.snapshot.reply?.text ?? "";
+      assert.include(reply, "Which project should I use?");
+      assert.notInclude(reply, "goat-si");
+      assert.strictEqual(harness.world.launches.length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("asks instead of guessing when the project is not clear", () => {
     const harness = makeHarness({ projects: 2 });
     return Effect.gen(function* () {

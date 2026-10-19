@@ -54,6 +54,7 @@ import { lowerRuntimeMode, mayAnswerFor } from "./ChannelGateway.ts";
 import * as ChannelBotHome from "./ChannelBotHome.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRemoteWorkers from "./ChannelRemoteWorkers.ts";
+import { makeChannelProjectChoices } from "./channelProjectChoices.ts";
 import * as ChannelWake from "./ChannelWake.ts";
 import {
   appendChannelBotNote,
@@ -262,6 +263,8 @@ const make = Effect.gen(function* () {
         label: shell.id === botProjectId ? CHANNEL_HOST_WORKSPACE_LABEL : shell.title,
       }));
     });
+
+  const projectChoices = (yield* makeChannelProjectChoices).question;
 
   const listThreads = threads
     .listProjectThreads({ projectId: undefined, includeSubagents: false })
@@ -533,6 +536,28 @@ const make = Effect.gen(function* () {
       const taskEvents: Array<ChannelLedger.ChannelTaskEventWrite> = [];
       const deliveries: Array<ChannelLedger.ChannelOutboxInsert> = [];
       const action = decision.action;
+
+      // A project question is worded by the server from the projects it would offer, so the
+      // person sees the same real projects the dispatcher would ask about.
+      if (action.type === "clarify" && action.about === "project") {
+        const shells = yield* projects.listShells().pipe(Effect.orElseSucceed(() => []));
+        const real = shells.filter((shell) => shell.id !== bot?.projectId);
+        const asked = yield* projectChoices(
+          real.length > 0 ? real : shells,
+          shells.some((shell) => shell.id === bot?.projectId),
+        );
+        replyText = asked.text;
+        finalDecision = {
+          ...decision,
+          replyText,
+          action: {
+            type: "clarify",
+            question: asked.text,
+            options: asked.choices,
+            about: "project",
+          },
+        };
+      }
 
       if (action.type === "create_task") {
         // People start work; agents may only report on or answer existing work.
