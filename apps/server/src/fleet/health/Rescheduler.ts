@@ -1,5 +1,4 @@
 import {
-  OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadStatusResult,
   type FleetWorkerView,
   type GoatThreadRescheduleResult,
@@ -90,7 +89,12 @@ export class Rescheduler extends Context.Service<Rescheduler, ReschedulerShape>(
 ) {}
 
 const decodeStatus = Schema.decodeUnknownEffect(OrchestratorMcpThreadStatusResult);
-const decodeThreadList = Schema.decodeUnknownEffect(OrchestratorMcpThreadListResult);
+// Only what launch recovery reads, so a newer or older remote list still decodes.
+const decodeThreadList = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    threads: Schema.Array(Schema.Struct({ threadId: ThreadId, title: Schema.String })),
+  }),
+);
 const decodeProjects = Schema.decodeUnknownEffect(
   Schema.Struct({
     projects: Schema.Array(
@@ -449,8 +453,16 @@ export const make = Effect.gen(function* () {
         launched.failure instanceof SshRemoteDispatch.SshRemoteDispatchError
           ? launched.failure.message
           : "the launcher is gone";
+      // Only a launch that may have reached the remote needs the title lookup before a retry.
+      const mayHaveStarted =
+        launched.failure instanceof SshRemoteDispatch.SshRemoteDispatchError &&
+        launched.failure.launchMayHaveStarted !== false;
       yield* save(worker.workerId, (current) => ({
         ...current,
+        move:
+          current.move === null || mayHaveStarted
+            ? current.move
+            : { ...current.move, launchStartedAt: null },
         attempts: current.attempts + 1,
         nextAttemptAt: until,
         phase: current.attempts + 1 >= RESCHEDULE_BUDGET ? "exhausted" : current.phase,
