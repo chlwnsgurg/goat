@@ -30,6 +30,7 @@ export function ContextWindowMeter(props: {
   compactDisabledReason?: string | null | undefined;
 }) {
   const { usage, modelDisplayName, onCompact, compactDisabled, compactDisabledReason } = props;
+  const unreportedMessage = props.unreportedMessage ?? "No usage reported yet";
   const usedPercentage = formatPercentage(usage?.usedPercentage ?? null);
   const normalizedPercentage = Math.max(0, Math.min(100, usage?.usedPercentage ?? 0));
   const leftPercentage = formatContextWindowRemainingPercentage(usage?.usedPercentage ?? null);
@@ -56,7 +57,7 @@ export function ContextWindowMeter(props: {
             className="size-7"
             aria-label={
               usage === null
-                ? "Context window usage not reported yet"
+                ? `Context window: ${unreportedMessage}`
                 : usage.maxTokens !== null && usedPercentage
                   ? `Context window ${usedPercentage} used`
                   : `Context window ${formatContextWindowTokens(usage.usedTokens)} tokens used`
@@ -73,7 +74,10 @@ export function ContextWindowMeter(props: {
                   cy="12"
                   r={radius}
                   fill="none"
-                  className="stroke-muted-foreground/24"
+                  // With no usage arc, the track alone identifies the control and needs 3:1 contrast.
+                  className={
+                    usage === null ? "stroke-muted-foreground/80" : "stroke-muted-foreground/24"
+                  }
                   strokeWidth="3"
                 />
                 <circle
@@ -106,9 +110,7 @@ export function ContextWindowMeter(props: {
           <div className="flex flex-col items-center gap-0.5 text-center text-xs leading-5 tabular-nums">
             <div className="text-muted-foreground">Context window:</div>
             {usage === null ? (
-              <div className="font-medium">
-                {props.unreportedMessage ?? "No usage reported yet"}
-              </div>
+              <div className="font-medium">{unreportedMessage}</div>
             ) : usage.maxTokens !== null && usedPercentage ? (
               <>
                 <div className={cn("font-medium", isOverloaded && "text-error-foreground")}>
