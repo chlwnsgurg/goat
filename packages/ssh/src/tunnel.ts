@@ -223,6 +223,124 @@ const matchesSignals = (signals: typeof RuntimeSignals.Type, requested: string) 
   );
 };
 
+// Starting goat costs about 0.4 s on a host, and one reconnect used to start it dozens of times
+// for answers that cannot change while their inputs stand: those of an unchanged executable, and
+// those of one running server instance. Each answer is recorded under a key naming every input it
+// depends on, so an executable that changed, was reinstalled or removed, or a server that was
+// replaced or restarted misses and is asked again. Failures are never recorded, and a record is
+// kept only when its key still holds after the answer. Windows hosts ask every time.
+const REMOTE_FACTS_SCRIPT = `case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*) GOAT_FACTS_DIR= ;;
+  *) GOAT_FACTS_DIR="$HOME/.goat/ssh-launch/facts" ;;
+esac
+FACT_NAME=; FACT_KEY=
+fact_nl='
+'
+file_sig() {
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  # BSD stat first: GNU stat reads -f as a file-system query and rejects the format operand.
+  sig_value="$(stat -f '%d:%i:%z:%m:%c' "$1" 2>/dev/null)" ||
+    sig_value="$(stat -c '%d:%i:%s:%Y:%Z' "$1" 2>/dev/null)" || return 1
+  printf '%s\\n' "$sig_value" | LC_ALL=C grep -Eq '^[0-9]+(:[0-9]+){4}$' || return 1
+  printf '%s' "$sig_value"
+}
+# Sets FACT_NAME and FACT_KEY for running goat as $1: an installed executable, or an archive
+# runner, which execs one. An executable changed less than 2 s ago is not keyed: a second write
+# within the same second would leave its ctime unchanged.
+exec_fact_key() {
+  FACT_NAME=; FACT_KEY=
+  [ -n "$GOAT_FACTS_DIR" ] && [ -f "$1" ] || return 1
+  fact_versions="$HOME/.goat/runtime/goat/versions"
+  case "$1" in
+    "$fact_versions"/*/goat) fact_exe="$1"; fact_via=exe ;;
+    *)
+      command -v read_runner_hint >/dev/null 2>&1 || return 1
+      [ -z "$(read_runner_hint "$1" GOAT_NODE_SCRIPT_PATH ${LEGACY_SSH_NODE_SCRIPT_PATH_KEY} 2>/dev/null)" ] || return 1
+      fact_exe="$fact_versions/$(read_runner_hint "$1" GOAT_ARCHIVE_VERSION ${LEGACY_SSH_ARCHIVE_VERSION_KEY} 2>/dev/null)/goat"
+      fact_via="$(runner_sha256 "$1" 2>/dev/null)" || return 1 ;;
+  esac
+  fact_version="\${fact_exe%/goat}"; fact_version="\${fact_version##*/}"
+  valid_version "$fact_version" && [ "$fact_exe" = "$fact_versions/$fact_version/goat" ] || return 1
+  fact_sig="$(file_sig "$fact_exe")" || return 1
+  [ "$(( $(date +%s) - \${fact_sig##*:} ))" -ge 2 ] || return 1
+  # A runner installs a version without its marker instead of running it.
+  [ "$(cat "$fact_versions/$fact_version/.install-complete" 2>/dev/null)" = "$fact_version" ] || return 1
+  case "$fact_via" in exe) FACT_NAME="$fact_version.exe" ;; *) FACT_NAME="$fact_version.runner" ;; esac
+  FACT_KEY="$fact_exe $fact_sig $fact_via"
+}
+fact_get() {
+  [ -n "$1" ] && [ -n "$2" ] && [ -f "$GOAT_FACTS_DIR/$1" ] && [ ! -L "$GOAT_FACTS_DIR/$1" ] || return 1
+  { IFS= read -r fact_recorded && IFS= read -r fact_value; } <"$GOAT_FACTS_DIR/$1" || return 1
+  [ "$fact_recorded" = "$2" ] || return 1
+  printf '%s\\n' "$fact_value"
+}
+fact_put() {
+  [ -n "$1" ] && [ -n "$2" ] || return 0
+  case "$2$3" in *"$fact_nl"*) return 0 ;; esac
+  (
+    umask 077
+    [ ! -L "$GOAT_FACTS_DIR" ] && mkdir -p "$GOAT_FACTS_DIR" &&
+      fact_tmp="$(mktemp "$GOAT_FACTS_DIR/.fact.XXXXXX")" || exit 0
+    printf '%s\\n%s\\n' "$2" "$3" >"$fact_tmp" && mv -f "$fact_tmp" "$GOAT_FACTS_DIR/$1" || rm -f "$fact_tmp"
+  ) 2>/dev/null || true
+}
+# Prints the output of goat run as "$2" "$3"..., recorded as fact $1 of that executable.
+exec_fact() {
+  fact_kind="$1"; shift
+  exec_fact_key "$1" || true
+  fact_name="$fact_kind.$FACT_NAME"; fact_key="$FACT_KEY"
+  if fact_get "$fact_name" "$fact_key"; then return 0; fi
+  fact_out="$("$@")" || return 1
+  if [ -n "$fact_key" ] && exec_fact_key "$1" && [ "$FACT_KEY" = "$fact_key" ]; then
+    fact_put "$fact_name" "$fact_key" "$fact_out"
+  fi
+  printf '%s\\n' "$fact_out"
+}
+# A live answer from goat $1 depends on its executable, the runtime record $2, the launch port
+# and PID files $3 and $4, and whether the PIDs they name still run the same processes.
+live_fact_key() {
+  exec_fact_key "$1" || return 1
+  fact_live="$FACT_KEY"; FACT_KEY=
+  [ -f "$2" ] && fact_record="$(tr '\\n' ' ' <"$2")" && [ -n "$fact_record" ] || return 1
+  fact_pid="$(printf '%s\\n' "$fact_record" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p')"
+  valid_positive "$fact_pid" || return 1
+  fact_start="$(LC_ALL=C TZ=UTC ps -o lstart= -p "$fact_pid" 2>/dev/null)" && [ -n "$fact_start" ] || return 1
+  fact_port="$(cat "$3" 2>/dev/null || true)"; fact_remembered="$(cat "$4" 2>/dev/null || true)"
+  fact_remembered_start=
+  if valid_positive "$fact_remembered"; then
+    fact_remembered_start="$(LC_ALL=C TZ=UTC ps -o lstart= -p "$fact_remembered" 2>/dev/null || true)"
+  fi
+  FACT_KEY="$fact_live|$fact_record|$fact_start|$fact_port|$fact_remembered|$fact_remembered_start"
+}
+# Live protocol tokens from goat $1 for runtime record $2, port file $3 and PID file $4.
+# Only a live answer is recorded; none and unknown are asked again.
+live_fact() {
+  live_fact_key "$1" "$2" "$3" "$4" || FACT_KEY=
+  fact_name="live.$FACT_NAME"; fact_key="$FACT_KEY"
+  if fact_get "$fact_name" "$fact_key"; then return 0; fi
+  fact_out="$("$1" __ssh-helper protocol --runtime-file "$2" --port-file "$3" --pid-file "$4" --shell)" || return 1
+  case "$fact_out" in
+    "live "*)
+      if [ -n "$fact_key" ] && live_fact_key "$1" "$2" "$3" "$4" && [ "$FACT_KEY" = "$fact_key" ]; then
+        fact_put "$fact_name" "$fact_key" "$fact_out"
+      fi ;;
+  esac
+  printf '%s\\n' "$fact_out"
+}
+# Compatibility tokens from goat $1 for the server on port $2, keyed like live_fact by $3-$5.
+compat_fact() {
+  live_fact_key "$1" "$3" "$4" "$5" || FACT_KEY=
+  fact_name="compat.$FACT_NAME"; fact_key="$FACT_KEY"
+  [ -z "$fact_key" ] || fact_key="$fact_key|$2"
+  if fact_get "$fact_name" "$fact_key"; then return 0; fi
+  fact_out="$("$1" __ssh-helper compat --port "$2")" || return 1
+  if [ -n "$fact_key" ] && live_fact_key "$1" "$3" "$4" "$5" && [ "$FACT_KEY|$2" = "$fact_key" ]; then
+    fact_put "$fact_name" "$fact_key" "$fact_out"
+  fi
+  printf '%s\\n' "$fact_out"
+}
+`;
+
 const REMOTE_PROTOCOL_TOKEN_SCRIPT = `valid_version() {
   printf '%s\\n' "$1" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$'
 }
@@ -252,14 +370,23 @@ valid_live_tokens() {
 }
 # Commit time of the build behind executable $1; fails for unstamped or older builds.
 build_commit_time() {
-  t="$("$1" __ssh-helper commit-time 2>/dev/null || true)"
+  t="$(exec_fact commit "$1" __ssh-helper commit-time 2>/dev/null || true)"
   valid_positive "$t" && printf '%s' "$t"
 }
 # True only when executable $1 lists its session scopes and memory:read is not among them.
 # Every GOAT CLI prints its scope choices here, so this also answers for builds before memory.
 lacks_memory_scopes() {
-  [ -x "$1" ] && scope_help="$("$1" auth session issue --help 2>/dev/null)" || return 1
-  case "$scope_help" in *memory:read*) return 1 ;; *--scope*) return 0 ;; *) return 1 ;; esac
+  [ -x "$1" ] || return 1
+  exec_fact_key "$1" || true
+  scope_name="scopes.$FACT_NAME"; scope_key="$FACT_KEY"
+  if ! scope_verdict="$(fact_get "$scope_name" "$scope_key")"; then
+    scope_help="$("$1" auth session issue --help 2>/dev/null)" || return 1
+    case "$scope_help" in *memory:read*) scope_verdict=has ;; *--scope*) scope_verdict=lacks ;; *) scope_verdict=unknown ;; esac
+    if [ -n "$scope_key" ] && exec_fact_key "$1" && [ "$FACT_KEY" = "$scope_key" ]; then
+      fact_put "$scope_name" "$scope_key" "$scope_verdict"
+    fi
+  fi
+  [ "$scope_verdict" = lacks ]
 }
 runner_sha256() {
   if command -v shasum >/dev/null 2>&1; then digest="$(shasum -a 256 "$1")" || return 1
@@ -269,6 +396,7 @@ runner_sha256() {
   printf '%s\\n' "$digest" | LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || return 1
   printf '%s' "$digest"
 }
+${REMOTE_FACTS_SCRIPT}
 `;
 
 export interface SshEnvironmentManagerOptions {
@@ -1090,10 +1218,10 @@ const REMOTE_PROTOCOL_GUARD_SCRIPT = `compatible_fields() {
 }
 check_candidate_protocol() {
   if [ -n "$SELECTED_VERSION" ] &&
-     [ "$("$CHECK_RUNNER" --version 2>/dev/null || true)" != "goat v$SELECTED_VERSION" ]; then
+     [ "$(exec_fact version "$CHECK_RUNNER" --version 2>/dev/null || true)" != "goat v$SELECTED_VERSION" ]; then
     printf 'Selected executable changed before protocol use.\\n' >&2; exit 1
   fi
-  if own="$("$CHECK_RUNNER" __ssh-helper protocol --shell 2>/dev/null)"; then
+  if own="$(exec_fact own "$CHECK_RUNNER" __ssh-helper protocol --shell 2>/dev/null)"; then
     set -f; set -- $own
     if ! valid_own_tokens "$@"; then printf 'Malformed candidate protocol output.\\n' >&2; exit 1; fi
     if [ -n "$SELECTED_VERSION" ] && [ "$1" != "$SELECTED_VERSION" ]; then
@@ -1103,7 +1231,7 @@ check_candidate_protocol() {
       printf 'Candidate signals %s incompatible with SSH=%s orchestration=%s.\\n' "$own" "@@GOAT_SSH_PROTOCOL@@" "@@GOAT_ORCHESTRATION_PROTOCOL@@" >&2; exit 1
     fi
   elif [ -z "$SELECTED_VERSION" ] || [ "$SELECTED_VERSION" != "$REQUESTED_VERSION" ] ||
-       [ "$("$CHECK_RUNNER" --version 2>/dev/null || true)" != "goat v$REQUESTED_VERSION" ]; then
+       [ "$(exec_fact version "$CHECK_RUNNER" --version 2>/dev/null || true)" != "goat v$REQUESTED_VERSION" ]; then
     printf 'No protocol signals; only an independently proven exact release is allowed.\\n' >&2; exit 1
   fi
 }
@@ -1111,7 +1239,7 @@ check_live_protocol() {
   LIVE_STATUS=none; LIVE_PID=0; LIVE_PORT=0; LIVE_VERSION=unknown
   LIVE_COMPATIBLE=0; LIVE_OWNED=0; NEEDS_OWNED_UPGRADE=0; REPLACEMENT_REASON=incompatible; comparison=
   LIVE_DRAIN=0; LIVE_INSTANCE_ID=
-  if live="$("$CHECK_RUNNER" __ssh-helper protocol --runtime-file "$DEFAULT_RUNTIME_FILE" --port-file "$PORT_FILE" --pid-file "$PID_FILE" --shell 2>/dev/null)"; then
+  if live="$(live_fact "$CHECK_RUNNER" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" 2>/dev/null)"; then
     set -f; set -- $live
     if ! valid_live_tokens "$@"; then printf 'Malformed live protocol output.\n' >&2; exit 1; fi
     LIVE_STATUS="$1"; LIVE_VERSION="$2"; LIVE_PID="$5"; LIVE_PORT="$6"
@@ -1209,7 +1337,7 @@ read_live_compat() {
   # The pinned helper applies the one protocol-range comparator. A helper that
   # predates it, or a server without integers, falls back to exact fields.
   compat_version="$1"; compat_ssh="$2"; compat_orchestration="$3"
-  if compat_tokens="$("$RUNNER_CANDIDATE_FILE.pin" __ssh-helper compat --port "$LIVE_PORT" 2>/dev/null)"; then
+  if compat_tokens="$(compat_fact "$RUNNER_CANDIDATE_FILE.pin" "$LIVE_PORT" "$DEFAULT_RUNTIME_FILE" "$PORT_FILE" "$PID_FILE" 2>/dev/null)"; then
     set -f; set -- $compat_tokens
     if [ "$#" = 3 ]; then
       case "$1" in
@@ -1342,7 +1470,7 @@ if [ "$PRESERVE_SELECTED_RUNNER" = 1 ] &&
   printf 'Retained GOAT runner changed while copying; reconnect.\\n' >&2; exit 1
 fi
 cp "$RUNNER_NEXT" "$RUNNER_CANDIDATE_FILE.pin"
-if ! RUNNER_VERSION_OUTPUT="$("$RUNNER_NEXT" --version)"; then
+if ! RUNNER_VERSION_OUTPUT="$(exec_fact version "$RUNNER_NEXT" --version)"; then
   printf 'Cannot validate %s; existing runner and server were preserved.\\n' "$REQUESTED_RUNNER" >&2; exit 1
 fi
 if [ -n "$EXPECTED_ARCHIVE_VERSION" ] && [ "$RUNNER_VERSION_OUTPUT" != "goat v$EXPECTED_ARCHIVE_VERSION" ]; then
@@ -2397,8 +2525,8 @@ signals_json() {
 }
 binary_json() {
   v="$1"; exe="$HOME/.goat/runtime/goat/versions/$v/goat"
-  if ! ready_version "$v" || [ "$("$exe" --version 2>/dev/null || true)" != "goat v$v" ]; then return 1; fi
-  if own="$("$exe" __ssh-helper protocol --shell 2>/dev/null)"; then
+  if ! ready_version "$v" || [ "$(exec_fact version "$exe" --version 2>/dev/null || true)" != "goat v$v" ]; then return 1; fi
+  if own="$(exec_fact own "$exe" __ssh-helper protocol --shell 2>/dev/null)"; then
     set -f; set -- $own
     if ! valid_own_tokens "$@" || [ "$1" != "$v" ]; then printf '{"serverVersion":"%s","invalid":true}' "$v"; return; fi
     if signals="$(signals_json "$1" "$2" "$3")"; then printf '%s' "$signals";
@@ -2440,74 +2568,99 @@ fi
 # Records are data, never shell code. A completion marker alone authorizes no discovery.
 installed_candidates=
 installed_versions=
-record_list="$(ls -t "$HOME/.goat/runtime/goat/versions/"*/.install-record 2>/dev/null | head -n 8)"
-old_ifs="$IFS"; IFS='
+installed_collected=0
+# Discovery used to run here; it keeps the glob setting it would have had at this point.
+case "$-" in *f*) installed_noglob=1 ;; *) installed_noglob=0 ;; esac
+# Hashing and asking every recorded install costs seconds, and only a host with no live server
+# uses the result (to fall back when this app's runtime cannot be installed), so it runs on demand.
+collect_installed_candidates() {
+  [ "$installed_collected" = 0 ] || return 0
+  installed_collected=1
+  case "$-" in *f*) caller_noglob=1 ;; *) caller_noglob=0 ;; esac
+  if [ "$installed_noglob" = 1 ]; then set -f; else set +f; fi
+  record_list="$(ls -t "$HOME/.goat/runtime/goat/versions/"*/.install-record 2>/dev/null | head -n 8)"
+  old_ifs="$IFS"; IFS='
 '
-for record in $record_list; do
+  for record in $record_list; do
+    IFS="$old_ifs"
+    dir="\${record%/.install-record}"; recorded_version="\${dir##*/}"
+    valid_version "$recorded_version" || continue
+    [ "$recorded_version" != "$retained_version" ] || continue
+    [ ! -L "$dir" ] && [ ! -L "$record" ] && [ ! -L "$dir/goat" ] || continue
+    read -r record_version archive_sha executable_sha record_source record_extra < "$record" || continue
+    [ "$record_version" = "$recorded_version" ] && [ -z "$record_extra" ] || continue
+    case "$record_source" in bundle|cache|mirror|https|gh) ;; *) continue ;; esac
+    printf '%s\\n' "$archive_sha" "$executable_sha" | LC_ALL=C grep -Eqv '^[0-9a-f]{64}$' && continue
+    [ "$(runner_sha256 "$dir/goat")" = "$executable_sha" ] || continue
+    candidate_signals="$(binary_json "$recorded_version" || true)"
+    [ -n "$candidate_signals" ] || continue
+    candidate_fields="$(printf '{"version":"%s","signals":%s,"executableSha256":"%s"' "$recorded_version" "$candidate_signals" "$executable_sha")"
+    if candidate_commit="$(build_commit_time "$dir/goat")"; then
+      candidate_fields="$candidate_fields,\\"commitTime\\":$candidate_commit"
+    fi
+    installed_versions="$installed_versions $recorded_version"
+    installed_candidates="$installed_candidates\${installed_candidates:+,}$candidate_fields}"
+  done
   IFS="$old_ifs"
-  dir="\${record%/.install-record}"; recorded_version="\${dir##*/}"
-  valid_version "$recorded_version" || continue
-  [ "$recorded_version" != "$retained_version" ] || continue
-  [ ! -L "$dir" ] && [ ! -L "$record" ] && [ ! -L "$dir/goat" ] || continue
-  read -r record_version archive_sha executable_sha record_source record_extra < "$record" || continue
-  [ "$record_version" = "$recorded_version" ] && [ -z "$record_extra" ] || continue
-  case "$record_source" in bundle|cache|mirror|https|gh) ;; *) continue ;; esac
-  printf '%s\\n' "$archive_sha" "$executable_sha" | LC_ALL=C grep -Eqv '^[0-9a-f]{64}$' && continue
-  [ "$(runner_sha256 "$dir/goat")" = "$executable_sha" ] || continue
-  candidate_signals="$(binary_json "$recorded_version" || true)"
-  [ -n "$candidate_signals" ] || continue
-  candidate_fields="$(printf '{"version":"%s","signals":%s,"executableSha256":"%s"' "$recorded_version" "$candidate_signals" "$executable_sha")"
-  if candidate_commit="$(build_commit_time "$dir/goat")"; then
-    candidate_fields="$candidate_fields,\\"commitTime\\":$candidate_commit"
-  fi
-  installed_versions="$installed_versions $recorded_version"
-  installed_candidates="$installed_candidates\${installed_candidates:+,}$candidate_fields}"
-done
-IFS="$old_ifs"
+  if [ "$caller_noglob" = 1 ]; then set -f; else set +f; fi
+}
 # Persisted version is a path hint only. The live descriptor proves identity.
 live_hint="$(sed -n 's/.*"serverVersion"[[:space:]]*:[[:space:]]*"\\([^" ]*\\)".*/\\1/p' "$runtime_file" 2>/dev/null || true)"
 live_fields=
 live_owned=false
+live_status=
 identity_absent=false
 if [ -n "$state_key" ] && [ ! -e "$state/identity" ] && [ ! -L "$state/identity" ]; then identity_absent=true; fi
-for candidate in "$live_hint" "$retained_version" "$V" $installed_versions; do
-  if ! ready_version "$candidate"; then continue; fi
+# Succeeds once the helper of installed version $1 answered for the live server.
+probe_live() {
+  candidate="$1"
+  ready_version "$candidate" || return 1
   exe="$HOME/.goat/runtime/goat/versions/$candidate/goat"
-  if live="$("$exe" __ssh-helper protocol --runtime-file "$runtime_file" --port-file "$state/port" --pid-file "$state/pid" --shell 2>/dev/null)"; then
-    set -f; set -- $live
-    if ! valid_live_tokens "$@"; then
-      printf 'Malformed live GOAT protocol tokens; fix the remote helper and reconnect.\\n' >&2; exit 1
-    fi
-    live_fields="$(printf ',"liveStatus":"%s"' "$1")"
-    if [ "$1" = live ] && valid_positive "$5" &&
-       [ "$(cat "$state/managed" 2>/dev/null || true)" = managed ] &&
-       [ "$(cat "$state/pid" 2>/dev/null || true)" = "$5" ] &&
-       [ "$(cat "$state/port" 2>/dev/null || true)" = "$6" ]; then live_owned=true; fi
-    if [ "$1" = live ] && valid_version "$2"; then
-      live_version="$2"
-      live_signals="$(signals_json "$2" "$3" "$4" || true)"
-      live_binary="$(binary_json "$live_version" || true)"
-      if [ -n "$live_signals" ]; then
-        live_fields="$live_fields$(printf ',"liveVersion":"%s","liveSignals":%s' "$live_version" "$live_signals")"
-        if [ -n "$live_binary" ]; then
-          live_fields="$live_fields$(printf ',"liveBinarySignals":%s' "$live_binary")"
-          if live_commit="$(build_commit_time "$HOME/.goat/runtime/goat/versions/$live_version/goat")"; then
-            live_fields="$live_fields,\\"liveCommitTime\\":$live_commit"
-          fi
-          if [ "$live_version" != "$V" ] && lacks_memory_scopes "$HOME/.goat/runtime/goat/versions/$live_version/goat"; then
-            live_fields="$live_fields,\\"liveLacksMemoryScopes\\":true"
-          fi
+  live="$(live_fact "$exe" "$runtime_file" "$state/port" "$state/pid" 2>/dev/null)" || return 1
+  set -f; set -- $live
+  if ! valid_live_tokens "$@"; then
+    printf 'Malformed live GOAT protocol tokens; fix the remote helper and reconnect.\\n' >&2; exit 1
+  fi
+  live_status="$1"
+  live_fields="$(printf ',"liveStatus":"%s"' "$1")"
+  if [ "$1" = live ] && valid_positive "$5" &&
+     [ "$(cat "$state/managed" 2>/dev/null || true)" = managed ] &&
+     [ "$(cat "$state/pid" 2>/dev/null || true)" = "$5" ] &&
+     [ "$(cat "$state/port" 2>/dev/null || true)" = "$6" ]; then live_owned=true; fi
+  if [ "$1" = live ] && valid_version "$2"; then
+    live_version="$2"
+    live_signals="$(signals_json "$2" "$3" "$4" || true)"
+    live_binary="$(binary_json "$live_version" || true)"
+    if [ -n "$live_signals" ]; then
+      live_fields="$live_fields$(printf ',"liveVersion":"%s","liveSignals":%s' "$live_version" "$live_signals")"
+      if [ -n "$live_binary" ]; then
+        live_fields="$live_fields$(printf ',"liveBinarySignals":%s' "$live_binary")"
+        if live_commit="$(build_commit_time "$HOME/.goat/runtime/goat/versions/$live_version/goat")"; then
+          live_fields="$live_fields,\\"liveCommitTime\\":$live_commit"
+        fi
+        if [ "$live_version" != "$V" ] && lacks_memory_scopes "$HOME/.goat/runtime/goat/versions/$live_version/goat"; then
+          live_fields="$live_fields,\\"liveLacksMemoryScopes\\":true"
         fi
       fi
-      # Only a server that drains for its own replacement may be replaced; others are attach-only.
-      if valid_port "$6" && live_compat="$("$exe" __ssh-helper compat --port "$6" 2>/dev/null)"; then
-        set -f; set -- $live_compat
-        if [ "$#" = 3 ] && [ "$2" = 1 ]; then live_fields="$live_fields,\\"liveDrain\\":true"; fi
-      fi
     fi
-    break
+    # Only a server that drains for its own replacement may be replaced; others are attach-only.
+    if valid_port "$6" && live_compat="$(compat_fact "$exe" "$6" "$runtime_file" "$state/port" "$state/pid" 2>/dev/null)"; then
+      set -f; set -- $live_compat
+      if [ "$#" = 3 ] && [ "$2" = 1 ]; then live_fields="$live_fields,\\"liveDrain\\":true"; fi
+    fi
   fi
+}
+live_answered=0
+for candidate in "$live_hint" "$retained_version" "$V"; do
+  if probe_live "$candidate"; then live_answered=1; break; fi
 done
+if [ "$live_answered" = 0 ]; then
+  collect_installed_candidates
+  for candidate in $installed_versions; do
+    if probe_live "$candidate"; then break; fi
+  done
+fi
+[ "$live_status" != none ] || collect_installed_candidates
 case "$(uname -s)" in
   Darwin) platform=darwin ;; Linux) platform=linux ;; MINGW*|MSYS*|CYGWIN*) platform=win32 ;; *) exit 1 ;;
 esac
