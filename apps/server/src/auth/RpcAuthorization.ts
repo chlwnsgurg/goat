@@ -335,7 +335,8 @@ const requiredScopesForSettingsUpdate = (payload: unknown) => {
 
 const decodeProjectMutation = Schema.decodeUnknownSync(ProjectMutation);
 
-const requiredScopesForRpcCall = (
+/** Throws for a method this server does not declare; callers outside the middleware must catch. */
+export const requiredScopesForRpcCall = (
   method: string,
   payload: unknown,
 ): ReadonlyArray<AuthEnvironmentScope> => {

@@ -36,6 +36,8 @@ import {
   BearerConnectionCredential,
   BearerConnectionProfile,
   BearerConnectionRegistration,
+  HubProxyConnectionProfile,
+  HubProxyConnectionRegistration,
   type ConnectionCatalogEntry,
   type ConnectionRegistration,
   type ConnectionRoute,
@@ -50,11 +52,12 @@ import * as Connectivity from "./connectivity.ts";
 import * as ConnectionCredentialStore from "./credentialStore.ts";
 import * as ConnectionDriver from "./driver.ts";
 import type { RouteCheck } from "./driver.ts";
-import { connectionRouteId, connectionRouteKind } from "./routes.ts";
+import { connectionRouteId, connectionRouteKind, connectionRoutes } from "./routes.ts";
 import {
   ConnectionTransientError,
   ConnectionBlockedError,
   BearerConnectionTarget,
+  HubProxyConnectionTarget,
   PrimaryConnectionTarget,
   RelayConnectionTarget,
   SshConnectionTarget,
@@ -229,11 +232,13 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
             return;
           case "BearerConnectionRegistration":
           case "SshConnectionRegistration":
+          case "HubProxyConnectionRegistration":
             yield* Ref.update(storedProfiles, (current) => {
               const next = new Map(current);
               next.set(registration.profile.connectionId, registration.profile);
               return next;
             });
+            if (registration._tag === "HubProxyConnectionRegistration") return;
             yield* Ref.update(storedCredentials, (current) => {
               const next = new Map(current);
               next.set(registration.target.connectionId, registration.credential);
@@ -285,6 +290,8 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
       }),
   });
   const cacheStore = Persistence.EnvironmentCacheStore.of({
+    loadShellMeta: () => Effect.succeedNone,
+    saveShellMeta: () => Effect.void,
     loadShell: (environmentId) =>
       Ref.get(shellCache).pipe(
         Effect.map((cache) => Option.fromUndefinedOr(cache.get(environmentId))),
@@ -530,6 +537,59 @@ function awaitConnectionState(
 }
 
 describe("EnvironmentRegistry", () => {
+  it.effect("preserves a disabled environment and its route order when hub metadata changes", () =>
+    Effect.gen(function* () {
+      const target = new HubProxyConnectionTarget({
+        environmentId: BEARER_TARGET.environmentId,
+        label: "Node",
+        connectionId: "hub:hub:node",
+      });
+      const profile = new HubProxyConnectionProfile({
+        connectionId: target.connectionId,
+        environmentId: target.environmentId,
+        label: target.label,
+        hubEnvironmentId: EnvironmentId.make("hub"),
+        hubConnectionId: "old-hub-route",
+        nodeId: "node",
+      });
+      const relay = new RelayConnectionTarget({
+        environmentId: target.environmentId,
+        label: "Node",
+      });
+      const harness = yield* makeHarness(
+        [relay, target, BEARER_TARGET],
+        [profile, BEARER_PROFILE],
+        [[BEARER_TARGET.connectionId, BEARER_CREDENTIAL]],
+        { initialDisabled: [target.environmentId] },
+      );
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.register(
+          new HubProxyConnectionRegistration({
+            target: new HubProxyConnectionTarget({ ...target, label: "Renamed" }),
+            profile: new HubProxyConnectionProfile({
+              ...profile,
+              label: "Renamed",
+              hubConnectionId: "primary",
+            }),
+          }),
+        );
+        const entry = (yield* SubscriptionRef.get(registry.entries)).get(target.environmentId)!;
+        expect(entry.enabled).toBe(false);
+        expect(connectionRoutes(entry).map((route) => connectionRouteId(route.target))).toEqual([
+          "relay",
+          target.connectionId,
+          BEARER_TARGET.connectionId,
+        ]);
+        const savedProfile = (yield* Ref.get(harness.storedProfiles)).get(target.connectionId);
+        expect(savedProfile).toMatchObject({ label: "Renamed", hubConnectionId: "primary" });
+        expect([...(yield* Ref.get(harness.storedCredentials)).keys()]).toEqual([
+          BEARER_TARGET.connectionId,
+        ]);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
   it.effect("replays connected state when arming a desktop commit observer", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness([TARGET]);

@@ -224,8 +224,10 @@ export const resolveRemoteWebSocketConnectionUrl = Effect.fn(
   });
 
   const url = new URL(input.wsBaseUrl);
-  if (url.pathname === "" || url.pathname === "/") {
-    url.pathname = "/ws";
+  const basePath = new URL(input.httpBaseUrl).pathname.replace(/\/+$/, "");
+  const socketPath = url.pathname.replace(/\/+$/, "");
+  if (socketPath === "" || socketPath === basePath) {
+    url.pathname = `${socketPath}/ws`;
   }
   url.searchParams.set("wsTicket", issued.ticket);
   appendClientConnectionParams(url, input.clientMetadata, input.connectionMethod);
@@ -250,8 +252,10 @@ export const resolveRemoteDpopWebSocketConnectionUrl = Effect.fn(
     ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
   });
   const url = new URL(input.wsBaseUrl);
-  if (url.pathname === "" || url.pathname === "/") {
-    url.pathname = "/ws";
+  const basePath = new URL(input.httpBaseUrl).pathname.replace(/\/+$/, "");
+  const socketPath = url.pathname.replace(/\/+$/, "");
+  if (socketPath === "" || socketPath === basePath) {
+    url.pathname = `${socketPath}/ws`;
   }
   url.searchParams.set("wsTicket", issued.ticket);
   appendClientConnectionParams(url, input.clientMetadata, input.connectionMethod);

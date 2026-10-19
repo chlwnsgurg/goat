@@ -79,7 +79,8 @@
         "packages/contracts/src/settings.ts",
         "packages/contracts/src/channelCommon.ts",
         "packages/contracts/src/channelGateway.ts",
-        "packages/contracts/src/ipc.ts"
+        "packages/contracts/src/ipc.ts",
+        "packages/contracts/src/hubProxy.ts"
       ]
     },
     {
@@ -95,7 +96,9 @@
         "packages/client-runtime/src/goatBot/home.ts",
         "packages/client-runtime/src/goatBot/index.ts",
         "apps/web/src/components/goatBot/",
-        "apps/mobile/src/features/goat-bot/"
+        "apps/mobile/src/features/goat-bot/",
+        "packages/client-runtime/src/connection/hubProxyAuthSource.ts",
+        "packages/client-runtime/src/connection/hubProxyDiscovery.ts"
       ]
     },
     {
@@ -182,7 +185,8 @@
         "packages/source-control-core",
         "packages/source-control-testing",
         "packages/contracts",
-        "packages/contracts/src/codexRoute.ts"
+        "packages/contracts/src/codexRoute.ts",
+        "apps/server/src/hubProxy"
       ]
     },
     {

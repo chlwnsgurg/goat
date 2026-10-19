@@ -819,6 +819,8 @@ describe("RpcSessionFactory", () => {
             retryNow: Effect.void,
           } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
           const cache = Persistence.EnvironmentCacheStore.of({
+            loadShellMeta: () => Effect.succeedNone,
+            saveShellMeta: () => Effect.void,
             loadShell: () => Effect.succeedNone,
             saveShell: () => Effect.void,
             loadThread: () => Effect.succeedNone,

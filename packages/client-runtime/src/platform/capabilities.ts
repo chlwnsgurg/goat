@@ -96,3 +96,16 @@ export class SshEnvironmentGateway extends Context.Service<
     ) => Effect.Effect<void, ConnectionAttemptError>;
   }
 >()("@goat/client-runtime/platform/capabilities/SshEnvironmentGateway") {}
+
+export class PrimaryConnectionEndpoint extends Context.Service<
+  PrimaryConnectionEndpoint,
+  {
+    readonly endpoint: Effect.Effect<
+      {
+        readonly httpBaseUrl: string;
+        readonly bearerToken: Option.Option<string>;
+      },
+      ConnectionAttemptError
+    >;
+  }
+>()("@goat/client-runtime/platform/capabilities/PrimaryConnectionEndpoint") {}

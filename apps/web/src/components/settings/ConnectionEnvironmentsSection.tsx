@@ -39,6 +39,7 @@ import {
   connectionRoutes,
   connectionStatusText,
   environmentMcpUrl,
+  offlineSnapshotAgeLabel,
 } from "@goat/client-runtime/connection";
 import {
   isAtomCommandInterrupted,
@@ -47,6 +48,8 @@ import {
 import * as Option from "effect/Option";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useCopyConnectionDiagnostic } from "../../hooks/useCopyConnectionDiagnostic";
+import { useNowMinute } from "../../hooks/useNowMinute";
+import { useEnvironmentSnapshotCapturedAt } from "../../state/presentation";
 import { cn } from "../../lib/utils";
 import { SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
@@ -458,6 +461,12 @@ function SavedBackendListRow({
     setLastRelayHttpBaseUrl(discoveredRelayHttpBaseUrl);
   }
   const prepared = usePreparedConnection(environmentId);
+  const snapshotCapturedAt = useEnvironmentSnapshotCapturedAt(environmentId);
+  const nowMinute = useNowMinute();
+  const snapshotAge =
+    isConnected || !enabled
+      ? null
+      : offlineSnapshotAgeLabel(snapshotCapturedAt, Date.parse(`${nowMinute}:59.999Z`));
   const connectedTarget = isConnected && prepared._tag === "Some" ? prepared.value.target : null;
   const mcpUrl = environmentMcpUrl({
     entry: environment.entry,
@@ -496,7 +505,7 @@ function SavedBackendListRow({
         unsupported
           ? (environment.connection.error ?? connectionStatusText(environment.connection))
           : enabled
-            ? connectionStatusText(environment.connection)
+            ? `${connectionStatusText(environment.connection)}${snapshotAge === null ? "" : ` · ${snapshotAge}`}`
             : "Switched off"
       }${
         versionMismatch

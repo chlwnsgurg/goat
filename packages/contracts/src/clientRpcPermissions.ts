@@ -109,6 +109,10 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.hubNodesRemove]: AuthSettingsWriteScope,
   [WS_METHODS.hubNodesImport]: AuthSettingsWriteScope,
   [WS_METHODS.hubNodesDismissNotice]: AuthSettingsWriteScope,
+  // Preparing may install GOAT on a node; enrolling lets the hub act there for every proxied client.
+  [WS_METHODS.hubProxyPrepareNode]: AuthSettingsWriteScope,
+  [WS_METHODS.hubProxyEnrollNode]: AuthSettingsWriteScope,
+  [WS_METHODS.hubProxyUnenrollNode]: AuthSettingsWriteScope,
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: AuthOrchestrationOperateScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;

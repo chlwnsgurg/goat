@@ -33,3 +33,9 @@ UI is `apps/mobile/src/features/goat-bot/`. The server side of the same bot is
 
 The [command commit](server.md#command-commit) is server-side. This package sends the command and
 reads the projections. It does not append orchestration events itself.
+
+A node a client reaches through a hub stays its own environment with a `hub-proxy` route. The route
+borrows the hub route's credential through
+`packages/client-runtime/src/connection/hubProxyAuthSource.ts`, and
+`packages/client-runtime/src/connection/hubProxyDiscovery.ts` keeps those routes in step with the
+hub's node list. See [server.md](server.md#hub-proxy).

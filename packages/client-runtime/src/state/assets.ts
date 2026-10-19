@@ -59,7 +59,10 @@ export function parseAssetCollectionKey(
 
 export function resolveAssetUrl(httpBaseUrl: string, relativeUrl: string): string | null {
   try {
-    return new URL(relativeUrl, httpBaseUrl).toString();
+    return new URL(
+      relativeUrl.startsWith("/api/") ? `.${relativeUrl}` : relativeUrl,
+      `${httpBaseUrl.replace(/\/+$/, "")}/`,
+    ).toString();
   } catch {
     return null;
   }

@@ -168,6 +168,8 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
       Layer.succeed(
         Persistence.EnvironmentCacheStore,
         Persistence.EnvironmentCacheStore.of({
+          loadShellMeta: () => Effect.succeedNone,
+          saveShellMeta: () => Effect.void,
           loadShell: () => Effect.succeedNone,
           saveShell: () => Effect.void,
           loadThread: () =>

@@ -100,6 +100,8 @@ function cacheWithRefs(
   overrides: Partial<Persistence.EnvironmentCacheStore["Service"]> = {},
 ) {
   return Persistence.EnvironmentCacheStore.of({
+    loadShellMeta: () => Effect.succeedNone,
+    saveShellMeta: () => Effect.void,
     loadShell: () => Effect.succeedNone,
     saveShell: () => Effect.void,
     loadThread: () => Effect.succeedNone,

@@ -140,6 +140,7 @@ describe("SSH dispatch tool compatibility", () => {
         forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: () =>
           Effect.succeed({
             token: "fixture-session",
@@ -555,6 +556,7 @@ describe("SshRemoteDispatch.callHostTool", () => {
         forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: (_target, sessionOptions) => {
           record.sessionRequests.push(sessionOptions.approvals === true);
           return sessionOptions.approvals === true && options.approvalsFail === true
@@ -1186,6 +1188,7 @@ const withLaunchRemote = <A, E>(
       forgetEnvironment: () => Effect.die("Unexpected forget"),
       disconnectEnvironment: () => Effect.void,
       revalidateTunnels: () => Effect.void,
+      issueClientSession: () => Effect.die("unused"),
       issueMcpClientSession: (target, opts) =>
         Effect.gen(function* () {
           yield* options.beforeSessionIssue?.(opts.memoryScopes ?? []) ?? Effect.void;
@@ -1808,6 +1811,7 @@ describe("SSH dispatch launch lineage", () => {
         forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: (_target, options) =>
           Effect.sync(() => {
             memorySessions.push(options.memoryScopes ?? []);
@@ -2519,6 +2523,7 @@ it.effect.each(["matching", "missing", "wrong"] as const)(
         forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.void,
         revalidateTunnels: () => Effect.void,
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: () =>
           Effect.succeed({ token: "fixture", expiresAt: null, runtimeModeCeilingApplied: true }),
         runRemoteScript: () =>
@@ -2928,6 +2933,7 @@ describe("SshRemoteDispatch SSH attachments", () => {
           forgetEnvironment: () => Effect.die("Unexpected forget"),
           disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
           revalidateTunnels: () => Effect.void,
+          issueClientSession: () => Effect.die("unused"),
           issueMcpClientSession: () =>
             Effect.sync(() => {
               record.sessions += 1;
@@ -3727,6 +3733,7 @@ describe("SSH launcher transport", () => {
         forgetEnvironment: () => Effect.die("Unexpected forget"),
         disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
         revalidateTunnels: () => Effect.void,
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: () =>
           Effect.succeed({ token: "fixture", expiresAt: null, runtimeModeCeilingApplied: true }),
         runRemoteScript: () =>
@@ -3826,6 +3833,7 @@ it.effect("ready-only host tools never bootstrap or issue a session on a stopped
           ensures++;
           return Effect.die("must not bootstrap");
         },
+        issueClientSession: () => Effect.die("unused"),
         issueMcpClientSession: () => {
           sessions++;
           return Effect.die("must not issue");

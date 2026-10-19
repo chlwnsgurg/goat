@@ -154,6 +154,7 @@ import { useThreadQueuedCount } from "./ThreadQueueControl";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 import { resolveThreadFeedSubmissionAnchor } from "./thread-feed-live-follow";
 import { useGlobalVoiceInput } from "../voice-input/VoiceInputProvider";
+import { useOfflineSnapshotAge } from "../connection/useOfflineSnapshotAge";
 
 export interface ThreadDetailScreenProps {
   readonly cloudState: CloudTaskState;
@@ -325,6 +326,10 @@ const USER_INPUT_TOGGLE_TIMING = {
 
 export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetailScreenProps) {
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
+  const offlineSnapshotAge = useOfflineSnapshotAge(
+    props.environmentId,
+    props.connectionStateLabel === "connected",
+  );
   const navigation = useNavigation();
   const { session: voiceInputSession } = useGlobalVoiceInput();
   const reportedModelSelection = useThreadReportedModelSelection(props.selectedThreadDetailRef);
@@ -1308,6 +1313,11 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                           {props.cloudState.launchSourceNotice}
                         </Text>
                       ) : null}
+                      {offlineSnapshotAge === null ? null : (
+                        <Text accessibilityLiveRegion="polite">
+                          {`${props.environmentLabel ?? "This machine"} is offline · ${offlineSnapshotAge}`}
+                        </Text>
+                      )}
                       {props.cloudState.cloudTask ? (
                         <CloudTaskStatus task={props.cloudState.cloudTask} />
                       ) : null}

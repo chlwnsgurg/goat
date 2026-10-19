@@ -774,6 +774,8 @@ describe("server state projection", () => {
       } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
       const savedConfigs = yield* Queue.unbounded<ServerConfig>();
       const cache = Persistence.EnvironmentCacheStore.of({
+        loadShellMeta: () => Effect.succeedNone,
+        saveShellMeta: () => Effect.void,
         loadShell: () => Effect.succeed(Option.none()),
         saveShell: () => Effect.void,
         loadThread: () => Effect.succeed(Option.none()),
@@ -835,6 +837,8 @@ describe("server state projection", () => {
       } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
       const savedConfigs = yield* Queue.unbounded<ServerConfig>();
       const cache = Persistence.EnvironmentCacheStore.of({
+        loadShellMeta: () => Effect.succeedNone,
+        saveShellMeta: () => Effect.void,
         loadShell: () => Effect.succeedNone,
         saveShell: () => Effect.void,
         loadThread: () => Effect.succeedNone,
@@ -898,6 +902,8 @@ describe("server state projection", () => {
       } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
       const savedConfigs = yield* Queue.unbounded<ServerConfig>();
       const cache = Persistence.EnvironmentCacheStore.of({
+        loadShellMeta: () => Effect.succeedNone,
+        saveShellMeta: () => Effect.void,
         loadShell: () => Effect.succeedNone,
         saveShell: () => Effect.void,
         loadThread: () => Effect.succeedNone,

@@ -104,6 +104,8 @@ describe("source control environment atoms", () => {
         } as unknown as EnvironmentRegistry.EnvironmentRegistry["Service"]);
         const removed = new Array<string>();
         const cache = Persistence.EnvironmentCacheStore.of({
+          loadShellMeta: () => Effect.succeedNone,
+          saveShellMeta: () => Effect.void,
           loadShell: () => Effect.succeedNone,
           saveShell: () => Effect.void,
           loadThread: () => Effect.succeedNone,

@@ -1,3 +1,10 @@
+import {
+  AuthWebSocketTicketResult,
+  ExecutionEnvironmentDescriptor as DescriptorSchema,
+} from "@goat/contracts";
+import { HubProxyAuthSource } from "./hubProxyAuthSource.ts";
+import { hubProxyHttpBaseUrl, requestHubProxyJson } from "./hubProxyHttp.ts";
+import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import type {
   AuthClientPresentationMetadata,
   ExecutionEnvironmentDescriptor,
@@ -68,6 +75,9 @@ export class ConnectionResolver extends Context.Service<
     >;
   }
 >()("@goat/client-runtime/connection/resolver/ConnectionResolver") {}
+
+const decodeHubDescriptor = Schema.decodeUnknownEffect(Schema.toCodecJson(DescriptorSchema));
+const decodeHubTicket = Schema.decodeUnknownEffect(Schema.toCodecJson(AuthWebSocketTicketResult));
 
 const isBearerProfile = Schema.is(BearerConnectionProfile);
 const isSshProfile = Schema.is(SshConnectionProfile);
@@ -302,6 +312,62 @@ export const make = Effect.gen(function* () {
   const relay = yield* makeRelayBroker();
   const ssh = yield* makeSshBroker();
   const httpClient = yield* HttpClient.HttpClient;
+  const hubAuth = yield* Effect.serviceOption(HubProxyAuthSource);
+  const presentation = yield* ClientCapabilities.ClientPresentation;
+  const hubProxy = Effect.fn("ConnectionResolver.hubProxy")(function* (
+    entry: ConnectionCatalogEntry,
+  ) {
+    const profile = Option.getOrNull(entry.profile);
+    if (
+      profile?._tag !== "HubProxyConnectionProfile" ||
+      profile.environmentId !== entry.target.environmentId ||
+      entry.target._tag !== "HubProxyConnectionTarget" ||
+      profile.connectionId !== entry.target.connectionId
+    ) {
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail: "The hub proxy profile is unavailable or does not match the node.",
+      });
+    }
+    if (Option.isNone(hubAuth))
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail: "Hub proxy authorization is unavailable on this client.",
+      });
+    const auth = yield* hubAuth.value.resolve(profile);
+    const httpBaseUrl = hubProxyHttpBaseUrl(auth.httpBaseUrl, profile.nodeId);
+    const descriptor = yield* requestHubProxyJson(
+      auth,
+      environmentEndpointUrl(httpBaseUrl, "/.well-known/goat/environment"),
+      decodeHubDescriptor,
+    );
+    if (descriptor.environmentId !== entry.target.environmentId)
+      return yield* environmentMismatchError({
+        expected: entry.target.environmentId,
+        actual: descriptor.environmentId,
+      });
+    const ticket = yield* requestHubProxyJson(
+      auth,
+      environmentEndpointUrl(httpBaseUrl, "/api/auth/websocket-ticket"),
+      decodeHubTicket,
+      "POST",
+    );
+    const socket = new URL(environmentEndpointUrl(httpBaseUrl, "/ws"));
+    socket.protocol = socket.protocol === "https:" ? "wss:" : "ws:";
+    socket.searchParams.set("wsTicket", ticket.ticket);
+    appendClientConnectionParams(socket, presentation.metadata, "direct");
+    return {
+      descriptor,
+      prepared: {
+        environmentId: entry.target.environmentId,
+        label: entry.target.label,
+        target: entry.target,
+        httpBaseUrl,
+        socketUrl: socket.toString(),
+        httpAuthorization: auth.authorization,
+      } satisfies PreparedConnection,
+    };
+  });
 
   const authorize = Effect.fn("clientRuntime.connection.broker.authorize")(function* (
     entry: ConnectionCatalogEntry,
@@ -312,6 +378,8 @@ export const make = Effect.gen(function* () {
       "connection.environment.id": target.environmentId,
       "connection.target.kind": target._tag,
     });
+    if (target._tag === "HubProxyConnectionTarget")
+      return yield* hubProxy(entry).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
     const { prepared, verifiedEndpoint } = yield* (() => {
       switch (target._tag) {
         case "PrimaryConnectionTarget":

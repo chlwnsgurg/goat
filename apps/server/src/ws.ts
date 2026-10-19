@@ -10,12 +10,14 @@ import { memoryError } from "./mcp/toolkits/memory/handlers.ts";
 import * as SshWorkspaceSync from "./sshRemote/SshWorkspaceSync.ts";
 import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
 import * as CloudMachineService from "./cloudMachines/CloudMachineService.ts";
+import * as HubProxySessions from "./hubProxy/HubProxySessions.ts";
 import {
   CHANNEL_GATEWAY_WS_METHODS,
   ChannelGatewayError,
   OrchestrationDispatchCommandError,
   SLACK_CHANNEL_WS_METHODS,
 } from "@goat/contracts";
+import { HubProxyRpcError } from "@goat/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 
@@ -1292,6 +1294,9 @@ const layerWsRpc = (
       const sshWorkspace = yield* SshWorkspaceSync.SshWorkspaceSync;
       const remoteLaunchCatalog = yield* RemoteLaunchCatalog.RemoteLaunchCatalog;
       const cloudMachines = yield* CloudMachineService.CloudMachineService;
+      const hubProxy = yield* HubProxySessions.HubProxySessions;
+      const hubProxyRpcError = (error: HubProxySessions.HubProxyError) =>
+        new HubProxyRpcError({ reason: error.reason, detail: error.message });
       const projectService = yield* ProjectService.ProjectService;
       const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
@@ -2348,6 +2353,15 @@ const layerWsRpc = (
         // A client connecting to a saved machine never wakes it; Resume does.
         [WS_METHODS.cloudMachinesEnsureReady]: (input) =>
           cloudMachines.ensureReady(input.alias, { wake: false }),
+        [WS_METHODS.hubProxyPrepareNode]: (input) =>
+          hubProxy.prepare(input.nodeId).pipe(Effect.as({}), Effect.mapError(hubProxyRpcError)),
+        [WS_METHODS.hubProxyEnrollNode]: (input) =>
+          hubProxy.enroll(input).pipe(Effect.mapError(hubProxyRpcError)),
+        [WS_METHODS.hubProxyUnenrollNode]: (input) =>
+          hubProxy.unenroll(input.nodeId).pipe(
+            Effect.map((removed) => ({ removed })),
+            Effect.mapError(hubProxyRpcError),
+          ),
         [WS_METHODS.scheduledTasksListWebhookDeliveries]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.listWebhookDeliveries(input)),

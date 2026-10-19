@@ -421,6 +421,29 @@ can't be unlocked, nothing is copied and the list asks you to add your devices
 again; **Saved on this desktop** offers the desktop's SSH connections that are
 not on the hub yet.
 
+### Reach every machine through one hub
+
+Pair your phone, or any other client, with one GOAT server you keep running, such as a Mac
+mini or a small VPS. That server is the hub. Every machine the hub lists as a node then shows
+up on the phone with its own threads, and the phone reaches it through the hub. The phone never
+needs SSH, Tailscale access to the node, or a pairing of its own with that machine.
+
+1. On the hub, pair the phone with hub access: `goat pair --tailscale --hub-proxy`. A pairing
+   made without `--hub-proxy` reaches only the hub itself; pair again to add it.
+2. Add the machines to the hub's [device list](#devices-on-this-hub). An SSH host needs nothing
+   more. If GOAT never ran on it, choose **Set up** once, so the hub installs GOAT there and
+   learns which machine it is.
+3. For a machine linked over HTTPS, choose **Allow phone access** and paste a pairing link
+   created on that machine with `goat pair`. Links made for agents cannot open your threads.
+
+Through the hub you can open a node's threads and watch them live. A machine that is off or
+asleep stays in the list as **Offline**, with how old the last copy of its threads is. It
+reconnects on its own when the machine comes back. Stopped cloud machines are never started
+by opening them.
+
+The hub holds the keys and sessions for every node, so keep its disk encrypted and its screen
+locked.
+
 ### Cloud machines
 
 GOAT can create [Boat](https://boat.dev) cloud machines and use them like any other

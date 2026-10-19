@@ -143,6 +143,23 @@ export function connectionStatusTitle(connection: EnvironmentConnectionPresentat
   return connectionStatusText({ ...connection, error: null });
 }
 
+/**
+ * How old the threads shown for a disconnected environment are, from the capture time stored with
+ * that exact snapshot. Null when the age is unknown, so callers show plain status instead of a
+ * borrowed time.
+ */
+export function offlineSnapshotAgeLabel(capturedAt: string | null, nowMs: number): string | null {
+  if (capturedAt === null) return null;
+  const capturedMs = Date.parse(capturedAt);
+  if (!Number.isFinite(capturedMs)) return null;
+  const minutes = Math.max(0, Math.floor((nowMs - capturedMs) / 60_000));
+  if (minutes < 1) return "last state just now";
+  if (minutes < 60) return `last state ${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `last state ${hours} h ago`;
+  return `last state ${Math.floor(hours / 24)} d ago`;
+}
+
 function formatRetryDelay(seconds: number): string {
   return seconds < 60 ? `${seconds}s` : `${Math.ceil(seconds / 60)}m`;
 }
@@ -213,6 +230,7 @@ export function environmentMcpUrl(input: {
   const connectedRoute = routes.find(
     (route) => connectionRouteId(route.target) === connectedRouteId,
   );
+  if (connectedRoute?.target._tag === "HubProxyConnectionTarget") return null;
   for (const route of connectedRoute ? [connectedRoute, ...routes] : routes) {
     const httpBaseUrl =
       route.target._tag === "RelayConnectionTarget"
@@ -242,6 +260,7 @@ export function connectionCatalogDisplayUrl(entry: ConnectionCatalogEntry): stri
     case "PrimaryConnectionTarget":
       return entry.target.httpBaseUrl;
     case "RelayConnectionTarget":
+    case "HubProxyConnectionTarget":
       return null;
     case "BearerConnectionTarget":
       return Option.isSome(entry.profile) && entry.profile.value._tag === "BearerConnectionProfile"

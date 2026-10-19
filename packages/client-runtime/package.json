@@ -231,6 +231,10 @@
       "types": "./src/state/presentation.ts",
       "default": "./src/state/presentation.ts"
     },
+    "./state/hubProxy": {
+      "types": "./src/state/hubProxy.ts",
+      "default": "./src/state/hubProxy.ts"
+    },
     "./state/device": {
       "types": "./src/state/device.ts",
       "default": "./src/state/device.ts"

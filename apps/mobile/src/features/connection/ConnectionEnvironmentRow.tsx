@@ -24,6 +24,7 @@ import { serverEnvironment } from "../../state/server";
 import { ConnectionFormField } from "./ConnectionFormField";
 import { ConnectionStatusDot } from "./ConnectionStatusDot";
 import { environmentStatusText } from "./environmentStatusText";
+import { useOfflineSnapshotAge } from "./useOfflineSnapshotAge";
 
 function connectionStatusLabel(environment: ConnectedEnvironmentSummary): string | null {
   if (!environment.isEnabled && environment.connectionState !== "unsupported") {
@@ -60,9 +61,17 @@ export function ConnectionEnvironmentRow(props: {
     isGoatConnectOnlyEnvironment(catalog.entries.get(props.environment.environmentId));
   const unsupported = connectUnavailable || props.environment.connectionState === "unsupported";
   const enabled = props.environment.isEnabled && !unsupported;
-  const statusLabel = connectUnavailable
+  const snapshotAge = useOfflineSnapshotAge(
+    props.environment.environmentId,
+    !enabled || props.environment.connectionState === "connected",
+  );
+  const baseStatusLabel = connectUnavailable
     ? `${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}. ${GOAT_CONNECT_COMING_SOON.description}`
     : connectionStatusLabel(props.environment);
+  const statusLabel =
+    snapshotAge === null || baseStatusLabel === null
+      ? baseStatusLabel
+      : `${baseStatusLabel} · ${snapshotAge}`;
   const statusTraceId = enabled ? props.environment.connectionErrorTraceId : null;
   const hasConnectionFailure = enabled && props.environment.connectionError !== null;
   const isRetrying =

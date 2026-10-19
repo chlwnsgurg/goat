@@ -173,3 +173,16 @@ errors. The service is an Effect `Context.Service`. `ThreadManagementService`,
 the state transition.
 
 > Decision record: [ADR-0003](decisions/ADR-0003-effect-services.md)
+
+## Hub proxy
+
+`apps/server/src/hubProxy/` serves `/hub/nodes/<nodeId>/*`: a client holding `hub:proxy` reaches
+a node's API through this server. `apps/server/src/hubProxy/http.ts` authenticates the client with
+this server's session, answers auth endpoints itself, proxies an allowlist of read paths and relays
+one upstream WebSocket per client socket. `apps/server/src/hubProxy/frames.ts` judges every client
+RPC envelope against the client's rights on the node before it is forwarded.
+`apps/server/src/hubProxy/HubProxySessions.ts` owns the node sessions the hub holds (issued over
+SSH, or enrolled for linked nodes), their per-node generation and the offline shell copy. The node
+list comes from `apps/server/src/hubNodes/HubNodes.ts` through
+`apps/server/src/hubProxy/HubProxyNodes.ts`. Constraints and the threat model are in
+[docs/internals/hub-proxy.md](../docs/internals/hub-proxy.md).
