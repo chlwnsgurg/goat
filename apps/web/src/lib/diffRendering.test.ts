@@ -6,11 +6,44 @@ import {
   buildFileDiffIdentityKey,
   buildFileDiffRenderKey,
   buildPatchCacheKey,
+  findPatchFile,
   getDiffLineStat,
   getRenderablePatch,
   resolveFileDiffPath,
   resolveFileDiffPreviousPath,
 } from "./diffRendering";
+
+describe("findPatchFile", () => {
+  const patch = [
+    "diff --git a/index.ts b/index.ts",
+    "--- a/index.ts",
+    "+++ b/index.ts",
+    "@@ -1 +1 @@",
+    "-a",
+    "+b",
+    "diff --git a/src/index.ts b/src/index.ts",
+    "--- a/src/index.ts",
+    "+++ b/src/index.ts",
+    "@@ -1 +1 @@",
+    "-c",
+    "+d",
+  ].join("\n");
+  const files = (() => {
+    const renderable = getRenderablePatch(patch, "find-patch-file");
+    return renderable?.kind === "files" ? renderable.files : [];
+  })();
+
+  it("matches a provider's absolute path on the remote host to the repository-relative patch", () => {
+    const file = findPatchFile(files, "/Users/jun/.goat/worktrees/goat/fix-x/src/index.ts");
+    expect(file && resolveFileDiffPath(file)).toBe("src/index.ts");
+  });
+
+  it("matches relative and Windows paths, and misses unrelated files", () => {
+    expect(findPatchFile(files, "./index.ts")?.name).toBe("index.ts");
+    expect(findPatchFile(files, "C:\\repo\\src\\index.ts")?.name).toBe("src/index.ts");
+    expect(findPatchFile(files, "/repo/other/index.tsx")).toBeNull();
+  });
+});
 
 describe("buildPatchCacheKey", () => {
   it("normalizes outer whitespace before hashing", () => {

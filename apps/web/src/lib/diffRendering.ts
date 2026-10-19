@@ -211,6 +211,39 @@ export function resolveFileDiffPreviousPath(fileDiff: FileDiffMetadata): string 
   return fileDiff.prevName ?? fileDiff.name ?? "";
 }
 
+function normalizeDiffPath(path: string): string {
+  return path.replaceAll("\\", "/").replace(/^\.\/+/, "");
+}
+
+/**
+ * Providers report absolute paths on the host that ran the edit, while checkpoint patches are
+ * repository-relative, so a file matches when its absolute path ends with the patch path.
+ */
+export function patchPathMatches(targetPath: string, patchPath: string): boolean {
+  const target = normalizeDiffPath(targetPath);
+  const candidate = normalizeDiffPath(patchPath);
+  if (candidate.length === 0) return false;
+  return target === candidate || target.endsWith(`/${candidate}`);
+}
+
+/** The patch file a provider-reported path names; the longest matching patch path wins. */
+export function findPatchFile<T extends FileDiffMetadata>(
+  files: ReadonlyArray<T>,
+  targetPath: string,
+): T | null {
+  let best: T | null = null;
+  let bestLength = -1;
+  for (const file of files) {
+    for (const path of [resolveFileDiffPath(file), resolveFileDiffPreviousPath(file)]) {
+      if (path.length > bestLength && patchPathMatches(targetPath, path)) {
+        best = file;
+        bestLength = path.length;
+      }
+    }
+  }
+  return best;
+}
+
 /**
  * A type change (regular file to symlink) arrives as a deletion and an addition
  * of the same path, so the change type is part of the identity.

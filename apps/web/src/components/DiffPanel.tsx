@@ -44,10 +44,12 @@ import {
   buildFileDiffIdentityKey,
   getDiffCollapseIconClassName,
   getDiffLineStat,
+  findPatchFile,
   getRenderablePatch,
   resolveDiffThemeName,
   resolveFileDiffPath,
 } from "../lib/diffRendering";
+import { resolveDiffPanelTurn } from "./DiffPanel.logic";
 import { PREFERRED_HIGHLIGHTER } from "../lib/syntaxHighlighting";
 import { areAllDiffFilesCollapsed, toggleAllDiffFiles } from "../lib/diffCollapse";
 import { useWorkspaceMutationRefresh } from "../hooks/useWorkspaceMutationRefresh";
@@ -272,31 +274,33 @@ export default function DiffPanel({
     return right.completedAt.localeCompare(left.completedAt);
   });
 
-  useEffect(() => {
-    if (!routeThreadRef || diffSelection.kind !== "turn") return;
-    useDiffPanelStore.getState().reconcileTurnSelection(
-      routeThreadRef,
-      orderedTurnDiffSummaries.map((summary) => summary.runId),
-    );
-  }, [diffSelection, orderedTurnDiffSummaries, routeThreadRef]);
-
   const selectedRunId = diffSelection.kind === "turn" ? diffSelection.turnId : null;
   const selectedGitScope = diffSelection.kind === "turn" ? "branch" : diffSelection.kind;
   const selectedBaseRef = diffSelection.kind === "branch" ? diffSelection.baseRef : null;
   const selectedFilePath = diffSelection.kind === "turn" ? diffSelection.filePath : null;
   const selectedFileRevealRequestId =
     diffSelection.kind === "turn" ? diffSelection.revealRequestId : 0;
-  const selectedTurn =
-    selectedRunId === null
-      ? undefined
-      : (orderedTurnDiffSummaries.find((summary) => summary.runId === selectedRunId) ??
-        orderedTurnDiffSummaries[0]);
+  const { turn: selectedTurn, awaitingCheckpoint } = resolveDiffPanelTurn({
+    orderedSummaries: orderedTurnDiffSummaries,
+    selectedRunId,
+    activeRunId: activeThread?.runtime?.activeRunId,
+    latestRunId: activeThread?.latestRun?.runId,
+  });
+
+  useEffect(() => {
+    if (!routeThreadRef || diffSelection.kind !== "turn" || awaitingCheckpoint) return;
+    useDiffPanelStore.getState().reconcileTurnSelection(
+      routeThreadRef,
+      orderedTurnDiffSummaries.map((summary) => summary.runId),
+    );
+  }, [awaitingCheckpoint, diffSelection, orderedTurnDiffSummaries, routeThreadRef]);
+
   const selectedCheckpointTurnCount = selectedTurn?.checkpointTurnCount;
   const latestTurn = orderedTurnDiffSummaries[0];
   const selectedScopeLabel =
     selectedRunId === null
       ? GIT_REVIEW_SCOPES[selectedGitScope].title
-      : selectedTurn?.runId === latestTurn?.runId
+      : awaitingCheckpoint || selectedTurn?.runId === latestTurn?.runId
         ? "Latest turn"
         : `Turn ${selectedCheckpointTurnCount ?? "?"}`;
   const reviewSectionId = selectedTurn ? `turn:${selectedTurn.runId}` : selectedGitScope;
@@ -519,8 +523,14 @@ export default function DiffPanel({
   const allDiffFilesCollapsed = areAllDiffFilesCollapsed(diffFileKeys, collapsedDiffFileKeys);
   const diffLineStat = sourceLineStat ?? getDiffLineStat(renderableFiles);
   const fileTreeEntries = diffFileTreeEntries(renderableFiles);
-  const selectedDiffFileKey = selectedFilePath
-    ? (codeViewFiles.find((candidate) => candidate.filePath === selectedFilePath)?.fileKey ?? null)
+  // Edit rows name the file as the provider reported it, often an absolute path on the host.
+  const selectedPatchFile = selectedFilePath
+    ? findPatchFile(renderableFiles, selectedFilePath)
+    : null;
+  const selectedPatchFilePath = selectedPatchFile ? resolveFileDiffPath(selectedPatchFile) : null;
+  const selectedDiffFileKey = selectedPatchFilePath
+    ? (codeViewFiles.find((candidate) => candidate.filePath === selectedPatchFilePath)?.fileKey ??
+      null)
     : null;
 
   useEffect(() => {
@@ -536,7 +546,7 @@ export default function DiffPanel({
       (candidate) => resolveFileDiffPath(candidate.fileDiff) === filePath,
     );
     const file = renderableFileEntries[index];
-    if (!file) return;
+    if (!file) return false;
     setCollapsedDiffFiles((current) => {
       const next = new Set(
         current.scopeKey === collapseScopeKey ? current.fileKeys : defaultCollapsedDiffFileKeys,
@@ -548,20 +558,29 @@ export default function DiffPanel({
       requestFile(index);
     }
     requestTreeReveal(file.fileKey);
+    return true;
   };
 
   const externalRevealRef = useRef<{ cache: string; key: string } | null>(null);
   useEffect(() => {
-    if (!lazySource || !selectedFilePath) return;
-    const key = `${selectedFilePath}:${selectedFileRevealRequestId}`;
+    // Files start collapsed, so a clicked file must also be expanded, for turn diffs too.
+    if (!selectedPatchFilePath) return;
+    const key = `${reviewSectionId}:${selectedPatchFilePath}:${selectedFileRevealRequestId}`;
     if (
       externalRevealRef.current?.cache === filePatchScope &&
       externalRevealRef.current.key === key
     )
       return;
-    externalRevealRef.current = { cache: filePatchScope, key };
-    revealDiffFile(selectedFilePath);
-  }, [lazySource, selectedFilePath, selectedFileRevealRequestId, filePatchScope, revealDiffFile]);
+    if (revealDiffFile(selectedPatchFilePath)) {
+      externalRevealRef.current = { cache: filePatchScope, key };
+    }
+  }, [
+    reviewSectionId,
+    selectedPatchFilePath,
+    selectedFileRevealRequestId,
+    filePatchScope,
+    revealDiffFile,
+  ]);
 
   const openDiffFile = (filePath: string) => {
     openDiffFilePrimaryAction({
@@ -986,6 +1005,10 @@ export default function DiffPanel({
       ) : !isGitRepo ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
           Turn diffs are unavailable because this project is not a git repository.
+        </div>
+      ) : awaitingCheckpoint ? (
+        <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
+          This turn&apos;s changes appear here when it finishes.
         </div>
       ) : selectedRunId !== null && orderedTurnDiffSummaries.length === 0 ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
