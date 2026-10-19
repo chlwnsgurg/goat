@@ -58,22 +58,45 @@ reads the sentences `@goat/ssh` writes. A change to those sentences in
 classifier's tests use the real strings.
 
 - **Unreachable.** ssh exited before it reached the host: connect timeout, no
-  route, refused, could not resolve, or a banner timeout. `describeSshConnectionFailure`
-  rewrites these as "Cannot reach <alias> over SSH (...)"; the tunnel step
+  route, refused, could not resolve, a banner timeout, or a proxy that closes
+  without a more specific diagnostic. `UNKNOWN port 65535` is OpenSSH's proxy
+  endpoint placeholder, not a remote port. A slow ProxyCommand or an unresolved
+  remote Tailscale name also retries quietly. `describeSshConnectionFailure`
+  rewrites connect and banner timeouts as "Cannot reach <alias> over SSH (...)"; the tunnel step
   passes ssh's own stderr, which the classifier also reads. This is the normal
   state of a closed laptop or a dropped VPN, so it is `host-unreachable`.
+- **Local proxy unavailable.** An explicit local Tailscale daemon failure,
+  stopped or logged-out client, missing approval, or missing ProxyCommand
+  executable is `configuration`, blocked until wake, network change, or Retry.
+  Retrying cannot start a local app, sign in, or repair its path; the message
+  names that fix and this machine, rather than blaming the remote host. These
+  diagnostics take precedence over the generic closure that OpenSSH prints
+  afterward. `tailscale nc` writes stopped/login status to stdout, so SSH reads
+  it as banner text: commands and tunnel startup retain only those known status lines
+  from DEBUG1, discarding other debug output and login URLs.
 - **Login rejected.** `Permission denied (publickey…)`, a rejected key-only
   login, and a cancelled password prompt are `authentication`. A locked
-  ssh-agent after wake produces the same message, which is why blocked states
-  still retry on wake and network change.
-- **Host key.** A changed or unverifiable host key is `configuration`. The fix
-  is to forget the host and review the new fingerprint; GOAT never replaces a
+  ssh-agent after wake can also stall authentication. An authentication timeout
+  is `authentication`, with an instruction to unlock the key or agent. Blocked
+  states still retry on wake and network change.
+- **Host key.** A changed, unknown under strict checking, or unverifiable host
+  key is `configuration`. The fix is to forget the host and review the new fingerprint; GOAT never replaces a
   pinned key automatically.
 - **Runtime refusal.** A remote runtime newer than this app, or an incompatible
   one that cannot be replaced, is `configuration`. It is deliberately not
   `unsupported`: that reason switches the environment off in the registry, and
   updating the app or stopping the remote server must bring it back without
   the user finding a disabled switch.
+- **Timeout stage.** OpenSSH's connect/banner timeout is `host-unreachable`.
+  The command deadline uses DEBUG1's authentication-service and authenticated
+  milestones (including a reused control connection) to distinguish an auth
+  stall from a remote command stall; a TCP connection alone does not prove
+  authentication began. After login, command, runtime install/download, launch,
+  and pairing deadlines name their operation and remain `remote-unavailable`.
+  Local HTTPS/gh archive download deadlines also remain runtime failures, never
+  SSH login or host reachability failures. A ready tunnel whose backend does not
+  answer remains a runtime failure, except the explicit high-latency readiness
+  diagnostic, which is `network`.
 - **Everything else** is a transient `remote-unavailable` failure of a host
   that answered: a server that did not start, a tunnel nothing answered on, a
   slow network.

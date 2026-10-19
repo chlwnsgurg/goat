@@ -75,6 +75,7 @@ import {
   resolveSshTarget,
   runSshCommand,
   SSH_KEEPALIVE_ARGS,
+  sshDiagnosticLines,
   targetConnectionKey,
 } from "./command.ts";
 import {
@@ -2744,6 +2745,7 @@ export const prepareRemoteRuntime = (
       yield* runSshCommand(target, {
         ...authOptions,
         ...remoteUploadCommand(script, archive.bytes, probe.platform),
+        timeoutStage: "runtime-install",
         timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
       }).pipe(
         // A remote reader that exits early (full disk, failed checksum) fails only
@@ -2916,6 +2918,7 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
     const result = yield* runSshCommand(target, {
       remoteCommandArgs: ["sh", "-l", "-s", "--", stateKey],
       stdin: buildRemoteLaunchScript(selected.runner, selected),
+      timeoutStage: "runtime-launch",
       timeoutMs: isNodeScriptRunner(selected.runner)
         ? REMOTE_LAUNCH_TIMEOUT_MS
         : REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
@@ -3020,6 +3023,7 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
     ));
   const result = yield* runSshCommand(target, {
     remoteCommandArgs: ["sh", "-s"],
+    timeoutStage: "pairing",
     stdin: buildRemotePairingScript(stateKey, selected.runner, {
       ...selected,
       mayUpgradeOwnedServer: false,
@@ -3086,6 +3090,7 @@ export const issueRemoteMcpClientSession = Effect.fn("ssh/tunnel.issueRemoteMcpC
       ));
     const result = yield* runSshCommand(target, {
       remoteCommandArgs: ["sh", "-s"],
+      timeoutStage: "pairing",
       stdin: buildRemoteMcpSessionScript(stateKey, sessionOptions, selected.runner, {
         ...selected,
         mayUpgradeOwnedServer: false,
@@ -3368,6 +3373,7 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
     ),
   );
   const args = [
+    "-v",
     ...baseSshArgs(input.resolvedTarget, {
       batchMode: input.authOptions.batchMode ?? "no",
     }),
@@ -3449,11 +3455,10 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
   };
   // Readiness cancels the exit waiter, but diagnostics must drain until the tunnel closes.
   let stderrTail = "";
-  const stderrDrain = yield* child.stderr.pipe(
-    Stream.decodeText(),
+  const stderrDrain = yield* sshDiagnosticLines(child.stderr).pipe(
     Stream.runForEach((chunk) =>
       Effect.sync(() => {
-        stderrTail = (stderrTail + chunk).slice(-TUNNEL_STDERR_TAIL_CHARS);
+        stderrTail = (stderrTail + chunk + "\n").slice(-TUNNEL_STDERR_TAIL_CHARS);
       }),
     ),
     // Diagnostics are best-effort: a failed read must not hide the real exit.

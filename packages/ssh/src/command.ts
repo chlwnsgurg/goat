@@ -37,6 +37,7 @@ export interface RunSshCommandOptions extends SshAuthOptions {
   readonly remoteCommandArgs?: ReadonlyArray<string>;
   readonly stdin?: string | Uint8Array;
   readonly timeoutMs?: number;
+  readonly timeoutStage?: "runtime-install" | "runtime-launch" | "pairing";
 }
 
 export function parseSshResolveOutput(alias: string, stdout: string): DesktopSshEnvironmentTarget {
@@ -144,6 +145,25 @@ export const collectProcessOutput = <E>(
     ),
   );
 
+// Proxy stdout becomes SSH banner text. Keep only known actionable Tailscale
+// states, never arbitrary debug output (which can include login URLs).
+export const sshDiagnosticLines = <E>(
+  stream: Stream.Stream<Uint8Array, E>,
+  observeLine?: (line: string) => void,
+): Stream.Stream<string, E> =>
+  stream.pipe(
+    Stream.decodeText(),
+    Stream.splitLines,
+    Stream.map((line) => {
+      observeLine?.(line);
+      return line.replace(
+        /^debug1: (?:kex_exchange_identification|ssh_exchange_identification): banner line \d+: (Tailscale is stopped\.|Logged out\.|Machine is not yet approved by tailnet admin\.)$/u,
+        "Tailscale proxy status: $1",
+      );
+    }),
+    Stream.filter((line) => !/^(?:debug[123]:|Authenticated to )/u.test(line)),
+  );
+
 function redactSshErrorOutput(output: string): string {
   const redacted = output.replace(
     /("(?:access_token|bearerToken|credential|pairingToken|token)"\s*:\s*")[^"]+(")/giu,
@@ -231,6 +251,7 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
   target: DesktopSshEnvironmentTarget,
   input: RunSshCommandOptions,
   commandScope: Scope.Scope,
+  progress: { authenticating: boolean; authenticated: boolean; stderr: string },
 ): Effect.fn.Return<
   SshCommandResult,
   SshCommandError | SshInvalidTargetError,
@@ -254,6 +275,9 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
     ),
   );
   const args = [
+    // DEBUG1 exposes connection/auth milestones, needed to distinguish a locked
+    // agent from a slow remote command. Diagnostic chatter is removed below.
+    "-v",
     ...baseSshArgs(target, {
       batchMode: input.batchMode ?? (input.interactiveAuth ? "no" : "yes"),
     }),
@@ -302,7 +326,23 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
   const [stdout, stderr, exitCode] = yield* Effect.all(
     [
       collectProcessOutput(child.stdout),
-      collectProcessOutput(child.stderr),
+      sshDiagnosticLines(child.stderr, (line) => {
+        progress.authenticating ||=
+          /^debug1: (?:SSH2_MSG_SERVICE_ACCEPT received|Authentications that can continue:|Next authentication method:)/u.test(
+            line,
+          );
+        progress.authenticated ||=
+          /^(?:Authenticated to |debug1: Authentication succeeded|debug1: mux_client_request_session: master session id:)/u.test(
+            line,
+          );
+      }).pipe(
+        Stream.runForEach((line) =>
+          Effect.sync(() => {
+            progress.stderr += `${line}\n`;
+          }),
+        ),
+        Effect.map(() => progress.stderr),
+      ),
       child.exitCode.pipe(Effect.map(Number)),
     ],
     { concurrency: "unbounded" },
@@ -359,8 +399,9 @@ export const runSshCommand = Effect.fn("ssh/command.runSshCommand")(function* (
   SshCommandError | SshInvalidTargetError,
   ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
 > {
+  const progress = { authenticating: false, authenticated: false, stderr: "" };
   return yield* Effect.scopedWith((commandScope) =>
-    runSshCommandInScope(target, input, commandScope),
+    runSshCommandInScope(target, input, commandScope, progress),
   ).pipe(
     Effect.timeoutOption(Duration.millis(input.timeoutMs ?? DEFAULT_SSH_COMMAND_TIMEOUT_MS)),
     Effect.flatMap((result) =>
@@ -375,11 +416,26 @@ export const runSshCommand = Effect.fn("ssh/command.runSshCommand")(function* (
               preHostArgs: input.preHostArgs ?? [],
               hasStdin: input.stdin !== undefined,
             });
+            const host = describeSshTarget(target);
+            const elapsed = `${input.timeoutMs ?? DEFAULT_SSH_COMMAND_TIMEOUT_MS}ms`;
+            const operation =
+              input.timeoutStage === "runtime-install"
+                ? "GOAT runtime install/download"
+                : input.timeoutStage === "runtime-launch"
+                  ? "GOAT runtime launch"
+                  : input.timeoutStage === "pairing"
+                    ? "GOAT pairing"
+                    : "Remote SSH command";
+            const message = progress.authenticated
+              ? `${operation} on ${host} timed out after ${elapsed}.`
+              : progress.authenticating
+                ? `SSH authentication timed out for ${host} after ${elapsed}. Unlock your SSH key or ssh-agent, then reconnect.`
+                : `SSH connection to ${host} timed out after ${elapsed} before authentication began. Check the network or SSH ProxyCommand.`;
             return yield* new SshCommandError({
               command: ["ssh"],
               exitCode: null,
-              stderr: "",
-              message: `SSH command to ${describeSshTarget(target)} timed out after ${input.timeoutMs ?? DEFAULT_SSH_COMMAND_TIMEOUT_MS}ms.`,
+              stderr: progress.stderr,
+              message: progress.stderr.trim() ? `${message}\n${progress.stderr.trim()}` : message,
             });
           }),
       }),
