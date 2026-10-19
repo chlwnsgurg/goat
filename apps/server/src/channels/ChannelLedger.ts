@@ -207,6 +207,13 @@ export class ChannelLedger extends Context.Service<
     readonly listConversationTasks: (
       conversationId: ChannelConversationId,
     ) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
+    /**
+     * Every running task in the conversation its worker shows as needing a person, however old:
+     * an open approval must stay answerable past the recent-task window.
+     */
+    readonly listConversationNeedsYou: (
+      conversationId: ChannelConversationId,
+    ) => Effect.Effect<ReadonlyArray<ChannelTask>, ChannelLedgerError>;
     readonly getTask: (
       taskId: ChannelTaskId,
     ) => Effect.Effect<ChannelStoredTask | undefined, ChannelLedgerError>;
@@ -1028,6 +1035,18 @@ const make = Effect.gen(function* () {
       `.pipe(
         Effect.map((rows) => rows.map((row) => storedTask(row).task)),
         Effect.mapError(toLedgerError("listConversationTasks")),
+      ),
+
+    listConversationNeedsYou: (conversationId) =>
+      sql<TaskRow>`
+        SELECT owner_id, task_json, pending_answer_message_id, completion_hold FROM channel_tasks
+        WHERE conversation_id = ${conversationId}
+          AND status IN ('running', 'waiting_input')
+          AND COALESCE(json_array_length(task_json, '$.observed.needsYou'), 0) > 0
+        ORDER BY created_at DESC
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => storedTask(row).task)),
+        Effect.mapError(toLedgerError("listConversationNeedsYou")),
       ),
 
     getTask: (taskId) =>

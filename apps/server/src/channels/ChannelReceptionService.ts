@@ -760,7 +760,6 @@ const make = Effect.gen(function* () {
   const approvalCards = (task: ChannelTask, listed: ReadonlyArray<ChannelTaskNeedsYou>) =>
     Effect.gen(function* () {
       const wanted = new Set(listed.flatMap((need) => need.approval?.requestId ?? []));
-      const open = openApprovalCards(yield* ledger.listConversationTasks(task.conversationId));
       const deliveries: Array<ChannelLedger.ChannelOutboxInsert> = [];
       for (const card of openApprovalCards([task])) {
         if (!wanted.has(card.approval.requestId)) continue;
@@ -770,7 +769,6 @@ const make = Effect.gen(function* () {
           bySubagent: card.approval.threadId !== task.worker?.threadId,
           kind: detail?.kind,
           prompt: detail?.prompt,
-          coded: open.length > 1,
         });
         deliveries.push(
           replyDelivery({
@@ -894,7 +892,10 @@ const make = Effect.gen(function* () {
       const approvalMatch =
         approvalReply === undefined
           ? undefined
-          : matchApprovalCard(openApprovalCards(tasks), approvalReply.target);
+          : matchApprovalCard(
+              openApprovalCards(yield* ledger.listConversationNeedsYou(conversationId)),
+              approvalReply.target,
+            );
       if (
         approvalReply !== undefined &&
         approvalMatch !== undefined &&
@@ -903,16 +904,18 @@ const make = Effect.gen(function* () {
         const answer =
           approvalMatch.type === "several"
             ? whichApproval(approvalMatch.cards, approvalReply.decision)
-            : {
-                text: yield* answerApproval(
-                  approvalMatch.card,
-                  approvalReply.decision,
-                  yield* judgedNow,
-                  inputId,
-                  message.kind,
-                ),
-                options: undefined,
-              };
+            : approvalMatch.type === "gone"
+              ? { text: CHANNEL_COPY.approvalAlreadyAnswered, options: undefined }
+              : {
+                  text: yield* answerApproval(
+                    approvalMatch.card,
+                    approvalReply.decision,
+                    yield* judgedNow,
+                    inputId,
+                    message.kind,
+                  ),
+                  options: undefined,
+                };
         yield* ledger.completeReception({
           owner,
           inputId,

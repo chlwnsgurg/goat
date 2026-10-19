@@ -8,6 +8,7 @@ import {
 } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 
 import { approvalCode } from "./channelApprovalCards.ts";
 import { CHANNEL_COPY } from "./channelCopy.ts";
@@ -89,10 +90,11 @@ describe("GOAT Bot approval cards", () => {
         cards[0]?.text,
         "clean the build cache: the agent wants to run a command.\nrm -rf build/",
       );
-      assert.deepStrictEqual(cards[0]?.channel?.options, ["Approve", "Deny"]);
+      const code = approvalCode(request.id);
+      assert.deepStrictEqual(cards[0]?.channel?.options, ["Approve " + code, "Deny " + code]);
 
       // The button sends its label, which is answered without the model.
-      yield* gateway.ingest(goatInput("Approve", "a2"), rpcContext);
+      yield* gateway.ingest(goatInput("Approve " + code, "a2"), rpcContext);
       yield* runtime.drain;
       const [answered] = responses(harness);
       assert.strictEqual(answered?.threadId, worker);
@@ -101,12 +103,26 @@ describe("GOAT Bot approval cards", () => {
       assert.strictEqual(answered?.respondedBy?.type, "client");
       assert.include(yield* assistantTexts, "Approved. clean the build cache continues.");
 
-      // Answered, the approval leaves the work; a second "approve" is ordinary conversation.
+      // Answered, the approval leaves the work. A newer approval does not inherit the old card's
+      // button: pressed again, it says the approval was answered.
       yield* reports.reconcile(runtime.ownerToken);
       assert.deepStrictEqual((yield* onlyTask).observed?.needsYou, []);
-      yield* gateway.ingest(goatInput("approve", "a3"), rpcContext);
+      harness.world.runtimeRequests.set(worker, [
+        { ...request, status: "resolved" },
+        approval("rm-again"),
+      ]);
+      yield* reports.reconcile(runtime.ownerToken);
+      yield* runtime.drain;
+      yield* gateway.ingest(goatInput("Approve " + code, "a3"), rpcContext);
       yield* runtime.drain;
       assert.strictEqual(responses(harness).length, 1);
+      assert.strictEqual((yield* assistantTexts).at(-1), CHANNEL_COPY.approvalAlreadyAnswered);
+
+      // A bare word answers the only open card.
+      yield* gateway.ingest(goatInput("approve", "a4"), rpcContext);
+      yield* runtime.drain;
+      assert.strictEqual(responses(harness).length, 2);
+      assert.strictEqual(responses(harness)[1]?.requestId, approval("rm-again").id);
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -138,7 +154,56 @@ describe("GOAT Bot approval cards", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.effect("asks which one when a bare answer fits several cards", () => {
+  it.effect(
+    "asks which one when a bare answer fits several cards, and never matches titles",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* setupBot;
+        const gateway = yield* ChannelGateway.ChannelGateway;
+        const runtime = yield* ChannelRuntime.ChannelRuntime;
+        const reports = yield* ChannelWorkerReports.ChannelWorkerReports;
+        const ledger = yield* ChannelLedger.ChannelLedger;
+        yield* gateway.ingest(goatInput("do: fix login", "m1"), rpcContext);
+        yield* gateway.ingest(goatInput("do: bump deps", "m2"), rpcContext);
+        yield* runtime.drain;
+        const tasks = (yield* ledger.listTasks({ ownerId, limit: 10 })).tasks;
+        const login = tasks.find((task) => task.title === "fix login")!;
+        const deps = tasks.find((task) => task.title === "bump deps")!;
+        harness.world.runtimeRequests.set(login.worker!.threadId, [approval("login")]);
+        harness.world.runtimeRequests.set(deps.worker!.threadId, [approval("deps")]);
+        yield* reports.reconcile(runtime.ownerToken);
+        yield* runtime.drain;
+
+        yield* gateway.ingest(goatInput("deny", "m3"), rpcContext);
+        yield* runtime.drain;
+        assert.strictEqual(responses(harness).length, 0);
+        const ask = (yield* botMessages).messages.findLast(
+          (message) => message.channel?.kind === "question",
+        );
+        const depsCode = approvalCode("approval:deps");
+        assert.include(ask?.channel?.options ?? [], "Deny " + depsCode);
+
+        yield* gateway.ingest(goatInput("Deny " + depsCode, "m4"), rpcContext);
+        yield* runtime.drain;
+        const [answered] = responses(harness);
+        assert.strictEqual(answered?.threadId, deps.worker!.threadId);
+        assert.strictEqual(answered?.decision, "decline");
+        // Words that happen to match a title are conversation, not an approval.
+        yield* gateway.ingest(goatInput("approve the fix login PR", "m5"), rpcContext);
+        yield* runtime.drain;
+        assert.strictEqual(responses(harness).length, 1);
+        yield* gateway.ingest(
+          goatInput("approve " + approvalCode("approval:login").toLowerCase(), "m6"),
+          rpcContext,
+        );
+        yield* runtime.drain;
+        assert.strictEqual(responses(harness)[1]?.threadId, login.worker!.threadId);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect("keeps an old approval answerable behind newer work", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       yield* setupBot;
@@ -146,35 +211,21 @@ describe("GOAT Bot approval cards", () => {
       const runtime = yield* ChannelRuntime.ChannelRuntime;
       const reports = yield* ChannelWorkerReports.ChannelWorkerReports;
       const ledger = yield* ChannelLedger.ChannelLedger;
-      yield* gateway.ingest(goatInput("do: fix login", "m1"), rpcContext);
-      yield* gateway.ingest(goatInput("do: bump deps", "m2"), rpcContext);
+      yield* gateway.ingest(goatInput("do: first thing", "o0"), rpcContext);
       yield* runtime.drain;
-      const tasks = (yield* ledger.listTasks({ ownerId, limit: 10 })).tasks;
-      const login = tasks.find((task) => task.title === "fix login")!;
-      const deps = tasks.find((task) => task.title === "bump deps")!;
-      harness.world.runtimeRequests.set(login.worker!.threadId, [approval("login")]);
-      harness.world.runtimeRequests.set(deps.worker!.threadId, [approval("deps")]);
+      const first = yield* onlyTask;
+      harness.world.runtimeRequests.set(first.worker!.threadId, [approval("first")]);
       yield* reports.reconcile(runtime.ownerToken);
+      for (let index = 1; index <= 21; index += 1) {
+        yield* TestClock.adjust("1 second");
+        yield* gateway.ingest(goatInput("do: later thing " + index, "o" + index), rpcContext);
+      }
       yield* runtime.drain;
-
-      yield* gateway.ingest(goatInput("deny", "m3"), rpcContext);
+      const recent = yield* ledger.listConversationTasks(first.conversationId);
+      assert.isFalse(recent.some((task) => task.taskId === first.taskId));
+      yield* gateway.ingest(goatInput("approve", "o-answer"), rpcContext);
       yield* runtime.drain;
-      assert.strictEqual(responses(harness).length, 0);
-      const ask = (yield* botMessages).messages.findLast(
-        (message) => message.channel?.kind === "question",
-      );
-      const depsCode = approvalCode("approval:deps");
-      assert.include(ask?.channel?.options ?? [], "Deny " + depsCode);
-
-      yield* gateway.ingest(goatInput("Deny " + depsCode, "m4"), rpcContext);
-      yield* runtime.drain;
-      const [answered] = responses(harness);
-      assert.strictEqual(answered?.threadId, deps.worker!.threadId);
-      assert.strictEqual(answered?.decision, "decline");
-      // Words from the title pick a card too.
-      yield* gateway.ingest(goatInput("approve login", "m5"), rpcContext);
-      yield* runtime.drain;
-      assert.strictEqual(responses(harness)[1]?.threadId, login.worker!.threadId);
+      assert.strictEqual(responses(harness)[0]?.threadId, first.worker!.threadId);
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -196,7 +247,10 @@ describe("GOAT Bot approval cards", () => {
       const card = resultsTo(harness.slackSent, "question")[0];
       assert.strictEqual(
         card?.message.text,
-        "deploy staging: the agent wants to run a command.\n• Approve\n• Deny",
+        "deploy staging: the agent wants to run a command.\n• Approve " +
+          approvalCode("approval:deploy") +
+          "\n• Deny " +
+          approvalCode("approval:deploy"),
       );
 
       yield* identities.unlink({ connectionId: "slack-1", externalActorId: "U1" });

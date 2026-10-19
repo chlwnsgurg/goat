@@ -48,7 +48,7 @@ const MAX_REPLY_LENGTH = 80;
 
 export interface ApprovalReply {
   readonly decision: Extract<ProviderApprovalDecision, "accept" | "decline">;
-  /** What followed the verb: a card code or words from the task title, or nothing. */
+  /** What followed the verb: a card code, or nothing. */
   readonly target: string;
 }
 
@@ -71,28 +71,31 @@ export const parseApprovalReply = (text: string): ApprovalReply | undefined => {
 export type ApprovalMatch =
   | { readonly type: "one"; readonly card: OpenApprovalCard }
   | { readonly type: "several"; readonly cards: ReadonlyArray<OpenApprovalCard> }
+  /** A code that names no open card: that approval was answered or is gone. */
+  | { readonly type: "gone" }
   | { readonly type: "none" };
 
+const CODE = /^[0-9a-z]{3}$/i;
+/** As a button sends it; a typed "approve all" is not a stale code. */
+const SENT_CODE = /^[0-9A-Z]{3}$/;
+
 /**
- * The card a reply answers: the only open one for a bare verb, else the one whose code or task
- * title the reply names. A reply that names nothing open is not a card answer.
+ * The card a reply answers: the only open one for a bare verb, else the one whose code it names.
+ * Only a code picks a card: words like "approve the PR" are conversation, never an approval of
+ * whatever a task with a matching title happens to be waiting on.
  */
 export const matchApprovalCard = (
   cards: ReadonlyArray<OpenApprovalCard>,
   target: string,
 ): ApprovalMatch => {
-  if (cards.length === 0) return { type: "none" };
   if (target === "") {
+    if (cards.length === 0) return { type: "none" };
     return cards.length === 1 ? { type: "one", card: cards[0]! } : { type: "several", cards };
   }
-  const wanted = target.toLowerCase();
-  const byCode = cards.filter((card) => card.code.toLowerCase() === wanted);
-  const named =
-    byCode.length > 0
-      ? byCode
-      : cards.filter((card) => card.task.title.toLowerCase().includes(wanted));
-  if (named.length === 1) return { type: "one", card: named[0]! };
-  return named.length === 0 ? { type: "none" } : { type: "several", cards: named };
+  if (!CODE.test(target)) return { type: "none" };
+  const named = cards.find((card) => card.code === target.toUpperCase());
+  if (named !== undefined) return { type: "one", card: named };
+  return SENT_CODE.test(target) ? { type: "gone" } : { type: "none" };
 };
 
 const actionPhrase = (kind: OrchestrationV2RuntimeRequest["kind"] | undefined): string => {
@@ -112,13 +115,15 @@ const actionPhrase = (kind: OrchestrationV2RuntimeRequest["kind"] | undefined): 
 
 const MAX_PROMPT_CHARS = 400;
 
-/** The card's words and buttons. With several cards open, buttons carry the code. */
+/**
+ * The card's words and buttons. Buttons always carry the card's code, so an old card's button
+ * can only ever answer its own request.
+ */
 export const approvalCard = (input: {
   readonly card: OpenApprovalCard;
   readonly bySubagent: boolean;
   readonly kind: OrchestrationV2RuntimeRequest["kind"] | undefined;
   readonly prompt: string | undefined;
-  readonly coded: boolean;
 }): { readonly text: string; readonly options: ReadonlyArray<string> } => {
   const prompt = input.prompt?.trim();
   const detail =
@@ -126,7 +131,6 @@ export const approvalCard = (input: {
       ? ""
       : "\n" +
         (prompt.length > MAX_PROMPT_CHARS ? prompt.slice(0, MAX_PROMPT_CHARS - 1) + "…" : prompt);
-  const suffix = input.coded ? " " + input.card.code : "";
   return {
     text:
       input.card.task.title +
@@ -136,7 +140,7 @@ export const approvalCard = (input: {
       actionPhrase(input.kind) +
       "." +
       detail,
-    options: ["Approve" + suffix, "Deny" + suffix],
+    options: ["Approve " + input.card.code, "Deny " + input.card.code],
   };
 };
 
