@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect";
 
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as CloudMachineService from "../../../cloudMachines/CloudMachineService.ts";
+import * as LinkedHosts from "../../../linkedHosts/LinkedHosts.ts";
 import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
 import * as SshHostSetup from "../../../sshRemote/SshHostSetup.ts";
 import * as SshWorkspaceSync from "../../../sshRemote/SshWorkspaceSync.ts";
@@ -46,6 +47,20 @@ const toMcpFailure = (error: SshRemoteDispatch.SshRemoteDispatchError) =>
         : "orchestration_error",
     message: Array.from(error.message).slice(0, 2000).join(""),
   });
+
+/** The server always provides it; a test layer without it has no links. */
+const linkedHostsService = Effect.serviceOption(LinkedHosts.LinkedHosts).pipe(
+  Effect.flatMap((service) =>
+    service._tag === "Some"
+      ? Effect.succeed(service.value)
+      : Effect.fail(
+          new OrchestratorMcpFailure({
+            code: "orchestration_error",
+            message: "This GOAT server cannot link hosts.",
+          }),
+        ),
+  ),
+);
 
 const toHandoffFailure = (error: SshWorkspaceError) =>
   new SshThreadHandoffFailure({
@@ -97,6 +112,17 @@ const toCloudFailure = (error: CloudMachineError) =>
   new OrchestratorMcpFailure({
     code: error.reason === "not_found" ? "invalid_request" : "orchestration_error",
     message: error.message,
+  });
+
+const toLinkFailure = (error: LinkedHosts.LinkedHostError) =>
+  new OrchestratorMcpFailure({
+    code:
+      error.reason === "invalid_request"
+        ? "invalid_request"
+        : error.reason === "link_refused"
+          ? "capability_denied"
+          : "orchestration_error",
+    message: Array.from(error.message).slice(0, 2000).join(""),
   });
 
 export const layer = McpToolAccess.toLayer(SshToolkit, {
@@ -187,6 +213,64 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
         .pipe(Effect.mapError(toMcpFailure));
       return { hosts: [...hosts] };
     }),
+  ),
+  // Linking stores a session that reaches another machine, like saving a connection.
+  goat_host_link_create: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      yield* requireOrchestration;
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const sshHosts = yield* dispatch
+        .listHosts({ probe: false })
+        .pipe(Effect.orElseSucceed((): ReadonlyArray<SshRemoteDispatch.SshDispatchHost> => []));
+      if (sshHosts.some((host) => host.alias === input.name.trim())) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: `${input.name} is already an SSH host on this machine; pick another name for the link.`,
+        });
+      }
+      const environment = yield* ServerEnvironment.ServerEnvironment;
+      const descriptor = yield* environment.getDescriptor;
+      const linkedHosts = yield* linkedHostsService;
+      const linked = yield* linkedHosts
+        .link({
+          name: input.name,
+          url: input.url,
+          code: input.code,
+          access: input.access ?? "approval-required",
+          beforeSave: check.pipe(Effect.asVoid),
+          clientName: `GOAT on ${descriptor.label}`,
+        })
+        .pipe(
+          Effect.mapError((error) =>
+            error instanceof LinkedHosts.LinkedHostError ? toLinkFailure(error) : error,
+          ),
+        );
+      return { host: linked.host, replaced: linked.replaced };
+    }),
+  ),
+  goat_host_link_list: McpToolAccess.reads(() =>
+    Effect.gen(function* () {
+      yield* requireOrchestration;
+      const linkedHosts = yield* Effect.serviceOption(LinkedHosts.LinkedHosts);
+      if (linkedHosts._tag === "None") return { hosts: [] };
+      const hosts = yield* linkedHosts.value.list.pipe(Effect.mapError(toLinkFailure));
+      return { hosts: [...hosts] };
+    }),
+  ),
+  goat_host_link_remove: McpToolAccess.destructive(
+    McpToolAccess.writesEnvironment((input) =>
+      Effect.gen(function* () {
+        const linkedHosts = yield* linkedHostsService;
+        const removed = yield* linkedHosts.unlink(input.name).pipe(Effect.mapError(toLinkFailure));
+        if (removed._tag === "None") {
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: `No host is linked as ${input.name}. Call goat_host_link_list for the linked hosts.`,
+          });
+        }
+        return { removed: removed.value };
+      }),
+    ),
   ),
   // Browsing changes nothing remote, but it runs commands there with this
   // machine's SSH keys, so read-only clients may not.
@@ -359,11 +443,11 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
                   ...result.notes,
                   ...(watching && launcher === undefined
                     ? [
-                        `This machine follows the thread over SSH and posts to its completion webhook when the run ends, waits on a question, or if ${result.host} stays unreachable.`,
+                        `This machine follows the thread on ${result.host} and posts to its completion webhook when the run ends, waits on a question, or if ${result.host} stays unreachable.`,
                       ]
                     : watching
                       ? [
-                          `This machine follows the thread over SSH and wakes this thread when its run ends, when it waits on a question, or if ${result.host} stays unreachable; do not poll it. goat_thread_unwatch stops that.`,
+                          `This machine follows the thread on ${result.host} and wakes this thread when its run ends, when it waits on a question, or if ${result.host} stays unreachable; do not poll it. goat_thread_unwatch stops that.`,
                         ]
                       : scope.thread !== undefined
                         ? [

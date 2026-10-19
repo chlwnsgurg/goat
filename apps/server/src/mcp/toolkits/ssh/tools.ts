@@ -3,6 +3,7 @@ import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import { RemoteReportDeliveryMode, RemoteDispatchView } from "@goat/contracts";
 import * as RemoteDispatchCoordinator from "../../../remoteReports/RemoteDispatchCoordinator.ts";
 import {
+  AuthMcpClientAccess,
   CloudMachine,
   CloudMachineAlias,
   CloudMachinesCreateInput,
@@ -87,6 +88,53 @@ const SshHostListTool = Tool.make(agentSurfaceRegistry["ssh.host_list"].name, {
   success: Schema.Struct({ hosts: Schema.Array(SshHost) }),
 }).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["ssh.host_list"]));
 
+const LinkedHost = Schema.Struct({
+  name: Schema.String,
+  baseUrl: Schema.String,
+  environmentId: Schema.String,
+  label: Schema.String,
+  serverVersion: Schema.String,
+  access: AuthMcpClientAccess,
+  linkedAt: Schema.String,
+  expiresAt: Schema.String,
+});
+
+const HostLinkCreateTool = Tool.make(agentSurfaceRegistry["host_link.create"].name, {
+  ...shared,
+  description: agentSurfaceRegistry["host_link.create"].description,
+  parameters: Schema.Struct({
+    name: TrimmedNonEmptyString.annotate({
+      description:
+        "What to call the host in the host parameter of other tools: lowercase letters, digits, '.', '_' and '-'. Must not be an SSH alias from goat_ssh_host_list.",
+    }),
+    url: TrimmedNonEmptyString.annotate({
+      description:
+        "The pairing URL from goat pair or goat auth pairing create on that host, or the host's https address (then pass code).",
+    }),
+    code: Schema.optional(
+      TrimmedNonEmptyString.annotate({
+        description: "A pairing code from that host, when url is only its address.",
+      }),
+    ),
+    access: Schema.optional(AuthMcpClientAccess),
+  }),
+  success: Schema.Struct({ host: LinkedHost, replaced: Schema.Boolean }),
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["host_link.create"]));
+
+const HostLinkListTool = Tool.make(agentSurfaceRegistry["host_link.list"].name, {
+  ...shared,
+  description: agentSurfaceRegistry["host_link.list"].description,
+  parameters: Tool.EmptyParams,
+  success: Schema.Struct({ hosts: Schema.Array(LinkedHost) }),
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["host_link.list"]));
+
+const HostLinkRemoveTool = Tool.make(agentSurfaceRegistry["host_link.remove"].name, {
+  ...shared,
+  description: agentSurfaceRegistry["host_link.remove"].description,
+  parameters: Schema.Struct({ name: TrimmedNonEmptyString }),
+  success: Schema.Struct({ removed: LinkedHost }),
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["host_link.remove"]));
+
 // HandoffSummary contains DateTime.Utc. MCP structuredContent accepts JSON values,
 // so encode the domain result through its JSON codec before CallToolResult validates it.
 const SshHostResultJson = Schema.toCodecJson(SshHostResult);
@@ -150,7 +198,10 @@ const SshThreadLaunchTool = Tool.make(agentSurfaceRegistry["ssh.thread_launch"].
   ...shared,
   description: agentSurfaceRegistry["ssh.thread_launch"].description,
   parameters: Schema.Struct({
-    host: HostAlias,
+    host: TrimmedNonEmptyString.annotate({
+      description:
+        "An SSH host alias from goat_ssh_host_list, or a linked host name from goat_host_link_list.",
+    }),
     cwd: TrimmedNonEmptyString.annotate({
       description: "Absolute path (or ~/path) of the folder on the remote machine.",
     }),
@@ -304,6 +355,9 @@ export const SshToolkit = Toolkit.make(
   SshHostPrepareTool,
   SshHostForgetTool,
   SshHostListTool,
+  HostLinkCreateTool,
+  HostLinkListTool,
+  HostLinkRemoveTool,
   SshHostStatusTool,
   SshRuntimeUpdateTool,
   SshBrowseTool,

@@ -261,6 +261,26 @@ SSH toolkit asks `RemoteDispatchCoordinator` to persist the dispatch first. That
 Workspace sync for a remote checkout is `apps/server/src/sshRemote/SshWorkspaceSync.ts`. Remote
 repo paths it prints sit under `$HOME/.goat/repos/`.
 
+## Linked hosts
+
+A linked host is another GOAT server this environment reaches over HTTPS instead of SSH, such as
+a headless `goat serve` behind Tailscale or a LAN address. `apps/server/src/linkedHosts/LinkedHosts.ts`
+links one by spending a pairing code from that host through its MCP OAuth endpoints
+(`/oauth/mcp/register`, `decision`, `token`), the same path an outside agent's sign-in takes, so the
+host needs no change and issues an ordinary `mcp-client` session with the access chosen at link
+time. Every link, token included, is one `linked-hosts` secret in `ServerSecretStore`.
+
+`SshRemoteDispatch` checks a host name against the links before SSH: `callHostTool` and
+`launchThread` use the link's origin and saved session, and `connectedHosts` includes every link,
+so the thread, project, worktree, host-status and launch-watch paths reach it without their own
+branch. SSH-only operations (browse, setup, runtime updates) refuse a linked name.
+
+The trade against SSH is authority. An SSH session is issued per call at the caller's ceiling;
+a link's session is fixed. `linkWriteRefusal` therefore refuses a write from a caller whose ceiling
+is below the link's access, a link never answers approvals, and launch only uses a folder that is
+already a project there: it cannot browse the host to apply the broad-folder guard, so a person on
+that host chooses the workspace.
+
 ## Cloud machines
 
 A Boat (boat.dev) machine becomes an ordinary OpenSSH alias, `boat-<sandbox id>`. The GOAT
