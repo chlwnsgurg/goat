@@ -1,6 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import { NodeWS } from "@effect/platform-node/NodeSocket";
-import { EnvironmentAuthorizationError } from "@goat/contracts";
+import { AuthStandardClientScopes, EnvironmentAuthorizationError } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -281,6 +281,23 @@ it.effect.each(["upstream close", "session revocation", "node removal"] as const
         ).toBe(404);
       }
     }).pipe(Effect.scoped, Effect.provide(authLayer)),
+);
+
+it.effect("hub:proxy is required even with every standard scope, before any node work", () =>
+  Effect.gen(function* () {
+    const hub = yield* startHub();
+    const session = yield* hub.auth.issueSession({ scopes: AuthStandardClientScopes });
+    const shell = yield* fetchResponse(
+      `${hub.baseUrl}hub/nodes/node-1/api/orchestration/shell`,
+      session.token,
+    );
+    expect(shell.status).toBe(403);
+    expect(JSON.parse(shell.text)).toMatchObject({ requiredScope: "hub:proxy" });
+    expect(AuthStandardClientScopes).not.toContain("hub:proxy");
+    expect(hub.ssh.endpoints).toHaveLength(0);
+    expect(hub.ssh.issues).toHaveLength(0);
+    expect(hub.node.requests).toHaveLength(0);
+  }).pipe(Effect.scoped, Effect.provide(authLayer)),
 );
 
 it.effect("F12: an upstream open failure returns HTTP 503 before any client upgrade", () =>
