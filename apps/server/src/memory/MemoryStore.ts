@@ -387,12 +387,18 @@ export type MemoryPayloadSelection = {
   readonly when?: (revision: M.MemoryRevision) => boolean;
 };
 /**
- * Admission needs at most the claimed conflict and the reverted resolution. Omit this
- * selection for full history; `{}` skips both histories without reading their rows.
+ * Admission needs at most the claimed conflict, the reverted resolution, and the incoming
+ * revision's frontier/parent metadata. Omit this selection for full history; `{}` skips
+ * historical rows that are not explicitly selected.
  */
 export type MemoryHistorySelection = {
   readonly conflictId?: M.MemoryConflictId;
   readonly resolutionId?: M.MemoryResolutionId;
+  /** Incoming revision whose admission DAG checks need its direct parents and any active ancestry. */
+  readonly revision?: M.MemoryRevision;
+  readonly metadataRevisionIds?: ReadonlyArray<M.MemoryRevisionId>;
+  /** Also retain import-attributed revision metadata when computing forget reservations. */
+  readonly importLineage?: boolean;
 };
 /** A published boundary is not proof that an arbitrary unknown UUID was compacted. */
 export type MemoryParentState =
@@ -3196,26 +3202,67 @@ const make = Effect.gen(function* () {
       };
     },
   );
-  /** Admission reads the whole revision DAG but only the payload bodies it selects. */
+  /** Admission reads only the revision metadata and payload bodies its selection requires. */
   const loadSelectedRevisions = Effect.fnUntraced(function* (
     space: M.MemorySpaceId,
     id: M.MemoryId,
     heads: ReadonlyArray<M.MemoryRevisionId>,
     visible: boolean,
+    blocked: boolean,
     payloads: MemoryPayloadSelection,
+    history?: MemoryHistorySelection,
   ) {
-    const rows = yield* stored(
-      "revisions",
-      sql<HistoryRevisionRow>`SELECT r.*,NULL AS body_json FROM memory_revisions r WHERE r.space=${space} AND r.memory_id=${id}`,
-    );
-    const decoded = yield* Effect.forEach(rows, (row) =>
-      decodeHistoryRevision(row, space, id, false),
-    );
-    if (!visible) return decoded;
     const wanted = new Set<string>([
       ...(payloads.heads ? heads : []),
       ...(payloads.revisionIds ?? []),
     ]);
+    const r = history?.revision;
+    const wantedMetadata = new Set<string>([
+      ...wanted,
+      ...(history?.metadataRevisionIds ?? []),
+      ...(r ? [r.revisionId, ...r.parents] : []),
+    ]);
+    let rows: ReadonlyArray<HistoryRevisionRow>;
+    if (
+      history === undefined ||
+      (payloads.when !== undefined && payloads.when !== hasSourceEvidence)
+    ) {
+      rows = yield* stored(
+        "revisions",
+        sql<HistoryRevisionRow>`SELECT r.*,NULL AS body_json FROM memory_revisions r WHERE r.space=${space} AND r.memory_id=${id}`,
+      );
+    } else if (payloads.when === hasSourceEvidence) {
+      rows = yield* stored(
+        "revisions",
+        sql<HistoryRevisionRow>`SELECT r.*,NULL AS body_json FROM memory_revisions r WHERE r.space=${space} AND r.memory_id=${id} AND ((instr(r.provenance_json,'"sourceThread"')>0 AND instr(r.provenance_json,'"sourceWatermark"')>0) ${history.importLineage ? sql`OR instr(r.provenance_json,'"importSource"')>0` : sql``} ${wantedMetadata.size ? sql`OR r.revision_id IN ${sql.in([...wantedMetadata])}` : sql``})`,
+      );
+    } else if (wantedMetadata.size === 0) {
+      return [];
+    } else {
+      rows = yield* stored(
+        "revisions",
+        sql<HistoryRevisionRow>`SELECT r.*,NULL AS body_json FROM memory_revisions r WHERE r.space=${space} AND r.memory_id=${id} AND r.revision_id IN ${sql.in([...wantedMetadata])}`,
+      );
+      if (r && (r.parents.length > 0 || heads.length > 0)) {
+        const fullDagNeeded =
+          blocked ||
+          rows.some((row) => row.revision_id === r.revisionId) ||
+          (yield* stored(
+            "revisions-pending",
+            sql`SELECT 1 FROM memory_inbox_pending WHERE space=${space} AND memory_id=${id} AND record_kind='operation' LIMIT 1`,
+          )).length > 0;
+        if (fullDagNeeded) {
+          rows = yield* stored(
+            "revisions",
+            sql<HistoryRevisionRow>`SELECT r.*,NULL AS body_json FROM memory_revisions r WHERE r.space=${space} AND r.memory_id=${id}`,
+          );
+        }
+      }
+    }
+    const decoded = yield* Effect.forEach(rows, (row) =>
+      decodeHistoryRevision(row, space, id, false),
+    );
+    if (!visible) return decoded;
     // The stored payload_ref decides the join, exactly as the full read's LEFT JOIN does.
     const refs = decoded.map(({ revision }, index) =>
       wanted.has(revision.revisionId) || payloads.when?.(revision) === true
@@ -3256,6 +3303,10 @@ const make = Effect.gen(function* () {
   ) {
     const item = yield* readItem(space, id);
     const visible = item?.item.status !== "forgotten";
+    const blocked =
+      item?.item.status === "blocked" &&
+      (item.item.failureCode === "missing_parent" ||
+        item.item.failureCode === "source_invalidated");
     const revisions =
       payloads === undefined
         ? yield* Effect.forEach(
@@ -3266,7 +3317,15 @@ const make = Effect.gen(function* () {
             ),
             (row) => decodeHistoryRevision(row, space, id, visible),
           )
-        : yield* loadSelectedRevisions(space, id, item?.heads ?? [], visible, payloads);
+        : yield* loadSelectedRevisions(
+            space,
+            id,
+            item?.heads ?? [],
+            visible,
+            blocked,
+            payloads,
+            history,
+          );
     const tombstones = yield* stored(
       "tombstone",
       sql<{
@@ -5102,7 +5161,12 @@ const make = Effect.gen(function* () {
         if (outcome.scannerCursor && !outcome.failure) return true;
         const old = yield* readItem(target.memorySpaceId, target.memoryId);
         if (old && old.item.status !== "forgotten" && target.kind === "scanner") {
-          const aggregate = yield* loadAggregate(target.memorySpaceId, target.memoryId);
+          const aggregate = yield* loadAggregate(
+            target.memorySpaceId,
+            target.memoryId,
+            { heads: true },
+            {},
+          );
           const pending = yield* readPending(target.memorySpaceId, target.memoryId);
           const reasons = old.item.localAvailability.reasons.filter(
             (reason) => !["scanner_pending", "secret_detected"].includes(reason),
@@ -6535,7 +6599,12 @@ const make = Effect.gen(function* () {
         }
         yield* persistImportLineageTx(pages.flatMap((page) => page.importLineage));
         for (const identity of pages.flatMap((page) => page.identities)) {
-          const current = yield* loadAggregate(input.memorySpaceId, identity.memoryId);
+          const current = yield* loadAggregate(
+            input.memorySpaceId,
+            identity.memoryId,
+            { when: hasSourceEvidence },
+            { importLineage: true },
+          );
           if (current.tombstone) continue;
           const reservation = yield* reservationForRevisions(
             {
@@ -6885,7 +6954,7 @@ const make = Effect.gen(function* () {
       {
         when: hasSourceEvidence,
       },
-      {},
+      { importLineage: true },
     );
     return yield* reservationForRevisions(op, [
       ...current.revisions,
@@ -9530,7 +9599,12 @@ const make = Effect.gen(function* () {
       }>`SELECT memory_id,highest_token FROM memory_hub_leases WHERE space=${input.memorySpaceId} AND json_extract(lease_json,'$.holderEnvironmentId')=${input.environmentId}`,
     );
     for (const lease of leases) {
-      const aggregate = yield* loadAggregate(input.memorySpaceId, M.MemoryId.make(lease.memory_id));
+      const aggregate = yield* loadAggregate(
+        input.memorySpaceId,
+        M.MemoryId.make(lease.memory_id),
+        {},
+        {},
+      );
       const highest = Math.max(lease.highest_token, aggregate.fence?.highestFencingToken ?? 0) + 1;
       const fence: M.MemoryFenceRecord = {
         memorySpaceId: input.memorySpaceId,
@@ -9883,7 +9957,7 @@ const make = Effect.gen(function* () {
     space: M.MemorySpaceId,
     request: M.MemorySourceReadRequest,
   ) {
-    const aggregate = yield* loadAggregate(space, request.memoryId);
+    const aggregate = yield* loadAggregate(space, request.memoryId, { heads: true }, {});
     if (aggregate.tombstone || aggregate.pendingForget) return false;
     if (!aggregate.item || aggregate.item.localAvailability.exposure !== "visible") return false;
     for (const pair of aggregate.revisions) {
@@ -11385,10 +11459,7 @@ const make = Effect.gen(function* () {
             : null,
       revertsResolutionId: op.kind === "revert" ? op.revertsResolutionId : null,
       attemptId:
-        op.kind === "resolve"
-          ? ((yield* loadAggregate(op.memorySpaceId, op.memoryId, {}, {})).fence?.activeLease
-              ?.attemptId ?? op.operationId)
-          : null,
+        op.kind === "resolve" ? (aggregate.fence?.activeLease?.attemptId ?? op.operationId) : null,
       fencingToken: op.kind === "resolve" ? op.fencingToken : null,
       reportGuard:
         (op.kind === "resolve" || op.kind === "revert") &&
