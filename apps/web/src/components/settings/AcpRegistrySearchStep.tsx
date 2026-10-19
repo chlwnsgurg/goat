@@ -82,14 +82,20 @@ export function AcpRegistrySearchStep({
   useEffect(
     () => () => {
       prepareGeneration.current += 1;
-      if (searchTimer.current !== null) clearTimeout(searchTimer.current);
+      if (searchTimer.current !== null) {
+        clearTimeout(searchTimer.current);
+        searchTimer.current = null;
+      }
       onPreparingChange?.(false);
     },
     [onPreparingChange],
   );
 
   const submitSearch = (nextQuery: string) => {
-    if (searchTimer.current !== null) clearTimeout(searchTimer.current);
+    if (searchTimer.current !== null) {
+      clearTimeout(searchTimer.current);
+      searchTimer.current = null;
+    }
     const trimmed = nextQuery.trim();
     setQuery(trimmed);
     setPrepareError(null);

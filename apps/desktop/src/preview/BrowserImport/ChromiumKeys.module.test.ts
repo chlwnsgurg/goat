@@ -7,11 +7,19 @@ vi.mock("@napi-rs/keyring", () => {
   throw new Error("Cannot find native binding");
 });
 
+import { ChromiumKeyError, resolveChromiumKeys } from "./ChromiumKeys.ts";
+
+// Vitest wraps a throwing mock factory, so the binding error sits somewhere in the cause chain.
+function causeMessages(cause: unknown): ReadonlyArray<string> {
+  const messages: string[] = [];
+  for (let current = cause; current instanceof Error; current = current.cause) {
+    messages.push(current.message);
+  }
+  return messages;
+}
+
 it.effect("reports an unavailable keychain when the macOS binding cannot load", () =>
   Effect.gen(function* () {
-    const { ChromiumKeyError, resolveChromiumKeys } = yield* Effect.promise(
-      () => import("./ChromiumKeys.ts"),
-    );
     const error = yield* resolveChromiumKeys({
       platform: "darwin",
       keychainService: "Chrome Safe Storage",
@@ -21,7 +29,7 @@ it.effect("reports an unavailable keychain when the macOS binding cannot load", 
 
     expect(error).toBeInstanceOf(ChromiumKeyError);
     expect(error.reason).toBe("keychainUnavailable");
-    expect(error.cause).toBeInstanceOf(Error);
+    expect(causeMessages(error.cause).join("\n")).toContain("Cannot find native binding");
   }).pipe(
     Effect.provideService(
       ChildProcessSpawner.ChildProcessSpawner,

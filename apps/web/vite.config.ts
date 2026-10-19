@@ -246,9 +246,13 @@ export default defineConfig(() => {
       // first request. Without this, a cold worktree discovers and transforms
       // modules one import-level at a time while the browser waits — which
       // over a tailnet origin turns into minutes of waterfall.
-      warmup: {
-        clientFiles: ["./src/main.tsx"],
-      },
+      ...(process.env.VITEST
+        ? {}
+        : {
+            warmup: {
+              clientFiles: ["./src/main.tsx"],
+            },
+          }),
       ...(devProxyTarget
         ? {
             // One entry per shared prefix; the server's dev catch-all 404s the
