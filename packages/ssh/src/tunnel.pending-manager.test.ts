@@ -1519,27 +1519,31 @@ describe("SSH drain-unavailable attachment", () => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect.each([
-    { name: "foreign owner", probe: { liveOwned: false } },
-    { name: "identity absent", probe: { identityAbsent: true } },
-    { name: "missing port", probe: { livePort: undefined } },
-    { name: "changed port", probe: { livePort: 4444 } },
-    { name: "changed version", probe: { liveVersion: "1.2.1" } },
-    { name: "missing live binary", probe: { liveBinarySignals: undefined } },
-    {
-      name: "incompatible live binary",
-      probe: {
-        liveBinarySignals: {
-          serverVersion: "1.2.2",
-          sshRuntimeProtocolVersion: 999,
-          orchestrationProtocolVersion: 999,
+  it.effect.each(
+    [false, true].flatMap((liveDrain) =>
+      [
+        { name: "foreign owner", probe: { liveOwned: false } },
+        { name: "identity absent", probe: { identityAbsent: true } },
+        { name: "missing port", probe: { livePort: undefined } },
+        { name: "changed port", probe: { livePort: 4444 } },
+        { name: "changed version", probe: { liveVersion: "1.2.1" } },
+        { name: "missing live binary", probe: { liveBinarySignals: undefined } },
+        {
+          name: "incompatible live binary",
+          probe: {
+            liveBinarySignals: {
+              serverVersion: "1.2.2",
+              sshRuntimeProtocolVersion: 999,
+              orchestrationProtocolVersion: 999,
+            },
+          },
         },
-      },
-    },
-    { name: "unknown runtime", probe: { liveStatus: "unknown" } },
-    { name: "dead forward", probe: {} },
-    { name: "changed requested version", probe: {} },
-  ])("fresh status cannot promote $name", ({ name, probe }) =>
+        { name: "unknown runtime", probe: { liveStatus: "unknown" } },
+        { name: "dead forward", probe: {} },
+        { name: "changed requested version", probe: {} },
+      ].map((scenario) => ({ ...scenario, liveDrain })),
+    ),
+  )("fresh status cannot promote $name (drain=$liveDrain)", ({ name, probe, liveDrain }) =>
     Effect.gen(function* () {
       const f = yield* fixture;
       f.setMode("drain-attached");
@@ -1550,11 +1554,14 @@ describe("SSH drain-unavailable attachment", () => {
         if (name === "changed requested version") {
           f.setRequestedVersion("1.2.4");
         }
-        f.setProbe({ ...probe, liveDrain: false });
+        f.setProbe({ ...probe, liveDrain });
         const result = yield* manager.status(uploadTarget);
         assert.isUndefined(result.status?.refreshDeferred);
         assert.notEqual(result.status?.state, "ready");
         assert.equal(f.count.launches, 1);
+        assert.isTrue(
+          Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+        );
       }).pipe(Effect.provide(f.layer), Effect.scoped);
     }).pipe(Effect.scoped),
   );
@@ -1637,13 +1644,13 @@ describe("SSH drain-unavailable attachment", () => {
   );
 });
 
-it.effect(
-  "failed HTTP readiness removes drain readiness without closing the forward or consuming intent",
-  () =>
+it.effect.each([false, true])(
+  "failed HTTP readiness with drain=%s removes readiness without closing the forward or consuming intent",
+  (liveDrain) =>
     Effect.gen(function* () {
       const f = yield* fixture;
       f.setMode("drain-attached");
-      f.setProbe({ liveDrain: false });
+      f.setProbe({ liveDrain });
       yield* Effect.gen(function* () {
         const manager = yield* SshTunnel.SshEnvironmentManager;
         yield* manager.ensureEnvironment(uploadTarget);
@@ -1654,6 +1661,9 @@ it.effect(
         const failed = yield* Fiber.join(status);
         assert.isUndefined(failed.status?.refreshDeferred);
         assert.equal(failed.status?.state, "update_blocked");
+        assert.isTrue(
+          Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+        );
         assert.equal(f.count.kills, 0);
         assert.equal(f.count.stops, 0);
         f.setStale(false);
@@ -1720,4 +1730,64 @@ it.effect("terminal setup failure fences drain publication across the forward-st
       assert.equal(f.count.launches, 1);
     }).pipe(Effect.provide(f.layer), Effect.scoped);
   }).pipe(Effect.scoped),
+);
+
+it.effect.each(
+  [false, true].flatMap((liveDrain) => [
+    { name: "foreign owner", probe: { liveOwned: false }, liveDrain },
+    { name: "identity absent", probe: { identityAbsent: true }, liveDrain },
+  ]),
+)(
+  "status invalidation of $name (drain=$liveDrain) prevents pending reuse and session admission",
+  ({ probe, liveDrain }) =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.setMode("drain-attached");
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        yield* manager.ensureEnvironment(uploadTarget);
+        f.setProbe({ ...probe, liveDrain });
+        assert.equal((yield* manager.status(uploadTarget)).status?.state, "update_blocked");
+        f.setMode("drain-pending");
+        const result = yield* manager.ensureEnvironment(uploadTarget, {
+          reuseWhileRefreshPending: true,
+        });
+        assert.property(result, "type");
+        assert.equal(f.count.launches, 2);
+        assert.equal(f.count.forwards, 1);
+        assert.equal(f.count.stops, 0);
+        const waiting = yield* manager.status(uploadTarget);
+        assert.equal(waiting.status?.state, "update_waiting");
+        assert.isUndefined(waiting.status?.refreshDeferred);
+        assert.isTrue(
+          Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+        );
+        assert.isTrue(
+          Result.isFailure(
+            yield* Effect.result(
+              manager.issueMcpClientSession(uploadTarget, {
+                requireReady: true,
+                label: "invalidated",
+                ttl: "1h",
+                runtimeModeCeiling: null,
+              }),
+            ),
+          ),
+        );
+        f.setMode("drain-attached");
+        f.setProbe({ liveDrain });
+        yield* TestClock.adjust("10 minutes");
+        yield* Deferred.await(f.published[2]!);
+        const recovered = yield* manager.ensureEnvironment(uploadTarget, {
+          reuseWhileRefreshPending: true,
+        });
+        assert.notProperty(recovered, "type");
+        yield* manager.readyEnvironment(uploadTarget);
+        assert.equal(f.count.launches, 3);
+      }).pipe(
+        Effect.provide(f.layer),
+        Effect.provideService(Tracer.Tracer, f.tracer),
+        Effect.scoped,
+      );
+    }).pipe(Effect.scoped),
 );
