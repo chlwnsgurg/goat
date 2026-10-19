@@ -63,6 +63,19 @@ describe("connection diagnostic", () => {
   });
 
   it.each([
+    ["Enter passphrase for key 'id_ed25519':\nalice@host's password:\nhunter2", "hunter2"],
+    ["SSH_ASKPASS=/tmp/x\nPassword:\nhunter2", "hunter2"],
+    ["Password for alice@mac-studio: hunter2", "hunter2"],
+    ["Password for alice@mac-studio:\nhunter2", "hunter2"],
+    ["[sudo] password for alice: hunter2", "hunter2"],
+    ["passphrase=opaque-key-phrase", "opaque-key-phrase"],
+    ["wsTicket=opaque-websocket-ticket", "opaque-websocket-ticket"],
+    ['"ticket": "opaque-ticket"', "opaque-ticket"],
+    ["pairingCode=opaque-pairing-code", "opaque-pairing-code"],
+    ["pairing_code=opaque-pairing-code", "opaque-pairing-code"],
+    ["pairing-code=opaque-pairing-code", "opaque-pairing-code"],
+    ["IdentityFile=keys/private/id_ed25519", "keys/private/"],
+    ['IdentityFile="keys/private dir/id_ed25519"', "keys/private dir/"],
     ["askpass prompt: What is the secret?\nresponse-without-a-label", "response-without-a-label"],
     ["Enter passphrase for key '/Users/alice/.ssh/id_ed25519':\nkey-password", "key-password"],
     ["alice@host's password: hunter2", "hunter2"],
@@ -133,6 +146,22 @@ describe("connection diagnostic", () => {
     expect(format(`token=${"s".repeat(10_000)}`)).not.toContain("sss");
     expect(format("\x1b[31mConnection refused\x1b[0m")).toContain("Connection refused");
     expect(format("\x1b[31mConnection refused\x1b[0m")).not.toContain("\x1b");
+  });
+
+  it.each([
+    "SSH password prompt expired. Try connecting again.",
+    "The token expired. Try connecting again.",
+    "The secret could not be loaded.",
+    "The credential was rejected.",
+    "A passphrase is required to unlock this key.",
+  ])("preserves public explanatory prose: %s", (detail) => {
+    const text = formatConnectionDiagnostic({
+      label: detail,
+      connection: presentConnectionState(AVAILABLE_CONNECTION_STATE),
+      diagnosticTail: detail,
+    });
+    expect(text).toContain(`Environment: ${detail}`);
+    expect(text.split("Public diagnostic tail:\n")[1]).toBe(detail);
   });
 
   it("handles an unconnected environment with no evidence", () => {

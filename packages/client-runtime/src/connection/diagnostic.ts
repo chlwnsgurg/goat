@@ -3,6 +3,7 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
 function publicText(text: string): string {
+  let redactResponse = false;
   return (
     text
       // oxlint-disable-next-line no-control-regex -- terminal escapes can hide credential labels
@@ -11,28 +12,41 @@ function publicText(text: string): string {
         /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/gu,
         "[redacted]",
       )
-      // Prompt responses may be unlabelled on the following line. Neither is public evidence.
-      .replace(
-        /^.*(?:askpass|passphrase|password\s*:|(?:enter|prompt.*|[\w@.'-]+['’]s)\s+password).*$(?:\r?\n[^\r\n]*)?/gimu,
-        "[redacted]",
-      )
+      // Consecutive prompts must keep the pending response secret until a non-prompt arrives.
+      .split(/\r?\n/u)
+      .map((line) => {
+        const prompt =
+          /askpass|\b(?:password|passphrase)\s*:|\b(?:password|passphrase)\s+for\b[^:]*:|\benter\s+(?:password|passphrase)\b|[\w@.'-]+['’]s\s+(?:password|passphrase)\b/iu.test(
+            line,
+          );
+        if (prompt) {
+          redactResponse = true;
+          return "[redacted]";
+        }
+        if (redactResponse && line.trim()) {
+          redactResponse = false;
+          return "[redacted]";
+        }
+        return line;
+      })
+      .join("\n")
       .replace(/^.*\b(?:set-cookie|cookie|authorization)\s*["']?\s*[:=].*$/gimu, "[redacted]")
       // Pairing/login URLs carry credentials in both query strings and fragments.
       .replace(/[a-z][a-z0-9+.-]*:\/\/[^\s<>"']+/giu, "[redacted URL]")
       .replace(/\bBearer\s+[^\s,;"']+/giu, "Bearer [redacted]")
       .replace(
-        /((?:[\w-]*(?:token|password|secret|credential)|api[_-]?key|askpass[\w-]*)[\s"']*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)/giu,
+        /((?:[\w-]*(?:token|password|secret|credential|passphrase|ticket)|pairing[_-]?code|api[_-]?key|askpass[\w-]*)[\s"']*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)/giu,
         "$1[redacted]",
       )
       .replace(
-        /((?:--)?(?:[\w-]*(?:token|password|secret|credential)|api[_-]?key)\s+)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s]+)/giu,
+        /(--?(?:[\w-]*(?:token|password|secret|credential)|api[_-]?key)\s+)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s]+)/giu,
         "$1[redacted]",
       )
       .replace(/\b(?:sk-|gh[opusr]_|github_pat_)[A-Za-z0-9_-]+/gu, "[redacted]")
       .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, "[redacted]")
       // Keep only filenames, including for identity paths outside ~/.ssh.
       .replace(
-        /((?:IdentityFile|Load key|private key(?: file)?|identity file|-i)[=:]?\s+)(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s]+)/giu,
+        /((?:IdentityFile|Load key|private key(?: file)?|identity file|-i)(?:[=:]\s*|\s+))(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s]+)/giu,
         (match, prefix: string) =>
           prefix +
           match

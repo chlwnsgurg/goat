@@ -140,6 +140,7 @@ import {
 } from "../../keybindings";
 
 const EMPTY_DISCOVERED_SSH_HOSTS: ReadonlyArray<DesktopDiscoveredSshHost> = [];
+const NO_SSH_RUNTIME_STATUS = Atom.make(null);
 function parseManualDesktopSshTarget(input: {
   readonly host: string;
   readonly username: string;
@@ -375,7 +376,7 @@ function SavedBackendListRow({
   const savedSshTarget = savedDesktopSshTarget(environment);
   const runtimeAtom =
     savedSshTarget === null
-      ? Atom.make(null)
+      ? NO_SSH_RUNTIME_STATUS
       : sshRuntime.statusAtom({ environmentId, target: savedSshTarget });
   const runtimeResult = useAtomValue(runtimeAtom);
   const runtimeStatus = runtimeResult?.status;

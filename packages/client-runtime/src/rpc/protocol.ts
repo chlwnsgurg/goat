@@ -28,7 +28,7 @@ export const PING_TIMEOUT = "15 seconds";
 
 // The upstream pinger treats a frozen event loop as silence when a ping is
 // outstanding. Keep its ping sender, but own the deadline at the socket boundary
-// so a late timer grants the resumed reader a full budget to receive replies.
+// so one late timer per received frame grants the resumed reader a full budget.
 export const makeWsRpcSocketProtocol = Effect.fnUntraced(function* (
   onTimeout: Effect.Effect<void>,
 ) {
@@ -36,19 +36,22 @@ export const makeWsRpcSocketProtocol = Effect.fnUntraced(function* (
   const serialization = yield* RpcSerialization.RpcSerialization;
   const clock = yield* Clock.Clock;
   let lastFrame = clock.currentTimeMillisUnsafe();
+  let freezeGraceUsed = false;
   const guardedSocket = {
     ...socket,
     reader: Effect.gen(function* () {
       const reader = yield* socket.reader;
       const expired = yield* Deferred.make<never, Socket.SocketError>();
       lastFrame = clock.currentTimeMillisUnsafe();
+      freezeGraceUsed = false;
       yield* Effect.gen(function* () {
         while (true) {
           const deadline = clock.currentTimeMillisUnsafe() + 5_000;
           yield* clock.sleep(Duration.millis(5_000));
           const now = clock.currentTimeMillisUnsafe();
-          if (now - deadline > 2_000) {
+          if (now - deadline > 2_000 && !freezeGraceUsed) {
             lastFrame = now;
+            freezeGraceUsed = true;
           } else if (now - lastFrame > Duration.toMillis(PING_TIMEOUT)) {
             yield* onTimeout;
             yield* Deferred.fail(
@@ -75,7 +78,10 @@ export const makeWsRpcSocketProtocol = Effect.fnUntraced(function* (
         ...parser,
         decode: (data: Uint8Array | string) => {
           const frames = parser.decode(data);
-          if (frames.length > 0) lastFrame = clock.currentTimeMillisUnsafe();
+          if (frames.length > 0) {
+            lastFrame = clock.currentTimeMillisUnsafe();
+            freezeGraceUsed = false;
+          }
           return frames;
         },
       };

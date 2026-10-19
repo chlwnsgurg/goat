@@ -1185,6 +1185,58 @@ describe("RpcSessionFactory", () => {
       }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
+  it.effect.each([false, true])(
+    "limits consecutive late timers to one grace per frame (pong: %s)",
+    (pong) =>
+      Effect.gen(function* () {
+        const clock = yield* TestClock.testClockWith(Effect.succeed);
+        let resumed = yield* Deferred.make<void>();
+        let frozen = false;
+        const frozenClock: Clock.Clock = {
+          ...clock,
+          sleep: (duration) =>
+            clock
+              .sleep(duration)
+              .pipe(
+                Effect.andThen(
+                  Effect.suspend(() => (frozen ? Deferred.await(resumed) : Effect.void)),
+                ),
+              ),
+        };
+        const lateTick = Effect.gen(function* () {
+          resumed = yield* Deferred.make<void>();
+          frozen = true;
+          yield* clock.adjust("20 seconds");
+          frozen = false;
+          yield* Deferred.succeed(resumed, undefined);
+          yield* clock.adjust(0);
+        });
+        yield* Effect.gen(function* () {
+          const { factory, sockets } = yield* makeFactory();
+          const session = yield* factory.connect(PREPARED);
+          const ready = yield* Effect.forkChild(session.ready);
+          const closed = yield* session.closed.pipe(Effect.exit, Effect.forkChild);
+          const socket = yield* awaitSocket(sockets);
+          socket.open();
+          yield* completeInitialConfig(socket);
+          yield* Fiber.join(ready);
+          yield* lateTick;
+          expect(closed.pollUnsafe()).toBeUndefined();
+
+          if (pong) {
+            socket.serverMessage(encodeJson({ _tag: "Pong" }));
+            yield* clock.adjust(0);
+            yield* lateTick;
+            expect(closed.pollUnsafe()).toBeUndefined();
+            expect(socket.readyState).toBe(TestWebSocket.OPEN);
+          }
+          yield* lateTick;
+          expect(closed.pollUnsafe()).toBeDefined();
+          expect(yield* Fiber.join(closed)).toMatchObject({ _tag: "Failure" });
+        }).pipe(Effect.provideService(Clock.Clock, frozenClock));
+      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
   it.effect("does not let empty decoded frames extend the silence budget", () =>
     Effect.gen(function* () {
       const { factory, sockets } = yield* makeFactory();
