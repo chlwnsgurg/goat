@@ -429,9 +429,13 @@ it.effect("when_idle returns the first published phase while installation is gat
   }),
 );
 
-it.effect.each(["not_ready", "transport_failure", "schema_failure"] as const)(
-  "prepare returns before upload and exits diagnosis after %s",
-  (diagnosisOutcome) =>
+it.effect.each(
+  (["not_ready", "transport_failure", "schema_failure"] as const).flatMap((diagnosisOutcome) =>
+    [false, true].map((drainDeferred) => ({ diagnosisOutcome, drainDeferred })),
+  ),
+)(
+  "prepare returns before upload and exits diagnosis after $diagnosisOutcome; drain=$drainDeferred",
+  ({ diagnosisOutcome, drainDeferred }) =>
     Effect.gen(function* () {
       const upload = yield* Deferred.make<void>();
       const diagnose = yield* Deferred.make<void>();
@@ -485,8 +489,18 @@ it.effect.each(["not_ready", "transport_failure", "schema_failure"] as const)(
               kind: "ok",
               status: {
                 ...stopped,
-                runtimeVersion: stopped.requestedVersion,
+                runtimeVersion: drainDeferred ? "0.4.2" : stopped.requestedVersion,
                 state: "ready",
+                ...(drainDeferred
+                  ? {
+                      refreshDeferred: {
+                        reason: "archive_unavailable" as const,
+                        refreshCause: "drain_unavailable" as const,
+                        requestedVersion: stopped.requestedVersion,
+                        detail: "Refresh deferred: this runtime could not drain for the refresh",
+                      },
+                    }
+                  : {}),
                 setup: { ...operation, stage: "diagnosis" },
               },
             };
@@ -499,8 +513,7 @@ it.effect.each(["not_ready", "transport_failure", "schema_failure"] as const)(
             snapshot = {
               kind: "ok",
               status: {
-                ...stopped,
-                runtimeVersion: stopped.requestedVersion,
+                ...snapshot.status!,
                 state: "providers_not_ready",
                 setup: { ...operation, stage: "complete" },
                 providers: input.providers,
@@ -605,6 +618,11 @@ it.effect.each(["not_ready", "transport_failure", "schema_failure"] as const)(
               },
         );
         if (diagnosisOutcome !== "not_ready") expect(result.status?.providers).toBeUndefined();
+        else if (drainDeferred) {
+          expect(result.status?.runtimeVersion).toBe("0.4.2");
+          expect(result.status?.refreshDeferred?.refreshCause).toBe("drain_unavailable");
+          expect(yield* setup.status({ host: "box" })).toEqual(result);
+        }
       }).pipe(Effect.ensuring(Effect.sync(() => key.mockRestore())));
     }),
 );

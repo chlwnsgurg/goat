@@ -161,23 +161,29 @@ console.log(command);
                 ? Effect.gen(function* () {
                     const exe = `${f.home}/.goat/runtime/goat/versions/${ARCHIVE.archiveVersion}/goat`;
                     const source = yield* f.fs.readFileString(exe);
-                    yield* f.fs.writeFileString(
-                      exe,
+                    const raced =
                       boundary === "candidate validation"
                         ? source.replace(
-                            'console.log("goat v" + version);',
+                            /^  console\.log\("goat v" \+ .*\);$/mu,
                             'console.log("goat v0.0.0");',
                           )
                         : source.replace(
                             '  event("version", { published:',
                             `  fs.appendFileSync(${JSON.stringify(`${f.state}/run-t3.sh`)},"# raced\\n");\n  event("version", { published:`,
-                          ),
-                    );
+                          );
+                    assert.notEqual(raced, source);
+                    yield* f.fs.writeFileString(exe, raced);
                   })
                 : Effect.void,
             );
           }
-          assert.isTrue(Result.isFailure(yield* f.run("launch")));
+          const result = yield* f.run("launch");
+          assert.isTrue(Result.isFailure(result));
+          if (boundary === "candidate validation" && Result.isFailure(result))
+            assert.include(
+              String(result.failure),
+              "observed goat v0.0.0; existing runner and server were preserved",
+            );
           yield* Effect.sync(() => process.kill(f.pid, 0));
           for (const type of ["stop", "drain", "drain-request", "self-stop", "supervise"])
             assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), `"type":"${type}"`);

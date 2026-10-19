@@ -157,3 +157,15 @@ export const observeWorker = (input: {
   needsYou: [...input.needsYou],
   ...(input.usageLimitResetAt === undefined ? {} : { usageLimitResetAt: input.usageLimitResetAt }),
 });
+
+/** Whether a failed thread read means the thread does not exist, rather than a read that failed. */
+export const isThreadMissing = (error: unknown): boolean => {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && typeof current === "object" && current !== null; depth += 1) {
+    if ((current as { readonly _tag?: string })._tag === "ProjectionStoreThreadNotFoundError") {
+      return true;
+    }
+    current = (current as { readonly cause?: unknown }).cause;
+  }
+  return false;
+};

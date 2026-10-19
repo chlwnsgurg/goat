@@ -15,7 +15,11 @@ replies happen after that return. Adapters do not send replies themselves.
 
 `ChannelBotHome.requireHome` in `apps/server/src/channels/ChannelBotHome.ts` rejects ingest when
 `settings.goatBotHome` says another environment is the cluster home. The claim schema is
-`GoatBotHomeClaim` in `packages/contracts/src/settings.ts`.
+`GoatBotHomeClaim` in `packages/contracts/src/settings.ts`. Servers do not sync the claim with
+each other: clients copy the newest claim to every server they reach. So a claim naming a
+vanished environment blocks the bot everywhere until someone moves it, either from a client or
+through `ChannelBotHome.claimHere` (the `channel_bot_home_claim` MCP tool), which writes a newer
+claim for its own server and rechecks inside the settings write lock that the caller still has full access.
 
 Slack is one adapter. `apps/server/src/channels/slack/SlackChannelAdapter.ts` maps Socket Mode
 envelopes into `ChannelGateway.ingest` and posts outbound through the Slack API.
@@ -43,6 +47,14 @@ The ledger migration is `apps/server/src/persistence/Migrations/067_ChannelLedge
 writes a task. A later pass has `ChannelDispatcher` in `apps/server/src/channels/ChannelDispatcher.ts`
 launch a worker thread through `ThreadLaunchService.launch`, with the task text as the initial
 message. The worker is an ordinary thread. Its completion is delivered back on the channel outbox.
+
+A reception may first choose `read`: `ChannelReceptionService` runs the lookups (bot notes from
+`channelBotNotes.ts`, a journal built from ledger tasks, GOAT memory through `MemoryService.search`,
+ledger tasks,
+worker thread messages through `ThreadManagementService.getThreadRecords`, and
+`ChannelLedger.searchConversation`) and generates once more with the results. Matching,
+visibility (`canSeeTask`) and size bounds are pure functions in
+`apps/server/src/channels/channelBotRecall.ts`.
 
 MCP agents use the same ledger through the `channel_*` tools in [`mcp-toolkits.md`](mcp-toolkits.md).
 `CHANNEL_MCP_TOOL_NAMES` has no tool that sends to an arbitrary channel.

@@ -111,6 +111,7 @@ export function createGoatBotHomeSync({
       resolution: {
         state: "claimed",
         claim,
+        homeKnown: true,
         homeConnected: true,
         homeSupportsBot: true,
         staleTargetIds,

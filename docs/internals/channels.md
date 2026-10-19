@@ -5,6 +5,8 @@ Input from the GOAT bot, Slack, local Mac iMessage, and agents over MCP goes thr
 and who asked; coding threads own the work and its history. Code lives in
 [`apps/server/src/channels/`](../../apps/server/src/channels/); the wire types are in
 [`packages/contracts/src/channel*.ts`](../../packages/contracts/src/).
+What the bot must do for a person, and how it compares with other chat bots, is in
+[goat-bot-behavior-spec.md](goat-bot-behavior-spec.md).
 
 ## The bot never runs a provider
 
@@ -15,6 +17,112 @@ and the orchestrator refuses any other `message.dispatch` to it (MCP sends, sche
 starts a provider turn there. Replies come from a one-shot, tool-free text generation per input
 (`generateChannelReception`; Codex and Claude only), not from a session that could queue behind
 work. Chip notifications carry `ledgerTask`; only the ledger writes them.
+
+## What the bot remembers and reads
+
+Questions about past work and memory are answered in reception, without starting a worker,
+because a coding thread costs a minute and a provider session for something the ledger already
+knows. The model still runs no tools: a pass may answer with a `read` action naming up to three
+lookups, the server runs them (each within five seconds), and one more pass answers with the
+results. A second request to read is answered with what that pass wrote, so an input costs at most
+two generations. Reads change nothing, so a reception retried after a crash reads again.
+
+- **Memory.** Every pass gets the newest 6,000 characters of `goat-bot/memory.md` (standing
+  notes, written only when the person's own message asks, as before) and a journal: one line per
+  recent task, with its state, result and pull requests. The journal is built from the ledger for
+  each requester rather than kept in a file, so it shows only work that requester may see, and it
+  cannot drift from the ledger or lose a line in a crash. A `memory` read searches the notes, the
+  requester's whole journal, and GOAT memory (`MemoryService.search`, the store agents use).
+  GOAT memory is read under the requester's `memory:read` as it stands at read time: a Slack or
+  iMessage link is read again on every permit check, and agents over MCP use their own memory
+  tools instead. Reception writes GOAT memory only through the coding threads it starts, which get
+  the requester's memory ceiling.
+- **Work.** A `work` read matches the owner's 200 most recently updated tasks by task id, a
+  linked pull request (by repository and number when the question names a repository), or shared
+  words, and returns each task's request, result, machine, open questions and pull requests with
+  their last known state. A `thread` read adds the last six messages from the newest runs of the
+  task's coding thread on this machine; a thread on another machine is read through the reports
+  already copied into the ledger, never over SSH during reception. A `conversation` read searches
+  the text of older inputs and replies in the same conversation.
+- **Who sees what.** Everyone sees the work of the conversation they write in. A person also sees
+  work they asked for elsewhere, and all of the owner's work when they hold `orchestration:read`.
+  Agents over MCP see only their own conversation. A Slack or iMessage link acts as the GOAT
+  principal who made the link code, so it sees what that principal sees, judged with the link as
+  it stands when reception reads: a link removed or narrowed after the message arrived leaves
+  only that conversation's work. Read results and journal
+  lines are labelled as records for the model, but the filtering above is what keeps them private.
+
+## The bot's own turns
+
+Some messages need tools but no repository change: why a disk is full, what three threads
+concluded, a web search. Reception answers those with `run_turn`: it acknowledges at once, and a
+ledger task of kind `turn` runs as an ordinary coding thread in the bot's own workspace on this
+machine. Reusing the task path keeps every guarantee the ledger already gives work: one launch per
+generation, the chip, exactly-once narration, restarts that read state, and the requester's
+ceiling. Running a provider session on the bot thread itself would put each new message behind
+the running turn and give the bot thread runs it was built never to have.
+
+- **Model.** A turn runs on `goatBotModelSelection` from the home server's settings. Null follows
+  the bot workspace's new-thread default, then the text generation model; a chosen model this
+  machine no longer offers falls back with a warning, because the person asked a question, not
+  for a model. Reception itself stays on the text generation model so the acknowledgement is fast.
+- **Ceiling.** A turn runs at the lowest of the requester's ceiling, the default runtime mode,
+  and `auto-accept-edits`: it reads and searches freely, while commands the provider gates still
+  ask for approval in the turn's thread. Subagents it starts with `delegate_task` cannot exceed it.
+  Work that changes a repository is a coding task, at the requester's full ceiling.
+- **Answer.** The turn's final report is the bot's reply, delivered as written; it is not
+  reworded by reception the way coding results are, because the turn already wrote it for the
+  person on the chosen model.
+- **Follow-ups.** A message that adds to running work in its conversation (`follow_up`, or
+  `run_turn` while a turn runs there) joins that work instead of starting more, if the sender, as
+  their link stands now, may answer for its requester. Reception records a `task.followup.received`
+  event in the same commit as its reply, with a completion fence (`pendingAnswerMessageId`) and a
+  pending forward. The dispatcher's forward loop sends it with ids derived from the input: into
+  the running run when it can take steering, else as the thread's next run. It then binds the
+  task to whichever run took it and lifts the fence in one write. A crash before or after the send
+  replays the forward onto the same message, and a run that ended just before the follow-up
+  cannot settle the task, because the fence holds it until the follow-up's run is bound. This is
+  the path answers to worker questions already take. Other conversations, and messages the bot
+  answers directly, never wait on running work.
+
+## Work items, worker runs, and stopping
+
+A task is a work item: what a person asked for. Its worker runs are separate records, one per
+run of the task's worker thread, kept as `worker-run:<task>:<run>` rows in
+`channel_runtime_state` (a `ChannelWorkerRun`) rather than a new table, so no migration
+competes with other work for an id. Worker reconciliation writes a run's row when its state
+changes: running, waiting (on a person), finished, failed or stopped. A run finishing never
+finishes its item. The item's state comes from the task and from its newest outcome delivery to
+where the work came from (`channelWorkQueue.ts`): finished work stays open as "result not sent
+yet" or "result not delivered" until that delivery is recorded delivered. Workers on other
+machines report through their host, so their runs are not recorded here.
+
+- **What's pending.** A `pending` read lists the open items the requester may see, newest
+  first, with their runs, open questions and age; every open task is read, however old,
+  including finished ones whose outcome has not reached the person. An item's
+  outcome delivery is the narration of its newest terminal event, so a retried task is not
+  closed by its earlier delivery. Runs still recorded as running after their item ended keep being
+  reconciled until they end, and a task that ended within the last hour has its thread's runs
+  read into history even if none were recorded while it ran.
+- **At most four at once.** The dispatcher leaves a person's fifth item received while four of
+  their items hold a worker: dispatching, running, or waiting on them with a worker. Stopped items
+  keep their slot until their stop has gone through. Questions asked before any worker exists
+  hold none. Remote dispatches handed off but not yet claimed are
+  reserved in the dispatcher so they count too. The runtime dispatches received tasks oldest
+  first by creation, so the queue drains in arrival order as items end. The reply to the queued request and "what's
+  pending" both say it is waiting for a free worker.
+- **Stopping.** `stop_work` (one task, or everything the person may stop) records a
+  `task.cancelled` per item in the same commit as the reply, with its narration and a pending
+  forward. The forward sends the worker thread a `thread.stop`, which ends its run and holds anything
+  queued behind it, then stops the subagents it started, with ids derived from the stop event, so
+  a crash after the reply still stops each once. A refused stop is tried once more under ids keyed by
+  the run still alive, since a refused command id is refused for good, and counts as done only
+  when nothing is left running there. A launch in flight when the stop came lands on the thread id the task's
+  generation derives, so the forward waits up to two minutes for that thread and stops it. Work
+  never claimed for a launch is stopped by the ledger write alone. A worker on another machine is
+  interrupted there through `goat_thread_interrupt`, found through its report binding when its
+  launch was still in flight; its async subagents run on until they end,
+  since GOAT has no remote thread stop.
 
 An owner has one bot, in the Scratch project, and one bot conversation keyed by the owner rather
 than the thread. Where Scratch is off because the data directory is inside a Git work tree, the bot

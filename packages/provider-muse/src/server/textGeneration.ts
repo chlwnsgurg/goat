@@ -28,7 +28,7 @@ import {
   sanitizeCommitSubject,
   sanitizePrTitle,
   sanitizeThreadTitle,
-  toJsonSchemaObject,
+  toStrictJsonSchemaObject,
 } from "@goat/provider-core/server/textGenerationUtils";
 
 const SessionStarted = Schema.Struct({ session: Schema.Struct({ sessionId: Schema.String }) });
@@ -227,7 +227,9 @@ export const makeMuseTextGeneration = Effect.fn("makeMuseTextGeneration")(functi
       getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort") ??
         DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
     );
-    const jsonSchema = yield* encodeJson(toJsonSchemaObject(input.outputSchema)).pipe(
+    const jsonSchema = yield* encodeJson(
+      yield* toStrictJsonSchemaObject(operation, input.outputSchema),
+    ).pipe(
       Effect.mapError(
         (cause) => new TextGenerationError({ operation, detail: "Invalid output schema.", cause }),
       ),
