@@ -8,9 +8,18 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 
-import { adoptLegacyEnv, withLegacyEnvNames } from "@goat/contracts/legacyT3Names";
+import {
+  adoptLegacyEnv,
+  GOAT_ENVIRONMENT_PATH,
+  withLegacyEnvNames,
+} from "@goat/contracts/legacyT3Names";
+import {
+  compareRuntimeProtocols,
+  type RuntimeProtocolRanges,
+} from "@goat/shared/sshRuntimeProtocol";
 
 import type {
   PendingServiceUpdate,
@@ -39,6 +48,8 @@ const HANDOFF_DELAY_MS = 2_000;
  * take minutes. A missed window rolls back the database, so the next attempt pays the same cost.
  */
 export const PREPARED_TIMEOUT_MS = 30 * 60_000;
+export const PROBATION_MS = 10 * 60_000;
+export const SMOKE_TIMEOUT_MS = 30_000;
 const TERMINATE_GRACE_MS = 5_000;
 const RESTORE_RETRY_MS = 5_000;
 // Matches SERVER_EXIT_CODE_STATE_DIR_OWNED in contracts. The standalone
@@ -52,6 +63,7 @@ interface ManagedChild {
   readonly version: string;
   role: ChildRole;
   readonly process: NodeChildProcess.ChildProcess;
+  exitedAt?: number;
 }
 
 const runtimePaths = (baseDir: string, version: string) => {
@@ -79,6 +91,7 @@ const OWNER_GENERATION_FILE = "owner-generation";
 // the userdata between an update's backup and its restore.
 const launcherOwner = (updateId: string) => `service-launcher:${updateId}`;
 const trialOwner = (updateId: string) => `service-trial:${updateId}`;
+const probationOwner = (updateId: string) => `service-probation:${updateId}`;
 const ownerLockDir = (pending: PendingServiceUpdate) => NodePath.dirname(pending.dbPath);
 
 const databaseBackupDir = (baseDir: string, updateId: string) =>
@@ -356,7 +369,11 @@ async function restoreDatabaseBackup(
         "utf8",
       ).catch(() => "");
       const generation = Number.parseInt(recorded, 10);
-      const ours = new Set([launcherOwner(pending.id), trialOwner(pending.id)]);
+      const ours = new Set([
+        launcherOwner(pending.id),
+        trialOwner(pending.id),
+        probationOwner(pending.id),
+      ]);
       // A backup without a recorded generation cannot prove nobody else wrote.
       if (
         !Number.isSafeInteger(generation) ||
@@ -492,26 +509,95 @@ const stopMarkerPath = (baseDir: string) =>
 const restartPendingPath = (baseDir: string) =>
   NodePath.join(baseDir, "runtime", SERVICE_RESTART_PENDING_FILE);
 
+/** A wildcard listener answers on loopback of its family; a specific address only on itself. */
+export function smokeProbeHostname(host: string | undefined): string {
+  if (host === undefined || host === "0.0.0.0" || host === "localhost") return "127.0.0.1";
+  if (host === "::" || host === "::0") return "::1";
+  return host;
+}
+
+function smokeProbe(
+  port: number,
+  host: string | undefined,
+  targetVersion: string,
+): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const finish = (reason?: string) => {
+      clearTimeout(timeout);
+      request.destroy();
+      resolve(reason);
+    };
+    const request = NodeHttp.get(
+      { hostname: smokeProbeHostname(host), port, path: GOAT_ENVIRONMENT_PATH, agent: false },
+      (response) => {
+        if (response.statusCode !== 200) {
+          finish(`http-${response.statusCode}`);
+          return;
+        }
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          body += chunk;
+        });
+        response.on("error", () => finish("response-error"));
+        response.on("end", () => {
+          try {
+            const descriptor = JSON.parse(body) as {
+              serverVersion?: unknown;
+              protocol?: RuntimeProtocolRanges;
+            } | null;
+            if (descriptor?.serverVersion !== targetVersion) return finish("version");
+            const protocol = descriptor.protocol;
+            // Compare the advertised ranges with themselves: smoke requires valid ranges,
+            // not compatibility with the old build embedded in this surviving launcher.
+            if (
+              protocol === undefined ||
+              compareRuntimeProtocols(protocol, { protocol }) !== "compatible"
+            ) {
+              return finish("protocol");
+            }
+            finish();
+          } catch {
+            finish("descriptor");
+          }
+        });
+      },
+    );
+    // One deadline covers connection, headers and the entire JSON body, even a trickle.
+    const timeout = setTimeout(() => finish("timeout"), SMOKE_TIMEOUT_MS);
+    request.on("error", () => finish("request-error"));
+  });
+}
+
 export class Launcher {
   readonly #baseDir: string;
   readonly #statePath: string;
   #state: ServiceState;
   #child: ManagedChild | null = null;
   #timer: NodeJS.Timeout | undefined;
+  #probationTimer: NodeJS.Timeout | undefined;
   #transitions: Promise<void> = Promise.resolve();
   #stopRequested = false;
   #stopping = false;
   #done = false;
   readonly #completion = Promise.withResolvers<void>();
   readonly #backupSpaceProbe: Partial<BackupSpaceProbe> | undefined;
+  readonly #probationMs: number;
+  readonly #now: () => number;
 
   constructor(
     baseDir: string,
     state: ServiceState,
-    options: { readonly backupSpaceProbe?: Partial<BackupSpaceProbe> } = {},
+    options: {
+      readonly backupSpaceProbe?: Partial<BackupSpaceProbe>;
+      readonly probationMs?: number;
+      readonly now?: () => number;
+    } = {},
   ) {
     this.#baseDir = baseDir;
     this.#backupSpaceProbe = options.backupSpaceProbe;
+    this.#probationMs = options.probationMs ?? PROBATION_MS;
+    this.#now = options.now ?? Date.now;
     this.#statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
     this.#state = state;
   }
@@ -581,6 +667,8 @@ export class Launcher {
   #clearTimer(): void {
     clearTimeout(this.#timer);
     this.#timer = undefined;
+    clearTimeout(this.#probationTimer);
+    this.#probationTimer = undefined;
   }
 
   async #recover(): Promise<void> {
@@ -599,7 +687,40 @@ export class Launcher {
     }
     const update = this.#state.update;
     if (update?.status !== "pending") {
-      if (update !== undefined) {
+      const probation = this.#state.probation;
+      if (update?.status === "committed" && probation !== undefined) {
+        if (
+          probation.rollbackReason !== undefined ||
+          (await databaseRestorePending(this.#baseDir, {
+            ...update,
+            status: "pending",
+            dbPath: probation.dbPath,
+          }))
+        ) {
+          await this.#returnToPrevious(
+            { ...update, status: "pending", dbPath: probation.dbPath },
+            "rolled-back",
+            probation.rollbackReason ?? "rollback-interrupted",
+          );
+          return;
+        }
+        await this.#resumeProbation();
+        if (this.#state.probation !== undefined) {
+          // A target that cannot even start must roll back now. Failing to the service manager
+          // instead would repeat until the deadline passes and the snapshot is discarded.
+          try {
+            await this.#startChild(this.#state.activeVersion, "active", update);
+          } catch {
+            this.#clearTimer();
+            await this.#returnToPrevious(
+              { ...update, status: "pending", dbPath: probation.dbPath },
+              "rolled-back",
+              "probation-start-failed",
+            );
+          }
+          return;
+        }
+      } else if (update !== undefined) {
         await discardDatabaseBackup(this.#baseDir, update.id).catch(() => undefined);
       }
       await this.#startChild(this.#state.activeVersion, "active", update);
@@ -656,6 +777,9 @@ export class Launcher {
       protocol: SERVICE_LAUNCHER_PROTOCOL,
       childVersion: version,
       ...(update === undefined ? {} : { update }),
+      ...(role === "active" && update?.status === "committed" && this.#state.probation !== undefined
+        ? { probation: true as const }
+        : {}),
     };
     const spawnArguments = runtimeSpawnArguments(paths);
     const child = NodeChildProcess.spawn(spawnArguments.command, spawnArguments.args, {
@@ -689,9 +813,10 @@ export class Launcher {
       const message = decodeServiceLauncherChildMessage(value);
       if (message !== undefined) this.#enqueue(() => this.#handleMessage(managed, message));
     });
-    child.once("exit", (code, signal) =>
-      this.#enqueue(() => this.#handleExit(managed, code, signal)),
-    );
+    child.once("exit", (code, signal) => {
+      managed.exitedAt = this.#now();
+      this.#enqueue(() => this.#handleExit(managed, code, signal));
+    });
 
     if (role === "trial") {
       this.#timer = setTimeout(
@@ -707,7 +832,7 @@ export class Launcher {
       await this.#handleUpdateRequest(child, message);
       return;
     }
-    await this.#handlePrepared(child, message.updateId);
+    await this.#handlePrepared(child, message.updateId, message.port, message.host);
   }
 
   async #handleUpdateRequest(
@@ -727,6 +852,13 @@ export class Launcher {
     if (this.#state.update?.status === "pending") {
       await reject("Another server update is already pending.");
       return;
+    }
+    if (this.#state.probation !== undefined) {
+      if (this.#now() >= this.#state.probation.deadline) await this.#finishProbation();
+      else {
+        await reject("The current update is still on probation.");
+        return;
+      }
     }
     if (!isExactServiceVersion(message.targetVersion)) {
       await reject("The requested target is not an exact version.");
@@ -785,7 +917,12 @@ export class Launcher {
     await this.#startTrial(pending);
   }
 
-  async #handlePrepared(child: ManagedChild, updateId: string): Promise<void> {
+  async #handlePrepared(
+    child: ManagedChild,
+    updateId: string,
+    port?: number,
+    host?: string,
+  ): Promise<void> {
     const pending = this.#state.update;
     if (
       child.role !== "trial" ||
@@ -800,17 +937,66 @@ export class Launcher {
       throw new Error("Trial child reported prepared for an unexpected update.");
     }
     this.#clearTimer();
+    if (port !== undefined) {
+      const failure = await smokeProbe(port, host, pending.targetVersion);
+      if (failure !== undefined) {
+        await this.#returnToPrevious(pending, "rolled-back", `smoke-failed:${failure}`, child);
+        return;
+      }
+    } else {
+      process.stderr.write("[service-launcher] Trial supplied no port; skipping smoke probe.\n");
+    }
     const committed = terminalUpdate({ pending, status: "committed" });
     const next: ServiceState = {
       ...this.#state,
       activeVersion: pending.targetVersion,
       update: committed,
+      probation: { dbPath: pending.dbPath, deadline: this.#now() + this.#probationMs },
     };
     await writeServiceState(this.#statePath, next);
     this.#state = next;
     child.role = "active";
-    await discardDatabaseBackup(this.#baseDir, committed.id).catch(() => undefined);
-    await sendMessage(child.process, { type: "committed", updateId: committed.id });
+    await this.#resumeProbation();
+    try {
+      await sendMessage(child.process, { type: "committed", updateId: committed.id });
+    } catch {
+      // Exit can race the durable commit. Do not let a failed IPC acknowledgement
+      // bypass probation by reaching the launcher's fatal-error path first.
+      // A surviving trial fails its own bounded acknowledgement wait and exits.
+      process.stderr.write(
+        "[service-launcher] Commit acknowledgement failed; awaiting child exit.\n",
+      );
+    }
+  }
+
+  async #resumeProbation(): Promise<void> {
+    if (this.#stopping || this.#stopRequested || this.#done) return;
+    const probation = this.#state.probation;
+    // A deadline callback already queued before cancellation must not erase a rollback.
+    if (probation === undefined || probation.rollbackReason !== undefined) return;
+    const remaining = probation.deadline - this.#now();
+    if (remaining <= 0) {
+      await this.#finishProbation();
+      return;
+    }
+    this.#probationTimer = setTimeout(
+      () => this.#enqueue(() => this.#resumeProbation()),
+      remaining,
+    );
+  }
+
+  async #finishProbation(): Promise<void> {
+    clearTimeout(this.#probationTimer);
+    this.#probationTimer = undefined;
+    const { probation, ...next } = this.#state;
+    if (probation === undefined || probation.rollbackReason !== undefined) return;
+    // The exit transition may still be queued behind a durable write at the deadline.
+    if (this.#child?.exitedAt !== undefined && this.#child.exitedAt < probation.deadline) return;
+    await writeServiceState(this.#statePath, next);
+    this.#state = next;
+    if (next.update !== undefined) {
+      await discardDatabaseBackup(this.#baseDir, next.update.id).catch(() => undefined);
+    }
   }
 
   async #handlePreparedTimeout(child: ManagedChild): Promise<void> {
@@ -833,6 +1019,12 @@ export class Launcher {
       await this.#idleWhileStateDirOwned();
       return;
     }
+    if (this.#stopRequested || (await pathExists(stopMarkerPath(this.#baseDir)))) {
+      this.#clearTimer();
+      this.#done = true;
+      this.#completion.resolve();
+      return;
+    }
     if (child.role === "trial") {
       this.#clearTimer();
       const pending = this.#state.update;
@@ -852,6 +1044,18 @@ export class Launcher {
     if (pending?.status === "pending") {
       await this.#startTrial(pending);
       return;
+    }
+    const probation = this.#state.probation;
+    if (pending?.status === "committed" && probation !== undefined) {
+      if ((child.exitedAt ?? this.#now()) < probation.deadline) {
+        await this.#returnToPrevious(
+          { ...pending, status: "pending", dbPath: probation.dbPath },
+          "rolled-back",
+          `probation-exit:${String(code ?? signal ?? "unknown")}`,
+        );
+        return;
+      }
+      await this.#finishProbation();
     }
     throw new Error(`Active child exited unexpectedly (${String(code ?? signal ?? "unknown")}).`);
   }
@@ -874,6 +1078,7 @@ export class Launcher {
       this.#state = next;
       await discardDatabaseBackup(this.#baseDir, pending.id).catch(() => undefined);
     }
+    await this.#resumeProbation();
     // Signal listeners alone do not keep Node alive.
     this.#timer = setInterval(() => {}, 2_147_483_647);
     process.stderr.write(
@@ -887,6 +1092,16 @@ export class Launcher {
     reason: string,
     child?: ManagedChild,
   ): Promise<void> {
+    this.#clearTimer();
+    if (this.#state.probation !== undefined) {
+      // Recovery must finish this rollback even if the lock stays busy past the deadline.
+      const next = {
+        ...this.#state,
+        probation: { ...this.#state.probation, rollbackReason: reason },
+      };
+      await writeServiceState(this.#statePath, next);
+      this.#state = next;
+    }
     if (child !== undefined) {
       this.#child = null;
       await terminateChild(child.process);
@@ -907,8 +1122,9 @@ export class Launcher {
       status,
       reason: restore === "kept" ? `${reason};db-kept-for-other-server` : reason,
     });
+    const { probation: _probation, ...state } = this.#state;
     const next: ServiceState = {
-      ...this.#state,
+      ...state,
       activeVersion: pending.fromVersion,
       update: outcome,
     };

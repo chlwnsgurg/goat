@@ -329,14 +329,15 @@ const decodeRemoteIdentity = Schema.decodeUnknownEffect(
   Schema.Struct({ environmentId: EnvironmentId }),
 );
 
-/** A launch note when the remote GOAT runs another build than this machine. */
+/** A launch note when the remote GOAT runs another build than this machine. A launch reaches
+    here only after the tunnel accepted the remote's protocol ranges, so this is informational. */
 export function remoteVersionNote(
   host: string,
   remoteVersion: string | undefined,
   localVersion: string,
 ): string | null {
   if (remoteVersion === undefined || remoteVersion === localVersion) return null;
-  return `GOAT on ${host} runs ${remoteVersion}; this machine runs ${localVersion}. Tools and launch options can differ between them; update GOAT on the older machine if this thread misbehaves.`;
+  return `GOAT on ${host} runs ${remoteVersion}; this machine runs ${localVersion}. Both speak the same protocols, but a tool or launch option added in the newer build can be missing on the older one.`;
 }
 
 const sessionKey = (

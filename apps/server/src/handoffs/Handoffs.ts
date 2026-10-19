@@ -266,7 +266,11 @@ const make = Effect.gen(function* () {
     sessionId: AuthSessionId,
   ) {
     const record = yield* read(input);
-    if (record.target.path.startsWith("ssh.") || record.target.path === "provider.home_request") {
+    if (
+      record.target.path.startsWith("ssh.") ||
+      record.target.path === "provider.home_request" ||
+      record.target.path === "provider.host_sync"
+    ) {
       if (Option.isNone(environment)) return yield* new HandoffError({ reason: "unavailable" });
       const origin = yield* environment.value.getEnvironmentId;
       if (record.target.environmentId !== origin)
@@ -378,7 +382,8 @@ const make = Effect.gen(function* () {
         expiresAt:
           input.kind === "approval" &&
           !input.target.path.startsWith("ssh.") &&
-          input.target.path !== "provider.home_request"
+          input.target.path !== "provider.home_request" &&
+          input.target.path !== "provider.host_sync"
             ? null
             : (input.expiresAt ?? DateTime.add(now, { minutes: 15 })),
         createdAt: now,
@@ -433,6 +438,7 @@ const make = Effect.gen(function* () {
         (handoff.kind === "approval" &&
           !handoff.target.path.startsWith("ssh.") &&
           handoff.target.path !== "provider.home_request" &&
+          handoff.target.path !== "provider.host_sync" &&
           (runStatus === null || ThreadManagement.isTerminalRunStatus(runStatus)))
       ) {
         const input = yield* decodeAddress({

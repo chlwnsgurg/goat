@@ -627,11 +627,37 @@ machine" (`packages/provider-claude-cloud/src/server/cli.ts:142-160`). The
 driver reports `setup: { canAuthenticate: false, canInstall: false }`
 (`apps/server/src/provider/Drivers/ClaudeCloudDriver.ts:174`). Devin Cloud reuses
 an ACP Registry Devin instance named by `siblingInstanceId`
-(`packages/provider-devin-cloud/src/settings.ts:11`). An agent can see that a
-provider is unavailable through `orchestrator_capabilities` and do nothing
-about it.
+(`packages/provider-devin-cloud/src/settings.ts:11`). Agents can inspect provider
+availability through `orchestrator_capabilities` and request CLI installation
+and sign-in across hosts through `provider.sync`.
 
-**Proposed.** Four entries:
+**Now.** `provider.host_matrix` (`goat_provider_host_matrix`) reads installed
+versions and sign-in state across this machine and SSH hosts. `provider.sync`
+(`goat_provider_sync`, write) installs with the vendor's official npm package or
+OS-specific script, matching this machine's version by default (latest if absent;
+Cursor's installer always installs latest), then starts sign-in on each host.
+Thread agents receive a `needs_human` approval handoff targeting
+`provider.host_sync`; the approver needs `providers:manage`, and execution uses
+their session. Follow approval with `goat_provider_sync_status` by `handoffId`,
+then use its `syncId` for `goat_provider_sync_cancel` if needed. Cancellation
+stops unfinished work but keeps completed installs.
+
+Each remote runs its own `goat_provider_sync` locally. Installer output stays
+there; only a device code and vendor page (Codex's `codex login --device-auth`)
+or an allowlisted vendor sign-in page (Cursor) can be relayed. Other flows ask
+the person to run the vendor's terminal command or finish in GOAT on that host.
+Sign-in details are visible only to the requester, approver, or a
+`providers:manage` caller. Credentials are never copied between machines. See
+[ProviderHostSync](../../apps/server/src/provider/ProviderHostSync.ts) and its
+[installer and login rules](../../apps/server/src/provider/ProviderHostSyncRecipes.ts).
+
+SSH-issued remote sessions do not carry `providers:manage`. Consequently, the
+remote accepts an outside client with a `full-access` ceiling plus
+`orchestration:operate`, as sent by an approved sync from another machine. The
+origin enforces `providers:manage`; a follow-up issue tracks carrying that grant
+to the remote.
+
+**Proposed.** Single-instance configuration and login still use this design:
 
 | Path                   | Effect         | Does                                                                                                                        |
 | ---------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------- |
@@ -640,13 +666,13 @@ about it.
 | `provider.login_start` | write          | Starts the driver's auth flow through `ProviderAuthService` and returns `needs_human`                                       |
 | `provider.verify`      | read           | Re-runs readiness; the target that a completed login handoff resumes                                                        |
 
-`provider.setup` and installing a CLI need `providers:manage`, which thread
-credentials lack. Instead of granting it, they return `needs_human` with
+The proposed `provider.setup` needs `providers:manage`, which thread credentials
+lack. Like the callable `provider.sync`, it would return `needs_human` with
 `kind: "approval"`, so the person approves the specific change ("Enable Claude
-Cloud on mac-mini using claudeAgent"). The server performs it under the person's
-session.
+Cloud on mac-mini using claudeAgent"). The server would perform it under the
+person's session.
 
-A Claude Cloud run, as an agent sees it:
+A proposed Claude Cloud run, as an agent would see it:
 
 ```text
 goat provider diagnose --driver claudeCloud --json
@@ -676,8 +702,9 @@ The callable provider diagnosis path accepts an SSH host and uses
 to inspect that host's own providers. It requires a ready runtime; a stopped or
 unprepared host returns instructions to prepare it and check status, without
 waiting for installation or silently diagnosing the local environment.
-`provider.setup` and `provider.login_start` above remain proposals, not callable
-SSH setup capabilities. Provider installation and sign-in stay on the remote host.
+`provider.setup` and `provider.login_start` remain proposals for single-instance
+configuration; callable `provider.sync` installs CLIs and starts sign-in across
+hosts, with installation and credential storage on each destination machine.
 See the [registry](../../packages/contracts/src/agentSurface/registry.ts) for current
 callable paths and human steps, and the [SSH ownership map](../../structure/ssh.md#host-trust-and-forgetting)
 for trust, key registration, and forget boundaries.

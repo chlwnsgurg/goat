@@ -108,6 +108,11 @@ connection notice says the runtime will be replaced when its work finishes.
 
 ## Update a connected server
 
+Background services automatically update within their stable or nightly release
+channel when idle. This is on by default; turn it off in **Settings → General →
+Automatic server updates** for the selected environments. Preview and development
+builds do not update automatically.
+
 The offered action depends on how the server runs:
 
 | Action                     | What to do                                                                                                                                                                                      |

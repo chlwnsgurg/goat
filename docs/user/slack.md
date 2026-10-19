@@ -56,6 +56,9 @@ GOAT Bot screen shows only a chip for the work and its final report.
   there; subagents it started there finish on their own.
 - GOAT Bot runs up to four pieces of your work at once. More wait in order and
   start as earlier ones finish; the reply says when something is queued.
+- Work counts as waiting on you when the agent working on it, or a subagent it
+  started in GOAT, needs your approval or an answer; open that thread in GOAT
+  to answer. Subagents that run on another service are not counted yet.
 - Ask GOAT Bot to remember a standing rule ("always reply in Korean") and it
   follows it from then on, in Slack and in GOAT. It keeps a note only when the
   message you send asks for it, and each note names the message it came from.

@@ -1,6 +1,7 @@
 import packageJson from "../../package.json" with { type: "json" };
 import * as MaintenanceAudit from "../maintenance/MaintenanceAudit.ts";
 import * as HomeRequests from "../provider/CodexHomeRequests.ts";
+import * as ProviderHostSync from "../provider/ProviderHostSync.ts";
 import {
   EnvironmentAuthorizationError,
   SshHostProbeError,
@@ -201,6 +202,7 @@ export const make = (
     const sessions = yield* SessionStore.SessionStore;
     const handoffs = yield* Handoffs.Handoffs;
     const providerHomeRequests = yield* Effect.serviceOption(HomeRequests.CodexHomeRequests);
+    const providerHostSync = yield* Effect.serviceOption(ProviderHostSync.ProviderHostSync);
     const threads = yield* Threads.ThreadManagementService;
     const environment = yield* Environment.ServerEnvironment;
     const diagnosis = yield* Diagnosis.ProviderDiagnosisRouting;
@@ -1491,17 +1493,18 @@ export const make = (
           ),
         );
     const respondHandoff: SshHostSetup["Service"]["respondHandoff"] = (input, sessionId) =>
-      Option.isNone(providerHomeRequests)
-        ? respondExisting(input, sessionId)
-        : handoffs
-            .read(input)
-            .pipe(
-              Effect.flatMap((record) =>
-                record.target.path === "provider.home_request"
-                  ? providerHomeRequests.value.respond(input, sessionId)
-                  : respondExisting(input, sessionId),
-              ),
-            );
+      handoffs
+        .read(input)
+        .pipe(
+          Effect.flatMap((record) =>
+            record.target.path === "provider.home_request" && Option.isSome(providerHomeRequests)
+              ? providerHomeRequests.value.respond(input, sessionId)
+              : record.target.path === ProviderHostSync.HOST_SYNC_PATH &&
+                  Option.isSome(providerHostSync)
+                ? providerHostSync.value.respondHandoff(input, sessionId)
+                : respondExisting(input, sessionId),
+          ),
+        );
     const handoffProgress: SshHostSetup["Service"]["handoffProgress"] = (input, caller) =>
       Effect.gen(function* () {
         yield* authorize(caller, "orchestration:read");

@@ -2,10 +2,12 @@ import type {
   HostStatusEntry,
   HostStatusQuota,
   HostThreadCounts,
+  RuntimeProtocolRanges,
   ServerProvider,
   ServerProviderUsageLimits,
 } from "@goat/contracts";
 import { GoatHostStatusResult } from "@goat/contracts";
+import { hostCompatibilityOf } from "@goat/shared/sshRuntimeProtocol";
 
 /** Active work this machine should show. Archived, deleted, and subagent threads are omitted. */
 export interface HostThreadCountSource {
@@ -73,22 +75,48 @@ export function unsupportedHostStatus(host: string): HostStatusEntry {
   };
 }
 
+const formatRanges = (protocol: RuntimeProtocolRanges) => {
+  const range = ({ min, max }: { readonly min: number; readonly max: number }) =>
+    min === max ? `${min}` : `${min}-${max}`;
+  return `orchestration ${range(protocol.orchestration)}, SSH ${range(protocol.ssh)}`;
+};
+
 /**
- * Flags a reachable remote whose GOAT version differs from this machine's. A
- * remote that reports no version predates version reporting, so it differs too.
+ * Judges a reachable remote against this machine by the protocols it serves. `versionMismatch`
+ * still marks a different build (or none reported) for older readers; only an incompatible or
+ * unprovable host gets a warning message.
  */
-export function markVersionMismatch(entry: HostStatusEntry, localVersion: string): HostStatusEntry {
+export function markHostCompatibility(
+  entry: HostStatusEntry,
+  local: { readonly version: string; readonly speaks: RuntimeProtocolRanges },
+): HostStatusEntry {
   if (entry.reachability !== "ok" || entry.host === null) return entry;
-  if (entry.serverVersion === localVersion) return entry;
+  const { message: _remoteMessage, ...rest } = entry;
+  const verdict = hostCompatibilityOf(local.speaks, entry);
+  const marked: HostStatusEntry = {
+    ...rest,
+    ...(entry.serverVersion === local.version ? {} : { versionMismatch: true as const }),
+    compatibility: verdict.compatibility,
+  };
   const remote =
     entry.serverVersion === undefined
-      ? `an older GOAT that does not report its version`
+      ? "an older GOAT that does not report its version"
       : `GOAT ${entry.serverVersion}`;
-  return {
-    ...entry,
-    versionMismatch: true,
-    message: `${entry.host} runs ${remote}; this machine runs GOAT ${localVersion}. Tools and launch options can differ between them. Update GOAT on the older machine.`,
-  };
+  const here = `this machine runs GOAT ${local.version} (${formatRanges(local.speaks)})`;
+  switch (verdict.compatibility) {
+    case "compatible":
+      return marked;
+    case "degraded":
+      return {
+        ...marked,
+        message: `${entry.host} runs ${remote}, which does not report the protocols it serves, so compatibility with this machine cannot be confirmed. Status works; update GOAT on ${entry.host} to confirm the rest.`,
+      };
+    case "incompatible":
+      return {
+        ...marked,
+        message: `${entry.host} runs ${remote}, serving ${entry.protocol === undefined ? "unknown protocols" : formatRanges(entry.protocol)}; ${here}. They cannot work together. Update GOAT on ${verdict.update === "this-machine" ? "this machine" : entry.host}.`,
+      };
+  }
 }
 
 export function unreachableHostStatus(

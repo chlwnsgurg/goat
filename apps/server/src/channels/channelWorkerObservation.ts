@@ -7,6 +7,7 @@
  * @module channelWorkerObservation
  */
 import type {
+  OrchestrationV2Subagent,
   ChannelTaskNeedsYou,
   ChannelTaskNeedsYouKind,
   ChannelTaskPullRequest,
@@ -19,6 +20,7 @@ import type {
 } from "@goat/contracts";
 import { derivePendingBackgroundWork } from "@goat/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 
 /** Which person-facing request a native runtime request is; tool calls the client answers are none. */
 export const needsYouKindOf = (
@@ -169,3 +171,55 @@ export const isThreadMissing = (error: unknown): boolean => {
   }
   return false;
 };
+/** How deep and how many subagent threads a pass reads for requests that need a person. */
+export const SUBAGENT_DEPTH = 3;
+export const SUBAGENT_THREADS = 20;
+const LIVE_SUBAGENT_STATUSES: ReadonlySet<OrchestrationV2Subagent["status"]> = new Set([
+  "pending",
+  "running",
+  "waiting",
+]);
+
+/**
+ * The pending requests of the live subagents a worker started, and of theirs, a few levels down
+ * and a bounded number of threads at most, each thread once. A subagent on another machine has no
+ * thread here and is not read. A thread that cannot be read is skipped this pass.
+ */
+export const subagentRequests = <E, R>(
+  subagents: ReadonlyArray<OrchestrationV2Subagent>,
+  read: (threadId: NonNullable<OrchestrationV2Subagent["childThreadId"]>) => Effect.Effect<
+    {
+      readonly runtimeRequests: ReadonlyArray<OrchestrationV2RuntimeRequest>;
+      readonly subagents: ReadonlyArray<OrchestrationV2Subagent>;
+    },
+    E,
+    R
+  >,
+): Effect.Effect<ReadonlyArray<OrchestrationV2RuntimeRequest>, never, R> =>
+  Effect.gen(function* () {
+    const found: Array<OrchestrationV2RuntimeRequest> = [];
+    const visited = new Set<string>();
+    let level = subagents;
+    for (let depth = 0; depth < SUBAGENT_DEPTH && level.length > 0; depth += 1) {
+      const next: Array<OrchestrationV2Subagent> = [];
+      for (const subagent of level) {
+        const childThreadId = subagent.childThreadId;
+        if (
+          childThreadId === null ||
+          subagent.promotedAt !== undefined ||
+          !LIVE_SUBAGENT_STATUSES.has(subagent.status) ||
+          visited.has(childThreadId) ||
+          visited.size >= SUBAGENT_THREADS
+        ) {
+          continue;
+        }
+        visited.add(childThreadId);
+        const child = yield* read(childThreadId).pipe(Effect.option);
+        if (child._tag === "None") continue;
+        found.push(...child.value.runtimeRequests);
+        next.push(...child.value.subagents);
+      }
+      level = next;
+    }
+    return found;
+  });

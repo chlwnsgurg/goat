@@ -3903,7 +3903,7 @@ describe("SSH launcher transport", () => {
       }
       if (result._tag === "Success")
         expect(result.success.notes).toContain(
-          `GOAT on box runs 0.0.1-older; this machine runs ${packageJson.version}. Tools and launch options can differ between them; update GOAT on the older machine if this thread misbehaves.`,
+          `GOAT on box runs 0.0.1-older; this machine runs ${packageJson.version}. Both speak the same protocols, but a tool or launch option added in the newer build can be missing on the older one.`,
         );
       expect(creates).toBe(scenario.success || scenario.name === "ambiguous" ? 1 : 0);
     }),

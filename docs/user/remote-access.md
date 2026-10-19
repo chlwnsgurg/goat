@@ -203,8 +203,9 @@ user, port and key come from that file; change them there.
 
 The remote host must be Linux, an Apple Silicon Mac, or a Windows machine set up
 as described below, with `tar`, `sha256sum` or `shasum`, and
-`git` for project work. Provider CLIs and sign-in are set up on that host;
-see [provider setup](./install.md#providers). GOAT keeps its server, launch state,
+`git` for project work. Set up provider CLIs and sign-in with
+[provider sync](#providers-on-your-machines) or follow [provider setup](./install.md#providers)
+on that host. GOAT keeps its server, launch state,
 and data under `~/.goat`, apart from any T3 Code install in `~/.t3`. A fresh host
 does not need the desktop app or Node.
 
@@ -269,6 +270,40 @@ again on its next connect.
 For Antigravity's Google callback on a remote host, see
 [remote sign-in](./providers-antigravity.md#sign-in-from-a-remote-device).
 
+### Providers on your machines
+
+Open **Settings → Connections → Providers on your machines** to compare installed
+provider versions and sign-in status on this machine and connected SSH hosts.
+Choose **Sync to other hosts…** for a provider and select your destination
+machines. GOAT uses the vendor's official npm package or installer for each
+operating system, matching this machine's version by default, or installing the
+latest if it is absent here. Cursor's installer always installs the latest.
+Choose **Update runtime** for a host whose GOAT is too old, or **Prepare host**
+if its runtime is stopped, then retry.
+
+Each host installs and starts its own sign-in. Complete the offered device code
+or vendor sign-in page, or finish in GOAT on that host. If a terminal step is
+needed, run it on the destination: `claude auth login`, `agent login` (Cursor),
+`grok login`, `opencode auth login`, or `pi` followed by `/login`. Codex uses
+`codex login --device-auth`. An agent can request a sync; approve the request in
+its thread before installation starts. Cancelling stops unfinished work; a
+completed installation stays installed.
+
+GOAT never copies credentials between machines. For headless Codex login,
+[OpenAI documents copying `~/.codex/auth.json` as a fallback](https://developers.openai.com/codex/auth).
+A person may do this between their own machines, treating the file like a
+password; GOAT does not automate it.
+
+Sync only to your own machines and sign in with your own account on each.
+Never sign in to someone else's account or share yours.
+[Claude's consumer terms](https://www.anthropic.com/legal/consumer-terms) forbid
+sharing login credentials or letting others use your account; see also the
+[Pro plan guidance](https://support.anthropic.com/en/articles/8325606-what-is-the-pro-plan).
+[OpenAI accounts are for the individual](https://help.openai.com/en/articles/10471989),
+and [use across your own devices is supported](https://help.openai.com/en/articles/8980438).
+Cursor and xAI subscription policies: **needs confirmation**; no source has been
+verified yet.
+
 ### A fresh VPS
 
 Open **Settings → Connections → Add device → SSH**, or tell an agent to
@@ -286,8 +321,9 @@ terminal; GOAT does not collect it or run `sudo` for you.
 GOAT prepares the runtime before checking providers. Provider diagnosis needs a
 ready runtime; if preparation is still running or failed, check the host's status
 and finish or retry setup first. After agent setup, GOAT checks provider CLIs and
-sign-in on the remote host. Run any provider installation or sign-in command
-there; signing in on your own computer does not sign in the VPS. The desktop
+sign-in on the remote host. Use [provider sync](#providers-on-your-machines) or
+run the offered installation and sign-in commands there; signing in on your own
+computer does not sign in the VPS. The desktop
 connection row reports runtime setup.
 
 Save the prepared host in the desktop app to see its environment in the sidebar.
