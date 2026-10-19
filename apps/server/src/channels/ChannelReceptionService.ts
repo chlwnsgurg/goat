@@ -559,7 +559,7 @@ const make = Effect.gen(function* () {
       // The person as they stand now: a Slack link removed or narrowed since the message
       // arrived counts.
       const judgedNow = Effect.gen(function* () {
-        if (message.kind !== "slack") return requester;
+        if (message.kind !== "slack" && message.kind !== "imessage") return requester;
         const linked =
           requester.externalActorId === undefined
             ? undefined

@@ -319,7 +319,7 @@ const make = Effect.gen(function* () {
       const cap = (ceiling: MemoryTaskGrantCeiling): MemoryTaskGrantCeiling =>
         task.target === undefined ? ceiling : lowerMemoryCeiling(ceiling, recorded ?? "none");
       let scopes = task.requester.grantedScopes;
-      if (task.originAddress.kind === "slack") {
+      if (task.originAddress.kind === "slack" || task.originAddress.kind === "imessage") {
         const actor = task.requester.externalActorId;
         if (actor === undefined) return "none" satisfies MemoryTaskGrantCeiling;
         const linked = yield* ledger.findIdentity({

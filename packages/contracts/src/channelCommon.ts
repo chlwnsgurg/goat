@@ -32,7 +32,7 @@ export type ChannelQuestionId = typeof ChannelQuestionId.Type;
 export const ChannelTaskEventId = makeChannelId("ChannelTaskEventId");
 export type ChannelTaskEventId = typeof ChannelTaskEventId.Type;
 
-export const ChannelKind = Schema.Literals(["goat", "slack", "mcp"]);
+export const ChannelKind = Schema.Literals(["goat", "slack", "mcp", "imessage"]);
 export type ChannelKind = typeof ChannelKind.Type;
 
 /**
@@ -57,6 +57,11 @@ export const ChannelReplyAddress = Schema.Union([
     connectionId: TrimmedNonEmptyString,
     requestNamespace: TrimmedNonEmptyString,
     conversationKey: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("imessage"),
+    connectionId: TrimmedNonEmptyString,
+    chatGuid: TrimmedNonEmptyString,
   }),
 ]);
 export type ChannelReplyAddress = typeof ChannelReplyAddress.Type;

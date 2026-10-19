@@ -15,6 +15,18 @@ const slackAddress = {
 };
 
 describe("channel addresses", () => {
+  it("round-trips an iMessage chat GUID", () => {
+    const address = {
+      kind: "imessage" as const,
+      connectionId: "imessage-000000000001",
+      chatGuid: "iMessage;-;+15550000000",
+    };
+    const codec = Schema.toCodecJson(ChannelReplyAddress);
+    expect(Schema.decodeUnknownSync(codec)(Schema.encodeSync(codec)(address))).toEqual(address);
+    expect(
+      decodeMeta({ conversationId: "conv", originKind: "imessage", kind: "inbound" }).originKind,
+    ).toBe("imessage");
+  });
   it("keeps the Slack thread root and external timestamps as strings", () => {
     const json = Schema.toCodecJson(ChannelReplyAddress);
     const address = Schema.decodeUnknownSync(json)(
