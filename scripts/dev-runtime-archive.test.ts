@@ -10,7 +10,12 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import { cliArchiveFileName, cliArchivePlatformKey } from "@goat/shared/cliRelease";
-import { buildDevRuntimeArchive, resolveRuntimeArchiveHome } from "./dev-runtime-archive.ts";
+import {
+  buildDevRuntimeArchive,
+  parseDevRuntimeArchiveArgs,
+  resolveDevRuntimeArchiveTarget,
+  resolveRuntimeArchiveHome,
+} from "./dev-runtime-archive.ts";
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 import { vi } from "vite-plus/test";
 import * as HostProcess from "@goat/shared/HostProcess";
@@ -45,10 +50,13 @@ if (args.includes('scripts/build-cli-archive.ts')) {
   const monitorEntries=fs.readdirSync(stagedMonitor);
   if (JSON.stringify(monitorEntries)!==JSON.stringify(['goat-resource-monitor'])) throw new Error('unexpected monitor filenames');
   const monitorContents=fs.readFileSync(path.join(stagedMonitor,'goat-resource-monitor'),'utf8');
-  if (monitorContents!==(process.env.FAIL_STEP==='legacy-monitor'?'legacy monitor':'new monitor')) throw new Error('wrong monitor selected');
-  const entries=['client/index.html','node_modules/node-pty/build/Release/pty.node',
-    'resource-monitor/'+platform+'-'+value('--arch')+'/goat-resource-monitor'];
+  const expectedMonitor=process.env.EXPECTED_MONITOR_CONTENTS||(process.env.FAIL_STEP==='legacy-monitor'?'legacy monitor':'new monitor');
+  if (monitorContents!==expectedMonitor) throw new Error('wrong monitor selected: '+monitorContents);
+  const entries=['client/index.html','node_modules/node-pty/build/Release/pty.node'];
   for (const entry of entries) { const file=path.join(content,entry); fs.mkdirSync(path.dirname(file),{recursive:true}); fs.writeFileSync(file,'fixture'); }
+  const monitorDest=path.join(content,'resource-monitor',platform+'-'+value('--arch'),'goat-resource-monitor');
+  fs.mkdirSync(path.dirname(monitorDest),{recursive:true});
+  fs.writeFileSync(monitorDest,monitorContents,{mode:0o755});
   fs.writeFileSync(path.join(content,'goat'),'#!/bin/sh\nprintf \'goat v'+(process.env.WRONG_EXECUTABLE_VERSION || value('--version'))+'\\n\'\n',{mode:0o755});
   if (process.env.BROKEN_EXECUTABLE) fs.chmodSync(path.join(content, 'goat'), 0o644);
   if (process.env.INVALID_ARCHIVE) fs.unlinkSync(path.join(content, 'client/index.html'));
@@ -242,5 +250,264 @@ describe("development runtime archive publication", () => {
         root + "/ambient",
       );
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it("parses CLI flags and resolves host and cross targets", () => {
+    assert.deepEqual(
+      parseDevRuntimeArchiveArgs([
+        "--platform",
+        "linux",
+        "--arch",
+        "x64",
+        "--resource-monitor-from",
+        "/tmp/goat-0.1.0-linux-x64.tar.gz",
+        "--home-dir",
+        "/tmp/home",
+        "--node-version",
+        "26.8.2",
+        "--version",
+        "0.1.0-dev.1",
+      ]),
+      {
+        platform: "linux",
+        arch: "x64",
+        resourceMonitorFrom: "/tmp/goat-0.1.0-linux-x64.tar.gz",
+        homeDir: "/tmp/home",
+        nodeVersion: "26.8.2",
+        version: "0.1.0-dev.1",
+      },
+    );
+
+    assert.deepEqual(
+      resolveDevRuntimeArchiveTarget({
+        hostPlatform: "darwin",
+        hostArch: "arm64",
+      }),
+      {
+        platform: "darwin",
+        arch: "arm64",
+        key: "darwin-arm64",
+        cliPlatform: "mac",
+        exeTarget: "host",
+        isHostTarget: true,
+        hostPlatform: "darwin",
+        hostArch: "arm64",
+        monitorName: "goat-resource-monitor",
+        legacyMonitorName: LEGACY_RESOURCE_MONITOR_BINARY_NAME,
+      },
+    );
+    assert.deepEqual(
+      resolveDevRuntimeArchiveTarget({
+        platform: "linux",
+        arch: "x64",
+        hostPlatform: "darwin",
+        hostArch: "arm64",
+      }),
+      {
+        platform: "linux",
+        arch: "x64",
+        key: "linux-x64",
+        cliPlatform: "linux",
+        exeTarget: "linux-x64",
+        isHostTarget: false,
+        hostPlatform: "darwin",
+        hostArch: "arm64",
+        monitorName: "goat-resource-monitor",
+        legacyMonitorName: LEGACY_RESOURCE_MONITOR_BINARY_NAME,
+      },
+    );
+    assert.deepEqual(
+      resolveDevRuntimeArchiveTarget({
+        platform: "win",
+        arch: "x64",
+        hostPlatform: "darwin",
+        hostArch: "arm64",
+      }),
+      {
+        platform: "win32",
+        arch: "x64",
+        key: "win32-x64",
+        cliPlatform: "win",
+        exeTarget: "win-x64",
+        isHostTarget: false,
+        hostPlatform: "darwin",
+        hostArch: "arm64",
+        monitorName: "goat-resource-monitor.exe",
+        legacyMonitorName: LEGACY_RESOURCE_MONITOR_BINARY_NAME + ".exe",
+      },
+    );
+    assert.throws(
+      () =>
+        resolveDevRuntimeArchiveTarget({
+          platform: "darwin",
+          arch: "x64",
+          hostPlatform: "darwin",
+          hostArch: "arm64",
+        }),
+      /No supported CLI archive for darwin-x64/,
+    );
+  });
+
+  it.live.each([
+    "from-archive",
+    "from-legacy-archive",
+    "from-binary",
+    "from-existing-cache-archive",
+    "missing-monitor-source",
+    "wrong-target-archive",
+  ] as const)("cross-target linux-x64 %s reuses resource monitor or fails clearly", (mode) =>
+    Effect.tryPromise(async () => {
+      if (HostProcess.Platform.defaultValue() === "win32") return;
+      const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-dev-cross-"));
+      try {
+        const fakeRepo = NodePath.join(root, "repo");
+        const tools = NodePath.join(root, "tools");
+        const home = NodePath.join(root, "home");
+        await NodeFSP.mkdir(fakeRepo, { recursive: true });
+        await NodeFSP.mkdir(tools, { recursive: true });
+        for (const name of ["vp", "cargo"])
+          await NodeFSP.writeFile(NodePath.join(tools, name), standIn, { mode: 0o755 });
+        const archives = NodePath.join(home, "runtime", "archives");
+        await NodeFSP.mkdir(archives, { recursive: true });
+        const targetKey = "linux-x64" as const;
+        const name = cliArchiveFileName(serverPackageJson.version, targetKey);
+        const old = Buffer.from("previous linux archive bytes");
+        await NodeFSP.writeFile(NodePath.join(archives, name), old);
+        const oldSidecar = "previous linux checksum";
+        await NodeFSP.writeFile(NodePath.join(archives, name + ".sha256"), oldSidecar);
+
+        const expectedMonitor = "reused linux-x64 monitor (" + mode + ")";
+        let resourceMonitorFrom: string | undefined;
+
+        const makeMonitorArchive = async (
+          archiveFilePath: string,
+          archiveKey: string,
+          binaryFileName: string,
+        ) => {
+          const srcRoot = await NodeFSP.mkdtemp(NodePath.join(root, "src-archive-"));
+          const stem = "goat-0.0.1-" + archiveKey;
+          const monitorFile = NodePath.join(
+            srcRoot,
+            stem,
+            "resource-monitor",
+            archiveKey,
+            binaryFileName,
+          );
+          await NodeFSP.mkdir(NodePath.dirname(monitorFile), { recursive: true });
+          await NodeFSP.writeFile(monitorFile, expectedMonitor, { mode: 0o755 });
+          NodeChildProcess.execFileSync("tar", ["-czf", archiveFilePath, "-C", srcRoot, stem]);
+        };
+
+        if (
+          mode === "from-archive" ||
+          mode === "from-legacy-archive" ||
+          mode === "wrong-target-archive"
+        ) {
+          resourceMonitorFrom = NodePath.join(root, "donor.tar.gz");
+          await makeMonitorArchive(
+            resourceMonitorFrom,
+            mode === "wrong-target-archive" ? "darwin-arm64" : targetKey,
+            mode === "from-legacy-archive"
+              ? LEGACY_RESOURCE_MONITOR_BINARY_NAME
+              : "goat-resource-monitor",
+          );
+        } else if (mode === "from-binary") {
+          resourceMonitorFrom = NodePath.join(root, "goat-resource-monitor-linux-x64");
+          await NodeFSP.writeFile(resourceMonitorFrom, expectedMonitor, { mode: 0o755 });
+        } else if (mode === "from-existing-cache-archive") {
+          await makeMonitorArchive(
+            NodePath.join(archives, "goat-0.0.0-" + targetKey + ".tar.gz"),
+            targetKey,
+            "goat-resource-monitor",
+          );
+        }
+
+        const selected = "26.8.2";
+        const success =
+          mode === "from-archive" ||
+          mode === "from-legacy-archive" ||
+          mode === "from-binary" ||
+          mode === "from-existing-cache-archive";
+        let failure: unknown;
+        try {
+          await buildDevRuntimeArchive({
+            homeDir: home,
+            repoRoot: fakeRepo,
+            platform: "linux",
+            arch: "x64",
+            hostPlatform: "darwin",
+            hostArch: "arm64",
+            resourceMonitorFrom,
+            nodeVersion: selected,
+            env: {
+              ...process.env,
+              HOME: home,
+              PATH: tools + NodePath.delimiter + (process.env.PATH ?? ""),
+              TOOL_LOG: NodePath.join(root, "tools.jsonl"),
+              VP_NODE_VERSION: selected,
+              PROBE_VERSION: "v" + selected,
+              LEGACY_MONITOR_NAME: LEGACY_RESOURCE_MONITOR_BINARY_NAME,
+              EXPECTED_MONITOR_CONTENTS: expectedMonitor,
+            },
+          });
+        } catch (cause) {
+          failure = cause;
+        }
+
+        const logPath = NodePath.join(root, "tools.jsonl");
+        const records = (await NodeFSP.readFile(logPath, "utf8").catch(() => ""))
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as { tool: string; args: string[]; node: string });
+
+        if (!success) {
+          assert.isDefined(failure);
+          assert.include(String(failure), "--resource-monitor-from");
+          assert.include(String(failure), targetKey);
+          assert.deepEqual(await NodeFSP.readFile(NodePath.join(archives, name)), old);
+          assert.equal(
+            await NodeFSP.readFile(NodePath.join(archives, name + ".sha256"), "utf8"),
+            oldSidecar,
+          );
+          assert.equal(
+            records.some((record) => record.tool === "cargo" || record.args.includes("build-exe")),
+            false,
+          );
+        } else {
+          assert.isUndefined(failure);
+          assert.equal(
+            records.some((record) => record.tool === "cargo"),
+            false,
+          );
+          assert.equal(
+            records.some(
+              (record) =>
+                record.args.includes("build-exe") &&
+                record.args[record.args.indexOf("--target") + 1] === "linux-x64",
+            ),
+            true,
+          );
+          const extracted = NodePath.join(root, "extracted");
+          await NodeFSP.mkdir(extracted);
+          NodeChildProcess.execFileSync("tar", [
+            "-xzf",
+            NodePath.join(archives, name),
+            "-C",
+            extracted,
+          ]);
+          const monitorInArchive = NodePath.join(
+            extracted,
+            name.slice(0, -7),
+            "resource-monitor",
+            targetKey,
+            "goat-resource-monitor",
+          );
+          assert.equal(await NodeFSP.readFile(monitorInArchive, "utf8"), expectedMonitor);
+        }
+      } finally {
+        await NodeFSP.rm(root, { recursive: true, force: true });
+      }
+    }),
   );
 });
