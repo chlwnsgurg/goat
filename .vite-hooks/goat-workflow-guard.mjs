@@ -10,6 +10,7 @@ const root = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta
 const [sha, ref] = NodeProcess.argv.slice(2);
 const workflowPath = ".github/workflows/goat-ci.yml";
 const nightlyPath = ".github/workflows/goat-nightly.yml";
+const closeOutsidePrsPath = ".github/workflows/close-outside-prs.yml";
 const disabled = new Set((NodeProcess.env.GOAT_DISABLED_WORKFLOWS ?? "").split("\n"));
 const labels = new Set(["self-hosted", "linux", "x64", "goat", "epyc"]);
 // goat-ci jobs run on a pinned GitHub-hosted image or on EPYC, never on a moving label.
@@ -443,6 +444,58 @@ function isPinnedResolve(step) {
   return NodeCrypto.createHash("sha256").update(pinned).digest("hex") === pinnedResolveSha256;
 }
 
+// close-outside-prs.yml stays active on goat-si/goat on purpose (#426, #430). It runs on
+// pull_request_target with a write token from the base branch, so it must never check out or
+// run pull request code. A blocklist of commands cannot promise that, so the reviewed job is
+// pinned whole: any change to it, including step names, scripts and env, means reviewing it
+// again and updating this hash on purpose.
+const pinnedCloseOutsideJobSha256 =
+  "1f8e3fb2ec56cb45493b0a0a6758252f5f119cf9f749bd857546370b3d585e5b";
+
+function validateCloseOutsidePrsWorkflow(source, yaml) {
+  const fail = (reason) => refuse(reason, closeOutsidePrsPath);
+  const workflow = parseWorkflow(source, yaml);
+  if (workflow === undefined) return fail("invalid YAML");
+  if (!isMapping(workflow)) return fail("root must be a mapping");
+  const trigger = isMapping(workflow.on) ? workflow.on.pull_request_target : undefined;
+  if (
+    !isMapping(workflow.on) ||
+    Object.keys(workflow.on).length !== 1 ||
+    !isMapping(trigger) ||
+    Object.keys(trigger).length !== 1 ||
+    !Array.isArray(trigger.types) ||
+    trigger.types.length !== 2 ||
+    trigger.types[0] !== "opened" ||
+    trigger.types[1] !== "reopened"
+  ) {
+    return fail("on must be exactly pull_request_target with types [opened, reopened]");
+  }
+  if (
+    !isMapping(workflow.permissions) ||
+    Object.keys(workflow.permissions).length !== 1 ||
+    workflow.permissions["pull-requests"] !== "write"
+  ) {
+    return fail("permissions must be exactly pull-requests: write");
+  }
+  if (Object.keys(workflow).some((key) => !["name", "on", "permissions", "jobs"].includes(key))) {
+    return fail("only name, on, permissions and jobs are allowed at the workflow level");
+  }
+  if (typeof workflow.name !== "undefined" && typeof workflow.name !== "string") {
+    return fail("name must be a string");
+  }
+  if (workflow.name?.includes("${{")) return fail("name must not contain expressions");
+  const job = isMapping(workflow.jobs) ? workflow.jobs.close : undefined;
+  if (Object.keys(workflow.jobs ?? {}).length !== 1 || !isMapping(job)) {
+    return fail("jobs must be exactly close");
+  }
+  const digest = NodeCrypto.createHash("sha256")
+    .update(JSON.stringify(canonical(job)))
+    .digest("hex");
+  if (digest !== pinnedCloseOutsideJobSha256) {
+    return fail("jobs.close must match the reviewed job; review it and update the pinned hash");
+  }
+}
+
 let paths;
 try {
   paths = NodeChildProcess.execFileSync(
@@ -462,6 +515,7 @@ for (const path of paths) {
   if (
     path !== workflowPath &&
     path !== nightlyPath &&
+    path !== closeOutsidePrsPath &&
     /\.ya?ml$/.test(path) &&
     !disabled.has(path)
   ) {
@@ -469,7 +523,7 @@ for (const path of paths) {
     status = 1;
   }
 }
-for (const path of [workflowPath, nightlyPath]) {
+for (const path of [workflowPath, nightlyPath, closeOutsidePrsPath]) {
   if (!paths.includes(path)) continue;
   let source;
   try {
@@ -496,6 +550,7 @@ for (const path of [workflowPath, nightlyPath]) {
     NodeProcess.exit(1);
   }
   if (path === workflowPath) validateWorkflow(source, yaml);
-  else validateNightlyWorkflow(source, yaml);
+  else if (path === nightlyPath) validateNightlyWorkflow(source, yaml);
+  else validateCloseOutsidePrsWorkflow(source, yaml);
 }
 if (status !== 0) NodeProcess.exit(status);
