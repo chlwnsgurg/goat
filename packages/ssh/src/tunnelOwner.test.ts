@@ -1,0 +1,137 @@
+// @effect-diagnostics nodeBuiltinImport:off -- A separate OS process must be SIGKILLed without running Effect finalizers.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeEvents from "node:events";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeNet from "node:net";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeReadline from "node:readline";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { makeOwnedSshTunnelCommand } from "./tunnelOwner.ts";
+import { assert, describe, expect, it } from "@effect/vitest";
+
+const listen = (server: NodeNet.Server, port = 0) =>
+  new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", resolve);
+  });
+
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH owner lifetime", () => {
+  it("reaps the pipe watcher when ssh exits and preserves its exit status", async () => {
+    const command = makeOwnedSshTunnelCommand(
+      HostProcess.Platform.defaultValue(),
+      process.execPath,
+      ["-e", "process.exit(23)"],
+      { forceKillAfter: 2000 },
+    );
+    const child = NodeChildProcess.spawn(command.command, command.args, {
+      detached: command.options.detached,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    try {
+      const [code] = await NodeEvents.EventEmitter.once(child, "close", {
+        signal: AbortSignal.timeout(5_000),
+      });
+      assert.equal(code, 23);
+    } finally {
+      if (child.exitCode === null && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+    }
+  });
+  it("kills the forward and releases its port and auth directory when the owner is SIGKILLed", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-owner-death-"));
+    const authDirectory = NodePath.join(directory, "auth");
+    await NodeFSP.mkdir(authDirectory);
+    const control = NodeNet.createServer();
+    await listen(control);
+    const address = control.address();
+    assert.isNotNull(address);
+    if (typeof address !== "object" || address === null)
+      throw new Error("Missing control listener");
+    const script = NodePath.join(directory, "ssh.cjs");
+    await NodeFSP.writeFile(
+      script,
+      `
+const net = require("node:net");
+process.on("SIGTERM", () => {});
+const server = net.createServer();
+server.listen(0, "127.0.0.1", () => {
+  console.log(server.address().port);
+  net.connect(${address.port}, "127.0.0.1");
+});
+`,
+    );
+    const moduleUrl = new URL("./tunnelOwner.ts", import.meta.url).href;
+    const servicesUrl = new URL(
+      "../node_modules/@effect/platform-node/dist/NodeServices.js",
+      import.meta.url,
+    ).href;
+    const effectUrl = new URL("../node_modules/effect/dist/Effect.js", import.meta.url).href;
+    const streamUrl = new URL("../node_modules/effect/dist/Stream.js", import.meta.url).href;
+    const spawnerUrl = new URL(
+      "../node_modules/effect/dist/process/ChildProcessSpawner.js",
+      import.meta.url,
+    ).href;
+    const ownerScript = `
+import * as NodeServices from ${JSON.stringify(servicesUrl)};
+import * as Effect from ${JSON.stringify(effectUrl)};
+import * as Stream from ${JSON.stringify(streamUrl)};
+import * as ChildProcessSpawner from ${JSON.stringify(spawnerUrl)};
+import { makeOwnedSshTunnelCommand } from ${JSON.stringify(moduleUrl)};
+const command = makeOwnedSshTunnelCommand(process.platform, process.execPath,
+  [${JSON.stringify(script)}], { forceKillAfter: 2000 }, ${JSON.stringify(authDirectory)});
+Effect.runPromise(Effect.gen(function* () {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const child = yield* spawner.spawn(command);
+  process.send({ pid: Number(child.pid) });
+  yield* child.stdout.pipe(Stream.runForEach(chunk => Effect.sync(() => process.stdout.write(chunk))));
+}).pipe(Effect.scoped, Effect.provide(NodeServices.layer))).catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
+`;
+    const owner = NodeChildProcess.spawn(
+      process.execPath,
+      ["--input-type=module", "-e", ownerScript],
+      {
+        stdio: ["pipe", "pipe", "inherit", "ipc"],
+      },
+    );
+    const lines = NodeReadline.createInterface({ input: owner.stdout! });
+    let supervisorPid: number | undefined;
+    let connection: NodeNet.Socket | undefined;
+    try {
+      const signal = AbortSignal.timeout(5_000);
+      const message = NodeEvents.EventEmitter.once(owner, "message", { signal });
+      const portLine = NodeEvents.EventEmitter.once(lines, "line", { signal });
+      const connected = NodeEvents.EventEmitter.once(control, "connection", { signal });
+      const [identity] = await message;
+      supervisorPid = (identity as { pid: number }).pid;
+      const [port] = await portLine;
+      [connection] = (await connected) as [NodeNet.Socket];
+      const closed = NodeEvents.EventEmitter.once(connection, "close", { signal });
+      const ownerExited = NodeEvents.EventEmitter.once(owner, "exit", { signal });
+      owner.kill("SIGKILL");
+      await ownerExited;
+      // Socket closure is an OS notification of forward death, not a polling loop.
+      await closed;
+      const replacement = NodeNet.createServer();
+      await listen(replacement, Number(port));
+      await new Promise<void>((resolve) => replacement.close(() => resolve()));
+      await expect(NodeFSP.stat(authDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      owner.kill("SIGKILL");
+      if (supervisorPid !== undefined) {
+        // Captured from spawn via IPC, never discovered by matching argv.
+        try {
+          process.kill(-supervisorPid, "SIGKILL");
+        } catch (error) {
+          assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+        }
+      }
+      connection?.destroy();
+      lines.close();
+      await new Promise<void>((resolve) => control.close(() => resolve()));
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+});
