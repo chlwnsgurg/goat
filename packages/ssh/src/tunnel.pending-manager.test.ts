@@ -40,7 +40,7 @@ const drainPending = {
   ...pending,
   reason: "unknown",
   replacement: "older",
-  detail: "drain-unavailable",
+  refreshCause: "drain_unavailable",
 } as const;
 const ready = {
   status: "ready",
@@ -1408,7 +1408,7 @@ describe("SSH drain-unavailable attachment", () => {
           yield* decodeHostResult(initial);
           assert.equal(initial.status?.state, "ready");
           assert.equal(initial.status?.runtimeVersion, "1.2.2");
-          assert.equal(initial.status?.refreshDeferred?.reason, "drain_unavailable");
+          assert.equal(initial.status?.refreshDeferred?.refreshCause, "drain_unavailable");
           yield* manager.publishProviderDiagnosis(uploadTarget, operation, {
             checkedAt: operationDate,
             ready: !unhealthy,
@@ -1416,7 +1416,7 @@ describe("SSH drain-unavailable attachment", () => {
           });
           const afterDiagnosis = yield* manager.status(uploadTarget);
           assert.equal(afterDiagnosis.status?.state, unhealthy ? "providers_not_ready" : "ready");
-          assert.equal(afterDiagnosis.status?.refreshDeferred?.reason, "drain_unavailable");
+          assert.equal(afterDiagnosis.status?.refreshDeferred?.refreshCause, "drain_unavailable");
           if (unhealthy)
             assert.equal(afterDiagnosis.status?.providers?.fixes[0]?.instruction, "Sign in");
           yield* manager.readyEnvironment(uploadTarget);
@@ -1439,7 +1439,7 @@ describe("SSH drain-unavailable attachment", () => {
           assert.equal(f.count.stops, 0);
           f.setProbe({ liveDrain: true });
           const positive = yield* manager.status(uploadTarget);
-          assert.equal(positive.status?.refreshDeferred?.reason, "drain_unavailable");
+          assert.equal(positive.status?.refreshDeferred?.refreshCause, "drain_unavailable");
           assert.equal(positive.status?.state, unhealthy ? "providers_not_ready" : "ready");
           yield* TestClock.adjust("9 minutes");
           assert.equal(f.count.launches, 2);
@@ -1507,7 +1507,7 @@ describe("SSH drain-unavailable attachment", () => {
           yield* Deferred.await(f.forwarded);
           yield* Deferred.await(f.published[mode === "drain-pending" ? 1 : 0]!);
           assert.equal(
-            (yield* manager.status(uploadTarget)).status?.refreshDeferred?.reason,
+            (yield* manager.status(uploadTarget)).status?.refreshDeferred?.refreshCause,
             "drain_unavailable",
           );
           assert.equal(f.count.launches, 2);
@@ -1624,7 +1624,7 @@ describe("SSH drain-unavailable attachment", () => {
         for (let i = 0; i < 2; i++) {
           const result = yield* manager.status(uploadTarget);
           yield* decodeHostResult(result);
-          assert.equal(result.status?.refreshDeferred?.reason, "drain_unavailable");
+          assert.equal(result.status?.refreshDeferred?.refreshCause, "drain_unavailable");
           assert.equal(result.status?.state, "providers_not_ready");
         }
         f.setMode("ready");
@@ -1668,7 +1668,7 @@ it.effect.each([false, true])(
         assert.equal(f.count.stops, 0);
         f.setStale(false);
         assert.equal(
-          (yield* manager.status(uploadTarget)).status?.refreshDeferred?.reason,
+          (yield* manager.status(uploadTarget)).status?.refreshDeferred?.refreshCause,
           "drain_unavailable",
         );
         yield* TestClock.adjust("10 minutes");

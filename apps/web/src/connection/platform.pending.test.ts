@@ -117,7 +117,7 @@ describe.each([
           target,
           pending: {
             reason: "unknown",
-            detail: "drain-unavailable",
+            refreshCause: "drain_unavailable",
             replacement: "older",
             requestedVersion: "1.2.3",
             liveVersion: "1.2.2",

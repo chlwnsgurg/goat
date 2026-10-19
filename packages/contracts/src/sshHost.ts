@@ -60,7 +60,9 @@ export const SshHostFailure = Schema.Struct({
 export type SshHostFailure = typeof SshHostFailure.Type;
 
 export const SshRefreshDeferred = Schema.Struct({
-  reason: Schema.Literals(["archive_unavailable", "drain_unavailable"]),
+  // Older clients decode this closed literal; the optional cause carries new refresh failures.
+  reason: Schema.Literals(["archive_unavailable"]),
+  refreshCause: Schema.optionalKey(Schema.Literal("drain_unavailable")),
   requestedVersion: Schema.String,
   detail: Schema.String,
 });

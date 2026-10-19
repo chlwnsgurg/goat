@@ -382,7 +382,12 @@ it.each(
     state,
     runtimeVersion: "0.4.2",
     requestedVersion: "0.4.3",
-    refreshDeferred: { reason, requestedVersion: "0.4.3", detail },
+    refreshDeferred: {
+      reason: "archive_unavailable",
+      ...(reason === "drain_unavailable" ? { refreshCause: reason } : {}),
+      requestedVersion: "0.4.3",
+      detail,
+    },
     ...(state === "providers_not_ready"
       ? {
           providers: {

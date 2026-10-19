@@ -118,7 +118,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH runtime ca
       assert.equal(result.success.status, "ready");
       assert.deepEqual(result.success.pending, {
         reason: "unknown",
-        detail: "drain-unavailable",
+        refreshCause: "drain_unavailable",
         replacement: "capability",
         requestedVersion: ARCHIVE.archiveVersion,
         liveVersion: SHA_BUILD,

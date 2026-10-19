@@ -105,7 +105,7 @@ const fixture = (initial: unknown, runnerOptions: SshTunnel.RemoteGoatRunnerOpti
             ? {
                 pending: {
                   reason: "unknown",
-                  detail: "drain-unavailable",
+                  refreshCause: "drain_unavailable",
                   replacement: drainReplacement,
                   requestedVersion: ARCHIVE.archiveVersion,
                   liveVersion: launchVersion,
@@ -862,7 +862,7 @@ it.effect.each(
       yield* decodeSshHostResult(fresh);
       assert.equal(fresh.status?.state, "ready");
       assert.equal(fresh.status?.runtimeVersion, actualVersion);
-      assert.equal(fresh.status?.refreshDeferred?.reason, "drain_unavailable");
+      assert.equal(fresh.status?.refreshDeferred?.refreshCause, "drain_unavailable");
       yield* manager.publishProviderDiagnosis(uploadTarget, operation, {
         checkedAt: "2026-10-18T00:00:00.000Z",
         ready: false,
@@ -870,7 +870,7 @@ it.effect.each(
       });
       const diagnosed = yield* manager.status(uploadTarget);
       assert.equal(diagnosed.status?.state, "providers_not_ready");
-      assert.equal(diagnosed.status?.refreshDeferred?.reason, "drain_unavailable");
+      assert.equal(diagnosed.status?.refreshDeferred?.refreshCause, "drain_unavailable");
       yield* manager.readyEnvironment(uploadTarget);
     }).pipe(Effect.provide(f.layer), Effect.scoped);
   },
@@ -879,6 +879,80 @@ it.effect.each(
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "live no-drain attachment status",
   () => {
+    it.live("pending ownership loss requires fresh proof before reusing the attachment", () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+          orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+        });
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          const first = yield* manager.ensureEnvironment(uploadTarget, { keyOnly: true });
+          assert.notProperty(first, "type");
+          f.setBeforeCommand((script) =>
+            script.includes('IDENTITY_NEXT="$STATE_DIR/identity.next.$$"')
+              ? f.fs.writeFileString(`${f.test}/pending-proof`, "ownership-loss")
+              : Effect.void,
+          );
+          const rejected = yield* manager.ensureEnvironment(uploadTarget, {
+            keyOnly: true,
+            refreshRuntime: true,
+          });
+          assert.property(rejected, "type");
+          assert.equal((yield* f.fs.readFileString(`${f.state}/managed`)).trim(), "external");
+          assert.isTrue(
+            Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+          );
+          const launches = () =>
+            f.remoteCommands.filter(
+              (command) => command._tag === "StandardCommand" && isRemoteLaunch(command.args),
+            ).length;
+          const beforeReuse = launches();
+          const reused = yield* manager.ensureEnvironment(uploadTarget, {
+            keyOnly: true,
+            reuseWhileRefreshPending: true,
+          });
+          assert.notProperty(reused, "type");
+          if ("type" in reused) throw new Error("Expected freshly verified runtime");
+          assert.equal(launches(), beforeReuse + 1);
+          assert.isUndefined(reused.pendingReplacement);
+          assert.isTrue(
+            Result.isFailure(yield* Effect.result(manager.readyEnvironment(uploadTarget))),
+          );
+          assert.isTrue(
+            Result.isFailure(
+              yield* Effect.result(
+                manager.issueMcpClientSession(uploadTarget, {
+                  requireReady: true,
+                  label: "ownership-loss",
+                  ttl: "1h",
+                  runtimeModeCeiling: null,
+                }),
+              ),
+            ),
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              SshTunnel.SshEnvironmentManager.layer({
+                resolveCliRunner: Effect.succeed({
+                  ...f.runner,
+                  refreshOwnedRuntimeOnFirstConnection: true,
+                }),
+                leaveRemoteServerRunning: true,
+              }),
+              SshAuth.SshPasswordPrompt.disabledLayer,
+              Layer.succeed(NetService.NetService, testNetService),
+              Layer.succeed(HttpClient.HttpClient, testHttpClient),
+              Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
     it.live("busy runtime admission survives diagnosis and agent sessions", () =>
       Effect.gen(function* () {
         const f = yield* makeProtocolFixture({
@@ -896,11 +970,11 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           const connected = yield* manager.ensureEnvironment(uploadTarget, { keyOnly: true });
           if ("type" in connected) throw new Error("Expected live attachment");
           assert.equal(connected.remotePort, f.port);
-          assert.equal(connected.pendingReplacement?.detail, "drain-unavailable");
+          assert.equal(connected.pendingReplacement?.refreshCause, "drain_unavailable");
           const fresh = yield* manager.status(uploadTarget);
           yield* decodeSshHostResult(fresh);
           assert.equal(fresh.status?.state, "ready");
-          assert.equal(fresh.status?.refreshDeferred?.reason, "drain_unavailable");
+          assert.equal(fresh.status?.refreshDeferred?.refreshCause, "drain_unavailable");
           yield* manager.publishProviderDiagnosis(
             uploadTarget,
             operation,
@@ -913,7 +987,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           const diagnosed = yield* manager.status(uploadTarget);
           assert.equal(diagnosed.status?.state, "providers_not_ready");
           assert.equal(diagnosed.status?.runtimeVersion, "1.2.2");
-          assert.equal(diagnosed.status?.refreshDeferred?.reason, "drain_unavailable");
+          assert.equal(diagnosed.status?.refreshDeferred?.refreshCause, "drain_unavailable");
           const session = yield* manager.issueMcpClientSession(uploadTarget, {
             requireReady: true,
             label: "diagnose",

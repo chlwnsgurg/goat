@@ -503,7 +503,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             assert.equal(result.success.status, "ready");
             assert.deepEqual(result.success.pending, {
               reason: "unknown",
-              detail: "drain-unavailable",
+              refreshCause: "drain_unavailable",
               replacement: "older",
               requestedVersion: ARCHIVE.archiveVersion,
               liveVersion: OLDER,
@@ -554,7 +554,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         assert.equal(result.success.version, OLDER);
         assert.deepEqual(result.success.pending, {
           reason: "unknown",
-          detail: "drain-unavailable",
+          refreshCause: "drain_unavailable",
           replacement: "older",
           requestedVersion: ARCHIVE.archiveVersion,
           liveVersion: OLDER,
@@ -625,7 +625,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           assert.isTrue(injected);
           assert.equal(result.success.status, "pending");
           assert.equal(result.success.port, 0);
-          assert.equal(result.success.pending?.detail, "drain-unavailable");
+          assert.equal(result.success.pending?.refreshCause, "drain_unavailable");
           assert.isTrue(isAlive(f.pid));
           const after = yield* f.snapshot;
           assert.deepEqual({ ...after, managed: null }, { ...before, managed: null });
@@ -683,7 +683,7 @@ GOAT_PENDING_PROOF
         assert.equal(after["run-t3.sh"], before["run-t3.sh"] + "# changed at pending proof\n");
         assert.equal(result.success.status, "pending");
         assert.equal(result.success.port, 0);
-        assert.equal(result.success.pending?.detail, "drain-unavailable");
+        assert.equal(result.success.pending?.refreshCause, "drain_unavailable");
         assert.deepEqual({ ...after, "run-t3.sh": null }, { ...before, "run-t3.sh": null });
         assert.isTrue(isAlive(f.pid));
         const log = yield* events(f);

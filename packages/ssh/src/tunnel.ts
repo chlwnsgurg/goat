@@ -1622,7 +1622,8 @@ emit_pending() {
   [ -n "$pending_detail" ] || pending_detail="$LOCK_DETAIL"
   pending_fields="$(printf '"reason":"%s","replacement":"%s","requestedVersion":"%s","liveVersion":"%s"' "$reason" "$REPLACEMENT_REASON" "$REQUESTED_VERSION" "$LIVE_VERSION")"
   case "$pending_detail" in
-    recovery-stale|drain-unavailable) pending_fields="$pending_fields,$(printf '"detail":"%s"' "$pending_detail")" ;;
+    recovery-stale) pending_fields="$pending_fields,"'"detail":"recovery-stale"' ;;
+    drain-unavailable) pending_fields="$pending_fields,"'"refreshCause":"drain_unavailable"' ;;
   esac
   # Reuse is independently proven using the retained runner, never the incompatible candidate.
   pending_attachment_safe || emit_pending_only
@@ -5212,7 +5213,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     detail: `Refresh deferred: archive for ${requestedVersion} unavailable`,
   });
   const deferredDrainRefresh = (requestedVersion: string) => ({
-    reason: "drain_unavailable" as const,
+    reason: "archive_unavailable" as const,
+    refreshCause: "drain_unavailable" as const,
     requestedVersion,
     detail: "Refresh deferred: this runtime could not drain for the refresh",
   });
@@ -5235,7 +5237,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     const drainAttached =
       !("type" in result) &&
       result.attachmentInvalidated !== true &&
-      pending?.detail === "drain-unavailable" &&
+      pending?.refreshCause === "drain_unavailable" &&
       (pending.replacement === "older" || pending.replacement === "capability") &&
       pending.liveVersion === runtimeVersion &&
       result.selectedRuntime.requestedVersion === requestedVersion &&
@@ -6530,7 +6532,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       observed = statuses.get(key);
       const entry = tunnels.get(key);
       const intent = pendingReplacements.get(key);
-      if (entry !== undefined && intent?.pending?.detail === "drain-unavailable")
+      if (entry !== undefined && intent?.pending?.refreshCause === "drain_unavailable")
         drainAttachment = { entry, intent };
       yield* validateManagedPin(resolvedTarget);
       if (observed?.status?.state === "preparing" || observed?.status?.state === "update_waiting")
@@ -6636,7 +6638,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         intent !== undefined &&
         intent.generation === generation &&
         intent.requestedRunner.archiveVersion?.trim() === requestedVersion &&
-        pending?.detail === "drain-unavailable" &&
+        pending?.refreshCause === "drain_unavailable" &&
         (pending.replacement === "older" || pending.replacement === "capability") &&
         pending.requestedVersion === requestedVersion &&
         pending.liveVersion === probe.liveVersion &&
@@ -6672,7 +6674,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           refreshDeferred,
           detail: refreshDeferred.detail,
         };
-      } else if (pending?.detail === "drain-unavailable") {
+      } else if (pending?.refreshCause === "drain_unavailable") {
         snapshot = {
           ...base,
           runtimeVersion: snapshot.runtimeVersion,

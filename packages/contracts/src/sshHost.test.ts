@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import * as Previous from "./fixtures/sshSchemas.af65f23e5.ts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -592,7 +593,10 @@ it.each(
   const status = {
     ...stopped,
     state,
-    refreshDeferred: { ...refreshDeferred, reason },
+    refreshDeferred: {
+      ...refreshDeferred,
+      ...(reason === "drain_unavailable" ? { refreshCause: reason } : {}),
+    },
     ...(state === "providers_not_ready" ? { providers } : {}),
   };
   const decoded = decodeStatus(status);
@@ -616,19 +620,22 @@ it.each(
     decodeStatus({
       ...stopped,
       state: "ready",
-      refreshDeferred: { ...refreshDeferred, reason },
+      refreshDeferred: {
+        ...refreshDeferred,
+        ...(reason === "drain_unavailable" ? { refreshCause: reason } : {}),
+      },
       ...invalid,
     }),
   ).toThrow();
 });
 
-it.each(["recovery-stale", "drain-unavailable"])(
-  "round-trips pending detail %s in desktop envelopes",
-  (detail) => {
+it.each([{ detail: "recovery-stale" }, { refreshCause: "drain_unavailable" }])(
+  "round-trips pending metadata %o in desktop envelopes",
+  (metadata) => {
     const pending = {
       reason: "unknown",
       replacement: "older",
-      detail,
+      ...metadata,
       requestedVersion: "0.4.3",
       liveVersion: "0.4.2",
     };
@@ -647,3 +654,63 @@ it.each(["recovery-stale", "drain-unavailable"])(
     expect(() => decodePendingReplacement({ ...pending, detail: "other" })).toThrow();
   },
 );
+
+it.each(["ready", "providers_not_ready"] as const)(
+  "af65f23e5 clients decode a new %s drain deferral and discard its optional cause",
+  (state) => {
+    const current = decodeStatus({
+      ...stopped,
+      state,
+      refreshDeferred: { ...refreshDeferred, refreshCause: "drain_unavailable" },
+      ...(state === "providers_not_ready" ? { providers } : {}),
+    });
+    expect(current.refreshDeferred).toEqual({
+      ...refreshDeferred,
+      refreshCause: "drain_unavailable",
+    });
+    const previous = { ...current, refreshDeferred };
+    expect(Schema.decodeUnknownSync(Previous.SshHostStatus)(current)).toEqual(previous);
+    const oldResult = Schema.Struct({ kind: Schema.Literal("ok"), status: Previous.SshHostStatus });
+    expect(
+      Schema.decodeUnknownSync(Schema.toCodecJson(oldResult))(
+        encodeResultWire({ kind: "ok", status: current }),
+      ),
+    ).toEqual({ kind: "ok", status: previous });
+  },
+);
+
+it("af65f23e5 desktop clients decode new pending and bootstrap metadata", () => {
+  const pending = {
+    reason: "unknown",
+    replacement: "older",
+    refreshCause: "drain_unavailable",
+    requestedVersion: "0.4.3",
+    liveVersion: "0.4.2",
+  } as const;
+  const previousPending = {
+    reason: "unknown",
+    replacement: "older",
+    requestedVersion: "0.4.3",
+    liveVersion: "0.4.2",
+  };
+  const target = { alias: "box", hostname: "box", username: null, port: null };
+  const result = decodeDesktopPending({ type: "ssh-runtime-pending", target, pending });
+  expect(result.pending).toEqual(pending);
+  expect(Schema.decodeUnknownSync(Previous.DesktopSshRuntimePendingResultSchema)(result)).toEqual({
+    ...result,
+    pending: previousPending,
+  });
+  const bootstrap = decodeDesktopBootstrap({
+    target,
+    httpBaseUrl: "http://127.0.0.1:3773/",
+    wsBaseUrl: "ws://127.0.0.1:3773/",
+    pairingToken: null,
+    pendingReplacement: pending,
+  });
+  expect(
+    Schema.decodeUnknownSync(Previous.DesktopSshEnvironmentBootstrapSchema)(bootstrap),
+  ).toEqual({
+    ...bootstrap,
+    pendingReplacement: previousPending,
+  });
+});

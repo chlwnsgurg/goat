@@ -215,7 +215,8 @@ function clientMetadata() {
 
 function sshRuntimePendingError(pending: {
   readonly reason: "busy" | "unknown" | "contended";
-  readonly detail?: "recovery-stale" | "drain-unavailable";
+  readonly detail?: "recovery-stale";
+  readonly refreshCause?: "drain_unavailable";
   readonly replacement: "older" | "legacy" | "incompatible" | "capability";
   readonly liveVersion: string;
   readonly requestedVersion: string;
@@ -229,7 +230,7 @@ function sshRuntimePendingError(pending: {
     detail:
       pending.detail === "recovery-stale"
         ? "Remote recovery is locked. Remove ~/.goat/ssh-launch/replacement.recovery on the remote host after checking that no GOAT client is replacing this runtime."
-        : pending.detail === "drain-unavailable"
+        : pending.refreshCause === "drain_unavailable"
           ? `Remote runtime GOAT ${pending.liveVersion} can't hand over to GOAT ${pending.requestedVersion} right now. GOAT retries every 10 minutes.`
           : pending.reason === "contended"
             ? "Another client is replacing the remote runtime."

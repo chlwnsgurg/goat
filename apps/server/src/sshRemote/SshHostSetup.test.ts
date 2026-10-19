@@ -483,7 +483,8 @@ it.effect.each(
                 ...(drainDeferred
                   ? {
                       refreshDeferred: {
-                        reason: "drain_unavailable" as const,
+                        reason: "archive_unavailable" as const,
+                        refreshCause: "drain_unavailable" as const,
                         requestedVersion: stopped.requestedVersion,
                         detail: "Refresh deferred: this runtime could not drain for the refresh",
                       },
@@ -608,7 +609,7 @@ it.effect.each(
         if (diagnosisOutcome !== "not_ready") expect(result.status?.providers).toBeUndefined();
         else if (drainDeferred) {
           expect(result.status?.runtimeVersion).toBe("0.4.2");
-          expect(result.status?.refreshDeferred?.reason).toBe("drain_unavailable");
+          expect(result.status?.refreshDeferred?.refreshCause).toBe("drain_unavailable");
           expect(yield* setup.status({ host: "box" })).toEqual(result);
         }
       }).pipe(Effect.ensuring(Effect.sync(() => key.mockRestore())));
