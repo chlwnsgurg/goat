@@ -99,16 +99,19 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host facts
         yield* launch(f);
         const first = yield* recordableAsks(f);
         assert.isAbove(first.compat, 0);
-        yield* launch(f);
+        // The probe uses the same compat facts as launch without repeating readiness and guards.
+        yield* probe(f);
         assert.isAbove((yield* recordableAsks(f)).compat, first.compat);
         const facts = yield* f.fs.readDirectory(`${f.home}/.goat/ssh-launch/facts`);
         assert.isFalse(facts.some((name) => name.startsWith("compat.")));
         const before = yield* f.snapshot;
         yield* f.setCompat(["real"]);
-        yield* launch(f);
+        yield* probe(f);
         assert.deepEqual(yield* f.snapshot, before);
         const positive = yield* recordableAsks(f);
-        yield* launch(f);
+        const recoveredFacts = yield* f.fs.readDirectory(`${f.home}/.goat/ssh-launch/facts`);
+        assert.isTrue(recoveredFacts.some((name) => name.startsWith("compat.")));
+        yield* probe(f);
         assert.equal((yield* recordableAsks(f)).compat, positive.compat);
         const refreshed = yield* f.run("launch", false, {
           refreshOwnedRuntimeOnFirstConnection: true,

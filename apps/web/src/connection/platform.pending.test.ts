@@ -109,6 +109,30 @@ describe.each([
       });
     }),
   );
+  it.effect("a runtime that cannot drain is a transient wait, not a block", () =>
+    Effect.gen(function* () {
+      const bridge = {
+        ensureSshEnvironment: async () => ({
+          type: "ssh-runtime-pending",
+          target,
+          pending: {
+            reason: "unknown",
+            detail: "drain-unavailable",
+            replacement: "older",
+            requestedVersion: "1.2.3",
+            liveVersion: "1.2.2",
+          },
+        }),
+      } as unknown as DesktopBridge;
+      const error = yield* consumer(bridge, target).pipe(Effect.flip);
+      expect(error).toMatchObject({
+        _tag: "ConnectionTransientError",
+        reason: "remote-unavailable",
+        detail:
+          "Remote runtime GOAT 1.2.2 can't hand over to GOAT 1.2.3 right now. GOAT retries every 10 minutes.",
+      });
+    }),
+  );
   it.effect("names the runtime a capability replacement waits on", () =>
     Effect.gen(function* () {
       const bridge = {
