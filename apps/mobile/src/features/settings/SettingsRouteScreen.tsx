@@ -1,9 +1,11 @@
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import * as Dialog from "../../components/ui/Dialog";
 import { MemoryEnvironmentEntry } from "./SettingsMemoryRouteScreen";
 import { Toolbar } from "../../components/ui/Toolbar";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useAuth, useUser } from "@clerk/expo";
 import { useNavigation } from "@react-navigation/native";
-import { Platform, View } from "react-native";
+import { Linking, Platform, View } from "react-native";
 import { deriveProjectGroupLabel } from "@goat/client-runtime/state/project-grouping";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -120,6 +122,19 @@ function LocalSettingsRouteScreen() {
         }}
       >
         <SettingsSection title="Connections">
+          {!isGoatConnectEnabled() ? (
+            <SettingsRow
+              icon="globe"
+              label={`${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}`}
+              value={GOAT_CONNECT_COMING_SOON.description}
+              valuePosition="below"
+              onPress={() => {
+                void Linking.openURL(GOAT_CONNECT_COMING_SOON.guideUrl).catch(() => {
+                  Dialog.alert("Could not open guide", "Try opening the Tailscale guide again.");
+                });
+              }}
+            />
+          ) : null}
           <SettingsRow
             icon="desktopcomputer"
             label="Environments"

@@ -1,3 +1,6 @@
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import { environmentCatalog } from "../../connection/catalog";
+import { isGoatConnectOnlyEnvironment } from "../connection/environmentSections";
 import { MemoryEnvironmentEntry } from "./SettingsMemoryRouteScreen";
 import * as Dialog from "../../components/ui/Dialog";
 import { useAtomValue } from "@effect/atom-react";
@@ -77,6 +80,9 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
   const checkController = useRef<AbortController | null>(null);
   useEffect(() => () => checkController.current?.abort(), []);
 
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  const connectUnavailable =
+    !isGoatConnectEnabled() && isGoatConnectOnlyEnvironment(catalog.entries.get(environmentId));
   const connected = environment?.isEnabled === true && environment.connectionState === "connected";
   const allowed =
     !AsyncResult.isFailure(sessionResult) && canMaintainEnvironment(session, connected);
@@ -214,7 +220,9 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
             />
             {!connected ? (
               <Text className="px-2 text-sm text-foreground-muted">
-                Connect this environment to manage it.
+                {connectUnavailable
+                  ? `${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}. ${GOAT_CONNECT_COMING_SOON.description}`
+                  : "Connect this environment to manage it."}
               </Text>
             ) : !allowed ? (
               <Text className="px-2 text-sm text-foreground-muted">

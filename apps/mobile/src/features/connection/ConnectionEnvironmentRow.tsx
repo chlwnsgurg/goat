@@ -1,3 +1,6 @@
+import { GOAT_CONNECT_COMING_SOON, isGoatConnectEnabled } from "@goat/shared/goatConnect";
+import { environmentCatalog } from "../../connection/catalog";
+import { isGoatConnectOnlyEnvironment } from "./environmentSections";
 import * as Dialog from "../../components/ui/Dialog";
 import { ConnectionTraceId } from "./ConnectionTraceId";
 import { SymbolView } from "../../components/ui/AppSymbol";
@@ -51,9 +54,15 @@ export function ConnectionEnvironmentRow(props: {
   const serverConfig = useAtomValue(
     serverEnvironment.configValueAtom(props.environment.environmentId),
   );
-  const unsupported = props.environment.connectionState === "unsupported";
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  const connectUnavailable =
+    !isGoatConnectEnabled() &&
+    isGoatConnectOnlyEnvironment(catalog.entries.get(props.environment.environmentId));
+  const unsupported = connectUnavailable || props.environment.connectionState === "unsupported";
   const enabled = props.environment.isEnabled && !unsupported;
-  const statusLabel = connectionStatusLabel(props.environment);
+  const statusLabel = connectUnavailable
+    ? `${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}. ${GOAT_CONNECT_COMING_SOON.description}`
+    : connectionStatusLabel(props.environment);
   const statusTraceId = enabled ? props.environment.connectionErrorTraceId : null;
   const hasConnectionFailure = enabled && props.environment.connectionError !== null;
   const isRetrying =
@@ -91,7 +100,13 @@ export function ConnectionEnvironmentRow(props: {
         >
           <View className="flex-row items-center gap-1.5">
             <ConnectionStatusDot
-              state={enabled || unsupported ? props.environment.connectionState : "available"}
+              state={
+                connectUnavailable
+                  ? "unsupported"
+                  : enabled || unsupported
+                    ? props.environment.connectionState
+                    : "available"
+              }
               pulse={isRetrying}
               size={8}
             />
@@ -173,7 +188,9 @@ export function ConnectionEnvironmentRow(props: {
         >
           {props.environment.isRelayManaged ? (
             <Text className="text-sm text-foreground-muted">
-              Managed by T3 Connect. Tunnel details update automatically.
+              {isGoatConnectEnabled()
+                ? "Managed by T3 Connect. Tunnel details update automatically."
+                : `${GOAT_CONNECT_COMING_SOON.title} · ${GOAT_CONNECT_COMING_SOON.status}. ${GOAT_CONNECT_COMING_SOON.description}`}
             </Text>
           ) : (
             <>

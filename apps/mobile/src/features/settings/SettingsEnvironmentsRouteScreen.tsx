@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useNavigation } from "@react-navigation/native";
 import { useAtomValue } from "@effect/atom-react";
@@ -48,7 +49,8 @@ export function SettingsEnvironmentsRouteScreen() {
     ? SHOWCASE_CONNECTED_CLOUD_ENVIRONMENTS
     : environmentSections.connectedCloudEnvironments;
   const headerIconColor = useUniwindTheme()["--color-icon"];
-  const relaySession = useAtomValue(managedRelaySessionAtom);
+  const savedRelaySession = useAtomValue(managedRelaySessionAtom);
+  const relaySession = isGoatConnectEnabled() ? savedRelaySession : null;
   const refreshRelayEnvironments = useAtomCommand(
     relayEnvironmentDiscovery.refresh,
     "relay environment refresh",

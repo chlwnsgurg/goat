@@ -1250,3 +1250,8 @@ describe("makeRelayDeviceRegistrationRequest", () => {
     },
   );
 });
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));

@@ -1,3 +1,4 @@
+import { makeMobileCloudSession } from "./cloud-session";
 import {
   ClientCapabilities,
   PlatformConnectionSource,
@@ -167,36 +168,7 @@ const layerCapabilities = Layer.effectContext(
     const storage = yield* MobileStorage.MobileStorage;
     return Context.make(
       ClientCapabilities.CloudSession,
-      ClientCapabilities.CloudSession.of({
-        identity: Effect.sync(() =>
-          Option.fromNullishOr(appAtomRegistry.get(managedRelaySessionAtom)),
-        ),
-        clerkToken: Effect.gen(function* () {
-          const session = appAtomRegistry.get(managedRelaySessionAtom);
-          if (session === null) {
-            return yield* new ConnectionBlockedError({
-              reason: "authentication",
-              detail: "Sign in to T3 Connect to connect this environment.",
-            });
-          }
-          const token = yield* session.readClerkToken().pipe(
-            Effect.mapError(
-              (error) =>
-                new ConnectionTransientError({
-                  reason: "network",
-                  detail: error.message,
-                }),
-            ),
-          );
-          if (token === null) {
-            return yield* new ConnectionBlockedError({
-              reason: "authentication",
-              detail: "The T3 Connect session is unavailable.",
-            });
-          }
-          return token;
-        }),
-      }),
+      makeMobileCloudSession(() => appAtomRegistry.get(managedRelaySessionAtom)),
     ).pipe(
       Context.add(
         ClientCapabilities.PrimaryEnvironmentAuth,
