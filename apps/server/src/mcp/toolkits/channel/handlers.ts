@@ -217,11 +217,17 @@ export const layer = McpToolAccess.toLayer(
       channel_bot_home_claim: McpToolAccess.writesEnvironment((_, check) =>
         Effect.gen(function* () {
           const services = yield* Effect.context<Effect.Services<typeof check>>();
+          const scope = yield* McpInvocationContext.McpInvocationContext;
           const home = yield* ChannelBotHome.ChannelBotHome;
+          // Inside the settings lock: the caller must still have full access and, when it
+          // holds a credential, that credential must still be live.
+          const stillAllowed = check.pipe(
+            Effect.andThen(scope.reauthorize?.([]) ?? Effect.void),
+            Effect.provideContext(services),
+          );
           return yield* home
             .claimHere(
-              check.pipe(
-                Effect.provideContext(services),
+              stillAllowed.pipe(
                 Effect.asVoid,
                 Effect.mapError(
                   () =>

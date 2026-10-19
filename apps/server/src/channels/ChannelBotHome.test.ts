@@ -126,3 +126,52 @@ it.effect("checks the caller again inside the settings lock, after a write that 
     ),
   ),
 );
+
+it.effect("reports the newer claim another write committed while this claim waited", () => {
+  let armed: Deferred.Deferred<void> | undefined;
+  // Signals when the claim has read the home it means to supersede.
+  const observedSettings = Layer.effect(
+    ServerSettings.ServerSettingsService,
+    Effect.gen(function* () {
+      const base = yield* ServerSettings.ServerSettingsService;
+      return ServerSettings.ServerSettingsService.of({
+        ...base,
+        getSettings: base.getSettings.pipe(
+          Effect.tap(() =>
+            armed === undefined ? Effect.void : Deferred.succeed(armed, undefined),
+          ),
+        ),
+      });
+    }),
+  ).pipe(Layer.provide(ServerSettings.layerTest()));
+  return Effect.gen(function* () {
+    yield* TestClock.setTime(1_000);
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const home = yield* ChannelBotHome.ChannelBotHome;
+    yield* settings.updateSettings({
+      goatBotHome: { environmentId: other, claimedAt: 5, claimId: "old" },
+    });
+    const newer = { environmentId: other, claimedAt: 50_000, claimId: "newer" };
+    const locked = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const holder = yield* settings
+      .updateSettings(
+        { goatBotHome: newer },
+        Deferred.succeed(locked, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      )
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(locked);
+    armed = yield* Deferred.make<void>();
+    const claim = yield* home.claimHere(Effect.void).pipe(Effect.forkChild);
+    yield* Deferred.await(armed);
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(holder);
+    const result = yield* Fiber.join(claim);
+    assert.deepStrictEqual(result, { claimed: false, home: newer, environmentId: self });
+    assert.isFalse((yield* home.read).isHome);
+  }).pipe(
+    Effect.provide(
+      ChannelBotHome.layer.pipe(Layer.provideMerge(Layer.mergeAll(observedSettings, identity))),
+    ),
+  );
+});

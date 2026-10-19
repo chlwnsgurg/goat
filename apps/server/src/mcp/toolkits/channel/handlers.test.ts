@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   type AuthMcpClientAccess,
+  EnvironmentAuthorizationError,
   EnvironmentId,
   ProviderInstanceId,
   ThreadId,
@@ -266,7 +267,10 @@ it.effect.each([
 });
 
 /** `access` is read on every check, so a test can lower it while a claim waits. */
-const homeScope = (access: () => AuthMcpClientAccess) =>
+const homeScope = (
+  access: () => AuthMcpClientAccess,
+  reauthorize?: () => Effect.Effect<void, EnvironmentAuthorizationError>,
+) =>
   Layer.succeed(McpInvocationContext.McpInvocationContext, {
     environmentId,
     capabilities: new Set(["orchestration"] as const),
@@ -280,6 +284,7 @@ const homeScope = (access: () => AuthMcpClientAccess) =>
         return access();
       },
     },
+    ...(reauthorize === undefined ? {} : { reauthorize }),
   });
 const gone = EnvironmentId.make("environment:gone");
 const goneHome = { environmentId: gone, claimedAt: 1_792_398_593_330, claimId: "gone" };
@@ -338,6 +343,57 @@ it.effect.each(["read-only", "approval-required", "auto-accept-edits"] as const)
       Effect.provide(
         Layer.merge(
           homeScope(() => access),
+          harness.layer,
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "a credential revoked while the claim waits for the settings lock changes nothing",
+  () => {
+    const harness = makeHarness();
+    // The write holding the lock revokes the credential as it finishes, so any check made after
+    // the claim gets the lock sees the revocation, whenever the claim's first check ran.
+    let revoked = false;
+    const reauthorize = () =>
+      revoked
+        ? Effect.fail(
+            new EnvironmentAuthorizationError({
+              message: "revoked",
+              requiredScope: "settings:write",
+            }),
+          )
+        : Effect.void;
+    return Effect.gen(function* () {
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({ goatBotHome: goneHome });
+      const locked = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const holder = yield* settings
+        .updateSettings(
+          {},
+          Deferred.succeed(locked, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.andThen(Effect.sync(() => void (revoked = true))),
+          ),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(locked);
+      const claim = yield* callHomeTool("channel_bot_home_claim").pipe(Effect.forkChild);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(holder);
+      const failure = yield* Fiber.join(claim);
+      assert.isTrue(
+        "code" in failure && failure.code === "capability_denied",
+        JSON.stringify(failure),
+      );
+      assert.deepStrictEqual((yield* settings.getSettings).goatBotHome, goneHome);
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          homeScope(() => "full-access", reauthorize),
           harness.layer,
         ),
       ),
