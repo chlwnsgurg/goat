@@ -1,6 +1,5 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- tests replace link/copyFile inside the service.
 import * as NodeFS from "node:fs";
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- re-exports the replaced functions to ESM importers.
 import * as NodeModule from "node:module";
 import { assert, it } from "@effect/vitest";
 import {
