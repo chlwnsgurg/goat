@@ -526,6 +526,21 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
       Effect.result,
     );
   };
+  // Host facts are recorded only for executables older than 2 s. Shifting the host clock makes
+  // this fixture's just-written files old (positive seconds) or new (negative) without waiting.
+  const shiftHostClock = (seconds: number) =>
+    Effect.gen(function* () {
+      const bin = `${test}/clock`;
+      yield* fs.makeDirectory(bin, { recursive: true });
+      yield* fs.writeFileString(
+        `${bin}/date`,
+        `#!/bin/sh
+if [ "$#" = 1 ] && [ "$1" = +%s ]; then echo $(( $(/bin/date +%s) + (${seconds}) )); else exec /bin/date "$@"; fi
+`,
+      );
+      yield* fs.chmod(`${bin}/date`, 0o700);
+      setRemotePath(`${bin}:${remotePath}`);
+    });
   const snapshot = Effect.gen(function* () {
     const files = ["run-t3.sh", "pid", "port", "managed", "identity"];
     const values: Record<string, string | null> = {};
@@ -556,6 +571,7 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
     setBeforeCommand,
     setScriptPrefix,
     setRemotePath,
+    shiftHostClock,
     counters: () => ({ uploads, gh, cacheReads }),
     remoteCommands,
     transport,

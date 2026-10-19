@@ -83,6 +83,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             ssh: SSH_RUNTIME_PROTOCOL_VERSION,
             orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
+          // Each MCP attempt must ask goat again; recorded answers are covered by tunnel.facts.test.ts.
+          yield* f.shiftHostClock(-60);
           let current = { ...f.runner, archiveVersion: String(f.runner.archiveVersion) };
           const layer = Layer.mergeAll(
             NodeServices.layer,
