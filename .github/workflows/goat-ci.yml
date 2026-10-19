@@ -87,6 +87,11 @@ jobs:
     needs: scope
     runs-on: [self-hosted, linux, x64, goat, epyc]
     timeout-minutes: ${{ matrix.task == 'test-memory-growth' && 75 || 40 }}
+    env:
+      # The EPYC runners are Ubuntu 26.04, which Playwright 1.60 does not recognize. Use the
+      # 24.04 build for both installing and launching; the install step's ldd check still fails
+      # when that build is missing a system library here.
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ubuntu24.04-x64
     strategy:
       fail-fast: false
       # Tasks: check, typecheck, test, test-desktop, test-contracts, test-client-runtime,
