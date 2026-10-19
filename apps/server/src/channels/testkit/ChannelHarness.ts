@@ -123,6 +123,8 @@ export class WorkerWorld {
   readonly subagentStops: Array<string> = [];
   /** Command ids the orchestrator refuses for good, as a persisted rejection would. */
   readonly rejectedCommands = new Set<string>();
+  /** A worker thread's cloud task status, when it has one. */
+  readonly cloudTasks = new Map<string, "running" | "submitting" | "completed">();
   /** Follow-ups that joined a running run, by message id, and the run they joined. */
   readonly steered = new Map<string, RunId>();
   /** Sends to fail, by message id, with the error the orchestrator would give. */
@@ -346,9 +348,14 @@ export function makeHarness(
             },
             runs,
             runtimeRequests: world.runtimeRequests.get(threadId) ?? [],
-            providerThreads: world.background.has(threadId)
-              ? [{ pendingBackgroundTasks: [{ taskId: "background" }] }]
-              : [],
+            providerThreads: [
+              ...(world.background.has(threadId)
+                ? [{ pendingBackgroundTasks: [{ taskId: "background" }] }]
+                : []),
+              ...(world.cloudTasks.has(threadId)
+                ? [{ cloudTask: { status: world.cloudTasks.get(threadId) } }]
+                : []),
+            ],
             messages: runs
               .filter((run) => messageRunIds === undefined || messageRunIds.includes(run.id))
               .flatMap((run) => {

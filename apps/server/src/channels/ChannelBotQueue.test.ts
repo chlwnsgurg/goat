@@ -453,4 +453,40 @@ describe("GOAT Bot worker slots", () => {
       assert.lengthOf(yield* ledger.listUndeliveredOutcomes(ownerId), 0);
     }).pipe(Effect.provide(harness.layer));
   });
+
+  it.effect("keeps retrying a refused stop while the worker's cloud task still runs", () => {
+    const { harness } = queueHarness();
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const reception = yield* ChannelReceptionService.ChannelReceptionService;
+      yield* gateway.ingest(goatInput("do: cloud job", "z1"), rpcContext);
+      yield* runtime.drain;
+      const [task] = (yield* ledger.listTasks({ ownerId, limit: 10 })).tasks;
+      const threadId = task!.worker!.threadId;
+      // The run has ended, but its cloud task is still running.
+      harness.world.setStatus(threadId, 1, "completed", "Submitted.");
+      harness.world.cloudTasks.set(threadId, "running");
+      yield* gateway.ingest(goatInput("stop", "z2"), rpcContext);
+      const [input] = yield* ledger.listPendingInputs(10);
+      yield* reception.receive(input!, runtime.ownerToken);
+      const [stop] = yield* ledger.listPendingForwards(10);
+      harness.world.rejectedCommands.add(stopIdsFor(stop!.event.eventId).interrupt);
+      const dispatcher = yield* ChannelDispatcher.ChannelDispatcher;
+      yield* dispatcher.forward(stop!, runtime.ownerToken);
+      // Refused while cloud work runs: not done, and the next attempt is lined up.
+      assert.lengthOf(yield* ledger.listPendingForwards(10), 1);
+      assert.strictEqual(yield* ledger.stopAttempt(stop!.event.eventId), 1);
+      yield* dispatcher.forward(stop!, runtime.ownerToken);
+      assert.deepStrictEqual(
+        harness.world.commands
+          .filter((command) => command.type === "thread.stop")
+          .map((command) => command.commandId),
+        [stopIdsFor(stop!.event.eventId, "attempt-1").interrupt],
+      );
+      assert.lengthOf(yield* ledger.listPendingForwards(10), 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
 });

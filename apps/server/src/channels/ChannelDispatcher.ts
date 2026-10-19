@@ -918,7 +918,7 @@ const make = Effect.gen(function* () {
       }
       const records = { value: read.success };
       // Anything not yet ended is alive: queued, preparing, starting, running, waiting, or a
-      // finished run whose provider still works in the background.
+      // finished run whose provider still works in the background or in the cloud.
       const runs = records.value.runs;
       const latestRun = runs.findLast((run) => run.status !== "queued");
       const background =
@@ -930,9 +930,15 @@ const make = Effect.gen(function* () {
           activeProviderThreadId: records.value.thread.activeProviderThreadId,
           runs,
         }).length > 0;
+      // A cloud task still running or being submitted keeps working whatever the runs say, as
+      // the orchestrator's own stop treats it.
+      const cloud = records.value.providerThreads.some(
+        (thread) =>
+          thread.cloudTask?.status === "running" || thread.cloudTask?.status === "submitting",
+      );
       const live =
         runs.findLast((run) => !ENDED_RUN_STATUSES.has(run.status)) ??
-        (background ? latestRun : undefined);
+        (background || cloud ? latestRun : undefined);
       const stopThread = (commandId: CommandId) =>
         threads
           .dispatch({ type: "thread.stop", commandId, threadId, reason: "Stopped from GOAT Bot." })
