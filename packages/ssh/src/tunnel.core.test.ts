@@ -56,6 +56,8 @@ import { nextVersion, shell, fixture } from "./tunnel.runnerSwitch.fixture.ts";
 // Archive acquisition stays local to these transport doubles.
 beforeEach(() => vi.stubGlobal("fetch", async () => new Response(null, { status: 404 })));
 afterEach(() => vi.unstubAllGlobals());
+const versionEntries = (...versions: string[]) =>
+  platform === "linux" ? [".maintenance.lock", ...versions] : versions;
 
 describe("ssh tunnel scripts", () => {
   it.live("generates valid shell syntax with GOAT runtime variables and legacy peer metadata", () =>
@@ -1755,7 +1757,10 @@ describe("archive runner script", () => {
       assert.isFalse(
         yield* fs.exists(`${root}/.goat/runtime/goat/versions/${archiveVersion}/.install-complete`),
       );
-      assert.deepEqual(yield* fs.readDirectory(`${root}/.goat/runtime/goat/versions`), []);
+      assert.deepEqual(
+        yield* fs.readDirectory(`${root}/.goat/runtime/goat/versions`),
+        versionEntries(),
+      );
       assert.notInclude(result.stderr, "curl");
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
@@ -1783,7 +1788,7 @@ describe("archive runner script", () => {
         assert.include(result.stdout, `goat v${archiveVersion}`);
       }
       const versions = `${root}/.goat/runtime/goat/versions`;
-      assert.deepEqual(yield* fs.readDirectory(versions), [archiveVersion]);
+      assert.deepEqual(yield* fs.readDirectory(versions), versionEntries(archiveVersion));
       assert.equal(
         (yield* fs.readFileString(`${versions}/${archiveVersion}/.install-complete`)).trim(),
         archiveVersion,
@@ -1815,7 +1820,7 @@ describe("archive runner script", () => {
           assert.include(result.stdout, `goat v${archiveVersion}`);
         }
         const versionsDir = `${home}/.goat/runtime/goat/versions`;
-        assert.deepEqual(yield* fs.readDirectory(versionsDir), [archiveVersion]);
+        assert.deepEqual(yield* fs.readDirectory(versionsDir), versionEntries(archiveVersion));
         assert.equal(
           (yield* fs.readFileString(`${versionsDir}/${archiveVersion}/.install-complete`)).trim(),
           archiveVersion,
@@ -1949,9 +1954,10 @@ exec /bin/mv "$@"
           assert.equal(result.stderr, "");
           assert.equal(result.stdout, `goat v${archiveVersion}\n`);
           assert.equal((yield* fs.readFileString(`${root}/attempts`)).trim().split("\n").length, 2);
-          assert.deepEqual(yield* fs.readDirectory(`${home}/.goat/runtime/goat/versions`), [
-            archiveVersion,
-          ]);
+          assert.deepEqual(
+            yield* fs.readDirectory(`${home}/.goat/runtime/goat/versions`),
+            versionEntries(archiveVersion),
+          );
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
@@ -2070,7 +2076,7 @@ wait "$b"
               `goat v${archiveVersion}\n`,
             );
           }
-          assert.deepEqual(yield* fs.readDirectory(versions), [archiveVersion]);
+          assert.deepEqual(yield* fs.readDirectory(versions), versionEntries(archiveVersion));
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
   });

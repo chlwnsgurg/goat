@@ -106,6 +106,10 @@ const fixture = Effect.fn("test.ghFixture")(function* (
         uploads.push(data);
         return processHandle();
       }
+      if (command.args.includes("goat-runtime-cleanup")) {
+        calls.push("cleanup");
+        return processHandle();
+      }
       const script = new TextDecoder().decode(data);
       if (script.includes("ready=false")) {
         calls.push("probe");
@@ -187,7 +191,13 @@ describe("SSH archives from locally authenticated gh", () => {
         yield* invoke(entry, { archiveVersion: version, archiveDirectory: state.directory }).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, state.spawner),
         );
-        assert.deepEqual(state.calls, ["probe", "gh", "upload", entry]);
+        assert.deepEqual(state.calls, [
+          "probe",
+          "gh",
+          "upload",
+          entry,
+          ...(entry === "launch" ? ["cleanup"] : []),
+        ]);
         assert.deepEqual(state.uploads, [bytes]);
         assert.deepEqual(yield* state.fs.readFile(`${state.directory}/${asset}`), bytes);
         assert.equal(
@@ -268,7 +278,7 @@ describe("SSH archives from locally authenticated gh", () => {
         archiveDirectory: state.directory,
         releaseBaseUrl: "https://mirror.example/goat/",
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, state.spawner));
-      assert.deepEqual(state.calls, ["probe", "launch"]);
+      assert.deepEqual(state.calls, ["probe", "launch", "cleanup"]);
       assert.deepEqual(state.uploads, []);
       assert.deepEqual(yield* state.fs.readDirectory(state.directory), []);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
@@ -283,7 +293,7 @@ describe("SSH archives from locally authenticated gh", () => {
       );
       assert.deepEqual(
         state.calls,
-        mode === "ready" ? ["probe", "launch"] : ["probe", "upload", "launch"],
+        mode === "ready" ? ["probe", "launch"] : ["probe", "upload", "launch", "cleanup"],
       );
       assert.deepEqual(state.uploads, mode === "ready" ? [] : [bytes]);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
@@ -371,7 +381,7 @@ describe("SSH archives from locally authenticated gh", () => {
         archiveDirectory: state.directory,
         ghCommand,
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, state.spawner));
-      assert.deepEqual(state.calls, ["probe", "gh", "upload", "launch"]);
+      assert.deepEqual(state.calls, ["probe", "gh", "upload", "launch", "cleanup"]);
       assert.deepEqual(state.uploads, [bytes]);
       assert.deepEqual(yield* state.fs.readFile(`${state.directory}/${asset}`), bytes);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
@@ -432,7 +442,7 @@ describe("SSH archives from locally authenticated gh", () => {
         );
         if (mode === "valid") {
           assert.isTrue(Result.isSuccess(result));
-          assert.deepEqual(state.calls, ["probe", "upload", "launch"]);
+          assert.deepEqual(state.calls, ["probe", "upload", "launch", "cleanup"]);
           assert.deepEqual(state.uploads, [bytes]);
         } else {
           assert.isTrue(Result.isFailure(result));

@@ -33,6 +33,9 @@ import {
   fixture,
 } from "./tunnel.runnerSwitch.fixture.ts";
 
+const versionEntries = (...versions: string[]) =>
+  platform === "linux" ? [".maintenance.lock", ...versions] : versions;
+
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "install before runner switch",
   () => {
@@ -235,7 +238,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           assert.include(result.stderr, `expected goat v${requestedVersion}`);
           assert.include(result.stderr, `reported "goat v${reportedVersion}"`);
           assert.deepEqual(yield* snapshot, before);
-          assert.deepEqual(yield* fs.readDirectory(versions), [requestedVersion]);
+          assert.deepEqual(yield* fs.readDirectory(versions), versionEntries(requestedVersion));
           assert.deepEqual(yield* fs.readDirectory(state), ["run-t3.sh"]);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
