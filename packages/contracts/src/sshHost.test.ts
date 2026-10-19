@@ -50,6 +50,19 @@ const providers = {
   ready: false,
   fixes: [{ ...fix, path: "provider.setup", handoff: "terminal", command: "git --version" }],
 } as const;
+const decodePreviousStatus = Schema.decodeUnknownSync(Previous.SshHostStatus);
+const decodePreviousPending = Schema.decodeUnknownSync(Previous.SshRuntimePendingReplacementSchema);
+const decodePreviousDesktopPending = Schema.decodeUnknownSync(
+  Previous.DesktopSshRuntimePendingResultSchema,
+);
+const decodePreviousBootstrap = Schema.decodeUnknownSync(
+  Previous.DesktopSshEnvironmentBootstrapSchema,
+);
+const previousOkResult = Schema.Struct({
+  kind: Schema.Literal("ok"),
+  status: Previous.SshHostStatus,
+});
+const decodePreviousResultWire = Schema.decodeUnknownSync(Schema.toCodecJson(previousOkResult));
 const decodeStatus = Schema.decodeUnknownSync(SshHostStatus);
 const decodeResult = Schema.decodeUnknownSync(SshHostResult);
 const decodeStatusInput = Schema.decodeUnknownSync(SshHostStatusInput);
@@ -669,13 +682,17 @@ it.each(["ready", "providers_not_ready"] as const)(
       refreshCause: "drain_unavailable",
     });
     const previous = { ...current, refreshDeferred };
-    expect(Schema.decodeUnknownSync(Previous.SshHostStatus)(current)).toEqual(previous);
-    const oldResult = Schema.Struct({ kind: Schema.Literal("ok"), status: Previous.SshHostStatus });
-    expect(
-      Schema.decodeUnknownSync(Schema.toCodecJson(oldResult))(
-        encodeResultWire({ kind: "ok", status: current }),
-      ),
-    ).toEqual({ kind: "ok", status: previous });
+    expect(decodePreviousStatus(current)).toEqual(previous);
+    expect(() =>
+      decodePreviousStatus({
+        ...current,
+        refreshDeferred: { ...refreshDeferred, reason: "drain_unavailable" },
+      }),
+    ).toThrow();
+    expect(decodePreviousResultWire(encodeResultWire({ kind: "ok", status: current }))).toEqual({
+      kind: "ok",
+      status: previous,
+    });
   },
 );
 
@@ -687,6 +704,12 @@ it("af65f23e5 desktop clients decode new pending and bootstrap metadata", () => 
     requestedVersion: "0.4.3",
     liveVersion: "0.4.2",
   } as const;
+  expect(() =>
+    decodePreviousPending({
+      ...pending,
+      detail: "drain-unavailable",
+    }),
+  ).toThrow();
   const previousPending = {
     reason: "unknown",
     replacement: "older",
@@ -696,7 +719,7 @@ it("af65f23e5 desktop clients decode new pending and bootstrap metadata", () => 
   const target = { alias: "box", hostname: "box", username: null, port: null };
   const result = decodeDesktopPending({ type: "ssh-runtime-pending", target, pending });
   expect(result.pending).toEqual(pending);
-  expect(Schema.decodeUnknownSync(Previous.DesktopSshRuntimePendingResultSchema)(result)).toEqual({
+  expect(decodePreviousDesktopPending(result)).toEqual({
     ...result,
     pending: previousPending,
   });
@@ -707,9 +730,7 @@ it("af65f23e5 desktop clients decode new pending and bootstrap metadata", () => 
     pairingToken: null,
     pendingReplacement: pending,
   });
-  expect(
-    Schema.decodeUnknownSync(Previous.DesktopSshEnvironmentBootstrapSchema)(bootstrap),
-  ).toEqual({
+  expect(decodePreviousBootstrap(bootstrap)).toEqual({
     ...bootstrap,
     pendingReplacement: previousPending,
   });
