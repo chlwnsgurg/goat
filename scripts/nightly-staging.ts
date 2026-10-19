@@ -170,6 +170,54 @@ const runTarWith = (
     catch: (error) => new NightlyStagingError({ message: `tar failed: ${String(error)}` }),
   });
 
+/**
+ * Extracts a tar stream fed part by part, so a consumer needs disk for the files
+ * only and never for a second, concatenated copy of the archive.
+ */
+const tarExtractor = (cwd: string) =>
+  Effect.acquireRelease(
+    Effect.flatMap(HostProcess.Platform, (platform) =>
+      Effect.sync(() => {
+        NodeFS.mkdirSync(cwd, { recursive: true });
+        const child = NodeChildProcess.spawn("tar", [...tarFlags(platform), "-xf", "-"], {
+          cwd,
+          env: { ...process.env, COPYFILE_DISABLE: "1" },
+          stdio: ["pipe", "inherit", "inherit"],
+        });
+        const done = new Promise<void>((resolve, reject) => {
+          child.on("error", reject);
+          child.on("close", (code) =>
+            code === 0 ? resolve() : reject(new Error(`tar exited with ${code}`)),
+          );
+        });
+        done.catch(() => undefined);
+        return { child, done };
+      }),
+    ),
+    ({ child }) =>
+      Effect.sync(() => {
+        if (child.exitCode === null) child.kill();
+      }),
+  ).pipe(
+    Effect.map(({ child, done }) => ({
+      write: (bytes: Uint8Array) =>
+        Effect.tryPromise({
+          try: () =>
+            new Promise<void>((resolve, reject) =>
+              child.stdin.write(bytes, (error) => (error ? reject(error) : resolve())),
+            ),
+          catch: (error) => new NightlyStagingError({ message: `tar failed: ${String(error)}` }),
+        }),
+      finish: Effect.tryPromise({
+        try: () => {
+          child.stdin.end();
+          return done;
+        },
+        catch: (error) => new NightlyStagingError({ message: `tar failed: ${String(error)}` }),
+      }),
+    })),
+  );
+
 const readRange = (file: string, offset: number, length: number) =>
   Effect.try({
     try: () => {
@@ -382,19 +430,23 @@ export const getHandoffs = Effect.fn("getHandoffs")(function* (
       read = yield* readHandoff(client, drafts.get(name)!, name);
     }
     if ("problem" in read) return yield* fail(read.problem);
-    const { file } = yield* temporaryFile(`${name}.tar`);
+    const expected = read.parts.reduce((sum, part) => sum + part.size, 0);
+    if (expected !== read.manifest.size)
+      return yield* fail(
+        `${name} parts add up to ${expected} bytes, manifest says ${read.manifest.size}.`,
+      );
+    // Each part is verified before tar sees any of its bytes.
+    const extractor = yield* tarExtractor(options.dir);
     let total = 0;
     for (const part of read.parts) {
       const bytes = yield* client.downloadAsset(part.asset.id);
       if (bytes.byteLength !== part.size || sha256(bytes) !== part.sha256) {
         return yield* fail(`${part.asset.name} does not match its manifest size and SHA-256.`);
       }
-      NodeFS.appendFileSync(file, bytes);
+      yield* extractor.write(bytes);
       total += bytes.byteLength;
     }
-    if (total !== read.manifest.size)
-      return yield* fail(`${name} is ${total} bytes, manifest says ${read.manifest.size}.`);
-    yield* runTar(["-xf", "-"], options.dir, { stdin: file });
+    yield* extractor.finish;
     yield* Console.log(`Restored ${name} (${total} bytes) into ${options.dir}.`);
     fetched.push(name);
   }
