@@ -3,6 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   DESKTOP_SLEEP_RECONNECT_AFTER_MS,
@@ -36,9 +37,7 @@ function makeDesktopShell() {
   };
 }
 
-const settle = Effect.gen(function* () {
-  for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
-});
+const settle = TestClock.adjust(0).pipe(Effect.provide(TestClock.layer()));
 
 describe("desktop wakeups", () => {
   it("replaces sessions after a long sleep and only probes after a short one or an unlock", () => {

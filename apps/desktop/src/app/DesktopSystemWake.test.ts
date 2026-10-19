@@ -96,18 +96,18 @@ describe("DesktopSystemWake", () => {
 
         yield* Effect.scoped(
           Effect.gen(function* () {
-            for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+            yield* TestClock.adjust(0);
 
             powerListeners.get("suspend")?.();
-            for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+            yield* TestClock.adjust(0);
             yield* TestClock.adjust("2 seconds");
 
             // First resume reports the 2s sleep; duplicate resume 100ms later is ignored.
             powerListeners.get("resume")?.();
-            for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+            yield* TestClock.adjust(0);
             yield* TestClock.adjust("100 millis");
             powerListeners.get("resume")?.();
-            for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+            yield* TestClock.adjust(0);
 
             assert.deepEqual(sentEvents, [
               {
@@ -116,6 +116,23 @@ describe("DesktopSystemWake", () => {
               },
             ]);
             assert.equal(tunnelRevalidations, 1);
+
+            // A new paired sleep is real even inside the duplicate window.
+            powerListeners.get("suspend")?.();
+            yield* TestClock.adjust(0);
+            yield* TestClock.adjust("100 millis");
+            powerListeners.get("resume")?.();
+            yield* TestClock.adjust(0);
+            assert.equal(sentEvents.length, 2);
+            assert.equal(tunnelRevalidations, 2);
+            assert.deepEqual(sentEvents[1]?.payload, { reason: "resume", asleepMs: 100 });
+
+            yield* TestClock.adjust("3 seconds");
+            powerListeners.get("resume")?.();
+            yield* TestClock.adjust(0);
+            assert.equal(sentEvents.length, 3);
+            assert.equal(tunnelRevalidations, 3);
+            assert.deepEqual(sentEvents[2]?.payload, { reason: "resume", asleepMs: null });
           }),
         ).pipe(Effect.provide(layer));
       }).pipe(Effect.provide(TestClock.layer())),
