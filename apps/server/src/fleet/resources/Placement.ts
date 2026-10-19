@@ -59,8 +59,12 @@ export class Placement extends Context.Service<Placement, PlacementShape>()(
   "goat/fleet/resources/Placement",
 ) {}
 
-/** Hosts are not cordoned until the health controller provides its conditions. */
-const NOT_CORDONED: ReadonlySet<string | null> = new Set();
+/** Cordoned hosts, from the health controller (T2) when it provides this; none until then. */
+export const PlacementHostConditions = Context.Reference<{
+  readonly cordoned: Effect.Effect<ReadonlySet<string | null>>;
+}>("goat/fleet/resources/Placement/PlacementHostConditions", {
+  defaultValue: () => ({ cordoned: Effect.succeed(new Set<string | null>()) }),
+});
 
 export const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettings.ServerSettingsService;
@@ -90,13 +94,12 @@ export const make = Effect.gen(function* () {
       const settings = yield* fleetSettings;
       const now = DateTime.toEpochMillis(yield* DateTime.now);
       const threads = fleetThreads(hosts);
+      const cordoned = yield* (yield* PlacementHostConditions).cordoned;
       return {
         controllerEnabled: settings.controllerEnabled === true,
         maxRunningThreads: settings.maxRunningThreads ?? null,
         threads,
-        hosts: hosts.map((entry) =>
-          schedulerHostStatus(entry, settings, NOT_CORDONED, threads, now),
-        ),
+        hosts: hosts.map((entry) => schedulerHostStatus(entry, settings, cordoned, threads, now)),
         cooldowns: [...(yield* fallback.cooldowns)],
         decisions: yield* Ref.get(log),
       } satisfies SchedulerStatus;
@@ -107,10 +110,10 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const settings = yield* fleetSettings;
         const cooling = new Set((yield* fallback.cooldowns).map(stepKey));
-        const chain =
-          request.fallbackChain === null
-            ? undefined
-            : settings.fallbackChains?.[request.fallbackChain];
+        // Goals that name no chain use the default one, as Fallback.next does.
+        const chainId = request.fallbackChain ?? settings.defaultFallbackChain ?? null;
+        const chain = chainId === null ? undefined : settings.fallbackChains?.[chainId];
+        const cordoned = yield* (yield* PlacementHostConditions).cordoned;
         const seen = new Set([stepKey(request.modelSelection)]);
         const selections = [request.modelSelection];
         for (const step of chain?.steps ?? []) {
@@ -126,7 +129,8 @@ export const make = Effect.gen(function* () {
             selections,
             hostSelector: request.hostSelector,
             avoidHosts: request.avoidHosts,
-            cordoned: NOT_CORDONED,
+            ...(request.project.projectId === null ? {} : { projectHost: request.project.host }),
+            cordoned,
           },
           hosts,
           settings,

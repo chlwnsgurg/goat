@@ -123,11 +123,12 @@ export const make = Effect.gen(function* () {
     const now = yield* nowMs;
     const cooling = yield* Ref.get(cooldownState);
     const providers = Option.isSome(registry) ? yield* registry.value.getProviders : undefined;
-    return (step: FallbackChainStep, current: string) => {
+    return (step: FallbackChainStep, current: string, local: boolean) => {
       const cooldown = cooling.get(stepKey(step));
       if (cooldown !== undefined && Date.parse(cooldown.until) > now)
         return "is cooling down until " + cooldown.until;
-      if (providers === undefined) return undefined;
+      // Only this machine's providers are known here; placement checks a remote's.
+      if (!local || providers === undefined) return undefined;
       const provider = providers.find((candidate) => candidate.instanceId === step.instanceId);
       if (provider === undefined) return "is not configured here";
       if (!provider.enabled) return "is disabled";
@@ -207,9 +208,7 @@ export const make = Effect.gen(function* () {
         current: input.selection,
         failure: input.failure,
         tried: input.tried,
-        // Only this machine's providers are known here; placement checks the remote's.
-        unavailable: (step) =>
-          input.host === null ? unavailable(step, input.selection.instanceId) : undefined,
+        unavailable: (step) => unavailable(step, input.selection.instanceId, input.host === null),
       });
       if (decision._tag === "Exhausted") return decision;
       const selection = toSelection(decision.step);
@@ -280,6 +279,77 @@ export const make = Effect.gen(function* () {
       const generation = Math.floor(
         (yield* nowMs) / Math.max(1, resolved.chain.cooldownMs ?? DEFAULT_FALLBACK_COOLDOWN_MS),
       );
+      /** Re-checks the thread, then the notice and the continuation, both fixed per run. */
+      const announce = (target: ModelSelection, hop: number) =>
+        Effect.gen(function* () {
+          // The user may have settled, stopped, or redirected the thread meanwhile. A small
+          // window remains between this read and the dispatch; the orchestrator has no
+          // conditional continuation to close it.
+          const latest = yield* threads.getThreadShell(threadId);
+          if (
+            latest === null ||
+            latest.latestRunId !== runId ||
+            latest.status !== "failed" ||
+            latest.archivedAt !== null ||
+            latest.settledOverride === "settled" ||
+            latest.pendingRuntimeRequest != null ||
+            stepKey(latest.modelSelection) !== stepKey(target)
+          )
+            return;
+          yield* Effect.logInfo("fleet.fallback.hop", {
+            threadId,
+            runId,
+            from: label(current),
+            to: label(target),
+            hop,
+          });
+          yield* notice(
+            threadId,
+            "switch:" + runId,
+            "Switched to " +
+              label(target) +
+              " after " +
+              failure +
+              " on " +
+              label(current) +
+              (shell.usageLimitResetAt == null
+                ? ""
+                : "; that limit resets at " + shell.usageLimitResetAt) +
+              " (fallback chain " +
+              resolved.id +
+              ").",
+          );
+          const continuation = "fleet-fallback:" + threadId + ":" + runId + ":continue";
+          yield* threads.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(continuation),
+            messageId: MessageId.make(continuation),
+            threadId,
+            text: "Continue where you left off.",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "server",
+          });
+        });
+      const selectId = (target: Pick<ModelSelection, "instanceId" | "model">, window: number) =>
+        CommandId.make(
+          "fleet-fallback:" + threadId + ":" + runId + ":" + stepKey(target) + ":" + window,
+        );
+      // A restart after our selection landed: finish that hop instead of choosing again, even
+      // if its account has since run out. The receipt tells it apart from a model the user
+      // picked by hand, which is left alone.
+      const committed =
+        stepKey(shell.modelSelection) !== stepKey(current) &&
+        resolved.chain.steps.some((step) => stepKey(step) === stepKey(shell.modelSelection)) &&
+        ((yield* threads.hasReceipt(selectId(shell.modelSelection, generation))) ||
+          (yield* threads.hasReceipt(selectId(shell.modelSelection, generation - 1))));
+      if (committed) {
+        yield* announce(shell.modelSelection, new Set(tried.map(stepKey)).size);
+        return true;
+      }
+      // The user picked another model since the failure; theirs to resume.
+      if (stepKey(shell.modelSelection) !== stepKey(current)) return false;
       for (let attempt = 0; attempt < resolved.chain.steps.length; attempt++) {
         const unavailable = yield* unavailability;
         const decision = decideNext({
@@ -287,21 +357,28 @@ export const make = Effect.gen(function* () {
           current,
           failure,
           tried,
-          unavailable: (step) => unavailable(step, current.instanceId),
+          unavailable: (step) => unavailable(step, current.instanceId, true),
         });
         if (decision._tag === "Exhausted") {
           yield* noticeOnce(threadId, runId, resolved.id, decision.reason);
           return false;
         }
         const target = toSelection(decision.step);
+        if (
+          !(yield* threads.isProviderInstanceEnabledForProject({
+            projectId: shell.projectId,
+            instanceId: target.instanceId,
+          }))
+        ) {
+          yield* reportFailure(target, "unavailable");
+          continue;
+        }
         const selected = yield* threads
           .dispatch({
             type: modelSelectionCommandType(shell.providerInstanceId, target),
             // The retry window is in the id: a refused command's receipt would replay the
             // refusal forever under a fixed one.
-            commandId: CommandId.make(
-              "fleet-fallback:" + threadId + ":" + runId + ":" + stepKey(target) + ":" + generation,
-            ),
+            commandId: selectId(target, generation),
             threadId,
             modelSelection: target,
           })
@@ -317,45 +394,7 @@ export const make = Effect.gen(function* () {
           yield* reportFailure(target, "unavailable");
           continue;
         }
-        // The user may have stopped or redirected the thread while the selection landed.
-        const latest = yield* threads.getThreadShell(threadId);
-        if (latest === null || latest.latestRunId !== runId || latest.status !== "failed")
-          return true;
-        yield* Effect.logInfo("fleet.fallback.hop", {
-          threadId,
-          runId,
-          from: label(current),
-          to: label(target),
-          hop: decision.hop,
-        });
-        yield* notice(
-          threadId,
-          "switch:" + runId,
-          "Switched to " +
-            label(target) +
-            " after " +
-            failure +
-            " on " +
-            label(current) +
-            (shell.usageLimitResetAt == null
-              ? ""
-              : "; that limit resets at " + shell.usageLimitResetAt) +
-            " (fallback chain " +
-            resolved.id +
-            ").",
-        );
-        const continuation = "fleet-fallback:" + threadId + ":" + runId + ":continue";
-        yield* threads.dispatch({
-          type: "message.dispatch",
-          commandId: CommandId.make(continuation),
-          messageId: MessageId.make(continuation),
-          threadId,
-          text: "Continue where you left off.",
-          attachments: [],
-          dispatchMode: { type: "start_immediately" },
-          createdBy: "user",
-          creationSource: "server",
-        });
+        yield* announce(target, decision.hop);
         return true;
       }
       return false;

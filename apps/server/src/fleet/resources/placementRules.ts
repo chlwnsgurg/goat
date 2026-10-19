@@ -37,6 +37,11 @@ export interface PlacementInput {
   readonly selections: ReadonlyArray<ModelSelection>;
   readonly hostSelector: HostSelector;
   readonly avoidHosts: ReadonlyArray<string | null>;
+  /**
+   * The host whose environment holds the project, when the work names one: projects are
+   * environment-local, so no other host can run it. Undefined when the work brings a cwd.
+   */
+  readonly projectHost?: string | null | undefined;
   /** From the health controller once it lands; empty until then. */
   readonly cordoned: ReadonlySet<string | null>;
 }
@@ -70,7 +75,7 @@ export const fleetThreads = (hosts: ReadonlyArray<HostStatusEntry>) =>
 export function hostRefusal(
   entry: HostStatusEntry,
   settings: FleetSettings,
-  input: Pick<PlacementInput, "owner" | "hostSelector" | "avoidHosts" | "cordoned">,
+  input: Pick<PlacementInput, "owner" | "hostSelector" | "avoidHosts" | "cordoned" | "projectHost">,
   fleetThreadCount: number,
 ): PlacementRefusal | undefined {
   const selected = input.hostSelector.hosts;
@@ -80,6 +85,8 @@ export function hostRefusal(
     input.avoidHosts.includes(entry.host)
   )
     return refusal("excluded", "outside the host selector");
+  if (input.projectHost !== undefined && input.projectHost !== entry.host)
+    return refusal("no_project", "the project lives on " + (input.projectHost ?? "this machine"));
   if (entry.reachability !== "ok")
     return refusal(
       "not_ready",

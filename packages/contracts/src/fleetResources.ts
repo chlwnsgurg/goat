@@ -109,6 +109,7 @@ export const PlacementRefusalCode = Schema.Literals([
   "cordoned",
   "excluded",
   "no_instance",
+  "no_project",
   "quota_exhausted",
   "host_cap",
   "global_cap",

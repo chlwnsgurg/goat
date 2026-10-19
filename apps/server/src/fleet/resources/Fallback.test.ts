@@ -57,12 +57,16 @@ interface World {
   shell: OrchestrationV2ThreadShell;
   runs: ReadonlyArray<ReturnType<typeof run>>;
   refuse: ReadonlySet<string>;
+  disabledForProject: ReadonlySet<string>;
+  readonly receipts: Set<string>;
   readonly commands: Array<OrchestrationV2ServerCommand>;
 }
 const makeWorld = (overrides: Partial<World> = {}): World => ({
   shell: shell(),
   runs: [run(1, "completed", opus), run(2, "failed", opus)],
   refuse: new Set(),
+  disabledForProject: new Set(),
+  receipts: new Set(),
   commands: [],
   ...overrides,
 });
@@ -100,12 +104,16 @@ const layer = (world: World, fleet: FleetSettings, claudeExhausted = false) =>
       Layer.mock(ThreadManagement.ThreadManagementService)({
         getThreadShell: () => Effect.sync(() => world.shell),
         getThreadRecords: (() => Effect.sync(() => ({ runs: world.runs }))) as never,
+        hasReceipt: (commandId) => Effect.sync(() => world.receipts.has(commandId)),
+        isProviderInstanceEnabledForProject: ({ instanceId }) =>
+          Effect.sync(() => !world.disabledForProject.has(instanceId)),
         dispatch: (command) =>
           Effect.suspend(() => {
             const target = "modelSelection" in command ? command.modelSelection : undefined;
             if (target !== undefined && world.refuse.has(target.model))
               return Effect.die("selection refused");
             world.commands.push(command);
+            world.receipts.add(command.commandId);
             if ("modelSelection" in command && command.modelSelection !== undefined)
               world.shell = { ...world.shell, modelSelection: command.modelSelection };
             return Effect.succeed({ sequence: world.commands.length } as never);
@@ -169,19 +177,27 @@ describe("Fallback.continueThread", () => {
     },
   );
 
-  it.effect("replays the same commands after a restart that already moved the thread", () => {
-    const world = makeWorld({ shell: shell({ modelSelection: opus2 }) });
-    return withClock(
-      Effect.gen(function* () {
-        const fallback = yield* Fallback.Fallback;
-        assert.isTrue(yield* fallback.continueThread(threadId));
-        assert.strictEqual(
-          world.commands[0]?.commandId,
+  it.effect(
+    "finishes a hop whose selection landed before a restart, even if that account ran out since",
+    () => {
+      const world = makeWorld({
+        shell: shell({ modelSelection: opus2 }),
+        receipts: new Set([
           "fleet-fallback:thread:fleet:run:2:codex/anthropic2/claude-opus-5-5:" + GENERATION,
-        );
-      }).pipe(Effect.provide(layer(world, threadChain))),
-    );
-  });
+        ]),
+      });
+      return withClock(
+        Effect.gen(function* () {
+          const fallback = yield* Fallback.Fallback;
+          assert.isTrue(yield* fallback.continueThread(threadId));
+          assert.deepStrictEqual(
+            world.commands.map((command) => command.commandId),
+            ["fleet-fallback-notice:switch:run:2", "fleet-fallback:thread:fleet:run:2:continue"],
+          );
+        }).pipe(Effect.provide(layer(world, threadChain))),
+      );
+    },
+  );
 
   it.effect("follows the failed tail and crosses to another driver with a provider switch", () => {
     const world = makeWorld({
@@ -265,6 +281,34 @@ describe("Fallback.continueThread", () => {
         );
         assert.deepStrictEqual(world.commands, []);
       }),
+    );
+  });
+  it.effect("leaves a thread whose model the user changed by hand after the failure", () => {
+    const world = makeWorld({ shell: shell({ modelSelection: sol }) });
+    return withClock(
+      Effect.gen(function* () {
+        const fallback = yield* Fallback.Fallback;
+        assert.isFalse(yield* fallback.continueThread(threadId));
+        assert.deepStrictEqual(world.commands, []);
+      }).pipe(Effect.provide(layer(world, threadChain))),
+    );
+  });
+
+  it.effect("skips a step whose instance this project disabled", () => {
+    const world = makeWorld({
+      shell: shell({ modelSelection: sol }),
+      runs: [run(1, "failed", opus), run(2, "failed", sol)],
+      disabledForProject: new Set(["claudeAgent"]),
+    });
+    return withClock(
+      Effect.gen(function* () {
+        const fallback = yield* Fallback.Fallback;
+        assert.isTrue(yield* fallback.continueThread(threadId));
+        assert.strictEqual(
+          summary(world.commands)[0],
+          "thread.model-selection.set anthropic2/claude-opus-5-5",
+        );
+      }).pipe(Effect.provide(layer(world, threadChain))),
     );
   });
 });

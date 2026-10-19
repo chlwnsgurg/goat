@@ -213,6 +213,21 @@ describe("place", () => {
     assert.deepStrictEqual(tie._tag === "Placed" && tie.modelSelection, opus);
   });
 
+  it("keeps work on the host whose environment holds its project", () => {
+    const result = place(
+      goal({ projectHost: "mac-studio" }),
+      [host(null), host("mac-studio")],
+      none,
+      NOW,
+    );
+    assert.strictEqual(result._tag === "Placed" && result.host, "mac-studio");
+    const refused = place(goal({ projectHost: "lidge-ai" }), [host(null)], none, NOW);
+    assert.deepStrictEqual(refused._tag === "Refused" && refused.reasons[0]?.reason, {
+      code: "no_project",
+      message: "the project lives on lidge-ai",
+    });
+  });
+
   it("refuses a host that does not report the requested instance", () => {
     const result = place(goal({ selections: [claudeOpus] }), [host(null)], none, NOW);
     assert.deepStrictEqual(result._tag === "Refused" && result.reasons[0]?.reason, {
