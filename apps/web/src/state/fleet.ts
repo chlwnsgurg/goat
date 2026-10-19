@@ -102,6 +102,25 @@ export function useFleetSummary(): FleetSummary {
 }
 
 /**
+ * Only what the graph shows of a connection, so the page rebuilds when a host's
+ * state or reason changes, not on every step of a connection attempt.
+ */
+const fleetConnectionAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make((get): FleetConnection | null => {
+    const connection = get(environmentPresentations.presentationAtom(environmentId))?.connection;
+    const next = connection === undefined ? null : presentFleetConnection(connection);
+    const previous = Option.getOrNull(get.self<FleetConnection | null>());
+    return previous !== null &&
+      next !== null &&
+      previous.state === next.state &&
+      previous.label === next.label &&
+      previous.reason === next.reason
+      ? previous
+      : next;
+  }).pipe(Atom.withLabel(`fleet-connection:${environmentId}`)),
+);
+
+/**
  * What each connected environment last reported about SSH launches and cloud
  * machines. Only the Fleet page reads it, so the queries mount, and revalidate,
  * when the page opens.
@@ -194,10 +213,8 @@ const fleetPageAtom = Atom.make((get): FleetPageState => {
   for (const machine of snapshot.machines) {
     if (machine.environmentId === null) continue;
     if (machine.environmentId === primaryEnvironmentId) currentMachineId = machine.id;
-    const connection = get(
-      environmentPresentations.presentationAtom(machine.environmentId),
-    )?.connection;
-    if (connection !== undefined) connections.set(machine.id, presentFleetConnection(connection));
+    const connection = get(fleetConnectionAtom(machine.environmentId));
+    if (connection !== null) connections.set(machine.id, connection);
   }
   const key = snapshotKey(snapshot, connections, currentMachineId);
   const previous = Option.getOrNull(get.self<FleetPageState>());

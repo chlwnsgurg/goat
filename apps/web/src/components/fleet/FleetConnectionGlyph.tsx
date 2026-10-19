@@ -35,7 +35,14 @@ export function FleetConnectionGlyph(props: {
       {props.halo ? <circle r={6.5} className="fill-background" /> : null}
       {glyph === "dot" ? <circle r={3.5} className={FILL[tone]} /> : null}
       {glyph === "ring" ? (
-        <circle r={3.4} fill="none" strokeWidth={1.4} className={STROKE[tone]} />
+        // Dashed like the host's edge, and unlike the solid hollow "Reported" dot.
+        <circle
+          r={3.4}
+          fill="none"
+          strokeWidth={1.4}
+          strokeDasharray="2.2 1.36"
+          className={STROKE[tone]}
+        />
       ) : null}
       {glyph === "arc" ? (
         // Three quarters of a ring: an attempt under way.
@@ -43,8 +50,9 @@ export function FleetConnectionGlyph(props: {
           r={3.4}
           fill="none"
           strokeWidth={1.6}
-          strokeDasharray="16 5.4"
+          strokeDasharray="13 8.4"
           strokeLinecap="round"
+          transform="rotate(-90)"
           className={STROKE[tone]}
         />
       ) : null}
@@ -73,7 +81,7 @@ export function FleetConnectionGlyph(props: {
 /** The glyph as a standalone inline icon, for the legend. */
 export function FleetConnectionIcon(props: { readonly state: FleetConnectionState }) {
   return (
-    <svg aria-hidden viewBox="-6 -6 12 12" className="size-3 shrink-0 overflow-visible">
+    <svg aria-hidden viewBox="-5 -5 10 10" className="size-3 shrink-0 overflow-visible">
       <FleetConnectionGlyph state={props.state} />
     </svg>
   );

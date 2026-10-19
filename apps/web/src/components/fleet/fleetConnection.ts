@@ -135,32 +135,25 @@ export function fleetConnectionVisual(state: FleetConnectionState): FleetConnect
   return VISUALS[state] ?? VISUALS.unknown;
 }
 
-const LEGEND_ORDER: ReadonlyArray<FleetConnectionState> = [
-  "connected",
-  "connecting",
-  "reconnecting",
-  "degraded",
-  "unreachable",
-  "offline",
-  "attention",
+/** One legend entry per shape, in the order healthy, in flight, away, blocked. */
+const LEGEND: ReadonlyArray<{ readonly state: FleetConnectionState; readonly label: string }> = [
+  { state: "connected", label: "Connected" },
+  { state: "reconnecting", label: "Reconnecting" },
+  { state: "degraded", label: "Degraded" },
+  // Unreachable, offline and switched-off-but-saved hosts share the quiet mark;
+  // each node's tooltip names which.
+  { state: "unreachable", label: "Not connected" },
+  { state: "attention", label: "Needs attention" },
 ];
 
-/**
- * The legend entries for what the graph shows right now: one per distinct
- * state name, healthy first, then in flight, then away or blocked.
- */
+/** The legend entries for the shapes the graph shows right now. */
 export function fleetConnectionLegend(
   connections: Iterable<FleetConnection>,
-): ReadonlyArray<Pick<FleetConnection, "state" | "label">> {
-  const byLabel = new Map<string, FleetConnection>();
+): ReadonlyArray<{ readonly state: FleetConnectionState; readonly label: string }> {
+  const shown = new Set<FleetConnectionShape>();
   for (const connection of connections) {
-    if (connection.state !== "unknown") byLabel.set(connection.label, connection);
+    const { glyph } = fleetConnectionVisual(connection.state);
+    if (glyph !== null) shown.add(glyph);
   }
-  return [...byLabel.values()]
-    .map(({ state, label }) => ({ state, label }))
-    .sort(
-      (left, right) =>
-        LEGEND_ORDER.indexOf(left.state) - LEGEND_ORDER.indexOf(right.state) ||
-        left.label.localeCompare(right.label),
-    );
+  return LEGEND.filter((entry) => shown.has(fleetConnectionVisual(entry.state).glyph!));
 }

@@ -100,7 +100,7 @@ describe("fleetConnectionVisual", () => {
 });
 
 describe("fleetConnectionLegend", () => {
-  it("lists each shown state name once, healthy first, and leaves unknown out", () => {
+  it("lists each shown shape once, healthy first, and leaves unknown out", () => {
     const legend = fleetConnectionLegend(
       [
         connection("error", { error: TAILSCALE }),
@@ -108,12 +108,15 @@ describe("fleetConnectionLegend", () => {
         connection("connected"),
         connection("connected"),
         connection("available"),
+        connection("offline"),
+        connection("connecting"),
+        connection("reconnecting"),
         null,
       ].map(presentFleetConnection),
     );
     expect(legend.map((entry) => entry.label)).toEqual([
       "Connected",
-      "Unreachable",
+      "Reconnecting",
       "Not connected",
       "Needs attention",
     ]);
