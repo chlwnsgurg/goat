@@ -182,6 +182,8 @@ vi.mock("../../state/entities", () => ({
     return enabled ? state.threads : [];
   },
 }));
+// Covered by its own controls; this page test exercises the memory browser and sharing flows.
+vi.mock("./MemoryGenerationSettings", () => ({ MemoryGenerationSettings: () => null }));
 vi.mock("../../hooks/useSettings", () => ({
   useEnvironmentSettings: (_id: string, selector: (settings: unknown) => unknown) => {
     useFixtureVersion();
@@ -813,7 +815,7 @@ it("keeps pending reenrollment when removing another owner permission and render
   });
   await click("Turn sharing off");
   await click("Stop sharing");
-  expect(container.textContent).toContain("Memory off");
+  expect(container.textContent).toContain("Sharing off");
   expect(container.textContent).toContain("Make this device the hub");
 });
 
@@ -2777,7 +2779,7 @@ it("shows automatically initialized memory as on and usable without an enable ac
   await supportedScreen(false);
   expect(container.textContent).toContain("This device is the hub");
   expect(container.textContent).toContain("Memory is on.");
-  expect(container.textContent).not.toContain("Memory off");
+  expect(container.textContent).not.toContain("Sharing off");
   expect(container.textContent).not.toContain("Make this device the hub");
   expect(container.textContent).not.toContain("Turn on memory to");
   await click("Remember something");

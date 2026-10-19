@@ -1,5 +1,7 @@
 import type { DesktopSshEnvironmentTarget } from "@goat/contracts";
 import * as HostProcess from "@goat/shared/HostProcess";
+import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -28,6 +30,76 @@ const sshCommandForPlatform = (platform: NodeJS.Platform): string =>
 export const resolveSshCommand = Effect.map(HostProcess.Platform, sshCommandForPlatform);
 
 const encoder = new TextEncoder();
+
+export const SshReconnectCost = Context.Reference<{
+  active: boolean;
+  spawns: number;
+  authentications: number;
+  mastersStarted?: number;
+  controlCommands?: number;
+  steps: Record<string, number>;
+} | null>("@goat/ssh/command/SshReconnectCost", {
+  defaultValue: () => null,
+});
+
+// Request-local observation; SSH diagnostics retain authority over the final target's login.
+export const SshHostAnswered = Context.Reference<(() => void) | null>(
+  "@goat/ssh/command/SshHostAnswered",
+  { defaultValue: () => null },
+);
+
+export interface SshMasterConnection {
+  readonly configuration: string;
+  readonly socket: string;
+  readonly process: ChildProcessSpawner.ChildProcessHandle;
+  readonly scope: Scope.Closeable;
+}
+
+export const SshConnectionSharing = Context.Reference<{
+  readonly configurations: Map<string, string>;
+  readonly masters: Map<string, SshMasterConnection>;
+} | null>("@goat/ssh/command/SshConnectionSharing", { defaultValue: () => null });
+
+export function hasUserSshSharing(configuration: string): boolean {
+  return configuration.split(/\r?\n/u).some((line) => {
+    const [key, value] = line.trim().toLowerCase().split(/\s+/u);
+    return (
+      (key === "controlmaster" && value !== undefined && value !== "false" && value !== "no") ||
+      (key === "controlpath" && value !== undefined && value !== "none")
+    );
+  });
+}
+
+export const healthySshMaster = (target: DesktopSshEnvironmentTarget) =>
+  Effect.gen(function* () {
+    const sharing = yield* SshConnectionSharing;
+    if (hasUserSshSharing(sharing?.configurations.get(target.alias) ?? "")) return undefined;
+    const master = sharing?.masters.get(targetConnectionKey(target));
+    return master !== undefined &&
+      master.configuration === sharing?.configurations.get(target.alias) &&
+      (yield* master.process.isRunning.pipe(Effect.orElseSucceed(() => false)))
+      ? master
+      : undefined;
+  });
+
+export const measureSshReconnectStep = <A, E, R>(
+  step: string,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+  Effect.gen(function* () {
+    const cost = yield* SshReconnectCost;
+    if (cost === null || !cost.active) return yield* effect;
+    const startedAt = yield* Clock.currentTimeMillis;
+    return yield* effect.pipe(
+      Effect.ensuring(
+        Clock.currentTimeMillis.pipe(
+          Effect.map((now) => {
+            if (cost.active) cost.steps[step] = (cost.steps[step] ?? 0) + now - startedAt;
+          }),
+        ),
+      ),
+    );
+  });
 
 export interface SshCommandResult {
   readonly stdout: string;
@@ -117,7 +189,7 @@ export function baseSshArgs(
  * Liveness probes for every SSH session GOAT opens to a remote host. Without them a half-open
  * link (sleep, roaming, a dropped NAT entry) is only noticed when a command's own timeout
  * expires, up to 15 minutes for an archive install. Three missed 15 s probes end the session.
- * Kept out of `baseSshArgs`, which also builds GIT_SSH_COMMAND for git operations.
+ * Git transfers use the same budget through GIT_SSH_COMMAND.
  */
 export const SSH_KEEPALIVE_ARGS = [
   "-o",
@@ -162,10 +234,12 @@ export const sshDiagnosticChunks = <E>(
   observeLine?: (line: string) => void,
 ): Stream.Stream<string, E> =>
   Stream.unwrap(
-    Effect.sync(() => {
+    Effect.gen(function* () {
+      const cost = yield* SshReconnectCost;
       let pending = "";
       let mode: "buffer" | "keep" | "drop" = "buffer";
       const diagnostic = (line: string) => {
+        if (cost?.active && /^(?:debug1: )?Authenticated to /u.test(line)) cost.authentications++;
         observeLine?.(line.replace(/\r?\n$/u, ""));
         const text = line.replace(
           /^debug1: (?:kex_exchange_identification|ssh_exchange_identification): banner line \d+: (Tailscale is stopped\.|Logged out\.|Machine is not yet approved by tailnet admin\.)(\r?\n)?$/u,
@@ -329,12 +403,16 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
         }),
     ),
   );
+  const master = input.preHostArgs?.some((arg) => arg === "-G" || arg === "-O")
+    ? undefined
+    : yield* healthySshMaster(target);
   const args = [
     ...SSH_DIAGNOSTIC_ARGS,
     ...baseSshArgs(target, {
       batchMode: input.batchMode ?? (input.interactiveAuth ? "no" : "yes"),
     }),
-    ...SSH_KEEPALIVE_ARGS,
+    ...(input.preHostArgs?.includes("-O") ? [] : SSH_KEEPALIVE_ARGS),
+    ...(master === undefined ? [] : ["-S", master.socket, "-o", "ControlMaster=no"]),
     ...(input.preHostArgs ?? []),
     "--",
     hostSpec,
@@ -378,6 +456,13 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
       ),
     );
 
+  const onHostAnswered = yield* SshHostAnswered;
+  let reportedAnswer = false;
+  const cost = yield* SshReconnectCost;
+  if (cost?.active) {
+    cost.spawns++;
+    if (input.preHostArgs?.includes("-O")) cost.controlCommands = (cost.controlCommands ?? 0) + 1;
+  }
   const [stdout, stderr, exitCode] = yield* Effect.all(
     [
       collectProcessOutput(child.stdout),
@@ -407,6 +492,18 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
             /^(?:Authenticated to |debug1: Authentication succeeded|debug1: mux_client_request_session: master session id:)/u.test(
               line,
             );
+        }
+        const finalHostAnswered =
+          line.startsWith(`Authenticated to ${target.hostname} `) ||
+          line.startsWith(`Authenticated to ${target.alias} `) ||
+          line.startsWith("debug1: mux_client_request_session: master session id:");
+        if (progress.authenticated && finalHostAnswered && !reportedAnswer) {
+          reportedAnswer = true;
+          try {
+            onHostAnswered?.();
+          } catch {
+            // A renderer that went away must not cancel the shared preparation.
+          }
         }
       }).pipe(
         Stream.runForEach((line) =>
@@ -513,11 +610,20 @@ export const runSshCommand = Effect.fn("ssh/command.runSshCommand")(function* (
           }),
       }),
     ),
+    (effect) =>
+      measureSshReconnectStep(
+        input.timeoutStage ??
+          (input.preHostArgs?.includes("-G") === true
+            ? "ssh/command.resolveSshTarget"
+            : "ssh/command.runSshCommand"),
+        effect,
+      ),
   );
 });
 
 export const resolveSshTarget = Effect.fn("ssh/command.resolveSshTarget")(function* (
   alias: string,
+  overrides?: Pick<DesktopSshEnvironmentTarget, "username" | "port">,
 ): Effect.fn.Return<
   DesktopSshEnvironmentTarget,
   SshCommandError | SshInvalidTargetError,
@@ -533,11 +639,17 @@ export const resolveSshTarget = Effect.fn("ssh/command.resolveSshTarget")(functi
     {
       alias: trimmedAlias,
       hostname: trimmedAlias,
-      username: null,
-      port: null,
+      username: overrides?.username ?? null,
+      port: overrides?.port ?? null,
     },
     { preHostArgs: ["-G"] },
   ).pipe(
+    Effect.tap((result) =>
+      Effect.gen(function* () {
+        const sharing = yield* SshConnectionSharing;
+        sharing?.configurations.set(trimmedAlias, result.stdout);
+      }),
+    ),
     Effect.map((result) => parseSshResolveOutput(trimmedAlias, result.stdout)),
     Effect.tap((target) =>
       Effect.logDebug("ssh.target.resolve.succeeded", sshTargetLogFields(target)),

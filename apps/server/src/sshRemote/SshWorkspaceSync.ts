@@ -16,6 +16,7 @@ import {
   type SshWorkspaceStage,
   type SshWorkspaceCode,
 } from "@goat/contracts";
+import { SSH_KEEPALIVE_ARGS } from "@goat/ssh/command";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -119,6 +120,7 @@ const make = Effect.gen(function* () {
       "BatchMode=yes",
       "-o",
       "ConnectTimeout=10",
+      ...SSH_KEEPALIVE_ARGS,
       ...(target.port === null ? [] : ["-p", String(target.port)]),
     ]
       .map(quote)

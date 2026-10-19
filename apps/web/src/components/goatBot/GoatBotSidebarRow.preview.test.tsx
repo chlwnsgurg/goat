@@ -59,7 +59,10 @@ vi.mock("./GoatBotModeButton", () => ({
   },
 }));
 vi.mock("./useGoatBotHome", () => ({ useGoatBotHome: () => undefined }));
-vi.mock("./useGoatBotWaitingCount", () => ({ useGoatBotWaitingCount: () => 2 }));
+vi.mock("./useGoatBotWaitingCount", () => ({
+  useGoatBotWaitingCount: () => 2,
+  useMarkGoatBotRead: () => null,
+}));
 vi.mock("./GoatBotAvatar", () => ({ GoatBotAvatar: () => <span>avatar</span> }));
 vi.mock("./goatBotChannelPort", async () => {
   const React = await import("react");

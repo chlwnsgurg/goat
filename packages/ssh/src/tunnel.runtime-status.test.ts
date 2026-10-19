@@ -90,6 +90,7 @@ const fixture = (initial: unknown, runnerOptions: SshTunnel.RemoteGoatRunnerOpti
           };
         return makeSuccessfulProcess(typeof probe === "string" ? probe : JSON.stringify(probe));
       }
+      if (command.args.includes("goat-runtime-cleanup")) return makeSuccessfulProcess("");
       calls.launches++;
       return makeSuccessfulProcess(
         JSON.stringify({

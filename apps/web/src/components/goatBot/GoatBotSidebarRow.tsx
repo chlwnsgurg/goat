@@ -34,6 +34,9 @@ import { useGoatBotPreferred } from "./GoatBotModeButton";
 import { GoatBotChannelContext } from "./goatBotChannelPort";
 import { useGoatBotHome } from "./useGoatBotHome";
 import { useGoatBotWaitingCount } from "./useGoatBotWaitingCount";
+import { useGoatBotReadMenu } from "./useGoatBotReadMenu";
+
+type GoatBotReadMenuProps = ReturnType<typeof useGoatBotReadMenu>;
 
 /** GOAT Bot's pinned place at the top of the thread list, hidden in thread mode. */
 export function GoatBotSidebarRow() {
@@ -46,6 +49,7 @@ export function GoatBotSidebarRow() {
 /** Observes the bot without creating a bot thread. */
 function GoatBotSidebarObserver() {
   const count = useGoatBotWaitingCount();
+  const readMenu = useGoatBotReadMenu(count);
   const botRef = useGlobalAgentStore((state) => state.botRef);
   const pathname = useLocation({ select: (location) => location.pathname });
   const params = useParams({ strict: false });
@@ -67,12 +71,14 @@ function GoatBotSidebarObserver() {
               active={active}
               count={count}
               onClick={handleClick}
+              readMenu={readMenu}
             />
           ) : (
             <GoatBotConversationRow
               active={active}
               count={count}
               onClick={handleClick}
+              readMenu={readMenu}
               preview={null}
               at={shell?.updatedAt ?? null}
             />
@@ -88,11 +94,13 @@ function GoatBotSidebarPreview({
   active,
   count,
   onClick,
+  readMenu,
 }: {
   botRef: GoatBotRef;
   active: boolean;
   count: number | undefined;
   onClick: () => void;
+  readMenu: GoatBotReadMenuProps;
 }) {
   const threadRef = scopeThreadRef(botRef.environmentId, botRef.threadId);
   const shell = useThreadShell(threadRef);
@@ -117,6 +125,7 @@ function GoatBotSidebarPreview({
       active={active}
       count={count}
       onClick={onClick}
+      readMenu={readMenu}
       preview={preview}
       at={preview?.at ?? shell?.updatedAt ?? null}
     />
@@ -127,12 +136,14 @@ function GoatBotConversationRow({
   active,
   count,
   onClick,
+  readMenu,
   preview,
   at,
 }: {
   active: boolean;
   count: number | undefined;
   onClick: () => void;
+  readMenu: GoatBotReadMenuProps;
   preview: GoatBotConversationPreview | null;
   at: string | null;
 }) {
@@ -142,6 +153,7 @@ function GoatBotConversationRow({
       isActive={active}
       aria-current={active ? "page" : undefined}
       onClick={onClick}
+      {...readMenu}
       render={<Link to={GOAT_BOT_PATH} />}
     >
       <span

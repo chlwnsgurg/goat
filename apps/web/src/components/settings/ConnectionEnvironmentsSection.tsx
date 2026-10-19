@@ -10,6 +10,7 @@ import { SessionPermissions } from "./SessionPermissions";
 import {
   ChevronRightIcon,
   ChevronsLeftRightEllipsisIcon,
+  CopyIcon,
   EllipsisIcon,
   PlusIcon,
   RouteIcon,
@@ -42,6 +43,7 @@ import {
 } from "@goat/client-runtime/state/runtime";
 import * as Option from "effect/Option";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { useCopyConnectionDiagnostic } from "../../hooks/useCopyConnectionDiagnostic";
 import { cn } from "../../lib/utils";
 import { SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
@@ -139,6 +141,7 @@ import {
 } from "../../keybindings";
 
 const EMPTY_DISCOVERED_SSH_HOSTS: ReadonlyArray<DesktopDiscoveredSshHost> = [];
+const NO_SSH_RUNTIME_STATUS = Atom.make(null);
 function parseManualDesktopSshTarget(input: {
   readonly host: string;
   readonly username: string;
@@ -374,11 +377,12 @@ function SavedBackendListRow({
   const savedSshTarget = savedDesktopSshTarget(environment);
   const runtimeAtom =
     savedSshTarget === null
-      ? Atom.make(null)
+      ? NO_SSH_RUNTIME_STATUS
       : sshRuntime.statusAtom({ environmentId, target: savedSshTarget });
   const runtimeResult = useAtomValue(runtimeAtom);
   const runtimeStatus = runtimeResult?.status;
   const errorTraceId = environment.connection.traceId;
+  const copyDiagnostic = useCopyConnectionDiagnostic(environment);
   const { copyToClipboard: copyTraceIdToClipboard } = useCopyToClipboard<{ traceId: string }>({
     target: "trace ID",
     onCopy: ({ traceId }) => {
@@ -669,11 +673,21 @@ function SavedBackendListRow({
             {routesOpen ? "Hide routes" : "Routes"}
           </MenuItem>
           {mcpUrl ? (
-            <MenuItem onClick={() => copyMcpUrl(mcpUrl, { url: mcpUrl })}>Copy MCP URL</MenuItem>
+            <MenuItem onClick={() => copyMcpUrl(mcpUrl, { url: mcpUrl })}>
+              <CopyIcon />
+              Copy MCP URL
+            </MenuItem>
           ) : null}
           {errorTraceId ? (
-            <MenuItem onClick={() => copyTraceId(errorTraceId)}>Copy trace ID</MenuItem>
+            <MenuItem onClick={() => copyTraceId(errorTraceId)}>
+              <CopyIcon />
+              Copy trace ID
+            </MenuItem>
           ) : null}
+          <MenuItem onClick={copyDiagnostic}>
+            <CopyIcon />
+            Copy diagnostic
+          </MenuItem>
           <MenuSeparator />
           {savedSshTarget && isSshHostAlias(savedSshTarget.alias) && onForget ? (
             <MenuItem variant="destructive" onClick={() => onForget(environment)}>

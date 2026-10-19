@@ -227,12 +227,15 @@ export class ChannelLedger extends Context.Service<
     readonly listTasksByStatus: (
       statuses: ReadonlyArray<ChannelTaskStatus>,
     ) => Effect.Effect<ReadonlyArray<ChannelStoredTask>, ChannelLedgerError>;
-    /** How many of an owner's GOAT-origin tasks wait for an answer, without reading them. */
     /**
      * Tasks from any channel that wait on a person: an open question, or a running worker whose
      * thread needs an answer, approval, sign-in or resume (`observed.needsYou`). Each counts once.
+     * With `readThrough`, a task counts only when it started waiting after that time.
      */
-    readonly countWaitingTasks: (ownerId: string) => Effect.Effect<number, ChannelLedgerError>;
+    readonly countWaitingTasks: (
+      ownerId: string,
+      readThrough?: string,
+    ) => Effect.Effect<number, ChannelLedgerError>;
     readonly findTaskByWorkerThread: (
       threadId: ThreadId,
     ) => Effect.Effect<ChannelStoredTask | undefined, ChannelLedgerError>;
@@ -566,6 +569,19 @@ const storedTask = (row: TaskRow): ChannelStoredTask => ({
   pendingAnswerMessageId: row.pending_answer_message_id ?? undefined,
   completionHold: row.completion_hold ?? undefined,
 });
+
+/**
+ * When a waiting task last asked for a person: its newest open question or worker need. Marking
+ * the bot read covers everything asked before then; a later question counts again.
+ */
+export const channelTaskWaitingSince = (task: ChannelTask): string => {
+  const times = [
+    ...task.openQuestions.map((question) => question.askedAt),
+    ...(task.observed?.needsYou ?? []).map((need) => need.since),
+  ];
+  if (times.length === 0) return task.updatedAt;
+  return times.reduce((latest, time) => (Date.parse(time) > Date.parse(latest) ? time : latest));
+};
 
 const toIdentity = (row: IdentityRow): ChannelIdentity => ({
   ownerId: row.owner_id,
@@ -1094,9 +1110,9 @@ const make = Effect.gen(function* () {
         Effect.mapError(toLedgerError("listTasksByStatus")),
       ),
 
-    countWaitingTasks: (ownerId) =>
-      sql<{ readonly count: number }>`
-        SELECT COUNT(*) AS count FROM channel_tasks
+    countWaitingTasks: (ownerId, readThrough) =>
+      sql<TaskRow>`
+        SELECT owner_id, task_json, pending_answer_message_id, completion_hold FROM channel_tasks
         WHERE owner_id = ${ownerId}
           AND (
             status = 'waiting_input'
@@ -1106,7 +1122,13 @@ const make = Effect.gen(function* () {
             )
           )
       `.pipe(
-        Effect.map((rows) => Number(rows[0]?.count ?? 0)),
+        Effect.map((rows) => {
+          if (readThrough === undefined) return rows.length;
+          const readMs = Date.parse(readThrough);
+          return rows.filter(
+            (row) => Date.parse(channelTaskWaitingSince(decodeTask(row.task_json))) > readMs,
+          ).length;
+        }),
         Effect.mapError(toLedgerError("countWaitingTasks")),
       ),
 

@@ -1,13 +1,18 @@
 export * from "./catalog.ts";
 export * as Connectivity from "./connectivity.ts";
 export * as CredentialStore from "./credentialStore.ts";
-export { type ConnectionDriverProgress, type EnvironmentConnectionLease } from "./driver.ts";
+export {
+  ConnectionDriver,
+  type ConnectionDriverProgress,
+  type EnvironmentConnectionLease,
+} from "./driver.ts";
 export * from "./errors.ts";
 export * from "./githubRoutingPermissions.ts";
 export * as Connection from "./layer.ts";
 export * from "./model.ts";
 export * as ConnectionOnboarding from "./onboarding.ts";
 export * from "./presentation.ts";
+export { formatConnectionDiagnostic } from "./diagnostic.ts";
 export * as ProfileStore from "./profileStore.ts";
 export * from "./routes.ts";
 export { sshPreparationFailure } from "./sshFailure.ts";

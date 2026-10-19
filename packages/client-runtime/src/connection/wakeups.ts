@@ -3,6 +3,7 @@ import * as Layer from "effect/Layer";
 import type * as Stream from "effect/Stream";
 
 export type ConnectionWakeup =
+  | "suspend"
   | "application-active"
   | "application-active-probe"
   | "application-active-reconnect"

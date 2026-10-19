@@ -1,9 +1,14 @@
 // @effect-diagnostics nodeBuiltinImport:off -- isolated fake SSH uses local shell and independent Node hashing.
 import * as NodeCrypto from "node:crypto";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeNet from "node:net";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as HostProcess from "@goat/shared/HostProcess";
 import {
   EventId,
   ThreadId,
@@ -30,6 +35,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -39,8 +45,46 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as ServerConfig from "../config.ts";
 import * as Dispatch from "./SshRemoteDispatch.ts";
 import * as Sync from "./SshWorkspaceSync.ts";
+import {
+  closeServer,
+  listenLoopback,
+  makeStallRelay,
+} from "../../../../packages/ssh/src/stallRelay.fixture.ts";
 
 const exec = NodeUtil.promisify(NodeChildProcess.execFile);
+const findExecutable = (name: string, extraDirs: ReadonlyArray<string> = []) => {
+  if (HostProcess.Platform.defaultValue() === "win32") return undefined;
+  for (const dir of [...(process.env.PATH ?? "").split(NodePath.delimiter), ...extraDirs]) {
+    if (!dir) continue;
+    const candidate = NodePath.join(dir, name);
+    try {
+      NodeFS.accessSync(candidate, NodeFS.constants.X_OK);
+      return candidate;
+    } catch {}
+  }
+  return undefined;
+};
+const realSsh = findExecutable("ssh");
+const realSshd = findExecutable("sshd", [
+  "/usr/sbin",
+  "/sbin",
+  "/opt/homebrew/sbin",
+  "/usr/local/sbin",
+]);
+const realSshKeygen = findExecutable("ssh-keygen");
+const realGitExecutable = findExecutable("git");
+const sshdTestBinaries =
+  realSsh !== undefined &&
+  realSshd !== undefined &&
+  realSshKeygen !== undefined &&
+  realGitExecutable !== undefined
+    ? {
+        ssh: realSsh,
+        sshd: realSshd,
+        sshKeygen: realSshKeygen,
+        gitDir: NodePath.dirname(realGitExecutable),
+      }
+    : undefined;
 const decodeProject = Schema.decodeUnknownSync(Project);
 const decodeInput = Schema.decodeUnknownSync(SshWorkspaceLaunchInput);
 const decodeTurnItem = Schema.decodeUnknownSync(OrchestrationV2TurnItem);
@@ -488,6 +532,8 @@ test("pushes snapshot then launches remote owned worktree", (f) =>
     });
     const log = yield* f.fs.readFileString(f.sshLog);
     assert.include(log, "BatchMode=yes");
+    assert.include(log, "ServerAliveInterval=15");
+    assert.include(log, "ServerAliveCountMax=3");
     assert.include(log, "runner@buildbox");
     assert.include(log, "2222");
   }));
@@ -953,6 +999,287 @@ test("fetch rejects malformed commit OID", (f) =>
         : undefined;
     yield* rejected(f.sync.fetchBack(f.fetchInput()), "fetch", "invalid_remote_response");
   }));
+it.effect.skipIf(sshdTestBinaries === undefined)(
+  "fetch aborts via SSH keepalive when the TCP link stalls mid-transfer",
+  () =>
+    Effect.gen(function* () {
+      if (sshdTestBinaries === undefined) return;
+      const f = yield* fixture;
+      const hostKey = f.path.join(f.parent, "sshd_host_ed25519");
+      const userKey = f.path.join(f.parent, "ssh_user_ed25519");
+      const authorizedKeys = f.path.join(f.parent, "authorized_keys");
+      yield* Effect.tryPromise(() =>
+        exec(sshdTestBinaries.sshKeygen, ["-q", "-t", "ed25519", "-N", "", "-f", hostKey]),
+      );
+      yield* Effect.tryPromise(() =>
+        exec(sshdTestBinaries.sshKeygen, ["-q", "-t", "ed25519", "-N", "", "-f", userKey]),
+      );
+      yield* f.fs.copyFile(`${userKey}.pub`, authorizedKeys);
+      yield* f.fs.chmod(authorizedKeys, 0o600);
+
+      // upload-pack spawns packObjectsHook only after advertising refs downstream and reading the
+      // client's want/done negotiation upstream, giving a deterministic mid-fetch stall point.
+      const packHookSockets = yield* Queue.unbounded<NodeNet.Socket>();
+      const gateSockets = new Set<NodeNet.Socket>();
+      const gateServer = NodeNet.createServer((socket) => {
+        gateSockets.add(socket);
+        socket.on("close", () => gateSockets.delete(socket));
+        socket.on("error", () => socket.destroy());
+        Queue.offerUnsafe(packHookSockets, socket);
+      });
+      const gatePort = yield* Effect.acquireRelease(listenLoopback(gateServer), () =>
+        Effect.suspend(() => {
+          for (const socket of gateSockets) socket.destroy();
+          return gateServer.listening ? closeServer(gateServer) : Effect.void;
+        }),
+      );
+
+      const packHookJs = f.path.join(f.parent, "pack-hook.cjs");
+      const packHookSh = f.path.join(f.parent, "pack-hook.sh");
+      const gitConfigGlobal = f.path.join(f.parent, "sshd.gitconfig");
+      yield* f.fs.writeFileString(
+        packHookJs,
+        [
+          'const net = require("node:net");',
+          "process.stdin.resume();",
+          `const socket = net.connect(${gatePort}, "127.0.0.1");`,
+          'socket.once("data", () => {',
+          '  process.stdout.write("PACK" + "\\0".repeat(8192));',
+          "});",
+          'socket.on("error", () => process.exit(0));',
+          'socket.on("close", () => process.exit(0));',
+        ].join("\n"),
+      );
+      yield* f.fs.writeFileString(
+        packHookSh,
+        `#!/bin/sh\nexec '${process.execPath}' '${packHookJs}'\n`,
+      );
+      yield* f.fs.chmod(packHookSh, 0o755);
+      yield* f.fs.writeFileString(
+        gitConfigGlobal,
+        `[uploadpack]\n\tkeepAlive = 0\n\tpackObjectsHook = ${packHookSh}\n`,
+      );
+
+      const sshdShell = f.path.join(f.parent, "sshd-shell.sh");
+      yield* f.fs.writeFileString(
+        sshdShell,
+        [
+          "#!/bin/sh",
+          `export PATH='${sshdTestBinaries.gitDir}':"$PATH"`,
+          `export GIT_CONFIG_GLOBAL='${gitConfigGlobal}'`,
+          'exec /bin/sh -c "$SSH_ORIGINAL_COMMAND"',
+          "",
+        ].join("\n"),
+      );
+      yield* f.fs.chmod(sshdShell, 0o755);
+
+      const sshUser = NodeOS.userInfo().username;
+      const sshdConfig = f.path.join(f.parent, "sshd_config");
+
+      const { port: sshdPort } = yield* Effect.acquireRelease(
+        Effect.gen(function* () {
+          for (let attempt = 1; ; attempt++) {
+            const probeServer = NodeNet.createServer();
+            const port = yield* listenLoopback(probeServer);
+            yield* closeServer(probeServer);
+            yield* f.fs.writeFileString(
+              sshdConfig,
+              [
+                `ListenAddress 127.0.0.1:${port}`,
+                `HostKey ${hostKey}`,
+                `AuthorizedKeysFile ${authorizedKeys}`,
+                "UsePAM no",
+                "StrictModes no",
+                "PasswordAuthentication no",
+                "KbdInteractiveAuthentication no",
+                "PubkeyAuthentication yes",
+                `PidFile ${f.path.join(f.parent, "sshd.pid")}`,
+                `AllowUsers ${sshUser}`,
+                `ForceCommand ${sshdShell}`,
+                "LogLevel INFO",
+                "",
+              ].join("\n"),
+            );
+            const started = yield* Effect.callback<Option.Option<NodeChildProcess.ChildProcess>>(
+              (resume) => {
+                const proc = NodeChildProcess.spawn(
+                  sshdTestBinaries.sshd,
+                  ["-D", "-e", "-f", sshdConfig],
+                  { stdio: ["ignore", "ignore", "pipe"] },
+                );
+                let stderr = "";
+                const cleanup = () => {
+                  proc.stderr.removeListener("data", onData);
+                  proc.removeListener("error", onError);
+                  proc.removeListener("close", onClose);
+                };
+                const onData = (chunk: Buffer) => {
+                  stderr += chunk.toString("utf8");
+                  if (stderr.includes("Server listening on")) {
+                    cleanup();
+                    resume(Effect.succeedSome(proc));
+                  }
+                };
+                const onError = (error: Error) => {
+                  cleanup();
+                  resume(Effect.die(error));
+                };
+                const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+                  cleanup();
+                  if (
+                    attempt < 5 &&
+                    /Bind to port .* failed|Address already in use|Cannot bind any address/iu.test(
+                      stderr,
+                    )
+                  ) {
+                    resume(Effect.succeedNone);
+                    return;
+                  }
+                  resume(
+                    Effect.die(
+                      new Error(
+                        `sshd exited before listening (code=${String(code)}, signal=${String(signal)}): ${stderr}`,
+                      ),
+                    ),
+                  );
+                };
+                proc.stderr.on("data", onData);
+                proc.once("error", onError);
+                proc.once("close", onClose);
+                return Effect.sync(() => {
+                  cleanup();
+                  if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGTERM");
+                });
+              },
+            );
+            if (Option.isSome(started)) return { child: started.value, port };
+          }
+        }),
+        ({ child }) =>
+          Effect.callback<void>((resume) => {
+            if (child.exitCode !== null || child.signalCode !== null) {
+              resume(Effect.void);
+              return;
+            }
+            child.once("exit", () => resume(Effect.void));
+            child.kill("SIGTERM");
+          }),
+      );
+
+      const relay = yield* makeStallRelay(sshdPort);
+      // Scale the 15 s x 3 keepalive window down only when GIT_SSH_COMMAND actually supplies those
+      // product flags, so removing SSH_KEEPALIVE_ARGS from SshWorkspaceSync leaves keepalive off.
+      yield* f.fs.writeFileString(
+        f.path.join(f.bin, "ssh"),
+        [
+          "#!/bin/sh",
+          `printf '%s\\n' "$@" >> '${f.sshLog}'`,
+          "for arg do",
+          "  shift",
+          '  case "$arg" in',
+          '    ServerAliveInterval=15) set -- "$@" ServerAliveInterval=1 ;;',
+          '    ServerAliveCountMax=3) set -- "$@" ServerAliveCountMax=2 ;;',
+          '    *) set -- "$@" "$arg" ;;',
+          "  esac",
+          "done",
+          `exec '${sshdTestBinaries.ssh}' -F /dev/null -i '${userKey}' -o User='${sshUser}' -o HostName=127.0.0.1 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"`,
+          "",
+        ].join("\n"),
+      );
+      yield* f.fs.chmod(f.path.join(f.bin, "ssh"), 0o755);
+
+      yield* f.initRemote;
+      yield* f.fs.writeFileString(f.path.join(f.remote, "remote-only.txt"), "remote change\n");
+      yield* f.git(["config", "user.name", "Remote"], f.remote);
+      yield* f.git(["config", "user.email", "remote@test.invalid"], f.remote);
+      yield* f.git(["add", "remote-only.txt"], f.remote);
+      yield* f.git(["commit", "-m", "remote commit"], f.remote);
+      yield* f.git(["branch", "-M", "feature/result"], f.remote);
+
+      const fetchStderr: string[] = [];
+      const fetchErrors: GitCommandError[] = [];
+      f.state.gitHook = (call) =>
+        call.args[0] === "fetch"
+          ? f.realGit
+              .execute({
+                ...call,
+                progress: {
+                  onStderrLine: (line) =>
+                    Effect.sync(() => {
+                      fetchStderr.push(line);
+                    }),
+                },
+              })
+              .pipe(
+                Effect.tapError((error) =>
+                  Effect.sync(() => {
+                    fetchErrors.push(error);
+                  }),
+                ),
+              )
+          : undefined;
+
+      const before = yield* f.unchanged;
+      const startedAtNs = process.hrtime.bigint();
+      const fetchFiber = yield* f.sync
+        .fetchBack({
+          ...f.fetchInput(),
+          target: { ...target, port: relay.port },
+        })
+        .pipe(Effect.flip, Effect.forkChild);
+
+      const hookSocket = yield* Queue.take(packHookSockets);
+      const preStallTraffic = Array.from(yield* Queue.takeAll(relay.traffic));
+      assert.isTrue(
+        preStallTraffic.some(
+          (item) => item.direction === "downstream" && item.forwarded && item.bytes > 0,
+        ),
+      );
+      assert.isTrue(
+        preStallTraffic.some(
+          (item) => item.direction === "upstream" && item.forwarded && item.bytes > 0,
+        ),
+      );
+
+      relay.setMode("stall");
+      assert.strictEqual(relay.openSockets, 2);
+      hookSocket.write("stall\n");
+
+      let sawDroppedDownstream = false;
+      let sawDroppedUpstream = false;
+      while (!sawDroppedDownstream || !sawDroppedUpstream) {
+        const packet = yield* Queue.take(relay.traffic);
+        assert.isFalse(packet.forwarded);
+        if (packet.direction === "downstream") sawDroppedDownstream = true;
+        if (packet.direction === "upstream") sawDroppedUpstream = true;
+      }
+      assert.strictEqual(relay.openSockets, 2);
+
+      const error = yield* Fiber.join(fetchFiber);
+      const elapsedMs = Number(process.hrtime.bigint() - startedAtNs) / 1_000_000;
+      assert.deepInclude(error, {
+        stage: "fetch",
+        code: "fetch_failed",
+        host: target.alias,
+      });
+      assert.isBelow(elapsedMs, 30_000);
+      assert.lengthOf(fetchErrors, 1);
+      assert.notStrictEqual(fetchErrors[0]?.exitCode, 0);
+      const stderrText = fetchStderr.join("\n");
+      assert.match(stderrText, /Timeout, server .* not responding\./i);
+      const postStallTraffic = Array.from(yield* Queue.takeAll(relay.traffic));
+      const droppedKeepalives =
+        1 +
+        postStallTraffic.filter((item) => item.direction === "upstream" && !item.forwarded).length;
+      assert.isAtLeast(droppedKeepalives, 2);
+      const sshLog = yield* f.fs.readFileString(f.sshLog);
+      assert.include(sshLog, "BatchMode=yes");
+      assert.include(sshLog, "ServerAliveInterval=15");
+      assert.include(sshLog, "ServerAliveCountMax=3");
+      assert.include(sshLog, String(relay.port));
+      assert.deepEqual(yield* f.unchanged, before);
+    }).pipe(Effect.scoped, Effect.provide(baseLayer)),
+);
 
 test("rejects HEAD changed snapshot before remote initialization", (f) =>
   Effect.gen(function* () {

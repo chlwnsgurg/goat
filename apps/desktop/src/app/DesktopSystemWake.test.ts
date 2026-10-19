@@ -13,7 +13,7 @@ import * as DesktopSystemWake from "./DesktopSystemWake.ts";
 
 describe("DesktopSystemWake", () => {
   it.effect(
-    "ignores duplicate macOS resume events within the wake window so a short sleep does not turn into a full reconnect",
+    "forwards suspend and measured sleep duration, and ignores duplicate macOS resume events without replacing a short-sleep session",
     () =>
       Effect.gen(function* () {
         const powerListeners = new Map<string, () => void>();
@@ -100,6 +100,13 @@ describe("DesktopSystemWake", () => {
 
             powerListeners.get("suspend")?.();
             yield* TestClock.adjust(0);
+            assert.deepEqual(sentEvents, [
+              {
+                channel: SYSTEM_WAKE_CHANNEL,
+                payload: { reason: "suspend", asleepMs: null } satisfies DesktopSystemWakeEvent,
+              },
+            ]);
+            assert.equal(tunnelRevalidations, 0);
             yield* TestClock.adjust("2 seconds");
 
             // First resume reports the 2s sleep; duplicate resume 100ms later is ignored.
@@ -110,6 +117,10 @@ describe("DesktopSystemWake", () => {
             yield* TestClock.adjust(0);
 
             assert.deepEqual(sentEvents, [
+              {
+                channel: SYSTEM_WAKE_CHANNEL,
+                payload: { reason: "suspend", asleepMs: null } satisfies DesktopSystemWakeEvent,
+              },
               {
                 channel: SYSTEM_WAKE_CHANNEL,
                 payload: { reason: "resume", asleepMs: 2_000 } satisfies DesktopSystemWakeEvent,
@@ -123,16 +134,31 @@ describe("DesktopSystemWake", () => {
             yield* TestClock.adjust("100 millis");
             powerListeners.get("resume")?.();
             yield* TestClock.adjust(0);
-            assert.equal(sentEvents.length, 2);
+            assert.equal(sentEvents.length, 4);
             assert.equal(tunnelRevalidations, 2);
-            assert.deepEqual(sentEvents[1]?.payload, { reason: "resume", asleepMs: 100 });
+            assert.deepEqual(sentEvents[3]?.payload, { reason: "resume", asleepMs: 100 });
 
             yield* TestClock.adjust("3 seconds");
             powerListeners.get("resume")?.();
             yield* TestClock.adjust(0);
-            assert.equal(sentEvents.length, 3);
+            assert.equal(sentEvents.length, 5);
             assert.equal(tunnelRevalidations, 3);
-            assert.deepEqual(sentEvents[2]?.payload, { reason: "resume", asleepMs: null });
+            assert.deepEqual(sentEvents[4]?.payload, { reason: "resume", asleepMs: null });
+
+            powerListeners.get("suspend")?.();
+            yield* TestClock.adjust(0);
+            yield* TestClock.adjust("2 minutes");
+            assert.equal(tunnelRevalidations, 3);
+            powerListeners.get("resume")?.();
+            yield* TestClock.adjust(0);
+            assert.deepEqual(
+              sentEvents.slice(-2).map((event) => event.payload),
+              [
+                { reason: "suspend", asleepMs: null },
+                { reason: "resume", asleepMs: 120_000 },
+              ],
+            );
+            assert.equal(tunnelRevalidations, 4);
           }),
         ).pipe(Effect.provide(layer));
       }).pipe(Effect.provide(TestClock.layer())),

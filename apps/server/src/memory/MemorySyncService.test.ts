@@ -63,6 +63,13 @@ const space = M.MemorySpaceId.make(id(1));
 const local = M.EnvironmentId.make("fixture-member");
 const remote = M.EnvironmentId.make("fixture-hub");
 const selection = { instanceId: M.ProviderInstanceId.make("P"), model: "P" };
+// Memory falls back from disabled instances, so the fixture models need enabled instances.
+const fixtureInstances = Object.fromEntries(
+  ["P", "Q"].map((id) => [
+    M.ProviderInstanceId.make(id),
+    { driver: M.ProviderDriverKind.make("codex"), enabled: true, config: {} },
+  ]),
+);
 const encode = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeStatus = Schema.decodeUnknownEffect(M.MemorySyncStatus);
 const pushDecode = Schema.decodeUnknownSync(Schema.fromJsonString(M.MemoryHubPushInput));
@@ -295,7 +302,8 @@ const changingSettings = (disabled: boolean) =>
           {
             memoryHub: disabled ? { mode: "disabled" } : member,
             memoryHubVersion: 1,
-            defaultModelSelection: selection,
+            memoryModelSelection: selection,
+            providerInstances: fixtureInstances,
           },
           "memoryHub",
         ),
@@ -326,7 +334,8 @@ const fixture = (
         {
           memoryHub: disabled ? { mode: "disabled" } : member,
           memoryHubVersion: 1,
-          defaultModelSelection: selection,
+          memoryModelSelection: selection,
+          providerInstances: fixtureInstances,
         },
         "memoryHub",
       );
@@ -563,7 +572,7 @@ it.effect(
           yield* sync.shutdown;
           const settings = yield* Settings.ServerSettingsService;
           yield* settings.updateSettings({
-            defaultModelSelection: { instanceId: M.ProviderInstanceId.make("Q"), model: "Q" },
+            memoryModelSelection: { instanceId: M.ProviderInstanceId.make("Q"), model: "Q" },
           });
           yield* TestClock.adjust("5 seconds");
           yield* Effect.scoped(
@@ -1420,7 +1429,7 @@ it.effect(
           yield* sync.shutdown;
           yield* database`DROP TRIGGER fixture_ticket_failure`;
           const settings = yield* Settings.ServerSettingsService;
-          yield* settings.updateSettings({ defaultModelSelection: null });
+          yield* settings.updateSettings({ memoryModelSelection: null });
           yield* TestClock.adjust("5 seconds");
           yield* Effect.scoped(
             Effect.gen(function* () {
@@ -3915,7 +3924,7 @@ it.effect(
           assert.strictEqual(reports[0]?.outcome, "failed");
           assert.strictEqual(reports[0]?.failureCode, "invalid_output");
           const next = { instanceId: M.ProviderInstanceId.make("Q"), model: "Q" };
-          yield* settings.updateSettings({ defaultModelSelection: next });
+          yield* settings.updateSettings({ memoryModelSelection: next });
           yield* TestClock.adjust("30 seconds");
           yield* sync.syncOnce;
           yield* Deferred.await(second);
@@ -4099,7 +4108,7 @@ it.effect(
           );
           yield* database`DROP TRIGGER fixture_combined_ticket_failure`;
           yield* settings.updateSettings({
-            defaultModelSelection: { instanceId: M.ProviderInstanceId.make("Q"), model: "Q" },
+            memoryModelSelection: { instanceId: M.ProviderInstanceId.make("Q"), model: "Q" },
           });
           yield* TestClock.adjust("5 seconds");
           yield* Effect.scoped(
@@ -4168,7 +4177,7 @@ it.effect(
           );
           watch = true;
           yield* settings.updateSettings({
-            defaultModelSelection: { instanceId: M.ProviderInstanceId.make("Q"), model: "Q" },
+            memoryModelSelection: { instanceId: M.ProviderInstanceId.make("Q"), model: "Q" },
           });
           yield* Deferred.await(resumed);
           yield* sync.syncOnce;
@@ -5327,7 +5336,8 @@ it.effect.each(["bootstrap", "exchange"] as const)(
             {
               memoryHub: { ...member, memorySpaceId: allocated, hubEnvironmentId: local },
               memoryHubVersion: 1,
-              defaultModelSelection: selection,
+              memoryModelSelection: selection,
+              providerInstances: fixtureInstances,
             },
             "memoryHub",
           );

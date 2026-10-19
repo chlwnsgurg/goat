@@ -158,6 +158,21 @@ export function resolveSourceControlWriterModelSelection(
     : settings.textGenerationModelSelection;
 }
 
+/**
+ * The model memory generation runs on. Without a usable dedicated choice it follows the
+ * text generation model, which the server already moves to a ready provider.
+ */
+export function resolveMemoryModelSelection(
+  settings: ServerSettings,
+  providers: ReadonlyArray<ServerProvider> | undefined,
+): ModelSelection {
+  return resolveSourceControlWriterModelSelection(
+    { ...settings, sourceControlWriterModelSelection: settings.memoryModelSelection },
+    providers,
+    null,
+  );
+}
+
 export function resolveReviewGuideModelSelection(
   settings: ServerSettings,
   providers: ReadonlyArray<ServerProvider> | undefined,
@@ -632,6 +647,9 @@ export function applyServerSettingsPatch(
       : {}),
     ...(patch.reviewGuideModelSelection !== undefined
       ? { reviewGuideModelSelection: patch.reviewGuideModelSelection }
+      : {}),
+    ...(patch.memoryModelSelection !== undefined
+      ? { memoryModelSelection: patch.memoryModelSelection }
       : {}),
     ...(goatBotHomePatch !== undefined &&
     goatBotHomeClaimSupersedes(goatBotHomePatch, current.goatBotHome)

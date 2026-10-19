@@ -6,12 +6,14 @@ import { legacyScopedSessionCookieName } from "./utils.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { authScopeResponse, AuthStandardClientScopes } from "@goat/contracts";
 import { expect, it } from "@effect/vitest";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -823,6 +825,53 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
       } as never);
       expect(verified.sessionId).toBe(bearer.sessionId);
     }).pipe(Effect.provide(layerEnvironmentAuth({ mode: "web", host: "192.168.1.50" }))),
+  );
+
+  // An SSH client reuses its saved bearer while the host answers it as signed in, so that
+  // answer must survive a restart and end with revocation or expiry.
+  it.effect("answers a paired bearer as signed in across a restart until revoked", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-auth-ssh-reuse-" });
+      const before = yield* makeDiskEnvironmentAuthLayer(baseDir);
+      const after = yield* makeDiskEnvironmentAuthLayer(baseDir);
+      const token = yield* Effect.gen(function* () {
+        const auth = yield* EnvironmentAuth.EnvironmentAuth;
+        const pairing = yield* auth.issuePairingCredential();
+        const access = yield* auth.exchangeBootstrapCredentialForAccessToken(
+          pairing.credential,
+          undefined,
+          requestMetadata,
+        );
+        return access.access_token;
+      }).pipe(Effect.provide(before), Effect.scoped);
+      yield* Effect.gen(function* () {
+        const auth = yield* EnvironmentAuth.EnvironmentAuth;
+        const state = yield* auth.getSessionState(makeBearerRequest(token) as never);
+        expect(state.authenticated).toBe(true);
+        expect(state.permissions).toEqual(expect.arrayContaining([...AuthStandardClientScopes]));
+        const principal = yield* auth.authenticateHttpRequest(makeBearerRequest(token));
+        yield* auth.revokeSession(principal.sessionId);
+        const revoked = yield* auth.getSessionState(makeBearerRequest(token) as never);
+        expect(revoked.authenticated).toBe(false);
+      }).pipe(Effect.provide(after), Effect.scoped);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("answers a paired bearer as signed out once it expires", () =>
+    Effect.gen(function* () {
+      const auth = yield* EnvironmentAuth.EnvironmentAuth;
+      const pairing = yield* auth.issuePairingCredential();
+      const access = yield* auth.exchangeBootstrapCredentialForAccessToken(
+        pairing.credential,
+        undefined,
+        requestMetadata,
+      );
+      const request = makeBearerRequest(access.access_token) as never;
+      expect((yield* auth.getSessionState(request)).authenticated).toBe(true);
+      yield* TestClock.adjust(Duration.seconds(access.expires_in + 1));
+      expect((yield* auth.getSessionState(request)).authenticated).toBe(false);
+    }).pipe(Effect.provide(layerEnvironmentAuth())),
   );
 
   it.effect("reauthorizes MCP clients that the CLI issued after the server started", () =>

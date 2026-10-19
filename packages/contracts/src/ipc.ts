@@ -537,6 +537,7 @@ export const DesktopSshEnvironmentEnsureOptionsSchema = Schema.Struct({
 });
 
 export const DesktopSshEnvironmentEnsureInputSchema = Schema.Struct({
+  requestId: Schema.optionalKey(Schema.String),
   target: DesktopSshEnvironmentTargetSchema,
   options: Schema.optionalKey(DesktopSshEnvironmentEnsureOptionsSchema),
 });
@@ -1133,12 +1134,12 @@ export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
 /**
- * The machine woke from sleep (`resume`) or the user unlocked the screen.
+ * The machine is suspending, woke from sleep, or the user unlocked the screen.
  * `asleepMs` is how long the machine was suspended before a resume. It is
- * null for an unlock, or when the desktop did not see the matching suspend.
+ * null for suspend/unlock, or when the desktop did not see the matching suspend.
  */
 export interface DesktopSystemWakeEvent {
-  readonly reason: "resume" | "unlock-screen";
+  readonly reason: "suspend" | "resume" | "unlock-screen";
   readonly asleepMs: number | null;
 }
 
@@ -1192,9 +1193,10 @@ export interface DesktopBridge {
   ) => Promise<void>;
   dismissSnapShotAnimation?: (id: DesktopSnapShotId) => Promise<void>;
   acknowledgeSnapShot?: (id: string) => Promise<void>;
+  supportsSshEnvironmentProgress?: true;
   ensureSshEnvironment: (
     target: DesktopSshEnvironmentTarget,
-    options?: { issuePairingToken?: boolean; keyOnly?: boolean },
+    options?: { issuePairingToken?: boolean; keyOnly?: boolean; onHostAnswered?: () => void },
   ) => Promise<DesktopSshEnvironmentReadyOrPending>;
   getSshHostStatus: (target: DesktopSshEnvironmentTarget) => Promise<SshHostResult>;
   updateSshRuntime: (

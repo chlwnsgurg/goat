@@ -1777,7 +1777,30 @@ export const MemoryHubDisableInput = struct({
   expectedVersion: NonNegativeInt,
 });
 export type MemoryHubDisableInput = typeof MemoryHubDisableInput.Type;
-export const MEMORY_ADMINISTRATION_MCP_TOOLS = ["memory_hub_disable"] as const;
+export const MemorySettingsGetInput = struct({});
+export type MemorySettingsGetInput = typeof MemorySettingsGetInput.Type;
+export const MemorySettingsView = struct({
+  enabled: Schema.Boolean,
+  hub: struct({ mode: Schema.Literals(["disabled", "hub", "member"]), version: NonNegativeInt }),
+  model: struct({ selection: MemoryModelSelection, automatic: Schema.Boolean }),
+});
+export type MemorySettingsView = typeof MemorySettingsView.Type;
+export const MemorySettingsUpdateInput = struct({
+  requestId: MemoryOperationId,
+  enabled: Schema.optionalKey(Schema.Boolean),
+  hubSync: Schema.optionalKey(struct({ enabled: Schema.Boolean, expectedVersion: NonNegativeInt })),
+  modelSelection: Schema.optionalKey(Schema.NullOr(MemoryModelSelection)),
+}).check(
+  Schema.makeFilter(
+    (v) => v.enabled !== undefined || v.hubSync !== undefined || v.modelSelection !== undefined,
+  ),
+);
+export type MemorySettingsUpdateInput = typeof MemorySettingsUpdateInput.Type;
+export const MEMORY_ADMINISTRATION_MCP_TOOLS = [
+  "memory_hub_disable",
+  "memory_settings_get",
+  "memory_settings_update",
+] as const;
 
 export const MemoryHubSettingsGetInput = struct({});
 export type MemoryHubSettingsGetInput = typeof MemoryHubSettingsGetInput.Type;

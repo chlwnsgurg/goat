@@ -1462,6 +1462,7 @@ export class MemoryStore extends Context.Service<
     readonly dueWork: (
       now: number,
       limit: number,
+      kinds?: ReadonlyArray<"summary" | "consolidate" | "rebuild">,
     ) => Effect.Effect<ReadonlyArray<MemoryWork>, MemoryStorageError>;
     readonly readWork: (id: string) => Effect.Effect<MemoryWork | undefined, MemoryStorageError>;
     /** Snapshot ownership prevents a timed-out worker from postponing a newer claim. */
@@ -1474,6 +1475,14 @@ export class MemoryStore extends Context.Service<
       work: MemoryWork,
       now: number,
       until: number,
+    ) => Effect.Effect<MemoryWork | undefined, MemoryStorageError>;
+    /**
+     * Moves a live summary claim to another model before generation. Undefined once the
+     * claim lapsed or moved; ids and space are kept so receipts stay idempotent.
+     */
+    readonly rebindWorkModel: (
+      work: MemoryWork,
+      modelSelection: M.MemoryModelSelection,
     ) => Effect.Effect<MemoryWork | undefined, MemoryStorageError>;
     readonly cancelThreadWork: (
       thread: M.ScopedThreadRef,
@@ -4358,6 +4367,24 @@ const make = Effect.gen(function* () {
     );
     return rows.length === 1 ? { ...work, claimedUntil: until } : undefined;
   });
+  const rebindWorkModel = Effect.fn("MemoryStore.rebindWorkModel")(function* (
+    work: MemoryWork,
+    modelSelection: M.MemoryModelSelection,
+  ) {
+    if (
+      work.metadata.kind !== "summary" ||
+      work.status !== "running" ||
+      work.claimedBy === null ||
+      work.claimedUntil === null
+    )
+      return undefined;
+    const metadata = { ...work.metadata, modelSelection };
+    const rows = yield* stored(
+      "rebind-work-model",
+      sql`UPDATE memory_outbox SET metadata_json=${yield* workMetadataCodec.encode(metadata)} WHERE id=${work.id} AND kind IN ('summary','consolidate') AND status='running' AND claimed_by=${work.claimedBy} AND claimed_until=${work.claimedUntil} AND attempt=${work.attempt} RETURNING id`,
+    );
+    return rows.length === 1 ? { ...work, metadata } : undefined;
+  });
   const cancelThreadWork = Effect.fn("MemoryStore.cancelThreadWork")(function* (
     input: M.ScopedThreadRef,
   ) {
@@ -4404,10 +4431,20 @@ const make = Effect.gen(function* () {
       }),
     );
   });
-  const dueWork = Effect.fn("MemoryStore.dueWork")(function* (now: number, limit: number) {
+  const dueWork = Effect.fn("MemoryStore.dueWork")(function* (
+    now: number,
+    limit: number,
+    kinds: ReadonlyArray<"summary" | "consolidate" | "rebuild"> = [
+      "summary",
+      "consolidate",
+      "rebuild",
+    ],
+  ) {
+    // Filter before the limit so skipped kinds cannot fill every page.
+    if (!kinds.length) return [];
     const rows = yield* stored(
       "due-work",
-      sql<WorkRow>`SELECT * FROM memory_outbox WHERE kind IN ('summary','consolidate','rebuild') AND (status IN ('pending','retry') OR (status='running' AND claimed_until<=${now})) AND next_attempt_at<=${now} ORDER BY next_attempt_at,attempt,id LIMIT ${Math.max(0, Math.min(limit, M.MEMORY_PAGE_MAX_ITEMS))}`,
+      sql<WorkRow>`SELECT * FROM memory_outbox WHERE kind IN ${sql.in(kinds)} AND (status IN ('pending','retry') OR (status='running' AND claimed_until<=${now})) AND next_attempt_at<=${now} ORDER BY next_attempt_at,attempt,id LIMIT ${Math.max(0, Math.min(limit, M.MEMORY_PAGE_MAX_ITEMS))}`,
     );
     return yield* workRows(rows);
   });
@@ -11993,6 +12030,7 @@ const make = Effect.gen(function* () {
     readWork,
     retryWork,
     renewWork,
+    rebindWorkModel,
     readThreadHookWatermark,
     cancelThreadWork,
     readThreadLineage,

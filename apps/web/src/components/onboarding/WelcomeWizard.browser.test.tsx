@@ -81,9 +81,14 @@ vi.mock("../../onboarding/useProjectScans", () => ({
 vi.mock("../../connection/onboarding", () => ({ connectPairing: vi.fn() }));
 vi.mock("../../state/terminal", () => ({ terminalEnvironment: {} }));
 vi.mock("../clerk/useT3ConnectAuthPrompt", () => ({ useT3ConnectAuthPrompt: vi.fn() }));
-vi.mock("../../cloud/publicConfig", () => ({ hasCloudPublicConfig: () => false }));
+vi.mock("../../cloud/publicConfig", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  hasCloudPublicConfig: () => false,
+}));
 vi.mock("../ThreadTerminalDrawer", () => ({ TerminalViewport: () => null }));
 vi.mock("../settings/ChatGptWelcomeCoordinator", () => ({ ChatGptWelcomeCoordinator: () => null }));
+vi.mock("../settings/MemoryGenerationSettings", () => ({ MemoryGenerationSettings: () => null }));
+vi.mock("./MemorySharingChoice", () => ({ MemorySharingChoice: () => null }));
 vi.mock("../settings/CodexSetupSection", () => ({
   CodexSetupSection: () => null,
   AddManagedCodexAccountDialog: () => null,
@@ -148,6 +153,7 @@ it("enters the workspace after a partial import and warns after navigation finis
   await act(async () => root.render(<WelcomeWizard localAvailable onDone={onDone} />));
   await click("Continue");
   await click("Continue");
+  await click("Continue");
   await click("Import 1 project");
   expect(onDone).toHaveBeenCalledWith({
     environmentId: EnvironmentId.make("test-env"),
@@ -183,6 +189,7 @@ it.each([
     await act(async () => root.render(<WelcomeWizard localAvailable onDone={onDone} />));
     await click("Continue");
     await click("Continue");
+    await click("Continue");
     await click("Import 1 project");
     expect(onDone).toHaveBeenCalledOnce();
     if (warning === null && importedCount > 0) {
@@ -204,6 +211,7 @@ it("keeps setup open when saving completion fails and preserves the import warni
   mocks.complete.mockRejectedValueOnce(new Error("settings unavailable"));
   const onDone = vi.fn();
   await act(async () => root.render(<WelcomeWizard localAvailable onDone={onDone} />));
+  await click("Continue");
   await click("Continue");
   await click("Continue");
   await click("Import 1 project");

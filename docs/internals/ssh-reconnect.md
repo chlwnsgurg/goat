@@ -19,15 +19,16 @@ other target. The presentation layer splits `reconnecting` by the last
 failure's reason, so the host that is simply away reads differently from the
 host that is broken.
 
-| What the user sees                           | Supervisor phase         | Last failure            | Automatic retry                         |
-| -------------------------------------------- | ------------------------ | ----------------------- | --------------------------------------- |
-| Connected                                    | `connected`              | none                    | —                                       |
-| Reconnecting, retrying in 30s                | `connecting` / `backoff` | transient, host reached | backoff                                 |
-| Unreachable, retrying in 4m                  | `connecting` / `backoff` | `host-unreachable`      | backoff, quiet                          |
-| Offline                                      | `offline`                | any                     | when this device is online              |
-| Connection failed: login rejected            | `blocked`                | `authentication`        | on wake, network change, or Retry       |
-| Connection failed: host key, runtime refusal | `blocked`                | `configuration`         | on wake, network change, or Retry       |
-| Client not supported                         | `blocked`                | `unsupported`           | never; marked unsupported until updated |
+| What the user sees                           | Supervisor phase         | Last failure                | Automatic retry                                       |
+| -------------------------------------------- | ------------------------ | --------------------------- | ----------------------------------------------------- |
+| Connected                                    | `connected`              | none                        | —                                                     |
+| Reconnecting, retrying in 30s                | `connecting` / `backoff` | transient, host reached     | backoff                                               |
+| Unreachable, retrying in 4m                  | `connecting` / `backoff` | `host-unreachable`          | backoff, quiet                                        |
+| Offline                                      | `offline`                | any                         | when this device is online                            |
+| Connection failed: login rejected            | `blocked`                | `authentication`            | on wake, network change, or Retry                     |
+| Connection failed: local proxy unavailable   | `blocked`                | local proxy `configuration` | every 60 s quietly, or on wake, network change, Retry |
+| Connection failed: host key, runtime refusal | `blocked`                | other `configuration`       | on wake, network change, or Retry                     |
+| Client not supported                         | `blocked`                | `unsupported`               | never; marked unsupported until updated               |
 
 ```mermaid
 stateDiagram-v2
@@ -39,6 +40,7 @@ stateDiagram-v2
   Backoff --> Connecting: delay elapsed
   Backoff --> Connecting: wake, network change, Retry now (ladder reset)
   Blocked --> Connecting: wake, network change, Retry now
+  Blocked --> Connected: quiet local proxy recheck succeeds
   Connecting --> Offline: device offline
   Backoff --> Offline: device offline
   Offline --> Connecting: device online or long resume
@@ -77,9 +79,13 @@ must not discard the connection failure's meaning.
   VPN, so it is `host-unreachable`.
 - **Local proxy unavailable.** An explicit local Tailscale daemon failure,
   stopped or logged-out client, missing approval, or missing ProxyCommand
-  executable is `configuration`, blocked until wake, network change, or Retry.
-  Retrying cannot start a local app, sign in, or repair its path; the message
-  names that fix and this machine, rather than blaming the remote host. These
+  executable is `configuration`. The supervisor re-checks this local-proxy
+  subset every 60 s and keeps the blocked display during the attempt, until
+  the session is ready. Starting the local app, signing in, obtaining approval,
+  or fixing the executable path outside GOAT can then recover without a click.
+  Wake, network change, and Retry still skip the wait. Other configuration and
+  authentication blocks have no timer. The message names the fix and this
+  machine, rather than blaming the remote host. These
   diagnostics take precedence over the generic closure that OpenSSH prints
   afterward. `tailscale nc` writes stopped/login status to stdout, so SSH reads
   it as banner text: commands and tunnel startup retain only those known status
@@ -149,6 +155,33 @@ GOAT's cap is longer because an SSH attempt spawns a process and can wait 10 s
 for `ConnectTimeout`, and a sleeping laptop can stay away for hours. The long
 cap never delays a return: every signal that conditions changed skips the wait.
 
+Setup starts with a 15 s per-route budget. Each environment's supervisor keeps
+its last five successful setup durations in memory, measured with the Effect
+Clock's monotonic time from that route's preparation start to its entering
+`synchronizing` (or completion when that stage is absent). The per-route budget
+is 1.5 times the largest sample, bounded to 15–45 s. It is multiplied by the
+route count; each route reaching `synchronizing` still adds 75 s for its snapshot.
+Until the host answers in the current attempt, the per-route budget stays 15 s.
+Failed routes' preparation and synchronization waits do not enter the sample.
+A first consecutive setup timeout after the host answers retries immediately
+without counting a failure. SSH reports the final host's authenticated answer
+through the desktop bridge while preparation is still running; a jump host's
+login and plain `preparing` do not qualify. `opening` also proves an answer.
+Retries of the same route retain the original preparation start, including
+counted retries, so joining in-flight preparation does not understate its cost.
+A second consecutive slow timeout, a silent host, and a stalled snapshot keep
+normal failure counting. Successful establishment
+ends the slow-timeout streak.
+
+A long resume (`application-active-reconnect`) resets the ladder and opens a
+30 s window measured with the Effect Clock's monotonic time. Failed attempts
+in that window retry after a flat 2 s, including the published `retryAt`, and do not advance
+the failure count. The first failure at or after the window ends uses the
+ladder's first step (1–2 s); subsequent failures escalate normally. Ordinary
+foreground and short-resume probes do not open this window. A successful
+connection or an explicit disconnect clears it; published `retryAt` values
+still use wall time.
+
 ## Resuming
 
 These signals skip a pending retry delay. Retry now cancels an establishing
@@ -157,7 +190,14 @@ its socket may have died during suspension even before readiness. Each signal
 targets the attempt present when it is queued, so a replacement absorbs queued
 duplicates targeting its predecessor. A later Retry can still replace that
 attempt if it stalls. Ordinary foreground and network-change signals leave
-establishment running. All but the return to online reset the retry ladder:
+establishment running. Desktop suspend cancels an in-flight establishment and
+any pending retry timer without counting a failure. No new attempt starts
+until a foreground/resume signal, Connect, Retry, or an online network change
+arrives. A cancelled establishment is shown as offline with no active stage
+or retry timer. A long resume still runs one replacement if the network reports
+offline while recovering, including when it ends the suspend wait.
+An already connected session is left for the wake's probe or replacement.
+All but the return to online reset the retry ladder:
 
 - The app returns to the foreground (`application-active`).
 - The device moves to another network (`network-changed`), the likely moment a
@@ -177,8 +217,29 @@ also tolerates offline reports while the network recovers.
 
 The connected RPC session also checks liveness: pings run every 5 s with a
 15 s silence budget, so a hanging forward is detected within roughly 15–20 s
-of the last received frame. HTTP checks run on reuse and resume; they are not
-a second periodic heartbeat.
+of the last received frame. A deadline tick more than 2 s late means the web
+page or mobile app may have been frozen: it restarts the silence budget so
+queued replies can arrive before the resumed session is judged unresponsive.
+HTTP checks run on reuse and resume; they are not a second periodic heartbeat.
+
+A reconnect keeps the saved bearer token while the host behind the forward is
+the same environment and answers the token as signed in with the scopes a
+fresh pairing would grant. Every pairing adds a session on the host, so
+minting one per reconnect only fills its client list. A runtime older than
+this app's standard scopes grants the same narrower set to every pairing; the
+client remembers, in memory, what a pairing granted per server instance and
+SSH target, and stops asking that server for scopes it never grants. A server
+restart or upgrade (a new instance), another SSH target, a revoked or expired
+token, or a narrower grant pairs again
+([`prepareDesktopSshEnvironment`](../../apps/web/src/connection/platform.ts)).
+
+The server closes an RPC `/ws` connection after 120 s without inbound transport
+traffic, across local, SSH, relay, and tunnel connections. The budget tolerates
+minute-aligned heartbeat throttling in hidden browser tabs. All shipped RPC
+clients use the 5 s ping interval, including during long-running streams;
+server output alone does not keep an abandoned connection alive. Control
+frames and message fragments also reset the budget. The server destroys the
+TCP socket rather than waiting for an unreachable peer's close handshake.
 
 On POSIX hosts, each local forward runs in a dedicated supervised process
 group. A pipe held by the owning GOAT process fences its lifetime: EOF kills

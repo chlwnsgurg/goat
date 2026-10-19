@@ -4,9 +4,11 @@ Save useful facts and instructions for later conversations, and share them betwe
 
 ## Memory is on by default
 
-Memory starts on in every new environment, which acts as its own hub. This applies to desktop, WSL, SSH and headless servers, and servers you use through a web browser or mobile. If you have already configured memory or turned it off, your choice is kept across restarts.
+Remembering conversations starts on in every new environment, which acts as its own memory hub. This applies to desktop, WSL, SSH and headless servers, and servers you use through a web browser or mobile. Your choices are kept across restarts.
 
-To share memory, use **Add device** in the hub’s Memory settings. Every device that shares memory can save and edit memories equally. If memory is off, choose **Make this device the hub** to turn it back on, or add the device from another hub.
+GOAT summarizes finished conversations using the text generation model by default. On web or desktop, choose a separate **Memory model** in **Settings → Memory** if you prefer. Turn off **Remember conversations** there (or in mobile Memory settings) to stop creating new summaries; saved memories remain. The sharing control is separate: turning sharing off keeps memory on this device.
+
+To share memory, use **Add device** in the hub’s Memory settings. Every device that shares memory can save and edit memories equally. If sharing is off, choose **Make this device the hub** to turn it back on, or add the device from another hub.
 
 ## Save and find memories
 
@@ -32,7 +34,7 @@ To share memory, start from the hub. Connect your other device through [Connecti
 
 Every member can save and edit memories when it has memory write permission. If you reach the device limit, remove a device before adding another. Use **Remove** to end a device’s shared-memory access, or **Replace key** to replace its sharing credential. Replacing a key requires a connection to that device and settings write permission there.
 
-To stop sharing on a device, turn sharing off in its Memory settings (**Leave sharing** for a member on web or desktop). Saved memories stay, but you cannot save new memories while memory is off. To turn it back on, make the same device the hub again, or add the member from the hub’s Memory settings.
+To stop sharing on a device, turn sharing off in its Memory settings (**Leave sharing** for a member on web or desktop). Saved memories stay on the device. To share them again, make the same device the hub or add the member from the hub’s Memory settings.
 
 If device setup does not finish, use **Retry** to continue the same request. After a reload, use **Replace key** to recover the device or **Remove** to clean up incomplete setup. If settings changed on another device, review the latest settings before trying again.
 

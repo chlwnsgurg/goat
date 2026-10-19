@@ -144,13 +144,30 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   clearConnectionCatalog: () => ipcRenderer.invoke(IpcChannels.CLEAR_CONNECTION_CATALOG_CHANNEL),
   discoverSshHosts: () => ipcRenderer.invoke(IpcChannels.DISCOVER_SSH_HOSTS_CHANNEL),
   resolveSshHost: (alias) => ipcRenderer.invoke(IpcChannels.RESOLVE_SSH_HOST_CHANNEL, alias),
-  ensureSshEnvironment: async (target, options) =>
-    unwrapEnsureSshEnvironmentResult(
-      await ipcRenderer.invoke(IpcChannels.ENSURE_SSH_ENVIRONMENT_CHANNEL, {
-        target,
-        ...(options === undefined ? {} : { options }),
-      }),
-    ),
+  supportsSshEnvironmentProgress: true,
+  ensureSshEnvironment: async (target, options) => {
+    // @effect-diagnostics-next-line cryptoRandomUUID:off - the sandboxed preload cannot load the Effect runtime
+    const requestId = crypto.randomUUID();
+    const { onHostAnswered, ...ensureOptions } = options ?? {};
+    const answered = (_event: Electron.IpcRendererEvent, id: unknown) => {
+      if (id === requestId) {
+        ipcRenderer.removeListener(IpcChannels.SSH_ENVIRONMENT_ANSWERED_CHANNEL, answered);
+        onHostAnswered?.();
+      }
+    };
+    ipcRenderer.on(IpcChannels.SSH_ENVIRONMENT_ANSWERED_CHANNEL, answered);
+    try {
+      return unwrapEnsureSshEnvironmentResult(
+        await ipcRenderer.invoke(IpcChannels.ENSURE_SSH_ENVIRONMENT_CHANNEL, {
+          requestId,
+          target,
+          ...(options === undefined ? {} : { options: ensureOptions }),
+        }),
+      );
+    } finally {
+      ipcRenderer.removeListener(IpcChannels.SSH_ENVIRONMENT_ANSWERED_CHANNEL, answered);
+    }
+  },
   // The main-process handlers encode these results with the SshHostResult schema.
   getSshHostStatus: (target) => ipcRenderer.invoke(IpcChannels.SSH_HOST_STATUS_CHANNEL, { target }),
   updateSshRuntime: (target, mode) =>
@@ -241,7 +258,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   onSystemWake: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, wake: unknown) => {
       if (typeof wake !== "object" || wake === null || !("reason" in wake)) return;
-      if (wake.reason !== "resume" && wake.reason !== "unlock-screen") return;
+      if (wake.reason !== "suspend" && wake.reason !== "resume" && wake.reason !== "unlock-screen")
+        return;
       const asleepMs = "asleepMs" in wake ? wake.asleepMs : null;
       listener({
         reason: wake.reason,

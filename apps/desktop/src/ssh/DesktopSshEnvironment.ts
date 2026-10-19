@@ -7,7 +7,7 @@ import type {
 } from "@goat/contracts";
 import * as NetService from "@goat/shared/Net";
 import * as SshAuth from "@goat/ssh/auth";
-import { resolveSshTarget } from "@goat/ssh/command";
+import { resolveSshTarget, SshHostAnswered } from "@goat/ssh/command";
 import { discoverSshHosts } from "@goat/ssh/config";
 import {
   SshCommandError,
@@ -148,6 +148,7 @@ export const make = Effect.gen(function* () {
       Effect.fail(new SshPasswordPromptError({ message: "SSH key authentication is required." })),
   });
   const generations = new Map<string, number>();
+  const preparations = new Map<string, { answered: boolean; listeners: Set<() => void> }>();
   const targetKey = (target: DesktopSshEnvironmentTarget) =>
     JSON.stringify([target.alias, target.hostname, target.username, target.port]);
   const cancelledResult = (target: DesktopSshEnvironmentTarget): SshHostResult => ({
@@ -192,13 +193,47 @@ export const make = Effect.gen(function* () {
         Effect.withSpan("desktop.ssh.resolveHost"),
       ),
     ensureEnvironment: (target, ensureOptions) =>
-      manager
-        .ensureEnvironment(target, ensureOptions)
-        .pipe(
-          Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
-          Effect.provide(runtimeContext),
-          Effect.withSpan("desktop.ssh.ensureEnvironment"),
-        ),
+      Effect.gen(function* () {
+        const onAnswered = yield* SshHostAnswered;
+        const listener = () => {
+          try {
+            onAnswered?.();
+          } catch {
+            // A destroyed renderer must not prevent other requests from observing authentication.
+          }
+        };
+        const key = targetKey(target);
+        return yield* Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const preparation = preparations.get(key) ?? { answered: false, listeners: new Set() };
+            preparations.set(key, preparation);
+            preparation.listeners.add(listener);
+            return preparation;
+          }),
+          (preparation) =>
+            Effect.gen(function* () {
+              // Replay only after acquisition so notification failures cannot bypass cleanup.
+              if (preparation.answered) listener();
+              return yield* manager.ensureEnvironment(target, ensureOptions).pipe(
+                Effect.provideService(SshHostAnswered, () => {
+                  if (preparations.get(key) !== preparation || preparation.answered) return;
+                  preparation.answered = true;
+                  for (const notify of preparation.listeners) notify();
+                }),
+              );
+            }),
+          (preparation) =>
+            Effect.sync(() => {
+              preparation.listeners.delete(listener);
+              if (preparation.listeners.size === 0 && preparations.get(key) === preparation)
+                preparations.delete(key);
+            }),
+        );
+      }).pipe(
+        Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
+        Effect.provide(runtimeContext),
+        Effect.withSpan("desktop.ssh.ensureEnvironment"),
+      ),
     status: (target) =>
       withCurrentRequest(target, () => readStatus(target)).pipe(
         Effect.withSpan("desktop.ssh.status"),
@@ -229,6 +264,7 @@ export const make = Effect.gen(function* () {
         const key = targetKey(target);
         // Do not start a status probe when an update completes after disconnect.
         generations.set(key, (generations.get(key) ?? 0) + 1);
+        preparations.delete(key);
         return manager.disconnectEnvironment(target);
       }).pipe(
         Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),

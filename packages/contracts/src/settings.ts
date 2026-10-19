@@ -1253,6 +1253,15 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_MEMORY_OWNER_SOURCE_READ_POLICY)),
   ),
   enableAgentMemoryAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /** Off stops new memory generation; queued work and stored memories are kept. */
+  memoryEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * Null follows `textGenerationModelSelection`, the cheap background model. Memory must
+   * never inherit the new-thread default, which can be an expensive or unsupported model.
+   */
+  memoryModelSelection: Schema.NullOr(ModelSelection).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   memoryHubVersion: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
   memoryHub: MemoryHubSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed({ mode: "disabled" as const })),
@@ -1684,6 +1693,8 @@ const ServerSettingsPatchFields = Schema.Struct({
   ),
   worktreesDirectory: Schema.optionalKey(TrimmedString),
   enableAgentMemoryAccess: Schema.optionalKey(Schema.Boolean),
+  memoryEnabled: Schema.optionalKey(Schema.Boolean),
+  memoryModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),

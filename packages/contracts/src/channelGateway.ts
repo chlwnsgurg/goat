@@ -273,6 +273,7 @@ export type ChannelEnsureBotResult = ChannelBotRef;
  * What a client shows about the GOAT bot without opening it: which thread is the bot (null until
  * an `ensureBot` creates one; this never creates it) and how many tasks, from any channel, wait on
  * a person: an open question, or a worker thread that needs an answer, approval, sign-in or resume.
+ * Tasks already waiting when the bot thread was last visited (`thread.visit`) count as read.
  */
 export const ChannelGetBotStatusInput = Schema.Struct({});
 export type ChannelGetBotStatusInput = typeof ChannelGetBotStatusInput.Type;

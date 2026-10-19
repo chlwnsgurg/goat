@@ -26,6 +26,8 @@ export type GlobalAgentDraftState = "none" | "unpromoted" | "promoted";
 export interface GlobalAgentResolverInput {
   /** Every environment's thread shells have loaded; absence now means gone. */
   readonly bootstrapped: boolean;
+  /** The saved ref's machine has its shell snapshot, so a missing shell there is authoritative. */
+  readonly refEnvironmentBootstrapped: boolean;
   readonly ref: GlobalAgentRef | null;
   /** Active shell for ref's thread, or null when absent (archived threads leave the active shell). */
   readonly threadShell: {
@@ -46,8 +48,19 @@ function createOrFallback(scratchEnvironmentId: EnvironmentId | null): GlobalAge
 }
 
 export function resolveGlobalAgent(input: GlobalAgentResolverInput): GlobalAgentResolution {
-  if (!input.bootstrapped) return { kind: "wait" };
   const { ref } = input;
+  if (ref !== null && input.refEnvironmentKnown) {
+    const shell = input.threadShell;
+    // A live shell already identifies the destination, regardless of other machines.
+    if (shell !== null && shell.archivedAt === null && shell.deletedAt == null) {
+      return { kind: "open-thread", environmentId: ref.environmentId, threadId: ref.threadId };
+    }
+    // An unsent draft only needs its own machine to confirm no thread exists.
+    if (shell === null && input.draftState === "unpromoted" && input.refEnvironmentBootstrapped) {
+      return { kind: "open-draft", draftId: ref.draftId };
+    }
+  }
+  if (!input.bootstrapped) return { kind: "wait" };
   if (ref !== null) {
     if (!input.refEnvironmentKnown) return { kind: "fallback" };
     const shell = input.threadShell;

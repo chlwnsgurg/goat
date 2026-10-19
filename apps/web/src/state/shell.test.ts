@@ -1,12 +1,20 @@
-import { BearerConnectionTarget, PrimaryConnectionTarget } from "@goat/client-runtime/connection";
+import {
+  AVAILABLE_CONNECTION_STATE,
+  BearerConnectionTarget,
+  PrimaryConnectionTarget,
+  type SupervisorConnectionState,
+} from "@goat/client-runtime/connection";
 import type { EnvironmentCatalogState } from "@goat/client-runtime/state/connections";
 import type { EnvironmentShellState } from "@goat/client-runtime/state/shell";
 import { EnvironmentId } from "@goat/contracts";
 import * as Option from "effect/Option";
-import { Atom, AtomRegistry } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 
-import { createAllEnvironmentProjectSnapshotsReadyAtom } from "./shell";
+import {
+  createAllEnvironmentProjectSnapshotsReadyAtom,
+  createPendingEnvironmentShellIdsAtom,
+} from "./shell";
 
 const LOCAL = EnvironmentId.make("local");
 const REMOTE = EnvironmentId.make("remote");
@@ -128,6 +136,64 @@ describe("project snapshot readiness", () => {
     expect(registry.get(ready)).toBe(false);
     registry.set(catalog, catalogState([LOCAL]));
     expect(registry.get(ready)).toBe(true);
+    registry.dispose();
+  });
+});
+
+describe("pending environment shells", () => {
+  it("keeps the pending list and bootstrap boolean aligned", () => {
+    const catalog = Atom.make<AsyncResult.AsyncResult<EnvironmentCatalogState>>(
+      AsyncResult.initial(),
+    );
+    const shells = Atom.family((_environmentId: EnvironmentId) =>
+      Atom.make<EnvironmentShellState>(shellState("empty")),
+    );
+    const connections = Atom.family((_environmentId: EnvironmentId) =>
+      Atom.make<AsyncResult.AsyncResult<SupervisorConnectionState>>(AsyncResult.initial()),
+    );
+    const pending = createPendingEnvironmentShellIdsAtom({
+      catalogAtom: catalog,
+      shellStateValueAtom: shells,
+      connectionStateAtom: connections,
+    });
+    const bootstrapped = Atom.map(pending, (ids) => ids !== null && ids.length === 0);
+    const registry = AtomRegistry.make();
+
+    expect(registry.get(pending)).toBeNull();
+    expect(registry.get(bootstrapped)).toBe(false);
+
+    registry.set(catalog, AsyncResult.success(catalogState([LOCAL, REMOTE])));
+    registry.set(shells(LOCAL), shellState("live"));
+    registry.set(
+      connections(REMOTE),
+      AsyncResult.success({ ...AVAILABLE_CONNECTION_STATE, phase: "connecting", desired: true }),
+    );
+    expect(registry.get(pending)).toEqual([REMOTE]);
+    expect(registry.get(bootstrapped)).toBe(false);
+
+    registry.set(
+      connections(REMOTE),
+      AsyncResult.success({
+        ...AVAILABLE_CONNECTION_STATE,
+        phase: "backoff",
+        desired: true,
+        attempt: 3,
+      }),
+    );
+    expect(registry.get(pending)).toEqual([]);
+    expect(registry.get(bootstrapped)).toBe(true);
+
+    registry.set(
+      connections(REMOTE),
+      AsyncResult.success({
+        ...AVAILABLE_CONNECTION_STATE,
+        phase: "backoff",
+        desired: true,
+        attempt: 2,
+      }),
+    );
+    expect(registry.get(pending)).toEqual([REMOTE]);
+    expect(registry.get(bootstrapped)).toBe(false);
     registry.dispose();
   });
 });

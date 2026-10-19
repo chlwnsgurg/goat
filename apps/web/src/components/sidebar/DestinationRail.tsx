@@ -25,6 +25,7 @@ import { useEnvironments, usePullRequestsSupported } from "../../state/environme
 import { useFleetSummary } from "../../state/fleet";
 import { resolveThreadRouteTarget } from "../../threadRoutes";
 import { useGoatBotWaitingCount } from "../goatBot/useGoatBotWaitingCount";
+import { useGoatBotReadMenu } from "../goatBot/useGoatBotReadMenu";
 import {
   isMemoryEnvironmentAvailable,
   validateMemorySettingsSearch,
@@ -157,6 +158,7 @@ export const DestinationRail = memo(function DestinationRail() {
   const isBotRoute = isGoatBotRoute(pathname, resolveThreadRouteTarget(params), botRef);
   const active = resolveActiveDestination(pathname, { isBotRoute });
   const botWaiting = useGoatBotWaitingCount();
+  const botReadMenu = useGoatBotReadMenu(botWaiting);
   const { count: decisionsWaiting } = useAtomValue(decisionInbox.summaryAtom);
   const pullRequestsSupported = usePullRequestsSupported();
   const { environments } = useEnvironments();
@@ -197,6 +199,7 @@ export const DestinationRail = memo(function DestinationRail() {
             activeOptions={EXACT_MATCH}
             aria-current={current("bot")}
             className={railItemClassName(active === "bot")}
+            {...botReadMenu}
           >
             <BotIcon aria-hidden />
             <RailCount count={botWaiting} />

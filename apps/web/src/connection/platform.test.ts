@@ -6,6 +6,7 @@ import {
   type DesktopSshEnvironmentTarget,
 } from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
@@ -29,6 +30,7 @@ import {
   secondaryBearerExpiresAtEpochMs,
   secondaryBearerRefreshAtEpochMs,
   secondsUntil,
+  type SshPairingGrants,
 } from "./platform.ts";
 
 const TARGET: DesktopSshEnvironmentTarget = {
@@ -44,6 +46,9 @@ function makeBridge(
     readonly failDescriptor?: boolean;
     readonly savedTokenRejected?: boolean;
     readonly savedTokenPermissions?: ReadonlyArray<string>;
+    readonly instanceId?: string;
+    readonly pairedScopes?: ReadonlyArray<string>;
+    readonly resolvedTarget?: DesktopSshEnvironmentTarget;
   },
 ): DesktopBridge {
   return {
@@ -53,7 +58,7 @@ function makeBridge(
     ) => {
       calls.push("ensure");
       return {
-        target,
+        target: options?.resolvedTarget ?? target,
         httpBaseUrl: "http://127.0.0.1:3201/",
         wsBaseUrl: "ws://127.0.0.1:3201/",
         pairingToken: ensureOptions?.issuePairingToken === true ? "pairing-token" : null,
@@ -79,6 +84,7 @@ function makeBridge(
           arch: "x64",
         },
         serverVersion: "0.0.0-test",
+        ...(options?.instanceId === undefined ? {} : { instanceId: options.instanceId }),
         capabilities: {
           repositoryIdentity: true,
         },
@@ -91,11 +97,16 @@ function makeBridge(
         issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
         token_type: "Bearer",
         expires_in: 3_600,
-        scope: AuthStandardClientScopes.join(" "),
+        scope: (options?.pairedScopes ?? AuthStandardClientScopes).join(" "),
       };
     },
   } as unknown as DesktopBridge;
 }
+
+// What a runtime from before access and relay management joined the standard scopes grants.
+const OLDER_RUNTIME_SCOPES = AuthStandardClientScopes.filter(
+  (scope) => !["access:read", "access:write", "relay:write"].includes(scope),
+);
 
 describe("desktop SSH pairing", () => {
   it.effect("forwards key-only authentication to the desktop bridge", () =>
@@ -150,6 +161,67 @@ describe("desktop SSH pairing", () => {
 
       expect(calls).toEqual(["ensure", "descriptor"]);
     }),
+  );
+
+  it.effect.each([undefined, "saved-token"])(
+    "reports SSH answering before preparation completes (%s)",
+    (bearerToken) =>
+      Effect.gen(function* () {
+        const answered = yield* Deferred.make<void>();
+        let reply: (() => void) | undefined;
+        let finish: (() => void) | undefined;
+        const ensureStarted = yield* Deferred.make<void>();
+        const calls: string[] = [];
+        const base = makeBridge(calls);
+        const bridge: DesktopBridge = {
+          ...base,
+          supportsSshEnvironmentProgress: true,
+          ensureSshEnvironment: (target, options) =>
+            new Promise((resolve) => {
+              reply = options?.onHostAnswered;
+              finish = () => {
+                void base.ensureSshEnvironment(target, options).then(resolve);
+              };
+              Deferred.doneUnsafe(ensureStarted, Effect.void);
+            }),
+        };
+        const fiber = yield* prepareDesktopSshEnvironment(bridge, {
+          target: TARGET,
+          expectedEnvironmentId: EnvironmentId.make("environment-ssh"),
+          ...(bearerToken === undefined ? {} : { bearerToken }),
+          onHostAnswered: Deferred.succeed(answered, undefined),
+        }).pipe(Effect.forkChild);
+        yield* Deferred.await(ensureStarted);
+        expect(reply).toBeDefined();
+        reply!();
+        yield* Deferred.await(answered);
+        expect(calls).toEqual([]);
+        finish!();
+        yield* Fiber.join(fiber);
+        expect(calls[0]).toBe("ensure");
+      }),
+  );
+
+  it.effect.each([undefined, "saved-token"])(
+    "keeps options serializable for an older preload (%s)",
+    (bearerToken) =>
+      Effect.gen(function* () {
+        const base = makeBridge([]);
+        const bridge: DesktopBridge = {
+          ...base,
+          ensureSshEnvironment: (target, options) => {
+            structuredClone(options);
+            return base.ensureSshEnvironment(target, options);
+          },
+        };
+        const prepared = yield* prepareDesktopSshEnvironment(bridge, {
+          target: TARGET,
+          expectedEnvironmentId: EnvironmentId.make("environment-ssh"),
+          ...(bearerToken === undefined ? {} : { bearerToken }),
+          onHostAnswered: Effect.die("An older preload must not receive a callback."),
+        });
+        expect(prepared.bootstrap.target).toEqual(TARGET);
+      }),
   );
 
   it.effect("reconnects with the saved token while it holds every standard scope", () =>
@@ -219,6 +291,145 @@ describe("desktop SSH pairing", () => {
       expect(calls).toEqual(["ensure", "descriptor"]);
     }),
   );
+
+  describe("on a runtime older than this app's standard scopes", () => {
+    const reconnect = (
+      grants: SshPairingGrants,
+      bridge: Parameters<typeof makeBridge>[1],
+      bearerToken: string,
+      target: DesktopSshEnvironmentTarget = TARGET,
+    ) =>
+      Effect.suspend(() => {
+        const calls: string[] = [];
+        return prepareDesktopSshEnvironment(
+          makeBridge(calls, bridge),
+          {
+            target,
+            expectedEnvironmentId: EnvironmentId.make("environment-ssh"),
+            bearerToken,
+          },
+          undefined,
+          grants,
+        ).pipe(Effect.map((prepared) => ({ ...prepared, calls })));
+      });
+    const older = {
+      instanceId: "server-start-1",
+      pairedScopes: OLDER_RUNTIME_SCOPES,
+      savedTokenPermissions: OLDER_RUNTIME_SCOPES,
+    };
+
+    it.effect("pairs once, then reuses the token that pairing issued", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+
+        const first = yield* reconnect(grants, older, "token-from-an-earlier-launch");
+        expect(first.bearerToken).toBe("bearer-token");
+        expect(first.calls).toContain("token");
+
+        const second = yield* reconnect(grants, older, first.bearerToken);
+        expect(second.bearerToken).toBe("bearer-token");
+        expect(second.calls).toEqual(["ensure", "descriptor", "session"]);
+      }),
+    );
+
+    it.effect("pairs again once the host's server restarted or was upgraded", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        yield* reconnect(grants, older, "token-from-an-earlier-launch");
+
+        const upgraded = yield* reconnect(
+          grants,
+          { ...older, instanceId: "server-start-2" },
+          "bearer-token",
+        );
+        expect(upgraded.calls).toContain("token");
+      }),
+    );
+
+    it.effect("finds the record under the target the saved profile keeps after resolution", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        const typed = { ...TARGET, hostname: "devbox", username: null, port: null };
+        yield* reconnect(
+          grants,
+          { ...older, resolvedTarget: TARGET },
+          "token-from-an-earlier-launch",
+          typed,
+        );
+
+        const saved = yield* reconnect(grants, older, "bearer-token", TARGET);
+        expect(saved.calls).toEqual(["ensure", "descriptor", "session"]);
+      }),
+    );
+
+    it.effect("never accepts any token when a pairing granted no standard scope", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        const odd = { ...older, pairedScopes: ["memory:sync"], savedTokenPermissions: [] };
+        yield* reconnect(grants, odd, "token-from-an-earlier-launch");
+
+        const again = yield* reconnect(grants, odd, "bearer-token");
+        expect(again.calls).toContain("token");
+      }),
+    );
+
+    it.effect("keeps another SSH host claiming this environment from lowering the bar", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        yield* reconnect(grants, older, "token-from-an-earlier-launch", {
+          ...TARGET,
+          alias: "impostor",
+          hostname: "impostor.example.test",
+        });
+
+        const genuine = yield* reconnect(grants, older, "bearer-token");
+        expect(genuine.calls).toContain("token");
+      }),
+    );
+
+    it.effect("pairs again when the host revoked or expired the token", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        yield* reconnect(grants, older, "token-from-an-earlier-launch");
+
+        const rejected = yield* reconnect(
+          grants,
+          { ...older, savedTokenRejected: true },
+          "bearer-token",
+        );
+        expect(rejected.calls).toContain("token");
+      }),
+    );
+
+    it.effect("pairs again when the token lacks a scope this runtime's pairing granted", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        yield* reconnect(grants, older, "token-from-an-earlier-launch");
+
+        const narrower = yield* reconnect(
+          grants,
+          { ...older, savedTokenPermissions: ["orchestration:read"] },
+          "bearer-token",
+        );
+        expect(narrower.calls).toContain("token");
+      }),
+    );
+
+    it.effect("requires every standard scope when the server names no instance", () =>
+      Effect.gen(function* () {
+        const grants: SshPairingGrants = new Map();
+        const unnamed = {
+          pairedScopes: OLDER_RUNTIME_SCOPES,
+          savedTokenPermissions: OLDER_RUNTIME_SCOPES,
+        };
+        yield* reconnect(grants, unnamed, "token-from-an-earlier-launch");
+
+        const again = yield* reconnect(grants, unnamed, "bearer-token");
+        expect(again.calls).toContain("token");
+        expect(grants.size).toBe(0);
+      }),
+    );
+  });
 });
 
 describe("desktop-local bearer cache", () => {

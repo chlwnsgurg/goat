@@ -235,6 +235,7 @@ import {
 } from "../types";
 import { useTheme } from "../hooks/useTheme";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
+import { useCopyConnectionDiagnostic } from "../hooks/useCopyConnectionDiagnostic";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { settleAndAdvance } from "../settleAndAdvance";
 import { subscribeSnapShotComposerFocus } from "../lib/desktopSnapShot";
@@ -292,6 +293,7 @@ import {
   MessageCircleIcon,
   PaperclipIcon,
   ChevronDownIcon,
+  CopyIcon,
   DownloadIcon,
   GitBranchIcon,
   ShieldQuestionIcon,
@@ -2097,6 +2099,7 @@ export default function ChatView(props: ChatViewProps) {
     );
   }, [activeReconnectingEnvironmentId]);
   const activeEnvironmentUnavailableLabel = activeEnvironment?.label ?? null;
+  const copyConnectionDiagnostic = useCopyConnectionDiagnostic(activeEnvironment);
   const activeEnvironmentUnavailableState = (() => {
     if (!activeEnvironmentUnavailable || !activeEnvironmentUnavailableLabel || !activeEnvironment) {
       return null;
@@ -2422,6 +2425,21 @@ export default function ChatView(props: ChatViewProps) {
               {environmentReconnecting ? "Retry now" : "Reconnect"}
             </Button>
             {disconnectAction}
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    size="icon-xs"
+                    variant="ghost"
+                    aria-label="Copy diagnostic"
+                    onClick={copyConnectionDiagnostic}
+                  />
+                }
+              >
+                <CopyIcon />
+              </TooltipTrigger>
+              <TooltipPopup side="top">Copy diagnostic</TooltipPopup>
+            </Tooltip>
           </>
         ),
       });

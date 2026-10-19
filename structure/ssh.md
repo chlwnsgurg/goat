@@ -34,6 +34,32 @@ is `ssh -L` onto the remote loopback port. The embedded launch script sets
 `apps/server/src/sshRemote/SshWorkspaceSync.ts` prints the label `GOAT_HOME` followed by `$HOME`
 when it fetches a branch back. That label is not an environment variable `resolveBaseDir` reads.
 
+### Local SSH ownership
+
+On POSIX, `master.ts` starts one private `ssh -M -N` per resolved target in a
+manager. Commands reuse its control socket; forwards are added with `-O forward`
+and removed with `-O cancel` using the identical `-L` spec before the master is
+killed through its captured process handle. `ControlPersist=no` and the same
+owner-pipe fence as standalone forwards prevent a master surviving an owner crash.
+The fresh, owner-checked 0700 runtime directory under `/tmp` contains both
+askpass and the socket; a 12-hex SHA-256 prefix covers the resolved target and
+effective `ssh -G` config, including proxy and identity settings. The path budget
+reserves 17 bytes for OpenSSH's temporary suffix plus a terminating NUL within
+macOS's 104-byte socket limit. A separate directory per lifetime keeps teardown
+from reaching a successor's socket.
+
+A failed or exited master falls back to standalone SSH. Windows stays standalone.
+An effective user ControlPath or enabled ControlMaster leaves command sharing to
+OpenSSH's user configuration. The forward stays standalone and owner-fenced with
+`ControlMaster=no`, `ControlPath=none`, and `ControlPersist=no`; GOAT never creates
+a master in that case. Keepalive runs on the owned master and on commands,
+including commands using `-S` in case OpenSSH falls back to a direct connection.
+Git workspace transfers carry the same 15 s / three missed probes budget through
+`GIT_SSH_COMMAND`. The RPC ping still owns detection
+of a forward that remains alive but stops carrying bytes. `ssh.reconnect.cost`
+counts all SSH spawns and reports `mastersStarted` and `controlCommands` separately
+from authentication milestones, so local mux requests do not imply new handshakes.
+
 ### Shared runtime
 
 One host user runs one SSH-managed server, and every client shares it. The launch, pairing, MCP
@@ -42,6 +68,14 @@ session, stop, and log scripts keep their ownership records (`pid`, `port`, `man
 `packages/ssh/src/command.ts`), whatever alias, hostname, or port the client dialled. A client that
 finds a compatible live server attaches to it, so threads started from any client live in that
 server's state and every client sees them.
+
+Each start of `goat` costs about 0.4 s on a host, and the probe, launch, and pairing scripts ask
+the same questions before every use. They record each successful answer in
+`~/.goat/ssh-launch/facts`: an executable's version, protocol, commit time, and memory-scope
+support under its path, inode, size, and times (only once it is 2 s old), and a live server's
+protocol and compatibility under its runtime record and the start times of the PIDs it names.
+A changed, reinstalled, or removed executable, or a replaced or restarted server, misses and is
+asked again, so the rechecks still guard every step. Windows hosts record nothing.
 
 The runner keeps `run-t3.sh` because independently updated clients and retained supervisors
 use that path for reuse, replacement, and rollback. Its shell variables use `GOAT_*`;
@@ -138,6 +172,16 @@ desktop and the server's SSH dispatch (`resolveSshCliRunner` in
 - With an older compatible server running, the first connection of each manager drains it once it
   answers `idle` (see [Replacement](#replacement)). While it is busy, the client attaches to it,
   logs `ssh.runtime.refresh.deferred` with the reason, and retries every 10 minutes.
+
+After a successful launch or attach, cleanup runs under the host replacement lock, never
+on a drain/replacement or rollback connection, and excludes concurrent installs. It uses the
+live binary's `__ssh-helper compare-version` to remove only proven older, unused directories,
+keeping the live, retained and requested versions and the newest older rollback build (all
+unordered rollback candidates are preserved). It checks process commands, executable paths and
+cwd, renames victims into sibling `.trash-*` directories before deleting, and never follows
+symlinks. Errors only log `ssh.runtime.cleanup.*`. Windows is skipped because its process and
+shell utilities differ; hosts without readable `/proc` executable/cwd links or `flock`, including
+macOS, conservatively keep everything.
 
 Runtime supply targets the owning process's exact release and platform, not the
 latest published build. The acquisition order in

@@ -421,6 +421,7 @@ function MemoryConnected({
         />
       ) : (
         <ScreenScrollView>
+          <MemoryGeneration environmentId={environmentId} />
           <MemoryAgentAccess environmentId={environmentId} />
           {status ? <MemoryStatusRows status={status} /> : null}
           <MemorySyncDiagnostics environmentId={environmentId} status={status} onRefresh={load} />
@@ -783,6 +784,7 @@ function ScopedMemoryBrowser({
             onSharingRefresh={() => void onSyncRefresh()}
             sync={status}
           />
+          <MemoryGeneration environmentId={params.environmentId} />
           <MemoryAgentAccess environmentId={params.environmentId} />
           {status ? <MemoryStatusRows status={status} /> : null}
           <MemorySyncDiagnostics
@@ -1728,6 +1730,51 @@ function MemoryStatusRows({ status }: { status: MemorySyncStatus }) {
         .map((label) => (
           <Copy key={label}>{label}</Copy>
         ))}
+    </SettingsSection>
+  );
+}
+
+function MemoryGeneration({ environmentId }: { environmentId: EnvironmentId }) {
+  const registry = useContext(RegistryContext);
+  const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
+  const allowed = useAtomValue(serverEnvironment.updateSettings.permissionAtom(environmentId));
+  const update = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
+  const live = useMemoryLifetime(environmentId);
+  const [busy, setBusy] = useState(false);
+  const pending = useRef(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  return (
+    <SettingsSection title="Memory">
+      <Copy>
+        GOAT summarizes finished conversations. Turning this off stops new summaries and keeps saved
+        memories.
+      </Copy>
+      <SettingsSwitchRow
+        label="Remember conversations"
+        value={config?.settings.memoryEnabled ?? true}
+        disabled={!allowed || !config || busy}
+        onValueChange={(value) => {
+          if (
+            pending.current ||
+            !registry.get(serverEnvironment.updateSettings.permissionAtom(environmentId))
+          )
+            return;
+          pending.current = true;
+          setBusy(true);
+          void update({ environmentId, input: { patch: { memoryEnabled: value } } })
+            .then((result) => {
+              if (live())
+                setNotice(
+                  result._tag === "Success" ? "Memory updated." : "Could not update memory.",
+                );
+            })
+            .finally(() => {
+              pending.current = false;
+              if (live()) setBusy(false);
+            });
+        }}
+      />
+      {notice ? <Copy>{notice}</Copy> : null}
     </SettingsSection>
   );
 }

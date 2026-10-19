@@ -394,6 +394,7 @@ describe("ConnectionResolver", () => {
     Effect.gen(function* () {
       const preparedTargets = yield* Ref.make<ReadonlyArray<DesktopSshEnvironmentTarget>>([]);
       const connectionMethods = yield* Ref.make<ReadonlyArray<string>>([]);
+      const answered = yield* Ref.make(false);
       const target = new SshConnectionTarget({
         environmentId: ENVIRONMENT_ID,
         label: "SSH",
@@ -408,6 +409,7 @@ describe("ConnectionResolver", () => {
       const layerBroker = yield* makeDependencies({
         prepareSsh: (input) =>
           Ref.update(preparedTargets, (values) => [...values, input.target]).pipe(
+            Effect.andThen(input.onHostAnswered ?? Effect.void),
             Effect.as({
               bootstrap: {
                 target: input.target,
@@ -435,8 +437,10 @@ describe("ConnectionResolver", () => {
       const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
 
       expect(
-        (yield* broker.prepare(catalogEntry(target, Option.some(profile)))).socketUrl,
+        (yield* broker.prepare(catalogEntry(target, Option.some(profile)), Ref.set(answered, true)))
+          .socketUrl,
       ).toContain("wsTicket=bearer");
+      expect(yield* Ref.get(answered)).toBe(true);
       expect(yield* Ref.get(preparedTargets)).toEqual([SSH_TARGET]);
       expect(yield* Ref.get(connectionMethods)).toEqual(["ssh"]);
     }),

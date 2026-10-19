@@ -342,6 +342,8 @@
         "apps/desktop/package.json",
         "apps/desktop/src/main.ts",
         "apps/desktop/src/app/DesktopEnvironment.ts",
+        "apps/desktop/src/app/DesktopSystemWake.ts",
+        "apps/web/src/connection/desktopWakeups.ts",
         "apps/desktop/src/app/DesktopConnectionCatalogStore.ts",
         "apps/desktop/src/app/DesktopSafeStorageSiblingKeys.ts",
         "apps/web/src/components/desktop/ConnectionCatalogUnreadableNotice.tsx",
