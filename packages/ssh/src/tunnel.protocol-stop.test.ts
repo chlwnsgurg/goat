@@ -380,7 +380,13 @@ done
 export PATH
 `,
             );
-            f.setRemotePath("/usr/bin:/bin");
+            // The node first on PATH fails the engine check, so the runner must discover nvm's.
+            // A runner image may ship a suitable /usr/bin/node, which would skip discovery.
+            const unsuitableBin = `${f.home}/unsuitable-node`;
+            yield* f.fs.makeDirectory(unsuitableBin);
+            yield* f.fs.writeFileString(`${unsuitableBin}/node`, "#!/bin/sh\nexit 1\n");
+            yield* f.fs.chmod(`${unsuitableBin}/node`, 0o700);
+            f.setRemotePath(`${unsuitableBin}:/usr/bin:/bin`);
           }
           const layer = (nodeScriptPath: string, leaveRemoteServerRunning: boolean) =>
             Layer.mergeAll(

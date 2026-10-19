@@ -106,6 +106,7 @@ describe("sshPreparationFailure", () => {
     for (const message of [
       gh,
       `Cannot prepare GOAT 0.3.0 on mbp: Public HTTPS release download failed and local gh acquisition failed: ${gh} The existing runner and server have been left unchanged.`,
+      `Cannot prepare GOAT 0.1.0 on mbp: Public HTTPS release is not published and local gh acquisition failed: ${gh} The existing runner and server have been left unchanged. Supply the requested runtime archive in the local SSH runtime archive directory or a release mirror, then retry.`,
     ]) {
       expect(sshPreparationFailure(new Error(`${IPC}${message}`))).toMatchObject({
         _tag: "ConnectionTransientError",
