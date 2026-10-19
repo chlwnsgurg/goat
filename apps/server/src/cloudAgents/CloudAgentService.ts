@@ -190,9 +190,11 @@ const readCloudRuns = Effect.fn("CloudAgentService.readRuns")(function* (limit: 
         ...(task.url === undefined ? {} : { url: task.url }),
         ...(task.prUrl === undefined ? {} : { prUrl: task.prUrl }),
         repository: task.source.repository,
-        ...((task.branch ?? task.source.branch)
-          ? { branch: task.branch ?? task.source.branch }
-          : {}),
+        ...(task.branch !== undefined
+          ? { branch: task.branch }
+          : task.source.branch !== "HEAD"
+            ? { branch: task.source.branch }
+            : {}),
         ...(thread.value.externalLauncher === undefined
           ? {}
           : { launchedBy: thread.value.externalLauncher }),
@@ -621,6 +623,7 @@ const make = Effect.gen(function* () {
             status: "running",
             tracking: follow ? "polled" : "link-only",
             ...(follow ? {} : { error: linkOnlyNote }),
+            // The source branch is required; "HEAD" stands for "unknown" and is never shown.
             source: {
               repository: `https://github.com/${input.repo}`,
               branch: input.branch ?? "HEAD",

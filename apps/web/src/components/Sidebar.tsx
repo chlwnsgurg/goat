@@ -2108,6 +2108,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       </span>
     );
   const accessibleTitle = isRenaming ? null : <span className="sr-only">{thread.title}</span>;
+  // A registered cloud run names the outside agent that launched it.
+  const externalLauncherBadge = thread.source.externalLauncher ? (
+    <span className="max-w-24 shrink-0 truncate text-xs text-muted-foreground">
+      via {thread.source.externalLauncher}
+    </span>
+  ) : null;
 
   const prBadgeShape = supportsMultiplePullRequests
     ? resolveThreadPullRequestBadge(thread.pullRequests)
@@ -2230,6 +2236,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             </span>
             {draftIndicator}
             {title}
+            {externalLauncherBadge}
             {pinIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
@@ -2396,6 +2403,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               ) : null}
               {draftIndicator}
               {title}
+              {externalLauncherBadge}
               {pinIndicator}
               {thread.worktreePath ? <ThreadWorktreeIndicator thread={thread} /> : null}
               {isRegeneratingTitle ? (
