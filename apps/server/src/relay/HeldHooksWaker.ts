@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
@@ -21,6 +22,7 @@ const wakeHeldHooks = Effect.fn("HeldHooksWaker.wake")(function* () {
 
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
+    if (!isGoatConnectEnabled()) return;
     const runtime = yield* CloudManagedEndpointRuntime.CloudManagedEndpointRuntime;
     const wake = wakeHeldHooks().pipe(
       Effect.timeout("10 seconds"),

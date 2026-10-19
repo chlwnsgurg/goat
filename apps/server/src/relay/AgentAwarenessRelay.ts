@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import type {
   EnvironmentId,
   OrchestrationV2DomainEvent,
@@ -360,6 +361,14 @@ export function resolveAgentAwarenessRelayActiveThreadIds(input: {
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  if (!isGoatConnectEnabled()) {
+    return AgentAwarenessRelay.of({
+      publishThread: () => Effect.void,
+      drain: Effect.void,
+      requestCatchUp: () => Effect.void,
+      start: () => Effect.void,
+    });
+  }
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const threads = yield* ThreadManagement.ThreadManagementService;

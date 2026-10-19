@@ -1,3 +1,4 @@
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { createClerkBridge } from "@clerk/electron";
 import * as NodeURL from "node:url";
 import { storage } from "@clerk/electron/storage";
@@ -67,6 +68,7 @@ export class DesktopClerk extends Context.Service<
 function resolveDesktopClerkFrontendApiHostname(
   publishableKey: string | undefined,
 ): string | undefined {
+  if (!isGoatConnectEnabled()) return undefined;
   const normalizedKey = publishableKey?.trim();
   if (!normalizedKey) return undefined;
 
@@ -121,27 +123,33 @@ export const make = Effect.gen(function* () {
     handleSecondInstance(argv);
   });
 
-  yield* Effect.acquireRelease(
-    Effect.try({
-      try: () => createDesktopClerkBridge(environment.stateDir, environment.isDevelopment),
-      catch: (cause) =>
-        new DesktopClerkBridgeInitializationError({
-          stateDir: environment.stateDir,
-          isDevelopment: environment.isDevelopment,
-          cause,
-        }),
-    }),
-    (bridge) =>
+  if (isGoatConnectEnabled()) {
+    yield* Effect.acquireRelease(
       Effect.try({
-        try: () => bridge.cleanup(),
+        try: () => createDesktopClerkBridge(environment.stateDir, environment.isDevelopment),
         catch: (cause) =>
-          new DesktopClerkBridgeCleanupError({
+          new DesktopClerkBridgeInitializationError({
             stateDir: environment.stateDir,
             isDevelopment: environment.isDevelopment,
             cause,
           }),
-      }).pipe(Effect.orDie),
-  );
+      }),
+      (bridge) =>
+        Effect.try({
+          try: () => bridge.cleanup(),
+          catch: (cause) =>
+            new DesktopClerkBridgeCleanupError({
+              stateDir: environment.stateDir,
+              isDevelopment: environment.isDevelopment,
+              cause,
+            }),
+        }).pipe(Effect.orDie),
+    );
+  } else if (environment.platform === "win32") {
+    yield* electronApp.setAsDefaultProtocolClient(
+      ElectronProtocol.getDesktopScheme(environment.isDevelopment),
+    );
+  }
   // The bridge registers the renderer scheme. Windows has no installer-level registration, so the
   // legacy scheme that existing links and the Codex sign-in handoff use is registered here too.
   if (environment.platform === "win32") {

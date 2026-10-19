@@ -1,3 +1,9 @@
+import {
+  GOAT_CONNECT_CLI_COMING_SOON_MESSAGE,
+  isGoatConnectEnabled,
+} from "@goat/shared/goatConnect";
+import * as Console from "effect/Console";
+import * as Stdio from "effect/Stdio";
 import { doctorCommand } from "./cli/doctor.ts";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -33,28 +39,12 @@ import { triageCommand } from "./cli/triage.ts";
 
 const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NetService.layer);
 
-const connectPublicConfigMissingMessage =
-  "T3 Connect commands are unavailable: this build is missing T3 Connect public configuration.";
-
-class ConnectPublicConfigMissingError extends CliError.UserError {
-  override get message() {
-    return connectPublicConfigMissingMessage;
-  }
-}
-
 const connectUnavailableCommand = Command.make("connect", {
   command: Argument.String("command").pipe(Argument.variadic),
 }).pipe(
-  Command.withDescription("T3 Connect is unavailable in builds without public configuration."),
+  Command.withDescription(GOAT_CONNECT_CLI_COMING_SOON_MESSAGE),
   Command.unlisted,
-  Command.withHandler(() =>
-    Effect.fail(
-      new CliError.ShowHelp({
-        commandPath: ["goat", "connect"],
-        errors: [new ConnectPublicConfigMissingError({ cause: connectPublicConfigMissingMessage })],
-      }),
-    ),
-  ),
+  Command.withHandler(() => Console.log(GOAT_CONNECT_CLI_COMING_SOON_MESSAGE)),
 );
 
 export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
@@ -90,15 +80,20 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
       traceCommand,
       doctorCommand,
       triageCommand,
-      cloudEnabled ? connectCommand : connectUnavailableCommand,
+      isGoatConnectEnabled() && cloudEnabled ? connectCommand : connectUnavailableCommand,
     ]),
   );
 
 export const cli = makeCli();
 
+export const runCliWithArgs = (args: ReadonlyArray<string>, command = cli) =>
+  Command.runWith(command, { version: packageJson.version })(
+    !isGoatConnectEnabled() && args[0] === "connect" ? ["connect"] : args,
+  );
+
 export function runCli() {
   keepOutboundFetchOnHttp1();
-  Command.run(cli, { version: packageJson.version }).pipe(
+  Stdio.Stdio.use(({ args }) => Effect.flatMap(args, runCliWithArgs)).pipe(
     Effect.scoped,
     Effect.provide(layerCliRuntime),
     NodeRuntime.runMain,

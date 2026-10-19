@@ -576,3 +576,8 @@ it.effect("hands web and app links to the renderer and leaves other links alone"
     );
   }).pipe(Effect.scoped),
 );
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));

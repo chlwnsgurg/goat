@@ -81,6 +81,7 @@ import {
   ThreadId,
 } from "@goat/contracts";
 import { runRanAfter } from "@goat/shared/orchestrationV2ThreadError";
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import {
   normalizeThreadPullRequestKey,
   visibleThreadPullRequests,
@@ -373,6 +374,10 @@ const WEBHOOK_DIRECT_URL_HINT =
 const WEBHOOK_URL_UNKNOWN =
   "This environment could not read its T3 Connect state. Ask the user to check remote access in Settings → Connections.";
 
+/** Public webhook URLs come from the hosted tunnel, which is off until GOAT Connect ships. */
+const WEBHOOK_URL_CONNECT_OFF =
+  "Public webhook URLs need GOAT Connect, which is coming soon, so this task has no public URL yet.";
+
 /** The URL starts runs, so a caller that may not start one does not see it. */
 const WEBHOOK_URL_WITHHELD =
   "The URL is withheld because this caller may not start this task's runs: that needs write access, an active turn for a thread caller, and modes at least as broad as the task's. The user can copy it from Settings → Scheduled Tasks.";
@@ -389,10 +394,13 @@ function webhookUrlFields(
       : { webhookUrlUnavailableReason: WEBHOOK_URL_WITHHELD };
   }
   const reason = webhook.urlUnavailableReason;
+  const cause = !isGoatConnectEnabled()
+    ? WEBHOOK_URL_CONNECT_OFF
+    : reason === undefined
+      ? WEBHOOK_URL_UNKNOWN
+      : WEBHOOK_URL_UNAVAILABLE[reason];
   return {
-    webhookUrlUnavailableReason:
-      (reason === undefined ? WEBHOOK_URL_UNKNOWN : WEBHOOK_URL_UNAVAILABLE[reason]) +
-      WEBHOOK_DIRECT_URL_HINT,
+    webhookUrlUnavailableReason: cause + WEBHOOK_DIRECT_URL_HINT,
   };
 }
 function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): OrchestratorMcpScheduledTask {

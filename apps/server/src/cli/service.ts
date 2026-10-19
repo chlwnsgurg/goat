@@ -1,4 +1,5 @@
 import * as HostProcess from "@goat/shared/HostProcess";
+import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -230,15 +231,16 @@ export const offerServiceDuringOnboarding = Effect.gen(function* () {
     return false;
   }
   const platform = yield* HostProcess.Platform;
+  const reachability = isGoatConnectEnabled() ? "T3 Connect" : "your network and Tailscale";
   const wanted = yield* Prompt.run(
     Prompt.Confirm({
       message: installed
         ? "The installed GOAT service needs an update or repair. Update it now?"
         : platform === "darwin"
           ? "Run GOAT in the background whenever you log in to this Mac? " +
-            "It stays reachable through T3 Connect while you are logged in."
+            `It stays reachable through ${reachability} while you are logged in.`
           : "Run GOAT in the background whenever this machine boots? " +
-            "It stays reachable through T3 Connect even after you log out.",
+            `It stays reachable through ${reachability} even after you log out.`,
       initial: true,
     }),
   );

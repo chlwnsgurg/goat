@@ -1,3 +1,4 @@
+import { vi } from "vite-plus/test";
 import { EnvironmentId } from "@goat/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -267,3 +268,8 @@ it.effect("an update the client walks away from still finishes", () => {
     }),
   );
 });
+
+vi.mock("@goat/shared/goatConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@goat/shared/goatConnect")>()),
+  isGoatConnectEnabled: () => true,
+}));
