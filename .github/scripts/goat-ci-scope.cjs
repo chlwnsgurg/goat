@@ -66,6 +66,7 @@ const TASKS = [
   "check",
   "typecheck",
   "test",
+  "test-ssh",
   "test-desktop",
   "test-contracts",
   "test-client-runtime",
@@ -79,7 +80,6 @@ const TASKS = [
 /** Workspace packages each task tests or builds. A change in their dependency closure selects the task. */
 const TASK_ROOTS = {
   test: [
-    "packages/ssh",
     "apps/web",
     "packages/provider-core",
     "packages/provider-opencode",
@@ -87,6 +87,7 @@ const TASK_ROOTS = {
     "packages/provider-grok",
     "packages/provider-acp",
   ],
+  "test-ssh": ["packages/ssh"],
   "test-desktop": ["apps/desktop"],
   "test-contracts": ["packages/contracts"],
   "test-client-runtime": ["packages/client-runtime"],

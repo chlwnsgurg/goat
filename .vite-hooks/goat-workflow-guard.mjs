@@ -12,7 +12,9 @@ const workflowPath = ".github/workflows/goat-ci.yml";
 const nightlyPath = ".github/workflows/goat-nightly.yml";
 const disabled = new Set((NodeProcess.env.GOAT_DISABLED_WORKFLOWS ?? "").split("\n"));
 const labels = new Set(["self-hosted", "linux", "x64", "goat", "epyc"]);
-// goat-scope picks the matrix, ci runs it, goat-ci-result aggregates; every job runs on EPYC.
+// goat-ci jobs run on a pinned GitHub-hosted image or on EPYC, never on a moving label.
+const goatCiHostedRunner = "ubuntu-24.04";
+// goat-scope picks the matrix, ci runs it, goat-ci-result aggregates.
 const goatCiJobs = new Set(["scope", "ci", "screenshot-gate", "result"]);
 // No Actions artifacts anywhere: goat-si is on the free plan and a full artifact
 // quota fails every upload. goat-nightly hands off through a staging draft release.
@@ -146,13 +148,14 @@ function validateWorkflow(source, yaml) {
     }
     const runners = job["runs-on"];
     if (
-      !Array.isArray(runners) ||
-      runners.length !== 5 ||
-      new Set(runners).size !== 5 ||
-      runners.some((label) => typeof label !== "string" || !labels.has(label))
+      runners !== goatCiHostedRunner &&
+      (!Array.isArray(runners) ||
+        runners.length !== 5 ||
+        new Set(runners).size !== 5 ||
+        runners.some((label) => typeof label !== "string" || !labels.has(label)))
     ) {
       return refuse(
-        `jobs.${name}.runs-on must contain exactly self-hosted, linux, x64, goat, epyc`,
+        `jobs.${name}.runs-on must be ${goatCiHostedRunner} or exactly self-hosted, linux, x64, goat, epyc`,
       );
     }
     if (
