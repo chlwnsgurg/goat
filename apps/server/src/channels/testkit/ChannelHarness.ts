@@ -395,6 +395,14 @@ export function makeHarness(
           }
           return Effect.sync(() => {
             world.commands.push(command);
+            // A thread stop ends the running run and holds the queue, as the orchestrator does.
+            if (command.type === "thread.stop") {
+              world.interrupts.push(command.threadId);
+              const latest = world.latestRun(command.threadId);
+              if (latest !== undefined && latest.status === "running") {
+                world.setStatus(command.threadId, latest.ordinal, "cancelled");
+              }
+            }
             if (command.type === "thread.metadata.update" && command.limitRecovery !== undefined) {
               const previous = world.shells.get(command.threadId);
               const recovery = command.limitRecovery;

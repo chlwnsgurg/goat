@@ -2,16 +2,23 @@ import { assert, describe, it } from "@effect/vitest";
 import type { ChannelReceptionInput, ChannelReceptionReadResult } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 
+import * as ChannelDispatcher from "./ChannelDispatcher.ts";
 import * as ChannelGateway from "./ChannelGateway.ts";
+import * as ChannelReceptionService from "./ChannelReceptionService.ts";
+import { workerLaunchIdsFor } from "./channelIds.ts";
+import { commitTransition } from "./channelTaskWrites.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRuntime from "./ChannelRuntime.ts";
 import * as ChannelWorkerReports from "./ChannelWorkerReports.ts";
 import { WORKERS_PER_REQUESTER } from "./ChannelDispatcher.ts";
 import {
   defaultScript,
+  environmentId,
   goatInput,
   makeHarness,
+  modelSelection,
   ownerId,
+  projectId,
   rpcContext,
   setupBot,
 } from "./testkit/ChannelHarness.ts";
@@ -180,10 +187,114 @@ describe("GOAT Bot work items and worker runs", () => {
       assert.deepStrictEqual(harness.world.interrupts.toSorted(), threads);
       assert.deepStrictEqual(harness.world.subagentStops.toSorted(), threads);
       assert.lengthOf(yield* ledger.listPendingForwards(10), 0);
+      // The runs record their own end, though the items had already ended.
+      yield* reports.reconcile(runtime.ownerToken);
+      const runs = yield* ledger.listWorkerRuns(tasks.map((task) => task.taskId));
+      assert.deepStrictEqual(
+        runs.map((run) => run.status),
+        ["stopped", "stopped"],
+      );
       // The stop was told to the person, so the items are closed, and nothing is pending.
       yield* gateway.ingest(goatInput("pending? after stop", "s4"), rpcContext);
       yield* runtime.drain;
       assert.strictEqual(pending(reads), "Nothing is pending.");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("stops a worker whose launch was still in flight when the stop came", () => {
+    const { harness } = queueHarness();
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const reception = yield* ChannelReceptionService.ChannelReceptionService;
+      const dispatcher = yield* ChannelDispatcher.ChannelDispatcher;
+      // Claims the worker ownership the direct calls below write under.
+      yield* runtime.drain;
+      yield* gateway.ingest(goatInput("do: long job", "l1"), rpcContext);
+      const [input] = yield* ledger.listPendingInputs(10);
+      yield* reception.receive(input!, runtime.ownerToken);
+      // The dispatcher claimed it for a launch that has not landed yet.
+      const [task] = (yield* ledger.listTasks({ ownerId, limit: 10 })).tasks;
+      const stored = (yield* ledger.getTask(task!.taskId))!;
+      yield* commitTransition(
+        ledger,
+        stored,
+        {
+          type: "task.dispatch.claimed",
+          payload: {
+            generation: 1,
+            target: {
+              environmentId,
+              projectId,
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              workspaceStrategy: { type: "root" },
+            },
+            leaseExpiresAt: "2026-10-12T00:00:00.000Z",
+          },
+        },
+        { owner: runtime.ownerToken },
+      );
+      yield* gateway.ingest(goatInput("stop", "l2"), rpcContext);
+      const [stopInput] = yield* ledger.listPendingInputs(10);
+      yield* reception.receive(stopInput!, runtime.ownerToken);
+      const [stop] = yield* ledger.listPendingForwards(10);
+      yield* dispatcher.forward(stop!, runtime.ownerToken);
+      // No thread yet: the stop waits for it.
+      assert.lengthOf(yield* ledger.listPendingForwards(10), 1);
+      const threadId = workerLaunchIdsFor(task!.taskId, 1).threadId;
+      harness.world.addRun(threadId, workerLaunchIdsFor(task!.taskId, 1).messageId);
+      yield* dispatcher.forward(stop!, runtime.ownerToken);
+      assert.deepStrictEqual(harness.world.interrupts, [threadId]);
+      assert.lengthOf(yield* ledger.listPendingForwards(10), 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("keeps a stop pending while the worker's thread refuses it", () => {
+    const { harness } = queueHarness();
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      yield* gateway.ingest(goatInput("do: job a", "f1"), rpcContext);
+      yield* runtime.drain;
+      const [task] = (yield* ledger.listTasks({ ownerId, limit: 10 })).tasks;
+      harness.world.dispatchFailures.add(task!.worker!.threadId);
+      yield* gateway.ingest(goatInput("stop", "f2"), rpcContext);
+      yield* runtime.drain;
+      assert.lengthOf(yield* ledger.listPendingForwards(10), 1);
+      assert.lengthOf(harness.world.subagentStops, 0);
+      harness.world.dispatchFailures.clear();
+      yield* runtime.drain;
+      assert.lengthOf(yield* ledger.listPendingForwards(10), 0);
+      assert.deepStrictEqual(harness.world.subagentStops, [task!.worker!.threadId]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+});
+
+describe("GOAT Bot worker slots", () => {
+  it.effect("does not count questions asked before any worker exists", () => {
+    const harness = makeHarness({ projects: 2 });
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      for (let index = 0; index < WORKERS_PER_REQUESTER; index += 1) {
+        yield* gateway.ingest(goatInput("do: which one " + index, "w" + index), rpcContext);
+        yield* runtime.drain;
+      }
+      const tasks = (yield* ledger.listTasks({ ownerId, limit: 10 })).tasks;
+      assert.isTrue(tasks.every((task) => task.status === "waiting_input" && !task.worker));
+      assert.strictEqual(
+        yield* ledger.countBusyTasks({ ownerId, principalId: tasks[0]!.requester.principalId }),
+        0,
+      );
+      assert.lengthOf(harness.world.launches, 0);
     }).pipe(Effect.provide(harness.layer));
   });
 });

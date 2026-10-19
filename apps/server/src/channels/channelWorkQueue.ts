@@ -65,11 +65,12 @@ export const pendingDigest = (
   }>,
   now: number,
 ) => {
-  const open = items
+  const all = items
     .filter((item) => isOpenItem(item.state))
-    .toSorted((left, right) => right.task.createdAt.localeCompare(left.task.createdAt))
-    .slice(0, PENDING_ITEM_LIMIT);
+    .toSorted((left, right) => right.task.createdAt.localeCompare(left.task.createdAt));
+  const open = all.slice(0, PENDING_ITEM_LIMIT);
   if (open.length === 0) return "Nothing is pending.";
+  const more = all.length - open.length;
   return open
     .map((item) => {
       const host = item.task.worker?.host ?? item.task.host;
@@ -105,5 +106,6 @@ export const pendingDigest = (
         ...runs,
       ].join("\n");
     })
+    .concat(more > 0 ? ["…and " + more + " older open items not listed."] : [])
     .join("\n");
 };

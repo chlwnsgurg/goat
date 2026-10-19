@@ -39,7 +39,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { readStoredThreadResultReport } from "../threadResults/ThreadResultService.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
-import { questionIdFor } from "./channelIds.ts";
+import { questionIdFor, workerLaunchIdsFor } from "./channelIds.ts";
 import { settleCompletedRun } from "./channelRunOutcome.ts";
 import { commitTransition } from "./channelTaskWrites.ts";
 import {
@@ -275,7 +275,17 @@ const make = Effect.gen(function* () {
         latest = reread;
       }
 
-      yield* recordRuns(latest.task, runs, bound?.ordinal ?? 0, observed.needsYou.length > 0);
+      // From the generation's first run, so a run rebound past before it was seen ending still
+      // gets its final state.
+      const launched = runs.find(
+        (run) => run.userMessageId === workerLaunchIdsFor(task.taskId, worker.generation).messageId,
+      );
+      yield* recordRuns(
+        latest.task,
+        runs,
+        launched?.ordinal ?? bound?.ordinal ?? 0,
+        observed.needsYou.length > 0,
+      );
 
       if (!TERMINAL_RUN_STATUSES.has(current.status)) return latest !== stored;
       // A follow-up or answer recorded but not yet sent belongs to this work; the run read above
@@ -373,6 +383,30 @@ const make = Effect.gen(function* () {
       let changed = 0;
       for (const stored of active) {
         if (yield* reconcileTask(stored, owner)) changed += 1;
+      }
+      // Runs recorded as running or waiting whose task has ended (stopped, or settled by the
+      // worker's own report) still end on their own; record how.
+      const activeIds = new Set(active.map((stored) => stored.task.taskId as string));
+      const open = (yield* ledger.listOpenWorkerRuns()).filter(
+        (run) => !activeIds.has(run.taskId) && run.host === undefined,
+      );
+      for (const threadId of new Set(open.map((run) => run.threadId))) {
+        const records = yield* threads
+          .getThreadRecords(threadId as ThreadId, ["runs"])
+          .pipe(Effect.option);
+        if (records._tag === "None") continue;
+        const now = DateTime.formatIso(yield* DateTime.now);
+        for (const recorded of open.filter((run) => run.threadId === threadId)) {
+          const run = records.value.runs.find((candidate) => candidate.id === recorded.runId);
+          const status = run === undefined ? "stopped" : workerRunStatus(run.status, false);
+          if (status === recorded.status) continue;
+          yield* ledger.upsertWorkerRun({
+            ...recorded,
+            status,
+            updatedAt: now,
+            ...(status === "running" || status === "waiting" ? {} : { endedAt: now }),
+          });
+        }
       }
       return changed;
     });

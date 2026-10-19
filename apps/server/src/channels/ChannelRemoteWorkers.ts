@@ -2180,23 +2180,25 @@ const make = Effect.gen(function* () {
       serialized(pending.event.taskId)(
         Effect.gen(function* () {
           const stored = yield* ledger.getTask(pending.event.taskId);
-          const worker = stored?.task.worker;
           const state = yield* readState(pending.event.taskId);
-          if (
-            stored === undefined ||
-            worker?.host === undefined ||
-            state === undefined ||
-            state.remoteThreadId !== worker.threadId
-          ) {
-            return yield* ledger.completeForward({ owner, sequence: pending.sequence });
+          const done = ledger.completeForward({ owner, sequence: pending.sequence });
+          if (stored === undefined || state === undefined) return yield* done;
+          // The launch may have been in flight when the stop was asked; its thread id is
+          // recorded here once the remote answers, so look again until a grace runs out.
+          const threadId = state.remoteThreadId ?? stored.task.worker?.threadId;
+          if (threadId === undefined) {
+            const age = (yield* Clock.currentTimeMillis) - Date.parse(pending.event.occurredAt);
+            if (age > 120_000) yield* done;
+            return;
           }
-          // The remote interrupt stops the run; its subagents stop with it there.
+          // The remote interrupt stops the running run there. Async subagents it started keep
+          // running on that machine until they finish; GOAT has no remote thread stop yet.
           const stopped = yield* callHost(
             {
               host: state.host,
               tool: "goat_thread_interrupt",
               arguments: {
-                threadId: worker.threadId,
+                threadId,
                 reason: "Stopped from GOAT Bot.",
                 clientRequestId: "channel-stop:" + pending.event.eventId,
               },
@@ -2206,6 +2208,7 @@ const make = Effect.gen(function* () {
             authorityFor(stored.task.taskId, stored.task.generation, owner),
           ).pipe(Effect.result);
           if (stopped._tag === "Failure" && remoteCode(stopped.failure) !== "thread_not_found") {
+            if (stopped.failure instanceof Superseded) return;
             // Unreachable or refused for now: left pending, so the next pass stops it.
             yield* Effect.logWarning("channel remote worker stop failed; retrying", {
               taskId: stored.task.taskId,
@@ -2213,7 +2216,7 @@ const make = Effect.gen(function* () {
             });
             return;
           }
-          yield* ledger.completeForward({ owner, sequence: pending.sequence });
+          yield* done;
         }),
       ),
     );

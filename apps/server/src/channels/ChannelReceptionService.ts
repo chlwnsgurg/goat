@@ -86,7 +86,7 @@ import {
 } from "./channelBotRecall.ts";
 import { CHANNEL_COPY } from "./channelCopy.ts";
 import { isOpenItem, pendingDigest, workItemState } from "./channelWorkQueue.ts";
-import { sameRequester, WORKERS_PER_REQUESTER } from "./ChannelDispatcher.ts";
+import { WORKERS_PER_REQUESTER } from "./ChannelDispatcher.ts";
 import {
   answerForwardIdsFor,
   deliveryIdFor,
@@ -381,10 +381,24 @@ const make = Effect.gen(function* () {
       Effect.map((outcome) => (outcome.ok ? Option.some(outcome.result) : Option.none())),
     );
 
-  /** Work that holds one of a person's worker slots. */
-  const busyWork = ledger
-    .listTasksByStatus(["dispatching", "running", "waiting_input"])
-    .pipe(Effect.map((stored) => stored.map((entry) => entry.task)));
+  /**
+   * Every open task this requester may see, however old, plus the newest visible ones (which
+   * may have finished without their outcome reaching the person yet).
+   */
+  const openAndRecentTasks = (viewer: ChannelRequester, conversationId: ChannelConversationId) =>
+    Effect.gen(function* () {
+      const open = (yield* ledger.listTasksByStatus([
+        "received",
+        "dispatching",
+        "running",
+        "waiting_input",
+      ]))
+        .map((stored) => stored.task)
+        .filter((task) => canSeeTask(viewer, task, conversationId));
+      const recent = yield* visibleTasks(viewer, conversationId);
+      const seen = new Set(open.map((task) => task.taskId as string));
+      return [...open, ...recent.filter((task) => !seen.has(task.taskId))];
+    });
 
   /** The owner's newest tasks this requester may see. */
   const visibleTasks = (viewer: ChannelRequester, conversationId: ChannelConversationId) =>
@@ -558,7 +572,7 @@ const make = Effect.gen(function* () {
           );
         }
         case "pending": {
-          const visible = yield* visibleTasks(viewer, conversationId);
+          const visible = yield* openAndRecentTasks(viewer, conversationId);
           const deliveries = yield* ledger.outcomeDeliveries(visible.map((task) => task.taskId));
           const items = visible.map((task) => ({
             task,
@@ -566,14 +580,26 @@ const make = Effect.gen(function* () {
           }));
           const open = items.filter((item) => isOpenItem(item.state));
           const runs = yield* ledger.listWorkerRuns(open.map((item) => item.task.taskId));
-          const busy = yield* busyWork;
+          const busy = new Map<string, number>();
+          for (const item of open) {
+            const key = item.task.requester.ownerId + "\u0000" + item.task.requester.principalId;
+            if (!busy.has(key)) {
+              busy.set(
+                key,
+                yield* ledger.countBusyTasks({
+                  ownerId: item.task.requester.ownerId,
+                  principalId: item.task.requester.principalId,
+                }),
+              );
+            }
+          }
           return pendingDigest(
             open.map((item) => ({
               ...item,
               runs: runs.filter((run) => run.taskId === item.task.taskId),
               ...(item.state === "queued" &&
-              busy.filter((other) => sameRequester(other.requester, item.task.requester)).length >=
-                WORKERS_PER_REQUESTER
+              (busy.get(item.task.requester.ownerId + "\u0000" + item.task.requester.principalId) ??
+                0) >= WORKERS_PER_REQUESTER
                 ? {
                     note:
                       "waiting for one of the " +
@@ -988,9 +1014,10 @@ const make = Effect.gen(function* () {
             ),
           };
           if (bot !== undefined) deliveries.push(chipDelivery(task, bot));
-          const running = (yield* busyWork).filter((other) =>
-            sameRequester(other.requester, requester),
-          ).length;
+          const running = yield* ledger.countBusyTasks({
+            ownerId: requester.ownerId,
+            principalId: requester.principalId,
+          });
           if (running >= WORKERS_PER_REQUESTER) {
             replyText +=
               " It's queued: " +
@@ -1089,12 +1116,14 @@ const make = Effect.gen(function* () {
       if (action.type === "stop_work") {
         const sender = requester.originKind === "mcp" ? undefined : yield* judgedNow;
         const viewer = yield* viewerNow(requester, message.connectionId);
+        const named =
+          action.taskId === undefined ? undefined : yield* ledger.getTask(action.taskId);
         const candidates =
           action.taskId === undefined
-            ? yield* visibleTasks(viewer, conversationId)
-            : (yield* visibleTasks(viewer, conversationId)).filter(
-                (task) => task.taskId === action.taskId,
-              );
+            ? yield* openAndRecentTasks(viewer, conversationId)
+            : named !== undefined && canSeeTask(viewer, named.task, conversationId)
+              ? [named.task]
+              : [];
         const stoppable = candidates.filter(
           (task) =>
             (task.status === "received" ||

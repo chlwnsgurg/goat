@@ -287,9 +287,23 @@ export class ChannelLedger extends Context.Service<
     readonly listWorkerRuns: (
       taskIds: ReadonlyArray<ChannelTaskId>,
     ) => Effect.Effect<ReadonlyArray<ChannelWorkerRun>, ChannelLedgerError>;
+    /** Recorded runs still running or waiting, across tasks, for reconciliation. */
+    readonly listOpenWorkerRuns: () => Effect.Effect<
+      ReadonlyArray<ChannelWorkerRun>,
+      ChannelLedgerError
+    >;
     /**
-     * How each task's outcome (result, failure or stop) reached its requester: the state of the
-     * newest outcome delivery to where the work came from, or none when nothing was sent yet.
+     * How many of a person's tasks hold a worker now: dispatching, running, or waiting on a
+     * person with a worker. Questions asked before any worker exists hold none.
+     */
+    readonly countBusyTasks: (input: {
+      readonly ownerId: string;
+      readonly principalId: string;
+    }) => Effect.Effect<number, ChannelLedgerError>;
+    /**
+     * How each task's outcome (result, failure or stop) reached its requester: the delivery state
+     * of the narration of the task's newest terminal event to where the work came from, or none
+     * when that narration was not written yet.
      */
     readonly outcomeDeliveries: (
       taskIds: ReadonlyArray<ChannelTaskId>,
@@ -1315,18 +1329,49 @@ const make = Effect.gen(function* () {
             Effect.mapError(toLedgerError("listWorkerRuns")),
           ),
 
+    listOpenWorkerRuns: () =>
+      sql<{ readonly value_json: string }>`
+        SELECT value_json FROM channel_runtime_state
+        WHERE key >= 'worker-run:' AND key < 'worker-run;'
+          AND json_extract(value_json, '$.status') IN ('running', 'waiting')
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => decodeWorkerRun(row.value_json))),
+        Effect.mapError(toLedgerError("listOpenWorkerRuns")),
+      ),
+
+    countBusyTasks: (input) =>
+      sql<{ readonly busy: number }>`
+        SELECT COUNT(*) AS busy FROM channel_tasks
+        WHERE owner_id = ${input.ownerId}
+          AND json_extract(task_json, '$.requester.principalId') = ${input.principalId}
+          AND (status IN ('dispatching', 'running')
+            OR (status = 'waiting_input' AND json_extract(task_json, '$.worker') IS NOT NULL))
+      `.pipe(
+        Effect.map((rows) => rows[0]?.busy ?? 0),
+        Effect.mapError(toLedgerError("countBusyTasks")),
+      ),
+
     outcomeDeliveries: (taskIds) =>
       taskIds.length === 0
         ? Effect.succeed(new Map())
-        : sql<{ readonly task_id: string; readonly state: string }>`
-            SELECT task_id, state FROM channel_outbox
-            WHERE task_id IN ${sql.in(taskIds)}
-              AND kind IN ('result', 'failure')
-              AND cause_key LIKE 'narration:%:origin'
-            ORDER BY created_at
+        : sql<{ readonly task_id: string; readonly state: string | null }>`
+            SELECT outcome.task_id, delivery.state FROM channel_task_events AS outcome
+            LEFT JOIN channel_outbox AS delivery
+              ON delivery.cause_key = 'narration:' || outcome.event_id || ':origin'
+            WHERE outcome.task_id IN ${sql.in(taskIds)}
+              AND outcome.type IN ('task.completed', 'task.failed', 'task.cancelled')
+              AND outcome.sequence = (
+                SELECT MAX(latest.sequence) FROM channel_task_events AS latest
+                WHERE latest.task_id = outcome.task_id
+                  AND latest.type IN ('task.completed', 'task.failed', 'task.cancelled')
+              )
           `.pipe(
-            // Later rows overwrite earlier ones: the newest outcome delivery decides.
-            Effect.map((rows) => new Map(rows.map((row) => [row.task_id, row.state]))),
+            Effect.map(
+              (rows) =>
+                new Map(
+                  rows.flatMap((row) => (row.state === null ? [] : [[row.task_id, row.state]])),
+                ),
+            ),
             Effect.mapError(toLedgerError("outcomeDeliveries")),
           ),
 
