@@ -1073,74 +1073,89 @@ it.effect.skipIf(sshdTestBinaries === undefined)(
       );
       yield* f.fs.chmod(sshdShell, 0o755);
 
-      const probeServer = NodeNet.createServer();
-      const sshdPort = yield* listenLoopback(probeServer);
-      yield* closeServer(probeServer);
-
       const sshUser = NodeOS.userInfo().username;
       const sshdConfig = f.path.join(f.parent, "sshd_config");
-      yield* f.fs.writeFileString(
-        sshdConfig,
-        [
-          `ListenAddress 127.0.0.1:${sshdPort}`,
-          `HostKey ${hostKey}`,
-          `AuthorizedKeysFile ${authorizedKeys}`,
-          "UsePAM no",
-          "StrictModes no",
-          "PasswordAuthentication no",
-          "KbdInteractiveAuthentication no",
-          "PubkeyAuthentication yes",
-          `PidFile ${f.path.join(f.parent, "sshd.pid")}`,
-          `AllowUsers ${sshUser}`,
-          `ForceCommand ${sshdShell}`,
-          "LogLevel INFO",
-          "",
-        ].join("\n"),
-      );
 
-      yield* Effect.acquireRelease(
-        Effect.callback<NodeChildProcess.ChildProcess>((resume) => {
-          const child = NodeChildProcess.spawn(
-            sshdTestBinaries.sshd,
-            ["-D", "-e", "-f", sshdConfig],
-            { stdio: ["ignore", "ignore", "pipe"] },
-          );
-          let stderr = "";
-          const cleanup = () => {
-            child.stderr.removeListener("data", onData);
-            child.removeListener("error", onError);
-            child.removeListener("exit", onExit);
-          };
-          const onData = (chunk: Buffer) => {
-            stderr += chunk.toString("utf8");
-            if (stderr.includes("Server listening on")) {
-              cleanup();
-              resume(Effect.succeed(child));
-            }
-          };
-          const onError = (error: Error) => {
-            cleanup();
-            resume(Effect.die(error));
-          };
-          const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
-            cleanup();
-            resume(
-              Effect.die(
-                new Error(
-                  `sshd exited before listening (code=${String(code)}, signal=${String(signal)}): ${stderr}`,
-                ),
-              ),
+      const { port: sshdPort } = yield* Effect.acquireRelease(
+        Effect.gen(function* () {
+          for (let attempt = 1; ; attempt++) {
+            const probeServer = NodeNet.createServer();
+            const port = yield* listenLoopback(probeServer);
+            yield* closeServer(probeServer);
+            yield* f.fs.writeFileString(
+              sshdConfig,
+              [
+                `ListenAddress 127.0.0.1:${port}`,
+                `HostKey ${hostKey}`,
+                `AuthorizedKeysFile ${authorizedKeys}`,
+                "UsePAM no",
+                "StrictModes no",
+                "PasswordAuthentication no",
+                "KbdInteractiveAuthentication no",
+                "PubkeyAuthentication yes",
+                `PidFile ${f.path.join(f.parent, "sshd.pid")}`,
+                `AllowUsers ${sshUser}`,
+                `ForceCommand ${sshdShell}`,
+                "LogLevel INFO",
+                "",
+              ].join("\n"),
             );
-          };
-          child.stderr.on("data", onData);
-          child.once("error", onError);
-          child.once("exit", onExit);
-          return Effect.sync(() => {
-            cleanup();
-            if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-          });
+            const started = yield* Effect.callback<Option.Option<NodeChildProcess.ChildProcess>>(
+              (resume) => {
+                const proc = NodeChildProcess.spawn(
+                  sshdTestBinaries.sshd,
+                  ["-D", "-e", "-f", sshdConfig],
+                  { stdio: ["ignore", "ignore", "pipe"] },
+                );
+                let stderr = "";
+                const cleanup = () => {
+                  proc.stderr.removeListener("data", onData);
+                  proc.removeListener("error", onError);
+                  proc.removeListener("close", onClose);
+                };
+                const onData = (chunk: Buffer) => {
+                  stderr += chunk.toString("utf8");
+                  if (stderr.includes("Server listening on")) {
+                    cleanup();
+                    resume(Effect.succeedSome(proc));
+                  }
+                };
+                const onError = (error: Error) => {
+                  cleanup();
+                  resume(Effect.die(error));
+                };
+                const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+                  cleanup();
+                  if (
+                    attempt < 5 &&
+                    /Bind to port .* failed|Address already in use|Cannot bind any address/iu.test(
+                      stderr,
+                    )
+                  ) {
+                    resume(Effect.succeedNone);
+                    return;
+                  }
+                  resume(
+                    Effect.die(
+                      new Error(
+                        `sshd exited before listening (code=${String(code)}, signal=${String(signal)}): ${stderr}`,
+                      ),
+                    ),
+                  );
+                };
+                proc.stderr.on("data", onData);
+                proc.once("error", onError);
+                proc.once("close", onClose);
+                return Effect.sync(() => {
+                  cleanup();
+                  if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGTERM");
+                });
+              },
+            );
+            if (Option.isSome(started)) return { child: started.value, port };
+          }
         }),
-        (child) =>
+        ({ child }) =>
           Effect.callback<void>((resume) => {
             if (child.exitCode !== null || child.signalCode !== null) {
               resume(Effect.void);
