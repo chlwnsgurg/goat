@@ -80,6 +80,9 @@ it.layer(NodeServices.layer)("OpenCode memory server isolation", (it) => {
         ...fs,
         makeTempDirectoryScoped: (options) =>
           fs.makeTempDirectoryScoped({ ...options, directory: options?.directory ?? userTemp }),
+        // Only the simulated machine counts; the real home above the fixture may hold .claude.
+        exists: (target) =>
+          target.startsWith(fixture + path.sep) ? fs.exists(target) : Effect.succeed(false),
       });
       const prepare = (platform: NodeJS.Platform) =>
         prepareMemoryServer(

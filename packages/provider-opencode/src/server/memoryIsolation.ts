@@ -42,7 +42,14 @@ export const prepareMemoryServer = Effect.fn("OpenCode.prepareMemoryServer")(fun
         ? yield* fs
             .makeTempDirectoryScoped({
               prefix: "goat-opencode-memory-",
-              directory: path.join(baseEnvironment.SystemRoot || "C:\\Windows", "Temp"),
+              directory: path.join(
+                baseEnvironment.SystemRoot ||
+                  baseEnvironment.SYSTEMROOT ||
+                  baseEnvironment.windir ||
+                  baseEnvironment.WINDIR ||
+                  "C:\\Windows",
+                "Temp",
+              ),
             })
             .pipe(Effect.option)
         : Option.none();
