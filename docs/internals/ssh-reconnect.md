@@ -62,9 +62,12 @@ classifier's tests use the real strings.
   without a more specific diagnostic. `UNKNOWN port 65535` is OpenSSH's proxy
   endpoint placeholder, not a remote port. A slow ProxyCommand or an unresolved
   remote Tailscale name also retries quietly. `describeSshConnectionFailure`
-  rewrites connect and banner timeouts as "Cannot reach <alias> over SSH (...)"; the tunnel step
-  passes ssh's own stderr, which the classifier also reads. This is the normal
-  state of a closed laptop or a dropped VPN, so it is `host-unreachable`.
+  rewrites connect and banner timeouts as "Cannot reach <alias> over SSH (...)";
+  the tunnel step passes ssh's own stderr, which the classifier also reads.
+  Generic cloudflared "Not Found", missing-route/peer, or Tailscale keychain
+  errors do not establish a broken local executable. With a proxy closure they
+  remain unreachable. This is the normal state of a closed laptop or a dropped
+  VPN, so it is `host-unreachable`.
 - **Local proxy unavailable.** An explicit local Tailscale daemon failure,
   stopped or logged-out client, missing approval, or missing ProxyCommand
   executable is `configuration`, blocked until wake, network change, or Retry.
@@ -72,16 +75,27 @@ classifier's tests use the real strings.
   names that fix and this machine, rather than blaming the remote host. These
   diagnostics take precedence over the generic closure that OpenSSH prints
   afterward. `tailscale nc` writes stopped/login status to stdout, so SSH reads
-  it as banner text: commands and tunnel startup retain only those known status lines
-  from DEBUG1, discarding other debug output and login URLs.
+  it as banner text: commands and tunnel startup retain only those known status
+  lines from DEBUG1. Missing executables require a real spawn or shell execution
+  diagnostic, not arbitrary "not found" text. The public diagnostic prefers the
+  local proxy cause over a subsequent generic closure.
+
+  Commands use `LogLevel=DEBUG1` rather than `-v`, so GOAT does not request
+  verbose logging from ProxyJump's child SSH. Lower levels omit the required
+  auth milestones and Tailscale banner; `LogVerbose` source/function overrides
+  vary by OpenSSH version. The diagnostic stream removes SSH debug output,
+  authentication/transfer summaries, version and terminal notices, and login
+  URLs while retaining remote stderr, including an unterminated fragment before
+  a failed read. Tunnel diagnostics keep their bounded tail.
+
 - **Login rejected.** `Permission denied (publickey…)`, a rejected key-only
   login, and a cancelled password prompt are `authentication`. A locked
   ssh-agent after wake can also stall authentication. An authentication timeout
   is `authentication`, with an instruction to unlock the key or agent. Blocked
   states still retry on wake and network change.
 - **Host key.** A changed, unknown under strict checking, or unverifiable host
-  key is `configuration`. The fix is to forget the host and review the new fingerprint; GOAT never replaces a
-  pinned key automatically.
+  key is `configuration`. The fix is to forget the host and review the new
+  fingerprint; GOAT never replaces a pinned key automatically.
 - **Runtime refusal.** A remote runtime newer than this app, or an incompatible
   one that cannot be replaced, is `configuration`. It is deliberately not
   `unsupported`: that reason switches the environment off in the registry, and
@@ -91,8 +105,11 @@ classifier's tests use the real strings.
   The command deadline uses DEBUG1's authentication-service and authenticated
   milestones (including a reused control connection) to distinguish an auth
   stall from a remote command stall; a TCP connection alone does not prove
-  authentication began. After login, command, runtime install/download, launch,
-  and pairing deadlines name their operation and remain `remote-unavailable`.
+  authentication began. A jump host's login does not authenticate the final
+  target: forwarding and a new target-authentication milestone reset the stage.
+  Timeout headlines take precedence over incidental stderr warnings in public
+  diagnostics and runtime status. After login, command, runtime install/download,
+  launch, and pairing deadlines name their operation and remain `remote-unavailable`.
   Local HTTPS/gh archive download deadlines also remain runtime failures, never
   SSH login or host reachability failures. A ready tunnel whose backend does not
   answer remains a runtime failure, except the explicit high-latency readiness

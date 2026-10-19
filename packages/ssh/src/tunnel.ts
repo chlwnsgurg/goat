@@ -75,7 +75,8 @@ import {
   resolveSshTarget,
   runSshCommand,
   SSH_KEEPALIVE_ARGS,
-  sshDiagnosticLines,
+  sshDiagnosticChunks,
+  SSH_DIAGNOSTIC_ARGS,
   targetConnectionKey,
 } from "./command.ts";
 import {
@@ -3373,7 +3374,7 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
     ),
   );
   const args = [
-    "-v",
+    ...SSH_DIAGNOSTIC_ARGS,
     ...baseSshArgs(input.resolvedTarget, {
       batchMode: input.authOptions.batchMode ?? "no",
     }),
@@ -3455,10 +3456,10 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
   };
   // Readiness cancels the exit waiter, but diagnostics must drain until the tunnel closes.
   let stderrTail = "";
-  const stderrDrain = yield* sshDiagnosticLines(child.stderr).pipe(
+  const stderrDrain = yield* sshDiagnosticChunks(child.stderr).pipe(
     Stream.runForEach((chunk) =>
       Effect.sync(() => {
-        stderrTail = (stderrTail + chunk + "\n").slice(-TUNNEL_STDERR_TAIL_CHARS);
+        stderrTail = (stderrTail + chunk).slice(-TUNNEL_STDERR_TAIL_CHARS);
       }),
     ),
     // Diagnostics are best-effort: a failed read must not hide the real exit.
@@ -3596,13 +3597,30 @@ function archiveFailure(error: SshLaunchError): SshHostFailure | undefined {
   };
 }
 
-// Only the final diagnostic line crosses the public boundary, with credentials removed.
+// A timeout headline and a local proxy diagnosis outrank incidental warnings
+// and OpenSSH's trailing generic closure. Only one sanitized line is public.
 function publicSshDiagnostic(error: SshEnvironmentEffectError) {
+  const headline = error.message.split(/\r?\n/u)[0] ?? "";
+  const timeout =
+    /^(?:SSH authentication timed out for .+ after \d+ms\.|SSH connection to .+ timed out after \d+ms before authentication began\.|(?:Remote SSH command|GOAT runtime (?:install\/download|launch)|GOAT pairing) on .+ timed out after \d+ms\.)/u.test(
+      headline,
+    );
+  const stderr = error instanceof SshCommandError ? error.stderr : error.message;
+  const proxy = stderr
+    .split(/\r?\n/u)
+    .find(
+      (line) =>
+        /^Tailscale proxy status: (?:Tailscale is stopped\.|Logged out\.|Machine is not yet approved by tailnet admin\.)$/u.test(
+          line,
+        ) ||
+        /^(?:.*?: )?failed to connect to local Tailscale(?:d| daemon)\b/iu.test(line) ||
+        /^posix_spawn(?:p)?: No such file or directory$/iu.test(line) ||
+        /^(?:(?:\S*\/)?(?:ba|da|z|k|c|fi)?sh): ?(?:(?:line )?\d+: ?)?(?:[^:\r\n]+: (?:command not found|not found|No such file or directory)|no such file or directory: [^\r\n]+)$/iu.test(
+          line,
+        ),
+    );
   return (
-    (
-      getLastNonEmptyOutputLine(error instanceof SshCommandError ? error.stderr : error.message) ||
-      error.message
-    )
+    (timeout ? headline : proxy || getLastNonEmptyOutputLine(stderr) || error.message)
       // oxlint-disable-next-line no-control-regex -- strips ANSI escape sequences
       .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, "")
       .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/giu, "$1[redacted]@")
@@ -3687,8 +3705,8 @@ function runtimeFailureResult(
     kind: "error",
     code:
       error instanceof SshCommandError &&
-      /cannot reach|SSH connection to .+ timed out after \d+ms before authentication began|connection (?:refused|timed out)|operation timed out|no route to host|could not resolve hostname|network is unreachable/iu.test(
-        `${error.message} ${diagnostic}`,
+      /cannot reach|SSH connection to .+ timed out after \d+ms before authentication began|Connection closed by UNKNOWN port 65535|(?:kex_exchange_identification|ssh_exchange_identification): (?:read: )?Connection (?:closed|reset) by (?:remote host|peer)|(?:Dial\([^\n]+|dial tcp: lookup [^\n]+): no such host|connection (?:refused|timed out)|operation timed out|no route to host|could not resolve hostname|network is unreachable/iu.test(
+        diagnostic,
       )
         ? "host_unreachable"
         : "operation_failed",

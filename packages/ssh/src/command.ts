@@ -14,6 +14,7 @@ import { SshCommandError, SshInvalidTargetError } from "./errors.ts";
 
 const DEFAULT_SSH_COMMAND_TIMEOUT_MS = 60_000;
 const MAX_SSH_ERROR_OUTPUT_LENGTH = 4_000;
+const MAX_SSH_DIAGNOSTIC_PREFIX_LENGTH = 512;
 
 /**
  * ssh is a real executable everywhere (`ssh.exe` on Windows), so it is always
@@ -145,23 +146,71 @@ export const collectProcessOutput = <E>(
     ),
   );
 
-// Proxy stdout becomes SSH banner text. Keep only known actionable Tailscale
-// states, never arbitrary debug output (which can include login URLs).
-export const sshDiagnosticLines = <E>(
+// DEBUG1 is needed for auth milestones and proxy status banners; lower levels
+// omit them. Unlike -v, LogLevel does not enable verbose logging in ProxyJump's
+// child ssh. LogVerbose's source/function overrides are version-dependent.
+export const SSH_DIAGNOSTIC_ARGS = ["-o", "LogLevel=DEBUG1"] as const;
+
+const SSH_CHATTER_RE =
+  /^(?:debug[123]:|Authenticated (?:to |using )|Transferred: sent |Bytes per second: sent |OpenSSH_\S+|Pseudo-terminal will not be allocated because stdin is not a terminal\.)/u;
+
+// Preserve remote stderr's bytes, including a final fragment before a read
+// failure. Buffer only short prefixes so a long line cannot grow without bound.
+export const sshDiagnosticChunks = <E>(
   stream: Stream.Stream<Uint8Array, E>,
   observeLine?: (line: string) => void,
 ): Stream.Stream<string, E> =>
-  stream.pipe(
-    Stream.decodeText(),
-    Stream.splitLines,
-    Stream.map((line) => {
-      observeLine?.(line);
-      return line.replace(
-        /^debug1: (?:kex_exchange_identification|ssh_exchange_identification): banner line \d+: (Tailscale is stopped\.|Logged out\.|Machine is not yet approved by tailnet admin\.)$/u,
-        "Tailscale proxy status: $1",
+  Stream.unwrap(
+    Effect.sync(() => {
+      let pending = "";
+      let mode: "buffer" | "keep" | "drop" = "buffer";
+      const diagnostic = (line: string) => {
+        observeLine?.(line.replace(/\r?\n$/u, ""));
+        const text = line.replace(
+          /^debug1: (?:kex_exchange_identification|ssh_exchange_identification): banner line \d+: (Tailscale is stopped\.|Logged out\.|Machine is not yet approved by tailnet admin\.)(\r?\n)?$/u,
+          "Tailscale proxy status: $1$2",
+        );
+        return SSH_CHATTER_RE.test(text) ? "" : text;
+      };
+      const flush = () => {
+        const text = diagnostic(pending);
+        pending = "";
+        return text;
+      };
+      return stream.pipe(
+        Stream.decodeText(),
+        Stream.flatMap((chunk) => {
+          const output: string[] = [];
+          let offset = 0;
+          while (offset < chunk.length) {
+            const end = chunk.indexOf("\n", offset);
+            const part = chunk.slice(offset, end < 0 ? undefined : end + 1);
+            if (mode === "keep") output.push(part);
+            else if (mode === "buffer") {
+              pending += part;
+              if (end >= 0) output.push(flush());
+              else if (pending.length > MAX_SSH_DIAGNOSTIC_PREFIX_LENGTH) {
+                const text = flush();
+                output.push(text);
+                mode = text.length > 0 ? "keep" : "drop";
+              }
+            }
+            if (end < 0) break;
+            mode = "buffer";
+            offset = end + 1;
+          }
+          return Stream.fromIterable(output);
+        }),
+        Stream.catchCause((cause) =>
+          Stream.concat(
+            Stream.suspend(() => Stream.make(flush())),
+            Stream.failCause(cause),
+          ),
+        ),
+        Stream.concat(Stream.suspend(() => Stream.make(flush()))),
+        Stream.filter((chunk) => chunk.length > 0),
       );
     }),
-    Stream.filter((line) => !/^(?:debug[123]:|Authenticated to )/u.test(line)),
   );
 
 function redactSshErrorOutput(output: string): string {
@@ -275,9 +324,7 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
     ),
   );
   const args = [
-    // DEBUG1 exposes connection/auth milestones, needed to distinguish a locked
-    // agent from a slow remote command. Diagnostic chatter is removed below.
-    "-v",
+    ...SSH_DIAGNOSTIC_ARGS,
     ...baseSshArgs(target, {
       batchMode: input.batchMode ?? (input.interactiveAuth ? "no" : "yes"),
     }),
@@ -326,7 +373,13 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
   const [stdout, stderr, exitCode] = yield* Effect.all(
     [
       collectProcessOutput(child.stdout),
-      sshDiagnosticLines(child.stderr, (line) => {
+      sshDiagnosticChunks(child.stderr, (line) => {
+        // A jump's login is not the target's login. These milestones start the
+        // next hop, even when the jump has its own verbose configuration.
+        if (/^debug1: (?:channel_connect_stdio_fwd:|Authenticating to )/u.test(line)) {
+          progress.authenticating = false;
+          progress.authenticated = false;
+        }
         progress.authenticating ||=
           /^debug1: (?:SSH2_MSG_SERVICE_ACCEPT received|Authentications that can continue:|Next authentication method:)/u.test(
             line,
@@ -338,7 +391,7 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
       }).pipe(
         Stream.runForEach((line) =>
           Effect.sync(() => {
-            progress.stderr += `${line}\n`;
+            progress.stderr += line;
           }),
         ),
         Effect.map(() => progress.stderr),

@@ -13,10 +13,11 @@ const HOST_KEY_FAILURE_RE =
 // ssh never reached the host. `describeSshConnectionFailure` in @goat/ssh/command
 // rewrites these as "Cannot reach …"; the tunnel step passes ssh's own stderr.
 const UNREACHABLE_RE =
-  /SSH connection to .+ timed out after \d+ms before authentication began|Connection closed by UNKNOWN port 65535|(?:kex_exchange_identification|ssh_exchange_identification): Connection (?:closed|reset) by remote host|(?:Dial\([^\n]+|dial tcp: lookup [^\n]+): no such host|\bCannot reach .+ over SSH \(|ssh: connect to host \S+ port \d+: |ssh: Could not resolve hostname |Connection timed out during banner exchange|Connection to \S+ port \d+ timed out/u;
+  /SSH connection to .+ timed out after \d+ms before authentication began|Connection closed by UNKNOWN port 65535|(?:kex_exchange_identification|ssh_exchange_identification): (?:read: )?Connection (?:closed|reset) by (?:remote host|peer)|(?:Dial\([^\n]+|dial tcp: lookup [^\n]+): no such host|\bCannot reach .+ over SSH \(|ssh: connect to host \S+ port \d+: |ssh: Could not resolve hostname |Connection timed out during banner exchange|Connection to \S+ port \d+ timed out/u;
 // The desktop's own prompt endings (DesktopSshPasswordPrompts): dismissed,
 // timed out, expired, the window closed, or the prompt service stopped; and an
-// ensure superseded by a newer one. Retrying on a timer would reopen the prompt.
+// ensure superseded by a newer one; also runSshCommand's authentication-stage
+// timeout. Retrying on a timer would reopen the prompt.
 const CANCELLED_RE =
   /^SSH (?:authentication|connection|setup)(?: was)? cancel|^SSH authentication timed out for |^SSH password prompt (?:service stopped|expired)/iu;
 // Runtime acquisition happens after SSH login. Download diagnostics can quote
@@ -63,13 +64,19 @@ export function sshPreparationFailure(cause: unknown): ConnectionAttemptError {
       message,
     );
   const tailscaleStopped =
-    /failed to connect to local Tailscale(?:d| daemon)|is Tailscale running\?|tailscale(?:d)?(?: is)? (?:not running|stopped)|tailscale.*(?:state: Stopped|not connected)/iu.test(
+    /^(?:.*?: )?failed to connect to local Tailscale(?:d| daemon)\b|^(?:Tailscale proxy status: )?Tailscale is (?:stopped|not running)\.?(?:\r?$)|^is Tailscale running\?/imu.test(
       message,
     );
-  const tailscaleLoggedOut = /tailscale.*(?:logged out|not logged in|NeedsLogin)/iu.test(message);
+  const tailscaleLoggedOut =
+    /^(?:Tailscale proxy status: |tailscale: )?(?:logged out\.|not logged in\.|NeedsLogin)\r?$/imu.test(
+      message,
+    );
   const proxyMissing =
-    /posix_spawn: No such file or directory/iu.test(message) ||
-    (proxyClosed && /no such file or directory|command not found|not found/iu.test(message));
+    /^posix_spawn(?:p)?: No such file or directory\r?$/imu.test(message) ||
+    (proxyClosed &&
+      /^(?:(?:\S*\/)?(?:ba|da|z|k|c|fi)?sh): ?(?:(?:line )?\d+: ?)?(?:[^:\r\n]+: (?:command not found|not found|No such file or directory)|no such file or directory: [^\r\n]+)\r?$/imu.test(
+        message,
+      ));
   const tailscaleApproval =
     /Tailscale proxy status: Machine is not yet approved by tailnet admin\./u.test(message);
   if (

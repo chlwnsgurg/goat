@@ -122,7 +122,7 @@ it.effect("retains a stopped local Tailscale proxy in tunnel diagnostics", () =>
                 exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(255)),
                 stderr: Stream.make(
                   new TextEncoder().encode(
-                    `${args.includes("-v") ? "debug1: kex_exchange_identification: banner line 0: Tailscale is stopped.\n" : ""}Connection closed by UNKNOWN port 65535\n`,
+                    `${args.includes("LogLevel=DEBUG1") ? "debug1: kex_exchange_identification: banner line 0: Tailscale is stopped.\n" : ""}Connection closed by UNKNOWN port 65535\n`,
                   ),
                 ),
               });
@@ -151,7 +151,9 @@ it.effect.each(["authentication", "connection", "runtime-launch"] as const)(
           return Effect.succeed({
             ...makeSuccessfulProcess(""),
             stderr: Stream.make(
-              new TextEncoder().encode("GOAT runtime launch on fixture timed out after 90000ms."),
+              new TextEncoder().encode(
+                "GOAT runtime launch on fixture timed out after 90000ms.\nWarning: Permanently added fixture.",
+              ),
             ),
             exitCode: Deferred.succeed(started, undefined).pipe(
               Effect.as(ChildProcessSpawner.ExitCode(1)),
@@ -161,7 +163,9 @@ it.effect.each(["authentication", "connection", "runtime-launch"] as const)(
           ...makeSuccessfulProcess(""),
           stderr: Stream.make(
             new TextEncoder().encode(
-              stage === "authentication" ? "debug1: SSH2_MSG_SERVICE_ACCEPT received\n" : "",
+              stage === "authentication"
+                ? "debug1: SSH2_MSG_SERVICE_ACCEPT received\nWarning: Permanently added fixture.\n"
+                : "",
             ),
           ),
           exitCode: Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),

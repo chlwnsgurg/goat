@@ -15,6 +15,7 @@ describe("sshPreparationFailure", () => {
     "Connection closed by UNKNOWN port 65535",
     "kex_exchange_identification: Connection closed by remote host",
     "ssh_exchange_identification: Connection closed by remote host",
+    "kex_exchange_identification: read: Connection reset by peer",
     "dial tcp: lookup fixture.invalid: no such host",
     // A host whose name happens to contain "cancel".
     "Cannot reach cancel-mbp over SSH (192.168.1.20:22: Operation timed out). Check the network or VPN connection to that host.",
@@ -129,6 +130,9 @@ describe("local SSH proxy failures", () => {
     ["posix_spawn: No such file or directory", "ProxyCommand"],
     ["zsh:1: no such file or directory: /nonexistent/goat-proxy", "ProxyCommand"],
     ["/bin/sh: tailscale: command not found", "ProxyCommand"],
+    ["/bin/sh: line 1: tailscale: command not found", "ProxyCommand"],
+    ["sh: tailscale: not found", "ProxyCommand"],
+    ["/bin/bash: line 1: /missing/tailscale: No such file or directory", "ProxyCommand"],
   ])("blocks local proxy failure before generic closure: %s", (diagnostic, fix) => {
     const failure = sshPreparationFailure(`${diagnostic}\nConnection closed by UNKNOWN port 65535`);
     expect(failure).toMatchObject({ _tag: "ConnectionBlockedError", reason: "configuration" });
@@ -141,5 +145,23 @@ describe("local SSH proxy failures", () => {
       _tag: "ConnectionTransientError",
       reason: "remote-unavailable",
     });
+  });
+});
+
+it.each([
+  "cloudflared: unexpected status code 404: Not Found",
+  "cloudflared: route not found",
+  "cloudflared: peer not found",
+  "tailscale: item not found in the data protection keychain",
+  "connect to tailscale-mbp: Socket is not connected",
+  "cloudflared: No such file or directory in remote response",
+])("keeps remote proxy failures quiet: %s", (diagnostic) => {
+  expect(
+    sshPreparationFailure(
+      `${diagnostic}\nkex_exchange_identification: Connection closed by remote host\nConnection closed by UNKNOWN port 65535`,
+    ),
+  ).toMatchObject({
+    _tag: "ConnectionTransientError",
+    reason: "host-unreachable",
   });
 });
