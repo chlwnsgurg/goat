@@ -1799,8 +1799,8 @@ fi`;
 
 // Use the existing post-install round trip: young executables remain unkeyed everywhere else.
 const REMOTE_RUNTIME_FACT_WARMUP_SCRIPT = String.raw`warm_runtime_facts() (
-  [ -n "$GOAT_FACTS_DIR" ] && [ "$LOCK_HELD" = 1 ] || exit 0
-  [ "$(readlink "$LOCK" 2>/dev/null)" = "$OWNER" ] || exit 1
+  [ -n "$GOAT_FACTS_DIR" ] || exit 0
+  # Skip an observed rollback window; concurrent changes are covered by each fact's keys.
   [ ! -e "$STATE_DIR/run-t3.previous" ] && [ ! -L "$STATE_DIR/run-t3.previous" ] || exit 1
   warm_exe="$HOME/.goat/runtime/goat/versions/$SELECTED_VERSION/goat"
   warm_sig="$(file_sig "$warm_exe")" || exit 1
@@ -3440,8 +3440,11 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ] || ! acquire_replacement_lock; then
   printf 'ssh.runtime.cleanup.skipped replacement lock held\\n' >&2
   exit 0
 fi
-${REMOTE_RUNTIME_FACT_WARMUP_SCRIPT}
-${REMOTE_RUNTIME_CLEANUP_SCRIPT}`,
+${REMOTE_RUNTIME_CLEANUP_SCRIPT}
+release_recovery_lock
+release_replacement_lock
+# Cleanup gets the full deadline under the mutex; only optional fact warming uses what remains.
+${REMOTE_RUNTIME_FACT_WARMUP_SCRIPT}`,
         });
         for (const line of cleanup.stderr.split(/\r?\n/u)) {
           if (line.startsWith("ssh.runtime.cleanup.")) {

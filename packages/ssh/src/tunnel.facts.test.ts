@@ -192,7 +192,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host facts
             (command) =>
               command._tag === "StandardCommand" && command.args.includes("goat-runtime-cleanup"),
           )!;
-          for (const fault of ["lock", "rollback", "wait", "clock", "windows"]) {
+          for (const fault of ["lock", "rollback", "wait", "timeout", "clock", "windows"]) {
             yield* f.fs.remove(facts, { recursive: true, force: true });
             yield* f.shiftHostClock(fault === "clock" ? -1 : 0, true);
             const lock = `${f.home}/.goat/ssh-launch/replacement.lock`;
@@ -202,12 +202,37 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH host facts
             f.setScriptPrefix(
               fault === "wait"
                 ? "sleep() { return 1; }\n"
-                : fault === "windows"
-                  ? 'uname() { if [ "$1" = -s ]; then echo MINGW64_NT; else command uname "$@"; fi; }\n'
-                  : "",
+                : fault === "timeout"
+                  ? `
+# Force the cleanup's existing fail-closed path on Linux as well as macOS.
+flock() { return 1; }
+printf() {
+  case "$1" in ssh.runtime.cleanup.skipped*) command printf 'cleanup-finished\\n' >> "$HOME/.test/order" ;; esac
+  command printf "$@"
+}
+sleep() {
+  if [ -e "$LOCK" ] || [ -L "$LOCK" ] || [ -e "$RECOVERY" ] || [ -L "$RECOVERY" ]; then
+    command printf 'warmup-locked\\n' >> "$HOME/.test/order"
+  else
+    command printf 'warmup-unlocked\\n' >> "$HOME/.test/order"
+  fi
+  # Model the command deadline expiring at the warm-up wait, without a timed test.
+  kill -TERM "$$"
+  exit 1
+}
+`
+                  : fault === "windows"
+                    ? 'uname() { if [ "$1" = -s ]; then echo MINGW64_NT; else command uname "$@"; fi; }\n'
+                    : "",
             );
             const child = yield* f.transport.spawn(cleanup);
-            assert.equal(Number(yield* child.exitCode), 0, fault);
+            assert.equal(Number(yield* child.exitCode), fault === "timeout" ? 1 : 0, fault);
+            if (fault === "timeout") {
+              assert.equal(
+                yield* f.fs.readFileString(`${f.test}/order`),
+                "cleanup-finished\nwarmup-unlocked\n",
+              );
+            }
             assert.isFalse(yield* f.fs.exists(facts), fault);
             yield* Effect.sync(() => process.kill(runtime.pid, 0));
             if (fault === "lock") {
