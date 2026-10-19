@@ -832,15 +832,14 @@ export const make = Effect.gen(function* () {
           message: after.lastReason ?? decision.note,
         };
       }).pipe(
-        Effect.catchTag(
-          "FleetLauncherGone",
-          () =>
+        Effect.catchTags({
+          FleetLauncherGone: () =>
             new RescheduleError({
               code: "invalid_request",
               message:
                 "The thread that launched this worker is gone or archived, so nothing may act for it.",
             }),
-        ),
+        }),
       ),
     );
 

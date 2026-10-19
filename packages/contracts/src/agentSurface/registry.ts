@@ -463,8 +463,7 @@ export const agentSurfaceRegistry = {
     verb: "cordon",
     name: "goat_host_cordon",
     toolkit: "fleetHealth",
-    summary:
-      "Stop placing new self-healing work on a host",
+    summary: "Stop placing new self-healing work on a host",
     description:
       "Cordon an SSH or linked host: self-healing and goal controllers stop placing new or moved work there. Threads already running on it are not touched. The cordon is saved on this machine and survives a restart; goat_host_uncordon lifts it, and goat_host_status shows it as a Cordoned condition. Needs a full-access caller.",
     effect: "write",
@@ -482,8 +481,7 @@ export const agentSurfaceRegistry = {
     verb: "uncordon",
     name: "goat_host_uncordon",
     toolkit: "fleetHealth",
-    summary:
-      "Allow placements on a cordoned host again",
+    summary: "Allow placements on a cordoned host again",
     description:
       "Lift a cordon or drain from a host so self-healing and goal controllers may place work there again. Workers already moved off the host stay where they are. Needs a full-access caller.",
     effect: "write",
@@ -501,8 +499,7 @@ export const agentSurfaceRegistry = {
     verb: "drain",
     name: "goat_host_drain",
     toolkit: "fleetHealth",
-    summary:
-      "Cordon a host and move its self-healing workers away",
+    summary: "Cordon a host and move its self-healing workers away",
     description:
       "Drain a host: cordon it, then move each self-healing worker on it (threads launched with selfHeal:true, and goal workers) to another Ready, uncordoned host after its current turn ends. force:true moves them now and interrupts their current turn. A worker moves only from its pushed branch, onto a new branch <branch>-r<n>, and the old thread is told to stop. Threads launched without selfHeal are listed nowhere and never moved. goat_host_uncordon ends the drain. Needs a full-access caller.",
     effect: "destructive",
@@ -520,8 +517,7 @@ export const agentSurfaceRegistry = {
     verb: "reschedule",
     name: "goat_thread_reschedule",
     toolkit: "fleetHealth",
-    summary:
-      "Move a self-healing thread to another host",
+    summary: "Move a self-healing thread to another host",
     description:
       "Move a self-healing worker thread (launched with selfHeal:true) to another host by hand. host and threadId name its current thread; targetHost picks the destination, otherwise the least busy Ready, uncordoned host that has the same project is chosen. If the old host answers, its thread is first asked to push its branch and then interrupted; otherwise the newest pushed branch is used. The new thread starts on branch <branch>-r<n> with the original prompt and a note to resume from the pushed commit. Each move spends one attempt of the worker's retry budget. Needs a full-access caller.",
     effect: "destructive",
