@@ -46,38 +46,34 @@ const isAlive = (pid: number) => {
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "SSH runtime drain replacement",
   () => {
-    it.live(
-      "a lost drain response fences later attachments while the old server still answers",
-      () =>
-        Effect.gen(function* () {
-          const f = yield* makeProtocolFixture({
-            live: true,
-            kind: "managed",
-            oldVersion: OLDER,
-            drain: true,
-            ...compatible,
-          });
-          yield* f.fs.writeFileString(`${f.test}/drain`, "response-lost");
-          const first = yield* f.run("launch", false, {
-            refreshOwnedRuntimeOnFirstConnection: true,
-          });
-          assert.isTrue(Result.isSuccess(first), describeFailure(first));
-          if (Result.isFailure(first)) return;
-          assert.equal(first.success.status, "pending");
-          assert.equal(first.success.pending?.reason, "unknown");
-          assert.isTrue(yield* f.fs.exists(`${f.state}/draining`));
-          assert.isTrue(isAlive(f.pid));
-          const commands = f.remoteCommands.length;
-          const again = yield* f.run("launch", false, {
-            refreshOwnedRuntimeOnFirstConnection: true,
-          });
-          assert.isTrue(Result.isSuccess(again), describeFailure(again));
-          if (Result.isFailure(again)) return;
-          assert.equal(again.success.status, "pending");
-          assert.equal(f.remoteCommands.length - commands, 2);
-          assert.equal((yield* events(f)).filter((e) => e.type === "drain").length, 1);
-          assert.isTrue(isAlive(f.pid));
-        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    it.live("a lost drain response leaves an instance fence and returns pending-only", () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: OLDER,
+          drain: true,
+          ...compatible,
+        });
+        yield* f.shiftHostClock(60);
+        yield* f.fs.writeFileString(`${f.test}/drain`, "response-lost");
+        const first = yield* f.run("launch", false, {
+          refreshOwnedRuntimeOnFirstConnection: true,
+        });
+        assert.isTrue(Result.isSuccess(first), describeFailure(first));
+        if (Result.isFailure(first)) return;
+        assert.equal(first.success.status, "pending");
+        assert.equal(first.success.pending?.reason, "unknown");
+        const runtime = JSON.parse(
+          yield* f.fs.readFileString(`${f.home}/.goat/userdata/server-runtime.json`),
+        ) as { instanceId: string };
+        assert.equal(
+          (yield* f.fs.readFileString(`${f.state}/draining`)).trim(),
+          runtime.instanceId,
+        );
+        assert.equal((yield* events(f)).filter((e) => e.type === "drain").length, 1);
+        assert.isTrue(isAlive(f.pid));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
     it.live.each(

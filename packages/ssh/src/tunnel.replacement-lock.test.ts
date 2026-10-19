@@ -111,10 +111,12 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
-    it.live.each([false, true])(
-      "a folded second client waits in-command before attaching (replacement=%s)",
-      (replace) =>
+    it.live.each(["deferred", "replaced", "cold"])(
+      "a second client waits in-command before attaching (%s)",
+      (mode) =>
         Effect.gen(function* () {
+          const replace = mode !== "deferred";
+          const commands = mode === "cold" ? 2 : 1;
           const f = yield* makeProtocolFixture({
             live: true,
             kind: "managed",
@@ -151,13 +153,22 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   read -r release < "$HOME/.test/wait-release"
 }
 `);
+          yield* f.fs.writeFileString(
+            `${f.test}/lock-barrier-bin/sleep`,
+            `#!/bin/sh
+printf waiting > "$HOME/.test/waiting"
+read -r release < "$HOME/.test/wait-release"
+`,
+          );
+          yield* f.fs.chmod(`${f.test}/lock-barrier-bin/sleep`, 0o700);
           const first = yield* Effect.forkChild(launch(true));
           yield* fileMilestone(`${f.test}/lock-acquired`);
           const before = f.remoteCommands.length;
-          const second = yield* Effect.forkChild(launch(false, baseline.selectedRuntime));
+          const second = yield* Effect.forkChild(
+            launch(mode === "cold", mode === "cold" ? undefined : baseline.selectedRuntime),
+          );
           yield* fileMilestone(`${f.test}/waiting`);
-          // The waiter has not probed or run readiness while the other owner could drain.
-          assert.equal(f.remoteCommands.length - before, 1);
+          assert.equal(f.remoteCommands.length - before, commands);
           yield* f.fs.writeFileString(`${f.test}/lock-release`, "release\n");
           const firstResult = yield* Fiber.join(first);
           assert.equal(firstResult.status, "ready");
@@ -183,7 +194,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             replace ? ARCHIVE.archiveVersion : "1.2.2",
           );
           assert.deepEqual(attached.pending, replace ? undefined : baseline.pending);
-          assert.equal(f.remoteCommands.length - before, 1);
+          assert.equal(f.remoteCommands.length - before, commands);
           assert.isString(attached.selectedRuntime.reconnectProbe);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
       180_000,

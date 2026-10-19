@@ -1534,7 +1534,6 @@ trap 'runner_exit=$?; cleanup_runner_next; exit "$runner_exit"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-@@GOAT_EARLY_REPLACEMENT_LOCK@@
 @@GOAT_CAPTURE_RUNNING_RUNNER@@
 if [ "$REQUIRE_INSTALLED" = 1 ] && [ -n "$SELECTED_VERSION" ]; then
   selected_dir="$HOME/.goat/runtime/goat/versions/$SELECTED_VERSION"
@@ -1640,6 +1639,12 @@ if [ "$OWNING_LAUNCH" = 1 ]; then
   CHECK_RUNNER="$RUNNER_CANDIDATE_FILE.pin"
   check_live_protocol
   [ "$DRAIN_UNCERTAIN" = 0 ] || emit_pending unknown
+  if [ "$LIVE_COMPATIBLE" = 1 ] && [ "$LIVE_VERSION" = "$SELECTED_VERSION" ] &&
+     [ "$LIVE_VERSION" = "$REQUESTED_VERSION" ] && [ -n "$REFRESH_LIVE_VERSION" ] &&
+     [ "$REFRESH_LIVE_VERSION" != "$LIVE_VERSION" ]; then
+    # Another owner completed this exact refresh while we waited; the old runner pin is obsolete.
+    EXPECTED_LIVE_RUNNER_SHA256="$(runner_sha256 "$RUNNER_FILE")" || ownership_unverified
+  fi
   if [ "$LIVE_COMPATIBLE" = 1 ] && [ "$comparison" = newer ] && [ "$LIVE_VERSION" != "$SELECTED_VERSION" ]; then
     # Another client may have completed a newer installation since preparation.
     # Pin its independently verified retained runner rather than publish our older candidate.
@@ -2531,23 +2536,6 @@ capture_reconnect_baseline() {
 `
         : ""),
     GOAT_READY_BASELINE: captureBaseline ? "capture_reconnect_baseline\n" : "",
-    GOAT_EARLY_REPLACEMENT_LOCK: verifyOwnedBeforePublication
-      ? `if ! acquire_replacement_lock; then
-  if ! wait_for_replacement_lock || ! acquire_replacement_lock; then
-    ${buildRemoteContendedOutput({
-      replacement: selection.refreshIfIdle ? "older" : "incompatible",
-      requestedVersion: selection.requestedVersion ?? "",
-      liveVersion: selection.expectedLiveVersion ?? selection.version ?? "unknown",
-    })}
-    exit 0
-  fi
-fi
-# A competing owner may have already installed our requested build while we waited.
-if [ "$SELECTED_VERSION" = "$REQUESTED_VERSION" ] && [ "$PRESERVE_SELECTED_RUNNER" = 0 ] &&
-   [ "$(read_runner_hint "$RUNNER_FILE" GOAT_ARCHIVE_VERSION ${LEGACY_SSH_ARCHIVE_VERSION_KEY})" = "$SELECTED_VERSION" ]; then
-  EXPECTED_LIVE_RUNNER_SHA256=
-fi`
-      : "",
     GOAT_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
     GOAT_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
     GOAT_REQUESTED_RUNNER: shellSingleQuote(
@@ -5593,6 +5581,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           return Effect.fail(error);
         },
       }),
+      Effect.onExit((exit) =>
+        Exit.isSuccess(exit)
+          ? Effect.void
+          : Effect.sync(() => {
+              const previous = input.previous ?? tunnels.get(input.key);
+              if (previous !== undefined) previous.attachmentInvalidated = true;
+            }),
+      ),
     );
     const deferredIntent = pendingReplacements.get(input.key);
     const retainedPending = deferredIntent?.pending;

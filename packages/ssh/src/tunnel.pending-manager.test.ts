@@ -331,28 +331,31 @@ describe("SSH pending replacement reconciliation", () => {
     }),
   );
 
-  it.effect("pending-only after attachment requires revalidation before any cached reuse", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture;
-      f.setMode("ready-pending");
-      yield* Effect.gen(function* () {
-        const manager = yield* SshTunnel.SshEnvironmentManager;
-        yield* manager.ensureEnvironment(uploadTarget);
-        f.setMode("pending");
-        yield* TestClock.adjust("10 minutes");
-        yield* Deferred.await(f.completed[1]!);
-        const result = yield* manager.ensureEnvironment(uploadTarget, {
-          reuseWhileRefreshPending: true,
-        });
-        assert.isTrue("type" in result);
-        assert.equal(f.count.launches, 3);
-        assert.equal(f.count.forwards, 1);
-      }).pipe(
-        Effect.provide(f.layer),
-        Effect.provideService(Tracer.Tracer, f.tracer),
-        Effect.scoped,
-      );
-    }),
+  it.effect.each(["pending", "failure"] as const)(
+    "%s after attachment requires revalidation before any cached reuse",
+    (outcome) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        f.setMode("ready-pending");
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          yield* manager.ensureEnvironment(uploadTarget);
+          f.setMode(outcome);
+          yield* TestClock.adjust("10 minutes");
+          yield* Deferred.await(f.completed[1]!);
+          f.setMode("pending");
+          const result = yield* manager.ensureEnvironment(uploadTarget, {
+            reuseWhileRefreshPending: true,
+          });
+          assert.isTrue("type" in result);
+          assert.equal(f.count.launches, 3);
+          assert.equal(f.count.forwards, 1);
+        }).pipe(
+          Effect.provide(f.layer),
+          Effect.provideService(Tracer.Tracer, f.tracer),
+          Effect.scoped,
+        );
+      }),
   );
 
   it.effect("forget still closes its tunnel and reports an unconfirmed remote stop", () =>
