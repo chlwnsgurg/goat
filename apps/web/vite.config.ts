@@ -105,6 +105,7 @@ const browserTestProject = {
     // project runs after the unit project.
     maxWorkers: Math.max(1, Math.min(8, NodeOS.availableParallelism() - 1)),
     sequence: { groupOrder: 1 },
+    setupFiles: ["./src/test/browserNoMotion.ts"],
     api: { port: browserTestApiPort, strictPort: false },
     browser: {
       enabled: true,
