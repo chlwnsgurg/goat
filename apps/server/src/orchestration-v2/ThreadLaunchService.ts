@@ -11,6 +11,7 @@ import {
   type OrchestrationV2Actor,
   type OrchestrationV2CreationSource,
   type OrchestrationV2ProviderThreadNativeMetadata,
+  type OrchestrationV2CloudTask,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadLauncher,
   type ProviderDriverKind,
@@ -101,6 +102,7 @@ export interface ThreadLaunchInput {
       readonly strength: "strong";
     };
     readonly metadata?: OrchestrationV2ProviderThreadNativeMetadata;
+    readonly cloudTask?: OrchestrationV2CloudTask;
   };
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
@@ -113,6 +115,8 @@ export interface ThreadLaunchInput {
   readonly fromClient?: boolean;
   /** The agent thread that asked for this launch; descriptive only. */
   readonly launchedBy?: OrchestrationV2ThreadLauncher | undefined;
+  /** Who started a registered cloud run outside GOAT; descriptive only. */
+  readonly externalLauncher?: string | undefined;
 }
 
 type PreparationInput = Pick<
@@ -1017,11 +1021,16 @@ const make = Effect.gen(function* () {
       }
 
       const launchReceipt = yield* readReceipt(input, input.commandId);
-      yield* threads.assertProviderInstanceEnabled({
-        projectId: input.projectId,
-        commandId: input.commandId,
-        instanceId: input.modelSelection.instanceId,
-      });
+      // A link-only registered cloud run never starts a turn, so its instance may be off.
+      const linkOnly =
+        input.initialMessage === undefined &&
+        input.importedNativeThread?.cloudTask?.tracking === "link-only";
+      if (!linkOnly)
+        yield* threads.assertProviderInstanceEnabled({
+          projectId: input.projectId,
+          commandId: input.commandId,
+          instanceId: input.modelSelection.instanceId,
+        });
       return yield* Effect.gen(function* () {
         // A retried launch has no client-supplied id to replay against, so
         // recover the thread id its accepted create was recorded under before
@@ -1114,6 +1123,9 @@ const make = Effect.gen(function* () {
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
                 ...(input.launchedBy === undefined ? {} : { launchedBy: input.launchedBy }),
+                ...(input.externalLauncher === undefined
+                  ? {}
+                  : { externalLauncher: input.externalLauncher }),
               });
         const claimed = yield* claimDispatch.pipe(
           Effect.mapError(

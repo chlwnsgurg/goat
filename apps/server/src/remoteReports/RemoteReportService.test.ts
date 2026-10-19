@@ -172,6 +172,7 @@ const setup = Effect.gen(function* () {
               })),
             },
           ],
+          subagents: [],
         };
         const after = state.afterRead;
         state.afterRead = undefined;

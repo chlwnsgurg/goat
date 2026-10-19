@@ -65,9 +65,13 @@ export const serverOwnerTag = (input: {
       : sshReplacementOwner(input.sshReplacementId);
   }
   const update = context.update;
-  return update?.status === "pending" && update.targetVersion === context.childVersion
-    ? `service-trial:${update.id}`
-    : `service:${context.childVersion}`;
+  if (update?.status === "pending" && update.targetVersion === context.childVersion) {
+    return `service-trial:${update.id}`;
+  }
+  if (context.probation === true && update?.status === "committed") {
+    return `service-probation:${update.id}`;
+  }
+  return `service:${context.childVersion}`;
 };
 
 export const launcherContextFromEnvironment = (

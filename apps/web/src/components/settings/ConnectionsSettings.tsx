@@ -1441,6 +1441,7 @@ function CloudLinkRow({
 // Sections folded under "Advanced settings"; a search jump to one opens the group.
 const ADVANCED_CONNECTION_SETTING_IDS = [
   "hosts",
+  "provider-host-matrix",
   "cloud-machines",
   "remote-launches",
   "load-balancing",

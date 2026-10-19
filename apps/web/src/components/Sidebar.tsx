@@ -2129,6 +2129,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       </span>
     );
   const accessibleTitle = isRenaming ? null : <span className="sr-only">{thread.title}</span>;
+  // A registered cloud run names the outside agent that launched it.
+  const externalLauncherBadge = thread.source.externalLauncher ? (
+    <span className="max-w-24 shrink-0 truncate text-xs text-muted-foreground">
+      via {thread.source.externalLauncher}
+    </span>
+  ) : null;
 
   const prBadgeShape = supportsMultiplePullRequests
     ? resolveThreadPullRequestBadge(thread.pullRequests)
@@ -2251,6 +2257,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             </span>
             {draftIndicator}
             {title}
+            {externalLauncherBadge}
             {pinIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
@@ -2417,6 +2424,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               ) : null}
               {draftIndicator}
               {title}
+              {externalLauncherBadge}
               {pinIndicator}
               {thread.worktreePath ? <ThreadWorktreeIndicator thread={thread} /> : null}
               {isRegeneratingTitle ? (
@@ -2608,6 +2616,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               <span className="min-w-0 flex-1 truncate">
                 {sidebarFolderName(props.project?.workspaceRoot) ?? props.projectDisplayName}
               </span>
+              {thread.source.externalLauncher ? (
+                <span className="max-w-[40%] shrink-0 truncate">
+                  via {thread.source.externalLauncher}
+                </span>
+              ) : null}
               <span className="ml-auto inline-flex min-w-0 max-w-[48%] shrink-0 items-center gap-1.5">
                 {prBadge}
                 <span className="inline-flex min-w-0 items-center gap-1">

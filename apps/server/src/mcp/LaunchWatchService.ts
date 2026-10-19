@@ -229,6 +229,11 @@ interface Details {
   readonly worktreePath: string | null;
   readonly excerpt: string | null;
   readonly prUrl: string | null;
+  /**
+   * A registered cloud run GOAT could only link: its attach run ends without a result, so
+   * the completion webhook is not told it completed. The launching thread still hears why.
+   */
+  readonly linkOnlyRegistration: boolean;
 }
 
 const noDetails: Details = {
@@ -237,6 +242,7 @@ const noDetails: Details = {
   worktreePath: null,
   excerpt: null,
   prUrl: null,
+  linkOnlyRegistration: false,
 };
 
 class LauncherGone extends Data.TaggedError("LauncherGone")<{}> {}
@@ -633,16 +639,21 @@ export const make = Effect.gen(function* () {
   const localDetails = (watch: LaunchWatch, runId: RunId) =>
     Effect.gen(function* () {
       const shell = yield* threads.getThreadShell(watch.threadId);
-      const records = yield* threads.getThreadRecords(watch.threadId, ["messages"], {
-        messageRoles: ["assistant"],
-        messageRunIds: [runId],
-      });
+      const records = yield* threads.getThreadRecords(
+        watch.threadId,
+        ["messages", "providerThreads"],
+        { messageRoles: ["assistant"], messageRunIds: [runId] },
+      );
       return {
         title: shell?.title ?? null,
         branch: shell?.branch ?? null,
         worktreePath: shell?.worktreePath ?? null,
         excerpt: lastText(records.messages.map((message) => message.text)),
         prUrl: shell?.linkedPullRequest?.url ?? null,
+        linkOnlyRegistration: (records.providerThreads ?? []).some(
+          (thread) =>
+            thread.cloudTask?.attach === "registered" && thread.cloudTask.tracking === "link-only",
+        ),
       } satisfies Details;
     });
 
@@ -684,6 +695,8 @@ export const make = Effect.gen(function* () {
         worktreePath: head.thread.worktreePath,
         excerpt: lastText(texts),
         prUrl: head.thread.linkedPullRequest?.url ?? null,
+        // Registered runs live on their holder, whose own watch reads them locally.
+        linkOnlyRegistration: false,
       } satisfies Details;
     });
 
@@ -873,13 +886,15 @@ export const make = Effect.gen(function* () {
               const sent = yield* deliver(
                 watch,
                 finishedWake({ watch, runId: endedRunId, status: result.status, ...details }),
-                {
-                  event: "run.completed",
-                  runId: endedRunId,
-                  status: result.status,
-                  title,
-                  prUrl: details.prUrl,
-                },
+                details.linkOnlyRegistration
+                  ? undefined
+                  : {
+                      event: "run.completed",
+                      runId: endedRunId,
+                      status: result.status,
+                      title,
+                      prUrl: details.prUrl,
+                    },
               );
               if (!sent.delivered) {
                 yield* keep(sent.watch);

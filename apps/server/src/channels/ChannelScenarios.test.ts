@@ -2596,7 +2596,9 @@ describe("completion (scenario 5)", () => {
       yield* reports.reconcile(runtime.ownerToken);
       const pending = yield* onlyTask;
       assert.strictEqual(pending.status, "running");
-      assert.deepStrictEqual(pending.observed?.needsYou, [{ kind: "approval", since }]);
+      assert.deepStrictEqual(pending.observed?.needsYou, [
+        { kind: "approval", since, approval: { requestId: request.id, threadId } },
+      ]);
       assert.strictEqual(yield* ledger.countWaitingTasks(ownerId), 1);
 
       harness.world.runtimeRequests.set(threadId, [
