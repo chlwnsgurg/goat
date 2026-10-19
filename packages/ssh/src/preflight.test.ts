@@ -26,7 +26,10 @@ const fixture = (
     auth?: string;
     facts?: string;
     none?: boolean;
-    alias?: boolean;
+    alias?: boolean | string;
+    resolvedHost?: string;
+    ownerLabel?: string;
+    user?: string;
     host?: string;
     runner?: RemoteGoatRunnerOptions;
     settings?: string;
@@ -42,7 +45,7 @@ const fixture = (
         calls.push(command.args);
         if (command.args.includes("-G"))
           return makeSuccessfulProcess(
-            `hostname ${input.host ?? "build.example"}\nuser deploy\nport 22\nidentityfile /keys/id_ed25519\nproxyjump bastion\n${input.settings ?? ""}`,
+            `hostname ${input.resolvedHost ?? input.host ?? "build.example"}\nuser ${input.user ?? "deploy"}\nport 22\nidentityfile /keys/id_ed25519\nproxyjump bastion\n${input.settings ?? ""}`,
           );
         if (command.args.includes("-lf"))
           return makeSuccessfulProcess(`256 SHA256:${"a".repeat(43)} build.example (ED25519)\n`);
@@ -58,7 +61,13 @@ const fixture = (
             arg === "PreferredAuthentications=publickey" ||
             arg === "PreferredAuthentications=none,publickey",
         );
-        const error = auth ? (input.auth ?? "") : (input.handshake ?? stderr.keyAndPassword);
+        const error = auth
+          ? (input.auth ?? "")
+          : (input.handshake ??
+            stderr.keyAndPassword.replace(
+              "build.example",
+              input.resolvedHost ?? input.host ?? "build.example",
+            ));
         return {
           ...makeSuccessfulProcess(auth ? (input.facts ?? facts) : ""),
           exitCode: Effect.succeed(
@@ -71,9 +80,11 @@ const fixture = (
     const report = yield* runSshPreflight(
       { host: input.host ?? "build" },
       {
-        ownerLabel: "Origin",
+        ownerLabel: input.ownerLabel ?? "Origin",
         runner: input.runner ?? { archiveVersion: "0.1.0" },
-        ...(input.alias === false ? {} : { alias: "build" }),
+        ...(input.alias === false
+          ? {}
+          : { alias: typeof input.alias === "string" ? input.alias : "build" }),
       },
     ).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -178,6 +189,57 @@ it.effect.each(["keyAndPassword", "passwordOnly", "partial"] as const)(
         expect(report.steps[2]?.fix?.instruction).toContain("PubkeyAuthentication yes");
       if (kind === "partial")
         expect(report.steps[2]?.fix?.instruction).toContain("AuthenticationMethods publickey");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each([
+  ["goat-juns-macbook-pro-e6ef0008", "juns-macbook-pro"],
+  ["my-macbook", "my-macbook"],
+] as const)("names the destination for %s key refusals", ([host, displayHost]) =>
+  Effect.gen(function* () {
+    const { report } = yield* fixture({
+      host,
+      alias: host,
+      resolvedHost: "juns-macbook-pro",
+      ownerLabel: "jun’s Mac Studio",
+      auth: `Offering public key: /keys/id_ed25519 SHA256:key\n${stderr.keyAndPassword}`,
+    });
+    expect(report.steps[2]?.summary).toBe(
+      `${displayHost} refused jun’s Mac Studio's SSH keys; it would ask for a password, and GOAT signs in only with keys.`,
+    );
+    expect(report.steps[2]?.fix?.instruction).toBe(
+      `Add this computer's key to ${displayHost} once: run this command in Terminal on jun’s Mac Studio, enter the password when asked, then choose Check again.`,
+    );
+    expect(report.steps[2]?.fix?.command).toBe(
+      "ssh-copy-id -i '/keys/id_ed25519.pub' -p '22' 'deploy@juns-macbook-pro'",
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["handshake", "auth"] as const)(
+  "reports Tailscale SSH policy refusals during %s as sign-in failures",
+  (stage) =>
+    Effect.gen(function* () {
+      const { report, calls } = yield* fixture({
+        host: "goat-cursor-2-12345678",
+        alias: "goat-cursor-2-12345678",
+        resolvedHost: "cursor-2",
+        user: "ubuntu",
+        [stage]: stderr.tailscalePolicy,
+      });
+      expect(report.ready).toBe(false);
+      expect(report.steps[0]?.state).toBe("passed");
+      expect(report.steps[1]?.state).toBe("passed");
+      expect(report.steps[2]).toEqual({
+        id: "key_auth",
+        state: "failed",
+        summary: "Tailscale's SSH policy doesn't allow signing in to cursor-2 as ubuntu.",
+        fix: {
+          actor: "human",
+          instruction:
+            "Sign in as a user the policy allows, or allow ubuntu for this device in the Tailscale admin console's SSH access rules.",
+        },
+      });
+      expect(report.steps.slice(3).every((step) => step.state === "skipped")).toBe(true);
+      expect(calls).toHaveLength(stage === "handshake" ? 2 : 3);
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 it.effect("accepts none authentication", () =>

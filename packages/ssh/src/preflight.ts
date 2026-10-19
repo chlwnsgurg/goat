@@ -54,6 +54,9 @@ const safeLine = (text: string) =>
 const tailscaleHost = (hostname: string) =>
   /\.ts\.net$/iu.test(hostname) || /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./u.test(hostname);
 
+const tailscalePolicyRefusal = (stderr: string) =>
+  /tailscale: tailnet policy does not permit you to SSH as user /iu.test(stderr);
+
 const diagnosticHost = (stderr: string) => /(?:^|\n)[^\s@]+@(\S+):\s+/u.exec(stderr)?.[1];
 const normalizedHost = (hostname: string) => {
   const host = hostname.replace(/^\[|\]$/gu, "").toLowerCase();
@@ -121,7 +124,21 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
     user: settings.get("user") || target.user || "unknown",
     port: Number(settings.get("port")) || target.port || 22,
   };
+  const displayHost =
+    options.alias === target.hostname && /^goat-.+-[a-f0-9]{8}$/u.test(target.hostname)
+      ? destination.hostname
+      : target.hostname;
   const steps: SshPreflightStep[] = [];
+  const policyFailure = () =>
+    steps.push({
+      id: "key_auth",
+      state: "failed",
+      summary: `Tailscale's SSH policy doesn't allow signing in to ${displayHost} as ${destination.user}.`,
+      fix: {
+        actor: "human",
+        instruction: `Sign in as a user the policy allows, or allow ${destination.user} for this device in the Tailscale admin console's SSH access rules.`,
+      },
+    });
   let platformKey: string | undefined;
   const finish = (): SshPreflightReport => {
     const blocker = steps.find((step) => step.state === "failed" || step.state === "needs_review");
@@ -214,7 +231,8 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
   }
   const unknownKey = /No .*host key is known|Host key verification failed/iu.test(handshake.stderr);
   const methods = methodList(handshake.stderr);
-  if (handshake.exitCode !== 0 && !methods && !unknownKey) {
+  const policyDenied = tailscalePolicyRefusal(handshake.stderr);
+  if (handshake.exitCode !== 0 && !methods && !unknownKey && !policyDenied) {
     reachabilityFailure(handshake.stderr);
     return finish();
   }
@@ -252,11 +270,19 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
     return finish();
   }
   steps.push({ id: "host_key", state: "passed", summary: "The SSH host key matches." });
+  if (policyDenied) {
+    policyFailure();
+    return finish();
+  }
   const facts = yield* run(handshake.exitCode === 0 ? "none,publickey" : "publickey", [
     "sh",
     "-c",
     `'${FACTS.replaceAll("'", "'\\''")}'`,
   ]);
+  if (facts.exitCode !== 0 && tailscalePolicyRefusal(facts.stderr)) {
+    policyFailure();
+    return finish();
+  }
   if (
     facts.exitCode !== 0 &&
     !/Authenticated .* using ["']?(?:publickey|none)/iu.test(facts.stderr)
@@ -292,9 +318,9 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
         : denied
           ? authMethods.includes("publickey")
             ? /password|keyboard-interactive/u.test(authMethods)
-              ? `${input.host} refused ${options.ownerLabel}'s SSH keys; it would ask for a password, and GOAT signs in only with keys.`
-              : `${input.host} refused ${options.ownerLabel}'s SSH keys. Add an authorized public key.`
-            : `${input.host} offers only ${authMethods || "non-key authentication"}.`
+              ? `${displayHost} refused ${options.ownerLabel}'s SSH keys; it would ask for a password, and GOAT signs in only with keys.`
+              : `${displayHost} refused ${options.ownerLabel}'s SSH keys. Add an authorized public key.`
+            : `${displayHost} offers only ${authMethods || "non-key authentication"}.`
           : safeLine(facts.stderr),
       fix: {
         actor: "human",
@@ -303,8 +329,10 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
           : !authMethods.includes("publickey") && denied
             ? "Enable PubkeyAuthentication yes in sshd_config, then add your public key."
             : publicKeyPath
-              ? guidance.instruction
-              : `Create an SSH key on ${options.ownerLabel}, then install its public key on ${input.host} and check again.`,
+              ? denied && /password|keyboard-interactive/u.test(authMethods)
+                ? `Add this computer's key to ${displayHost} once: run this command in Terminal on ${options.ownerLabel}, enter the password when asked, then choose Check again.`
+                : guidance.instruction
+              : `Create an SSH key on ${options.ownerLabel}, then install its public key on ${displayHost} and check again.`,
         ...(partial
           ? {}
           : guidance.command
