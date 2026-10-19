@@ -443,11 +443,11 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
                   ...result.notes,
                   ...(watching && launcher === undefined
                     ? [
-                        `This machine follows the thread over SSH and posts to its completion webhook when the run ends, waits on a question, or if ${result.host} stays unreachable.`,
+                        `This machine follows the thread on ${result.host} and posts to its completion webhook when the run ends, waits on a question, or if ${result.host} stays unreachable.`,
                       ]
                     : watching
                       ? [
-                          `This machine follows the thread over SSH and wakes this thread when its run ends, when it waits on a question, or if ${result.host} stays unreachable; do not poll it. goat_thread_unwatch stops that.`,
+                          `This machine follows the thread on ${result.host} and wakes this thread when its run ends, when it waits on a question, or if ${result.host} stays unreachable; do not poll it. goat_thread_unwatch stops that.`,
                         ]
                       : scope.thread !== undefined
                         ? [
