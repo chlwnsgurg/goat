@@ -16,7 +16,7 @@ export const CHANNEL_COPY = {
   /** Fixed wording per failure kind: provider output stays in the server log. */
   receptionFailedBecause: {
     schema_rejected:
-      "I couldn't read that: the model provider rejected GOAT's request format. Updating GOAT fixes this.",
+      "I couldn't read that: the model provider rejected GOAT's request format. Check for a GOAT update.",
     auth: "I couldn't read that: the model provider on GOAT Bot's computer needs you to sign in again.",
     rate_limited:
       "I couldn't read that: the model provider's usage limit was reached. Please try again later.",
