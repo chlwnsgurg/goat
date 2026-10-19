@@ -61,9 +61,14 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH owner life
   });
   // gracefulFirst: the owner began its own SIGTERM teardown (signalling the whole group) and
   // died inside the grace period, while ssh ignored SIGTERM.
-  it.each([false, true])(
-    "kills the forward and releases its port and auth directory when the owner is SIGKILLed; gracefulFirst=%s",
-    async (gracefulFirst) => {
+  it.each([
+    { role: "forward", gracefulFirst: false },
+    { role: "forward", gracefulFirst: true },
+    { role: "master", gracefulFirst: false },
+    { role: "master", gracefulFirst: true },
+  ])(
+    "kills the $role and releases its socket and auth directory when the owner is SIGKILLed; gracefulFirst=$gracefulFirst",
+    async ({ role, gracefulFirst }) => {
       const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-owner-death-"));
       const authDirectory = NodePath.join(directory, "auth");
       await NodeFSP.mkdir(authDirectory);
@@ -80,8 +85,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH owner life
 const net = require("node:net");
 process.on("SIGTERM", () => {});
 const server = net.createServer();
-server.listen(0, "127.0.0.1", () => {
-  console.log(server.address().port);
+server.listen(${role === "master" ? JSON.stringify(NodePath.join(authDirectory, "control")) : '0, "127.0.0.1"'}, () => {
+  console.log(typeof server.address() === "string" ? server.address() : server.address().port);
   net.connect(${address.port}, "127.0.0.1");
 });
 `,
@@ -104,7 +109,7 @@ import * as Stream from ${JSON.stringify(streamUrl)};
 import * as ChildProcessSpawner from ${JSON.stringify(spawnerUrl)};
 import { makeOwnedSshTunnelCommand } from ${JSON.stringify(moduleUrl)};
 const command = makeOwnedSshTunnelCommand(process.platform, process.execPath,
-  [${JSON.stringify(script)}], { forceKillAfter: 2000 }, ${JSON.stringify(authDirectory)});
+  ${JSON.stringify([script, ...(role === "master" ? ["-M", "-N", "-S", NodePath.join(authDirectory, "control")] : ["-N", "-L", "fixture"])])}, { forceKillAfter: 2000 }, ${JSON.stringify(authDirectory)});
 Effect.runPromise(Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const child = yield* spawner.spawn(command);
@@ -141,10 +146,16 @@ Effect.runPromise(Effect.gen(function* () {
         await ownerExited;
         // Socket closure is an OS notification of forward death, not a polling loop.
         await closed;
-        const replacement = NodeNet.createServer();
-        await listen(replacement, Number(port));
-        await new Promise<void>((resolve) => replacement.close(() => resolve()));
         await expect(NodeFSP.stat(authDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+        const replacement = NodeNet.createServer();
+        if (role === "master") {
+          await NodeFSP.mkdir(authDirectory);
+          await new Promise<void>((resolve, reject) => {
+            replacement.once("error", reject);
+            replacement.listen(String(port), resolve);
+          });
+        } else await listen(replacement, Number(port));
+        await new Promise<void>((resolve) => replacement.close(() => resolve()));
       } finally {
         owner.kill("SIGKILL");
         if (supervisorPid !== undefined) {

@@ -164,22 +164,22 @@ are relative to the bundle's `snapshots/vite-build-beautified/`.
 
 ## Gap table
 
-| Concern                      | GOAT today                                                                                                   | Best reference practice                                         | Gap                   |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- | --------------------- |
-| Backoff and jitter           | 1 s→5 min, upper-half jitter, 30 s stable reset                                                              | cmux full jitter; herdr resets on 60 s _ready_                  | none                  |
-| Post-wake retries            | ladder resets on wake, then doubles (1–2, 2–4, 4–8 s…)                                                       | herdr caps at 2 s for 30 s after wake                           | P1                    |
-| Suspend                      | only timestamps the sleep (`apps/desktop/src/app/DesktopSystemWake.ts:48`)                                   | herdr cancels in-flight attempts; cmux cancels timers           | P2                    |
-| Blocked recovery             | waits for wake, network change, or click (`supervisor.ts:972`)                                               | herdr re-checks every 30 s                                      | P1 (local proxy only) |
-| SSH handshakes per reconnect | standalone commands and forward; `ssh.reconnect.cost` records spawns, auth milestones, and step timings      | one scoped master per host in cmux, herdr, herdr-web-ui (POSIX) | P1, measure first     |
-| Stalled link                 | ServerAlive + RPC silence budget; real loopback stall tests cover RPC timeout and forward revalidation       | cmux blocked-write and carrier-cut fixtures                     | none                  |
-| Abandoned server sockets     | not measured; the server sets no idle option (`apps/server/src/ws.ts:3430`)                                  | herdr bridge idles out at 60 s; cmux lease evicts older bridges | P1, measure first     |
-| Git over SSH                 | `GIT_SSH_COMMAND` has no keepalive; 120 s transfer cap (`apps/server/src/sshRemote/SshWorkspaceSync.ts:116`) | every other SSH path carries ServerAlive                        | P2                    |
-| Error detail                 | tooltip; menu copies a trace ID only (`ConnectionEnvironmentsSection.tsx:675`)                               | cmux Copy SSH Error; herdr-web-ui last 8 lines                  | P2                    |
-| Frozen timers (web, mobile)  | long-resume path replaces the session                                                                        | herdr-web-ui treats a late deadline as a freeze                 | P2, verify            |
-| Archive pinning              | SHA-256 locally and on the host                                                                              | same                                                            | none                  |
-| Session resume               | server owns turns and state; subscriptions replay from cursor; mutations never replayed                      | cmux keeps replay state 120 s; herdr keeps panes running        | none                  |
-| Forward lifetime             | owner-death fence on POSIX, 2 s bounded teardown (#378); Windows unfenced                                    | herdr-web-ui and Codex kill by captured PID                     | none on POSIX         |
-| Roaming transport (Mosh)     | none                                                                                                         | cmux uses it for the terminal only                              | non-goal              |
+| Concern                      | GOAT today                                                                                                         | Best reference practice                                         | Gap                                   |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- | ------------------------------------- |
+| Backoff and jitter           | 1 s→5 min, upper-half jitter, 30 s stable reset                                                                    | cmux full jitter; herdr resets on 60 s _ready_                  | none                                  |
+| Post-wake retries            | ladder resets on wake, then doubles (1–2, 2–4, 4–8 s…)                                                             | herdr caps at 2 s for 30 s after wake                           | P1                                    |
+| Suspend                      | only timestamps the sleep (`apps/desktop/src/app/DesktopSystemWake.ts:48`)                                         | herdr cancels in-flight attempts; cmux cancels timers           | P2                                    |
+| Blocked recovery             | waits for wake, network change, or click (`supervisor.ts:972`)                                                     | herdr re-checks every 30 s                                      | P1 (local proxy only)                 |
+| SSH handshakes per reconnect | one owned POSIX master per target; commands and forwards reuse it; cost log separates masters and control commands | one scoped master per host in cmux, herdr, herdr-web-ui (POSIX) | none; real-host remeasurement pending |
+| Stalled link                 | ServerAlive + RPC silence budget; real loopback stall tests cover RPC timeout and forward revalidation             | cmux blocked-write and carrier-cut fixtures                     | none                                  |
+| Abandoned server sockets     | not measured; the server sets no idle option (`apps/server/src/ws.ts:3430`)                                        | herdr bridge idles out at 60 s; cmux lease evicts older bridges | P1, measure first                     |
+| Git over SSH                 | `GIT_SSH_COMMAND` uses ServerAliveInterval=15 / ServerAliveCountMax=3, plus the 120 s transfer cap                 | every other SSH path carries ServerAlive                        | none; stall timing pending            |
+| Error detail                 | tooltip; menu copies a trace ID only (`ConnectionEnvironmentsSection.tsx:675`)                                     | cmux Copy SSH Error; herdr-web-ui last 8 lines                  | P2                                    |
+| Frozen timers (web, mobile)  | long-resume path replaces the session                                                                              | herdr-web-ui treats a late deadline as a freeze                 | P2, verify                            |
+| Archive pinning              | SHA-256 locally and on the host                                                                                    | same                                                            | none                                  |
+| Session resume               | server owns turns and state; subscriptions replay from cursor; mutations never replayed                            | cmux keeps replay state 120 s; herdr keeps panes running        | none                                  |
+| Forward lifetime             | forwards and masters share the POSIX owner-death fence and 2 s bounded teardown; Windows stays standalone          | herdr-web-ui and Codex kill by captured PID                     | none on POSIX                         |
+| Roaming transport (Mosh)     | none                                                                                                               | cmux uses it for the terminal only                              | non-goal                              |
 
 Two reference behaviors are deliberately not adopted. cmux's older coordinator
 parks a session after a bounded number of failures; GOAT never gives up on a
@@ -248,32 +248,6 @@ Real app: quit Tailscale, reconnect `mac-studio` over its Tailscale alias,
 confirm the blocked message, start Tailscale, and confirm recovery within
 about 60 s without a click.
 
-**P1-3. One scoped master per host.**
-Problem: when cost logs show several handshakes per reconnect, each one repeats
-ProxyCommand startup, key exchange, and authentication; behind
-`cloudflared` that is seconds each, and an askpass prompt can repeat.
-Evidence: on POSIX, cmux, herdr, and herdr-web-ui each run one private master
-per host or route (`SSHConnectionSharingOptions.swift:274`,
-`herdr:src/remote/attach.rs:1433`, `herdr-web-ui:server/ssh.ts:203`). cmux and
-herdr-web-ui add forwards to it with `-O forward`
-(`ReverseRelayControlMaster.swift:45`, `herdr-web-ui:server/ssh.ts:324`); herdr
-pins the control socket before `-O stop` so it never stops a newer master
-(`herdr:src/platform/unix_common.rs:768`, `herdr:src/remote/attach.rs:953`).
-Change: on POSIX, start a GOAT-owned master per resolved target under the
-owner fence from #378 (`-M -N -S <private dir>/<hash>`,
-`ControlPersist=no`), run commands with `-S` and `ControlMaster=no`, add the
-forward with `-O forward` and remove it with `-O cancel`. A failed master falls
-back to today's standalone processes. Keepalive moves to the master; the
-existing RPC ping still detects a dead master within its budget. Windows keeps
-standalone processes.
-Files: `packages/ssh/src/command.ts`, `tunnel.ts`, `tunnelOwner.ts`,
-`structure/ssh.md`.
-Test: fake-ssh tests that commands carry `-S`; teardown cancels the forward
-and kills the master; a master that dies mid-session falls back.
-Real app: rerun cost and stalled-link measurements; the PR states spawn and auth counts before and
-after, and that killing the master by its captured PID reconnects within the
-stalled-link baseline.
-
 **P1-4. Find out whether the server keeps abandoned sockets.**
 Problem: when a laptop sleeps with a forward open, sshd on the host may hold
 the forwarded connection to GOAT's port until TCP keepalive gives up, by
@@ -302,12 +276,6 @@ wakeup kind that interrupts establishment. Files: `DesktopSystemWake.ts`,
 Test in `supervisor.test.ts`. Real app: start Reconnect on `jun-macbookpro`
 and sleep within 5 s; after wake, logs show one attempt, not two.
 
-**P2-2. Keepalive for Git over SSH.** `GIT_SSH_COMMAND` omits ServerAlive
-(`SshWorkspaceSync.ts:116`), so a stalled fetch waits out the 120 s transfer
-cap. Add `SSH_KEEPALIVE_ARGS`. Test in `SshWorkspaceSync.test.ts`. Real app:
-during agent dispatch to `mac-studio` over the stall relay, stall it mid-fetch
-and record how long the failure takes before and after.
-
 **P2-3. Copy the SSH diagnostic.** cmux offers Copy SSH Error
 (`TabItemView+WorkspaceContextMenu.swift:204`); herdr-web-ui shows the last 8
 sanitized lines (`server/ssh.ts:46`). GOAT's connection menu copies only a
@@ -335,8 +303,9 @@ changing reconnect policy or connection sharing.
 2. **Wake and blocked recovery** (P1-1, P1-2, P2-1). Supervisor policy and the
    desktop wake source; updates the States and Backoff sections of
    [SSH reconnect](ssh-reconnect.md).
-3. **Scoped SSH master** (P1-3, P2-2). `packages/ssh` only, plus
-   `SshWorkspaceSync` keepalive; land after the cost logs show the real-host baseline.
+3. **Scoped SSH master** (P1-3, P2-2), implemented. POSIX sharing and Git
+   keepalive have fixture coverage; real-host reconnect and stalled-fetch
+   measurements remain to be collected against bundle 1.
 4. **Server socket hygiene** (P1-4). Measurement, then the idle close if the
    counts justify it.
 5. **Diagnostic copy and late timers** (P2-3, P2-4). UI plus a verified-only

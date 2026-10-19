@@ -34,6 +34,28 @@ is `ssh -L` onto the remote loopback port. The embedded launch script sets
 `apps/server/src/sshRemote/SshWorkspaceSync.ts` prints the label `GOAT_HOME` followed by `$HOME`
 when it fetches a branch back. That label is not an environment variable `resolveBaseDir` reads.
 
+### Local SSH ownership
+
+On POSIX, `master.ts` starts one private `ssh -M -N` per resolved target in a
+manager. Commands reuse its control socket; forwards are added with `-O forward`
+and removed with `-O cancel` using the identical `-L` spec before the master is
+killed through its captured process handle. `ControlPersist=no` and the same
+owner-pipe fence as standalone forwards prevent a master surviving an owner crash.
+The 0700 GOAT runtime temp directory contains both askpass and the socket; a
+16-hex SHA-256 prefix covers the resolved target and effective `ssh -G` config,
+including proxy and identity settings. Paths of 104 bytes or more disable sharing
+rather than exceed macOS's socket limit. A separate directory per lifetime keeps
+teardown from reaching a successor's socket.
+
+A failed or exited master falls back to standalone SSH. Windows stays standalone.
+An effective user ControlPath or enabled ControlMaster leaves sharing to OpenSSH's
+user configuration; GOAT adds no socket override. Keepalive runs on the owned master,
+or on each standalone session. Git workspace transfers carry the same 15 s / three
+missed probes budget through `GIT_SSH_COMMAND`. The RPC ping still owns detection
+of a forward that remains alive but stops carrying bytes. `ssh.reconnect.cost`
+counts all SSH spawns and reports `mastersStarted` and `controlCommands` separately
+from authentication milestones, so local mux requests do not imply new handshakes.
+
 ### Shared runtime
 
 One host user runs one SSH-managed server, and every client shares it. The launch, pairing, MCP
