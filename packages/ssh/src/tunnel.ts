@@ -1575,8 +1575,7 @@ emit_pending() {
       fi
     fi
   fi
-@@GOAT_RECONNECT_PENDING_GUARD@@
-  printf '{"status":"pending","pending":{%s}}\n' "$pending_fields"
+@@GOAT_RECONNECT_PENDING_GUARD@@  printf '{"status":"pending","pending":{%s}}\n' "$pending_fields"
   exit 0
 }
 if [ "$OWNING_LAUNCH" = 1 ]; then
@@ -2395,7 +2394,8 @@ function buildRemoteRunnerSetupScript(
     GOAT_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
     GOAT_RECONNECT_PENDING_GUARD: reconnect
       ? `  # Normal preparation captures the retained runner so contention can still attach.
-  exit ${REMOTE_RECONNECT_REPROBE_EXIT_CODE}`
+  exit ${REMOTE_RECONNECT_REPROBE_EXIT_CODE}
+`
       : "",
     GOAT_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
     GOAT_REQUESTED_RUNNER: shellSingleQuote(
