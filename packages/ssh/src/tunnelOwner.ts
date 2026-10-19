@@ -13,9 +13,12 @@ export function ownedAuthDirectory(askpassPath: string | undefined): string {
 
 // ssh -N ignores stdin EOF. A separate reader keeps the owner's pipe alive and
 // kills only this dedicated process group if the owner disappears without cleanup.
+// The reader ignores the group's graceful signals: an owner that dies during its own
+// SIGTERM grace period must still leave the reader to fence a SIGTERM-resistant ssh.
 const OWNER_PIPE_SUPERVISOR = `auth_directory=$1
 shift
 (
+  trap '' TERM INT HUP
   while IFS= read -r ignored; do :; done
   if [ -n "$auth_directory" ]; then rm -rf -- "$auth_directory"; fi
   kill -KILL "-$$"

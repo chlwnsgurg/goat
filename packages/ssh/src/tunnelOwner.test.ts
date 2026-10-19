@@ -54,20 +54,24 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("SSH owner life
       if (child.exitCode === null && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
     }
   });
-  it("kills the forward and releases its port and auth directory when the owner is SIGKILLed", async () => {
-    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-owner-death-"));
-    const authDirectory = NodePath.join(directory, "auth");
-    await NodeFSP.mkdir(authDirectory);
-    const control = NodeNet.createServer();
-    await listen(control);
-    const address = control.address();
-    assert.isNotNull(address);
-    if (typeof address !== "object" || address === null)
-      throw new Error("Missing control listener");
-    const script = NodePath.join(directory, "ssh.cjs");
-    await NodeFSP.writeFile(
-      script,
-      `
+  // gracefulFirst: the owner began its own SIGTERM teardown (signalling the whole group) and
+  // died inside the grace period, while ssh ignored SIGTERM.
+  it.each([false, true])(
+    "kills the forward and releases its port and auth directory when the owner is SIGKILLed; gracefulFirst=%s",
+    async (gracefulFirst) => {
+      const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-owner-death-"));
+      const authDirectory = NodePath.join(directory, "auth");
+      await NodeFSP.mkdir(authDirectory);
+      const control = NodeNet.createServer();
+      await listen(control);
+      const address = control.address();
+      assert.isNotNull(address);
+      if (typeof address !== "object" || address === null)
+        throw new Error("Missing control listener");
+      const script = NodePath.join(directory, "ssh.cjs");
+      await NodeFSP.writeFile(
+        script,
+        `
 const net = require("node:net");
 process.on("SIGTERM", () => {});
 const server = net.createServer();
@@ -76,19 +80,19 @@ server.listen(0, "127.0.0.1", () => {
   net.connect(${address.port}, "127.0.0.1");
 });
 `,
-    );
-    const moduleUrl = new URL("./tunnelOwner.ts", import.meta.url).href;
-    const servicesUrl = new URL(
-      "../node_modules/@effect/platform-node/dist/NodeServices.js",
-      import.meta.url,
-    ).href;
-    const effectUrl = new URL("../node_modules/effect/dist/Effect.js", import.meta.url).href;
-    const streamUrl = new URL("../node_modules/effect/dist/Stream.js", import.meta.url).href;
-    const spawnerUrl = new URL(
-      "../node_modules/effect/dist/process/ChildProcessSpawner.js",
-      import.meta.url,
-    ).href;
-    const ownerScript = `
+      );
+      const moduleUrl = new URL("./tunnelOwner.ts", import.meta.url).href;
+      const servicesUrl = new URL(
+        "../node_modules/@effect/platform-node/dist/NodeServices.js",
+        import.meta.url,
+      ).href;
+      const effectUrl = new URL("../node_modules/effect/dist/Effect.js", import.meta.url).href;
+      const streamUrl = new URL("../node_modules/effect/dist/Stream.js", import.meta.url).href;
+      const spawnerUrl = new URL(
+        "../node_modules/effect/dist/process/ChildProcessSpawner.js",
+        import.meta.url,
+      ).href;
+      const ownerScript = `
 import * as NodeServices from ${JSON.stringify(servicesUrl)};
 import * as Effect from ${JSON.stringify(effectUrl)};
 import * as Stream from ${JSON.stringify(streamUrl)};
@@ -106,49 +110,51 @@ Effect.runPromise(Effect.gen(function* () {
   process.exitCode = 1;
 });
 `;
-    const owner = NodeChildProcess.spawn(
-      process.execPath,
-      ["--input-type=module", "-e", ownerScript],
-      {
-        stdio: ["pipe", "pipe", "inherit", "ipc"],
-      },
-    );
-    const lines = NodeReadline.createInterface({ input: owner.stdout! });
-    let supervisorPid: number | undefined;
-    let connection: NodeNet.Socket | undefined;
-    try {
-      const signal = AbortSignal.timeout(5_000);
-      const message = NodeEvents.EventEmitter.once(owner, "message", { signal });
-      const portLine = NodeEvents.EventEmitter.once(lines, "line", { signal });
-      const connected = NodeEvents.EventEmitter.once(control, "connection", { signal });
-      const [identity] = await message;
-      supervisorPid = (identity as { pid: number }).pid;
-      const [port] = await portLine;
-      [connection] = (await connected) as [NodeNet.Socket];
-      const closed = NodeEvents.EventEmitter.once(connection, "close", { signal });
-      const ownerExited = NodeEvents.EventEmitter.once(owner, "exit", { signal });
-      owner.kill("SIGKILL");
-      await ownerExited;
-      // Socket closure is an OS notification of forward death, not a polling loop.
-      await closed;
-      const replacement = NodeNet.createServer();
-      await listen(replacement, Number(port));
-      await new Promise<void>((resolve) => replacement.close(() => resolve()));
-      await expect(NodeFSP.stat(authDirectory)).rejects.toMatchObject({ code: "ENOENT" });
-    } finally {
-      owner.kill("SIGKILL");
-      if (supervisorPid !== undefined) {
-        // Captured from spawn via IPC, never discovered by matching argv.
-        try {
-          process.kill(-supervisorPid, "SIGKILL");
-        } catch (error) {
-          assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+      const owner = NodeChildProcess.spawn(
+        process.execPath,
+        ["--input-type=module", "-e", ownerScript],
+        {
+          stdio: ["pipe", "pipe", "inherit", "ipc"],
+        },
+      );
+      const lines = NodeReadline.createInterface({ input: owner.stdout! });
+      let supervisorPid: number | undefined;
+      let connection: NodeNet.Socket | undefined;
+      try {
+        const signal = AbortSignal.timeout(5_000);
+        const message = NodeEvents.EventEmitter.once(owner, "message", { signal });
+        const portLine = NodeEvents.EventEmitter.once(lines, "line", { signal });
+        const connected = NodeEvents.EventEmitter.once(control, "connection", { signal });
+        const [identity] = await message;
+        supervisorPid = (identity as { pid: number }).pid;
+        const [port] = await portLine;
+        [connection] = (await connected) as [NodeNet.Socket];
+        const closed = NodeEvents.EventEmitter.once(connection, "close", { signal });
+        const ownerExited = NodeEvents.EventEmitter.once(owner, "exit", { signal });
+        if (gracefulFirst) process.kill(-supervisorPid, "SIGTERM");
+        owner.kill("SIGKILL");
+        await ownerExited;
+        // Socket closure is an OS notification of forward death, not a polling loop.
+        await closed;
+        const replacement = NodeNet.createServer();
+        await listen(replacement, Number(port));
+        await new Promise<void>((resolve) => replacement.close(() => resolve()));
+        await expect(NodeFSP.stat(authDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        owner.kill("SIGKILL");
+        if (supervisorPid !== undefined) {
+          // Captured from spawn via IPC, never discovered by matching argv.
+          try {
+            process.kill(-supervisorPid, "SIGKILL");
+          } catch (error) {
+            assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+          }
         }
+        connection?.destroy();
+        lines.close();
+        await new Promise<void>((resolve) => control.close(() => resolve()));
+        await NodeFSP.rm(directory, { recursive: true, force: true });
       }
-      connection?.destroy();
-      lines.close();
-      await new Promise<void>((resolve) => control.close(() => resolve()));
-      await NodeFSP.rm(directory, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 });
