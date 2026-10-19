@@ -63,6 +63,9 @@ with `probation-exit:<code-or-signal>`, except an explicit service stop, a stop
 marker, or the state-directory-owned idle path. Another update is refused during
 probation so there is only one rollback snapshot. The deadline and database path
 are persisted in service state; a launcher restart retains the original deadline.
+A restarted launcher that cannot start the target during probation rolls back with
+`probation-start-failed` instead of failing to the service manager, whose restarts
+could otherwise outlast the deadline and discard the snapshot.
 Expiry durably clears probation and discards the snapshot. After that, an unexpected
 active exit fails the launcher so the service manager's ordinary restart policy
 applies.

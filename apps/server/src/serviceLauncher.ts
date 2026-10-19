@@ -689,6 +689,21 @@ export class Launcher {
           return;
         }
         await this.#resumeProbation();
+        if (this.#state.probation !== undefined) {
+          // A target that cannot even start must roll back now. Failing to the service manager
+          // instead would repeat until the deadline passes and the snapshot is discarded.
+          try {
+            await this.#startChild(this.#state.activeVersion, "active", update);
+          } catch {
+            this.#clearTimer();
+            await this.#returnToPrevious(
+              { ...update, status: "pending", dbPath: probation.dbPath },
+              "rolled-back",
+              "probation-start-failed",
+            );
+          }
+          return;
+        }
       } else if (update !== undefined) {
         await discardDatabaseBackup(this.#baseDir, update.id).catch(() => undefined);
       }

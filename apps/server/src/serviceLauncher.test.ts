@@ -1310,6 +1310,29 @@ it.layer(NodeServices.layer)("post-update health", (it) => {
         assert.equal(yield* f.fs.readFileString(f.dbPath), "committed writes");
       }),
   );
+
+  it.effect("rolls back when the committed target cannot start after a launcher restart", () =>
+    Effect.gen(function* () {
+      const f = yield* healthFixture();
+      const first = yield* f.start({ now: () => 1000 });
+      yield* f.wait("test-committed");
+      yield* Effect.promise(() => first.launcher.stop("SIGTERM"));
+      // The committed build is no longer startable when the service comes back.
+      yield* f.fs.remove(
+        f.path.join(f.root, "runtime", "goat", "versions", "1.1.0", ".install-complete"),
+      );
+      const restarted = yield* f.start({ now: () => 1000 + 1234 });
+      yield* Effect.promise(() => restarted.running.catch(() => undefined));
+      const state = yield* Effect.promise(() => readServiceState(f.statePath));
+      assert.equal(state.activeVersion, "1.0.0");
+      assert.equal(
+        state.update?.status === "rolled-back" ? state.update.reason : undefined,
+        "probation-start-failed",
+      );
+      assert.isUndefined(state.probation);
+      assert.equal(yield* f.fs.readFileString(f.dbPath), "original database");
+    }),
+  );
 });
 
 it.layer(NodeServices.layer)("probation exit ownership", (it) => {
