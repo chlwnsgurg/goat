@@ -5,7 +5,10 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 export interface DesktopIpcInvokeEvent {
-  readonly sender: { readonly id: number };
+  readonly sender: {
+    readonly id: number;
+    readonly send?: (channel: string, ...args: ReadonlyArray<unknown>) => void;
+  };
 }
 
 export interface DesktopIpcSyncEvent {

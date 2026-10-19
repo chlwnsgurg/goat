@@ -27,6 +27,7 @@ import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
 export type ConnectionDriverProgress =
   | {
       readonly stage: "preparing";
+      readonly hostAnswered?: true;
     }
   | {
       readonly stage: Exclude<ConnectionAttemptStage, "preparing">;
@@ -157,7 +158,10 @@ export const make = Effect.gen(function* () {
       entry,
       (route) => checkRoute(entry, route),
       Effect.fnUntraced(function* (route) {
-        const prepared = yield* resolver.prepare(routeEntry(entry, route));
+        const prepared = yield* resolver.prepare(
+          routeEntry(entry, route),
+          reportProgress({ stage: "preparing", hostAnswered: true }),
+        );
         yield* reportProgress({ stage: "opening", prepared });
         const session = yield* sessions.connect(prepared);
         yield* reportProgress({ stage: "synchronizing", prepared });

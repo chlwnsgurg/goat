@@ -2,6 +2,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
 import * as DesktopSshEnvironment from "../../ssh/DesktopSshEnvironment.ts";
+import { SshHostAnswered } from "@goat/ssh/command";
+import * as IpcChannels from "../channels.ts";
 import { SshHttpBridgeError } from "@goat/ssh/errors";
 import { SshHostResult } from "@goat/contracts";
 import * as SshTunnel from "@goat/ssh/tunnel";
@@ -257,6 +259,44 @@ describe("SSH runtime IPC", () => {
 });
 
 describe("SSH environment IPC", () => {
+  it.effect("sends one preparation answer to the requesting renderer with its request ID", () =>
+    Effect.gen(function* () {
+      const sent: unknown[] = [];
+      const result = yield* ensureSshEnvironment
+        .handler(
+          { target, requestId: "setup-1", options: { issuePairingToken: false } },
+          {
+            sender: {
+              id: 42,
+              send: (...args) => {
+                sent.push(args);
+              },
+            },
+          },
+        )
+        .pipe(
+          Effect.provide(desktopAt("/nonexistent-home")),
+          Effect.provideService(DesktopSshEnvironment.DesktopSshEnvironment, {
+            ...unusedSshService,
+            ensureEnvironment: () =>
+              Effect.gen(function* () {
+                const answer = yield* SshHostAnswered;
+                answer?.();
+                answer?.();
+                return {
+                  target,
+                  httpBaseUrl: "http://127.0.0.1:41773/",
+                  wsBaseUrl: "ws://127.0.0.1:41773/",
+                  pairingToken: null,
+                };
+              }),
+          }),
+        );
+      assert.deepEqual(sent, [[IpcChannels.SSH_ENVIRONMENT_ANSWERED_CHANNEL, "setup-1"]]);
+      assert.equal((result as { pairingToken: null }).pairingToken, null);
+    }),
+  );
+
   it.effect("preserves key-only options across the IPC handler", () =>
     Effect.gen(function* () {
       const target = {

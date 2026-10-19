@@ -30,6 +30,7 @@ import {
   AuthWebSocketTicketResult,
   isCloudMachineAlias,
 } from "@goat/contracts";
+import { SshHostAnswered } from "@goat/ssh/command";
 import { SshHttpBridgeError, SshInvalidTargetError } from "@goat/ssh/errors";
 import { resolveLoopbackSshHttpBaseUrl } from "@goat/ssh/tunnel";
 import * as Clock from "effect/Clock";
@@ -175,13 +176,19 @@ export const ensureSshEnvironment = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.ENSURE_SSH_ENVIRONMENT_CHANNEL,
   payload: DesktopSshEnvironmentEnsureInputSchema,
   result: DesktopSshEnvironmentEnsureResultSchema,
-  handler: Effect.fn("desktop.ipc.sshEnvironment.ensureEnvironment")(function* ({
-    target,
-    options,
-  }) {
+  handler: Effect.fn("desktop.ipc.sshEnvironment.ensureEnvironment")(function* (
+    { target, options, requestId },
+    event,
+  ) {
     const sshEnvironment = yield* DesktopSshEnvironment.DesktopSshEnvironment;
     yield* requireReadiedCloudMachine(target.alias);
+    let answered = false;
     return yield* sshEnvironment.ensureEnvironment(target, options).pipe(
+      Effect.provideService(SshHostAnswered, () => {
+        if (answered || requestId === undefined) return;
+        answered = true;
+        event?.sender.send?.(IpcChannels.SSH_ENVIRONMENT_ANSWERED_CHANNEL, requestId);
+      }),
       Effect.catchIf(DesktopSshEnvironment.isDesktopSshPasswordPromptCancellation, (error) =>
         Effect.succeed({
           type: DesktopSshPasswordPromptCancelledType,

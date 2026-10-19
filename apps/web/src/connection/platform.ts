@@ -40,6 +40,7 @@ import {
 } from "@goat/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -277,7 +278,7 @@ export const provisionDesktopSshEnvironment = Effect.fn(
   bridge: DesktopBridge,
   target: DesktopSshEnvironmentTarget,
   expectedEnvironmentId?: EnvironmentId,
-  options?: { readonly keyOnly?: boolean },
+  options?: { readonly keyOnly?: boolean; readonly onHostAnswered?: () => void },
   readyCloudMachine: CloudMachinePreflight = readyCloudMachineThroughPrimary,
 ) {
   yield* preflightCloudMachine(target.alias, readyCloudMachine);
@@ -332,10 +333,21 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       readonly target: DesktopSshEnvironmentTarget;
       readonly expectedEnvironmentId: EnvironmentId;
       readonly bearerToken?: string;
+      readonly onHostAnswered?: Effect.Effect<void>;
     },
     readyCloudMachine: CloudMachinePreflight = readyCloudMachineThroughPrimary,
   ) {
     yield* preflightCloudMachine(input.target.alias, readyCloudMachine);
+    const answered = yield* Deferred.make<void>();
+    yield* Deferred.await(answered).pipe(
+      Effect.andThen(input.onHostAnswered ?? Effect.void),
+      Effect.forkScoped,
+    );
+    // Older preloads forward all options over IPC, where a function cannot be cloned.
+    const progressOptions =
+      bridge.supportsSshEnvironmentProgress === true
+        ? { onHostAnswered: () => Deferred.doneUnsafe(answered, Effect.void) }
+        : undefined;
     const bearerToken = input.bearerToken;
     if (bearerToken !== undefined) {
       const bootstrap = yield* Effect.tryPromise({
@@ -343,6 +355,7 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
           bridge.ensureSshEnvironment(input.target, {
             ...(input.target.alias.startsWith("goat-") ? { keyOnly: true } : {}),
             issuePairingToken: false,
+            ...progressOptions,
           }),
         catch: sshPreparationFailure,
       });
@@ -378,11 +391,12 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
       bridge,
       input.target,
       input.expectedEnvironmentId,
-      undefined,
+      progressOptions,
       () => Effect.void,
     );
     return { bootstrap: provisioned.bootstrap, bearerToken: provisioned.bearerToken };
   },
+  Effect.scoped,
 );
 
 /** New trust files must be written by the native primary backend on this Desktop's OS user. */
