@@ -6,6 +6,7 @@ import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import {
   NOTE_BODY_MAX_BYTES,
+  NOTE_TITLE_MAX_LENGTH,
   NoteConflictError,
   NoteError,
   NoteFolder,
@@ -48,6 +49,12 @@ const isFolder = Schema.is(NoteFolder);
 const LIST_LIMIT = 500;
 const MAX_FILE_BYTES = NOTE_BODY_MAX_BYTES + 256 * 1024;
 const summary = ({ body: _body, ...note }: NoteDocument): NoteSummary => note;
+const displayTitle = (title: string) => {
+  if (title.length <= NOTE_TITLE_MAX_LENGTH) return title;
+  const cut = title.slice(0, NOTE_TITLE_MAX_LENGTH - 1);
+  return `${/[\uD800-\uDBFF]$/u.test(cut) ? cut.slice(0, -1) : cut}…`;
+};
+const sha256 = (bytes: Uint8Array) => NodeCrypto.createHash("sha256").update(bytes).digest("hex");
 
 export class NotesService extends Context.Service<
   NotesService,
@@ -276,12 +283,13 @@ const make = Effect.gen(function* () {
         const document: NoteDocument = {
           path: name,
           folder: name.includes("/") ? name.split("/")[0]! : null,
-          title:
+          title: displayTitle(
             /^#{1,6}\s+(.+?)\s*#*\s*$/mu.exec(contents.body)?.[1] ?? path.basename(name, ".md"),
+          ),
           status: contents.status,
           threads: contents.threads,
           updatedBy: contents.updatedBy,
-          revision: NodeCrypto.createHash("sha256").update(bytes).digest("hex"),
+          revision: sha256(bytes),
           updatedAt: info.mtime.toISOString(),
           size: bytes.byteLength,
           body: contents.body,
@@ -358,6 +366,8 @@ const make = Effect.gen(function* () {
   const persist = Effect.fnUntraced(function* (
     name: NotePath,
     contents: NoteContents,
+    /** The revision the caller read, or null to create a note that must not exist yet. */
+    expected: string | null,
     emit = true,
   ) {
     const bytes = new TextEncoder().encode(serializeNote(contents));
@@ -391,7 +401,13 @@ const make = Effect.gen(function* () {
         // Pathname syscalls retain a directory-swap window after these checks, including cleanup.
         // A process able to rename folders here already has the user's write access, so such swaps
         // are outside the notes containment threat model.
-        yield* fs.rename(temp, directory.absolute).pipe(Effect.mapError(() => storage));
+        if (expected === null) yield* createExclusive(name, temp, directory.absolute);
+        else {
+          yield* expectOnDisk(name, directory.absolute, expected);
+          // POSIX has no compare-and-rename, so an edit landing between this check and rename(2)
+          // is still replaced. The window is a few syscalls instead of the whole write.
+          yield* fs.rename(temp, directory.absolute).pipe(Effect.mapError(() => storage));
+        }
         yield* directory.verify;
       }),
     );
@@ -399,11 +415,13 @@ const make = Effect.gen(function* () {
     if (emit) yield* publish(document);
     return document;
   });
-  const unlink = (name: NotePath) =>
+  const unlink = (name: NotePath, expected: string) =>
     Effect.scoped(
       Effect.gen(function* () {
         const directory = yield* pinDirectory(name);
         yield* directory.verifyFile;
+        yield* expectOnDisk(name, directory.absolute, expected);
+        // As in persist, an edit between this check and unlink(2) is the remaining window.
         yield* io(name, () => NodeFSP.unlink(directory.absolute));
         forget(name);
         yield* directory.verify;
@@ -419,6 +437,90 @@ const make = Effect.gen(function* () {
             message: "The note changed. Read it again before retrying.",
           }),
         );
+  const conflictMessage = "The note changed. Read it again before retrying.";
+  /** The revision of the bytes at absolute now, or null when no file is there. */
+  const diskRevision = (name: NotePath, absolute: string) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const handle = yield* open(
+          name,
+          absolute,
+          NodeFS.constants.O_RDONLY | (NodeFS.constants.O_NOFOLLOW ?? 0),
+        );
+        const info = yield* io(name, () => handle.stat());
+        // Larger than any revision a caller can hold, so it can only differ.
+        if (info.size > MAX_FILE_BYTES) return "";
+        return sha256(yield* io(name, () => handle.readFile()));
+      }),
+    ).pipe(
+      Effect.catchTags({
+        NoteError: (error) =>
+          error.reason === "not_found" ? Effect.succeed(null) : Effect.fail(error),
+      }),
+    );
+  /** Fails unless the file still holds the revision the caller decided on. */
+  const expectOnDisk = Effect.fnUntraced(function* (
+    name: NotePath,
+    absolute: string,
+    expected: string | null,
+  ) {
+    if ((yield* diskRevision(name, absolute)) === expected) return;
+    const current = yield* optionalLoad(name);
+    if (!current)
+      return yield* new NoteError({
+        reason: "not_found",
+        message: "The note was not found.",
+        path: name,
+      });
+    if (expected === null)
+      return yield* new NoteError({
+        reason: "exists",
+        message: "The note already exists.",
+        path: name,
+      });
+    return yield* new NoteConflictError({
+      path: name,
+      current: current.document,
+      message: conflictMessage,
+    });
+  });
+  /** link(2) refuses an existing destination, so a file created meanwhile is never replaced. */
+  const createExclusive = (name: NotePath, temp: string, absolute: string) =>
+    Effect.tryPromise({
+      try: () => NodeFSP.link(temp, absolute),
+      catch: (cause) => (cause as NodeJS.ErrnoException).code,
+    }).pipe(
+      Effect.catch((code) =>
+        code === "EEXIST"
+          ? Effect.fail(
+              new NoteError({
+                reason: "exists",
+                message: "The note already exists.",
+                path: name,
+              }),
+            )
+          : code === "EPERM" || code === "ENOTSUP" || code === "EOPNOTSUPP"
+            ? // Volumes without hard links fall back to check-then-rename.
+              expectOnDisk(name, absolute, null).pipe(
+                Effect.andThen(fs.rename(temp, absolute).pipe(Effect.mapError(() => storage))),
+              )
+            : Effect.fail(storage),
+      ),
+    );
+  /** link and complete own no user revision, so a racing edit makes them read again. */
+  const rereadOnConflict = <A>(effect: Effect.Effect<A, NoteError | NoteConflictError>) =>
+    effect.pipe(
+      Effect.retry({ times: 3, while: (error) => error._tag === "NoteConflictError" }),
+      Effect.catchTags({
+        NoteConflictError: () =>
+          Effect.fail(
+            new NoteError({
+              reason: "storage",
+              message: "The note kept changing during the update. Try again.",
+            }),
+          ),
+      }),
+    );
 
   const scan = Effect.fnUntraced(function* (input: NotesListInput, limit = LIST_LIMIT) {
     if (input.folder !== undefined)
@@ -505,13 +607,17 @@ const make = Effect.gen(function* () {
             });
           if (existing && input.baseRevision !== null)
             yield* checkRevision(existing.document, input.baseRevision);
-          return yield* persist(input.path, {
-            metadata: existing?.contents.metadata ?? null,
-            body: input.body,
-            status: input.status ?? existing?.contents.status ?? "idea",
-            threads: existing?.contents.threads ?? [],
-            updatedBy: author,
-          });
+          return yield* persist(
+            input.path,
+            {
+              metadata: existing?.contents.metadata ?? null,
+              body: input.body,
+              status: input.status ?? existing?.contents.status ?? "idea",
+              threads: existing?.contents.threads ?? [],
+              updatedBy: author,
+            },
+            existing?.document.revision ?? null,
+          );
         }),
       )
       .pipe(Effect.flatMap(enrich));
@@ -531,10 +637,13 @@ const make = Effect.gen(function* () {
           const document = yield* persist(
             input.to,
             { ...source.contents, updatedBy: author },
+            null,
             false,
           );
-          yield* unlink(source.document.path).pipe(
-            Effect.tapError(() => unlink(input.to).pipe(Effect.ignore({ log: true }))),
+          yield* unlink(source.document.path, source.document.revision).pipe(
+            Effect.tapError(() =>
+              unlink(input.to, document.revision).pipe(Effect.ignore({ log: true })),
+            ),
           );
           yield* publish(document);
           yield* removed(input.from);
@@ -547,7 +656,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const source = yield* load(input.path);
         yield* checkRevision(source.document, input.baseRevision);
-        yield* unlink(source.document.path);
+        yield* unlink(source.document.path, source.document.revision);
         yield* removed(input.path);
         return { path: input.path };
       }),
@@ -555,21 +664,27 @@ const make = Effect.gen(function* () {
   const link: NotesService["Service"]["link"] = (name, entry) =>
     lock
       .withPermits(1)(
-        Effect.gen(function* () {
-          const source = yield* load(name);
-          if (
-            source.contents.threads.some(
-              (link) => link.threadId === entry.threadId && link.host === entry.host,
+        rereadOnConflict(
+          Effect.gen(function* () {
+            const source = yield* load(name);
+            if (
+              source.contents.threads.some(
+                (link) => link.threadId === entry.threadId && link.host === entry.host,
+              )
             )
-          )
-            return source.document;
-          return yield* persist(name, {
-            ...source.contents,
-            status: "doing",
-            updatedBy: "user",
-            threads: [...source.contents.threads, entry],
-          });
-        }),
+              return source.document;
+            return yield* persist(
+              name,
+              {
+                ...source.contents,
+                status: "doing",
+                updatedBy: "user",
+                threads: [...source.contents.threads, entry],
+              },
+              source.document.revision,
+            );
+          }),
+        ),
       )
       .pipe(Effect.flatMap(enrich));
   const complete: NotesService["Service"]["complete"] = (name, entry, observed) =>
@@ -579,26 +694,32 @@ const make = Effect.gen(function* () {
       const result = lookup ? lookup.lastResult : observed;
       if (result?.runStatus !== "completed" || result.outcome !== "succeeded") return false;
       return yield* lock.withPermits(1)(
-        Effect.gen(function* () {
-          const version = lookup ? lookup.version : resultVersions.get(id);
-          const isCurrent = () =>
-            version !== undefined &&
-            resultVersions.get(id) === version &&
-            resultCache.get(id) === result;
-          if (!isCurrent()) return false;
-          const source = yield* optionalLoad(name);
-          const last = source?.contents.threads.at(-1);
-          if (
-            !isCurrent() ||
-            !source ||
-            source.contents.status !== "doing" ||
-            last?.threadId !== entry.threadId ||
-            last.host !== entry.host
-          )
-            return false;
-          yield* persist(name, { ...source.contents, status: "done", updatedBy: "agent" });
-          return true;
-        }),
+        rereadOnConflict(
+          Effect.gen(function* () {
+            const version = lookup ? lookup.version : resultVersions.get(id);
+            const isCurrent = () =>
+              version !== undefined &&
+              resultVersions.get(id) === version &&
+              resultCache.get(id) === result;
+            if (!isCurrent()) return false;
+            const source = yield* optionalLoad(name);
+            const last = source?.contents.threads.at(-1);
+            if (
+              !isCurrent() ||
+              !source ||
+              source.contents.status !== "doing" ||
+              last?.threadId !== entry.threadId ||
+              last.host !== entry.host
+            )
+              return false;
+            yield* persist(
+              name,
+              { ...source.contents, status: "done", updatedBy: "agent" },
+              source.document.revision,
+            );
+            return true;
+          }),
+        ),
       );
     });
   const refresh = lock.withPermits(1)(

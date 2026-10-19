@@ -24,7 +24,11 @@ A revision is the sha256 of the file's bytes, so an edit made outside GOAT chang
 the change stream. Writes, moves, and deletes run under one semaphore, compare `baseRevision` with
 the bytes on disk inside it, and write through a temporary file and rename. A mismatch fails with
 `NoteConflictError` carrying the current document; nothing is written. `baseRevision: null`
-creates and fails when the file exists. The author (`updatedBy`) is passed by the caller's
+creates and fails when the file exists. The semaphore does not stop a terminal or editor, so the
+file is hashed again just before the rename or unlink, and a create links the temporary file into
+place, which refuses an existing name. Only the few syscalls between that last check and the rename
+can still lose an outside edit. Thread links and automatic completion own no user revision, so they
+read the note again and retry instead of failing. The author (`updatedBy`) is passed by the caller's
 transport: `user` from the WebSocket handlers, `agent` from MCP tools and from automatic
 completion.
 

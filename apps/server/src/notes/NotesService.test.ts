@@ -1,5 +1,12 @@
 import { assert, it } from "@effect/vitest";
-import { ThreadId, RunId, type ThreadResult } from "@goat/contracts";
+import {
+  NOTE_TITLE_MAX_LENGTH,
+  NoteSummary,
+  RunId,
+  ThreadId,
+  type ThreadResult,
+} from "@goat/contracts";
+import * as Schema from "effect/Schema";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -744,4 +751,109 @@ it.effect.each([
       ),
     );
   }),
+);
+
+// An external writer acting while a note write prepares its temp file, after the revision check.
+const racing = () => {
+  let race: Effect.Effect<void> | undefined;
+  return {
+    arm: (effect: Effect.Effect<void>) => {
+      race = effect;
+    },
+    layer: layer(undefined, undefined, (fs) => ({
+      ...fs,
+      makeTempDirectoryScoped: (options) =>
+        Effect.gen(function* () {
+          const pending = options?.prefix === ".note-" ? race : undefined;
+          race = undefined;
+          if (pending) yield* pending;
+          return yield* fs.makeTempDirectoryScoped(options);
+        }),
+    })),
+  };
+};
+
+it.effect("an external edit after the revision check is refused, not overwritten", () => {
+  const external = racing();
+  return Effect.gen(function* () {
+    const notes = yield* Notes.NotesService;
+    const fs = yield* FileSystem.FileSystem;
+    const { notesDir } = yield* Config.ServerConfig;
+    const initial = yield* notes.write({ path: "a.md", body: "# A\n", baseRevision: null }, "user");
+    external.arm(fs.writeFileString(`${notesDir}/a.md`, "# Terminal\n").pipe(Effect.orDie));
+    const conflict = yield* notes
+      .write({ path: "a.md", body: "# Mine\n", baseRevision: initial.revision }, "agent")
+      .pipe(Effect.flip);
+    assert.strictEqual(conflict._tag, "NoteConflictError");
+    if (conflict._tag === "NoteConflictError")
+      assert.strictEqual(conflict.current.body, "# Terminal\n");
+    assert.strictEqual(yield* fs.readFileString(`${notesDir}/a.md`), "# Terminal\n");
+  }).pipe(Effect.provide(external.layer));
+});
+
+it.effect("creating a note refuses a file another process created meanwhile", () => {
+  const external = racing();
+  return Effect.gen(function* () {
+    const notes = yield* Notes.NotesService;
+    const fs = yield* FileSystem.FileSystem;
+    const { notesDir } = yield* Config.ServerConfig;
+    external.arm(fs.writeFileString(`${notesDir}/new.md`, "terminal\n").pipe(Effect.orDie));
+    const exists = yield* notes
+      .write({ path: "new.md", body: "mine\n", baseRevision: null }, "agent")
+      .pipe(Effect.flip);
+    assert.strictEqual(exists._tag === "NoteError" && exists.reason, "exists");
+    assert.strictEqual(yield* fs.readFileString(`${notesDir}/new.md`), "terminal\n");
+  }).pipe(Effect.provide(external.layer));
+});
+
+it.effect("a move keeps a source edited during the move and leaves no destination", () => {
+  const external = racing();
+  return Effect.gen(function* () {
+    const notes = yield* Notes.NotesService;
+    const fs = yield* FileSystem.FileSystem;
+    const { notesDir } = yield* Config.ServerConfig;
+    const initial = yield* notes.write({ path: "a.md", body: "# A\n", baseRevision: null }, "user");
+    external.arm(fs.writeFileString(`${notesDir}/a.md`, "# Terminal\n").pipe(Effect.orDie));
+    const conflict = yield* notes
+      .move({ from: "a.md", to: "b.md", baseRevision: initial.revision }, "user")
+      .pipe(Effect.flip);
+    assert.strictEqual(conflict._tag, "NoteConflictError");
+    assert.strictEqual(yield* fs.readFileString(`${notesDir}/a.md`), "# Terminal\n");
+    assert.isFalse(yield* fs.exists(`${notesDir}/b.md`));
+  }).pipe(Effect.provide(external.layer));
+});
+
+it.effect("linking a thread re-reads a note edited during the update", () => {
+  const external = racing();
+  return Effect.gen(function* () {
+    const notes = yield* Notes.NotesService;
+    const fs = yield* FileSystem.FileSystem;
+    const { notesDir } = yield* Config.ServerConfig;
+    yield* notes.write({ path: "a.md", body: "# A\n", baseRevision: null }, "user");
+    external.arm(fs.writeFileString(`${notesDir}/a.md`, "# Terminal\n").pipe(Effect.orDie));
+    const note = yield* notes.link("a.md", linked);
+    assert.strictEqual(note.body, "# Terminal\n");
+    assert.strictEqual(note.status, "doing");
+    assert.deepStrictEqual(
+      note.threads.map((link) => link.threadId),
+      [linked.threadId],
+    );
+  }).pipe(Effect.provide(external.layer));
+});
+
+it.effect("summary titles are capped without splitting a surrogate pair", () =>
+  Effect.gen(function* () {
+    const notes = yield* Notes.NotesService;
+    const note = yield* notes.write(
+      {
+        path: "long.md",
+        body: `# ${"x".repeat(NOTE_TITLE_MAX_LENGTH - 2)}😀tail\n`,
+        baseRevision: null,
+      },
+      "user",
+    );
+    assert.isAtMost(note.title.length, NOTE_TITLE_MAX_LENGTH);
+    assert.isTrue(note.title.endsWith("x…"));
+    assert.isTrue(Schema.is(NoteSummary)((yield* notes.list({})).notes[0]));
+  }).pipe(Effect.provide(layer())),
 );
