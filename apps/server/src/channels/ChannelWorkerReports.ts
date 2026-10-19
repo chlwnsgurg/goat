@@ -27,8 +27,6 @@ import {
   type ChannelTaskReportInput,
   type ChannelWorkerRunStatus,
   type OrchestrationV2Run,
-  type OrchestrationV2RuntimeRequest,
-  type OrchestrationV2Subagent,
   type ThreadId,
 } from "@goat/contracts";
 import { latestExecutedRun } from "@goat/shared/orchestrationV2ThreadError";
@@ -48,6 +46,7 @@ import {
   completionHoldCount,
   isThreadMissing,
   needsYouFromRuntimeRequests,
+  subagentRequests,
   observeWorker,
   pullRequestsFromLinks,
   usageLimitWait,
@@ -77,15 +76,6 @@ const RUN_HISTORY_DAYS = 7;
 const RUN_HISTORY_PER_PASS = 20;
 /** How long a finished task without a thread waits for a launch that may still land. */
 const NO_THREAD_GRACE_MS = 120_000;
-
-/** How deep and how many subagent threads a pass reads for requests that need a person. */
-const SUBAGENT_DEPTH = 3;
-const SUBAGENT_THREADS = 20;
-const LIVE_SUBAGENT_STATUSES: ReadonlySet<OrchestrationV2Subagent["status"]> = new Set([
-  "pending",
-  "running",
-  "waiting",
-]);
 
 const TERMINAL_RUN_STATUSES = new Set([
   "completed",
@@ -215,41 +205,6 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  /**
-   * The pending requests of the live subagents a worker started, and of theirs, a few levels down
-   * and a bounded number of threads at most. A thread that cannot be read is skipped this pass.
-   */
-  const subagentRequests = (
-    subagents: ReadonlyArray<OrchestrationV2Subagent>,
-  ): Effect.Effect<ReadonlyArray<OrchestrationV2RuntimeRequest>> =>
-    Effect.gen(function* () {
-      const found: Array<OrchestrationV2RuntimeRequest> = [];
-      let level = subagents;
-      let read = 0;
-      for (let depth = 0; depth < SUBAGENT_DEPTH && level.length > 0; depth += 1) {
-        const next: Array<OrchestrationV2Subagent> = [];
-        for (const subagent of level) {
-          if (
-            subagent.childThreadId === null ||
-            subagent.promotedAt !== undefined ||
-            !LIVE_SUBAGENT_STATUSES.has(subagent.status) ||
-            read >= SUBAGENT_THREADS
-          ) {
-            continue;
-          }
-          read += 1;
-          const child = yield* threads
-            .getThreadRecords(subagent.childThreadId, ["runtimeRequests", "subagents"])
-            .pipe(Effect.option);
-          if (child._tag === "None") continue;
-          found.push(...child.value.runtimeRequests);
-          next.push(...child.value.subagents);
-        }
-        level = next;
-      }
-      return found;
-    });
-
   const reconcileTask = (stored: ChannelLedger.ChannelStoredTask, owner: string) =>
     Effect.gen(function* () {
       const task = stored.task;
@@ -316,7 +271,11 @@ const make = Effect.gen(function* () {
         needsYou: [
           ...needsYouFromRuntimeRequests(records.value.runtimeRequests),
           // A subagent waiting on an approval or answer blocks the work as much as the worker.
-          ...needsYouFromRuntimeRequests(yield* subagentRequests(records.value.subagents)),
+          ...needsYouFromRuntimeRequests(
+            yield* subagentRequests(records.value.subagents, (threadId) =>
+              threads.getThreadRecords(threadId, ["runtimeRequests", "subagents"]),
+            ),
+          ),
           ...(limit?.needsYou === undefined ? [] : [limit.needsYou]),
         ],
         usageLimitResetAt: limit?.resetAt,

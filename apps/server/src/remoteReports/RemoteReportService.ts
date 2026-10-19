@@ -37,6 +37,7 @@ import { readStoredThreadResultReport } from "../threadResults/ThreadResultServi
 import {
   completionHoldCount,
   needsYouFromRuntimeRequests,
+  subagentRequests,
   observeWorker,
   pullRequestsFromLinks,
   usageLimitWait,
@@ -318,10 +319,17 @@ const make = Effect.gen(function* () {
         const runState = (run: OrchestrationV2Run, shell: OrchestrationV2ThreadShell) =>
           Effect.gen(function* () {
             const requests = yield* orchestrator
-              .getThreadRecords(binding.threadId, ["runtimeRequests"])
+              .getThreadRecords(binding.threadId, ["runtimeRequests", "subagents"])
               .pipe(Effect.mapError(unavailable));
             const pullRequests = pullRequestsFromLinks(shell.pullRequests);
-            const needsYou = needsYouFromRuntimeRequests(requests.runtimeRequests);
+            // A subagent on this machine waiting on a person blocks the work as much as the
+            // worker, so the origin hears about it the same way.
+            const needsYou = needsYouFromRuntimeRequests([
+              ...requests.runtimeRequests,
+              ...(yield* subagentRequests(requests.subagents, (threadId) =>
+                orchestrator.getThreadRecords(threadId, ["runtimeRequests", "subagents"]),
+              )),
+            ]);
             if (!isTerminalRunStatus(run.status)) {
               const items = yield* orchestrator
                 .getThreadRecords(binding.threadId, ["turnItems"], {
