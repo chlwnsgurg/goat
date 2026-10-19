@@ -68,7 +68,9 @@ upload the attachments a follow-up references, answer a provider's approval requ
 (`runtime-request.respond`, `thread.user-input.dismiss`), and start a thread
 (`orchestration.launchThread`, `thread.create`), browsing the node's folders and registering an
 existing one as a project. A project carries no scripts (they need `settings:write`) and the hub
-never asks the node to create a missing folder. Every other orchestration command, such as
+never asks the node to create a missing folder. A launch into a new worktree still creates it and
+runs the node's configured setup script: `orchestration:operate` already lets a client run an
+agent there, so the hub does not narrow launch strategies. Every other orchestration command, such as
 archiving, deleting or renaming a thread, stays with the node's own clients. Approval support is
 each provider's own on the node; the hub only forwards the generic response.
 

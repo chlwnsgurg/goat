@@ -438,11 +438,12 @@ needs SSH, Tailscale access to the node, or a pairing of its own with that machi
 
 Through the hub you can open a node's threads, watch them live, send follow-ups with images or
 files, stop a running turn, answer approval requests, and start a new thread on any node in a
-folder you pick there. Archiving, deleting and other changes to a thread, project scripts, and
-creating new folders stay with the machine's own GOAT. A machine that is off or asleep stays in
-the list as **Unreachable**, with its threads as last seen and how old that copy is, for example
-"last state 5 min ago". It reconnects on its own when the machine comes back. Stopped cloud
-machines are never started by opening them.
+folder you pick there. Archiving, deleting and other changes to a thread, editing project
+scripts, and creating a folder that does not exist yet stay with the machine's own GOAT. A
+thread started in a new worktree runs that machine's own setup script. A machine that is off or
+asleep stays in the list as **Unreachable**, with its threads as last seen and how old that copy
+is, for example "last state 5 min ago". It reconnects on its own when the machine comes back.
+Stopped cloud machines are never started by opening them.
 
 The hub holds the keys and sessions for every node, so keep its disk encrypted and its screen
 locked.

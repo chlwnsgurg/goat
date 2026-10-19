@@ -73,6 +73,12 @@ export function readEnvironmentScope(
   );
 }
 
+/** A node reached through a hub, which registers only folders that already exist there. */
+export function readEnvironmentProxiedByHub(environmentId: EnvironmentId): boolean {
+  const result = appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId));
+  return Option.getOrNull(AsyncResult.value(result))?.proxiedByHub === true;
+}
+
 const EMPTY_PREPARED_CONNECTION_ATOM = Atom.make(Option.none()).pipe(
   Atom.withLabel("web-prepared-connection:empty"),
 );

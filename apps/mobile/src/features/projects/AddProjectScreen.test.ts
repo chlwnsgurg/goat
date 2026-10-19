@@ -58,6 +58,7 @@ vi.mock("../../state/session", () => ({
     (environmentId === "environment" ? state.scopes : state.otherScopes).has(scope),
   readEnvironmentScope: (environmentId: string, scope: string) =>
     (environmentId === "environment" ? state.scopes : state.otherScopes).has(scope),
+  readEnvironmentProxiedByHub: () => false,
 }));
 vi.mock("../../state/entities", () => ({
   useProjects: () => [],
