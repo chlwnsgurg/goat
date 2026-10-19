@@ -1,7 +1,7 @@
 import { act, useImperativeHandle, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@goat/shared/keybindings";
+import { DEFAULT_RESOLVED_KEYBINDINGS, isMacPlatform } from "@goat/shared/keybindings";
 import { CommandPalette } from "./CommandPalette";
 import { useComposerHandleContext } from "../composerHandleContext";
 import { openCommandPalette } from "../commandPaletteBus";
@@ -149,7 +149,8 @@ describe("command palette focus restoration", () => {
       field.dispatchEvent(
         new KeyboardEvent("keydown", {
           key: "p",
-          ctrlKey: true,
+          // mod+p: the browser reports the host's platform, so macOS needs Meta.
+          ...(isMacPlatform(navigator.platform) ? { metaKey: true } : { ctrlKey: true }),
           bubbles: true,
           cancelable: true,
         }),

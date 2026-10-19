@@ -1,4 +1,5 @@
 import * as NodeZlib from "node:zlib";
+import * as NodeOS from "node:os";
 
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
@@ -97,6 +98,13 @@ const browserTestProject = {
     include: ["src/**/*.browser.test.{ts,tsx}"],
     hookTimeout: 15_000,
     testTimeout: 15_000,
+    // One Vite server, one Chromium process and one Playwright connection serve every page, and
+    // none of them scale with cores. Vitest's default (one page per core, alongside the unit
+    // workers) opens dozens of pages on the EPYC runners, where clicks, workers and highlighting
+    // stall past their timeouts. A different worker count needs its own group, so the browser
+    // project runs after the unit project.
+    maxWorkers: Math.max(1, Math.min(8, NodeOS.availableParallelism() - 1)),
+    sequence: { groupOrder: 1 },
     api: { port: browserTestApiPort, strictPort: false },
     browser: {
       enabled: true,
