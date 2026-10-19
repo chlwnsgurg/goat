@@ -168,6 +168,8 @@ export class ProviderHostSync extends Context.Service<
       input: HandoffRespondInput,
       sessionId: AuthSessionId,
     ) => Effect.Effect<Handoff, HandoffError | EnvironmentAuthorizationError>;
+    /** Waits until every host of a sync has finished, without polling. */
+    readonly awaitDone: (syncId: string) => Effect.Effect<ProviderSyncState, ProviderHostSyncError>;
   }
 >()("goat/provider/ProviderHostSync") {}
 
@@ -933,6 +935,11 @@ export const make = Effect.gen(function* () {
     status: provided(status),
     cancel: provided(cancel),
     respondHandoff: provided(respondHandoff),
+    awaitDone: (syncId) =>
+      find(syncId).pipe(
+        Effect.tap((operation) => Fiber.awaitAll(operation.fibers)),
+        Effect.map(view),
+      ),
   });
 });
 
