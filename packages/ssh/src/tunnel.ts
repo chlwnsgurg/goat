@@ -3439,6 +3439,12 @@ sh -s -- "\${1:-}" <<'GOAT_RECONNECT_PROBE_SCRIPT'
 ${buildRemoteRuntimeProbeScript(selected.requestedVersion ?? "", REMOTE_RUNTIME_STATE_KEY, false, true)}
 GOAT_RECONNECT_PROBE_SCRIPT
 }`;
+  // The folded launch guard only attaches to the unchanged owned server. Reusing the compared
+  // baseline is safe: stale facts only force a reprobe next reconnect, never a wrong selection.
+  const baseline =
+    expectedProbe === undefined
+      ? 'if probe_output="$(reconnect_probe capture)"; then printf \'GOAT_RECONNECT_PROBE=%s\\n\' "$probe_output"; fi'
+      : "printf 'GOAT_RECONNECT_PROBE=%s\\n' \"$probe_output\"";
   return `set -eu
 ${probe}
 ${
@@ -3468,7 +3474,7 @@ else
   exit 0
 fi`
 }
-if probe_output="$(reconnect_probe capture)"; then printf 'GOAT_RECONNECT_PROBE=%s\\n' "$probe_output"; fi
+${baseline}
 printf '%s\\n' "$launch_output"
 `;
 }

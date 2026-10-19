@@ -98,11 +98,19 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             ssh: SSH_RUNTIME_PROTOCOL_VERSION,
             orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
+          f.setScriptPrefix(`sh() {
+  if [ "\${3:-}" != runtime ]; then
+    printf 'probe\\n' >> "$HOME/.test/probe-invocations"
+  fi
+  command sh "$@"
+}
+`);
           yield* f.shiftHostClock(60);
           const first = yield* launch(f);
           assert.equal(first.status, "ready");
           if (first.status !== "ready") return;
           assert.isString(first.selectedRuntime.reconnectProbe);
+          assert.equal(yield* f.fs.readFileString(`${f.test}/probe-invocations`), "probe\n");
           const commands = f.remoteCommands.length;
           const events = yield* f.fs.readFileString(`${f.test}/events`);
           const cost = {
@@ -118,6 +126,17 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           assert.equal(f.remoteCommands.length - commands, 1);
           assert.equal(yield* f.fs.readFileString(`${f.test}/events`), events);
           assert.property(cost.steps, "runtime-probe-folded");
+          assert.equal(yield* f.fs.readFileString(`${f.test}/probe-invocations`), "probe\nprobe\n");
+          if (second.status !== "ready") return;
+          const beforeThird = f.remoteCommands.length;
+          const third = yield* launch(f, second.selectedRuntime);
+          assert.equal(third.status, "ready");
+          assert.equal(f.remoteCommands.length - beforeThird, 1);
+          assert.equal(
+            yield* f.fs.readFileString(`${f.test}/probe-invocations`),
+            "probe\nprobe\nprobe\n",
+          );
+          assert.equal(yield* f.fs.readFileString(`${f.test}/events`), events);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
       180_000,
     );
