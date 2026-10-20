@@ -355,6 +355,14 @@
       "types": "./src/state/fleetCloudAgents.ts",
       "default": "./src/state/fleetCloudAgents.ts"
     },
+    "./state/fleet-heat": {
+      "types": "./src/state/fleetHeat.ts",
+      "default": "./src/state/fleetHeat.ts"
+    },
+    "./state/host-metrics": {
+      "types": "./src/state/host-metrics.ts",
+      "default": "./src/state/host-metrics.ts"
+    },
     "./state/user-input-draft": {
       "types": "./src/state/userInputDraft.ts",
       "default": "./src/state/userInputDraft.ts"

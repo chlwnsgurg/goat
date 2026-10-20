@@ -3,7 +3,7 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as SqlClient from "effect/sql/SqlClient";
-import { runMigrations } from "../Migrations.ts";
+import { runMigrations, migrationManifest } from "../Migrations.ts";
 import migration from "./083_MemoryLastReadySpace.ts";
 
 it.effect("081 rolls DDL back and preserves the retained destination across ledger reruns", () =>
@@ -18,10 +18,7 @@ it.effect("081 rolls DDL back and preserves the retained destination across ledg
     assert.deepStrictEqual(rollback, Exit.fail("rollback"));
     assert.isEmpty(yield* sql`SELECT name FROM sqlite_master WHERE name='memory_last_ready_space'`);
     assert.deepStrictEqual(yield* runMigrations(), [
-      [83, "MemoryLastReadySpace"],
-      [84, "MemoryHubAdministered"],
-      [85, "MemoryCheckpointLifecycle"],
-      [86, "HubNodes"],
+      ...migrationManifest.filter(([id]) => id >= 83),
     ]);
     yield* sql`INSERT INTO memory_last_ready_space(singleton,space) VALUES (1,${space})`;
     assert.deepStrictEqual(yield* runMigrations(), []);

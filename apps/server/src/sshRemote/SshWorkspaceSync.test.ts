@@ -756,6 +756,28 @@ test("initializes receiver once without a root checkout", (f) =>
       "Failure",
     );
   }));
+test("accepts its own receiver on a Git Bash host, where git prints C:/ paths", (f) =>
+  Effect.gen(function* () {
+    // Stand-ins for Git for Windows: `uname -s` says MINGW, `--show-toplevel` answers in drive
+    // form (W: + the real path), and cygpath turns it back into the shell form `$HOME` uses.
+    const fake = (name: string, body: string) =>
+      f.fs
+        .writeFileString(f.path.join(f.bin, name), `#!/bin/sh\n${body}\n`)
+        .pipe(Effect.andThen(f.fs.chmod(f.path.join(f.bin, name), 0o755)));
+    yield* fake("uname", '[ "$1" = -s ] && echo MINGW64_NT-10.0-26100 || exec /usr/bin/uname "$@"');
+    yield* fake("cygpath", '[ "$1" = -u ] || exit 2\nprintf "%s\\n" "${2#W:}"');
+    yield* fake(
+      "git",
+      [
+        'real="$(PATH="${PATH#*:}" command -v git)"',
+        'case "$*" in *.goat/repos/*--show-toplevel*) out="$("$real" "$@")" || exit $?; printf "W:%s\\n" "$out" ;;',
+        '*) exec "$real" "$@" ;; esac',
+      ].join("\n"),
+    );
+    yield* f.sync.launch(f.input);
+    yield* f.sync.launch(f.input);
+    assert.lengthOf(f.state.launches, 2);
+  }));
 testEach(
   (["file", "directory", "repo", "symlink"] as const).map(
     (kind) => [`refuses foreign file directory repo or symlink: ${kind}`, kind] as const,

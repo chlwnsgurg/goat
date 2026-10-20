@@ -83,6 +83,15 @@ const createFixtureSource = Effect.fn("createMigrateDevDbFixtureSource")(functio
           'full-access', 'default', 'user', 'user', '2026-08-01', '2026-08-01', 'never', 0)`;
       yield* sql`INSERT INTO auth_sessions (session_id, subject, scopes, method, issued_at, expires_at)
         VALUES ('session-1', 'user', '[]', 'pairing', '2026-08-01', '2027-08-01')`;
+      for (const threadId of ["stopped-thread", "running-thread", "settled-thread"] as const) {
+        const correlationId = `corr-${threadId}`;
+        yield* sql`INSERT INTO remote_report_bindings
+          (thread_id, correlation_id, origin_label, origin_thread_id, read_key_hash, last_sequence, created_at)
+          VALUES (${threadId}, ${correlationId}, 'origin', ${`origin-${threadId}`}, 'hash', 1, '2026-08-01')`;
+        yield* sql`INSERT INTO remote_reports
+          (correlation_id, sequence, run_id, kind, summary, created_at)
+          VALUES (${correlationId}, 1, ${`run-${threadId}`}, 'completed', 'done', '2026-08-01')`;
+      }
       // A generated column on a row with no thread. SELECT * cannot copy this
       // table; the flag must be recomputed, and the row must not mark a family live.
       yield* sql`INSERT INTO orchestration_v2_projection_provider_threads
@@ -128,6 +137,8 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
             SELECT stream_id FROM orchestration_events ORDER BY stream_id`;
           const sessions = yield* sql<{ provider_session_id: string }>`
             SELECT provider_session_id FROM orchestration_v2_projection_provider_sessions`;
+          const reports = yield* sql<{ correlation_id: string }>`
+            SELECT correlation_id FROM remote_reports ORDER BY correlation_id`;
           const [leftovers] = yield* sql<{ auth: number; tasks: number; transfers: number }>`
             SELECT
               (SELECT COUNT(*) FROM auth_sessions) AS auth,
@@ -147,6 +158,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
             threads,
             events,
             sessions,
+            reports,
             leftovers,
             pending: roster?.has_pending_background_work,
             cleared: cleared?.has_pending_background_work,
@@ -164,6 +176,10 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
       assert.deepStrictEqual(
         kept.sessions.map((row) => row.provider_session_id),
         ["session-shared"],
+      );
+      assert.deepStrictEqual(
+        kept.reports.map((row) => row.correlation_id),
+        ["corr-stopped-thread"],
       );
       assert.deepStrictEqual(kept.leftovers, { auth: 0, tasks: 0, transfers: 0 });
       assert.equal(kept.pending, 1);
@@ -199,6 +215,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
             SELECT
               (SELECT COUNT(*) FROM orchestration_v2_projection_runs WHERE thread_id = 'settled-thread')
               + (SELECT COUNT(*) FROM orchestration_events WHERE stream_id = 'settled-thread')
+              + (SELECT COUNT(*) FROM remote_reports WHERE correlation_id = 'corr-settled-thread')
               AS count`;
           const [sequence] = yield* sql<{ seq: number }>`
             SELECT seq FROM sqlite_sequence WHERE name = 'orchestration_events'`;

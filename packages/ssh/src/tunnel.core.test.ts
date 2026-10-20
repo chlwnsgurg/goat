@@ -989,7 +989,8 @@ describe("ssh tunnel scripts", () => {
   );
 });
 
-describe("runtime preparation", () => {
+// Fake runtime fixtures use extensionless #!/bin/sh scripts and POSIX executable bits.
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("runtime preparation", () => {
   it.live.each([
     { entry: "launch", mode: "ready" },
     { entry: "mcp", mode: "ready" },
@@ -1466,7 +1467,10 @@ else {
       if (Result.isFailure(result)) {
         assert.instanceOf(result.failure, SshLaunchError);
         assert.include(result.failure.message, ARCHIVE.archiveVersion);
-        assert.include(result.failure.message, "local SSH runtime archive directory");
+        assert.include(
+          result.failure.message,
+          `Remove goat-${ARCHIVE.archiveVersion}-${platform}-${arch}.tar.gz from ${directory}, then reconnect.`,
+        );
       }
       assert.equal(calls, 1);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),

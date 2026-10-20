@@ -2,7 +2,7 @@ import { assert, it } from "@effect/vitest";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
-import { migrationEntries, runMigrations } from "../Migrations.ts";
+import { migrationEntries, runMigrations, migrationManifest } from "../Migrations.ts";
 import { reconcileGoatMigrationIds } from "../reconcileGoatMigrationIds.ts";
 
 const insertTask = Effect.gen(function* () {
@@ -42,17 +42,7 @@ it.effect(
       yield* insertTask;
       yield* insertDispatches;
       assert.deepStrictEqual(yield* runMigrations(), [
-        [76, "MemoryTaskGrantCeiling"],
-        [77, "MemoryImportLineage"],
-        [78, "MemoryCheckpointAccounting"],
-        [79, "MemoryReportLifecycle"],
-        [80, "MemoryUsageCounters"],
-        [81, "MemoryRevertResults"],
-        [82, "HandoffLookupIndex"],
-        [83, "MemoryLastReadySpace"],
-        [84, "MemoryHubAdministered"],
-        [85, "MemoryCheckpointLifecycle"],
-        [86, "HubNodes"],
+        ...migrationManifest.filter(([id]) => id >= 76),
       ]);
       assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
         { memory_grant_ceiling: "none" },

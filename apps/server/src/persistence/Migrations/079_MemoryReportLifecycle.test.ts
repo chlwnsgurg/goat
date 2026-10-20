@@ -4,7 +4,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
-import { runMigrations } from "../Migrations.ts";
+import { runMigrations, migrationManifest } from "../Migrations.ts";
 import reportMigration from "./079_MemoryReportLifecycle.ts";
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
 it.effect("077 DDL and accounting rollback together then ledger restart preserves rows", () =>
@@ -27,14 +27,7 @@ it.effect("077 DDL and accounting rollback together then ledger restart preserve
       before,
     );
     assert.deepStrictEqual(yield* runMigrations(), [
-      [79, "MemoryReportLifecycle"],
-      [80, "MemoryUsageCounters"],
-      [81, "MemoryRevertResults"],
-      [82, "HandoffLookupIndex"],
-      [83, "MemoryLastReadySpace"],
-      [84, "MemoryHubAdministered"],
-      [85, "MemoryCheckpointLifecycle"],
-      [86, "HubNodes"],
+      ...migrationManifest.filter(([id]) => id >= 79),
     ]);
     assert.deepStrictEqual(
       yield* sql`SELECT automatic_attempts,report_kind,report_approved FROM memory_report_outbox`,

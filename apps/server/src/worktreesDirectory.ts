@@ -11,6 +11,7 @@ import * as HostProcess from "@goat/shared/HostProcess";
 
 import * as ServerConfig from "./config.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import { nativeWorkspacePath } from "./workspace/WorkspacePaths.ts";
 
 /**
  * Null when the setting is not an absolute path on this machine, such as `D:\worktrees`
@@ -22,9 +23,11 @@ export function resolveWorktreesDirectory(
   defaultDir: string,
   path: Path.Path,
   home: string,
+  platform: NodeJS.Platform,
 ): string | null {
   if (setting === "") return defaultDir;
-  const expanded = expandHomePath(setting, home);
+  // A setting typed in Git Bash (`/d/goat-worktrees`) would otherwise resolve to `C:\d\…`.
+  const expanded = expandHomePath(nativeWorkspacePath(platform, setting), home);
   if (!path.isAbsolute(expanded)) return null;
   const resolved = path.resolve(expanded);
   return isFilesystemRoot(resolved, path) ? null : resolved;
@@ -102,7 +105,13 @@ export const resolveAvailableWorktreesDirectory = Effect.fn("resolveAvailableWor
     ): WorktreesDirectoryStatus => ({ configured: input.setting, directory, unavailable });
     if (input.setting === "") return status(input.defaultDir, null);
     const home = yield* HostProcess.HomeDirectory;
-    const configured = resolveWorktreesDirectory(input.setting, input.defaultDir, path, home);
+    const configured = resolveWorktreesDirectory(
+      input.setting,
+      input.defaultDir,
+      path,
+      home,
+      yield* HostProcess.Platform,
+    );
     if (configured === null) return status(input.defaultDir, { reason: "invalid", path: null });
     const reason = yield* checkWorktreesDirectory(configured, fileSystem, path);
     return reason === null
@@ -119,10 +128,11 @@ export function managedWorktreesDirectories(
   defaultDir: string,
   path: Path.Path,
   home: string,
+  platform: NodeJS.Platform,
 ): ReadonlyArray<string> {
   const directories = new Set([defaultDir]);
   for (const setting of [settings.worktreesDirectory, ...settings.previousWorktreesDirectories]) {
-    const directory = resolveWorktreesDirectory(setting, defaultDir, path, home);
+    const directory = resolveWorktreesDirectory(setting, defaultDir, path, home, platform);
     if (directory !== null) directories.add(directory);
   }
   return [...directories];
@@ -138,6 +148,7 @@ export const makeIsManagedWorktreePath = Effect.gen(function* () {
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const platform = yield* HostProcess.Platform;
 
   // Where git would create `target`: the real path of its nearest existing
   // ancestor plus the missing rest, since git follows symlinks on the way.
@@ -155,8 +166,10 @@ export const makeIsManagedWorktreePath = Effect.gen(function* () {
     // git resolves a relative path against the project, not the server cwd.
     if (!path.isAbsolute(worktreePath)) return false;
     // Server-made paths are normalized. A `..` would be applied after git
-    // follows a symlink but before realPath does, so the two disagree.
-    if (path.resolve(worktreePath) !== worktreePath) return false;
+    // follows a symlink but before realPath does, so the two disagree. Git for
+    // Windows prints `C:/…`, which only differs from the server's form by slashes.
+    const given = platform === "win32" ? worktreePath.replaceAll("/", "\\") : worktreePath;
+    if (path.resolve(given) !== given) return false;
     const settings = yield* serverSettings.getSettings.pipe(
       Effect.orElseSucceed(() => ({
         worktreesDirectory: "",
@@ -169,6 +182,7 @@ export const makeIsManagedWorktreePath = Effect.gen(function* () {
         serverConfig.worktreesDir,
         path,
         yield* HostProcess.HomeDirectory,
+        platform,
       ),
       realLocation,
     );

@@ -6,7 +6,7 @@ import {
   CheckpointAccountingError,
   refreshCheckpointAccounting,
 } from "../../memory/MemoryCheckpointAccounting.ts";
-import { runMigrations } from "../Migrations.ts";
+import { runMigrations, migrationManifest } from "../Migrations.ts";
 import migration from "./085_MemoryCheckpointLifecycle.ts";
 
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
@@ -108,8 +108,7 @@ it.effect("083 participates in the migration ledger and leaves healthy spaces un
     yield* runMigrations({ toMigrationInclusive: 84 });
     yield* sql`INSERT INTO memory_quota_counters VALUES (${space},'checkpoint_initialized','',1),(${space},'hub_snapshot_bytes','',0),(${space},'hub_snapshot_rows','',0)`;
     assert.deepStrictEqual(yield* runMigrations(), [
-      [85, "MemoryCheckpointLifecycle"],
-      [86, "HubNodes"],
+      ...migrationManifest.filter(([id]) => id >= 85),
     ]);
     assert.deepStrictEqual(yield* pending, []);
     yield* sql.withTransaction(refreshCheckpointAccounting());

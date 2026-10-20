@@ -14,6 +14,16 @@ const trimmedString = (name: string) =>
 const optionalBoolean = (name: string) =>
   Config.Boolean(name).pipe(Config.option, Config.map(Option.getOrElse(() => false)));
 
+const optionalTruthyFlag = (name: string) =>
+  trimmedString(name).pipe(
+    Config.map(
+      Option.exists((value) => {
+        const normalized = value.toLowerCase();
+        return normalized === "1" || normalized === "true";
+      }),
+    ),
+  );
+
 const commaSeparatedStrings = (name: string) =>
   trimmedString(name).pipe(
     Config.map(
@@ -57,6 +67,7 @@ export const DesktopConfig = Config.all({
   ),
   appImagePath: trimmedString("APPIMAGE"),
   disableAutoUpdate: optionalBoolean("GOAT_DISABLE_AUTO_UPDATE"),
+  insecureDevSecretStorage: optionalTruthyFlag("GOAT_DEV_INSECURE_SECRET_STORAGE"),
   mockUpdates: optionalBoolean("GOAT_DESKTOP_MOCK_UPDATES"),
   mockUpdateServerPort: Config.Port("GOAT_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(
     Config.withDefault(3000),

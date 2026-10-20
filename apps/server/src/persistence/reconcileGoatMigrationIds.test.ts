@@ -99,7 +99,9 @@ describe("GOAT migration ids", () => {
         [83, "MemoryLastReadySpace"],
         [84, "MemoryHubAdministered"],
         [85, "MemoryCheckpointLifecycle"],
-        [86, "HubNodes"],
+        [86, "FleetGoals"],
+        [87, "FleetHealth"],
+        [88, "HubNodes"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -133,7 +135,9 @@ describe("GOAT migration ids", () => {
         [83, "MemoryLastReadySpace"],
         [84, "MemoryHubAdministered"],
         [85, "MemoryCheckpointLifecycle"],
-        [86, "HubNodes"],
+        [86, "FleetGoals"],
+        [87, "FleetHealth"],
+        [88, "HubNodes"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -174,7 +178,9 @@ describe("GOAT migration ids", () => {
           [83, "MemoryLastReadySpace"],
           [84, "MemoryHubAdministered"],
           [85, "MemoryCheckpointLifecycle"],
-          [86, "HubNodes"],
+          [86, "FleetGoals"],
+          [87, "FleetHealth"],
+          [88, "HubNodes"],
         ]);
         assert.deepStrictEqual(yield* history, migrationManifest);
         assert.deepStrictEqual(yield* runMigrations(), []);
@@ -317,18 +323,7 @@ it.effect("restarts the current WP5 registry without rewriting lineage or accoun
     const schema = yield* sql`SELECT name,sql FROM sqlite_master ORDER BY name`;
     assert.deepStrictEqual(
       migrationManifest.filter(([id]) => id >= 77),
-      [
-        [77, "MemoryImportLineage"],
-        [78, "MemoryCheckpointAccounting"],
-        [79, "MemoryReportLifecycle"],
-        [80, "MemoryUsageCounters"],
-        [81, "MemoryRevertResults"],
-        [82, "HandoffLookupIndex"],
-        [83, "MemoryLastReadySpace"],
-        [84, "MemoryHubAdministered"],
-        [85, "MemoryCheckpointLifecycle"],
-        [86, "HubNodes"],
-      ],
+      [...migrationManifest.filter(([id]) => id >= 77)],
     );
     assert.deepStrictEqual(yield* runMigrations(), []);
     assert.deepStrictEqual(yield* history, migrationManifest);

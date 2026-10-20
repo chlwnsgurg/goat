@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
-import { runMigrations } from "../Migrations.ts";
+import { runMigrations, migrationManifest } from "../Migrations.ts";
 import migration from "./081_MemoryRevertResults.ts";
 import * as Store from "../../memory/MemoryStore.ts";
 import {
@@ -82,12 +82,7 @@ it.effect(
         yield* sql`SELECT name FROM sqlite_master WHERE name='memory_report_memory_idx'`,
       );
       assert.deepStrictEqual(yield* runMigrations(), [
-        [81, "MemoryRevertResults"],
-        [82, "HandoffLookupIndex"],
-        [83, "MemoryLastReadySpace"],
-        [84, "MemoryHubAdministered"],
-        [85, "MemoryCheckpointLifecycle"],
-        [86, "HubNodes"],
+        ...migrationManifest.filter(([id]) => id >= 81),
       ]);
       assert.deepStrictEqual(
         yield* sql`SELECT resolution_id,revert_operation_id,json_extract(revert_result_json,'$.status') AS status FROM memory_resolutions ORDER BY resolution_id`,

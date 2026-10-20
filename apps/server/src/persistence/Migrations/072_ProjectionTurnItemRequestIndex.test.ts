@@ -3,7 +3,7 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { runMigrations } from "../Migrations.ts";
+import { runMigrations, migrationManifest } from "../Migrations.ts";
 import ProjectionTurnItemRequestIndex from "./072_ProjectionTurnItemRequestIndex.ts";
 
 it.effect(
@@ -31,21 +31,7 @@ it.effect(
     `;
 
       assert.deepStrictEqual(yield* runMigrations(), [
-        [72, "ProjectionTurnItemRequestIndex"],
-        [73, "Memory"],
-        [74, "MemoryHubSync"],
-        [75, "MemorySearchCounters"],
-        [76, "MemoryTaskGrantCeiling"],
-        [77, "MemoryImportLineage"],
-        [78, "MemoryCheckpointAccounting"],
-        [79, "MemoryReportLifecycle"],
-        [80, "MemoryUsageCounters"],
-        [81, "MemoryRevertResults"],
-        [82, "HandoffLookupIndex"],
-        [83, "MemoryLastReadySpace"],
-        [84, "MemoryHubAdministered"],
-        [85, "MemoryCheckpointLifecycle"],
-        [86, "HubNodes"],
+        ...migrationManifest.filter(([id]) => id >= 72),
       ]);
       yield* ProjectionTurnItemRequestIndex;
       assert.deepStrictEqual(yield* runMigrations(), []);

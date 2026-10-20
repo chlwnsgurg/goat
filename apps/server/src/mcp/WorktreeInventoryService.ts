@@ -206,6 +206,7 @@ const make = Effect.gen(function* () {
       config.worktreesDir,
       path,
       yield* HostProcess.HomeDirectory,
+      yield* HostProcess.Platform,
     )) {
       const root = yield* real(directory);
       if (!isFilesystemRoot(root, path)) managedRoots.push(root);

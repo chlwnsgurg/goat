@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -33,9 +34,30 @@ export const prepareMemoryServer = Effect.fn("OpenCode.prepareMemoryServer")(fun
     cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
   });
   return yield* Effect.gen(function* () {
+    // Windows keeps TEMP under the user's home, so the ancestor walk below would find the
+    // user's own .claude or .agents there and refuse every time. %SystemRoot%\Temp lets each
+    // user create private folders outside any home; when it can't, the walk still guards.
+    const outsideHome =
+      platform === "win32"
+        ? yield* fs
+            .makeTempDirectoryScoped({
+              prefix: "goat-opencode-memory-",
+              directory: path.join(
+                baseEnvironment.SystemRoot ||
+                  baseEnvironment.SYSTEMROOT ||
+                  baseEnvironment.windir ||
+                  baseEnvironment.WINDIR ||
+                  "C:\\Windows",
+                "Temp",
+              ),
+            })
+            .pipe(Effect.option)
+        : Option.none();
     // Discovery resolves symlinks before walking ancestors (macOS /var -> /private/var).
     const root = yield* fs.realPath(
-      yield* fs.makeTempDirectoryScoped({ prefix: "goat-opencode-memory-" }),
+      Option.isSome(outsideHome)
+        ? outsideHome.value
+        : yield* fs.makeTempDirectoryScoped({ prefix: "goat-opencode-memory-" }),
     );
     const directory = path.join(root, "work");
     const system =

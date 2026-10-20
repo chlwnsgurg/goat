@@ -30,6 +30,11 @@ import {
   type ReleaseCommandRunner,
   type ReleaseReport,
 } from "./lib/release-verify.ts";
+import {
+  ownRuntimeManifest,
+  releaseRuntimeManifest,
+  runtimeManifestAssetName,
+} from "@goat/shared/runtimeManifest";
 import { finalizeMacosDmgs, rewriteDmgManifest } from "./finalize-macos-dmg.ts";
 import { verifyMacPayload, verifyReleaseDirectory } from "./verify-release-artifacts.ts";
 import { mergeUpdateManifestFiles } from "./merge-update-manifests.ts";
@@ -642,7 +647,25 @@ it.effect(
             path.join(dir, name),
             serializeUpdateManifest(manifest(selected), { platformLabel: "release" }),
           );
+        const runtimeName = runtimeManifestAssetName(version);
+        const runtime = releaseRuntimeManifest(
+          ownRuntimeManifest({ version, commitTime: 123 }),
+          new Map(final.map((a) => [a.name, a.sha256])),
+        );
+        yield* fs.writeFileString(path.join(dir, runtimeName), JSON.stringify(runtime));
         expect((yield* assembleRelease(dir, reportsDir, version)).ok).toBe(true);
+        const runtimeSource = yield* fs.readFileString(path.join(dir, runtimeName));
+        for (const bad of ["invalid", JSON.stringify({ ...runtime, platforms: {} })]) {
+          yield* fs.writeFileString(path.join(dir, runtimeName), bad);
+          expect((yield* Effect.result(assembleRelease(dir, reportsDir, version)))._tag).toBe(
+            "Failure",
+          );
+        }
+        yield* fs.remove(path.join(dir, runtimeName));
+        expect((yield* Effect.result(assembleRelease(dir, reportsDir, version)))._tag).toBe(
+          "Failure",
+        );
+        yield* fs.writeFileString(path.join(dir, runtimeName), runtimeSource);
         const sums = yield* fs.readFileString(path.join(dir, "SHA256SUMS"));
         expect(sums.split("\n").filter(Boolean)).toHaveLength(
           requiredReleaseAssets(version).length,

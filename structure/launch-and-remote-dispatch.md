@@ -115,9 +115,11 @@ whether to send it itself. The relay does not change the dispatch's latest repor
 
 ## Fleet goals
 
-No goal controller, host cordon, placement limit, or fallback chain exists yet. Remote work is
-started and followed only through the launch watches and dispatches above. The proposed design,
-which builds goals, self-healing and fallback on these watches, is in
+Fleet goals and their controller (`apps/server/src/fleet/goals/`, tools `goat_goal_*`) launch and
+follow workers through the same launch services as the tools above, as the goal's owner thread and
+never above its ceiling. They are off unless `fleet.controllerEnabled` is set. Host cordon,
+placement limits and fallback chains do not exist yet; the controller reaches them through the
+`goat/fleet/*` service tags, whose defaults are local-only. Design and current differences:
 [agentic-k8s.md](../docs/internals/agentic-k8s.md).
 
 > Decision record: [ADR-0016](decisions/ADR-0016-agentic-goals-controller.md)

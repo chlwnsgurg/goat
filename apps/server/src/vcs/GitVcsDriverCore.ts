@@ -32,6 +32,7 @@ import {
 import { dedupeRemoteBranchesWithLocalMatches, normalizeGitRemoteUrl } from "@goat/shared/git";
 import * as HostProcess from "@goat/shared/HostProcess";
 import { compactTraceAttributes } from "@goat/shared/observability";
+import { isWindowsReservedFileName, normalizeProjectPathForComparison } from "@goat/shared/path";
 import { decodeJsonResult } from "@goat/shared/schemaJson";
 import { resolveSpawnCommand } from "@goat/shared/shell";
 import { LEGACY_PROJECT_FILE_NAME } from "@goat/contracts/legacyT3Names";
@@ -256,6 +257,70 @@ function paginateBranches(input: {
     nextCursor,
     totalCount,
   };
+}
+
+/**
+ * The folder a new worktree gets for its branch. Git allows branch names Windows refuses as file
+ * names (`"`, `<`, `|`, a trailing dot, `con`), so a Windows server replaces those as well.
+ */
+export function worktreeFolderName(branch: string, platform: NodeJS.Platform): string {
+  const name = branch.replace(/\//g, "-");
+  if (platform !== "win32") return name;
+  const safe = name.replace(/[\\:*?"<>|]/gu, "-").replace(/[. ]+$/u, "") || "worktree";
+  return isWindowsReservedFileName(safe) ? `${safe}-branch` : safe;
+}
+
+const C_QUOTE_ESCAPES: Record<string, number> = {
+  a: 7,
+  b: 8,
+  t: 9,
+  n: 10,
+  v: 11,
+  f: 12,
+  r: 13,
+  '"': 34,
+  "\\": 92,
+};
+
+/** Reads git's C-style quoting (`"a\tb\303\251"`), whose octal escapes are UTF-8 bytes. */
+function unquoteGitPath(quoted: string): string {
+  const bytes: number[] = [];
+  const encoder = new TextEncoder();
+  for (let index = 1; index < quoted.length - 1; index += 1) {
+    const char = String.fromCodePoint(quoted.codePointAt(index)!);
+    if (char !== "\\") {
+      bytes.push(...encoder.encode(char));
+      index += char.length - 1;
+      continue;
+    }
+    const next = quoted[index + 1] ?? "";
+    const octal = /^[0-7]{3}/u.exec(quoted.slice(index + 1, index + 4))?.[0];
+    if (octal !== undefined) {
+      bytes.push(Number.parseInt(octal, 8));
+      index += 3;
+    } else {
+      bytes.push(C_QUOTE_ESCAPES[next] ?? next.charCodeAt(0));
+      index += 1;
+    }
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+/**
+ * Line-form `git worktree list --porcelain` in the `-z` shape: Git for Windows may end lines
+ * with CR, and the line form C-quotes unusual paths, which `-z` output never does.
+ */
+export function worktreeListLinesToFields(stdout: string): string {
+  return stdout
+    .split("\n")
+    .map((line) => {
+      const field = line.endsWith("\r") ? line.slice(0, -1) : line;
+      const value = field.slice("worktree ".length);
+      return field.startsWith("worktree ") && value.length > 1 && /^".*"$/su.test(value)
+        ? `worktree ${unquoteGitPath(value)}`
+        : field;
+    })
+    .join("\0");
 }
 
 function parseWorktreeBranchPaths(stdout: string): ReadonlyMap<string, string> {
@@ -1168,7 +1233,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     });
     if (result.exitCode === 0) return result;
     const lineResult = yield* executeGit(operation, cwd, args, options);
-    return { ...lineResult, stdout: lineResult.stdout.replaceAll("\n", "\0") };
+    return { ...lineResult, stdout: worktreeListLinesToFields(lineResult.stdout) };
   });
 
   const runGitStdoutWithOptions = (
@@ -3499,13 +3564,23 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         repositoryPaths.gitCommonDir,
         input.refresh === true,
       );
+      // NTFS folds case, so git's `C:/Users/Super/repo` is the stored `C:\Users\super\repo`.
+      const worktreeRoot =
+        hostPlatform === "win32" && repositoryPaths.worktreeRoot !== null
+          ? normalizeProjectPathForComparison(repositoryPaths.worktreeRoot)
+          : repositoryPaths.worktreeRoot;
+      const isCurrentWorktree = (worktreePath: string | null) =>
+        worktreePath !== null &&
+        (hostPlatform === "win32"
+          ? normalizeProjectPathForComparison(worktreePath)
+          : worktreePath) === worktreeRoot;
       const hasCurrentWorktreeBranch =
-        repositoryPaths.worktreeRoot !== null &&
-        snapshot.localBranches.some((ref) => ref.worktreePath === repositoryPaths.worktreeRoot);
+        worktreeRoot !== null &&
+        snapshot.localBranches.some((ref) => isCurrentWorktree(ref.worktreePath));
       const localBranches = snapshot.localBranches.map((ref) => ({
         ...ref,
         current: hasCurrentWorktreeBranch
-          ? ref.worktreePath === repositoryPaths.worktreeRoot
+          ? isCurrentWorktree(ref.worktreePath)
           : ref.name === repositoryPaths.currentBranch,
       }));
       const combinedBranches = input.includeMatchingRemoteRefs
@@ -3544,7 +3619,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     yield* refuseOptionLikeRefName("GitVcsDriver.createWorktree", input.cwd, input.refName);
     yield* refuseOptionLikeRefName("GitVcsDriver.createWorktree", input.cwd, input.newRefName);
     const targetBranch = input.newRefName ?? input.refName;
-    const sanitizedBranch = targetBranch.replace(/\//g, "-");
+    const sanitizedBranch = worktreeFolderName(targetBranch, hostPlatform);
     // resolve: a cwd like `<repo>/sub/..` must not name the folder `..`.
     const repoName = path.basename(path.resolve(input.cwd));
     let worktreePath = input.path;

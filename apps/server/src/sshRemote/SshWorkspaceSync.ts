@@ -207,8 +207,15 @@ else
     fi
   fi
 fi
-if [ "$(git -C "$repo" rev-parse --is-bare-repository)" != false ] ||
-   [ "$(git -C "$repo" rev-parse --show-toplevel)" != "$repo" ]; then
+top="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null)" || top=
+expected="$repo"
+# Git for Windows prints C:/… with the folder's own casing, while $HOME in Git Bash or Cygwin
+# is /c/… or /cygdrive/c/… and NTFS ignores case.
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
+  [ -z "$top" ] || top="$(cygpath -u "$top" 2>/dev/null | tr '[:upper:]' '[:lower:]')" || top=
+  expected="$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')" ;;
+esac
+if [ "$(git -C "$repo" rev-parse --is-bare-repository)" != false ] || [ "$top" != "$expected" ]; then
   printf 'GOAT_FOREIGN_PATH\\n'
   exit 0
 fi
