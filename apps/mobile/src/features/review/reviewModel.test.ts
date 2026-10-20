@@ -149,6 +149,15 @@ describe("buildReviewSectionItems", () => {
 });
 
 describe("buildReviewParsedDiff", () => {
+  it("keeps a hunk's trailing blank context line", () => {
+    const parsed = buildReviewParsedDiff(
+      "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,2 +1,2 @@\n-a\n+b\n \n",
+      "trailing-context",
+    );
+    const file = parsed.kind === "files" ? parsed.files[0] : undefined;
+    expect(file?.rows.filter((row) => row.kind === "line")).toHaveLength(3);
+  });
+
   it.each([
     ["a/example.ts", "a/example.ts"],
     ["b/example.ts", "b/example.ts"],
