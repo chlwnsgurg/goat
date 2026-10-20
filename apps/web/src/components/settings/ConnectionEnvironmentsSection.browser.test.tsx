@@ -1,5 +1,5 @@
-// @vitest-environment jsdom
 import * as Cause from "effect/Cause";
+import { isMacPlatform } from "@goat/shared/keybindings";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -10,7 +10,8 @@ const state = vi.hoisted(() => ({
   sshHosts: null as unknown,
 }));
 
-vi.mock("../../state/environments", () => ({
+vi.mock("../../state/environments", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../state/environments")>()),
   useEnvironments: () => ({ environments: [] }),
   usePrimaryEnvironment: () => ({
     environmentId: "primary",
@@ -27,10 +28,13 @@ vi.mock("../../connection/onboarding", () => ({
 vi.mock("../../connection/catalog", () => ({
   environmentCatalog: { remove: vi.fn(), register: vi.fn(), setEnabled: vi.fn() },
 }));
-vi.mock("../../state/server", async () => {
+vi.mock("../../state/server", async (importOriginal) => {
   const { Atom } = await import("effect/reactivity");
+  const { DEFAULT_SERVER_SETTINGS } = await import("@goat/contracts");
   const { compileResolvedKeybindingsConfig } = await import("@goat/shared/keybindings");
   return {
+    ...(await importOriginal<typeof import("../../state/server")>()),
+    primaryServerSettingsAtom: Atom.make(DEFAULT_SERVER_SETTINGS),
     primaryServerKeybindingsAtom: Atom.make(
       compileResolvedKeybindingsConfig([
         { key: "mod+1", command: "thread.jump.1" },
@@ -139,7 +143,7 @@ it("pairs a pasted GOAT server link through Add device and closes the dialog", a
     host: "https://hub.tail.ts.net",
     pairingCode: "PAIR1234",
   });
-  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
 });
 
 it("keeps the dialog open with the error when pairing fails", async () => {
@@ -186,7 +190,8 @@ it("keeps thread jump chords inside the SSH host suggestions", async () => {
     new KeyboardEvent("keydown", {
       key,
       code: `Digit${key}`,
-      ctrlKey: true,
+      ctrlKey: !isMacPlatform(navigator.platform),
+      metaKey: isMacPlatform(navigator.platform),
       bubbles: true,
       cancelable: true,
     });
@@ -225,5 +230,5 @@ it("keeps Add device pending until the GOAT server pairing command settles", asy
   expect(document.querySelector('[role="dialog"]')).not.toBeNull();
   expect(button("Adding…", dialog).disabled).toBe(true);
   await act(async () => finish({ _tag: "Success", value: undefined }));
-  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
 });
