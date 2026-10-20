@@ -168,6 +168,7 @@ import {
   readLastEnabledProjectGroupingMode,
   rememberEnabledProjectGroupingMode,
   resolveBackgroundActivityProfileOption,
+  supportsAutomaticServerUpdates as connectedEnvironmentsSupportAutomaticServerUpdates,
 } from "./SettingsPanels.logic";
 import {
   PolicyTooltip,
@@ -2166,6 +2167,8 @@ export function GeneralSettingsPanel() {
     connectedEnvironments.every(
       (target) => target.serverConfig?.environment.capabilities.threadRestartContinuation === true,
     );
+  const supportsAutomaticServerUpdates =
+    connectedEnvironmentsSupportAutomaticServerUpdates(connectedEnvironments);
 
   const textGenerationProviders = serverProviders.filter(
     (provider) => provider.supportsTextGeneration !== false,
@@ -2893,7 +2896,13 @@ export function GeneralSettingsPanel() {
           serverScoped
           settingKeys={["automaticServerUpdates"]}
           description="When this server runs as a background service, install new releases from its channel while no threads are running. A failed update rolls back."
+          status={
+            !supportsAutomaticServerUpdates
+              ? "Update this server to change this setting."
+              : undefined
+          }
           resetAction={
+            supportsAutomaticServerUpdates &&
             settings.automaticServerUpdates !== DEFAULT_UNIFIED_SETTINGS.automaticServerUpdates ? (
               <SettingResetButton
                 label="automatic server updates"
@@ -2909,6 +2918,7 @@ export function GeneralSettingsPanel() {
             <ScopedSwitch
               settingKeys={["automaticServerUpdates"]}
               checked={settings.automaticServerUpdates}
+              disabled={!supportsAutomaticServerUpdates}
               onCheckedChange={(checked) =>
                 updateSettings({ automaticServerUpdates: Boolean(checked) })
               }

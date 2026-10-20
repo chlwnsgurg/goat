@@ -84,11 +84,13 @@ vi.mock("./components/SettingsChoiceRow", () => ({ SettingsChoiceRow: () => null
 vi.mock("./components/SettingsSwitchRow", () => ({
   SettingsSwitchRow: ({
     label,
+    subtitle,
     value,
     disabled,
     onValueChange,
   }: {
     label: string;
+    subtitle?: string;
     value: boolean | null;
     disabled?: boolean;
     onValueChange: (value: boolean) => void;
@@ -96,6 +98,7 @@ vi.mock("./components/SettingsSwitchRow", () => ({
     <button
       role="switch"
       aria-checked={value ?? "mixed"}
+      aria-description={subtitle}
       disabled={disabled}
       onClick={() => onValueChange(!value)}
     >
@@ -126,7 +129,10 @@ vi.mock("./settings-environment-filter", () => ({
   }),
 }));
 
-import { SettingsEnvironmentSourceControlRouteScreen } from "./SettingsServerControlsRouteScreen";
+import {
+  SettingsEnvironmentMaintenanceRouteScreen,
+  SettingsEnvironmentSourceControlRouteScreen,
+} from "./SettingsServerControlsRouteScreen";
 import { SettingsThreadsRouteScreen } from "./SettingsThreadsRouteScreen";
 
 function environment(environmentId: string, label: string) {
@@ -195,6 +201,36 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root.unmount());
+});
+
+describe("maintenance automatic server updates", () => {
+  const automaticUpdates = () => button("Automatic server updates");
+
+  it("disables the switch until the server advertises the capability", () => {
+    act(() => root.render(<SettingsEnvironmentMaintenanceRouteScreen />));
+    expect(automaticUpdates().disabled).toBe(true);
+    expect(automaticUpdates().getAttribute("aria-description")).toBe(
+      "Update this server to change this setting.",
+    );
+
+    mocks.targets = mocks.targets.map((target) => ({
+      ...target,
+      serverConfig: {
+        ...target.serverConfig,
+        environment: {
+          capabilities: {
+            ...target.serverConfig.environment.capabilities,
+            automaticServerUpdates: true,
+          },
+        },
+      },
+    }));
+    act(() => root.render(<SettingsEnvironmentMaintenanceRouteScreen />));
+    expect(automaticUpdates().disabled).toBe(false);
+    expect(automaticUpdates().getAttribute("aria-description")).toBe(
+      "When this server runs as a background service, install new releases from its channel while no threads are running. A failed update rolls back.",
+    );
+  });
 });
 
 describe("SettingsServerControlsRouteScreen", () => {

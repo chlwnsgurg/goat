@@ -18,6 +18,7 @@ import {
   isProjectGroupingEnabled,
   projectGroupingModeFromToggle,
   resolveBackgroundActivityProfileOption,
+  supportsAutomaticServerUpdates,
 } from "./SettingsPanels.logic";
 
 describe("typography settings restore", () => {
@@ -133,6 +134,26 @@ describe("background activity settings restore", () => {
         automaticGitFetchInterval,
       },
     });
+  });
+});
+
+describe("automatic server updates capability", () => {
+  const environment = (automaticServerUpdates?: boolean) => ({
+    serverConfig: {
+      environment: {
+        capabilities: automaticServerUpdates === undefined ? {} : { automaticServerUpdates },
+      },
+    },
+  });
+
+  it("stays off until every connected environment advertises the capability", () => {
+    expect(supportsAutomaticServerUpdates([])).toBe(false);
+    expect(supportsAutomaticServerUpdates([environment()])).toBe(false);
+    expect(supportsAutomaticServerUpdates([environment(false)])).toBe(false);
+    expect(supportsAutomaticServerUpdates([{ serverConfig: null }])).toBe(false);
+    expect(supportsAutomaticServerUpdates([environment(true), environment()])).toBe(false);
+    expect(supportsAutomaticServerUpdates([environment(true)])).toBe(true);
+    expect(supportsAutomaticServerUpdates([environment(true), environment(true)])).toBe(true);
   });
 });
 

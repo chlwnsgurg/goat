@@ -18,6 +18,7 @@ import { HttpClient } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
+  SERVER_EXIT_CODE_DATABASE_AHEAD,
   SERVER_EXIT_CODE_STATE_DIR_OWNED,
   DesktopBackendBootstrap,
   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
@@ -244,6 +245,7 @@ export interface BackendInstanceSpec {
   readonly onShutdown?: () => Effect.Effect<void>;
   readonly onPreflightFailed?: (failure: PreflightFailure) => Effect.Effect<boolean>;
   readonly onStateDirOwned?: () => Effect.Effect<void>;
+  readonly onDatabaseAhead?: () => Effect.Effect<void>;
 }
 
 interface ActiveBackendRun {
@@ -800,6 +802,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
           exitCode?: number,
         ) {
           const stateDirOwned = exitCode === SERVER_EXIT_CODE_STATE_DIR_OWNED;
+          const databaseAhead = exitCode === SERVER_EXIT_CODE_DATABASE_AHEAD;
           yield* mutex.withPermits(1)(
             Effect.gen(function* () {
               const { isCurrentRun, nextState, pid, exitObserved, stopRequested, wasReady } =
@@ -872,6 +875,11 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
                 if (stateDirOwned && !stopRequested) {
                   yield* Ref.update(state, (latest) => ({ ...latest, desiredRunning: false }));
                   yield* (spec.onStateDirOwned?.() ?? Effect.void).pipe(Effect.ignore);
+                  return;
+                }
+                if (databaseAhead && !stopRequested) {
+                  yield* Ref.update(state, (latest) => ({ ...latest, desiredRunning: false }));
+                  yield* (spec.onDatabaseAhead?.() ?? Effect.void).pipe(Effect.ignore);
                   return;
                 }
                 yield* scheduleRestart(reason);
