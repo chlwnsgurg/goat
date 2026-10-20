@@ -1,7 +1,7 @@
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
+import { deriveGoatBotModelState } from "@goat/client-runtime/goatBot";
 import type { EnvironmentId } from "@goat/contracts";
 import { createModelSelection } from "@goat/shared/model";
-import { resolveGoatBotModelSelection } from "@goat/shared/serverSettings";
 import { useContext, useState } from "react";
 
 import { useEnvironmentSettings } from "../../hooks/useSettings";
@@ -39,14 +39,8 @@ function GoatBotModelRow({ environmentId }: { environmentId: EnvironmentId }) {
   const entries = sortProviderInstanceEntries(
     applyProviderInstanceSettings(deriveProviderInstanceEntries(providers), settings, null),
   );
-  const selection = resolveGoatBotModelSelection(settings);
-  const activeEntry = entries.find((entry) => entry.instanceId === selection.instanceId);
-  // When the automatic model's provider is gone, choosing a model starts from one that exists.
-  const startEntry =
-    activeEntry ??
-    entries.find((entry) => entry.enabled && entry.isAvailable && entry.models.length > 0);
-  const startModel = startEntry?.models.find((model) => model.isDefault) ?? startEntry?.models[0];
-  const separate = settings.goatBotModelSelection !== null;
+  const { activeEntry, automaticLabel, initialSelection, selection, separate } =
+    deriveGoatBotModelState({ settings, entries });
   const options = getCustomModelOptionsByInstance(
     settings,
     providers,
@@ -71,10 +65,7 @@ function GoatBotModelRow({ environmentId }: { environmentId: EnvironmentId }) {
       control={
         <div className="flex flex-wrap items-center justify-end gap-2">
           {!separate ? (
-            <span className="text-sm text-muted-foreground">
-              Automatic · {selection.model}
-              {activeEntry ? null : " (not available)"}
-            </span>
+            <span className="text-sm text-muted-foreground">{automaticLabel}</span>
           ) : null}
           {separate ? (
             <>
@@ -120,16 +111,10 @@ function GoatBotModelRow({ environmentId }: { environmentId: EnvironmentId }) {
           <Switch
             aria-label="Choose a model for GOAT Bot"
             checked={separate}
-            disabled={
-              !allowed || (!separate && !activeEntry && (startEntry === undefined || !startModel))
-            }
+            disabled={!allowed || (!separate && initialSelection === null)}
             onCheckedChange={(checked) =>
               save({
-                goatBotModelSelection: !checked
-                  ? null
-                  : activeEntry
-                    ? createModelSelection(selection.instanceId, selection.model, selection.options)
-                    : createModelSelection(startEntry!.instanceId, startModel!.slug),
+                goatBotModelSelection: !checked ? null : initialSelection,
               })
             }
           />

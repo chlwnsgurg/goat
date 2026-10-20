@@ -10,6 +10,7 @@ import {
 } from "./work-log-layout";
 import { QuestionAnswerHistory } from "./QuestionAnswerHistory";
 import { ThreadCommandOutput, useCommandOutputStreaming } from "./thread-command-output";
+import { FileChangeInlineDiff } from "./FileChangeInlineDiff";
 import {
   getQuestionAnswerPreview,
   hasQuestionAnswer,
@@ -983,8 +984,13 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
     call && shownItem.type === "command_execution" && shownItem.exitCode
       ? shownItem.exitCode
       : null;
+  // A failed edit keeps its text detail: its diffStr holds the provider's error.
+  const inlineDiff =
+    expanded &&
+    row.projectedItem.item.type === "file_change" &&
+    row.projectedItem.item.status !== "failed";
   const fullDetail =
-    expanded && !reasoning && !call
+    expanded && !reasoning && !call && !inlineDiff
       ? fetchedItem && !isRead
         ? formatItemFullDetail(row.projectedItem, fetchedItem)
         : row.getFullDetail()
@@ -1175,6 +1181,7 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
 
       {expanded &&
       (reasoning ||
+        inlineDiff ||
         fullDetail ||
         call ||
         fetchedOutput ||
@@ -1197,6 +1204,9 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
             <View className="pb-1.5">
               {props.renderImage({ href: viewedImagePath, alt: null, title: null })}
             </View>
+          ) : null}
+          {inlineDiff ? (
+            <FileChangeInlineDiff environmentId={props.environmentId} row={row.projectedItem} />
           ) : null}
           <FilePreviewGallery
             value={outputImages.map((resource) => ({
