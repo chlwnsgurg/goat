@@ -5,99 +5,141 @@ import type * as Socket from "effect/socket/Socket";
 import { gateClientFrame, refuseProxiedCall } from "./frames.ts";
 
 /**
- * Effect's socket writer hands frames to ws without waiting for them to leave, so a stalled peer
- * would make the hub queue replies without bound. Each pump waits for its sink's TCP buffer to fall
- * below this mark before pulling more, which also leaves the source unread so its reader pauses.
+ * A ws socket can hold sent frames in its compression queue as well as its TCP buffer, and
+ * Effect's writer returns before either drains, so a stalled peer would let the hub queue relay
+ * frames without bound. Each pump sends through ws with a completion callback and pulls again only
+ * once every frame it sent has reached the socket; past this many queued bytes the relay ends.
  */
-export const RELAY_HIGH_WATER_BYTES = 1024 * 1024;
-/** A single pull can overshoot the mark; past this the peer is not reading and the relay ends. */
 export const RELAY_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 
-/** The bytes a socket has accepted but not yet sent, and when that falls back below the mark. */
-export interface OutboundBuffer {
-  readonly length: () => number;
-  readonly drained: Effect.Effect<void>;
+/** The parts of a ws WebSocket the relay uses; `bufferedAmount` includes the compression queue. */
+export interface RelayWebSocket {
+  readonly bufferedAmount: number;
+  send(data: string | Uint8Array, callback: (error?: Error) => void): void;
+  once(event: "close", listener: () => void): unknown;
+  off(event: "close", listener: () => void): unknown;
 }
-
-interface WritableSocket {
-  readonly writableLength: number;
-  once(event: "drain" | "close", listener: () => void): unknown;
-  off(event: "drain" | "close", listener: () => void): unknown;
-}
-
-const isWritableSocket = (value: unknown): value is WritableSocket =>
-  typeof value === "object" &&
-  value !== null &&
-  typeof (value as { writableLength?: unknown }).writableLength === "number" &&
-  typeof (value as { once?: unknown }).once === "function";
-
-export const outboundBuffer = (socket: unknown): OutboundBuffer | undefined => {
-  if (!isWritableSocket(socket)) return undefined;
-  return {
-    length: () => socket.writableLength,
-    drained: Effect.callback<void>((resume) => {
-      if (socket.writableLength <= RELAY_HIGH_WATER_BYTES) return resume(Effect.void);
-      const done = () => {
-        socket.off("drain", done);
-        socket.off("close", done);
-        resume(Effect.void);
-      };
-      socket.once("drain", done);
-      socket.once("close", done);
-      return Effect.sync(() => {
-        socket.off("drain", done);
-        socket.off("close", done);
-      });
-    }),
-  };
-};
 
 export class RelayOverflowError extends Error {
   override readonly name = "RelayOverflowError";
 }
 
-const withinLimit = (buffers: ReadonlyArray<OutboundBuffer>) =>
-  buffers.some((buffer) => buffer.length() > RELAY_MAX_BUFFERED_BYTES)
+export class RelaySendError extends Error {
+  override readonly name = "RelaySendError";
+}
+
+/** Where a pump writes: sends complete only once ws has handed them to the socket. */
+export interface RelaySink {
+  readonly write: (frame: string | Uint8Array) => Effect.Effect<void, RelaySendError>;
+  /** Waits until every frame written so far has been sent, or the socket closed. */
+  readonly sent: Effect.Effect<void>;
+  readonly queuedBytes: () => number;
+}
+
+export const relaySink = (ws: RelayWebSocket): RelaySink => {
+  let pending = 0;
+  let closed = false;
+  let failure: Error | undefined;
+  const waiters = new Set<() => void>();
+  const wake = () => {
+    for (const waiter of waiters) waiter();
+  };
+  const onClose = () => {
+    closed = true;
+    wake();
+  };
+  ws.once("close", onClose);
+  const settled = () => pending === 0 || closed;
+  return {
+    write: (frame) =>
+      Effect.suspend(() => {
+        if (failure !== undefined) return Effect.fail(new RelaySendError(failure.message));
+        if (closed) return Effect.fail(new RelaySendError("The relay socket closed."));
+        pending += 1;
+        try {
+          ws.send(frame, (error) => {
+            pending -= 1;
+            if (error !== undefined && error !== null) failure ??= error;
+            wake();
+          });
+        } catch (cause) {
+          pending -= 1;
+          return Effect.fail(new RelaySendError(String(cause)));
+        }
+        return Effect.void;
+      }),
+    sent: Effect.callback<void>((resume) => {
+      if (settled()) return resume(Effect.void);
+      const done = () => {
+        if (!settled()) return;
+        waiters.delete(done);
+        resume(Effect.void);
+      };
+      waiters.add(done);
+      return Effect.sync(() => {
+        waiters.delete(done);
+      });
+    }),
+    queuedBytes: () => ws.bufferedAmount,
+  };
+};
+
+/**
+ * The accepted client socket stays inside Effect's platform server; ws records itself on the TCP
+ * socket it upgraded under a symbol named "websocket", which is the only way back to it.
+ */
+export const webSocketOfTransport = (transport: unknown): RelayWebSocket | undefined => {
+  if (typeof transport !== "object" || transport === null) return undefined;
+  const key = Object.getOwnPropertySymbols(transport).find(
+    (symbol) => symbol.description === "websocket",
+  );
+  const ws = key === undefined ? undefined : (transport as Record<symbol, unknown>)[key];
+  return isRelayWebSocket(ws) ? ws : undefined;
+};
+
+export const isRelayWebSocket = (value: unknown): value is RelayWebSocket =>
+  typeof value === "object" &&
+  value !== null &&
+  typeof (value as { bufferedAmount?: unknown }).bufferedAmount === "number" &&
+  typeof (value as { send?: unknown }).send === "function" &&
+  typeof (value as { once?: unknown }).once === "function";
+
+const withinLimit = (sinks: ReadonlyArray<RelaySink>) =>
+  sinks.some((sink) => sink.queuedBytes() > RELAY_MAX_BUFFERED_BYTES)
     ? Effect.fail(new RelayOverflowError("A relay peer stopped reading."))
     : Effect.void;
 
-const drained = (buffers: ReadonlyArray<OutboundBuffer>) =>
-  Effect.forEach(buffers, (buffer) => buffer.drained, { discard: true });
+const allSent = (sinks: ReadonlyArray<RelaySink>) =>
+  Effect.forEach(sinks, (sink) => sink.sent, { discard: true });
 
 /** Node to client, unchanged. */
-export const pumpFrames = (
-  source: Socket.Reader,
-  sink: Socket.Writer,
-  sinkBuffer: OutboundBuffer,
-) =>
+export const pumpFrames = (source: Socket.Reader, sink: RelaySink) =>
   Effect.gen(function* () {
     while (true) {
-      yield* drained([sinkBuffer]);
-      yield* sink.writeAll(yield* source.pull);
-      yield* withinLimit([sinkBuffer]);
+      yield* allSent([sink]);
+      for (const frame of yield* source.pull) yield* sink.write(frame);
+      yield* withinLimit([sink]);
     }
   });
 
 /** Client to node: every message is judged; refusals are answered here and never sent on. */
 export const pumpGated = (
   source: Socket.Reader,
-  upstreamSink: Socket.Writer,
-  upstreamBuffer: OutboundBuffer,
-  clientSink: Socket.Writer,
-  clientBuffer: OutboundBuffer,
+  upstream: RelaySink,
+  client: RelaySink,
   scopes: ReadonlyArray<AuthEnvironmentScope>,
 ) =>
   Effect.gen(function* () {
     const admit = (method: string, payload: unknown) => refuseProxiedCall(scopes, method, payload);
-    const buffers = [upstreamBuffer, clientBuffer];
+    // Refusals go to the client, so a client that sends but never reads stalls here too.
+    const sinks = [upstream, client];
     while (true) {
-      // Refusals are written to the client, so a client that sends but never reads stalls here too.
-      yield* drained(buffers);
+      yield* allSent(sinks);
       for (const frame of yield* source.pull) {
         const gated = gateClientFrame(frame, admit);
-        for (const reply of gated.replies) yield* clientSink.write(reply);
-        if (gated.forward !== undefined) yield* upstreamSink.write(gated.forward);
+        for (const reply of gated.replies) yield* client.write(reply);
+        if (gated.forward !== undefined) yield* upstream.write(gated.forward);
       }
-      yield* withinLimit(buffers);
+      yield* withinLimit(sinks);
     }
   });
