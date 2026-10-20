@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { EnvironmentId, type GoatBotHomeClaim } from "@goat/contracts";
 import { act, StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";

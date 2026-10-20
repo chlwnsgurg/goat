@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { EnvironmentId, ThreadId } from "@goat/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
