@@ -738,8 +738,10 @@ const SshReplacementRecord = Schema.Struct({
   at: Schema.String,
 });
 const SshReplacementRecordJson = Schema.fromJsonString(SshReplacementRecord);
+const decodeSshReplacementRecord = Schema.decodeUnknownOption(SshReplacementRecordJson);
+const encodeSshReplacementRecord = Schema.encodeSync(SshReplacementRecordJson);
 export const readSshReplacementRecord = (text: string) =>
-  Option.getOrUndefined(Schema.decodeUnknownOption(SshReplacementRecordJson)(text.trim()));
+  Option.getOrUndefined(decodeSshReplacementRecord(text.trim()));
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -863,7 +865,7 @@ export const superviseSshRuntimeReplacement = async (
     try {
       writeAtomically(
         NodePath.join(input.stateDir, SSH_REPLACEMENT_RECORD_FILE),
-        Schema.encodeSync(SshReplacementRecordJson)({
+        encodeSshReplacementRecord({
           status: result.status,
           targetVersion: input.targetVersion,
           previousVersion: input.previousVersion,

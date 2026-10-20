@@ -103,8 +103,8 @@ const makeHarness = Effect.fn("test.ssh_runtime_auto_update.harness")(function* 
     moveAside: (dir) =>
       Effect.sync(() => {
         const aside = dir + ".aside";
-        for (const [file, text] of [...files]) {
-          if (!file.startsWith(dir + "/")) continue;
+        const moved = Array.from(files).filter(([file]) => file.startsWith(dir + "/"));
+        for (const [file, text] of moved) {
           files.delete(file);
           files.set(aside + file.slice(dir.length), text);
         }
@@ -113,7 +113,8 @@ const makeHarness = Effect.fn("test.ssh_runtime_auto_update.harness")(function* 
       }),
     remove: (dir) =>
       Effect.sync(() => {
-        for (const file of [...files.keys()]) if (file.startsWith(dir + "/")) files.delete(file);
+        for (const file of Array.from(files.keys()))
+          if (file.startsWith(dir + "/")) files.delete(file);
       }),
   });
   const config = yield* ServerConfig.ServerConfig.pipe(

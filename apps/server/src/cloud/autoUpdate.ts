@@ -82,11 +82,12 @@ export const make = Effect.fn("server.auto_update.make")(function* (options?: {
     activate: (targetVersion) =>
       selfUpdate.update({ targetVersion }, undefined, undefined, { kind: "auto-update" }).pipe(
         Effect.as("requested" as const),
-        Effect.catchTag("ServerSelfUpdateError", (error) =>
-          error.reason === ServerSelfUpdate.SERVER_UPDATE_BUSY_REASON
-            ? Effect.succeed("busy" as const)
-            : Effect.fail(error),
-        ),
+        Effect.catchTags({
+          ServerSelfUpdateError: (error) =>
+            error.reason === ServerSelfUpdate.SERVER_UPDATE_BUSY_REASON
+              ? Effect.succeed("busy" as const)
+              : Effect.fail(error),
+        }),
       ),
     settle: Effect.void,
   };
@@ -191,18 +192,17 @@ export const make = Effect.fn("server.auto_update.make")(function* (options?: {
           return yield* skipped("update-in-flight", pending);
         }
         const targetVersion = pending;
-        const outcome = yield* activation
-          .activate(targetVersion)
-          .pipe(
-            Effect.catchTag("ServerSelfUpdateError", (error) =>
+        const outcome = yield* activation.activate(targetVersion).pipe(
+          Effect.catchTags({
+            ServerSelfUpdateError: (error) =>
               drop.pipe(
                 Effect.andThen(
                   Effect.logWarning("server.auto_update.failed", { stage: "activation", error }),
                 ),
                 Effect.as("failed" as const),
               ),
-            ),
-          );
+          }),
+        );
         if (outcome === "busy") {
           nextActivation = (yield* Clock.currentTimeMillis) + ACTIVATION_INTERVAL;
           return yield* Effect.logInfo("server.auto_update.deferred-busy", { targetVersion });

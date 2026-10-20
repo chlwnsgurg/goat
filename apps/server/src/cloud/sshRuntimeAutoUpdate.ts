@@ -20,6 +20,7 @@ import {
   type PreparedRemoteRuntime,
   type RemoteGoatRunnerOptions,
 } from "@goat/ssh/tunnel";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -242,8 +243,7 @@ const lastLine = (stdout: string) =>
   stdout
     .split(/\r?\n/u)
     .map((line) => line.trim())
-    .filter((line) => line !== "")
-    .at(-1) ?? "";
+    .findLast((line) => line !== "") ?? "";
 
 export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (options?: {
   readonly ownVersion?: string;
@@ -269,7 +269,7 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
   // supervisor needs a native detached spawn this POSIX path does not provide.
   const supported =
     config.mode !== "desktop" &&
-    (options?.platform ?? process.platform) !== "win32" &&
+    (options?.platform ?? (yield* HostProcess.Platform)) !== "win32" &&
     NodePath.resolve(config.baseDir) === NodePath.resolve(defaultHome);
   const inFlight = yield* Ref.make(false);
   const pending = yield* Ref.make<string | undefined>(undefined);
