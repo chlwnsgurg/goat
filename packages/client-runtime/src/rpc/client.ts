@@ -242,6 +242,20 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
           : {}),
       } as EnvironmentRpcInput<TTag>;
     }
+    if (
+      tag === WS_METHODS.memoryImportProvider &&
+      (input as { action?: string }).action === "preview"
+    ) {
+      const { includeTurnStartFit: _hint, ...legacyInput } = input as {
+        readonly includeTurnStartFit?: true;
+      };
+      dispatchInput = {
+        ...legacyInput,
+        ...(config.environment.capabilities.memory?.importTurnStartFit === true
+          ? { includeTurnStartFit: true as const }
+          : {}),
+      } as EnvironmentRpcInput<TTag>;
+    }
     if (tag === WS_METHODS.memoryHistory) {
       dispatchInput = memoryHistoryDispatchInput(
         input as MemoryHistoryInput,

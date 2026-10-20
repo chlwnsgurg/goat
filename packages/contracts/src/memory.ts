@@ -2039,6 +2039,8 @@ export const MemoryImportPreviewItem = struct({
   issue: Schema.optionalKey(MemoryImportIssue),
   memoryId: Schema.optionalKey(MemoryId),
   revisionId: Schema.optionalKey(MemoryRevisionId),
+  /** Imports normally but never fits the turn-start memory frame. Only sent when requested. */
+  tooLargeForTurnStart: Schema.optionalKey(Schema.Literal(true)),
 }).check(
   Schema.makeFilter(
     (v) =>
@@ -2090,7 +2092,13 @@ const importSelector = struct({
 export const MemoryImportProviderInput = bounded(
   Schema.Union([
     struct({ ...space, action: Schema.Literal("discover"), format: MemoryImportFormat }),
-    struct({ ...space, action: Schema.Literal("preview"), sourceId: MemoryImportSourceId }),
+    struct({
+      ...space,
+      action: Schema.Literal("preview"),
+      sourceId: MemoryImportSourceId,
+      /** Older clients decode preview items strictly, so the server adds the field only on request. */
+      includeTurnStartFit: Schema.optionalKey(Schema.Literal(true)),
+    }),
     struct({
       ...space,
       action: Schema.Literal("apply"),

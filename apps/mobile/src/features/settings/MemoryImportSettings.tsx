@@ -279,6 +279,9 @@ export function MemoryImportSettings({
                   ? `Memory ${index + 1} unavailable`
                   : (item.title ?? `Memory ${index + 1}`)
               }
+              {...(item.tooLargeForTurnStart
+                ? { subtitle: "Stored, but too large to add to new turns automatically" }
+                : {})}
               value={selected.has(item.sourceItemKey)}
               disabled={!writable || !selecting || !!item.issue || !item.sourceFingerprint}
               onValueChange={(value) =>

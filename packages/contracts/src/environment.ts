@@ -94,6 +94,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       protocolVersion: Schema.Int,
       hub: Schema.optionalKey(Schema.Boolean),
       importProvider: Schema.optionalKey(Schema.Boolean),
+      /** Import preview can flag items too large for the turn-start frame; absent on older servers. */
+      importTurnStartFit: Schema.optionalKey(Schema.Boolean),
       refusedReverts: Schema.optionalKey(Schema.Boolean),
       resolutionInputs: Schema.optionalKey(Schema.Boolean),
       retainedLocalSpace: Schema.optionalKey(Schema.Boolean),
