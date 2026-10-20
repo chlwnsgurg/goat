@@ -141,6 +141,17 @@ export const layer = Layer.effect(
                 ),
               ),
             ),
+          onDatabaseAhead: () =>
+            Ref.set(ownershipRefusedRef, Option.some(targetId)).pipe(
+              Effect.andThen(
+                Ref.set(
+                  preflightErrorRef,
+                  Option.some(
+                    "A newer GOAT version upgraded this distro's database, so this version cannot open it. Install the latest GOAT to keep using it.",
+                  ),
+                ),
+              ),
+            ),
           onReady: () =>
             Ref.set(ownershipRefusedRef, Option.none()).pipe(
               Effect.andThen(Ref.set(preflightErrorRef, Option.none())),
