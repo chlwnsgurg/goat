@@ -15,6 +15,8 @@ const MAX_DETAIL_STRING_BYTES = 32_768;
 const MAX_DYNAMIC_VALUE_BYTES = 16_384;
 const MAX_ON_DEMAND_BYTES = 256 * 1024;
 
+type FileChangeItem = Extract<OrchestrationV2TurnItem, { type: "file_change" }>;
+
 function truncateDetail(
   value: string | undefined,
   maxBytes = MAX_DETAIL_STRING_BYTES,
@@ -41,14 +43,22 @@ function truncateDetail(
  */
 export function boundFileChangeForStorage(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
   if (item.type !== "file_change") return item;
-  const { diffStr, oldStr, newStr } = item;
+  const { diffStr, oldStr, newStr, patch } = item;
+  // A cut patch cannot be parsed, so a larger edit falls back to the checkpoint diff.
+  const patchTooLarge =
+    patch !== undefined &&
+    (patch.length > MAX_ON_DEMAND_BYTES || Buffer.byteLength(patch, "utf8") > MAX_ON_DEMAND_BYTES);
   const bounded = {
     ...item,
     ...(diffStr === undefined ? {} : { diffStr: truncateDetail(diffStr) }),
     ...(oldStr === undefined ? {} : { oldStr: truncateDetail(oldStr) }),
     ...(newStr === undefined ? {} : { newStr: truncateDetail(newStr) }),
   };
-  return bounded.diffStr === diffStr && bounded.oldStr === oldStr && bounded.newStr === newStr
+  if (patchTooLarge) delete bounded.patch;
+  return !patchTooLarge &&
+    bounded.diffStr === diffStr &&
+    bounded.oldStr === oldStr &&
+    bounded.newStr === newStr
     ? item
     : bounded;
 }
@@ -111,10 +121,7 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
       };
     }
     case "file_change": {
-      const { diffStr, oldStr: _old, newStr: _new, ...projected } = item;
-      return item.status === "failed" && diffStr?.trim()
-        ? { ...projected, diffStr: truncateDetail(diffStr) }
-        : projected;
+      return projectFileChangeForWire(item);
     }
     case "subagent":
       return {
@@ -136,6 +143,18 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
     default:
       return item;
   }
+}
+
+/**
+ * The patch stays behind a flag so a transcript frame stays small; a client fetches it with
+ * getTurnItem when the row opens. A failed edit's diffStr holds the provider's error.
+ */
+function projectFileChangeForWire(item: FileChangeItem): FileChangeItem {
+  const { diffStr, oldStr: _old, newStr: _new, patch, patchOmitted, ...projected } = item;
+  if (item.status === "failed") {
+    return diffStr?.trim() ? { ...projected, diffStr: truncateDetail(diffStr) } : projected;
+  }
+  return patch?.trim() || patchOmitted === true ? { ...projected, patchOmitted: true } : projected;
 }
 
 function hasDynamicValue(value: unknown): boolean {
@@ -199,8 +218,13 @@ export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): Orchest
           item.result === null ? null : (truncateDetail(item.result, MAX_ON_DEMAND_BYTES) ?? null),
       };
     case "handoff":
-    case "file_change":
       return projectTurnItemForWire(item);
+    case "file_change": {
+      const { patchOmitted: _omitted, ...projected } = projectFileChangeForWire(item);
+      return item.status === "failed" || !item.patch?.trim()
+        ? projected
+        : { ...projected, patch: item.patch };
+    }
     default:
       return item;
   }

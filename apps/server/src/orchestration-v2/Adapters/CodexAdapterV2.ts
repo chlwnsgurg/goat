@@ -164,6 +164,7 @@ import {
 import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import { codexFileChangeLineCounts } from "../fileChangeLineCounts.ts";
+import { codexFileChangePatch } from "../fileChangePatch.ts";
 
 const decodeRouteCatalogArg = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.String));
 const CODEX_PROVIDER = ProviderDriverKind.make("codex");
@@ -3928,6 +3929,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const status = codexItemStatus(item.status);
             const completedAt = status.completed ? updatedAt : null;
             const lineCounts = codexFileChangeLineCounts(item.changes);
+            const patch = codexFileChangePatch(item.changes);
             const nodeId = idAllocator.derive.nodeFromProviderItem({
               driver: CODEX_PROVIDER,
               nativeItemId: item.id,
@@ -3972,6 +3974,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               type: "file_change",
               fileName: firstChange.path,
               diffStr: firstChange.diff,
+              ...(patch === undefined ? {} : { patch }),
               ...lineCounts,
               // One apply_patch can touch several files; keep each so the row
               // names them all and its counts match what it lists.

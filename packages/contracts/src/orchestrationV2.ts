@@ -1649,6 +1649,10 @@ export const OrchestrationV2TurnItem = Schema.Union([
     diffStr: Schema.optional(Schema.String),
     oldStr: Schema.optional(Schema.String),
     newStr: Schema.optional(Schema.String),
+    /** This edit alone as a git-style patch, from adapters that know it. Fetch it with getTurnItem. */
+    patch: Schema.optional(Schema.String),
+    /** Set on the wire when patch was withheld. */
+    patchOmitted: Schema.optional(Schema.Boolean),
     changes: Schema.optional(Schema.Array(OrchestrationV2FileChangeDetail)),
   }),
   Schema.Struct({
@@ -2421,6 +2425,10 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     diffStr: Schema.optional(Schema.String),
     oldStr: Schema.optional(Schema.String),
     newStr: Schema.optional(Schema.String),
+    /** This edit alone as a git-style patch, from adapters that know it. Fetch it with getTurnItem. */
+    patch: Schema.optional(Schema.String),
+    /** Set on the wire when patch was withheld. */
+    patchOmitted: Schema.optional(Schema.Boolean),
     changes: Schema.optional(Schema.Array(OrchestrationV2FileChangeDetail)),
   }),
   Schema.Struct({
