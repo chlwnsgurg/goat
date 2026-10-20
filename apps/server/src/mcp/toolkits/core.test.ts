@@ -112,29 +112,22 @@ import { htmlRenderFromToolItem } from "@goat/shared/toolOutput";
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 
-// The shared stack provides ProviderRegistry itself, so a test that needs real
-// providers passes its own instead of layering one outside, which would lose.
-const layerThreadToolkitWith = (providerRegistry: Layer.Layer<ProviderRegistry.ProviderRegistry>) =>
-  McpHttpServer.layerThreadToolkit.pipe(
-    Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
-    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
-    Layer.provide(ServerSettings.layerTest()),
-    Layer.provide(Layer.mock(ThreadResultService.ThreadResultService)({})),
-    Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
-    Layer.provide(Layer.mock(LaunchWatchService.LaunchWatchService)({})),
-    Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
-    Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
-    Layer.provide(
-      Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({ connectedHosts: Effect.succeed([]) }),
-    ),
-    Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
-    Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
-    Layer.provide(providerRegistry),
-    Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
-  );
-
-const layerThreadToolkit = layerThreadToolkitWith(
-  Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
+  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(ServerSettings.layerTest()),
+  Layer.provide(Layer.mock(ThreadResultService.ThreadResultService)({})),
+  Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+  Layer.provide(Layer.mock(LaunchWatchService.LaunchWatchService)({})),
+  Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+  Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+  Layer.provide(
+    Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({ connectedHosts: Effect.succeed([]) }),
+  ),
+  Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+  Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+  Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+  Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
 );
 
 it("publishes unique tool names with reference-free object-root inputs", () => {
@@ -666,22 +659,7 @@ it.effect("records the calling agent and the agent a tool acted on", () => {
     });
   }).pipe(
     Effect.provide(
-      layerThreadToolkitWith(
-        Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getProviders: Effect.succeed([
-            {
-              instanceId: ProviderInstanceId.make("codex"),
-              driver: "codex",
-              models: [{ slug: "gpt-5.5", isCustom: false }],
-            } as never,
-            {
-              instanceId: ProviderInstanceId.make("claudeAgent"),
-              driver: "claudeAgent",
-              models: [{ slug: "claude-opus-5-5", isCustom: false }],
-            } as never,
-          ]),
-        }),
-      ).pipe(
+      layerThreadToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
@@ -696,6 +674,22 @@ it.effect("records the calling agent and the agent a tool acted on", () => {
             getProjectThreadRecords: () =>
               Effect.succeed({ thread: shell(threadId, "codex", "gpt-5.5") } as never),
             dispatch: () => Effect.succeed({ sequence: 1 } as never),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([
+              {
+                instanceId: ProviderInstanceId.make("codex"),
+                driver: "codex",
+                models: [{ slug: "gpt-5.5", isCustom: false }],
+              } as never,
+              {
+                instanceId: ProviderInstanceId.make("claudeAgent"),
+                driver: "claudeAgent",
+                models: [{ slug: "claude-opus-5-5", isCustom: false }],
+              } as never,
+            ]),
           }),
         ),
         Layer.provide(
