@@ -1,6 +1,7 @@
 # Agentic Kubernetes: goals, controller, self-healing, resources, fallback
 
-Status: proposal. Nothing below is implemented unless a paragraph is marked **Now**.
+Status: proposal, with T1 (goals and the controller) implemented as its **Now** paragraph says.
+Nothing else below is implemented unless a paragraph is marked **Now**.
 
 **Now** describes `dev` at `876c09947` with source paths. **Proposed** is design that
 does not exist yet. Unlabeled text inside a Proposed section is also proposal.
@@ -313,6 +314,39 @@ Remote thread status has no failure class today: `OrchestratorMcpThreadStatusRes
 that predates them reports `unknown`, which the decision table treats as "reschedule, no fallback".
 New status fields are decoded with defaults so a newer parent still reads an older host; the
 existing fallback in `HostThreadsMcpService.ts` only covers a missing tool.
+
+**Now (T1).** Goals, the controller and the goal tools exist on `dev`, behind
+`fleet.controllerEnabled` (default off). The pieces follow the Proposed text above, with these
+differences a maintainer would otherwise trip on:
+
+- Code: contract in `packages/contracts/src/fleetGoal.ts`; `plan()` is `planGoal` in
+  `apps/server/src/fleet/goals/goalPlan.ts`; claims, CAS and the four tables are in
+  `GoalStore.ts` (migration 085); `GoalController.ts` is the Scheduler source; every touch on a
+  thread goes through `GoalWorkerRuntime.ts`. The four tags live where the interface section says,
+  with the local-only defaults in `apps/server/src/fleet/defaults.ts`.
+- Workers are observed by reading thread status on each pass. The `controller` watch kind and
+  `LaunchWatchService.snapshot` are not built: local workers are launched without a watch, and
+  launch-watch reports do not move `nextReconcileAt` yet, so the 60 s cadence is the only trigger.
+- An unconfirmed local launch is found by the action id at the end of the worker's title among the
+  project's threads, which exist before any watch. A rescheduled attempt is claimed under
+  `goal:<id>:s<slot>:a<attempt>:<runId>:reschedule`, one per failed or stalled run.
+- Local follow-ups, model switches and interrupts dispatch `message.dispatch` / `run.interrupt`
+  directly with the action id as `commandId`, after checking the worker's modes against the
+  goal's authority and under `DispatchModeLimit`, because `goat_thread_send` refuses an owner
+  whose turn has ended. Remote follow-ups still go through `goat_thread_send` and need a live
+  owner (#494).
+- PR state comes from `PullRequestService.checks` for the goal's repo, not thread PR links.
+- Goal-owned threads are not yet excluded from `UsageLimitRecoveryWorker` auto-resume; that filter
+  is the resources work's 3b slice. Until then, with `autoResumeLimitedThreads` on, a limited goal
+  worker resumes after its reset even if the goal is paused or out of budget.
+- An attempt replaced after `LAUNCH_GRACE_MS` is not kept as its own record, so a late thread from
+  it is not found or interrupted by the goal. Fencing of stale attempts arrives with self-healing.
+- Owner authority is re-read right before each action, but not inside the claim transaction, so a
+  mode change in that short window is honoured from the next action on.
+- `limits.maxTokens` is refused unless null; nothing counts tokens yet.
+- Only thread owners are accepted; `owner.kind: "mcp_client"` is in the contract but refused
+  (#493). Owners in plan mode are refused because the remote and dispatch paths carry no plan
+  ceiling.
 
 ## Self-healing
 

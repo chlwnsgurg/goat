@@ -1,0 +1,43 @@
+import * as Effect from "effect/Effect";
+
+import * as GoalService from "../../../fleet/goals/GoalService.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
+import { FleetToolkit } from "./tools.ts";
+
+const withGoals = <A, E>(
+  use: (
+    goals: GoalService.GoalService["Service"],
+    scope: McpInvocationContext.McpInvocationScope,
+  ) => Effect.Effect<A, E>,
+) =>
+  Effect.gen(function* () {
+    const goals = yield* GoalService.GoalService;
+    const scope = yield* McpInvocationContext.McpInvocationContext;
+    return yield* use(goals, scope);
+  });
+
+export const layer = McpToolAccess.toLayer(FleetToolkit, {
+  goat_goal_apply: McpToolAccess.writes((input) =>
+    withGoals((goals, scope) => goals.apply(scope, input)),
+  ),
+  goat_goal_get: McpToolAccess.readsAsCaller(({ id }) =>
+    withGoals((goals, scope) => goals.get(scope, id)),
+  ),
+  goat_goal_list: McpToolAccess.readsAsCaller((input) =>
+    withGoals((goals, scope) => goals.list(scope, input)),
+  ),
+  goat_goal_pause: McpToolAccess.writes(({ id }) =>
+    withGoals((goals, scope) => goals.setPaused(scope, id, true)).pipe(
+      Effect.map((goal) => ({ goal })),
+    ),
+  ),
+  goat_goal_resume: McpToolAccess.writes(({ id }) =>
+    withGoals((goals, scope) => goals.setPaused(scope, id, false)).pipe(
+      Effect.map((goal) => ({ goal })),
+    ),
+  ),
+  goat_goal_delete: McpToolAccess.destructive(
+    McpToolAccess.writes((input) => withGoals((goals, scope) => goals.remove(scope, input))),
+  ),
+});
