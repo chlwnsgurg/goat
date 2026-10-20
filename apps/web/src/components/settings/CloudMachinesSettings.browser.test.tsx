@@ -1,14 +1,10 @@
-// @vitest-environment jsdom
 import { it } from "@effect/vitest";
 import { RegistryContext } from "@effect/atom-react";
 import {
   EnvironmentId,
-  ThreadId,
+  type CloudMachine,
   type DesktopSshPreparationProgress,
-  type RemoteLaunch,
 } from "@goat/contracts";
-import { actEffect, makeSshProvisionGate } from "./sshPreparation.test-support";
-import type { ConnectionOnboarding } from "@goat/client-runtime/connection";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -16,55 +12,49 @@ import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, vi } from "vite-plus/test";
+import { actEffect, makeSshProvisionGate } from "./sshPreparation.test-support";
+import type { ConnectionOnboarding } from "@goat/client-runtime/connection";
 
 const state = vi.hoisted(() => ({
   connect: vi.fn(),
+  resume: vi.fn(),
   toast: vi.fn(),
-  presentations: null as unknown as Atom.Writable<
-    ReadonlyMap<EnvironmentId, { connection: { phase: string } }>
-  >,
-  launches: null as unknown as Atom.Writable<unknown>,
+  machines: null as unknown as Atom.Writable<unknown>,
 }));
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: (command: unknown) => command }));
 vi.mock("../../connection/onboarding", () => ({ connectSshEnvironment: state.connect }));
-vi.mock("../../state/entities", () => ({ useThreadShells: () => [] }));
-vi.mock("../../state/environments", () => ({
-  useEnvironments: () => ({
-    environments: [
-      {
-        environmentId: "dispatcher",
-        label: "Fixture dispatcher",
-        connection: { phase: "connected" },
-        serverConfig: null,
-      },
-    ],
-  }),
+vi.mock("../../state/session", async (original) => ({
+  ...(await original<typeof import("../../state/session")>()),
+  useEnvironmentScope: () => true,
 }));
-vi.mock("../../state/presentation", () => ({
-  environmentPresentations: {
-    get presentationsAtom() {
-      return state.presentations;
-    },
+vi.mock("../../state/server", async (original) => ({
+  ...(await original<typeof import("../../state/server")>()),
+  serverEnvironment: {
+    cloudMachines: () => state.machines,
+    resumeCloudMachine: state.resume,
+    stopCloudMachine: vi.fn(),
+    deleteCloudMachine: vi.fn(),
+    forgetCloudMachine: vi.fn(),
+    configureCloudMachines: vi.fn(),
+    createCloudMachine: vi.fn(),
+    disconnectCloudMachines: vi.fn(),
   },
 }));
-vi.mock("../../state/server", () => ({
-  serverEnvironment: { remoteLaunches: () => state.launches },
-}));
 vi.mock("../ui/toast", () => ({ toastManager: { add: state.toast } }));
-import { RemoteLaunchesSettings } from "./RemoteLaunchesSettings";
+import { CloudMachinesSettings } from "./CloudMachinesSettings";
 
-const dispatcher = EnvironmentId.make("dispatcher");
-const launch: RemoteLaunch = {
-  host: "fixture-vps",
-  threadId: null,
-  title: "Fixture launch",
-  launcherThreadId: ThreadId.make("launcher"),
-  source: "watch",
+const environmentId = EnvironmentId.make("cloud-fixture");
+const machine: CloudMachine = {
+  alias: "fixture-vps",
+  sandboxId: "fixture-1",
+  label: "Fixture VPS",
+  provider: "boat",
+  type: "small",
+  ttlSeconds: 3600,
+  presence: "present",
   state: "running",
-  latest: null,
-  hostUnavailableSince: null,
-  updatedAt: "2026-10-20T00:00:00Z",
+  deletePending: false,
+  lastError: null,
 };
 const progress: DesktopSshPreparationProgress = {
   operationId: "fixture-op",
@@ -78,6 +68,7 @@ let container: HTMLDivElement;
 let mounted: boolean;
 let report: NonNullable<ConnectionOnboarding.SshConnectionInput["onPreparationProgress"]>;
 let gate: ReturnType<typeof makeSshProvisionGate>;
+
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal(
@@ -88,17 +79,25 @@ beforeEach(() => {
       disconnect() {}
     },
   );
-  Object.defineProperty(window, "desktopBridge", { configurable: true, value: {} });
   state.toast.mockReset();
+  state.resume.mockReset().mockResolvedValue({ _tag: "Success", value: undefined });
   gate = makeSshProvisionGate();
   state.connect.mockReset().mockImplementation(gate.command);
-  state.presentations = Atom.make<ReadonlyMap<EnvironmentId, { connection: { phase: string } }>>(
-    new Map([[dispatcher, { connection: { phase: "connected" } }]]),
-  );
-  state.launches = Atom.make<unknown>(
-    AsyncResult.success({ launches: [launch], truncated: false }),
-  );
+  Object.defineProperty(window, "desktopBridge", {
+    configurable: true,
+    value: {
+      resolveSshHost: async (alias: string) => ({
+        alias,
+        hostname: "example.invalid",
+        username: null,
+        port: null,
+      }),
+    },
+  });
   registry = AtomRegistry.make();
+  state.machines = Atom.make<unknown>(
+    AsyncResult.success({ configured: true, machines: [machine], unconfirmedCreates: 0 }),
+  );
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -118,12 +117,12 @@ function mountAndConnect() {
       await act(async () =>
         root.render(
           <RegistryContext value={registry}>
-            <RemoteLaunchesSettings />
+            <CloudMachinesSettings environmentId={environmentId} />
           </RegistryContext>,
         ),
       );
       const section = [...container.querySelectorAll("button")].find((node) =>
-        node.textContent?.includes("Remote launches"),
+        node.textContent?.includes("Cloud machines"),
       );
       if (!section) throw new Error("Missing section");
       await act(async () => section.click());
@@ -140,45 +139,47 @@ function mountAndConnect() {
     yield* actEffect(report(progress));
   });
 }
-it.effect("shows provision progress, clears terminal, and silently settles supersession", () =>
-  Effect.gen(function* () {
-    yield* mountAndConnect();
-    expect(container.textContent).toContain(
-      "Installing GOAT runtime — first setup can take a few minutes",
-    );
-    yield* actEffect(report({ ...progress, phase: null, outcome: "superseded" }));
-    expect(container.textContent).not.toContain("Installing GOAT");
-    yield* actEffect(
-      Deferred.succeed(gate.release, {
-        _tag: "Failure",
-        cause: Cause.fail(new Error("SSH preparation superseded by a newer connection intent.")),
-      }),
-    );
-    expect(state.toast).not.toHaveBeenCalled();
-    expect(
-      [...container.querySelectorAll("button")].find((node) => node.textContent === "Connect")
-        ?.disabled,
-    ).toBe(false);
-    yield* actEffect(report(progress));
-    expect(container.textContent).not.toContain("Installing GOAT");
-  }),
+it.effect(
+  "shows provision phases, clears terminal immediately, and drops neutral supersession without a toast",
+  () =>
+    Effect.gen(function* () {
+      yield* mountAndConnect();
+      expect(container.textContent).toContain(
+        "Installing GOAT runtime — first setup can take a few minutes",
+      );
+      yield* actEffect(report({ ...progress, phase: null, outcome: "superseded" }));
+      expect(container.textContent).not.toContain("Installing GOAT");
+      yield* actEffect(
+        Deferred.succeed(gate.release, {
+          _tag: "Failure",
+          cause: Cause.fail(new Error("SSH preparation superseded by a newer connection intent.")),
+        }),
+      );
+      expect(state.toast).not.toHaveBeenCalled();
+      expect(
+        [...container.querySelectorAll("button")].find((node) => node.textContent === "Connect")
+          ?.disabled,
+      ).toBe(false);
+      yield* actEffect(report(progress));
+      expect(container.textContent).not.toContain("Installing GOAT");
+    }),
 );
-it.effect("ignores reports from a replaced host and completion after unmount", () =>
+it.effect("fences a switched machine and all reports/completion after unmount", () =>
   Effect.gen(function* () {
     yield* mountAndConnect();
     yield* actEffect(
       Effect.sync(() =>
         registry.set(
-          state.launches,
+          state.machines,
           AsyncResult.success({
-            launches: [{ ...launch, host: "fixture-other" }],
-            truncated: false,
+            configured: true,
+            machines: [{ ...machine, alias: "fixture-other", label: "Other VPS" }],
           }),
         ),
       ),
     );
     yield* actEffect(report(progress));
-    expect(container.textContent).toContain("fixture-other");
+    expect(container.textContent).toContain("Other VPS");
     expect(container.textContent).not.toContain("Installing GOAT");
     yield* Effect.promise(() => act(async () => root.unmount()));
     mounted = false;

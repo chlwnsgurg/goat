@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { expect, it, vi } from "vite-plus/test";
 import { Atom, AtomRegistry, AsyncResult } from "effect/reactivity";
 import * as Option from "effect/Option";
