@@ -710,15 +710,17 @@ const make = Effect.gen(function* () {
             // Renewal failure interrupts the provider, including a hung one-shot execution.
             return yield* Effect.raceFirst(
               hold.guard(holdKey, model(input)).pipe(
-                // Only unusable output retires the attempt. A held model, a refusal or an unknown
-                // failure maps to "unavailable", which is transient, so the ticket is retried.
+                // A held model or a refusal that repeats retires this attempt without a failure
+                // report (generation_failed is definitive but unreported): its lease is released
+                // and the conflict is claimed again once the model is no longer held.
                 Effect.mapError(
                   (error) =>
                     new M.MemoryHubError({
                       code:
-                        error._tag !== "MemoryGenerationHeld" && Hold.outputFailure(error)
-                          ? "invalid_output"
-                          : "unavailable",
+                        error._tag === "MemoryGenerationHeld" ||
+                        Hold.deterministicFailure(error) !== undefined
+                          ? "generation_failed"
+                          : "invalid_output",
                     }),
                 ),
               ),
@@ -1056,6 +1058,13 @@ const make = Effect.gen(function* () {
         limit: 100,
       });
       for (const ticket of saved) yield* register(r, ticket);
+      // A held memory model would refuse at once; leave its conflicts unclaimed until it is due.
+      const memoryModel = memorySelection(yield* readSettings);
+      if (memoryModel !== null) {
+        const decoded = yield* decodeMemorySelection(memoryModel).pipe(Effect.option);
+        if (Option.isSome(decoded) && (yield* hold.isHeld(yield* hold.keyFor(decoded.value))))
+          return;
+      }
       const candidates = yield* store.readDueClaimCandidates(100, now, r.space);
       for (const work of candidates) {
         if (executions.size + reservations >= 4) break;

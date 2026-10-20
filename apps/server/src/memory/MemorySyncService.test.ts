@@ -181,7 +181,11 @@ const runtimeBase = Layer.effect(
   }),
 );
 
-const peer = (overrides: Partial<Client.MemoryHubClient["Service"]> = {}) => {
+const peer = (
+  overrides: Partial<Client.MemoryHubClient["Service"]> = {},
+  // The Hub ends a lease on release, so a released attempt can no longer renew.
+  { releaseEndsLease = false }: { releaseEndsLease?: boolean } = {},
+) => {
   const issued = new Map<string, M.MemoryResolutionLease>();
   const defaultClaim: Client.MemoryHubClient["Service"]["claim"] = (
     _c,
@@ -214,7 +218,11 @@ const peer = (overrides: Partial<Client.MemoryHubClient["Service"]> = {}) => {
           outcome: "accepted" as const,
         })),
       }),
-    release: () => Effect.succeed({ released: true }),
+    release: (_c, i) =>
+      Effect.sync(() => {
+        if (releaseEndsLease) issued.delete(i.attemptId);
+        return { released: true };
+      }),
     ...overrides,
     claim: (c, i) =>
       claim(c, i).pipe(
@@ -3881,7 +3889,6 @@ it.effect(
 const refusals = [
   {
     shape: "a typed runner refusal",
-    held: true,
     error: new M.TextGenerationError({
       operation: "resolveMemoryConflict",
       detail: "Grok did not disclose or support the selected memory model.",
@@ -3890,7 +3897,6 @@ const refusals = [
   },
   {
     shape: "a provider setup error under a generic detail",
-    held: true,
     error: new M.TextGenerationError({
       operation: "resolveMemoryConflict",
       detail: "Antigravity text generation failed.",
@@ -3901,20 +3907,13 @@ const refusals = [
       }),
     }),
   },
-  {
-    shape: "an unknown failure",
-    held: false,
-    error: new M.TextGenerationError({
-      operation: "resolveMemoryConflict",
-      detail: "Some provider failed.",
-    }),
-  },
 ];
 it.effect.each(refusals)(
-  "$shape keeps the conflict resumable instead of retiring it as invalid output",
-  ({ held, error }) =>
+  "$shape retires the attempt unreported and claims the conflict again once the model is due",
+  ({ error }) =>
     Effect.gen(function* () {
       let calls = 0;
+      let claims = 0;
       const model = realGeneration({
         resolveMemoryConflict: () =>
           Effect.suspend(() => {
@@ -3922,6 +3921,22 @@ it.effect.each(refusals)(
             return Effect.fail(error);
           }),
       });
+      const client = peer(
+        {
+          claim: (_c, { protocolVersion: _protocol, ...claim }) =>
+            Effect.sync(() => {
+              claims++;
+              return {
+                ...claim,
+                fencingToken: claims,
+                claimedAtHubTime: timestamp,
+                expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+                attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+              };
+            }),
+        },
+        { releaseEndsLease: true },
+      );
       yield* Effect.scoped(
         Effect.gen(function* () {
           yield* ready;
@@ -3933,27 +3948,23 @@ it.effect.each(refusals)(
             yield* sync.scheduleConflictResolution;
           });
           yield* attempt;
-          assert.strictEqual(calls, 1);
-          if (held) {
-            // Held: further sweeps before the probe make no provider call.
-            for (let n = 0; n < 5; n++) {
-              yield* TestClock.adjust("5 seconds");
-              yield* attempt;
-            }
-            assert.strictEqual(calls, 1);
+          assert.deepStrictEqual([calls, claims], [1, 1]);
+          // Held: sweeps before the probe neither call the provider nor claim at the Hub.
+          for (let n = 0; n < 5; n++) {
+            yield* TestClock.adjust("5 seconds");
+            yield* attempt;
           }
+          assert.deepStrictEqual([calls, claims], [1, 1]);
+          // A refusal is not a failed resolution.
           assert.isFalse(
-            (yield* store.pendingReports(100)).some(
-              (report) => report.outcome === "failed" && report.failureCode === "invalid_output",
-            ),
+            (yield* store.pendingReports(100)).some((report) => report.outcome === "failed"),
           );
-          // The ticket is still there: the next due attempt calls the provider again.
+          // Once the hold is due the conflict is claimed afresh, with a new lease.
           yield* TestClock.adjust("1 minute");
           yield* attempt;
-          assert.isAbove(calls, 1);
-          if (held) assert.strictEqual(calls, 2);
+          assert.deepStrictEqual([calls, claims], [2, 2]);
           yield* sync.shutdown;
-        }).pipe(Effect.provide(fixture(peer(), model).pipe(Layer.provideMerge(Hold.layer)))),
+        }).pipe(Effect.provide(fixture(client, model).pipe(Layer.provideMerge(Hold.layer)))),
       );
     }),
 );

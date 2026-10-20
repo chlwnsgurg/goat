@@ -134,24 +134,6 @@ describe("MemoryGenerationHold", () => {
     }),
   );
 
-  it("retires a conflict attempt only for output GOAT cannot use", () => {
-    const failed = (detail: string, cause?: unknown) =>
-      new M.TextGenerationError({ operation: "resolveMemoryConflict", detail, cause });
-    assert.isTrue(Hold.outputFailure(failed("Memory result is invalid.")));
-    assert.isTrue(Hold.outputFailure(failed("Codex returned invalid structured output.")));
-    assert.isTrue(
-      Hold.outputFailure(
-        failed("Claude failed.", new MemoryGenerationRunnerError({ code: "invalid_output" })),
-      ),
-    );
-    // Refusals and unknown failures leave the ticket resumable.
-    assert.isFalse(Hold.outputFailure(failed("Antigravity text generation failed.")));
-    assert.isFalse(Hold.outputFailure(rejected));
-    assert.isFalse(
-      Hold.outputFailure(failed("x", new MemoryGenerationRunnerError({ code: "unavailable" }))),
-    );
-  });
-
   it("treats only rejections that repeat for every request as deterministic", () => {
     assert.strictEqual(Hold.deterministicFailure(rejected), "schema_rejected");
     assert.strictEqual(
