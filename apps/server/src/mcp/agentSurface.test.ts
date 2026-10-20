@@ -70,6 +70,10 @@ import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import { FleetToolkit } from "./toolkits/fleet/tools.ts";
 import { FleetResourcesToolkit } from "./toolkits/fleet/resources/tools.ts";
 import { HostStatusToolkit } from "./toolkits/hostStatus/tools.ts";
+import { FleetHealthToolkit } from "./toolkits/fleet/healthTools.ts";
+import * as HostHealthMonitor from "../fleet/health/HostHealthMonitor.ts";
+import * as FleetHostStates from "../fleet/health/FleetHostStates.ts";
+import * as Rescheduler from "../fleet/health/Rescheduler.ts";
 import { HtmlToolkit } from "./toolkits/html/tools.ts";
 import { MemoryToolkit } from "./toolkits/memory/tools.ts";
 import { MemoryAdministrationToolkit } from "./toolkits/memoryAdministration/tools.ts";
@@ -92,6 +96,7 @@ const toolkits = {
   fleet: FleetToolkit,
   fleetResources: FleetResourcesToolkit,
   hostStatus: HostStatusToolkit,
+  fleetHealth: FleetHealthToolkit,
   html: HtmlToolkit,
   memory: MemoryToolkit,
   memoryAdministration: MemoryAdministrationToolkit,
@@ -176,6 +181,9 @@ const dependencies = Layer.mergeAll(
   Layer.mock(RemoteReportService.RemoteReportService)({}),
   Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
   Layer.mock(SshDeviceAdd.SshDeviceAdd)({}),
+  Layer.mock(HostHealthMonitor.HostHealthMonitor)({}),
+  Layer.mock(FleetHostStates.FleetHostStates)({}),
+  Layer.mock(Rescheduler.Rescheduler)({}),
   Layer.mock(SshHostSetup.SshHostSetup)({}),
   Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),
   Layer.mock(LaunchWatchService.LaunchWatchService)({}),
@@ -207,7 +215,7 @@ const client = McpSchema.McpServerClient.of({
 });
 
 it("gives every entry a unique path, legacy name and resolvable schema reference", () => {
-  expect(entries).toHaveLength(166); // Includes current memory, browser, provider, SSH runtime, GOAT Bot home and fleet goal and resource tools.
+  expect(entries).toHaveLength(170); // Includes current memory, browser, provider, SSH runtime, GOAT Bot home and fleet goal, resource and health tools.
   expect(new Set(entries.map((entry) => entry.name)).size).toBe(entries.length);
   for (const [path, entry] of Object.entries(agentSurfaceRegistry)) {
     expect(path).toBe(entry.path);

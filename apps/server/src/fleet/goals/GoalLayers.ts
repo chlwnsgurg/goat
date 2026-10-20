@@ -1,7 +1,7 @@
 /**
  * Fleet goals as one unit for the server: the store, the controller on the shared Scheduler,
- * the tools' service, and the default fleet layers (fleet/defaults.ts). Self-healing and resources
- * replace a default by providing Placement, Health, Rescheduler or Fallback above this layer.
+ * and the tools' service. Health and Rescheduler (fleet/health/layer.ts) and Placement and
+ * Fallback (fleet/resources) are provided above it, so goals and the fleet tools share one of each.
  */
 import * as Layer from "effect/Layer";
 
@@ -10,7 +10,6 @@ import * as OrchestratorMcpService from "../../mcp/OrchestratorMcpService.ts";
 import * as ThreadLaunchMcpService from "../../mcp/ThreadLaunchMcpService.ts";
 import * as RemoteReportService from "../../remoteReports/RemoteReportService.ts";
 import * as ThreadResultService from "../../threadResults/ThreadResultService.ts";
-import * as FleetDefaults from "../defaults.ts";
 import * as GoalController from "./GoalController.ts";
 import * as GoalService from "./GoalService.ts";
 import * as GoalStore from "./GoalStore.ts";
@@ -28,7 +27,6 @@ const layerCore = GoalController.layer.pipe(
   Layer.provideMerge(GoalService.layer),
   Layer.provideMerge(layerRuntime),
   Layer.provideMerge(GoalStore.layer),
-  Layer.provideMerge(FleetDefaults.layer),
 );
 
 export const layer = GoalController.layerRunning.pipe(Layer.provideMerge(layerCore));

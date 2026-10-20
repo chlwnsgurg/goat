@@ -9,7 +9,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as SqlitePersistence from "../../persistence/Sqlite.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as FleetDefaults from "../defaults.ts";
-import { Health } from "../health/Health.ts";
+import { Health, type ThreadHealth } from "../health/Health.ts";
 import { Fallback } from "../resources/Fallback.ts";
 import { Placement } from "../resources/Placement.ts";
 import { GoalController, layer as controllerLayer } from "./GoalController.ts";
@@ -141,27 +141,39 @@ const runtimeFor = (fake: Fake) =>
   });
 
 /** This machine only, like the design's first release; SSH hosts are refused. */
-const localPlacement = Layer.succeed(Placement, {
-  place: (request) =>
-    Effect.succeed(
-      (request.hostSelector.hosts ?? [null]).includes(null)
-        ? {
-            _tag: "Placed" as const,
-            host: null,
-            modelSelection: request.modelSelection,
-            reason: undefined,
-          }
-        : {
-            _tag: "Refused" as const,
-            reasons: (request.hostSelector.hosts ?? []).map((host) => ({
-              host,
-              reason: { code: "placement_unavailable" as const, message: "placement_unavailable" },
-            })),
-          },
-    ),
-  status: Effect.die("unused"),
-  statusOf: () => Effect.die("unused"),
-});
+/** This machine only, like the design's first release, unless a test asks it to place remotely. */
+const placementFor = (placeRemote: boolean) =>
+  Layer.succeed(Placement, {
+    place: (request) =>
+      Effect.succeed(
+        placeRemote
+          ? {
+              _tag: "Placed" as const,
+              host: "mac-studio",
+              modelSelection: request.modelSelection,
+              reason: undefined,
+            }
+          : (request.hostSelector.hosts ?? [null]).includes(null)
+            ? {
+                _tag: "Placed" as const,
+                host: null,
+                modelSelection: request.modelSelection,
+                reason: undefined,
+              }
+            : {
+                _tag: "Refused" as const,
+                reasons: (request.hostSelector.hosts ?? []).map((host) => ({
+                  host,
+                  reason: {
+                    code: "placement_unavailable" as const,
+                    message: "placement_unavailable",
+                  },
+                })),
+              },
+      ),
+    status: Effect.die("unused"),
+    statusOf: () => Effect.die("unused"),
+  });
 
 const noFallback = Layer.succeed(Fallback, {
   next: () => Effect.succeed({ _tag: "Exhausted" as const, reason: "No chain." }),
@@ -171,9 +183,10 @@ const noFallback = Layer.succeed(Fallback, {
   continueThread: () => Effect.succeed(false),
 });
 
+let healthOf = (): ThreadHealth => ({ _tag: "healthy" });
 const healthy = Layer.succeed(Health, {
   hostCondition: (host) => Effect.succeed({ host, conditions: [], observedAt: "" }),
-  threadHealth: () => Effect.succeed({ _tag: "healthy" as const }),
+  threadHealth: () => Effect.sync(() => healthOf()),
 });
 
 const persistence = (path: string | undefined) =>
@@ -183,14 +196,23 @@ const persistence = (path: string | undefined) =>
 
 const layerFor = (
   fake: Fake,
-  options: { readonly enabled?: boolean; readonly path?: string } = {},
+  options: {
+    readonly enabled?: boolean;
+    readonly path?: string;
+    readonly placeRemote?: boolean;
+  } = {},
 ) =>
   controllerLayer.pipe(
     Layer.provideMerge(goalStoreLayer),
     Layer.provideMerge(persistence(options.path)),
     Layer.provide(runtimeFor(fake)),
     Layer.provide(
-      Layer.mergeAll(localPlacement, FleetDefaults.layerRescheduler, noFallback, healthy),
+      Layer.mergeAll(
+        placementFor(options.placeRemote === true),
+        FleetDefaults.layerRescheduler,
+        noFallback,
+        healthy,
+      ),
     ),
     Layer.provide(
       ServerSettings.ServerSettingsService.layerTest({
@@ -504,6 +526,83 @@ describe("GoalController", () => {
       expect(
         (yield* record("goal_budget")).goal.status.conditions.find((c) => c.type === "Blocked"),
       ).toMatchObject({ reason: "BudgetExhausted" });
+    }).pipe(Effect.provide(layerFor(fake)));
+  });
+  it.effect(
+    "never launches on another machine, even when placement offers one (P1-1, P1-2)",
+    () => {
+      const fake = makeFake();
+      return Effect.gen(function* () {
+        const store = yield* GoalStore;
+        yield* insert(testGoal("goal_far"));
+        yield* pass("goal_far");
+        expect(fake.launches).toEqual([]);
+        expect(yield* store.launches(FleetGoalId.make("goal_far"))).toEqual([]);
+        expect(
+          (yield* record("goal_far")).goal.status.conditions.find((c) => c.type === "Blocked"),
+        ).toMatchObject({ status: "True", reason: "RemoteWorkersDisabled" });
+      }).pipe(Effect.provide(layerFor(fake, { placeRemote: true })));
+    },
+  );
+
+  it.effect("keeps an unconfirmed launch's host from its claim (P1-2)", () => {
+    const fake = makeFake();
+    return Effect.gen(function* () {
+      const store = yield* GoalStore;
+      yield* insert(testGoal("goal_host"));
+      yield* store.claim({
+        goalId: FleetGoalId.make("goal_host"),
+        generation: 1,
+        actionId: "goal:goal_host:s0:a1:launch",
+        kind: "launch",
+        host: "mac-studio",
+        slot: 0,
+        nowIso: "2026-10-20T00:00:00.000Z",
+      });
+      expect(yield* store.launches(FleetGoalId.make("goal_host"))).toMatchObject([
+        {
+          actionId: "goal:goal_host:s0:a1:launch",
+          host: "mac-studio",
+          threadId: null,
+          settledAt: null,
+        },
+      ]);
+    }).pipe(Effect.provide(layerFor(fake)));
+  });
+
+  it.effect("continues a usage-limited worker after its reset, once (P2-4)", () => {
+    const fake = makeFake();
+    return Effect.gen(function* () {
+      yield* insert(testGoal("goal_limit"));
+      yield* pass("goal_limit");
+      fake.reading = () => ({
+        kind: "seen",
+        terminal: true,
+        runId: RunId.make("run:5"),
+        runStatus: "failed",
+        lastActivityAt: null,
+        result: null,
+        usageLimitResetAt: "1970-01-01T00:10:00.000Z",
+      });
+      healthOf = () => ({
+        _tag: "failed",
+        failureClass: "usage_limit",
+        runId: RunId.make("run:5"),
+      });
+      // First the fallback gets the run (none configured), then it waits for the reset.
+      yield* pass("goal_limit");
+      yield* pass("goal_limit");
+      expect(fake.followUps).toEqual([]);
+      yield* TestClock.adjust(11 * 60_000);
+      yield* pass("goal_limit");
+      yield* pass("goal_limit");
+      healthOf = () => ({ _tag: "healthy" });
+      expect(fake.followUps).toEqual([
+        {
+          actionId: "goal:goal_limit:s0:a1:run:5:resume",
+          message: "Your usage limit has reset. Continue where you left off.",
+        },
+      ]);
     }).pipe(Effect.provide(layerFor(fake)));
   });
 });

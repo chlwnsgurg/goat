@@ -110,6 +110,7 @@ it.effect("083 participates in the migration ledger and leaves healthy spaces un
     assert.deepStrictEqual(yield* runMigrations(), [
       [85, "MemoryCheckpointLifecycle"],
       [86, "FleetGoals"],
+      [87, "FleetHealth"],
     ]);
     assert.deepStrictEqual(yield* pending, []);
     yield* sql.withTransaction(refreshCheckpointAccounting());

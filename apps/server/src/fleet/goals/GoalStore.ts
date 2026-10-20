@@ -38,6 +38,8 @@ const WorkerDetail = Schema.Struct({
   followUps: NonNegativeInt,
   /** The run a follow-up was last sent about, so each run is nudged once. */
   followedUpRunId: Schema.NullOr(RunId),
+  /** The usage-limited run the goal resumed after its reset, so it is resumed once. */
+  resumedRunId: Schema.NullOr(RunId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   /** The run a stall was steered on, so a second stall reschedules. */
   steeredRunId: Schema.NullOr(RunId),
   lastRunId: Schema.NullOr(RunId),
@@ -356,6 +358,7 @@ export const make = Effect.gen(function* () {
         followUps: worker.followUps,
         followedUpRunId: worker.followedUpRunId,
         steeredRunId: worker.steeredRunId,
+        resumedRunId: worker.resumedRunId,
         lastRunId: worker.lastRunId,
         note: worker.note,
       }),
@@ -675,7 +678,9 @@ export const make = Effect.gen(function* () {
           readonly thread_host: string | null;
           readonly thread_id: string | null;
         }>`
-          SELECT action_id, reserved_slot, claimed_at, settled_at, outcome, thread_host, thread_id
+          SELECT action_id, reserved_slot, claimed_at, settled_at, outcome,
+            -- Until a thread is recorded, the claim's own host is where the launch went.
+            CASE WHEN thread_id IS NULL THEN host ELSE thread_host END AS thread_host, thread_id
           FROM fleet_goal_actions WHERE goal_id = ${id} AND kind = 'launch'
           ORDER BY claimed_at, action_id
         `,

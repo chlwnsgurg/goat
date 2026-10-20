@@ -59,50 +59,50 @@ Toolkits do not match the resource in the name, which matters once docs or permi
 
 | Tool                           | Lives in toolkit | Declared at                                          |
 | ------------------------------ | ---------------- | ---------------------------------------------------- |
-| `goat_cloud_holders`           | `provider`       | packages/contracts/src/agentSurface/registry.ts:2866 |
-| `goat_cloud_launch`            | `provider`       | packages/contracts/src/agentSurface/registry.ts:2885 |
-| `goat_cloud_machine_create`    | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2226 |
-| `goat_cloud_machine_list`      | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2207 |
-| `goat_cloud_machine_resume`    | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2264 |
-| `goat_cloud_machine_stop`      | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2245 |
-| `goat_cloud_run_forget`        | `provider`       | packages/contracts/src/agentSurface/registry.ts:2930 |
-| `goat_cloud_run_list`          | `provider`       | packages/contracts/src/agentSurface/registry.ts:2915 |
-| `goat_cloud_run_register`      | `provider`       | packages/contracts/src/agentSurface/registry.ts:2900 |
+| `goat_cloud_holders`           | `provider`       | packages/contracts/src/agentSurface/registry.ts:2938 |
+| `goat_cloud_launch`            | `provider`       | packages/contracts/src/agentSurface/registry.ts:2957 |
+| `goat_cloud_machine_create`    | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2298 |
+| `goat_cloud_machine_list`      | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2279 |
+| `goat_cloud_machine_resume`    | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2336 |
+| `goat_cloud_machine_stop`      | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2317 |
+| `goat_cloud_run_forget`        | `provider`       | packages/contracts/src/agentSurface/registry.ts:3002 |
+| `goat_cloud_run_list`          | `provider`       | packages/contracts/src/agentSurface/registry.ts:2987 |
+| `goat_cloud_run_register`      | `provider`       | packages/contracts/src/agentSurface/registry.ts:2972 |
 | `goat_goal_apply`              | `fleet`          | packages/contracts/src/agentSurface/registry.ts:445  |
 | `goat_goal_delete`             | `fleet`          | packages/contracts/src/agentSurface/registry.ts:520  |
 | `goat_goal_get`                | `fleet`          | packages/contracts/src/agentSurface/registry.ts:460  |
 | `goat_goal_list`               | `fleet`          | packages/contracts/src/agentSurface/registry.ts:475  |
 | `goat_goal_pause`              | `fleet`          | packages/contracts/src/agentSurface/registry.ts:490  |
 | `goat_goal_resume`             | `fleet`          | packages/contracts/src/agentSurface/registry.ts:505  |
-| `goat_host_link_create`        | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2056 |
-| `goat_host_link_list`          | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2075 |
-| `goat_host_link_remove`        | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2094 |
-| `goat_origin_report`           | `remoteReport`   | packages/contracts/src/agentSurface/registry.ts:1936 |
-| `goat_origin_reports_wait`     | `remoteReport`   | packages/contracts/src/agentSurface/registry.ts:1955 |
-| `goat_pending_request_list`    | `thread`         | packages/contracts/src/agentSurface/registry.ts:2428 |
-| `goat_pending_request_read`    | `thread`         | packages/contracts/src/agentSurface/registry.ts:2446 |
-| `goat_pending_request_respond` | `thread`         | packages/contracts/src/agentSurface/registry.ts:2465 |
-| `goat_queue_cancel`            | `thread`         | packages/contracts/src/agentSurface/registry.ts:2556 |
-| `goat_queue_edit`              | `thread`         | packages/contracts/src/agentSurface/registry.ts:2538 |
-| `goat_queue_list`              | `thread`         | packages/contracts/src/agentSurface/registry.ts:2503 |
-| `goat_queue_promote_to_steer`  | `thread`         | packages/contracts/src/agentSurface/registry.ts:2591 |
-| `goat_queue_read`              | `thread`         | packages/contracts/src/agentSurface/registry.ts:2521 |
-| `goat_queue_reorder`           | `thread`         | packages/contracts/src/agentSurface/registry.ts:2573 |
-| `goat_review_findings_export`  | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:920  |
-| `goat_review_findings_record`  | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:905  |
-| `goat_thread_interrupt`        | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1201 |
-| `goat_thread_launch`           | `project`        | packages/contracts/src/agentSurface/registry.ts:1675 |
-| `goat_thread_list`             | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1087 |
-| `goat_thread_read`             | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1106 |
-| `goat_thread_send`             | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1144 |
+| `goat_host_link_create`        | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2128 |
+| `goat_host_link_list`          | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2147 |
+| `goat_host_link_remove`        | `ssh`            | packages/contracts/src/agentSurface/registry.ts:2166 |
+| `goat_origin_report`           | `remoteReport`   | packages/contracts/src/agentSurface/registry.ts:2008 |
+| `goat_origin_reports_wait`     | `remoteReport`   | packages/contracts/src/agentSurface/registry.ts:2027 |
+| `goat_pending_request_list`    | `thread`         | packages/contracts/src/agentSurface/registry.ts:2500 |
+| `goat_pending_request_read`    | `thread`         | packages/contracts/src/agentSurface/registry.ts:2518 |
+| `goat_pending_request_respond` | `thread`         | packages/contracts/src/agentSurface/registry.ts:2537 |
+| `goat_queue_cancel`            | `thread`         | packages/contracts/src/agentSurface/registry.ts:2628 |
+| `goat_queue_edit`              | `thread`         | packages/contracts/src/agentSurface/registry.ts:2610 |
+| `goat_queue_list`              | `thread`         | packages/contracts/src/agentSurface/registry.ts:2575 |
+| `goat_queue_promote_to_steer`  | `thread`         | packages/contracts/src/agentSurface/registry.ts:2663 |
+| `goat_queue_read`              | `thread`         | packages/contracts/src/agentSurface/registry.ts:2593 |
+| `goat_queue_reorder`           | `thread`         | packages/contracts/src/agentSurface/registry.ts:2645 |
+| `goat_review_findings_export`  | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:992  |
+| `goat_review_findings_record`  | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:977  |
+| `goat_thread_interrupt`        | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1273 |
+| `goat_thread_launch`           | `project`        | packages/contracts/src/agentSurface/registry.ts:1747 |
+| `goat_thread_list`             | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1159 |
+| `goat_thread_read`             | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1178 |
+| `goat_thread_send`             | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1216 |
 | `goat_thread_send_attachments` | `attachment`     | packages/contracts/src/agentSurface/registry.ts:87   |
-| `goat_thread_status`           | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1182 |
-| `goat_thread_unwatch`          | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1239 |
-| `goat_thread_update`           | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1125 |
-| `goat_thread_wait`             | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1163 |
-| `goat_thread_watch`            | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1220 |
-| `goat_thread_watch_list`       | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1258 |
-| `goat_workflow_stop`           | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:954  |
+| `goat_thread_status`           | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1254 |
+| `goat_thread_unwatch`          | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1311 |
+| `goat_thread_update`           | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1197 |
+| `goat_thread_wait`             | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1235 |
+| `goat_thread_watch`            | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1292 |
+| `goat_thread_watch_list`       | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1330 |
+| `goat_workflow_stop`           | `orchestrator`   | packages/contracts/src/agentSurface/registry.ts:1026 |
 
 One intent is spelled several ways (tool counts in parentheses):
 
@@ -118,11 +118,11 @@ One intent is spelled several ways (tool counts in parentheses):
 
 - **Undeclared arguments.** 143 of 163 published input schemas say `"additionalProperties": true`, but every registration refuses undeclared arguments at call time ((not found)). A client that validates against the schema cannot learn the real contract.
 - **Two failure modes.** Tools split 128 `return` and 35 `error`. Both reach the client as `isError` with JSON in a text block and no `structuredContent` (apps/server/src/mcp/toolkits/core.test.ts:94), so an agent parses text to branch on an error.
-- **6 error families.** 124 tools fail with `OrchestratorMcpFailure`; 4 tools fail with 8 tagged errors; 25 tools fail with 19 tagged errors; 1 tools fail with `OrchestratorMcpFailure` or `SshThreadHandoffFailure`; 2 tools fail with `OrchestratorMcpFailure` or `WorktreeMcpFailure`; 7 tools fail with 15 tagged errors. Only `OrchestratorMcpFailure` carries a machine `code` (packages/contracts/src/orchestratorMcp.ts:1149). Preview, device, worktree, and pull request failures are told apart by `_tag` alone, and every preview tool advertises all of its toolkit's tags whether or not it can raise them.
+- **6 error families.** 124 tools fail with `OrchestratorMcpFailure`; 4 tools fail with 8 tagged errors; 25 tools fail with 19 tagged errors; 1 tools fail with `OrchestratorMcpFailure` or `SshThreadHandoffFailure`; 2 tools fail with `OrchestratorMcpFailure` or `WorktreeMcpFailure`; 7 tools fail with 15 tagged errors. Only `OrchestratorMcpFailure` carries a machine `code` (packages/contracts/src/orchestratorMcp.ts:1152). Preview, device, worktree, and pull request failures are told apart by `_tag` alone, and every preview tool advertises all of its toolkit's tags whether or not it can raise them.
 - **Idempotency.** 11 tools accept `clientRequestId`: `channel_ingest`, `create_threads`, `delegate_task`, `goat_goal_apply`, `goat_review_findings_record`, `goat_thread_interrupt`, `goat_thread_send`, `goat_thread_update`, `request_secret`, `schedule_task`, and 1 more. The other 92 mutating tools have no retry key, including the destructive `delete_scheduled_task`, `device_close`, `goat_attachment_discard`, `goat_attachment_prepare_upload`, `goat_cloud_run_forget`, `goat_connection_remove`, `goat_environment_preferences_update`, `goat_goal_delete`, `goat_host_link_remove`, `goat_pending_request_respond`, and 37 more.
 - **Pagination.** 10 tools use `cursor/nextCursor` (`channel_task_export`, `channel_task_list`, `goat_goal_list`, `goat_preview_list`, and 6 more); 8 tools use `limit only` (`goat_cloud_run_list`, `goat_ssh_browse`, `goat_ssh_reports`, `memory_history`, and 4 more); 1 tool uses `afterSequence/hasMore` (`goat_origin_reports_wait`); 1 tool uses `limit/hasMore` (`goat_thread_read`). List tools with no page control: `device_list`, `goat_cloud_machine_list`, `goat_connection_list`, `goat_host_link_list`, `goat_pending_request_list`, `goat_provider_addable_list`, `goat_ssh_host_list`, `goat_thread_watch_list`, `list_scheduled_tasks`, `list_thread_pull_requests`.
 - **Hints that disagree with enforcement.** The handler's `McpToolAccess` declaration is what the server enforces; the MCP `readOnlyHint` is what clients see. They disagree for no tools. Reads declared `actsAsCaller` without a read-only hint: `task_status`.
-- **Image results.** `preview_snapshot`, `device_screenshot`, and `html_preview` are registered by hand to return image content (apps/server/src/mcp/McpHttpServer.ts:1200), outside the toolkit path every other tool uses.
+- **Image results.** `preview_snapshot`, `device_screenshot`, and `html_preview` are registered by hand to return image content (apps/server/src/mcp/McpHttpServer.ts:1202), outside the toolkit path every other tool uses.
 
 ## Descriptions and examples
 
@@ -132,20 +132,20 @@ Only 22% of input parameters carry a description. 110 tools describe none of the
 
 | Tool                     | Characters | Declared at                                          |
 | ------------------------ | ---------- | ---------------------------------------------------- |
-| `delegate_task`          | 3631       | packages/contracts/src/agentSurface/registry.ts:867  |
-| `goat_thread_launch`     | 2817       | packages/contracts/src/agentSurface/registry.ts:1675 |
-| `html_render`            | 2737       | packages/contracts/src/agentSurface/registry.ts:627  |
-| `goat_thread_send`       | 2446       | packages/contracts/src/agentSurface/registry.ts:1144 |
-| `goat_ssh_thread_launch` | 2028       | packages/contracts/src/agentSurface/registry.ts:2151 |
-| `schedule_task`          | 1963       | packages/contracts/src/agentSurface/registry.ts:973  |
+| `delegate_task`          | 3631       | packages/contracts/src/agentSurface/registry.ts:939  |
+| `goat_thread_launch`     | 2817       | packages/contracts/src/agentSurface/registry.ts:1747 |
+| `html_render`            | 2737       | packages/contracts/src/agentSurface/registry.ts:699  |
+| `goat_thread_send`       | 2446       | packages/contracts/src/agentSurface/registry.ts:1216 |
+| `goat_ssh_thread_launch` | 2028       | packages/contracts/src/agentSurface/registry.ts:2223 |
+| `schedule_task`          | 1963       | packages/contracts/src/agentSurface/registry.ts:1045 |
 
 Long descriptions carry routing policy (when to use another tool, what to tell the user) that every session pays for in context and no test checks.
 
 ## Errors an agent cannot act on
 
 - `orchestration_error` is raised from 79 places in `apps/server/src/mcp`, for example apps/server/src/mcp/HostStatusMcpService.ts:136, apps/server/src/mcp/HostThreadsMcpService.ts:103, apps/server/src/mcp/HostThreadsMcpService.ts:131, apps/server/src/mcp/HostThreadsMcpService.ts:354. The code does not say whether to retry, fix the input, or ask the user.
-- `invalid_request` is raised from 119 places in `apps/server/src/mcp`, for example apps/server/src/mcp/HostStatusMcpService.ts:183, apps/server/src/mcp/HostStatusMcpService.ts:199, apps/server/src/mcp/HostThreadsMcpService.ts:245, apps/server/src/mcp/HostThreadsMcpService.ts:313. The code does not say whether to retry, fix the input, or ask the user.
-- `OrchestratorMcpFailure` has only `code` and `message` (packages/contracts/src/orchestratorMcp.ts:1175): no retry hint, offending field, or next action. Recovery advice, where it exists, lives in message text.
+- `invalid_request` is raised from 120 places in `apps/server/src/mcp`, for example apps/server/src/mcp/HostStatusMcpService.ts:183, apps/server/src/mcp/HostStatusMcpService.ts:199, apps/server/src/mcp/HostThreadsMcpService.ts:245, apps/server/src/mcp/HostThreadsMcpService.ts:313. The code does not say whether to retry, fix the input, or ask the user.
+- `OrchestratorMcpFailure` has only `code` and `message` (packages/contracts/src/orchestratorMcp.ts:1178): no retry hint, offending field, or next action. Recovery advice, where it exists, lives in message text.
 
 ## Where a human is required
 
@@ -153,10 +153,10 @@ These are the steps GOAT cannot finish without a person today, and how an agent 
 
 | Step                                          | How it surfaces to an agent                                                                                                                                                       | Evidence                                                                                                                 |
 | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Enter a secret (webhook signing, credentials) | Agent calls `request_secret`; the user types the value in the app; the agent gets a `secretRef`. Only callable from inside a GOAT thread.                                         | packages/contracts/src/agentSurface/registry.ts:1049, apps/server/src/mcp/completionWebhook.ts:569                       |
+| Enter a secret (webhook signing, credentials) | Agent calls `request_secret`; the user types the value in the app; the agent gets a `secretRef`. Only callable from inside a GOAT thread.                                         | packages/contracts/src/agentSurface/registry.ts:1121, apps/server/src/mcp/completionWebhook.ts:569                       |
 | Answer a provider question or approval        | The thread turns waiting; `goat_pending_request_list`, `goat_pending_request_read`, and `goat_pending_request_respond` let an agent answer, and escalation names the tool to use. | apps/server/src/orchestration-v2/QuestionEscalationService.ts:106, apps/server/src/mcp/PendingQuestionsMcpService.ts:454 |
-| Raise runtime or interaction mode             | The call fails with `runtime_mode_escalation_denied` or `interaction_mode_escalation_denied`. No tool requests approval, so the agent must stop and tell the user.                | packages/contracts/src/orchestratorMcp.ts:1154                                                                           |
-| Grant a capability or credential              | The call fails with `capability_denied` or `thread_credential_required`; the user resolves it in settings or by issuing a token.                                                  | packages/contracts/src/orchestratorMcp.ts:1164                                                                           |
+| Raise runtime or interaction mode             | The call fails with `runtime_mode_escalation_denied` or `interaction_mode_escalation_denied`. No tool requests approval, so the agent must stop and tell the user.                | packages/contracts/src/orchestratorMcp.ts:1157                                                                           |
+| Grant a capability or credential              | The call fails with `capability_denied` or `thread_credential_required`; the user resolves it in settings or by issuing a token.                                                  | packages/contracts/src/orchestratorMcp.ts:1167                                                                           |
 | T3 Connect sign-in (OAuth or device code)     | CLI only: `goat connect login`, or `--headless` for the device flow. No MCP tool starts it or reports its state.                                                                  | apps/server/src/cli/connect.ts:59                                                                                        |
 | Pair a client                                 | `goat pair` or `goat auth pairing create` on the host, or Settings → Connections. No MCP tool.                                                                                    | apps/server/src/cli/pair.ts:467                                                                                          |
 | Add an SSH host                               | `goat_connection_add_ssh` exists; host key trust, passphrases, and MFA prompts are not modelled as a handoff.                                                                     | packages/contracts/src/agentSurface/registry.ts:294                                                                      |
@@ -198,10 +198,10 @@ Names that look like tools but are not in the registry:
 | `goat_html_render`               | docs/internals/agent-surface.md:241                                     |
 | `goat_pull_request_link`         | docs/internals/agent-surface.md:242                                     |
 | `goat_pull_request_guide_update` | docs/internals/agent-surface.md:243                                     |
-| `goat_host_cordon`               | docs/internals/agentic-k8s.md:908                                       |
-| `goat_thread_reschedule`         | docs/internals/agentic-k8s.md:908                                       |
-| `goat_scheduler_status`          | docs/internals/agentic-k8s.md:911                                       |
-| `goat_fallback_chain_get`        | docs/internals/agentic-k8s.md:911                                       |
+| `goat_host_cordon`               | docs/internals/agentic-k8s.md:940                                       |
+| `goat_thread_reschedule`         | docs/internals/agentic-k8s.md:940                                       |
+| `goat_scheduler_status`          | docs/internals/agentic-k8s.md:943                                       |
+| `goat_fallback_chain_get`        | docs/internals/agentic-k8s.md:943                                       |
 
 All 112 `goat ...` invocations in the docs resolve to a real command and its flags.
 
