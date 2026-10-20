@@ -240,7 +240,7 @@ export const make = Effect.gen(function* () {
         resolutionInputs: true,
         retainedLocalSpace: true,
         hubDiagnostics: true,
-        ...(importRuntime._tag === "Some" ? { importProvider: true } : {}),
+        ...(importRuntime._tag === "Some" ? { importProvider: true, asideImport: true } : {}),
       },
       repositoryIdentity: true,
       connectionProbe: true,

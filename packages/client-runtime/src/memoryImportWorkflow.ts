@@ -1,8 +1,9 @@
 import type {
+  ExecutionEnvironmentCapabilities,
   MemoryCapacityDimension,
   MemoryImportIssue,
   MemoryImportOutcome,
-  MemoryImportFormat,
+  MemoryImportSourceFormat,
   MemoryImportProviderInput,
   MemoryImportProviderResult,
   MemoryImportReceipt,
@@ -10,6 +11,29 @@ import type {
   MemoryOperationId,
 } from "@goat/contracts";
 import type { MemoryImportDestination, MemoryImportRecoveryStore } from "./memoryImportRecovery.ts";
+
+export const memoryImportFormatLabels: Record<MemoryImportSourceFormat, string> = {
+  codex: "Codex",
+  claude: "Claude",
+  omo: "OMO",
+  aside: "Aside",
+};
+/** Older servers reject `aside` at decode, so it is offered only when advertised. */
+export const memoryImportFormats = (
+  capabilities: ExecutionEnvironmentCapabilities | undefined,
+): readonly MemoryImportSourceFormat[] =>
+  capabilities?.memory?.asideImport === true
+    ? ["codex", "claude", "omo", "aside"]
+    : ["codex", "claude", "omo"];
+const issueReasons: Partial<Record<MemoryImportIssue, string>> = {
+  unsupported_format: "unsupported structure",
+  limit_exceeded: "too large to import",
+  invalid_utf8: "unreadable text",
+  secret_detected: "contains a secret",
+  scope_unmapped: "needs a project scope",
+};
+export const memoryImportIssueReason = (issue: MemoryImportIssue) =>
+  issueReasons[issue] ?? "unavailable for import";
 
 type Apply = Extract<MemoryImportProviderInput, { action: "apply" }>;
 type Preview = Extract<MemoryImportProviderResult, { action: "preview" }>;
@@ -383,7 +407,7 @@ export function createMemoryImportWorkflow(options: {
     stop: () => {
       progress({ type: "stop", inFlight: isBusy() });
     },
-    discover: (format: MemoryImportFormat) =>
+    discover: (format: MemoryImportSourceFormat) =>
       exclusive(async (token) => {
         preview = null;
         chunks = [];

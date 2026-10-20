@@ -172,6 +172,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(descriptor.capabilities.memory).toEqual({
         protocolVersion: 1,
         importProvider: true,
+        asideImport: true,
         refusedReverts: true,
         resolutionInputs: true,
         retainedLocalSpace: true,
