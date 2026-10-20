@@ -265,12 +265,15 @@ it.effect(
 
       expect(
         yield* f.setup
-          .update({ host: "box", mode: "now" }, { kind: "mcp", scope: { ...threadScope, readOnly: true } })
+          .update(
+            { host: "box", mode: "now" },
+            { kind: "mcp", scope: { ...threadScope, readOnly: true } },
+          )
           .pipe(Effect.flip),
       ).toMatchObject({ requiredScope: "orchestration:read" });
-      expect(
-        yield* f.setup.prepare({ host: "box" }, caller).pipe(Effect.flip),
-      ).toMatchObject({ requiredScope: "environment:maintain" });
+      expect(yield* f.setup.prepare({ host: "box" }, caller).pipe(Effect.flip)).toMatchObject({
+        requiredScope: "environment:maintain",
+      });
       expect(
         yield* f.setup.update({ host: "box", mode: "when_idle" }, caller).pipe(Effect.flip),
       ).toMatchObject({ requiredScope: "environment:maintain" });

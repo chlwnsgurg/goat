@@ -149,7 +149,9 @@ export function quotaRefreshDue(
 }
 
 export function hostStatusProviders(
-  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "driver" | "displayName" | "enabled">>,
+  providers: ReadonlyArray<
+    Pick<ServerProvider, "instanceId" | "driver" | "displayName" | "enabled">
+  >,
 ): Array<HostStatusProvider> {
   return providers.map((provider) => ({
     instanceId: provider.instanceId,
