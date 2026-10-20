@@ -48,6 +48,8 @@ const state = vi.hoisted(() => ({
   threads: [] as { id: string; environmentId: string; title: string }[],
   threadReads: vi.fn(),
   agentAccess: true,
+  memoryEnabled: true,
+  memoryModel: null as { instanceId: string; model: string } | null,
   connection: {} as object | null,
   deviceConnections: new Map<string, object | null>(),
 }));
@@ -187,7 +189,12 @@ vi.mock("./MemoryGenerationSettings", () => ({ MemoryGenerationSettings: () => n
 vi.mock("../../hooks/useSettings", () => ({
   useEnvironmentSettings: (_id: string, selector: (settings: unknown) => unknown) => {
     useFixtureVersion();
-    return selector({ enableAgentMemoryAccess: state.agentAccess });
+    return selector({
+      enableAgentMemoryAccess: state.agentAccess,
+      memoryEnabled: state.memoryEnabled,
+      memoryModelSelection: state.memoryModel,
+      providerInstances: {},
+    });
   },
 }));
 vi.mock("../../state/server", () => ({
@@ -400,6 +407,8 @@ beforeEach(() => {
   state.projects = [];
   state.threads = [];
   state.agentAccess = true;
+  state.memoryEnabled = true;
+  state.memoryModel = null;
   state.allowed = true;
   state.write = true;
   state.exposure = 0;
@@ -992,6 +1001,34 @@ it("retries a failed load inline without a reload control", async () => {
   expect(container.textContent).not.toContain("Reload sharing settings");
   expect(container.textContent).not.toContain("Operational details");
   expect(container.textContent).not.toContain("Device removal applied");
+});
+
+it("reads memory status again when memory is turned off or its model changes", async () => {
+  let reads = 0;
+  state.executors.set("syncStatus", async () => {
+    reads += 1;
+    return success({ state: "online", memorySpaceId: id(1) });
+  });
+  await supportedScreen(false);
+  const first = reads;
+  expect(first).toBeGreaterThan(0);
+  // A pause belongs to the old model, so either change must replace the shown status.
+  await act(async () => {
+    state.memoryEnabled = false;
+    notifyFixture();
+  });
+  expect(reads).toBe(first + 1);
+  await act(async () => {
+    state.memoryModel = { instanceId: "codex", model: "other" };
+    notifyFixture();
+  });
+  expect(reads).toBe(first + 2);
+  // Unrelated settings changes do not read it again.
+  await act(async () => {
+    state.agentAccess = false;
+    notifyFixture();
+  });
+  expect(reads).toBe(first + 2);
 });
 
 it("automatically opens the ready space and keeps saved memories read-only after disabling", async () => {

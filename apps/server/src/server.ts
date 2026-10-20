@@ -36,6 +36,7 @@ import * as MemoryQuota from "./memory/MemoryQuotaService.ts";
 import * as MemoryService from "./memory/MemoryService.ts";
 import * as MemoryMaintenance from "./memory/MemoryFtsMaintenance.ts";
 import * as MemorySync from "./memory/MemorySyncService.ts";
+import * as MemoryGenerationHold from "./memory/MemoryGenerationHold.ts";
 import * as MemorySettings from "./memory/MemorySettingsService.ts";
 import * as MemoryOwnerSourceReadPolicyBinding from "./memory/MemoryOwnerSourceReadPolicyBinding.ts";
 import * as MemorySyncRuntimeLive from "./memory/MemorySyncRuntimeLive.ts";
@@ -600,6 +601,11 @@ export const layerMemorySourceReadBinding = Layer.effect(
     });
   }),
 );
+// One layer reference for the worker and layerMemorySync, so the worker, conflict resolution and
+// the status read share one set of holds. The registry supplies the provider version in each key.
+const layerMemoryGenerationHold = MemoryGenerationHold.layer.pipe(
+  Layer.provide(ProviderRegistry.layer),
+);
 const layerMemoryQuota = MemoryQuota.layer.pipe(Layer.provideMerge(MemoryStore.layer));
 export const layerMemorySourceReadService = Layer.unwrap(
   Effect.gen(function* () {
@@ -624,6 +630,7 @@ const layerMemoryWorker = Layer.mergeAll(
   Layer.provide(RuntimeLayer.layerEventSink),
   Layer.provide(layerTextGeneration),
   Layer.provide(RuntimeIdentity.layer),
+  Layer.provide(layerMemoryGenerationHold),
 );
 const layerMemoryStarted = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -787,6 +794,7 @@ const layerMemorySync = layerMemorySyncStarted.pipe(
   Layer.provide(layerMemoryHub),
   Layer.provide(layerTextGeneration),
   Layer.provide(ServerEnvironment.layerIdentity),
+  Layer.provide(layerMemoryGenerationHold),
 );
 
 /** Acquisition is isolated from the core graph; only a fully acquired reader publishes the tag. */

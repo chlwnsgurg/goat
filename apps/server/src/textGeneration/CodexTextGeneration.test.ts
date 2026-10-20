@@ -13,13 +13,21 @@ import * as Scope from "effect/Scope";
 import { createModelSelection } from "@goat/shared/model";
 import { expect } from "vite-plus/test";
 
-import { CodexSettings, ProviderInstanceId, TextGenerationError } from "@goat/contracts";
+import {
+  CodexSettings,
+  ProviderInstanceId,
+  ProviderSetupError,
+  TextGenerationError,
+} from "@goat/contracts";
 
 import * as ServerConfig from "../config.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import { makeCodexTextGeneration } from "./CodexTextGeneration.ts";
+import * as Hold from "../memory/MemoryGenerationHold.ts";
 import { writeFakeCli } from "@goat/provider-testing/fakeCli";
+import { strictOutputSchemaViolations } from "@goat/provider-core/server/strictOutputSchema";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
+const isSetupError = Schema.is(ProviderSetupError);
 
 const DEFAULT_TEST_MODEL_SELECTION = createModelSelection(
   ProviderInstanceId.make("codex"),
@@ -46,6 +54,8 @@ interface FakeCodexInput {
   /** Fail if `CODEX_HOME` holds an AGENTS.md, then rotate its auth.json as a token refresh would. */
   refreshAuth?: "in-place" | "replace";
   mcpServers?: ReadonlyArray<{ name: string; enabled: boolean }> | number;
+  /** Copies the `--output-schema` file here so a test can check what the CLI received. */
+  schemaCopyPath?: string;
 }
 
 function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
@@ -61,6 +71,7 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
     stdinMustNotContain: input.stdinMustNotContain ?? null,
     refreshAuth: input.refreshAuth ?? null,
     mcpServers: input.mcpServers ?? [],
+    schemaCopyPath: input.schemaCopyPath ?? null,
     stderr: input.stderr ?? null,
     output: input.output,
     exitCode: input.exitCode ?? 0,
@@ -119,6 +130,7 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
         // Codex CLI 0.163.0 forwards the schema to the API, which rejects a non-object root.
         "if (schemaPath !== null) {",
         '  const schema = JSON.parse(NodeFS.readFileSync(schemaPath, "utf8"));',
+        "  if (check.schemaCopyPath !== null) NodeFS.copyFileSync(schemaPath, check.schemaCopyPath);",
         '  if (schema.type !== "object")',
         "    fail(",
         "      `Invalid schema for response_format 'codex_output_schema': schema must be a JSON Schema of 'type: \"object\"', got 'type: \"${schema.type ?? \"None\"}\"'.`,",
@@ -178,7 +190,7 @@ function withFakeCodexEnv<A, E, R>(
     launchArgs?: string;
     environment?: NodeJS.ProcessEnv;
     models?: ReadonlyArray<string>;
-    managedRuntime?: boolean;
+    managedRuntime?: boolean | ProviderSetupError;
     memoryRunnerContext?: import("@goat/provider-core/server/memoryGenerationRunner").MemoryGenerationRunnerContext;
   },
   effectFn: (textGeneration: TextGeneration.TextGeneration["Service"]) => Effect.Effect<A, E, R>,
@@ -203,13 +215,15 @@ function withFakeCodexEnv<A, E, R>(
           capabilities: null,
         })),
       ),
-      input.managedRuntime
-        ? Effect.succeed({
-            config,
-            environment: input.environment ?? process.env,
-            revision: "test",
-          })
-        : undefined,
+      isSetupError(input.managedRuntime)
+        ? Effect.fail(input.managedRuntime)
+        : input.managedRuntime
+          ? Effect.succeed({
+              config,
+              environment: input.environment ?? process.env,
+              revision: "test",
+            })
+          : undefined,
       input.memoryRunnerContext,
     );
     return yield* effectFn(textGeneration);
@@ -280,33 +294,61 @@ const memoryOperations = ["resolveMemoryConflict", "generateMemorySummary"] as c
 
 it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
   it.effect.each(memoryOperations)("runs %s without tools or checkout configuration", (operation) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const schemaCopyPath = (yield* fs.makeTempDirectoryScoped()) + "/schema.json";
+      yield* withFakeCodexEnv(
+        {
+          schemaCopyPath,
+          output: JSON.stringify(
+            operation === "resolveMemoryConflict"
+              ? { ...memoryOutput, judgment: "Synthetic judgment" }
+              : memoryOutput,
+          ),
+          memoryRunnerContext: memoryContext,
+          models: ["openai.gpt-5.6-luna"],
+          requireArg:
+            "--ignore-user-config --ignore-rules --disable shell_tool --disable unified_exec --disable apps --disable plugins --disable browser_use --disable computer_use --disable view_image --disable hooks",
+          isolated: true,
+        },
+        (generation) =>
+          Effect.gen(function* () {
+            const generated =
+              operation === "resolveMemoryConflict"
+                ? yield* generation.resolveMemoryConflict!(memoryConflict)
+                : yield* generation.generateMemorySummary!(memorySummary);
+            expect(generated.result.text).toBe(memoryOutput.text);
+            expect(generated.execution).toEqual({
+              requestedModelSelection: memorySelection,
+              effectiveModel: "openai.gpt-5.6-luna",
+              effectiveProvider: "codex",
+              providerInstanceId: memoryContext.providerInstanceId,
+              environmentId: memoryContext.environmentId,
+            });
+          }),
+      );
+      // Codex CLI 0.163.0 sends this file as a strict response format; one broken rule fails the call.
+      const schema: unknown = JSON.parse(yield* fs.readFileString(schemaCopyPath));
+      expect(strictOutputSchemaViolations(schema)).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+  it.effect("keeps a managed setup refusal as the cause so memory pauses the model", () =>
     withFakeCodexEnv(
       {
-        output: JSON.stringify(
-          operation === "resolveMemoryConflict"
-            ? { ...memoryOutput, judgment: "Synthetic judgment" }
-            : memoryOutput,
-        ),
+        output: JSON.stringify(memoryOutput),
         memoryRunnerContext: memoryContext,
-        models: ["openai.gpt-5.6-luna"],
-        requireArg:
-          "--ignore-user-config --ignore-rules --disable shell_tool --disable unified_exec --disable apps --disable plugins --disable browser_use --disable computer_use --disable view_image --disable hooks",
-        isolated: true,
+        managedRuntime: new ProviderSetupError({
+          instanceId: memoryContext.providerInstanceId,
+          operation: "managedRuntime",
+          detail: "Sign in with ChatGPT to use managed Codex.",
+        }),
       },
       (generation) =>
         Effect.gen(function* () {
-          const generated =
-            operation === "resolveMemoryConflict"
-              ? yield* generation.resolveMemoryConflict!(memoryConflict)
-              : yield* generation.generateMemorySummary!(memorySummary);
-          expect(generated.result.text).toBe(memoryOutput.text);
-          expect(generated.execution).toEqual({
-            requestedModelSelection: memorySelection,
-            effectiveModel: "openai.gpt-5.6-luna",
-            effectiveProvider: "codex",
-            providerInstanceId: memoryContext.providerInstanceId,
-            environmentId: memoryContext.environmentId,
-          });
+          const error = yield* generation.generateMemorySummary!(memorySummary).pipe(Effect.flip);
+          expect(error.detail).toBe("Sign in with ChatGPT to use managed Codex.");
+          expect(isSetupError(error.cause)).toBe(true);
+          expect(Hold.deterministicFailure(error)).toBe("unavailable");
         }),
     ),
   );
