@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 
 import { ForwardCompatibleOptional, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { RuntimeProtocolRanges } from "./environment.ts";
+import { HostCondition } from "./fleetHealth.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits } from "./providerUsageLimits.ts";
 import { HostResourcesSnapshot } from "./resourceTelemetry.ts";
@@ -110,6 +111,8 @@ export const HostStatusEntry = Schema.Struct({
       know decodes away, so a later verdict cannot break an older client. */
   compatibility: ForwardCompatibleOptional(HostCompatibility),
   message: Schema.optional(Schema.String),
+  /** Self-healing conditions this machine derived for the host. Older servers omit it. */
+  conditions: Schema.optional(Schema.Array(HostCondition)),
 });
 export type HostStatusEntry = typeof HostStatusEntry.Type;
 

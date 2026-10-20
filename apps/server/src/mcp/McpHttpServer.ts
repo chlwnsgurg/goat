@@ -53,6 +53,10 @@ import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { HostStatusToolkit } from "./toolkits/hostStatus/tools.ts";
 import * as HostStatusHandlers from "./toolkits/hostStatus/handlers.ts";
+import { FleetHealthToolkit } from "./toolkits/fleet/healthTools.ts";
+import * as FleetHealthHandlers from "./toolkits/fleet/healthHandlers.ts";
+import { FleetToolkit } from "./toolkits/fleet/tools.ts";
+import * as FleetHandlers from "./toolkits/fleet/handlers.ts";
 import { FleetResourcesToolkit } from "./toolkits/fleet/resources/tools.ts";
 import * as FleetResourcesHandlers from "./toolkits/fleet/resources/handlers.ts";
 import { ProviderToolkit } from "./toolkits/provider/tools.ts";
@@ -1218,6 +1222,8 @@ export const catalogRegistrations = {
   previewControls: toolkitRegistration(PreviewControlsToolkit, PreviewControlsHandlers.layer),
   environment: toolkitRegistration(EnvironmentToolkit, EnvironmentHandlers.layer),
   hostStatus: toolkitRegistration(HostStatusToolkit, HostStatusHandlers.layer),
+  fleetHealth: toolkitRegistration(FleetHealthToolkit, FleetHealthHandlers.layer),
+  fleet: toolkitRegistration(FleetToolkit, FleetHandlers.layer),
   fleetResources: toolkitRegistration(FleetResourcesToolkit, FleetResourcesHandlers.layer),
   provider: toolkitRegistration(ProviderToolkit, ProviderHandlers.layer),
   project: toolkitRegistration(ProjectToolkit, ProjectHandlers.layer),
@@ -1296,6 +1302,8 @@ export const layerHostStatusService = HostStatusMcpService.layer.pipe(
 /** Reads HostStatusMcpService from the server's context; see `layerHostStatusService`. */
 export const layerHostStatusToolkit = catalogRegistrations.hostStatus;
 
+/** goat_goal_*. The server provides GoalService with the controller (fleet/goals/GoalLayers). */
+export const layerFleetToolkit = catalogRegistrations.fleet;
 /** Reads Placement and FallbackChains from the server's context, like host status. */
 export const layerFleetResourcesToolkit = catalogRegistrations.fleetResources;
 
@@ -1351,6 +1359,7 @@ export const layer = Layer.mergeAll(
   layerProjectRegistration,
   layerEnvironmentToolkit,
   layerHostStatusToolkit,
+  catalogRegistrations.fleetHealth,
   layerFleetResourcesToolkit,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,

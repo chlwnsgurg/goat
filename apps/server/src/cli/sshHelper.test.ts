@@ -17,6 +17,7 @@ import * as NodeChildProcess from "node:child_process";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ownRuntimeManifest } from "@goat/shared/runtimeManifest";
 import packageJson from "../../package.json" with { type: "json" };
 import { readLiveSshRuntimeProtocol, readSshServerActivity } from "./sshHelper.ts";
 
@@ -93,6 +94,43 @@ await Effect.runPromise(Command.runWith(sshHelperCommand,{version:'test'})(['pro
       sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
       orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
     });
+  });
+
+  it.each([
+    { commit: undefined, commitTime: undefined },
+    { commit: "abc123", commitTime: 123456 },
+  ])("prints one runtime manifest JSON line with build metadata: %j", async (build) => {
+    const moduleUrl = new URL("./sshHelper.ts", import.meta.url).href;
+    const effectUrl = import.meta.resolve("effect/Effect");
+    const cliUrl = import.meta.resolve("effect/cli");
+    const script = `import * as Effect from ${JSON.stringify(effectUrl)};
+import {Command} from ${JSON.stringify(cliUrl)};
+globalThis.__GOAT_BUILD_COMMIT__ = ${JSON.stringify(build.commit) ?? "undefined"};
+globalThis.__GOAT_BUILD_COMMIT_TIME__ = ${JSON.stringify(build.commitTime?.toString()) ?? "undefined"};
+const {sshHelperCommand} = await import(${JSON.stringify(moduleUrl)});
+await Effect.runPromise(Command.runWith(sshHelperCommand,{version:'test'})(['runtime-manifest']));`;
+    const stdout = await new Promise<string>((resolve, reject) => {
+      NodeChildProcess.execFile(
+        process.execPath,
+        ["--input-type=module", "-e", script],
+        { timeout: 10000 },
+        (error, stdout, stderr) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          if (stderr.trim()) {
+            reject(new Error(stderr));
+            return;
+          }
+          resolve(stdout);
+        },
+      );
+    });
+    expect(stdout.split("\n")).toHaveLength(2);
+    expect(JSON.parse(stdout)).toEqual(
+      ownRuntimeManifest({ version: packageJson.version, ...build }),
+    );
   });
 
   it.each(

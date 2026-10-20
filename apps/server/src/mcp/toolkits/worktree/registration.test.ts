@@ -56,6 +56,9 @@ import * as ChannelWorkerReports from "../../../channels/ChannelWorkerReports.ts
 import * as LaunchWatchService from "../../LaunchWatchService.ts";
 import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpSessionRegistry from "../../McpSessionRegistry.ts";
+import * as HostHealthMonitor from "../../../fleet/health/HostHealthMonitor.ts";
+import * as FleetHostStates from "../../../fleet/health/FleetHostStates.ts";
+import * as Rescheduler from "../../../fleet/health/Rescheduler.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
 
@@ -63,6 +66,9 @@ const layerStubServices = Layer.mergeAll(
   Layer.mock(NotesService.NotesService)({}),
   Layer.mock(CloudSource.CloudTaskSourceService)({}),
   Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
+  Layer.mock(HostHealthMonitor.HostHealthMonitor)({}),
+  Layer.mock(FleetHostStates.FleetHostStates)({}),
+  Layer.mock(Rescheduler.Rescheduler)({}),
   Layer.mock(SshHostSetup.SshHostSetup)({}),
   Layer.mock(CloudMachineService.CloudMachineService)({}),
   Layer.mock(SshWorkspaceSync.SshWorkspaceSync)({}),

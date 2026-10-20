@@ -165,6 +165,7 @@ export function statusFromShell(
             at: DateTime.formatIso(message.updatedAt),
           },
     lastError: shell.lastError ?? null,
+    lastErrorClass: shell.lastErrorClass ?? null,
   });
 }
 

@@ -25,7 +25,12 @@ import {
 } from "@goat/contracts";
 import * as Semaphore from "effect/Semaphore";
 import * as NetService from "@goat/shared/Net";
-import { isWindowsShellOs, toWindowsHostPath, windowsHostPathKey } from "@goat/shared/path";
+import {
+  isWindowsAbsolutePath,
+  isWindowsShellOs,
+  toWindowsHostPath,
+  windowsHostPathKey,
+} from "@goat/shared/path";
 import { targetConnectionKey } from "@goat/ssh/command";
 import * as SshAuth from "@goat/ssh/auth";
 import { discoverSshHosts } from "@goat/ssh/config";
@@ -487,6 +492,7 @@ export function linkedHostFolder(alias: string, cwd: string): SshBrowseResult | 
 /**
  * Finds the project registered at the browsed folder, by either form of its path. A Windows
  * host compares either shell form, any slash, and any case, as NTFS does by default.
+ * A linked host reports no OS, so its native `C:\…` project roots alone mark it as Windows.
  */
 export function matchRemoteProject(
   projects: ReadonlyArray<RemoteProject>,
@@ -503,6 +509,14 @@ export function matchRemoteProject(
   const exact = projects.find((project) =>
     candidates.has(normalizeRemotePath(project.workspaceRoot)),
   );
+  if (exact === undefined && folder.os === null) {
+    const keys = new Set([windowsHostPathKey(folder.path), windowsHostPathKey(folder.realPath)]);
+    return projects.find(
+      (project) =>
+        isWindowsAbsolutePath(project.workspaceRoot) &&
+        keys.has(windowsHostPathKey(project.workspaceRoot)),
+    );
+  }
   if (exact !== undefined || folder.os !== "Darwin") return exact;
   // macOS volumes are usually case-insensitive, so a project can be saved with other casing.
   const folded = new Set([...candidates].map((candidate) => candidate.toLowerCase()));
@@ -2019,6 +2033,7 @@ export const resolveSshCliRunner = (baseDir: string) =>
       ...(bundledArchiveDirectory === undefined ? {} : { bundledArchiveDirectory }),
       ...(releaseBaseUrl === undefined ? {} : { releaseBaseUrl }),
       hostDownload: true,
+      publishedFallback: true,
       refreshOwnedRuntimeOnFirstConnection: true,
     } satisfies SshTunnel.RemoteGoatRunnerOptions;
   });

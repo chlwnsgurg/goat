@@ -38,9 +38,44 @@ import {
   parseGitCheckoutProgressLine,
   splitNullSeparatedGitStdoutPaths,
   windowsLongPathConfigEnv,
+  worktreeFolderName,
+  worktreeListLinesToFields,
 } from "./GitVcsDriverCore.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 import { gitConfigEnv } from "./VcsProcess.ts";
+
+describe("worktreeFolderName", () => {
+  it("keeps POSIX folder names as before", () => {
+    assert.equal(worktreeFolderName('feature/a"b<c>|d.', "linux"), 'feature-a"b<c>|d.');
+    assert.equal(worktreeFolderName("con", "darwin"), "con");
+  });
+
+  it("avoids names Windows refuses", () => {
+    assert.equal(worktreeFolderName('feature/a"b<c>|d', "win32"), "feature-a-b-c--d");
+    assert.equal(worktreeFolderName("release/1.0. ", "win32"), "release-1.0");
+    assert.equal(worktreeFolderName("CON", "win32"), "CON-branch");
+    assert.equal(worktreeFolderName("lpt1.txt", "win32"), "lpt1.txt-branch");
+    assert.equal(worktreeFolderName("console", "win32"), "console");
+  });
+});
+
+describe("worktreeListLinesToFields", () => {
+  it("drops CR and unquotes C-quoted paths from the line form", () => {
+    const lines =
+      "worktree C:/repo\r\nHEAD abc\r\nbranch refs/heads/main\r\n\r\n" +
+      'worktree "/tmp/caf\\303\\251 \\"q\\"\\ttab"\nbranch refs/heads/x\n\n';
+    assert.deepEqual(worktreeListLinesToFields(lines).split("\0"), [
+      "worktree C:/repo",
+      "HEAD abc",
+      "branch refs/heads/main",
+      "",
+      'worktree /tmp/café "q"\ttab',
+      "branch refs/heads/x",
+      "",
+      "",
+    ]);
+  });
+});
 
 const encodeGitCommandError = Schema.encodeEffect(Schema.fromJsonString(GitCommandError));
 

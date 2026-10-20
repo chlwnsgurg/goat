@@ -8,6 +8,8 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as HostProcess from "@goat/shared/HostProcess";
 import type { PlatformError } from "effect/PlatformError";
+import { runtimeManifestAssetName } from "@goat/shared/runtimeManifest";
+import { checkReleaseRuntimeManifest } from "./runtime-manifest.ts";
 import { parseUpdateManifest, type UpdateManifest } from "./update-manifest.ts";
 
 export class ReleaseVerificationError extends Schema.TaggedError<ReleaseVerificationError>()(
@@ -436,6 +438,7 @@ export const writePayloadReport = Effect.fn("writePayloadReport")(function* (
 
 export function requiredReleaseAssets(version: string): string[] {
   const names = [
+    runtimeManifestAssetName(version),
     "nightly-mac.yml",
     "nightly.yml",
     "nightly-linux.yml",
@@ -659,6 +662,16 @@ export const assembleRelease = Effect.fn("assembleRelease")(function* (
       continue;
     }
     assets.push(yield* readReleaseAsset(dir, name));
+  }
+  const runtimeName = runtimeManifestAssetName(version);
+  if (names.includes(runtimeName)) {
+    problems.push(
+      ...checkReleaseRuntimeManifest(
+        yield* fs.readFileString(path.join(dir, runtimeName)),
+        version,
+        new Map(assets.map(({ name, sha256 }) => [name, sha256])),
+      ),
+    );
   }
   for (const name of names.filter((name) => name.endsWith(".yml"))) {
     // Read before parsing so parser errors become a failed report instead of a defect.

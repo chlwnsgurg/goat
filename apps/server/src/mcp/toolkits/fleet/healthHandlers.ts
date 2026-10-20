@@ -1,0 +1,135 @@
+import { FleetOwnerKey, OrchestratorMcpFailure, ThreadId } from "@goat/contracts";
+import * as Effect from "effect/Effect";
+
+import * as FleetHostStates from "../../../fleet/health/FleetHostStates.ts";
+import * as HostHealthMonitor from "../../../fleet/health/HostHealthMonitor.ts";
+import * as Rescheduler from "../../../fleet/health/Rescheduler.ts";
+import { attemptOfBranch, nextAttemptBranch } from "../../../fleet/health/reschedulePolicy.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
+import { FleetHealthToolkit } from "./healthTools.ts";
+
+const asHost = (host: string) => (host === FleetHostStates.LOCAL_HOST ? null : host);
+
+/** Cordons and moves change where everyone's work runs, so each needs a full-access caller. */
+const hostResult = (host: string, message: string) =>
+  Effect.gen(function* () {
+    const monitor = yield* HostHealthMonitor.HostHealthMonitor;
+    const conditions = (yield* monitor.conditions(asHost(host))).conditions;
+    return {
+      host,
+      cordoned: conditions.some((condition) => condition.type === "Cordoned"),
+      draining: conditions.some((condition) => condition.type === "Draining"),
+      conditions: [...conditions],
+      message,
+    };
+  });
+
+export const layer = McpToolAccess.toLayer(FleetHealthToolkit, {
+  goat_host_cordon: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      const caller = yield* check;
+      yield* (yield* FleetHostStates.FleetHostStates).cordon({
+        host: input.host,
+        draining: false,
+        reason: input.reason ?? null,
+        changedBy: caller.scope.thread?.threadId ?? caller.scope.requestNamespace,
+      });
+      return yield* hostResult(
+        input.host,
+        "No new goal work is placed on " + input.host + ". Running threads are untouched.",
+      );
+    }),
+  ),
+  goat_host_uncordon: McpToolAccess.writesEnvironment((input) =>
+    Effect.gen(function* () {
+      yield* (yield* FleetHostStates.FleetHostStates).uncordon(input.host);
+      return yield* hostResult(input.host, input.host + " takes new placements again.");
+    }),
+  ),
+  goat_host_drain: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      const caller = yield* check;
+      yield* (yield* FleetHostStates.FleetHostStates).cordon({
+        host: input.host,
+        draining: true,
+        reason: input.reason ?? null,
+        changedBy: caller.scope.thread?.threadId ?? caller.scope.requestNamespace,
+      });
+      return yield* hostResult(
+        input.host,
+        "Goal attempts on " +
+          input.host +
+          " move to other hosts after their current run, one slot per goal at a time. Threads no goal owns stay.",
+      );
+    }),
+  ),
+  goat_thread_reschedule: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      const caller = yield* check;
+      if (input.targetHost === FleetHostStates.LOCAL_HOST) {
+        return {
+          status: "refused" as const,
+          reason: "no_capacity" as const,
+          message: "This machine cannot be a move target: moved work is launched on SSH hosts.",
+        };
+      }
+      const modelSelection = input.modelSelection ?? caller.caller?.modelSelection;
+      if (modelSelection === undefined) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message:
+            "Pass modelSelection: a caller outside a GOAT thread has no model to resume with.",
+        });
+      }
+      const rescheduler = yield* Rescheduler.Rescheduler;
+      // The caller is checked again after the move waits for its lock and before each remote write,
+      // so a caller that ended or lost its modes meanwhile changes nothing.
+      const services = yield* Effect.context<Effect.Services<typeof check>>();
+      const authorize = check.pipe(
+        Effect.map((current) => current.limits.runtimeMode),
+        Effect.mapError(
+          (error) => new Rescheduler.RescheduleNotAllowed({ message: error.message }),
+        ),
+        Effect.provideContext(services),
+      );
+      const attempt = attemptOfBranch(input.branch);
+      const branch = nextAttemptBranch(input.branch);
+      const result = yield* rescheduler.reschedule({
+        ref: { host: asHost(input.host), threadId: ThreadId.make(input.threadId), watchId: null },
+        owner: FleetOwnerKey.make("thread:" + input.threadId),
+        attempt,
+        reason: "manual",
+        modelSelection,
+        workspace: { baseRef: input.branch, branch, startFromOrigin: true },
+        previousBranch: input.branch,
+        replica: null,
+        prompt:
+          input.prompt ??
+          "Continue the task this branch was started for. Why it moved: " + input.reason,
+        runtimeMode: caller.limits.runtimeMode,
+        clientRequestId: "manual:" + input.host + ":" + input.threadId + ":a" + (attempt + 1),
+        project: { cwd: input.cwd, canonicalKey: null },
+        targetHost: input.targetHost === undefined ? null : asHost(input.targetHost),
+        force: input.force === true,
+        authorize,
+      });
+      return result._tag === "Rescheduled"
+        ? {
+            status: "rescheduled" as const,
+            host: result.host ?? FleetHostStates.LOCAL_HOST,
+            threadId: result.threadId,
+            branch: result.branch,
+            resumedFrom: result.resumedFrom,
+            message:
+              "Resumed on " +
+              (result.host ?? "this machine") +
+              " as " +
+              result.branch +
+              ". The old thread stays on " +
+              input.host +
+              " on its own branch.",
+          }
+        : { status: "refused" as const, reason: result.reason, message: result.message };
+    }),
+  ),
+});

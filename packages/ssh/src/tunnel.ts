@@ -37,23 +37,26 @@ import {
   waitForHttpReady as waitForHttpReadyShared,
 } from "@goat/shared/httpReadiness";
 import {
+  CLI_ARCHIVE_PLATFORM_KEYS,
   CLI_RELEASE_REPOSITORY,
   cliArchiveFileName,
   cliArchivePlatformKey,
   cliReleaseDownloadBaseUrl,
   isPublishableCliReleaseVersion,
+  type CliArchivePlatformKey,
 } from "@goat/shared/cliRelease";
 import * as KeyedLock from "@goat/shared/KeyedLock";
 import * as NetService from "@goat/shared/Net";
 import * as HostProcess from "@goat/shared/HostProcess";
 import { extractJsonObject, fromLenientJson } from "@goat/shared/schemaJson";
-import { compareRuntimeBuilds } from "@goat/shared/semver";
+import { compareRuntimeBuilds, parseSemver, type RuntimeBuild } from "@goat/shared/semver";
 import {
   encodePowerShellCommand,
   WINDOWS_DETACHED_SPAWN_POWERSHELL,
   WINDOWS_PROCESS_INFO_POWERSHELL,
 } from "@goat/shared/windowsHostProcess";
 import * as Config from "effect/Config";
+import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -77,6 +80,7 @@ import { makeOwnedSshTunnelCommand, ownedAuthDirectory } from "./tunnelOwner.ts"
 import { readLocalRuntimeArchive } from "./runtimeArchive.ts";
 import { downloadRuntimeArchiveWithGh } from "./runtimeArchiveGh.ts";
 import { downloadRuntimeArchiveWithHttps } from "./runtimeArchiveHttp.ts";
+import { findPublishedRuntime, type PublishedRuntimeMiss } from "./runtimePublished.ts";
 import {
   baseSshArgs,
   buildSshHostSpecEffect,
@@ -158,6 +162,12 @@ export interface RemoteGoatRunnerOptions {
    * acquires the archive and uploads it.
    */
   readonly hostDownload?: boolean;
+  /**
+   * When this build's own runtime cannot be acquired for a host that runs nothing usable,
+   * install the newest published runtime that is compatible with it instead. The desktop app
+   * and the server's SSH dispatch set it.
+   */
+  readonly publishedFallback?: boolean;
   /** Local gh executable used for authenticated acquisition; defaults to PATH lookup. */
   readonly ghCommand?: string | undefined;
   /** Deadline for the best-effort post-install cleanup and fact warming round trip; 10 s by default. */
@@ -204,6 +214,11 @@ export interface PreparedRemoteRuntime {
   readonly reconnectProbe?: string;
   readonly reconnectPending?: SshRuntimePendingReplacement;
   readonly hostPlatform?: "darwin" | "linux" | "win32";
+  /**
+   * Set for a published fallback chosen because the host had no GOAT data. Launch refuses to
+   * start it if data appeared meanwhile, since that data may come from a newer build.
+   */
+  readonly requireFreshHost?: boolean;
 }
 const requestedRuntime = (runner: RemoteGoatRunnerOptions | undefined): PreparedRemoteRuntime => ({
   runner: { ...runner },
@@ -2270,6 +2285,13 @@ elif [ "$LIVE_STATUS" = live ]; then
   publish_selected_runner
   reuse_live_server
 else
+  if [ "@@GOAT_REQUIRE_FRESH_HOST@@" = 1 ]; then
+    for fresh_db in "$DEFAULT_SERVER_HOME/userdata/statev2.sqlite" "$DEFAULT_SERVER_HOME/userdata/state.sqlite"; do
+      if [ -e "$fresh_db" ] || [ -L "$fresh_db" ]; then
+        printf 'GOAT data appeared on this host while it was being set up; reconnect.\\n' >&2; exit 1
+      fi
+    done
+  fi
   publish_selected_runner
 fi
 LAUNCH_ATTEMPTS=0
@@ -2343,6 +2365,9 @@ while [ -z "$REMOTE_PORT" ]; do
     rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$STATE_DIR/identity"
     exit 1
   fi
+  # A held published fallback becomes an ordinary runtime only once its own server is ready
+  # and owns the port, so it serves this host's data.
+  if [ "@@GOAT_REQUIRE_FRESH_HOST@@" = 1 ]; then rm -f "$HOME/.goat/runtime/goat/held/$SELECTED_VERSION"; fi
 done
 refresh_fields=
 [ "$REFRESH_DECISION" != replaced ] || refresh_fields=',"refresh":"replaced"'
@@ -2659,6 +2684,7 @@ export function buildRemoteLaunchScript(
     GOAT_READY_TIMEOUT_MS: String(REMOTE_READY_TIMEOUT_MS),
     GOAT_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
     GOAT_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
+    GOAT_REQUIRE_FRESH_HOST: selection.requireFreshHost === true ? "1" : "0",
   });
 }
 
@@ -2916,6 +2942,13 @@ if [ -n "$state_key" ] && [ -f "$state/run-t3.sh" ]; then
   fi
 fi
 retained_fields=
+# A published fallback that has not yet served (pending) or failed verification (rejected).
+# Any marker GOAT cannot read still holds the version.
+held_of() {
+  held_file="$HOME/.goat/runtime/goat/held/$1"
+  [ -e "$held_file" ] || [ -L "$held_file" ] || return 1
+  case "$(cat "$held_file" 2>/dev/null || true)" in rejected) printf rejected ;; *) printf pending ;; esac
+}
 if [ -n "$retained_sha256" ]; then
   retained_fields="$(printf ',"retainedRunnerSha256":"%s"' "$retained_sha256")"
 fi
@@ -2931,6 +2964,9 @@ if ready_version "$retained_version"; then
     fi
     if [ "$retained_version" != "$V" ] && lacks_memory_scopes "$HOME/.goat/runtime/goat/versions/$retained_version/goat"; then
       retained_fields="$retained_fields,\\"retainedLacksMemoryScopes\\":true"
+    fi
+    if retained_held="$(held_of "$retained_version")"; then
+      retained_fields="$retained_fields,\\"retainedHeld\\":\\"$retained_held\\""
     fi
   fi
 fi
@@ -2968,6 +3004,9 @@ collect_installed_candidates() {
     if candidate_commit="$(build_commit_time "$dir/goat")"; then
       candidate_fields="$candidate_fields,\\"commitTime\\":$candidate_commit"
     fi
+    if held_state="$(held_of "$recorded_version")"; then
+      candidate_fields="$candidate_fields,\\"held\\":\\"$held_state\\""
+    fi
     installed_versions="$installed_versions $recorded_version"
     installed_candidates="$installed_candidates\${installed_candidates:+,}$candidate_fields}"
   done
@@ -2995,6 +3034,9 @@ collect_installed_candidates() {
     candidate_fields="$(printf '{"version":"%s","signals":%s,"executableSha256":"%s","unrecorded":true' "$candidate_version" "$candidate_signals" "$executable_sha")"
     if candidate_commit="$(build_commit_time "$dir/goat")"; then
       candidate_fields="$candidate_fields,\\"commitTime\\":$candidate_commit"
+    fi
+    if held_state="$(held_of "$candidate_version")"; then
+      candidate_fields="$candidate_fields,\\"held\\":\\"$held_state\\""
     fi
     installed_versions="$installed_versions $candidate_version"
     installed_candidates="$installed_candidates\${installed_candidates:+,}$candidate_fields}"
@@ -3104,6 +3146,8 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
             signals: RuntimeSignals,
             commitTime: Schema.optionalKey(Schema.Int),
             unrecorded: Schema.optionalKey(Schema.Boolean),
+            /** A published fallback still being verified (`pending`) or refused (`rejected`). */
+            held: Schema.optionalKey(Schema.Literals(["pending", "rejected"])),
             executableSha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
           }),
         ),
@@ -3118,6 +3162,8 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
       retainedCommitTime: Schema.optionalKey(Schema.Int),
       /** The installed build's CLI cannot issue memory scopes; absent when it can or is unknown. */
       retainedLacksMemoryScopes: Schema.optionalKey(Schema.Boolean),
+      /** The retained runtime is a held published fallback; see `REMOTE_PUBLISHED_RUNTIME_GATE_SCRIPT`. */
+      retainedHeld: Schema.optionalKey(Schema.Literals(["pending", "rejected"])),
       liveStatus: Schema.optionalKey(Schema.Literals(["none", "live", "unknown"])),
       liveOwned: Schema.optionalKey(Schema.Boolean),
       identityAbsent: Schema.optionalKey(Schema.Boolean),
@@ -3154,7 +3200,7 @@ const runtimePreparationError = (cause: unknown) =>
       });
 
 /** A failure to read or fetch the archive itself: supplying another archive is the remedy. */
-const archiveSupplyError = (cause: unknown) => {
+const archiveSupplyError = (cause: unknown, action?: string) => {
   const error = runtimePreparationError(cause);
   return error instanceof SshLaunchError && error.reason === undefined
     ? new SshLaunchError({
@@ -3162,6 +3208,7 @@ const archiveSupplyError = (cause: unknown) => {
         message: error.message,
         stdout: error.stdout,
         ...(error.acquisition === undefined ? {} : { acquisition: error.acquisition }),
+        ...(action === undefined ? {} : { action }),
         cause: error.cause,
       })
     : error;
@@ -3206,6 +3253,33 @@ const installOnHost = Effect.fn("ssh/tunnel.installOnHost")(function* (
     }),
   );
 });
+
+/**
+ * `compareRuntimeBuilds` for runtimes found on a host. Between a plain release and a prerelease
+ * the commit time decides, and a plain build without one predates stamping, so it is older.
+ * GOAT has only published prereleases, so a plain `0.1.1` on a host is a leftover from an older
+ * install. It sorts above every `0.1.0-nightly.*` yet lacks their migrations, so starting it
+ * against their database fails every launch.
+ */
+export const compareHostRuntimeBuilds = (
+  left: RuntimeBuild,
+  right: RuntimeBuild,
+): number | undefined => {
+  const leftParsed = parseSemver(left.version);
+  const rightParsed = parseSemver(right.version);
+  const leftPlain = leftParsed?.prerelease.length === 0;
+  if (
+    leftParsed === null ||
+    rightParsed === null ||
+    leftPlain === (rightParsed.prerelease.length === 0)
+  )
+    return compareRuntimeBuilds(left, right);
+  const [plain, prerelease] = leftPlain ? [left, right] : [right, left];
+  if (prerelease.commitTime === undefined) return compareRuntimeBuilds(left, right);
+  const plainNewer = plain.commitTime === undefined ? -1 : plain.commitTime - prerelease.commitTime;
+  if (plainNewer === 0) return compareRuntimeBuilds(left, right);
+  return leftPlain ? plainNewer : -plainNewer;
+};
 
 export const prepareRemoteRuntime = (
   target: DesktopSshEnvironmentTarget,
@@ -3262,7 +3336,7 @@ export const prepareRemoteRuntime = (
     const retainedOrder =
       probe.retainedVersion === undefined
         ? undefined
-        : compareRuntimeBuilds(
+        : compareHostRuntimeBuilds(
             { version: probe.retainedVersion, commitTime: probe.retainedCommitTime },
             requestedBuild,
           );
@@ -3307,7 +3381,9 @@ export const prepareRemoteRuntime = (
       probe.retainedSignals !== undefined &&
       probe.retainedRunnerSha256 !== undefined &&
       probe.retainedSignals.serverVersion === probe.retainedVersion &&
-      matchesSignals(probe.retainedSignals, version);
+      matchesSignals(probe.retainedSignals, version) &&
+      // A held fallback runs only through the published path, which rechecks the host's data.
+      probe.retainedHeld === undefined;
     // No server runs, so no thread can be interrupted: an owning client installs
     // its own release instead of restarting an older retained one. A retained
     // build without a commit time predates stamping, so a stamped client counts it
@@ -3392,17 +3468,17 @@ export const prepareRemoteRuntime = (
         : retainedCompatible && !upgradeRetained
           ? probe.retainedVersion
           : undefined;
-    const selectInstalled = (selectedVersion: string) => {
+    const selectInstalled = (selectedVersion: string, from = probe) => {
       const installed =
-        probe.liveStatus === "none"
-          ? probe.installedCandidates?.find((candidate) => candidate.version === selectedVersion)
+        from.liveStatus === "none"
+          ? from.installedCandidates?.find((candidate) => candidate.version === selectedVersion)
           : undefined;
       const retained =
-        selectedVersion === probe.retainedVersion &&
-        probe.retainedSignals !== undefined &&
-        probe.retainedSignals.serverVersion === selectedVersion &&
-        matchesSignals(probe.retainedSignals, version) &&
-        probe.retainedRunnerSha256 !== undefined;
+        selectedVersion === from.retainedVersion &&
+        from.retainedSignals !== undefined &&
+        from.retainedSignals.serverVersion === selectedVersion &&
+        matchesSignals(from.retainedSignals, version) &&
+        from.retainedRunnerSha256 !== undefined;
       return Effect.annotateCurrentSpan(
         "goat.runtime.source",
         retained ? "retained-runner" : installed ? "recorded-install" : "live-runtime",
@@ -3416,12 +3492,12 @@ export const prepareRemoteRuntime = (
             : { installedExecutableSha256: installed.executableSha256 }),
           requireInstalled: true,
           runner: { ...runner, archiveVersion: selectedVersion },
-          retainedRunnerSha256: retained ? (probe.retainedRunnerSha256 ?? null) : null,
-          ...(probe.liveStatus === "live" &&
-          (probe.liveOwned !== true ||
+          retainedRunnerSha256: retained ? (from.retainedRunnerSha256 ?? null) : null,
+          ...(from.liveStatus === "live" &&
+          (from.liveOwned !== true ||
             liveOrder === undefined ||
             liveOrder > 0 ||
-            (selectedVersion !== version && probe.liveDrain !== true))
+            (selectedVersion !== version && from.liveDrain !== true))
             ? {
                 updateBlocked:
                   liveOrder !== undefined && liveOrder > 0
@@ -3440,185 +3516,204 @@ export const prepareRemoteRuntime = (
         sourcesTried.push(label);
         return effect;
       });
-    const acquireRequested = Effect.gen(function* () {
-      if (probe.ready) {
-        yield* Effect.annotateCurrentSpan("goat.runtime.source", "ready");
-        return { ...exact, requireInstalled: true };
-      }
-      if (platformKey === undefined) {
-        if (mirror !== "") {
+    // `fallback` installs another published version only: it never reports the requested one ready.
+    const acquireVersion = (version: string, fallback = false) =>
+      Effect.gen(function* () {
+        if (!fallback && probe.ready) {
+          yield* Effect.annotateCurrentSpan("goat.runtime.source", "ready");
+          return { ...exact, requireInstalled: true };
+        }
+        if (platformKey === undefined) {
+          if (mirror !== "") {
+            sourcesTried.push("mirror");
+            yield* Effect.annotateCurrentSpan("goat.runtime.source", "download");
+            return exact;
+          }
+          const asset =
+            platformKey === undefined
+              ? `unsupported-${probe.platform}-${probe.arch}`
+              : cliArchiveFileName(version, platformKey);
+          return yield* new SshLaunchError({
+            reason: "archive-unavailable",
+            message: `Cannot acquire the SSH runtime archive (repo=${CLI_RELEASE_REPOSITORY}, tag=v${version}, asset=${asset}, archive directory=${directory || "<not configured>"}). Configure a local archive directory and use a supported SSH platform, or an explicit release mirror.`,
+            stdout: "",
+          });
+        }
+        // The host's own network is usually faster than this client's uplink, and an upload
+        // costs this client the whole archive. Unpublished builds and mirrors skip it.
+        if (
+          runner?.hostDownload === true &&
+          mirror === "" &&
+          isPublishableCliReleaseVersion(version) &&
+          (yield* source(
+            "host",
+            installOnHost(target, authOptions, { ...runner, archiveVersion: version }, onPhase),
+          ))
+        ) {
+          yield* Effect.annotateCurrentSpan("goat.runtime.source", "host-download");
+          return { ...exact, requireInstalled: true, uploaded: true };
+        }
+        const bundledArchive =
+          bundleDirectory === ""
+            ? null
+            : yield* source(
+                "bundle",
+                readLocalRuntimeArchive(bundleDirectory, version, platformKey, true),
+              ).pipe(
+                Effect.mapError((cause) =>
+                  archiveSupplyError(cause, "Reinstall this app, then reconnect."),
+                ),
+              );
+        const localArchive =
+          bundledArchive !== null || directory === ""
+            ? null
+            : yield* source("cache", readLocalRuntimeArchive(directory, version, platformKey)).pipe(
+                Effect.mapError((cause) =>
+                  archiveSupplyError(
+                    cause,
+                    `Remove ${cliArchiveFileName(version, platformKey)} from ${directory}, then reconnect.`,
+                  ),
+                ),
+              );
+        if (bundledArchive === null && localArchive === null && mirror !== "") {
           sourcesTried.push("mirror");
           yield* Effect.annotateCurrentSpan("goat.runtime.source", "download");
           return exact;
         }
-        const asset =
-          platformKey === undefined
-            ? `unsupported-${probe.platform}-${probe.arch}`
-            : cliArchiveFileName(version, platformKey);
-        return yield* new SshLaunchError({
-          reason: "archive-unavailable",
-          message: `Cannot acquire the SSH runtime archive (repo=${CLI_RELEASE_REPOSITORY}, tag=v${version}, asset=${asset}, archive directory=${directory || "<not configured>"}). Configure a local archive directory and use a supported SSH platform, or an explicit release mirror.`,
-          stdout: "",
-        });
-      }
-      // The host's own network is usually faster than this client's uplink, and an upload
-      // costs this client the whole archive. Unpublished builds and mirrors skip it.
-      if (
-        runner?.hostDownload === true &&
-        mirror === "" &&
-        isPublishableCliReleaseVersion(version) &&
-        (yield* source(
-          "host",
-          installOnHost(target, authOptions, { ...runner, archiveVersion: version }, onPhase),
-        ))
-      ) {
-        yield* Effect.annotateCurrentSpan("goat.runtime.source", "host-download");
-        return { ...exact, requireInstalled: true, uploaded: true };
-      }
-      const bundledArchive =
-        bundleDirectory === ""
-          ? null
-          : yield* source(
-              "bundle",
-              readLocalRuntimeArchive(bundleDirectory, version, platformKey, true),
-            ).pipe(Effect.mapError(archiveSupplyError));
-      const localArchive =
-        bundledArchive !== null || directory === ""
-          ? null
-          : yield* source("cache", readLocalRuntimeArchive(directory, version, platformKey)).pipe(
-              Effect.mapError(archiveSupplyError),
-            );
-      if (bundledArchive === null && localArchive === null && mirror !== "") {
-        sourcesTried.push("mirror");
-        yield* Effect.annotateCurrentSpan("goat.runtime.source", "download");
-        return exact;
-      }
-      if (bundledArchive === null && localArchive === null) {
-        const path = yield* Path.Path;
-        if (
-          directory === "" ||
-          (bundleDirectory !== "" && path.resolve(directory) === path.resolve(bundleDirectory))
-        ) {
-          return yield* new SshLaunchError({
-            reason: "archive-unavailable",
-            message: `Cannot acquire ${cliArchiveFileName(version, platformKey)} for ${target.alias}: no writable user archive cache distinct from the bundle (${directory || "<not configured>"}). Configure archiveDirectory for ${CLI_RELEASE_REPOSITORY} release v${version} or rebuild the packaged archives.`,
-            stdout: "",
-          });
+        if (bundledArchive === null && localArchive === null) {
+          const path = yield* Path.Path;
+          if (
+            directory === "" ||
+            (bundleDirectory !== "" && path.resolve(directory) === path.resolve(bundleDirectory))
+          ) {
+            return yield* new SshLaunchError({
+              reason: "archive-unavailable",
+              message: `Cannot acquire ${cliArchiveFileName(version, platformKey)} for ${target.alias}: no writable user archive cache distinct from the bundle (${directory || "<not configured>"}). Configure archiveDirectory for ${CLI_RELEASE_REPOSITORY} release v${version} or rebuild the packaged archives.`,
+              stdout: "",
+              action: "Reinstall this app, then reconnect.",
+            });
+          }
         }
-      }
-      const archive =
-        bundledArchive ??
-        localArchive ??
-        (yield* source(
-          "https",
-          downloadRuntimeArchiveWithHttps(directory, version, platformKey),
-        ).pipe(
-          Effect.catchTags({
-            RuntimeArchiveNotPublished: () =>
-              source(
-                "gh",
-                downloadRuntimeArchiveWithGh(directory, version, platformKey, runner?.ghCommand),
-              ).pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new SshLaunchError({
-                      reason: "archive-unavailable",
-                      message: `Public HTTPS release is not published and local gh acquisition failed: ${cause.message}`,
-                      stdout: "",
-                      cause,
-                    }),
+        const archive =
+          bundledArchive ??
+          localArchive ??
+          (yield* source(
+            "https",
+            downloadRuntimeArchiveWithHttps(directory, version, platformKey),
+          ).pipe(
+            Effect.catchTags({
+              RuntimeArchiveNotPublished: () =>
+                source(
+                  "gh",
+                  downloadRuntimeArchiveWithGh(directory, version, platformKey, runner?.ghCommand),
+                ).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new SshLaunchError({
+                        reason: "archive-unavailable",
+                        message: `Public HTTPS release is not published and local gh acquisition failed: ${cause.message}`,
+                        stdout: "",
+                        // A published build whose archive is gone was pruned: a newer app has one.
+                        action: isPublishableCliReleaseVersion(version)
+                          ? missAction("client-too-old", "", directory)
+                          : missAction("none", cliArchiveFileName(version, platformKey), directory),
+                        cause,
+                      }),
+                  ),
                 ),
-              ),
-            RuntimeArchiveNetworkError: () =>
-              source(
-                "gh",
-                downloadRuntimeArchiveWithGh(directory, version, platformKey, runner?.ghCommand),
-              ).pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new SshLaunchError({
-                      reason: "archive-unavailable",
-                      message: `Public HTTPS release download failed and local gh acquisition failed: ${cause.message}`,
-                      stdout: "",
-                      cause,
-                    }),
+              RuntimeArchiveNetworkError: () =>
+                source(
+                  "gh",
+                  downloadRuntimeArchiveWithGh(directory, version, platformKey, runner?.ghCommand),
+                ).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new SshLaunchError({
+                        reason: "archive-unavailable",
+                        message: `Public HTTPS release download failed and local gh acquisition failed: ${cause.message}`,
+                        stdout: "",
+                        action: missAction("unreachable", "", directory),
+                        cause,
+                      }),
+                  ),
                 ),
-              ),
-          }),
-          Effect.mapError(archiveSupplyError),
-        ));
-      yield* Effect.annotateCurrentSpan(
-        "goat.runtime.acquisition",
-        bundledArchive !== null ? "bundle" : localArchive !== null ? "cache" : "https-or-gh",
-      );
-      yield* Effect.annotateCurrentSpan({
-        "goat.runtime.source": "upload",
-        "goat.runtime.upload.bytes": archive.bytes.byteLength,
-        "goat.runtime.upload.sha256": archive.sha256,
-        "goat.runtime.upload.installComplete": false,
-      });
-      const script = yield* Effect.try({
-        try: () =>
-          buildRemoteUploadScript(
-            {
-              ...runner,
-              archiveVersion: version,
-              archiveSource:
-                bundledArchive !== null
-                  ? "bundle"
-                  : localArchive !== null
-                    ? "cache"
-                    : sourcesTried.at(-1) === "gh"
-                      ? "gh"
-                      : "https",
-            },
-            archive.sha256,
-          ),
-        catch: runtimePreparationError,
-      });
-      notifyRuntimePhase(target, "uploading", onPhase);
-      yield* runSshCommand(target, {
-        ...authOptions,
-        ...remoteUploadCommand(script, archive.bytes, probe.platform),
-        timeoutStage: "runtime-install",
-        timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
-      }).pipe(
-        // A remote reader that exits early (full disk, failed checksum) fails only
-        // this upload, with the remote's own reason. A connection failure or timeout
-        // stays an SshCommandError that names the host.
-        Effect.catchTags({
-          SshCommandError: (error) =>
-            error.exitCode === null || error.exitCode === 255
-              ? Effect.fail(error)
-              : Effect.fail(
-                  new SshLaunchError({
-                    message: `Uploading the runtime archive failed (exit ${error.exitCode}): ${error.message}`,
-                    stdout: error.stdout ?? "",
-                    cause: error,
-                  }),
-                ),
-        }),
-      );
-      yield* Effect.annotateCurrentSpan("goat.runtime.upload.installComplete", true);
-      return { ...exact, requireInstalled: true, uploaded: true };
-    }).pipe(
-      // Error.message is non-enumerable; adding acquisition context must preserve it explicitly.
-      Effect.mapError((error) =>
-        error instanceof SshLaunchError && error.reason === "archive-unavailable"
-          ? new SshLaunchError({
-              message: error.message,
-              stdout: error.stdout,
-              reason: error.reason,
-              ...(error.cause === undefined ? {} : { cause: error.cause }),
-              acquisition: {
-                requestedVersion: version,
-                platformKey: platformKey ?? `${probe.platform}-${probe.arch}`,
-                sourcesTried: [...sourcesTried],
+            }),
+            Effect.mapError(archiveSupplyError),
+          ));
+        yield* Effect.annotateCurrentSpan(
+          "goat.runtime.acquisition",
+          bundledArchive !== null ? "bundle" : localArchive !== null ? "cache" : "https-or-gh",
+        );
+        yield* Effect.annotateCurrentSpan({
+          "goat.runtime.source": "upload",
+          "goat.runtime.upload.bytes": archive.bytes.byteLength,
+          "goat.runtime.upload.sha256": archive.sha256,
+          "goat.runtime.upload.installComplete": false,
+        });
+        const script = yield* Effect.try({
+          try: () =>
+            buildRemoteUploadScript(
+              {
+                ...runner,
+                archiveVersion: version,
+                archiveSource:
+                  bundledArchive !== null
+                    ? "bundle"
+                    : localArchive !== null
+                      ? "cache"
+                      : sourcesTried.at(-1) === "gh"
+                        ? "gh"
+                        : "https",
               },
-            })
-          : error,
-      ),
-    );
+              archive.sha256,
+            ),
+          catch: runtimePreparationError,
+        });
+        notifyRuntimePhase(target, "uploading", onPhase);
+        yield* runSshCommand(target, {
+          ...authOptions,
+          ...remoteUploadCommand(script, archive.bytes, probe.platform),
+          timeoutStage: "runtime-install",
+          timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
+        }).pipe(
+          // A remote reader that exits early (full disk, failed checksum) fails only
+          // this upload, with the remote's own reason. A connection failure or timeout
+          // stays an SshCommandError that names the host.
+          Effect.catchTags({
+            SshCommandError: (error) =>
+              error.exitCode === null || error.exitCode === 255
+                ? Effect.fail(error)
+                : Effect.fail(
+                    new SshLaunchError({
+                      message: `Uploading the runtime archive failed (exit ${error.exitCode}): ${error.message}`,
+                      stdout: error.stdout ?? "",
+                      cause: error,
+                    }),
+                  ),
+          }),
+        );
+        yield* Effect.annotateCurrentSpan("goat.runtime.upload.installComplete", true);
+        return { ...exact, requireInstalled: true, uploaded: true };
+      }).pipe(
+        // Error.message is non-enumerable; adding acquisition context must preserve it explicitly.
+        Effect.mapError((error) =>
+          error instanceof SshLaunchError && error.reason === "archive-unavailable"
+            ? new SshLaunchError({
+                message: error.message,
+                stdout: error.stdout,
+                reason: error.reason,
+                ...(error.cause === undefined ? {} : { cause: error.cause }),
+                ...(error.action === undefined ? {} : { action: error.action }),
+                acquisition: {
+                  requestedVersion: version,
+                  platformKey: platformKey ?? `${probe.platform}-${probe.arch}`,
+                  sourcesTried: [...sourcesTried],
+                },
+              })
+            : error,
+        ),
+      );
+    const acquireRequested = acquireVersion(version);
     if (selectedVersion !== undefined) return yield* selectInstalled(selectedVersion);
     // Legacy ownership must be adopted through its normal replacement path;
     // attaching without adoption would fail the launch-time identity check.
@@ -3635,19 +3730,20 @@ export const prepareRemoteRuntime = (
         : undefined;
       for (const candidate of probe.installedCandidates ?? []) {
         if (
+          candidate.held !== undefined ||
           candidate.signals.serverVersion !== candidate.version ||
           !matchesSignals(candidate.signals, version) ||
-          compareRuntimeBuilds(candidate, requestedBuild) === undefined
+          compareHostRuntimeBuilds(candidate, requestedBuild) === undefined
         )
           continue;
         if (probe.retainedVersion !== undefined) {
-          const retainedOrder = compareRuntimeBuilds(candidate, {
+          const retainedOrder = compareHostRuntimeBuilds(candidate, {
             version: probe.retainedVersion,
             commitTime: probe.retainedCommitTime,
           });
           if (retainedOrder === undefined || retainedOrder <= 0) continue;
         }
-        const order = chosen === undefined ? 1 : compareRuntimeBuilds(candidate, chosen);
+        const order = chosen === undefined ? 1 : compareHostRuntimeBuilds(candidate, chosen);
         if (order !== undefined && order > 0)
           chosen = { version: candidate.version, commitTime: candidate.commitTime };
       }
@@ -3701,25 +3797,326 @@ export const prepareRemoteRuntime = (
         }),
       );
     }
-    return yield* acquireRequested;
+    // A host that has never run GOAT: nothing installed, nothing running, no data. Only such a
+    // host may get a published runtime other than the requested one, because GOAT has no way
+    // to prove that an older build can read data a newer one wrote (unknown migrations only
+    // warn). Liveness the probe could not establish is never read as stopped. Held runtimes are
+    // earlier published fallbacks that never passed verification and launch.
+    const coldHost =
+      probe.liveStatus !== "live" &&
+      probe.liveStatus !== "unknown" &&
+      (probe.retainedVersion === undefined || probe.retainedHeld !== undefined) &&
+      (probe.installedCandidates ?? []).every((candidate) => candidate.held !== undefined);
+    if (
+      runner?.publishedFallback !== true ||
+      !owningLaunch ||
+      !exact.mayUpgradeOwnedServer ||
+      !coldHost ||
+      mirror !== "" ||
+      platformKey === undefined
+    )
+      return yield* acquireRequested;
+    return yield* acquireRequested.pipe(
+      Effect.catchTags({
+        SshLaunchError: (error) =>
+          error.reason === "archive-unavailable"
+            ? installPublishedRuntime(platformKey, error)
+            : Effect.fail(error),
+      }),
+    );
+
+    function installPublishedRuntime(key: CliArchivePlatformKey, requestedError: SshLaunchError) {
+      const asset = cliArchiveFileName(version, key);
+      const giveUp = (miss: PublishedRuntimeMiss, detail: string) =>
+        Effect.logWarning("ssh.runtime.published.unavailable", {
+          ...sshTargetLogFields(target),
+          requestedVersion: version,
+          miss,
+          detail,
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new SshLaunchError({
+                message: requestedError.message,
+                stdout: requestedError.stdout,
+                reason: "archive-unavailable",
+                ...(requestedError.acquisition === undefined
+                  ? {}
+                  : { acquisition: requestedError.acquisition }),
+                action: missAction(miss, asset, directory),
+                cause: requestedError,
+              }),
+            ),
+          ),
+        );
+      return Effect.gen(function* () {
+        const gate = (mode: "fresh" | "capable" | "hold" | "reject", candidate = "") =>
+          runSshCommand(target, {
+            ...authOptions,
+            remoteCommandArgs: ["sh", "-s", "--", mode, candidate],
+            stdin: buildPublishedRuntimeGateScript(stateKey ?? REMOTE_RUNTIME_STATE_KEY),
+          }).pipe(
+            Effect.map((result) => result.stdout.trim()),
+            Effect.catchTags({
+              SshCommandError: (error) =>
+                error.exitCode === null || error.exitCode === 255
+                  ? Effect.fail(error)
+                  : Effect.succeed("no"),
+            }),
+          );
+        const raced = new SshLaunchError({
+          message: `Another GOAT client set up ${target.alias} at the same time. Reconnect to use it.`,
+          stdout: "",
+        });
+        if ((yield* gate("fresh")) !== "yes")
+          return yield* giveUp("none", "The host has GOAT data but no runtime this app can start.");
+        const search = yield* findPublishedRuntime({
+          platformKey: key,
+          requestedVersion: version,
+          exclude: new Set(
+            [
+              ...(probe.installedCandidates ?? []).map((candidate) => ({
+                version: candidate.version,
+                held: candidate.held,
+              })),
+              { version: probe.retainedVersion, held: probe.retainedHeld },
+            ].flatMap((runtime) =>
+              runtime.held === "rejected" && runtime.version !== undefined ? [runtime.version] : [],
+            ),
+          ),
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.succeed({ miss: "unreachable" as const, rejected: [Cause.pretty(cause)] }),
+          ),
+        );
+        if ("miss" in search) return yield* giveUp(search.miss, search.rejected.join("; "));
+        const published = search.found;
+        yield* Effect.logInfo("ssh.runtime.published.install", {
+          ...sshTargetLogFields(target),
+          requestedVersion: version,
+          publishedVersion: published.version,
+          channel: published.channel,
+          manifest: published.manifest !== undefined,
+          rejected: search.rejected.join("; "),
+        });
+        yield* Effect.annotateCurrentSpan("goat.runtime.published", published.version);
+        // Held from before installation until launch confirms the host still has no data, so
+        // installed-runtime recovery never starts it unverified, here or from another client.
+        // "no": data appeared since the check above; "busy": another client holds the lock.
+        if ((yield* gate("hold", published.version)) !== "yes") return yield* raced;
+        yield* acquireVersion(published.version, true).pipe(
+          Effect.catchTags({
+            SshLaunchError: (error) =>
+              error.reason === "archive-unavailable"
+                ? giveUp("unreachable", error.message)
+                : Effect.fail(error),
+          }),
+        );
+        // The installed binary, not the release, has the last word: its own protocol answer,
+        // a proven build order, and positive evidence of every required capability.
+        const after = yield* runSshCommand(target, {
+          ...authOptions,
+          remoteCommandArgs: ["sh", "-l", "-s"],
+          stdin: buildRemoteRuntimeProbeScript(
+            version,
+            stateKey,
+            runner?.keepExistingRunner ?? false,
+          ),
+        }).pipe(
+          Effect.mapError(runtimePreparationError),
+          Effect.flatMap((result) =>
+            decodeRemoteJsonOutput(result.stdout, decodeRemoteRuntimeProbe),
+          ),
+          Effect.mapError(runtimePreparationError),
+        );
+        // A launch that failed after publishing the runner left this version retained.
+        const listed = [
+          ...(after.installedCandidates ?? []),
+          ...(after.retainedVersion === undefined || after.retainedSignals === undefined
+            ? []
+            : [
+                {
+                  version: after.retainedVersion,
+                  signals: after.retainedSignals,
+                  commitTime: after.retainedCommitTime,
+                  held: after.retainedHeld,
+                },
+              ]),
+        ].find((candidate) => candidate.version === published.version);
+        // Another client set the host up meanwhile, or the probe could not see the install. Neither
+        // says anything against this runtime, so it is neither rejected nor started here.
+        if (listed === undefined || after.liveStatus === "live" || after.liveStatus === "unknown")
+          return yield* raced;
+        const order = compareRuntimeBuilds(listed, requestedBuild);
+        if (
+          listed.held === "rejected" ||
+          listed.signals.serverVersion !== listed.version ||
+          !matchesSignals(listed.signals, version) ||
+          order === undefined ||
+          (yield* gate("capable", published.version)) !== "yes"
+        ) {
+          // Stays installed but held for good: recovery skips it and the search never offers it.
+          // The gate refuses once the host has data, so a runtime another client already
+          // started is never rejected.
+          yield* gate("reject", published.version);
+          return yield* giveUp(
+            "none",
+            `GOAT ${published.version} was installed but cannot serve this app (protocol, build order or capability).`,
+          );
+        }
+        const selected = yield* selectInstalled(published.version, after);
+        // Older than this app: say so and keep retrying the requested build. Newer: nothing to wait for.
+        const failure = order < 0 ? archiveFailure(requestedError) : undefined;
+        const pinned = {
+          ...selected,
+          mayUpgradeOwnedServer: false,
+          refreshIfIdle: false,
+          requireFreshHost: true,
+          ...(failure === undefined
+            ? {}
+            : {
+                upgradeFailure: {
+                  ...failure,
+                  fix: {
+                    ...failure.fix,
+                    instruction: `Using published GOAT ${published.version}. ${failure.fix.instruction}`,
+                  },
+                },
+              }),
+        };
+        delete pinned.expectedLiveVersion;
+        delete pinned.expectedLiveRunnerSha256;
+        return pinned satisfies PreparedRemoteRuntime;
+      });
+    }
   }).pipe(
+    Effect.tapError((error) =>
+      error instanceof SshLaunchError && error.reason === "archive-unavailable"
+        ? Effect.logWarning("ssh.runtime.acquisition.failed", {
+            ...sshTargetLogFields(target),
+            requestedVersion: runner?.archiveVersion?.trim() ?? "",
+            sourcesTried: error.acquisition?.sourcesTried.join(",") ?? "",
+            detail: error.message,
+          })
+        : Effect.void,
+    ),
     Effect.mapError((error) =>
       error instanceof SshLaunchError
-        ? new SshLaunchError({
-            message: `Cannot prepare GOAT ${runner?.archiveVersion?.trim() || "(node-script runner)"} on ${target.alias}: ${error.message} The existing runner and server have been left unchanged.${
-              error.reason === "archive-unavailable"
-                ? " Supply the requested runtime archive in the local SSH runtime archive directory or a release mirror, then retry."
-                : ""
-            }`,
-            stdout: error.stdout,
-            ...(error.reason === undefined ? {} : { reason: error.reason }),
-            ...(error.acquisition === undefined ? {} : { acquisition: error.acquisition }),
-            cause: error,
-          })
+        ? error.reason === "archive-unavailable" && error.acquisition !== undefined
+          ? new SshLaunchError({
+              ...archiveUnavailableText(
+                target.alias,
+                error,
+                runner?.archiveDirectory?.trim() ?? "",
+              ),
+              stdout: error.stdout,
+              reason: error.reason,
+              acquisition: error.acquisition,
+              cause: error,
+            })
+          : new SshLaunchError({
+              message: `Cannot prepare GOAT ${runner?.archiveVersion?.trim() || "(node-script runner)"} on ${target.alias}: ${error.message} The existing runner and server have been left unchanged.`,
+              stdout: error.stdout,
+              ...(error.reason === undefined ? {} : { reason: error.reason }),
+              ...(error.acquisition === undefined ? {} : { acquisition: error.acquisition }),
+              cause: error,
+            })
         : error,
     ),
     Effect.withSpan("ssh.prepareRemoteRuntime"),
   );
+
+/**
+ * `fresh`: prints yes when the host has no GOAT database. `capable <version>`: prints yes
+ * when that installed runtime's `auth session issue --help` succeeds and lists `memory:read`
+ * (#285); partial output from a failing command is not evidence.
+ * `hold <version>` / `reject <version>`: marks it held (`pending`) or refused for good. The
+ * probe reports the mark, installed and retained recovery skip held runtimes, and launch
+ * clears a `pending` mark once the server it started on a host without data is ready.
+ * Marks change only under the launch's replacement lock and only while the host has no data,
+ * so a setup that lost a race to another client can never hold or reject the runtime that
+ * client started.
+ */
+const REMOTE_PUBLISHED_RUNTIME_GATE_SCRIPT = `set -u
+DEFAULT_SERVER_HOME="$HOME/.goat"
+STATE_DIR="$HOME/.goat/ssh-launch/@@GOAT_STATE_KEY@@"
+has_data() {
+  for db in "$DEFAULT_SERVER_HOME/userdata/statev2.sqlite" "$DEFAULT_SERVER_HOME/userdata/state.sqlite"; do
+    if [ -e "$db" ] || [ -L "$db" ]; then return 0; fi
+  done
+  return 1
+}
+case "$1" in
+  fresh)
+    if has_data; then echo no; else echo yes; fi ;;
+  capable)
+    exe="$HOME/.goat/runtime/goat/versions/$2/goat"
+    [ -x "$exe" ] || { echo no; exit 0; }
+    scope_help="$("$exe" auth session issue --help 2>/dev/null)" || { echo no; exit 0; }
+    case "$scope_help" in *memory:read*) echo yes ;; *) echo no ;; esac ;;
+  hold | reject)
+    case "$2" in '' | */* | . | ..) exit 2 ;; esac
+    if [ "$1" = hold ]; then state=pending; else state=rejected; fi
+    mkdir -p "$STATE_DIR"
+@@GOAT_PROTOCOL_TOKENS@@
+@@GOAT_REPLACEMENT_LOCK@@
+    trap 'release_recovery_lock; release_replacement_lock' EXIT
+    if ! acquire_replacement_lock; then
+      if ! wait_for_replacement_lock || ! acquire_replacement_lock; then echo busy; exit 0; fi
+    fi
+    if has_data; then echo no; exit 0; fi
+    held_dir="$HOME/.goat/runtime/goat/held"
+    # Replace atomically: a torn write must never read as anything but held.
+    mkdir -p "$held_dir" &&
+      printf '%s\\n' "$state" > "$held_dir/.$2.$$" &&
+      mv -f "$held_dir/.$2.$$" "$held_dir/$2" && echo yes ;;
+  *) exit 2 ;;
+esac
+`;
+
+function buildPublishedRuntimeGateScript(stateKey: string): string {
+  return applyScriptPlaceholders(REMOTE_PUBLISHED_RUNTIME_GATE_SCRIPT, {
+    GOAT_STATE_KEY: stateKey,
+    GOAT_PROTOCOL_TOKENS: REMOTE_PROTOCOL_TOKEN_SCRIPT,
+    GOAT_REPLACEMENT_LOCK: REMOTE_REPLACEMENT_LOCK_SCRIPT,
+  });
+}
+
+/** The single next step for a host that has no runtime this app can start. */
+function missAction(miss: PublishedRuntimeMiss, asset: string, directory: string): string {
+  switch (miss) {
+    case "unreachable":
+      return "Check that this computer can reach github.com, then reconnect.";
+    case "client-too-old":
+      return "Update this app, then reconnect.";
+    case "none":
+      return directory === ""
+        ? "Install a published GOAT release on this computer, then reconnect."
+        : `Put ${asset} in ${directory}, then reconnect.`;
+  }
+}
+
+/** One sentence for what failed and one for the fix; the acquisition detail goes to the log. */
+function archiveUnavailableText(alias: string, error: SshLaunchError, directory: string) {
+  const acquisition = error.acquisition!;
+  const key = CLI_ARCHIVE_PLATFORM_KEYS.find((candidate) => candidate === acquisition.platformKey);
+  if (key === undefined) {
+    const action = "Use Linux, an Apple Silicon Mac, or Windows.";
+    return {
+      message: `GOAT has no runtime for ${alias} (${acquisition.platformKey}). ${action}`,
+      action,
+    };
+  }
+  const action =
+    error.action ??
+    (isPublishableCliReleaseVersion(acquisition.requestedVersion)
+      ? missAction("unreachable", "", directory)
+      : missAction("none", cliArchiveFileName(acquisition.requestedVersion, key), directory));
+  return {
+    message: `No GOAT runtime for ${key} that works with this app (GOAT ${acquisition.requestedVersion}) could be installed on ${alias}. ${action}`,
+    action,
+  };
+}
 
 export function buildRemoteStopScript(
   stateKey: string,
@@ -4751,7 +5148,9 @@ function archiveFailure(error: SshLaunchError): SshHostFailure | undefined {
     archive: error.acquisition,
     fix: {
       actor: "human",
-      instruction: `GOAT ${error.acquisition.requestedVersion} runtime archive is unavailable. Install a published GOAT release, or set a release mirror.`,
+      instruction:
+        error.action ??
+        `GOAT ${error.acquisition.requestedVersion} runtime archive is unavailable. Install a published GOAT release, or set a release mirror.`,
     },
   };
 }
@@ -5248,7 +5647,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
   const deferredArchiveRefresh = (requestedVersion: string) => ({
     reason: "archive_unavailable" as const,
     requestedVersion,
-    detail: `Refresh deferred: archive for ${requestedVersion} unavailable`,
+    detail: `Upgrade to ${requestedVersion} deferred`,
   });
   const deferredDrainRefresh = (requestedVersion: string) => ({
     reason: "archive_unavailable" as const,

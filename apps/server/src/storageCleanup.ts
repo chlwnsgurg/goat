@@ -572,6 +572,7 @@ const make = Effect.gen(function* () {
       config.worktreesDir,
       path,
       yield* HostProcess.HomeDirectory,
+      yield* HostProcess.Platform,
     )) {
       const root = yield* fs.exists(directory).pipe(
         Effect.flatMap((exists) => (exists ? fs.realPath(directory) : Effect.succeed(null))),

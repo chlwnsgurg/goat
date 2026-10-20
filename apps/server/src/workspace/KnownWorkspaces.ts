@@ -88,6 +88,7 @@ export const make = Effect.gen(function* () {
         config.worktreesDir,
         path,
         home,
+        yield* HostProcess.Platform,
       );
       const managed = (yield* Effect.forEach(managedDirectories, resolveRoot)).filter(
         (root) => root !== null,

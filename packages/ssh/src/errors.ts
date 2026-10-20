@@ -26,6 +26,8 @@ export class SshLaunchError extends Data.TaggedError("SshLaunchError")<{
     readonly platformKey: string | null;
     readonly sourcesTried: readonly string[];
   };
+  /** For `archive-unavailable`: the one step that fixes it. */
+  readonly action?: string;
   readonly message: string;
   readonly stdout: string;
   readonly cause?: unknown;

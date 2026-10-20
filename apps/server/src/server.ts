@@ -52,6 +52,8 @@ import * as RuntimeControl from "./runtimeControl.ts";
 import * as RuntimeIdentity from "./runtimeIdentity.ts";
 import * as SshRemoteDispatch from "./sshRemote/SshRemoteDispatch.ts";
 import * as HandoffExpiry from "./handoffs/HandoffExpiry.ts";
+import * as FleetHealth from "./fleet/health/layer.ts";
+import * as GoalLayers from "./fleet/goals/GoalLayers.ts";
 import * as HostThreadsMcpService from "./mcp/HostThreadsMcpService.ts";
 import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as ThreadResultService from "./threadResults/ThreadResultService.ts";
@@ -324,6 +326,10 @@ const layerResourceTelemetry = ResourceTelemetry.layer.pipe(
 const layerHostPowerMonitor = HostPowerMonitor.layer.pipe(
   Layer.provide(layerDesktopTelemetryReceiver),
 );
+
+// One self-healing instance for the fleet tools and the goal controller: one host monitor and one
+// move lock. It gets the power monitor background policy uses, so suspend and resume reach it.
+const layerFleetHealth = FleetHealth.layer.pipe(Layer.provide(layerHostPowerMonitor));
 
 // Reuses DesktopTelemetryReceiverLayerLive: a fresh receiver layer here
 // would open a second reader on the desktop telemetry fd.
@@ -1269,10 +1275,14 @@ const layerMakeRoutes = Layer.mergeAll(
     Ws.layer,
   ),
   Layer.mergeAll(
-    McpHttpServer.layer,
+    McpHttpServer.layer.pipe(Layer.provide(layerFleetHealth)),
     layerMemoryToolkits,
     McpHttpServer.layerProviderToolkit,
     HandoffExpiry.layer,
+    // Fleet goals act through the same launch, watch and dispatch services as these tools.
+    McpHttpServer.layerFleetToolkit.pipe(
+      Layer.provide(GoalLayers.layer.pipe(Layer.provideMerge(layerFleetHealth))),
+    ),
   ).pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),

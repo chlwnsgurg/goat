@@ -99,6 +99,10 @@ export function windowsHostPathKey(value: string): string {
 // Windows refuses these as file names, with or without an extension.
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
 
+export function isWindowsReservedFileName(name: string): boolean {
+  return WINDOWS_RESERVED_NAME.test(name.split(".")[0]!.trimEnd().toLowerCase());
+}
+
 export function newProjectFolderName(name: string): string {
   const slug = name
     .normalize("NFKD")
@@ -109,7 +113,7 @@ export function newProjectFolderName(name: string): string {
     .slice(0, 64)
     .replace(/-+$/, "");
   if (slug.length === 0) return "project";
-  return WINDOWS_RESERVED_NAME.test(slug) ? `${slug}-project` : slug;
+  return isWindowsReservedFileName(slug) ? `${slug}-project` : slug;
 }
 
 const SLASH_PREFIXED_WINDOWS_DRIVE_PATTERN = /^\/[A-Za-z]:[\\/]/;

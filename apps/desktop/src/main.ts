@@ -166,7 +166,6 @@ const layerElectron = Layer.mergeAll(
   ElectronMenu.layer,
   ElectronPowerMonitor.layer,
   ElectronProtocol.layer,
-  ElectronSafeStorage.layer,
   ElectronShell.layer,
   ElectronTheme.layer,
   ElectronUpdater.layer,
@@ -190,7 +189,7 @@ const layerDesktopFoundation = Layer.mergeAll(
   DesktopAssets.layer,
   DesktopObservability.layer,
   DesktopRendererHistory.layer,
-).pipe(Layer.provideMerge(layerDesktopEnvironment));
+).pipe(Layer.provideMerge(ElectronSafeStorage.layer), Layer.provideMerge(layerDesktopEnvironment));
 
 const layerDesktopSsh = layerDesktopSshEnvironment.pipe(
   Layer.provideMerge(DesktopSshPasswordPrompts.layer()),

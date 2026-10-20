@@ -20,6 +20,7 @@
 - [Product usage data](./user/telemetry.md)
 - [Remote access](./user/remote-access.md)
 - [Outside agents (MCP)](./user/outside-agents.md)
+- [Fleet goals](./user/fleet-goals.md)
 - [Slack](./user/slack.md)
 - [Running in the background](./user/background-service.md)
 - [Updating GOAT](./user/updating.md)

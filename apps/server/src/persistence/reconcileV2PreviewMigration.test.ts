@@ -98,6 +98,8 @@ describe("V2 preview upgrade", () => {
         [83, "MemoryLastReadySpace"],
         [84, "MemoryHubAdministered"],
         [85, "MemoryCheckpointLifecycle"],
+        [86, "FleetGoals"],
+        [87, "FleetHealth"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -206,6 +208,8 @@ describe("V2 preview upgrade", () => {
         [83, "MemoryLastReadySpace"],
         [84, "MemoryHubAdministered"],
         [85, "MemoryCheckpointLifecycle"],
+        [86, "FleetGoals"],
+        [87, "FleetHealth"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
