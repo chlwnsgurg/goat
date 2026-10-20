@@ -171,9 +171,7 @@ describe("saved SSH runtime row", () => {
     });
     expect(container.textContent).not.toContain("isn't available to install");
     expect(container.textContent).not.toContain("Target");
-    expect(container.textContent).toContain(
-      "This build has no published server archive. Install a published GOAT release, or set a release mirror.",
-    );
+    expect(container.textContent).toContain("Install a published release");
     expect(container.textContent).not.toContain("Up to date");
     owner.update.mockImplementation(async () => {
       reply = { kind: "ok", status: { ...base, state: "ready", runtimeVersion: "0.4.3" } };

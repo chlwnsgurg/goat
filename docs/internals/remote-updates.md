@@ -153,10 +153,46 @@ needs a person's confirmation bound to that environment and target.
   in October 2026), and source builds never publish. When the exact archive is
   missing, a live compatible server stays attached; with nothing running, the
   host starts the newest compatible runtime that is either the retained one or one
-  GOAT recorded installing. Recorded installs carry the archive and executable
+  installed on the host. Recorded installs carry the archive and executable
   digests, and the executable is hashed before anything in that directory runs.
-  Directories without a record, including hand-extracted ones, are never
-  candidates. Each fallback logs `ssh.runtime.upgrade.skipped` with the reason.
+  A directory without a record qualifies only when its completion marker, binary
+  and directory are not symlinks and its own binary reports its exact version
+  and both protocols (#412). Each fallback logs `ssh.runtime.upgrade.skipped`
+  with the reason.
+- **Nothing on the host.** A host that has never run GOAT (no runtime installed,
+  nothing running, no database under `~/.goat/userdata`) gets the newest published
+  runtime that is compatible with the client, nightlies first, then stable. This
+  is what makes dev builds and platforms without a bundled archive connect. Each
+  release carries `goat-<version>-runtime.json` (and each archive a
+  `goat-runtime.json`) with the protocol ranges the runtime serves and its
+  capabilities, so the client rejects an incompatible release before moving
+  90 MB; the manifest must match `SHA256SUMS`, which also covers the archive.
+  goat-releases has no detached signatures, so the trust anchor is the same as
+  for the exact archive: HTTPS to `goat-si/goat-releases` plus `SHA256SUMS`.
+  After installing, the client re-probes and starts the runtime only if its own
+  binary reports compatible protocols, a provable build order against the
+  requested build, and lists `memory:read` among the scopes it can issue (#285).
+  The version is held (`~/.goat/runtime/goat/held/<version>`) from before
+  installation until its server is ready; launch starts it only after checking,
+  under the host lock, that the host still has no database. Installed and
+  retained-runtime recovery skip held versions, and any marker GOAT cannot read
+  counts as held. A runtime that fails verification stays held as `rejected`, so
+  no later connection starts it or downloads it again; deleting it instead would
+  race other clients and runners. GOAT clients from before this change do not
+  read holds, so on a shared host their recovery could still start a held
+  version.
+  An older fallback is labelled "Upgrade to <requested> deferred" and retried
+  every 10 minutes like any other deferred refresh. The release index is cached
+  for 10 minutes (2 after a failure, longer when GitHub's rate limit says so).
+  - Releases published before manifests existed are offered only while their
+    channel has no manifest release at all, and only the newest one; their
+    compatibility is then proven only by the installed binary. Once a channel
+    publishes a manifest, its older releases are never offered.
+  - Hosts with GOAT data are excluded because an older build cannot be proven to
+    read data a newer one wrote: unknown migrations only warn at startup. Those
+    hosts keep the installed-runtime recovery above, or fail with one sentence
+    and one action (update the app, check that github.com is reachable, or put
+    the named archive in the local archive directory).
 - **Retained older runtimes.** With nothing running, an owning client installs
   its own release even when `run-t3.sh` names an older compatible one; an older
   retained runtime wins only when the client's archive cannot be acquired, and

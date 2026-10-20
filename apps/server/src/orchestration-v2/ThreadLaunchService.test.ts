@@ -139,6 +139,8 @@ interface HarnessOptions {
   readonly git?: Partial<GitWorkflow.GitWorkflowService["Service"]>;
   /** Folders that are gone from this machine. Without it, folders are not checked. */
   readonly missingPaths?: ReadonlySet<string>;
+  /** How this machine writes a folder path; identity unless given. */
+  readonly nativePath?: (path: string) => string;
 }
 
 function makeHarness(options: HarnessOptions = {}) {
@@ -232,7 +234,7 @@ function makeHarness(options: HarnessOptions = {}) {
         isScratchProject: () => Effect.succeed(false),
         folderForThread: () => Effect.succeed(Option.none()),
       }),
-    options.missingPaths === undefined
+    options.missingPaths === undefined && options.nativePath === undefined
       ? Layer.empty
       : Layer.mock(WorkspacePaths.WorkspacePaths)({
           normalizeWorkspaceRoot: (path) =>
@@ -243,7 +245,7 @@ function makeHarness(options: HarnessOptions = {}) {
                     normalizedWorkspaceRoot: path,
                   }),
                 )
-              : Effect.succeed(path),
+              : Effect.succeed(options.nativePath?.(path) ?? path),
         }),
   );
   const layerLaunch = ThreadLaunch.layer.pipe(
@@ -3467,6 +3469,27 @@ it.effect("refuses an agent launch into a missing existing worktree", () => {
       }),
     );
     assert.deepInclude(error, { kind: "worktree", path: "/repo-worktrees/gone" });
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("records a client's existing worktree in the server's own path form", () => {
+  // A Windows client lists worktrees as git prints them, `C:/…`; the server stores `C:\…`.
+  const harness = makeHarness({ nativePath: (path) => path.replaceAll("/", "\\") });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const launched = yield* launches.launch({
+      ...launchInput({
+        command: "command:client-native-worktree",
+        thread: "thread:client-native-worktree",
+        workspace: { type: "existing_worktree", worktreePath: "C:/Users/super/wt" },
+      }),
+      fromClient: true,
+    });
+    assert.strictEqual(
+      (yield* threads.getThreadProjection(launched.threadId)).thread.worktreePath,
+      "C:\\Users\\super\\wt",
+    );
   }).pipe(Effect.provide(harness.layer));
 });
 

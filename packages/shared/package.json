@@ -459,6 +459,10 @@
       "types": "./src/cliRelease.ts",
       "import": "./src/cliRelease.ts"
     },
+    "./runtimeManifest": {
+      "types": "./src/runtimeManifest.ts",
+      "import": "./src/runtimeManifest.ts"
+    },
     "./gitPatchPath": {
       "types": "./src/gitPatchPath.ts",
       "import": "./src/gitPatchPath.ts"

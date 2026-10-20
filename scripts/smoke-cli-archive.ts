@@ -16,6 +16,11 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as NetService from "@goat/shared/Net";
 import * as HostProcess from "@goat/shared/HostProcess";
+import {
+  decodeRuntimeManifest,
+  RUNTIME_MANIFEST_ARCHIVE_ENTRY,
+} from "@goat/shared/runtimeManifest";
+import { runtimeManifestMismatch } from "./lib/runtime-manifest.ts";
 import { windowsSystemTar } from "./build-cli-archive.ts";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
@@ -59,6 +64,20 @@ const runExecutable = Effect.fn("runExecutable")(function* (
   return { stdout, stderr, exitCode };
 });
 
+export function checkCliRuntimeManifest(
+  embeddedJson: string,
+  binaryJson: string,
+  expectVersion: string,
+): string[] {
+  const embedded = decodeRuntimeManifest(embeddedJson);
+  const binary = decodeRuntimeManifest(binaryJson);
+  if (!embedded || !binary) return ["invalid runtime manifest"];
+  if (embedded.version !== expectVersion) return ["runtime manifest version mismatch"];
+  if (runtimeManifestMismatch(embedded, binary))
+    return ["binary and archive runtime manifests disagree"];
+  return [];
+}
+
 const smokeCliArchive = Effect.fn("smokeCliArchive")(function* (input: {
   readonly archive: string;
   readonly expectVersion: string;
@@ -101,7 +120,11 @@ const smokeCliArchive = Effect.fn("smokeCliArchive")(function* (input: {
   }
   const contentDir = path.join(scratch, root);
   const executable = path.join(contentDir, platform === "win32" ? "goat.exe" : "goat");
-  for (const required of [executable, path.join(contentDir, "client/index.html")]) {
+  for (const required of [
+    executable,
+    path.join(contentDir, "client/index.html"),
+    path.join(contentDir, RUNTIME_MANIFEST_ARCHIVE_ENTRY),
+  ]) {
     if (!(yield* fs.exists(required))) {
       return yield* new CliArchiveSmokeError({
         step: "checking the archive layout",
@@ -115,6 +138,23 @@ const smokeCliArchive = Effect.fn("smokeCliArchive")(function* (input: {
     return yield* new CliArchiveSmokeError({
       step: "running --version",
       detail: `exit ${String(version.exitCode)}\n${version.stdout}${version.stderr}`,
+    });
+  }
+
+  const runtime = yield* runExecutable(
+    executable,
+    ["__ssh-helper", "runtime-manifest"],
+    contentDir,
+  );
+  const manifestProblems = checkCliRuntimeManifest(
+    yield* fs.readFileString(path.join(contentDir, RUNTIME_MANIFEST_ARCHIVE_ENTRY)),
+    runtime.stdout,
+    input.expectVersion,
+  );
+  if (runtime.exitCode !== 0 || manifestProblems.length) {
+    return yield* new CliArchiveSmokeError({
+      step: "checking runtime manifests",
+      detail: `exit ${String(runtime.exitCode)}: ${manifestProblems.join("; ")}\n${runtime.stderr}`,
     });
   }
 

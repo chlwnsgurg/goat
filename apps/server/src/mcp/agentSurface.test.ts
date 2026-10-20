@@ -26,6 +26,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as Settings from "../serverSettings.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as HostStatusMcpService from "./HostStatusMcpService.ts";
+import * as GoalService from "../fleet/goals/GoalService.ts";
 import * as FleetFallback from "../fleet/resources/Fallback.ts";
 import * as FleetPlacement from "../fleet/resources/Placement.ts";
 import * as HtmlRender from "../htmlRender/HtmlRender.ts";
@@ -66,6 +67,7 @@ import { ChannelToolkit } from "./toolkits/channel/tools.ts";
 import { ConnectionToolkit } from "./toolkits/connection/tools.ts";
 import { DeviceToolkit } from "./toolkits/device/tools.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
+import { FleetToolkit } from "./toolkits/fleet/tools.ts";
 import { FleetResourcesToolkit } from "./toolkits/fleet/resources/tools.ts";
 import { HostStatusToolkit } from "./toolkits/hostStatus/tools.ts";
 import { HtmlToolkit } from "./toolkits/html/tools.ts";
@@ -87,6 +89,7 @@ const toolkits = {
   connection: ConnectionToolkit,
   device: DeviceToolkit,
   environment: EnvironmentToolkit,
+  fleet: FleetToolkit,
   fleetResources: FleetResourcesToolkit,
   hostStatus: HostStatusToolkit,
   html: HtmlToolkit,
@@ -135,6 +138,7 @@ const dependencies = Layer.mergeAll(
   Layer.mock(Settings.ServerSettingsService)({}),
   Layer.mock(ThreadCommandExecutor.ThreadCommandExecutor)({}),
   Layer.mock(HostStatusMcpService.HostStatusMcpService)({}),
+  Layer.mock(GoalService.GoalService)({}),
   Layer.mock(FleetFallback.FallbackChains)({}),
   Layer.mock(FleetPlacement.Placement)({}),
   Layer.mock(HtmlRender.HtmlRender)({}),
@@ -203,7 +207,7 @@ const client = McpSchema.McpServerClient.of({
 });
 
 it("gives every entry a unique path, legacy name and resolvable schema reference", () => {
-  expect(entries).toHaveLength(160); // Includes current memory, browser, provider, SSH runtime, GOAT Bot home and fleet resource tools.
+  expect(entries).toHaveLength(166); // Includes current memory, browser, provider, SSH runtime, GOAT Bot home and fleet goal and resource tools.
   expect(new Set(entries.map((entry) => entry.name)).size).toBe(entries.length);
   for (const [path, entry] of Object.entries(agentSurfaceRegistry)) {
     expect(path).toBe(entry.path);

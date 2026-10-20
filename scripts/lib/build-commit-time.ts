@@ -22,3 +22,18 @@ export const resolveBuildCommitTime = (cwd: string): string => {
     return "";
   }
 };
+
+/** Optional source identity for runtime manifests; source runs stay unstamped. */
+export const resolveBuildCommit = (cwd: string): string | undefined => {
+  try {
+    return (
+      NodeChildProcess.execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim() || undefined
+    );
+  } catch {
+    return undefined;
+  }
+};

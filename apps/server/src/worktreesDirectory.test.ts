@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodePath from "@effect/platform-node/NodePath";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -8,6 +9,7 @@ import * as HostProcess from "@goat/shared/HostProcess";
 import {
   checkWorktreesDirectory,
   resolveAvailableWorktreesDirectory,
+  resolveWorktreesDirectory,
 } from "./worktreesDirectory.ts";
 
 const setup = Effect.gen(function* () {
@@ -19,6 +21,37 @@ const setup = Effect.gen(function* () {
 });
 
 it.layer(NodeServices.layer)("worktreesDirectory", (it) => {
+  describe("resolveWorktreesDirectory", () => {
+    it.effect("reads a Git Bash drive path as that drive on a Windows server", () =>
+      Effect.gen(function* () {
+        const win32 = yield* Path.Path.pipe(Effect.provide(NodePath.layerWin32));
+        const resolve = (setting: string) =>
+          resolveWorktreesDirectory(
+            setting,
+            "C:\\goat\\worktrees",
+            win32,
+            "C:\\Users\\super",
+            "win32",
+          );
+        assert.equal(resolve("/d/goat-worktrees"), "D:\\goat-worktrees");
+        assert.equal(resolve("/cygdrive/e/wt/"), "E:\\wt");
+        assert.equal(resolve("D:/goat-worktrees"), "D:\\goat-worktrees");
+        assert.equal(resolve("~/wt"), "C:\\Users\\super\\wt");
+        assert.isNull(resolve("/d"));
+      }),
+    );
+
+    it.effect("keeps /d/… an ordinary folder on POSIX", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        assert.equal(
+          resolveWorktreesDirectory("/d/goat-worktrees", "/default", path, "/home/u", "linux"),
+          "/d/goat-worktrees",
+        );
+      }),
+    );
+  });
+
   describe("checkWorktreesDirectory", () => {
     it.effect("accepts an existing folder and a missing leaf in a writable parent", () =>
       Effect.gen(function* () {
