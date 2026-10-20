@@ -12,7 +12,7 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 
 const input = { expectedInstanceId: "this-start", targetVersion: "next", graceSeconds: 1 };
-const setup = (activity: "idle" | "busy") =>
+const setup = (activity: "idle" | "busy", admitted?: string) =>
   Effect.gen(function* () {
     const checked = yield* Deferred.make<void>();
     const stopped = yield* Deferred.make<void>();
@@ -31,7 +31,16 @@ const setup = (activity: "idle" | "busy") =>
         getServerActivity: () => Deferred.succeed(checked, undefined).pipe(Effect.as(activity)),
       }),
     );
-    const context = yield* Layer.build(RuntimeDrain.layer.pipe(Layer.provideMerge(dependencies)));
+    const arbiter =
+      admitted === undefined
+        ? Layer.empty
+        : Layer.succeed(RuntimeDrain.RuntimeUpdateArbiter, {
+            admit: (request) =>
+              Effect.succeed(request.automatic !== true || request.targetVersion === admitted),
+          });
+    const context = yield* Layer.build(
+      RuntimeDrain.layer.pipe(Layer.provideMerge(Layer.merge(dependencies, arbiter))),
+    );
     return { context, checked, stopped };
   });
 
@@ -182,4 +191,34 @@ it.effect("one cancelled drain cannot reopen admission held by another update", 
     yield* gate.resume;
     yield* gate.admit(Effect.void);
   }).pipe(Effect.provide(RuntimeAdmission.layer)),
+);
+
+it.effect("a dropped automatic refresh is cancelled without closing admission", () =>
+  Effect.gen(function* () {
+    const { context, checked, stopped } = yield* setup("idle", "newest");
+    yield* Effect.gen(function* () {
+      const drain = yield* RuntimeDrain.RuntimeDrain;
+      const lifecycle = yield* ServerLifecycleEvents.ServerLifecycleEvents;
+      // Client B asks for an older build than the target the runtime arbitrated for.
+      assert.deepEqual(
+        yield* drain.request({ ...input, targetVersion: "older", automatic: true }),
+        {
+          status: "cancelled",
+          instanceId: "this-start",
+          forced: false,
+        },
+      );
+      yield* (yield* RuntimeAdmission.RuntimeAdmission).admit(Effect.void);
+      assert.equal(yield* Deferred.isDone(checked), false);
+      assert.equal((yield* lifecycle.snapshot).sequence, 0);
+      // Client A's request for the winning target drains as before.
+      const result = yield* drain
+        .request({ ...input, targetVersion: "newest", automatic: true })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(checked);
+      assert.equal((yield* Fiber.join(result)).status, "drained");
+      yield* TestClock.adjust(Duration.millis(250));
+      yield* Deferred.await(stopped);
+    }).pipe(Effect.provide(context));
+  }).pipe(Effect.scoped),
 );

@@ -191,6 +191,11 @@ export interface RemoteGoatRunnerOptions {
   readonly confirmReplacement?: boolean;
   /** Drain window for a replacement, in seconds (default 60, at most 300). */
   readonly replacementGraceSeconds?: number;
+  /**
+   * A person asked for this refresh. Only refreshes without it, and without
+   * `confirmReplacement`, are automatic and let the runtime arbitrate the target.
+   */
+  readonly manualRefresh?: boolean;
 }
 
 export interface PreparedRemoteRuntime {
@@ -1530,6 +1535,7 @@ REFRESH_LIVE_VERSION=@@GOAT_REFRESH_LIVE_VERSION@@
 EXPECTED_LIVE_RUNNER_SHA256=@@GOAT_LIVE_RUNNER_SHA256@@
 OWNING_LAUNCH=@@GOAT_OWNING_LAUNCH@@
 DRAIN_FORCE=@@GOAT_DRAIN_FORCE@@
+DRAIN_AUTOMATIC=@@GOAT_DRAIN_AUTOMATIC@@
 DRAIN_GRACE_SECONDS=@@GOAT_DRAIN_GRACE_SECONDS@@
 RUNNER_PUBLISHED=0; REFRESH_DECISION=; LEGACY_PENDING=0; LEGACY_COMMITTED=0
 LEGACY_TERMINATED=0; LEGACY_IDENTITY_LINK=; LEGACY_PUBLICATION_STARTED=0
@@ -2223,7 +2229,10 @@ if [ "$NEEDS_OWNED_UPGRADE" = 1 ]; then
   # A lost response or a dead SSH owner cannot prove the server stopped draining.
   printf '%s\\n' "$UPGRADE_INSTANCE" > "$STATE_DIR/draining.next.$$"
   mv "$STATE_DIR/draining.next.$$" "$STATE_DIR/draining"
-  drain_result="$("$RUNNER_CANDIDATE_FILE.pin" __ssh-helper drain --port "$UPGRADE_PORT" --instance-id "$UPGRADE_INSTANCE" --target-version "$TARGET_VERSION" --grace-seconds "$DRAIN_GRACE_SECONDS" $drain_force --token-file "$DEFAULT_SERVER_HOME/userdata/runtime-control.token" 2>/dev/null || true)"
+  # Only an automatic refresh of an older runtime is a request the runtime may arbitrate.
+  drain_automatic=0
+  if [ "$DRAIN_AUTOMATIC" = 1 ] && [ "$RECONCILING_DRAIN" != 1 ] && [ "$REPLACEMENT_REASON" = older ]; then drain_automatic=1; fi
+  drain_result="$(GOAT_RUNTIME_DRAIN_AUTOMATIC="$drain_automatic" "$RUNNER_CANDIDATE_FILE.pin" __ssh-helper drain --port "$UPGRADE_PORT" --instance-id "$UPGRADE_INSTANCE" --target-version "$TARGET_VERSION" --grace-seconds "$DRAIN_GRACE_SECONDS" $drain_force --token-file "$DEFAULT_SERVER_HOME/userdata/runtime-control.token" 2>/dev/null || true)"
   case "$drain_result" in
     drained) ;;
     cancelled) rm -f "$STATE_DIR/draining" "$PREVIOUS_RUNNER"; DRAIN_UNCERTAIN=0; emit_pending busy ;;
@@ -2572,6 +2581,8 @@ function buildRemoteRunnerSetupScript(
   return applyScriptPlaceholders(REMOTE_RUNNER_SETUP_SCRIPT, {
     GOAT_OWNING_LAUNCH: verifyOwnedBeforePublication ? "1" : "0",
     GOAT_DRAIN_FORCE: input?.confirmReplacement === true ? "1" : "0",
+    GOAT_DRAIN_AUTOMATIC:
+      input?.confirmReplacement !== true && input?.manualRefresh !== true ? "1" : "0",
     GOAT_DRAIN_GRACE_SECONDS: String(
       Math.min(
         Math.max(
@@ -6815,6 +6826,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
                       !pendingReplacements.has(key))) &&
                   runner.refreshOwnedRuntimeOnFirstConnection === true,
                 confirmReplacement: requestOptions?.confirmReplacement === true,
+                ...(requestOptions?.refreshRuntime === true ? { manualRefresh: true } : {}),
               };
         const entry = yield* ensureTunnelEntry(
           key,

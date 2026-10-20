@@ -10,6 +10,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 import * as RuntimeAdmission from "./runtimeAdmission.ts";
 import * as RuntimeIdentity from "./runtimeIdentity.ts";
@@ -33,6 +34,15 @@ export class RuntimeDrain extends Context.Service<
   }
 >()("goat/runtimeDrain") {}
 
+/**
+ * Arbitrates automatic idle refreshes from clients; see `SshRuntimeAutoUpdate.admitDrain`.
+ * Without it every request proceeds as it always did.
+ */
+export class RuntimeUpdateArbiter extends Context.Service<
+  RuntimeUpdateArbiter,
+  { readonly admit: (input: RuntimeDrainRequest) => Effect.Effect<boolean> }
+>()("goat/runtimeDrain/RuntimeUpdateArbiter") {}
+
 interface ActiveDrain {
   readonly result: Deferred.Deferred<RuntimeDrainResult>;
   readonly targetVersion: string;
@@ -48,6 +58,7 @@ const make = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const shutdown = yield* RuntimeShutdown;
   const scope = yield* Scope.Scope;
+  const arbiter = yield* Effect.serviceOption(RuntimeUpdateArbiter);
   let active: ActiveDrain | undefined;
 
   const publish = (drain: ActiveDrain, status: "draining" | "cancelled" | "drained") =>
@@ -101,6 +112,9 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           if (input.expectedInstanceId !== instanceId)
             return { status: "instance-changed" as const, instanceId, forced: false };
+          // A dropped refresh never closes admission; the client keeps its attachment and retries.
+          if (Option.isSome(arbiter) && !(yield* arbiter.value.admit(input)))
+            return { status: "cancelled" as const, instanceId, forced: false };
           if (active !== undefined) {
             const drain = active;
             if (drain.status === "draining" && input.force === true && !drain.forced) {

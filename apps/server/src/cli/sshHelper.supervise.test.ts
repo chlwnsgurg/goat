@@ -7,7 +7,11 @@ import * as NodeURL from "node:url";
 
 import { afterEach, assert, it } from "@effect/vitest";
 
-import { superviseSshRuntimeReplacement } from "./sshHelper.ts";
+import {
+  readSshReplacementRecord,
+  SSH_REPLACEMENT_RECORD_FILE,
+  superviseSshRuntimeReplacement,
+} from "./sshHelper.ts";
 
 const lockModuleUrl = JSON.stringify(
   NodeURL.pathToFileURL(NodePath.join(import.meta.dirname, "..", "serverOwnerLockFile.ts")).href,
@@ -81,13 +85,25 @@ const superviseFailedReplacement = async (target: "trial" | "foreign") => {
     logFile: NodePath.join(stateDir, "server.log"),
   });
   assert.isTrue(NodeFS.existsSync(`${dbPath}.replacement-ran`), "the replacement ran");
-  return { result, database: NodeFS.readFileSync(dbPath, "utf8") };
+  return {
+    result,
+    database: NodeFS.readFileSync(dbPath, "utf8"),
+    record: readSshReplacementRecord(
+      NodeFS.readFileSync(NodePath.join(stateDir, SSH_REPLACEMENT_RECORD_FILE), "utf8"),
+    ),
+  };
 };
 
 it("restores the backup over a failed replacement's own writes", async () => {
-  const { result, database } = await superviseFailedReplacement("trial");
+  const { result, database, record } = await superviseFailedReplacement("trial");
   assert.equal(result.status, "failed");
   assert.equal(database, "original");
+  // The runtime's scheduler reads this record and never retries the target automatically.
+  assert.deepInclude(record, {
+    status: "failed",
+    targetVersion: "2.0.0",
+    previousVersion: "1.0.0",
+  });
 });
 
 it("keeps writes from another server that owned the data since the backup", async () => {
