@@ -4052,6 +4052,72 @@ it.effect("a claim frozen to a healthy model is not blocked by a held default", 
 );
 
 it.effect(
+  "conflicts waiting on a held model do not crowd a healthy frozen claim off the page",
+  () =>
+    Effect.gen(function* () {
+      const frozenModels: string[] = [];
+      const client = peer({
+        claim: (_c, { protocolVersion: _protocol, ...claim }) =>
+          Effect.suspend(() => {
+            frozenModels.push(claim.frozenDefaultModelSelection.model);
+            // The Hub's answer to the first claim never arrives; that claim stays frozen to P.
+            if (frozenModels.length === 1)
+              return Effect.fail(new M.MemoryHubError({ code: "unavailable" }));
+            return Effect.succeed({
+              ...claim,
+              fencingToken: frozenModels.length,
+              claimedAtHubTime: timestamp,
+              expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+              attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+            });
+          }),
+      });
+      const model = realGeneration({ resolveMemoryConflict: () => Effect.never });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* conflict();
+          const sync = yield* Sync.MemorySyncService;
+          const hold = yield* Hold.MemoryGenerationHold;
+          yield* sync.syncOnce;
+          yield* sync.scheduleConflictResolution;
+          const next = M.MemoryModelSelection.make({
+            instanceId: M.ProviderInstanceId.make("Q"),
+            model: "Q",
+          });
+          yield* (yield* Settings.ServerSettingsService).updateSettings({
+            memoryModelSelection: next,
+          });
+          yield* hold
+            .guard(
+              yield* hold.keyFor(next),
+              Effect.fail(
+                new M.TextGenerationError({
+                  operation: "resolveMemoryConflict",
+                  detail: 'Codex CLI command failed: {"code":"invalid_json_schema","status":400}',
+                }),
+              ),
+            )
+            .pipe(Effect.flip);
+          // A full page of conflicts that would use the held default, all due before P's retry.
+          for (let n = 2; n <= 110; n++) yield* conflict(n);
+          // Candidate discovery is paged too; a few passes queue them all.
+          for (let n = 0; n < 3; n++) yield* sync.syncOnce;
+          // Still inside the hold on Q; P's frozen claim is due by now.
+          yield* TestClock.adjust("40 seconds");
+          for (let n = 0; n < 2; n++) {
+            yield* sync.syncOnce;
+            yield* sync.scheduleConflictResolution;
+          }
+          assert.deepStrictEqual(frozenModels, [frozenModels[0], frozenModels[0]]);
+          assert.notStrictEqual(frozenModels[0], "Q");
+          yield* sync.shutdown;
+        }).pipe(Effect.provide(fixture(client, model).pipe(Layer.provideMerge(Hold.layer)))),
+      );
+    }),
+);
+
+it.effect(
   "generation failure records one conflict report, retires the attempt, and the next attempt uses Q",
   () =>
     Effect.gen(function* () {

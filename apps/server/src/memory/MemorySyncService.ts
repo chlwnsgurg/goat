@@ -174,6 +174,7 @@ const holdClass = (e: Error): Store.MemoryHoldClass =>
           ].includes(failureCode(e))
         ? "protocol"
         : "availability";
+const HELD_CLAIM_DEFER_MS = 60_000;
 const transient = (e: Error) =>
   e._tag === "MemoryStorageError" ||
   (e._tag === "MemoryHubError" &&
@@ -467,9 +468,16 @@ const make = Effect.gen(function* () {
       Effect.timeout("15 seconds"),
       Effect.map((result) => result.released),
       // The Hub answers fenced when it holds no lease for this attempt, for example after a
-      // release whose response was lost. Nothing is held, so callers may retire the attempt.
+      // release whose response was lost; nothing is held, so callers may retire the attempt.
+      // The client raises the same code locally once settings moved past this route's epoch,
+      // which proves nothing about the lease.
       Effect.catch((error) =>
-        Effect.succeed(error._tag === "MemoryHubError" && error.code === "fenced"),
+        error._tag === "MemoryHubError" && error.code === "fenced"
+          ? readSettings.pipe(
+              Effect.map((current) => current.memoryHubVersion === r.settings.memoryHubVersion),
+              Effect.orElseSucceed(() => false),
+            )
+          : Effect.succeed(false),
       ),
     );
   };
@@ -1057,6 +1065,10 @@ const make = Effect.gen(function* () {
           : Effect.succeed(false),
       ),
     );
+  // Moving a held candidate back lets later due candidates (on healthy models) reach the
+  // bounded page; a minute keeps a model change from waiting out the old hold.
+  const deferHeld = (id: string, now: number) =>
+    store.retryClaimCandidate(id, now + HELD_CLAIM_DEFER_MS, "generation_failed");
   const sweep: Effect.Effect<void, Error> = registryMutex.withPermit(
     Effect.gen(function* () {
       const r = yield* route();
@@ -1099,7 +1111,7 @@ const make = Effect.gen(function* () {
               const selection = memorySelection(yield* readSettings);
               if (!selection) return yield* new M.MemoryHubError({ code: "route_unavailable" });
               // A held model would refuse at once: leave the conflict unclaimed until it is due.
-              if (yield* heldSelection(selection)) return;
+              if (yield* heldSelection(selection)) return yield* deferHeld(work.id, now);
               yield* runtime.available(selection);
               frozen = yield* store.transact(
                 store.prepareClaimAttemptTx({
@@ -1119,7 +1131,8 @@ const make = Effect.gen(function* () {
             }
             if (!frozen) return;
             // A claim frozen earlier waits only on its own model.
-            if (yield* heldSelection(frozen.claim.frozenDefaultModelSelection)) return;
+            if (yield* heldSelection(frozen.claim.frozenDefaultModelSelection))
+              return yield* deferHeld(work.id, now);
             prepared.value = frozen;
             const claimed = yield* store.transact(
               Effect.gen(function* () {
