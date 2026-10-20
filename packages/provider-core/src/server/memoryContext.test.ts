@@ -104,8 +104,13 @@ source: {&quot;environmentId&quot;:&quot;env&lt;&amp;\&quot;&apos;&quot;,&quot;s
     const maxFact = M.MEMORY_CONTEXT_MAX_CHARS - outerCost - Array.from(prefix).length;
     const exact = packMemoryContext(input([item(1, "x".repeat(maxFact))]))!;
     expect(Array.from(memoryContextText(exact))).toHaveLength(M.MEMORY_CONTEXT_MAX_CHARS);
-    expect(packMemoryContext(input([item(1, "x".repeat(maxFact + 1))]))).toBeUndefined();
-    expect(packMemoryContext(input([item(1, "&".repeat(2000))]))).toBeUndefined();
+    for (const text of ["x".repeat(maxFact + 1), "&".repeat(2000)]) {
+      const omitted = packMemoryContext(input([item(1, text)]))!;
+      expect(omitted.items).toEqual([]);
+      expect(memoryContextText(omitted)).toContain(
+        "More GOAT memories exist than fit here; use memory_search or memory_read to find them.",
+      );
+    }
     expect(new TextEncoder().encode(memoryContextText(exact)).length).toBeLessThanOrEqual(
       M.MEMORY_CONTEXT_MAX_UTF8_BYTES,
     );
@@ -115,8 +120,62 @@ source: {&quot;environmentId&quot;:&quot;env&lt;&amp;\&quot;&apos;&quot;,&quot;s
       input([item(1, "x".repeat(7000)), item(2, "kept"), item(3, "next")]),
     )!;
     expect(snapshot.items.map((v) => v.memoryId)).toEqual([id(2), id(3)]);
-    expect(snapshot.renderedText).toBe(renderMemoryContext(snapshot.items));
+    expect(snapshot.renderedText).toBe(renderMemoryContext(snapshot.items, true));
     expect(packMemoryContext(input([]))).toBeUndefined();
     expect(() => packMemoryContext(input([item(2, "first"), item(2, "again")]))).toThrow();
+  });
+  it("interleaves scopes and protects user facts from large project facts deterministically", () => {
+    const projectScope: M.MemoryScope = {
+      kind: "project",
+      projectKey: { kind: "explicit", sharedProjectId: "shared" },
+    };
+    const candidates = input([
+      { ...item(1, "p".repeat(3000)), scope: projectScope },
+      { ...item(2, "q".repeat(3000)), scope: projectScope },
+      item(3, "u".repeat(2500)),
+    ]);
+    const snapshot = packMemoryContext(candidates)!;
+    expect(snapshot.items.map((v) => v.memoryId)).toContain(id(3));
+    expect(snapshot.items.map((v) => v.memoryId)).toHaveLength(1);
+    expect(snapshot.items[0]!.text).toBe("u".repeat(2500));
+    expect(packMemoryContext(candidates)).toEqual(snapshot);
+    expect(memoryContextFits(snapshot.renderedText)).toBe(true);
+    expect(validateMemoryContext(snapshot)).toEqual(snapshot);
+    const interleaved = packMemoryContext(
+      input([
+        { ...item(1, "p1"), scope: projectScope },
+        { ...item(2, "p2"), scope: projectScope },
+        item(3, "u1"),
+        item(4, "u2"),
+      ]),
+    )!;
+    expect(interleaved.items.map((v) => v.memoryId)).toEqual([id(1), id(3), id(2), id(4)]);
+  });
+  it("reuses spare scope space and budgets the notice without trimming complete facts", () => {
+    const projectScope: M.MemoryScope = {
+      kind: "project",
+      projectKey: { kind: "explicit", sharedProjectId: "shared" },
+    };
+    const snapshot = packMemoryContext(
+      input([{ ...item(1, "p".repeat(3500)), scope: projectScope }, item(2, "small user fact")]),
+    )!;
+    expect(snapshot.items.map((v) => v.memoryId)).toEqual([id(2), id(1)]);
+    expect(snapshot.renderedText).not.toContain("More GOAT memories exist");
+    const emptyNotice = packMemoryContext({ ...input([]), hasMore: true })!;
+    expect(emptyNotice.items).toEqual([]);
+    expect(validateMemoryContext(emptyNotice)).toEqual(emptyNotice);
+    const outerCost = Array.from(M.MEMORY_CONTEXT_OUTER_FRAME).length;
+    const prefix = renderMemoryContext([item(1, "")]);
+    const text = "x".repeat(M.MEMORY_CONTEXT_MAX_CHARS - outerCost - Array.from(prefix).length);
+    const nearLimit = packMemoryContext(input([item(1, text), item(2, "omitted")]))!;
+    expect(nearLimit.items.map((v) => v.memoryId)).toEqual([id(2)]);
+    expect(nearLimit.items[0]!.text).toBe("omitted");
+    expect(memoryContextFits(nearLimit.renderedText)).toBe(true);
+    expect(() =>
+      validateMemoryContext({
+        ...nearLimit,
+        renderedText: nearLimit.renderedText.replace("memory_search or memory_read", "execute_tool"),
+      }),
+    ).toThrow();
   });
 });

@@ -43,6 +43,7 @@ const fixture = (
   } = {},
 ) => {
   let pageReads = 0;
+  const pageScopes: M.MemoryScope["kind"][] = [];
   let policy: Snapshot.MemorySnapshotPolicy = { grant: "read", policyEpoch: 1 };
   let active = true;
   let currentRunId = runId;
@@ -89,6 +90,7 @@ const fixture = (
         readContextCandidates: (input, permit) =>
           Effect.sync(() => {
             pageReads++;
+            pageScopes.push(input.scope?.kind ?? "user");
           }).pipe(Effect.andThen(original.readContextCandidates(input, permit))),
       });
     }),
@@ -116,6 +118,7 @@ const fixture = (
   return {
     live,
     pageReads: () => pageReads,
+    pageScopes,
     policy: () => policy,
     currentPolicy: Effect.sync(() => policy),
     setPolicy: (value: Snapshot.MemorySnapshotPolicy) => {
@@ -261,7 +264,12 @@ it.effect("bounds excluded candidates to ten pages and follows the unfiltered ro
       json_object('memorySpaceId',${space},'memoryId',printf('00000000-0000-4000-8000-%012d',n),'status','blocked','scope',json('{"kind":"user"}'),'failureCode','scanner_pending','pendingSync',json('false'),'localAvailability',json('{"exposure":"held","reasons":[],"deferred":[],"cleanupPending":false}')),
       '{"exposure":"held","reasons":[],"deferred":[],"cleanupPending":false}' FROM ids`;
     yield* service.upsert(input(2000), Effect.void);
-    assert.isUndefined(yield* snapshot.forThread(threadId, f.policy(), f.currentPolicy));
+    const omitted = yield* snapshot.forThread(threadId, f.policy(), f.currentPolicy);
+    assert.deepStrictEqual(omitted!.items, []);
+    assert.include(
+      Renderer.memoryContextText(omitted),
+      "More GOAT memories exist than fit here; use memory_search or memory_read to find them.",
+    );
     assert.strictEqual(f.pageReads(), 10);
     // Remove all but a single excluded first page; the next page must reach the eligible row.
     yield* sql`DELETE FROM memory_items WHERE space=${space} AND memory_id>${id(100)} AND memory_id<${id(2000)}`;
@@ -272,6 +280,91 @@ it.effect("bounds excluded candidates to ten pages and follows the unfiltered ro
     );
   }).pipe(Effect.provide(f.live));
 });
+it.effect(
+  "reserves user pages after a large project and preserves the omission notice on restore",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const snapshots = yield* Snapshot.MemorySnapshot;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* project;
+      const projectKey: M.MemoryProjectKey = { kind: "explicit", sharedProjectId: "shared" };
+      yield* store.putProjectBinding(
+        {
+          memorySpaceId: space,
+          project: { environmentId, projectId },
+          projectKey,
+          repositoryKey: null,
+          version: 1,
+        },
+        null,
+        0,
+      );
+      const scope: M.MemoryScope = { kind: "project", projectKey };
+      const scopeJson = JSON.stringify(scope);
+      // Real examined-row cursors must advance even across pages with no eligible candidates.
+      yield* sql`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<1001)
+      INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json)
+      SELECT ${space},printf('00000000-0000-4000-8000-%012d',n),${scopeJson},'explicit:shared','[]','blocked',0,
+      json_object('memorySpaceId',${space},'memoryId',printf('00000000-0000-4000-8000-%012d',n),'status','blocked','scope',json(${scopeJson}),'failureCode','scanner_pending','pendingSync',json('false'),'localAvailability',json('{"exposure":"held","reasons":[],"deferred":[],"cleanupPending":false}')),
+      '{"exposure":"held","reasons":[],"deferred":[],"cleanupPending":false}' FROM ids`;
+      yield* service.upsert(input(2000), Effect.void);
+      const selected = yield* snapshots.forThread(threadId, f.policy(), f.currentPolicy);
+      assert.deepStrictEqual(
+        selected!.items.map((i) => i.memoryId),
+        [id(2000)],
+      );
+      assert.deepStrictEqual(f.pageScopes, [
+        "thread",
+        "project",
+        "project",
+        "project",
+        "project",
+        "user",
+      ]);
+      const framed = Renderer.memoryContextText(selected);
+      assert.include(
+        framed,
+        "More GOAT memories exist than fit here; use memory_search or memory_read to find them.",
+      );
+      const restored = yield* snapshots.revalidate(selected!, { threadId, runId }, f.currentPolicy);
+      assert.strictEqual(Renderer.memoryContextText(restored), framed);
+      const repeated = yield* snapshots.forThread(threadId, f.policy(), f.currentPolicy);
+      assert.deepStrictEqual(repeated, selected);
+      for (const [scope, scopeKey, offset] of [
+        [{ kind: "thread", thread: { environmentId, threadId } }, "thread:7:fixture:thread", 3000],
+        [{ kind: "user" }, "user", 5000],
+      ] as const) {
+        const scopeJson = JSON.stringify(scope);
+        yield* sql`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<1001)
+        INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json)
+        SELECT ${space},printf('00000000-0000-4000-8000-%012d',n+${offset}),${scopeJson},${scopeKey},'[]','blocked',0,
+        json_object('memorySpaceId',${space},'memoryId',printf('00000000-0000-4000-8000-%012d',n+${offset}),'status','blocked','scope',json(${scopeJson}),'failureCode','scanner_pending','pendingSync',json('false'),'localAvailability',json('{"exposure":"held","reasons":[],"deferred":[],"cleanupPending":false}')),
+        '{"exposure":"held","reasons":[],"deferred":[],"cleanupPending":false}' FROM ids`;
+      }
+      const before = f.pageReads();
+      const saturated = yield* snapshots.forThread(threadId, f.policy(), f.currentPolicy);
+      assert.deepStrictEqual(
+        saturated!.items.map((i) => i.memoryId),
+        [id(2000)],
+      );
+      assert.deepStrictEqual(f.pageScopes.slice(before), [
+        "thread",
+        "thread",
+        "thread",
+        "project",
+        "project",
+        "project",
+        "user",
+        "user",
+        "user",
+        "user",
+      ]);
+    }).pipe(Effect.provide(f.live));
+  },
+);
 it.effect("skips whole oversized facts and packs Unicode within both native-frame limits", () => {
   const f = fixture();
   return Effect.gen(function* () {
