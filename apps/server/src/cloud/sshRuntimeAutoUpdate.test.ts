@@ -406,3 +406,20 @@ it.effect("the detached launcher returns the script's output through files", () 
     expect(result).toEqual({ code: 3, stdout: "runtime\n", stderr: "marker\n" });
   }).pipe(Effect.provide(SshRuntimeAutoUpdate.layerHost)),
 );
+
+it.effect("a timed-out host command also stops the processes it started", () =>
+  Effect.gen(function* () {
+    const host = yield* SshRuntimeAutoUpdate.SshRuntimeHost;
+    // The shell waits on a long download-like child; the timeout is the behavior under test.
+    const result = yield* host.run({
+      command: "/bin/sh",
+      args: ["-c", 'sleep 600 & printf "%s\n" "$!"; wait'],
+      env: { PATH: process.env.PATH },
+      timeoutMs: 200,
+    });
+    const descendant = Number(result.stdout.trim());
+    expect(descendant).toBeGreaterThan(0);
+    // The output closes only once every process holding it has exited.
+    expect(() => process.kill(descendant, 0)).toThrow();
+  }).pipe(Effect.provide(SshRuntimeAutoUpdate.layerHost)),
+);

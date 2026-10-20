@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalTimers:off
+// @effect-diagnostics globalTimersInEffect:off
 // @effect-diagnostics globalDateInEffect:off
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
@@ -94,20 +95,39 @@ const collect = (child: NodeChildProcess.ChildProcess) =>
     );
   });
 
+const signalGroup = (pid: number, signal: NodeJS.Signals) => {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // The group is already gone.
+  }
+};
+
 export const layerHost = Layer.succeed(SshRuntimeHost, {
   run: (input) =>
     Effect.callback<SshRuntimeProcessResult>((resume) => {
+      // Its own process group, so a timeout or an interruption also stops the downloader the
+      // install script waits on, and with it the install lock.
       const child = NodeChildProcess.spawn(input.command, [...input.args], {
         env: input.env,
+        detached: true,
         stdio: ["pipe", "pipe", "pipe"],
-        timeout: input.timeoutMs,
       });
       child.stdin?.on("error", () => undefined);
       child.stdin?.end(input.stdin ?? "");
-      void collect(child).then((result) => resume(Effect.succeed(result)));
-      // An interrupted install or preflight must not keep running, or holding install locks.
+      const stopGroup = () => {
+        if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+        signalGroup(child.pid, "SIGTERM");
+        setTimeout(() => signalGroup(child.pid!, "SIGKILL"), 5_000).unref();
+      };
+      const bound = setTimeout(stopGroup, input.timeoutMs);
+      void collect(child).then((result) => {
+        clearTimeout(bound);
+        resume(Effect.succeed(result));
+      });
       return Effect.sync(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+        clearTimeout(bound);
+        stopGroup();
       });
     }),
   runDetached: (input) =>
@@ -139,13 +159,7 @@ export const layerHost = Layer.succeed(SshRuntimeHost, {
         // Still alive here means the script never drained this server: it is stuck before the
         // swap, so stopping it (its trap releases the replacement lock) cannot strand the host.
         const bound = setTimeout(() => {
-          if (child.pid !== undefined) {
-            try {
-              process.kill(-child.pid, "SIGTERM");
-            } catch {
-              // Already gone.
-            }
-          }
+          if (child.pid !== undefined) signalGroup(child.pid, "SIGTERM");
         }, DETACHED_TIMEOUT_MS);
         bound.unref();
         child.once("close", () => clearTimeout(bound));
