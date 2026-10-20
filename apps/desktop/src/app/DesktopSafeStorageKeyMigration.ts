@@ -75,12 +75,21 @@ export const copySafeStorageKey = async (
 };
 
 /**
- * Electron's Keychain item: service `<name> Safe Storage`, account `<name>`. Read in process, so
- * macOS checks the same app identity it checks for Electron's own access.
+ * Electron's Keychain item: service `<name> Safe Storage`, account `<name> Key` (Chromium's own
+ * builds use `<name>`; Electron appends " Key"). Read in process, so macOS checks the same app
+ * identity it checks for Electron's own access.
  */
+export const macKeychainItem = (name: string) => ({
+  service: `${name} Safe Storage`,
+  account: `${name} Key`,
+});
+
 const macKeychainStore = async (): Promise<SafeStorageKeyStore> => {
   const { Entry } = await import("@napi-rs/keyring");
-  const entry = (name: string) => new Entry(`${name} Safe Storage`, name);
+  const entry = (name: string) => {
+    const item = macKeychainItem(name);
+    return new Entry(item.service, item.account);
+  };
   return {
     read: async (name) => {
       try {
