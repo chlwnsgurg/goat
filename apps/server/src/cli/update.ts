@@ -681,7 +681,7 @@ const runUpdate = Effect.fn("cli.update.run")(function* (input: {
     yield* Console.log(
       `  Background service still running ${serviceVersion ?? "an unknown version"}. Run \`goat service restart\` when you are ready to switch it to ${targetVersion}.`,
     );
-  } else if (status.installed && !servesThisHome) {
+  } else if (!servesThisHome && (status.installed || status.installedBaseDir !== undefined)) {
     yield* Console.log(
       `  The background service serves ${status.installedBaseDir ?? "another GOAT home"} and was left unchanged.`,
     );

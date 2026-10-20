@@ -77,6 +77,16 @@ it("points an older service at a repair, never at npx", () => {
   expect(output).not.toContain("npx");
 });
 
+it("says when the only service belongs to another home", () => {
+  assert.include(
+    formatServiceStatus(
+      { ...status, installed: false, current: false, installedBaseDir: "/home/other/.t3" },
+      "0.0.29",
+    ),
+    "The service for this user serves /home/other/.t3 and was left alone.",
+  );
+});
+
 it("explains where the service is supported", () => {
   assert.include(
     formatServiceStatus({ ...status, supported: false, installed: false }, "0.0.29"),
@@ -195,7 +205,48 @@ it.layer(Layer.mergeAll(NodeServices.layer, NetService.layer))("service commands
         Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
       );
 
-      expect(installOptions).toEqual([{ allowDowngrade: true }]);
+      expect(installOptions).toEqual([
+        command === "install" ? { allowDowngrade: true, start: true } : { allowDowngrade: true },
+      ]);
+    }),
+  );
+
+  it.effect("install accepts --start and --no-start", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-service-cli-test-" });
+      const { service, installOptions } = makeTestService({
+        ...status,
+        current: false,
+        installedVersion: "0.0.1",
+      });
+      vi.spyOn(BootService, "layer").mockReturnValue(
+        Layer.succeed(BootService.BootService, service),
+      );
+
+      yield* Command.runWith(serviceCommand, { version: packageJson.version })([
+        "install",
+        "--base-dir",
+        baseDir,
+        "--no-start",
+      ]).pipe(
+        Effect.provideService(HostProcess.Environment, {}),
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
+      );
+      yield* Command.runWith(serviceCommand, { version: packageJson.version })([
+        "install",
+        "--base-dir",
+        baseDir,
+        "--start",
+      ]).pipe(
+        Effect.provideService(HostProcess.Environment, {}),
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
+      );
+
+      expect(installOptions).toEqual([
+        { allowDowngrade: false, start: false },
+        { allowDowngrade: false, start: true },
+      ]);
     }),
   );
 });

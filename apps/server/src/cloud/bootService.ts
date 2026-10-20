@@ -1,4 +1,5 @@
 import * as HostProcess from "@goat/shared/HostProcess";
+import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -9,16 +10,18 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import { HttpClient } from "effect/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import * as Schema from "effect/Schema";
 
 import { CLI_RELEASE_BASE_URL_ENV } from "@goat/shared/cliRelease";
 import {
+  GOAT_ENVIRONMENT_PATH,
   LEGACY_BOOT_SERVICE_LAUNCHD_LABEL,
   LEGACY_BOOT_SERVICE_UNIT_FILE,
   legacyEnvName,
 } from "@goat/contracts/legacyT3Names";
 
+import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import {
   ensurePinnedRuntimeInstalled,
@@ -268,6 +271,18 @@ export interface BootServiceStep {
  * next step races a still-loaded service.
  */
 const STOP_STEP_TIMEOUT = Duration.seconds(120);
+/**
+ * `systemctl restart` and `launchctl bootstrap` return when the unit is loaded,
+ * which is before the server is listening — and a pinned runtime that exits
+ * immediately still counts as a successful start. Success waits until this
+ * home's service-managed server answers, or the unit is already dead.
+ */
+const SERVICE_READY_TIMEOUT = Duration.seconds(60);
+const SERVICE_READY_POLL = Duration.millis(200);
+/** The environment descriptor field that identifies which server answered. */
+const ServiceEnvironmentAnswer = Schema.Struct({
+  serverVersion: Schema.optionalKey(Schema.String),
+});
 
 export interface BootServiceManager {
   readonly kind: "systemd" | "launchd";
@@ -802,16 +817,96 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
    * that serves another home is upstream T3 Code's or another install's, and
    * is never touched.
    */
+  const servesThisHome = (baseDir: string | undefined) =>
+    baseDir !== undefined && path.resolve(baseDir) === path.resolve(input.baseDir);
+
   const readOwnedLegacyUnit = Effect.gen(function* () {
     if (legacyManager === undefined) return Option.none<OwnedLegacyUnit>();
     const contents = yield* fs.readFileString(legacyManager.unitPath).pipe(Effect.option);
     if (Option.isNone(contents)) return Option.none<OwnedLegacyUnit>();
     const servedBaseDir = bootServiceBaseDirOf(contents.value);
-    return servedBaseDir !== undefined &&
-      path.resolve(servedBaseDir) === path.resolve(input.baseDir)
+    return servesThisHome(servedBaseDir)
       ? Option.some<OwnedLegacyUnit>({ manager: legacyManager, contents: contents.value })
       : Option.none<OwnedLegacyUnit>();
   });
+
+  /**
+   * `goat.service` is one unit per user. A file that serves another home belongs
+   * to that home; this command must not stop, replace, or report it as ours.
+   */
+  const readCurrentUnit = Effect.gen(function* () {
+    const contents = yield* fs.readFileString(unitPath).pipe(Effect.option);
+    if (Option.isNone(contents)) return { _tag: "Absent" as const };
+    const servedBaseDir = bootServiceBaseDirOf(contents.value);
+    return servesThisHome(servedBaseDir)
+      ? { _tag: "Owned" as const, contents: contents.value }
+      : { _tag: "Foreign" as const, baseDir: servedBaseDir };
+  });
+
+  const runtimeStatePath = path.join(input.baseDir, "userdata", "server-runtime.json");
+
+  const serviceLiveness = (manager: BootServiceManager) =>
+    Effect.gen(function* () {
+      if (manager.kind === "systemd") {
+        const active = yield* probe("systemctl", [
+          "--user",
+          "is-active",
+          path.basename(manager.unitPath),
+        ]);
+        return succeeded(active) ? "running" : "dead";
+      }
+      const printed = yield* probe("launchctl", [
+        "print",
+        `gui/${uid}/${path.basename(manager.unitPath, ".plist")}`,
+      ]);
+      if (!succeeded(printed) || Option.isNone(printed)) return "dead";
+      const stdout = printed.value.stdout;
+      if (/^\s*pid = [1-9]\d*/m.test(stdout)) return "running";
+      const lastExit = /last exit code = (\d+)/.exec(stdout);
+      if (lastExit !== null && lastExit[1] !== "0") return "dead";
+      // Loaded, not started yet. RunAtLoad can lag a GUI login; an SSH
+      // Background session may stay here until the next login.
+      return "pending";
+    });
+
+  /** Resolves once the new unit's server answers the environment descriptor. */
+  const awaitServiceAnswer = (manager: BootServiceManager, begunAt: number) =>
+    Effect.gen(function* () {
+      const deadline = begunAt + Duration.toMillis(SERVICE_READY_TIMEOUT);
+      const giveUp = new BootServiceCommandError({ step: "waiting for the service to answer" });
+      while ((yield* Clock.currentTimeMillis) <= deadline) {
+        const runtime = yield* readPersistedServerRuntimeState(runtimeStatePath).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+        );
+        if (
+          Option.isSome(runtime) &&
+          runtime.value.serviceManaged === true &&
+          runtime.value.serverVersion === input.cliVersion &&
+          Date.parse(runtime.value.startedAt) >= begunAt
+        ) {
+          const requestUrl = yield* Effect.try({
+            try: () => new URL(GOAT_ENVIRONMENT_PATH, runtime.value.origin).href,
+            catch: () => "bad-origin" as const,
+          }).pipe(Effect.option);
+          if (Option.isSome(requestUrl)) {
+            const reported = yield* httpClient
+              .execute(HttpClientRequest.get(requestUrl.value))
+              .pipe(
+                Effect.flatMap(HttpClientResponse.filterStatusOk),
+                Effect.flatMap(HttpClientResponse.schemaBodyJson(ServiceEnvironmentAnswer)),
+                Effect.timeout(Duration.seconds(1)),
+                Effect.option,
+              );
+            if (Option.isSome(reported) && reported.value.serverVersion === input.cliVersion) {
+              return;
+            }
+          }
+        }
+        if ((yield* serviceLiveness(manager)) === "dead") return yield* giveUp;
+        yield* Effect.sleep(SERVICE_READY_POLL);
+      }
+      return yield* giveUp;
+    });
 
   /** Disables the legacy unit and removes its file. Callers stop it first. */
   const retireLegacyUnit = (legacy: OwnedLegacyUnit) =>
@@ -825,10 +920,17 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
 
   /**
    * Rollback for a migration that failed: drop the new unit, put the legacy
-   * file back as it was, and start it again. Best effort, like `restart`.
+   * file back as it was, and start it again. `restore` runs first so the
+   * legacy launcher does not read the new activeVersion. Best effort, like
+   * `restart`.
    */
-  const reinstateLegacyUnit = (manager: BootServiceManager, legacy: OwnedLegacyUnit) =>
+  const reinstateLegacyUnit = (
+    manager: BootServiceManager,
+    legacy: OwnedLegacyUnit,
+    restore: Effect.Effect<void> = Effect.void,
+  ) =>
     Effect.gen(function* () {
+      yield* restore;
       yield* runSteps(manager.deactivate).pipe(Effect.ignore);
       yield* fs.remove(manager.unitPath, { force: true }).pipe(Effect.ignore);
       yield* writeDurably(legacy.manager.unitPath, legacy.contents);
@@ -840,6 +942,13 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     readonly start?: boolean;
   }) {
     const manager = yield* requireManager;
+    const current = yield* readCurrentUnit;
+    if (current._tag === "Foreign") {
+      return yield* new BootServiceCommandError({
+        step: `the service for this user belongs to ${current.baseDir ?? "another GOAT home"}`,
+      });
+    }
+    const currentInstalled = current._tag === "Owned";
     yield* fs
       .makeDirectory(input.logsDir, { recursive: true })
       .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
@@ -900,9 +1009,6 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
           : new BootServiceInstallError({ cause: error }),
       ),
     );
-    const currentInstalled = yield* fs
-      .exists(unitPath)
-      .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
     const legacy = yield* readOwnedLegacyUnit;
     const installed = currentInstalled || Option.isSome(legacy);
     // With start=false the service keeps running while its files change. The
@@ -920,6 +1026,23 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       if (currentInstalled) yield* runSteps(manager.stop);
       if (Option.isSome(legacy)) yield* runSteps(legacy.value.manager.stop);
     }
+
+    let wroteSelection = false;
+    let selectionState: Option.Option<string> = Option.none();
+    let selectionPending: Option.Option<string> = Option.none();
+    const restoreSelection = Effect.gen(function* () {
+      if (!wroteSelection) return;
+      if (Option.isSome(selectionState)) {
+        yield* writeDurably(statePath, selectionState.value);
+      } else {
+        yield* fs.remove(statePath, { force: true }).pipe(Effect.ignore);
+      }
+      if (Option.isSome(selectionPending)) {
+        yield* fs.writeFileString(restartPendingPath, selectionPending.value, { mode: 0o600 });
+      } else {
+        yield* fs.remove(restartPendingPath, { force: true }).pipe(Effect.ignore);
+      }
+    }).pipe(Effect.ignore);
 
     yield* Effect.gen(function* () {
       if (installed) {
@@ -946,6 +1069,8 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       yield* fs
         .makeDirectory(path.dirname(target.unitPath), { recursive: true })
         .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
+      selectionState = yield* fs.readFileString(statePath).pipe(Effect.option);
+      selectionPending = yield* fs.readFileString(restartPendingPath).pipe(Effect.option);
       // Files can match the new version even when activation fails; keep that install retryable.
       yield* fs.writeFileString(restartPendingPath, `${input.cliVersion}\n`, { mode: 0o600 });
       yield* writeDurably(
@@ -960,6 +1085,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
           2,
         )}\n`,
       );
+      wroteSelection = true;
       if (!start && installed) {
         // The launcher only writes this file while a remote update is in
         // flight. One that began after the check above lands either before
@@ -976,7 +1102,9 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
 
       if (start) {
         if (Option.isSome(legacy)) yield* retireLegacyUnit(legacy.value);
+        const begunAt = yield* Clock.currentTimeMillis;
         yield* runSteps(manager.activate);
+        yield* awaitServiceAnswer(manager, begunAt);
         yield* fs.remove(restartPendingPath, { force: true });
       }
     }).pipe(
@@ -986,7 +1114,11 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       Effect.tapError(() => {
         if (!start) return Effect.void;
         if (currentInstalled) return runSteps(manager.restart).pipe(Effect.ignore);
-        if (Option.isSome(legacy)) return reinstateLegacyUnit(manager, legacy.value);
+        // The legacy launcher reads activeVersion at startup. Put the previous
+        // selection back before it starts, or it clears the marker and runs
+        // the new server under the old unit.
+        if (Option.isSome(legacy))
+          return reinstateLegacyUnit(manager, legacy.value, restoreSelection);
         return Effect.void;
       }),
     );
@@ -1001,29 +1133,30 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       if (Option.isNone(legacy)) return false;
       // Move the legacy unit to the new names without changing the version it starts.
       yield* runSteps(legacy.value.manager.stop);
+      const begunAt = yield* Clock.currentTimeMillis;
       yield* Effect.gen(function* () {
         yield* fs.makeDirectory(path.dirname(unitPath), { recursive: true });
         yield* writeDurably(unitPath, migrateLegacyBootServiceUnit(legacy.value.contents));
         yield* retireLegacyUnit(legacy.value);
         yield* runSteps(manager.activate);
+        yield* awaitServiceAnswer(manager, begunAt);
       }).pipe(Effect.tapError(() => reinstateLegacyUnit(manager, legacy.value)));
       yield* fs.remove(restartPendingPath, { force: true });
       return true;
     }
     const installedBaseDir = bootServiceBaseDirOf(unit.value);
-    if (
-      installedBaseDir === undefined ||
-      path.resolve(installedBaseDir) !== path.resolve(input.baseDir)
-    ) {
+    if (!servesThisHome(installedBaseDir)) {
       return false;
     }
     yield* runSteps(manager.stop);
+    const begunAt = yield* Clock.currentTimeMillis;
     // A legacy unit left behind next to the current one would start a second server at boot.
     const retireLeftover = Option.isSome(legacy)
       ? runSteps(legacy.value.manager.stop).pipe(Effect.andThen(retireLegacyUnit(legacy.value)))
       : Effect.void;
     yield* retireLeftover.pipe(
       Effect.andThen(runSteps(manager.activate)),
+      Effect.andThen(awaitServiceAnswer(manager, begunAt)),
       Effect.tapError(() => runSteps(manager.restart).pipe(Effect.ignore)),
     );
     yield* fs.remove(restartPendingPath, { force: true });
@@ -1040,16 +1173,18 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
   ): Effect.Effect<A, E | BootServiceError, R> =>
     Effect.gen(function* () {
       if (detectedManager === undefined) return yield* operation;
-      const manager = detectedManager;
-      const unit = yield* fs.readFileString(unitPath).pipe(Effect.option);
-      if (Option.isNone(unit)) return yield* operation;
-      const installedBaseDir = bootServiceBaseDirOf(unit.value);
-      if (
-        installedBaseDir === undefined ||
-        path.resolve(installedBaseDir) !== path.resolve(input.baseDir)
-      ) {
+      const current = yield* readCurrentUnit;
+      const legacy = current._tag === "Owned" ? Option.none() : yield* readOwnedLegacyUnit;
+      let manager: BootServiceManager;
+      if (current._tag === "Owned") {
+        manager = detectedManager;
+      } else if (Option.isSome(legacy)) {
+        manager = legacy.value.manager;
+      } else {
         return yield* operation;
       }
+      const unitFile = path.basename(manager.unitPath);
+      const launchdLabel = path.basename(manager.unitPath, ".plist");
       // `is-active` fails while a crash-looping unit sits in `activating
       // (auto-restart)`, and a throttled launchd job is loaded without a pid;
       // both would start the server mid-repair. So the unit is always
@@ -1060,16 +1195,14 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
           ? yield* Effect.map(
               Effect.all(
                 [
-                  probe("systemctl", ["--user", "is-enabled", BOOT_SERVICE_NAMES.unitFile]),
-                  probe("systemctl", ["--user", "is-active", BOOT_SERVICE_NAMES.unitFile]),
+                  probe("systemctl", ["--user", "is-enabled", unitFile]),
+                  probe("systemctl", ["--user", "is-active", unitFile]),
                 ],
                 { concurrency: "unbounded" },
               ),
               ([enabled, active]) => succeeded(active) || succeeded(enabled),
             )
-          : succeeded(
-              yield* probe("launchctl", ["print", `gui/${uid}/${BOOT_SERVICE_NAMES.launchdLabel}`]),
-            );
+          : succeeded(yield* probe("launchctl", ["print", `gui/${uid}/${launchdLabel}`]));
       return yield* Effect.acquireUseRelease(
         // Every stop step is required when the service is to be restored: a
         // step that was fine to skip during uninstall would leave the server
@@ -1092,19 +1225,17 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
 
   const uninstall: BootService["Service"]["uninstall"] = Effect.gen(function* () {
     const manager = yield* requireManager;
-    const currentInstalled = yield* fs
-      .exists(unitPath)
-      .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
+    const current = yield* readCurrentUnit;
     const legacy = yield* readOwnedLegacyUnit;
-    if (!currentInstalled && Option.isNone(legacy)) return false;
-    if (currentInstalled) {
+    if (current._tag !== "Owned" && Option.isNone(legacy)) return false;
+    if (current._tag === "Owned") {
       yield* runSteps(manager.deactivate);
       yield* fs
         .remove(unitPath)
         .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
     }
     if (Option.isSome(legacy)) yield* retireLegacyUnit(legacy.value);
-    yield* runSteps(manager.finalize);
+    if (current._tag === "Owned" || Option.isSome(legacy)) yield* runSteps(manager.finalize);
     return true;
   }).pipe(Effect.withSpan("cloud.boot_service.uninstall"));
 
@@ -1126,6 +1257,9 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         detectedManager.kind === "systemd"
           ? [...(yield* readSystemdProblems(true, LEGACY_BOOT_SERVICE_NAMES.unitFile))]
           : [];
+      // The goat.service branch reports this; skipping it here makes `goat update`
+      // treat a legacy unit that is still on the previous server as already current.
+      if (yield* fs.exists(restartPendingPath)) problems.push("restart-pending");
       return {
         supported: true,
         installed: true,
@@ -1148,6 +1282,16 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       ? serviceStateActiveVersion(stateText.value)
       : undefined;
     const installedBaseDir = bootServiceBaseDirOf(unit);
+    if (!servesThisHome(installedBaseDir)) {
+      return {
+        supported: true,
+        installed: false,
+        current: false,
+        ...(installedBaseDir === undefined ? {} : { installedBaseDir }),
+        unitPath,
+        logPath,
+      };
+    }
     const normalizeUnit = (contents: string) =>
       detectedManager.kind === "launchd"
         ? contents.replace(/(<key>PATH<\/key>\n\s*<string>)[^<]*(<\/string>)/, "$1$2")

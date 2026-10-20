@@ -3,6 +3,7 @@ import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Terminal from "effect/Terminal";
 import { Command, Flag, GlobalFlag, Prompt } from "effect/cli";
 import { FetchHttpClient } from "effect/http";
@@ -67,6 +68,13 @@ export function formatServiceStatus(
     return "GOAT service\n  Status: unavailable on this machine\n  Supported on: Linux with systemd, macOS with launchd";
   }
   if (!status.installed) {
+    if (status.installedBaseDir !== undefined) {
+      return [
+        "GOAT service",
+        "  Status: not installed for this home",
+        `  The service for this user serves ${status.installedBaseDir} and was left alone.`,
+      ].join("\n");
+    }
     return "GOAT service\n  Status: not installed\n  Next: Run `goat service install`.";
   }
   const installedVersion = status.installedVersion ?? cliVersion;
@@ -114,13 +122,24 @@ const serviceReconcileFlags = {
   ),
 };
 
-const serviceInstallCommand = Command.make("install", serviceReconcileFlags).pipe(
+const serviceInstallCommand = Command.make("install", {
+  ...serviceReconcileFlags,
+  start: Flag.Boolean("start").pipe(
+    Flag.withDescription(
+      "Start the service after writing it. Pass --no-start to point it at this version and leave the running server in place until `goat service restart`.",
+    ),
+    Flag.withDefault(true),
+  ),
+}).pipe(
   Command.withDescription("Install GOAT as a background service for this user."),
   Command.withHandler((flags) =>
     runServiceCommand(
       flags,
       Effect.gen(function* () {
-        const result = yield* reconcileService({ allowDowngrade: flags.allowDowngrade });
+        const result = yield* reconcileService({
+          allowDowngrade: flags.allowDowngrade,
+          start: flags.start,
+        });
         if (!result.changed) {
           yield* Console.log(`GOAT service is already installed with goat@${packageJson.version}.`);
           return;
@@ -180,16 +199,26 @@ const serviceRestartCommand = Command.make("restart", projectLocationFlags).pipe
 const serviceUninstallCommand = Command.make("uninstall", projectLocationFlags).pipe(
   Command.withDescription("Stop and remove the GOAT background service."),
   Command.withHandler((flags) =>
-    runServiceCommand(
-      flags,
-      Effect.gen(function* () {
+    Effect.gen(function* () {
+      const logLevel = yield* GlobalFlag.LogLevel;
+      const config = yield* resolveCliAuthConfig(flags, logLevel);
+      return yield* Effect.gen(function* () {
         const service = yield* BootService.BootService;
+        const path = yield* Path.Path;
+        const before = yield* service.status;
         const removed = yield* service.uninstall;
+        const foreign =
+          before.installedBaseDir !== undefined &&
+          path.resolve(before.installedBaseDir) !== path.resolve(config.baseDir);
         yield* Console.log(
-          removed ? "Removed the GOAT service." : "GOAT service is not installed.",
+          removed
+            ? "Removed the GOAT service."
+            : foreign
+              ? `The GOAT service serves ${before.installedBaseDir} and was left unchanged.`
+              : "GOAT service is not installed.",
         );
-      }),
-    ),
+      }).pipe(Effect.provide(layer(config)));
+    }),
   ),
 );
 
