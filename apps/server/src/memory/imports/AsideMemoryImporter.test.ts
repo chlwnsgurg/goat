@@ -117,6 +117,12 @@ describe("Aside semantic page parser", () => {
     ["empty Current", "---\ntitle: X\n---\n## Current\n\n## History\n\nB.\n"],
     ["structured title", "---\ntitle: { a: 1 }\n---\n## Current\n\nA.\n"],
     ["nested unknown field", "---\ntitle: X\nmeta:\n  a: 1\n---\n## Current\n\nA.\n"],
+    [
+      "Setext History boundary",
+      "---\ntitle: X\n---\n## Current\n\nKeep.\n\nHistory\n-------\n\nObsolete.\n",
+    ],
+    ["Setext Current", "---\ntitle: X\n---\nCurrent\n=======\n\nA.\n"],
+    ["H1 inside Current", "---\ntitle: X\n---\n## Current\n\nA.\n\n# Archive\n\nB.\n"],
   ] as const)("refuses %s per file while siblings import", ([, text]) =>
     Effect.gen(function* () {
       const rows = yield* parseAsideMemory(snapshot({ "bad.md": text, "good.md": page("Fine.") }));

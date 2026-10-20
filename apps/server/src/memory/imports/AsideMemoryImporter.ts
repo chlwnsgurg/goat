@@ -25,6 +25,8 @@ const headingText = (text: string) => canonical(text).replace(/\s+/g, " ");
 const H2 = /^ {0,3}##(?!#)(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
 const H3 = /^ {0,3}###(?!#)(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
 const FENCE = /^ {0,3}(\x60{3,}|~{3,})/;
+const H1 = /^ {0,3}#(?!#)(?:[ \t]|$)/;
+const SETEXT = /^ {0,3}(?:=+|-+)[ \t]*$/;
 
 type Section = { readonly heading: string | null; readonly body: string };
 type Page = {
@@ -87,6 +89,7 @@ const page = (text: string): Page | undefined => {
   let state: "before" | "current" | "history" = "before";
   let fence: { char: string; length: number } | null = null;
   const current: string[] = [];
+  let previous = "";
   for (const line of lines.slice(end + 1)) {
     if (fence) {
       const close = FENCE.exec(line);
@@ -101,6 +104,11 @@ const page = (text: string): Page | undefined => {
       const open = FENCE.exec(line);
       if (open) fence = { char: open[1]![0]!, length: open[1]!.length };
       else {
+        // Setext headings and an H1 inside Current would hide a section boundary; refuse them
+        // rather than let later text (such as History) leak into the imported section.
+        if (state !== "history" && SETEXT.test(line) && previous.trim() && !H2.test(previous))
+          return undefined;
+        if (state === "current" && H1.test(line)) return undefined;
         const h2 = H2.exec(line);
         if (h2) {
           const name = headingText(h2[1] ?? "");
@@ -117,6 +125,7 @@ const page = (text: string): Page | undefined => {
       }
     }
     if (state === "current") current.push(line);
+    previous = fence ? "" : line;
   }
   if (fence || state === "before") return undefined;
   const sections: Section[] = [];
