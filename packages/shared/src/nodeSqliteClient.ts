@@ -165,6 +165,60 @@ const LARGE_BINDING_SIZE = 64 * 1024;
 const isBlob = (value: unknown): value is ArrayBufferView | ArrayBufferLike =>
   ArrayBuffer.isView(value) || NodeUtil.types.isAnyArrayBuffer(value);
 
+// Node 24.20's `node:sqlite` (SQLite 3.53.4) binds a raw ArrayBuffer parameter as
+// NULL. A Uint8Array of the same bytes binds on that build and on later ones.
+const sqliteBlob = (value: ArrayBufferLike): Uint8Array | ArrayBufferLike => {
+  try {
+    return new Uint8Array(value);
+  } catch {
+    return value;
+  }
+};
+
+const sqliteParameter = (value: unknown): unknown => {
+  if (NodeUtil.types.isAnyArrayBuffer(value)) return sqliteBlob(value);
+  if (
+    value === null ||
+    (typeof value !== "object" && typeof value !== "function") ||
+    ArrayBuffer.isView(value)
+  ) {
+    return value;
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  let changed = false;
+  for (const descriptor of Object.values(descriptors)) {
+    if (
+      descriptor.enumerable &&
+      "value" in descriptor &&
+      NodeUtil.types.isAnyArrayBuffer(descriptor.value)
+    ) {
+      changed = true;
+      break;
+    }
+  }
+  if (!changed) return value;
+  const copy = typeof value === "function" ? function namedBinding() {} : {};
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (!descriptor.enumerable) continue;
+    if ("value" in descriptor && NodeUtil.types.isAnyArrayBuffer(descriptor.value)) {
+      Object.defineProperty(copy, key, { ...descriptor, value: sqliteBlob(descriptor.value) });
+    } else {
+      Object.defineProperty(copy, key, descriptor);
+    }
+  }
+  return copy;
+};
+
+const sqliteParameters = (params: ReadonlyArray<unknown>): ReadonlyArray<unknown> => {
+  let changed = false;
+  const next = params.map((param) => {
+    const normalized = sqliteParameter(param);
+    if (normalized !== param) changed = true;
+    return normalized;
+  });
+  return changed ? next : params;
+};
+
 const bindingSize = (value: unknown): number => {
   if (typeof value === "string") {
     return value.length;
@@ -443,9 +497,10 @@ const makeReader = Effect.fnUntraced(function* (options: SqliteClientConfig) {
             },
           });
           if (pending.size === 1) worker.ref();
-          const cached = input.cached && !hasLargeBinding(input.params);
+          const params = sqliteParameters(input.params);
+          const cached = input.cached && !hasLargeBinding(params);
           // oxlint-disable-next-line unicorn/require-post-message-target-origin -- Node workers do not accept a target origin.
-          worker.postMessage({ id, safeIntegers, ...input, cached });
+          worker.postMessage({ id, safeIntegers, ...input, params, cached });
           return Effect.sync(() => {
             pending.delete(id);
             if (pending.size === 0) worker.unref();
@@ -793,13 +848,14 @@ const make = Effect.fn("makeWithDatabase")(function* (
     ) =>
       Effect.withFiber<ReadonlyArray<any>, SqlError>((fiber) => {
         try {
+          const bindable = sqliteParameters(params);
           statement.setReadBigInts(Boolean(Context.get(fiber.context, Client.SafeIntegers)));
           if (hasRows(statement)) {
-            const rows = statement.all(...(params as any));
+            const rows = statement.all(...(bindable as any));
             checkpoint?.();
             return Effect.succeed(rows);
           }
-          const result = statement.run(...(params as any));
+          const result = statement.run(...(bindable as any));
           checkpoint?.();
           return Effect.succeed(raw ? (result as unknown as ReadonlyArray<any>) : []);
         } catch (cause) {
@@ -823,18 +879,19 @@ const make = Effect.fn("makeWithDatabase")(function* (
         (statement) =>
           Effect.try({
             try: () => {
+              const bindable = sqliteParameters(params);
               statement.setReadBigInts(
                 Boolean(Context.get(Fiber.getCurrent()!.context, Client.SafeIntegers)),
               );
               if (hasRows(statement)) {
                 statement.setReturnArrays(true);
-                const rows = statement.all(...(params as any)) as unknown as ReadonlyArray<
+                const rows = statement.all(...(bindable as any)) as unknown as ReadonlyArray<
                   ReadonlyArray<unknown>
                 >;
                 checkpoint?.();
                 return rows;
               }
-              statement.run(...(params as any));
+              statement.run(...(bindable as any));
               checkpoint?.();
               return [];
             },
