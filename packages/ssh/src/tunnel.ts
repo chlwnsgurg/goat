@@ -7073,7 +7073,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
                       true,
                       true,
                       false,
-                      ({ phase }) => report.onPhase(phase),
+                      ({ phase, upload }) => report.onPhase(phase, upload),
                     );
                     if (closed || (generations.get(key) ?? 0) !== intent.generation)
                       return yield* supersededPreparation();
@@ -7446,7 +7446,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       ...(requestOptions?.onPhase === undefined
         ? {}
         : {
-            onPhase: (phase) => notifyRuntimePhase(resolvedTarget, phase, requestOptions.onPhase),
+            onPhase: (phase, upload) =>
+              notifyRuntimePhase(resolvedTarget, phase, requestOptions.onPhase, upload),
           }),
       onHostAnswered,
       terminal: preparationTerminal,
@@ -7468,7 +7469,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
               preparationOptions.refreshRuntime !== true &&
               pendingReplacements.has(key) &&
               tunnels.has(key);
-            const onPhase: SshRuntimeProgressCallback = ({ phase }) => report.onPhase(phase);
+            const onPhase: SshRuntimeProgressCallback = ({ phase, upload }) =>
+              report.onPhase(phase, upload);
             if (!reusingPending)
               publishPhase(
                 key,

@@ -1,4 +1,8 @@
-import type { DesktopSshPreparationProgress, SshRuntimePhase } from "@goat/contracts";
+import type {
+  DesktopSshPreparationProgress,
+  SshHostStatus,
+  SshRuntimePhase,
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -23,7 +27,7 @@ export interface PreparationAdmission {
 
 export interface PreparationReporter {
   readonly operationId: string;
-  readonly onPhase: (phase: SshRuntimePhase) => void;
+  readonly onPhase: (phase: SshRuntimePhase, upload?: SshHostStatus["upload"]) => void;
   readonly onHostAnswered: () => void;
 }
 
@@ -33,7 +37,7 @@ type TerminalProgress = Pick<
 >;
 interface Observer {
   readonly onProgress?: (progress: DesktopSshPreparationProgress) => void;
-  readonly onPhase?: (phase: SshRuntimePhase) => void;
+  readonly onPhase?: PreparationReporter["onPhase"];
   readonly onHostAnswered?: (() => void) | null;
 }
 
@@ -68,6 +72,7 @@ export const makeEnsureFlights = <A, E>(options: {
       readonly drained: Deferred.Deferred<void>;
       readonly observers: Set<Observer>;
       latest: Omit<DesktopSshPreparationProgress, "remainingMs">;
+      upload: SshHostStatus["upload"];
       leases: number;
       settling: boolean;
       settled: boolean;
@@ -77,19 +82,29 @@ export const makeEnsureFlights = <A, E>(options: {
     const flights = new Map<string, Flight>();
     const observations = new WeakMap<
       Observer,
-      { phase: SshRuntimePhase | null; answered: boolean }
+      { phase: SshRuntimePhase | null; answered: boolean; upload: SshHostStatus["upload"] }
     >();
     const remaining = (flight: Flight) =>
       Math.max(0, Math.floor(Number(flight.deadline - clock.monotonicTimeNanosUnsafe()) / 1e6));
     const replay = (flight: Flight, observer: Observer) => {
       const progress = { ...flight.latest, remainingMs: remaining(flight) };
       const previous = observations.get(observer);
-      observations.set(observer, { phase: progress.phase, answered: progress.hostAnswered });
+      observations.set(observer, {
+        phase: progress.phase,
+        answered: progress.hostAnswered,
+        upload: flight.upload,
+      });
       notify(() => observer.onProgress?.(progress));
       if (progress.hostAnswered && previous?.answered !== true)
         notify(observer.onHostAnswered ?? undefined);
       const phase = progress.phase;
-      if (phase !== null && previous?.phase !== phase) notify(() => observer.onPhase?.(phase));
+      if (
+        phase !== null &&
+        (previous?.phase !== phase ||
+          previous.upload?.sentBytes !== flight.upload?.sentBytes ||
+          previous.upload?.totalBytes !== flight.upload?.totalBytes)
+      )
+        notify(() => observer.onPhase?.(phase, flight.upload));
     };
     const emit = (flight: Flight) => {
       for (const observer of flight.observers) replay(flight, observer);
@@ -200,6 +215,7 @@ export const makeEnsureFlights = <A, E>(options: {
               result: yield* Deferred.make<A, Error>(),
               drained: yield* Deferred.make<void>(),
               observers: new Set([input]),
+              upload: undefined,
               leases: 1,
               settling: false,
               settled: false,
@@ -210,8 +226,16 @@ export const makeEnsureFlights = <A, E>(options: {
             const owned = flight;
             const report: PreparationReporter = {
               operationId,
-              onPhase: (phase) => {
-                if (owned.settling || owned.settled || owned.latest.phase === phase) return;
+              onPhase: (phase, upload) => {
+                if (
+                  owned.settling ||
+                  owned.settled ||
+                  (owned.latest.phase === phase &&
+                    owned.upload?.sentBytes === upload?.sentBytes &&
+                    owned.upload?.totalBytes === upload?.totalBytes)
+                )
+                  return;
+                owned.upload = upload;
                 owned.latest = { operationId, phase, hostAnswered: owned.latest.hostAnswered };
                 emit(owned);
               },

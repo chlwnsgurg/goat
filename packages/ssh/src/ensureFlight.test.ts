@@ -1,5 +1,9 @@
 import { assert, describe, it } from "@effect/vitest";
-import type { DesktopSshPreparationProgress } from "@goat/contracts";
+import type {
+  DesktopSshPreparationProgress,
+  SshHostStatus,
+  SshRuntimePhase,
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -45,7 +49,7 @@ const fixture = Effect.gen(function* () {
   const ensure = (
     overrides: Partial<typeof input> & {
       onProgress?: (progress: DesktopSshPreparationProgress) => void;
-      onPhase?: () => void;
+      onPhase?: PreparationReporter["onPhase"];
       onHostAnswered?: () => void;
     } = {},
   ) => Effect.scoped(flights.join({ ...input, ...overrides }));
@@ -53,6 +57,36 @@ const fixture = Effect.gen(function* () {
 });
 
 describe("manager preparation flights", () => {
+  it.effect("replays upload counters to joiners and emits updates within the same phase", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const leader: Array<{ phase: SshRuntimePhase; upload: SshHostStatus["upload"] }> = [];
+      const joiner: typeof leader = [];
+      const first = yield* f
+        .ensure({ onPhase: (phase, upload) => leader.push({ phase, upload }) })
+        .pipe(Effect.forkChild);
+      const report = yield* Deferred.await(f.entered);
+      yield* Queue.take(f.admissions);
+      const initial = { sentBytes: 0, totalBytes: 3 * 1024 * 1024 };
+      report.onPhase("uploading", initial);
+      const second = yield* f
+        .ensure({ onPhase: (phase, upload) => joiner.push({ phase, upload }) })
+        .pipe(Effect.forkChild);
+      assert.equal((yield* Queue.take(f.admissions)).disposition, "join");
+      assert.deepEqual(joiner.at(-1), { phase: "uploading", upload: initial });
+      const complete = { ...initial, sentBytes: initial.totalBytes };
+      report.onPhase("uploading", complete);
+      for (const events of [leader, joiner])
+        assert.deepEqual(events.at(-1), { phase: "uploading", upload: complete });
+      report.onPhase("starting");
+      for (const events of [leader, joiner])
+        assert.deepEqual(events.at(-1), { phase: "starting", upload: undefined });
+      yield* Deferred.succeed(f.release, undefined);
+      yield* Fiber.join(first);
+      yield* Fiber.join(second);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect(
     "twenty callers at 20/35/60 seconds share work and replay the original remaining budget",
     () =>
