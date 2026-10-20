@@ -1948,7 +1948,13 @@ const make = Effect.gen(function* () {
             // Revoked or expired on the remote: issue a fresh session once.
             if (attemptedToken !== undefined) {
               invalidateSession(
-                sessionKey(target, ceiling, call.approvals === true, "none", call.providersManage === true),
+                sessionKey(
+                  target,
+                  ceiling,
+                  call.approvals === true,
+                  "none",
+                  call.providersManage === true,
+                ),
                 attemptedToken,
               );
             }
