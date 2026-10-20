@@ -586,6 +586,8 @@ if [ "$#" = 1 ] && [ "$1" = +%s ]; then echo $(( ${freezeFileTimes ? '$(cat "$HO
         yield* fs.writeFileString(
           `${bin}/sleep`,
           `#!/bin/sh
+# Listener polling waits for the real child; only fact warm-up advances the frozen file clock.
+case "$1" in 0.1) exit 0 ;; esac
 printf '%s\\n' "$1" >> "$HOME/.test/clock/waits"
 second="$(cat "$HOME/.test/clock/second")"
 wait_seconds="\${1%%.*}"

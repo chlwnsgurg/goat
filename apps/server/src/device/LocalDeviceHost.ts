@@ -234,6 +234,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
   const runner = yield* ProcessRunner.ProcessRunner;
   const httpClient = yield* HttpClient.HttpClient;
   const environment = yield* HostProcess.Environment;
+  const workingDirectory = yield* HostProcess.WorkingDirectory;
   const hostPlatform = yield* HostProcess.Platform;
   const sdk = yield* androidSdk;
   const hostEnvironment = deviceHostEnvironment(environment, sdk.root, hostPlatform, path);
@@ -398,6 +399,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
               ...hubPlatformArguments(hostPlatform),
             ],
             {
+              cwd: workingDirectory,
               detached: false,
               shell: false,
               stdout: "pipe",
@@ -763,6 +765,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
               )
             : command,
         args,
+        cwd: workingDirectory,
         env: hostEnvironment,
         timeout: Duration.millis(options?.timeoutMs ?? 20_000),
         timeoutBehavior: "timedOutResult",
@@ -772,7 +775,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
         Effect.map((result) => ({
           stdout: result.stdout,
           stderr: result.stderr,
-          code: Number(result.code),
+          code: result.timedOut ? 124 : Number(result.code ?? 127),
         })),
         Effect.catch((cause) => Effect.succeed({ stdout: "", stderr: String(cause), code: 127 })),
       );

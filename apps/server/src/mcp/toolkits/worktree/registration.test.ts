@@ -3,9 +3,9 @@ import * as SshHostSetup from "../../../sshRemote/SshHostSetup.ts";
 import * as CloudMachineService from "../../../cloudMachines/CloudMachineService.ts";
 import * as SshWorkspaceSync from "../../../sshRemote/SshWorkspaceSync.ts";
 import * as ConnectionCatalogBroker from "../../../connections/ConnectionCatalogBroker.ts";
-import Migration0062 from "../../../persistence/Migrations/065_RemoteReports.ts";
-import Migration0063 from "../../../persistence/Migrations/066_RemoteDispatches.ts";
-import Migration0065 from "../../../persistence/Migrations/068_RemoteDispatchQuestions.ts";
+import Migration0062 from "../../../persistence/Migrations/066_RemoteReports.ts";
+import Migration0063 from "../../../persistence/Migrations/067_RemoteDispatches.ts";
+import Migration0065 from "../../../persistence/Migrations/069_RemoteDispatchQuestions.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as RemoteDispatchCoordinator from "../../../remoteReports/RemoteDispatchCoordinator.ts";
 import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
@@ -24,6 +24,8 @@ import { HttpBody, HttpClient, HttpRouter } from "effect/http";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as GitWorkflowService from "../../../git/GitWorkflowService.ts";
 import * as GitManager from "../../../git/GitManager.ts";
+import * as FleetFallback from "../../../fleet/resources/Fallback.ts";
+import * as FleetPlacement from "../../../fleet/resources/Placement.ts";
 import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
@@ -124,6 +126,8 @@ it.effect("production mcp layer lists worktree tools over http", () =>
     Effect.gen(function* () {
       const layerRoutes = McpHttpServer.layer.pipe(
         Layer.provide(McpHttpServer.layerHostStatusService),
+        Layer.provide(Layer.mock(FleetFallback.FallbackChains)({})),
+        Layer.provide(Layer.mock(FleetPlacement.Placement)({})),
         Layer.provide(McpSessionRegistry.layer),
         Layer.provide(RemoteDispatchCoordinator.layer),
         Layer.provide(LaunchWatchService.layer),

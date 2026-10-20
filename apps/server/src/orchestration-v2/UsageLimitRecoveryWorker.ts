@@ -2,6 +2,8 @@ import { CommandId, MessageId, type OrchestrationV2Command } from "@goat/contrac
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Fallback from "../fleet/resources/Fallback.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -74,16 +76,34 @@ const makeSweep = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const settings = yield* ServerSettings.ServerSettingsService;
+  // Optional so this worker's own tests need no fleet; without a chain it never switches.
+  const fallback = yield* Effect.serviceOption(Fallback.Fallback);
   return Effect.fn("UsageLimitRecoveryWorker.sweep")(function* () {
     const preferences = yield* settings.getSettings;
     const now = yield* DateTime.now;
+    const ownership = yield* Fallback.GoalThreadOwnership;
+    // A chain for ordinary threads needs the unarmed failures even with auto-resume off;
+    // arming below still follows the user's settings.
+    const coversThreads = Option.isSome(fallback) && (yield* fallback.value.coversThreads);
     const candidates = yield* projections.getLimitRecoveryCandidates({
       now,
-      autoResume: preferences.autoResumeLimitedThreads,
+      autoResume: preferences.autoResumeLimitedThreads || coversThreads,
       snooze: preferences.snoozeLimitedThreads,
+      // A limit without a reset time can still move to another model; nothing arms for it.
+      withoutReset: coversThreads,
     });
     const nowMs = DateTime.toEpochMillis(now);
     for (const thread of candidates) {
+      // A goal's controller owns its threads' failures, including the wait for a reset.
+      if (yield* ownership.isGoalThread(thread.id)) continue;
+      // Fallback before wait-for-reset: one branch of this sweep, so one source per run.
+      if (
+        coversThreads &&
+        Option.isSome(fallback) &&
+        thread.limitRecovery?.runId !== thread.latestRunId &&
+        (yield* fallback.value.continueThread(thread.id))
+      )
+        continue;
       const command = limitRecoveryCommand(
         thread,
         preferences.autoResumeLimitedThreads,

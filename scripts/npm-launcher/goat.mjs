@@ -21,7 +21,7 @@ const RELEASES = "https://github.com/goat-si/goat-releases/releases";
 // The server adopts T3CODE_* as GOAT_* and keeps a pre-rename ~/.t3 that holds
 // state (see packages/shared/src/goatHome.ts); resolve the same home it will use.
 function goatHome() {
-  const raw = (process.env.GOAT_HOME || process.env.T3CODE_HOME || "").trim();
+  const raw = (process.env.GOAT_HOME || process.env.T3CODE_HOME || "").trim(); // goat-rename: legacy
   if (raw === "") {
     const goat = path.join(os.homedir(), ".goat");
     const legacy = path.join(os.homedir(), ".t3");
@@ -79,7 +79,7 @@ async function install(dir, key) {
   const archive = `goat-${version}-${key}.${process.platform === "win32" ? "zip" : "tar.gz"}`;
   const base = (
     process.env.GOAT_RELEASE_BASE_URL ||
-    process.env.T3CODE_RELEASE_BASE_URL ||
+    process.env.T3CODE_RELEASE_BASE_URL || // goat-rename: legacy
     `${RELEASES}/download`
   ).replace(/\/+$/, "");
   const sums = await (await get(`${base}/v${version}/SHA256SUMS`)).text();

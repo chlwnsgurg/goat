@@ -61,5 +61,4 @@ export class Rescheduler extends Context.Service<
   {
     readonly reschedule: (request: RescheduleRequest) => Effect.Effect<RescheduleResult>;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off -- the key is the T1/T2/T3 agreement in docs/internals/agentic-k8s.md.
->()("goat/fleet/Rescheduler") {}
+>()("goat/fleet/health/Rescheduler") {}

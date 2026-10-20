@@ -5,7 +5,10 @@ import type { LegendListRef } from "@legendapp/list/react";
 import { EnvironmentId, MessageId, RunId, ThreadId } from "@goat/contracts";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import type { TimelineEntry } from "../../session-logic";
-import { deriveMessagesTimelineRows } from "./MessagesTimeline.logic";
+import {
+  deriveMessagesTimelineRows,
+  timelineTurnFoldRunIdsByEntryId,
+} from "./MessagesTimeline.logic";
 import { useAssistantCitationTarget, type CitationHistoryPage } from "./useAssistantCitationTarget";
 import type { AssistantCitationRequest } from "./AssistantCitationSource";
 
@@ -92,7 +95,8 @@ function Harness({
     viewport,
     historyLoading: false,
     loadEarlier: history,
-    foldInput,
+    getTurnFoldRunId: (entryId) =>
+      timelineTurnFoldRunIdsByEntryId({ ...foldInput, timelineEntries: entries }).get(entryId),
     onExpandTurn,
     onManualNavigation: manualNavigation,
   });

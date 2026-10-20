@@ -382,7 +382,7 @@ export const make = Effect.gen(function* () {
               if (placed._tag === "Refused") {
                 failed = true;
                 const reasons = placed.reasons
-                  .map((entry) => (entry.host ?? "this machine") + ": " + entry.reason)
+                  .map((entry) => (entry.host ?? "this machine") + ": " + entry.reason.message)
                   .join("; ");
                 issues.push({
                   condition: "Blocked",

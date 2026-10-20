@@ -193,6 +193,8 @@ export class GoalStore extends Context.Service<
       } | null,
       GoalStoreError
     >;
+    /** Whether a goal launched or adopted this thread, as its slot record or launch record says. */
+    readonly ownsThread: (threadId: string) => Effect.Effect<boolean, GoalStoreError>;
     /** When the goal's first action was claimed, or null before any. */
     readonly firstClaimAt: (id: FleetGoalId) => Effect.Effect<string | null, GoalStoreError>;
     /** Turns the goal has spent: claimed launches, follow-ups and model switches. */
@@ -707,6 +709,16 @@ export const make = Effect.gen(function* () {
             : { claimedAt: row.claimed_at, settledAt: row.settled_at, outcome: row.outcome },
         ),
       ),
+    ownsThread: (threadId) =>
+      run(
+        "GoalStore.ownsThread",
+        sql<{ readonly found: number }>`
+          SELECT 1 AS found FROM fleet_goal_workers WHERE thread_id = ${threadId}
+          UNION ALL
+          SELECT 1 AS found FROM fleet_goal_actions WHERE thread_id = ${threadId}
+          LIMIT 1
+        `,
+      ).pipe(Effect.map((rows) => rows.length > 0)),
     firstClaimAt: (id) =>
       run(
         "GoalStore.firstClaimAt",

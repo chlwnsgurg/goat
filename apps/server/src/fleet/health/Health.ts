@@ -54,5 +54,4 @@ export class Health extends Context.Service<
     readonly hostCondition: (host: string | null) => Effect.Effect<HostConditionSet>;
     readonly threadHealth: (ref: FleetThreadRef) => Effect.Effect<ThreadHealth>;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off -- the key is the T1/T2/T3 agreement in docs/internals/agentic-k8s.md.
->()("goat/fleet/Health") {}
+>()("goat/fleet/health/Health") {}

@@ -70,28 +70,29 @@ import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
 import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
 import Migration0062 from "./Migrations/062_ThreadFailureLookupIndex.ts";
 import Migration0063 from "./Migrations/063_DropUnusedV1Projections.ts";
-import Migration0064 from "./Migrations/064_ServerActivityIndexes.ts";
-import Migration0065 from "./Migrations/065_RemoteReports.ts";
-import Migration0066 from "./Migrations/066_RemoteDispatches.ts";
-import Migration0067 from "./Migrations/067_ChannelLedger.ts";
-import Migration0068 from "./Migrations/068_RemoteDispatchQuestions.ts";
-import Migration0069 from "./Migrations/069_ThreadRunResults.ts";
-import Migration0070 from "./Migrations/070_RemoteReportRelay.ts";
-import Migration0071 from "./Migrations/071_ProjectionTurnItemRequestIndex.ts";
-import Migration0072 from "./Migrations/072_Memory.ts";
-import Migration0073 from "./Migrations/073_MemoryHubSync.ts";
-import Migration0074 from "./Migrations/074_MemorySearchCounters.ts";
-import Migration0075 from "./Migrations/075_MemoryTaskGrantCeiling.ts";
-import Migration0076 from "./Migrations/076_MemoryImportLineage.ts";
-import Migration0077 from "./Migrations/077_MemoryCheckpointAccounting.ts";
-import Migration0079 from "./Migrations/079_MemoryUsageCounters.ts";
-import Migration0080 from "./Migrations/080_MemoryRevertResults.ts";
-import Migration0078 from "./Migrations/078_MemoryReportLifecycle.ts";
-import Migration0081 from "./Migrations/081_HandoffLookupIndex.ts";
-import Migration0082 from "./Migrations/082_MemoryLastReadySpace.ts";
-import Migration0083 from "./Migrations/083_MemoryHubAdministered.ts";
-import Migration0084 from "./Migrations/084_MemoryCheckpointLifecycle.ts";
-import Migration0085 from "./Migrations/085_FleetGoals.ts";
+import Migration0064 from "./Migrations/064_CanonicalizeThreadPullRequestLinks.ts";
+import Migration0065 from "./Migrations/065_ServerActivityIndexes.ts";
+import Migration0066 from "./Migrations/066_RemoteReports.ts";
+import Migration0067 from "./Migrations/067_RemoteDispatches.ts";
+import Migration0068 from "./Migrations/068_ChannelLedger.ts";
+import Migration0069 from "./Migrations/069_RemoteDispatchQuestions.ts";
+import Migration0070 from "./Migrations/070_ThreadRunResults.ts";
+import Migration0071 from "./Migrations/071_RemoteReportRelay.ts";
+import Migration0072 from "./Migrations/072_ProjectionTurnItemRequestIndex.ts";
+import Migration0073 from "./Migrations/073_Memory.ts";
+import Migration0074 from "./Migrations/074_MemoryHubSync.ts";
+import Migration0075 from "./Migrations/075_MemorySearchCounters.ts";
+import Migration0076 from "./Migrations/076_MemoryTaskGrantCeiling.ts";
+import Migration0077 from "./Migrations/077_MemoryImportLineage.ts";
+import Migration0078 from "./Migrations/078_MemoryCheckpointAccounting.ts";
+import Migration0079 from "./Migrations/079_MemoryReportLifecycle.ts";
+import Migration0080 from "./Migrations/080_MemoryUsageCounters.ts";
+import Migration0081 from "./Migrations/081_MemoryRevertResults.ts";
+import Migration0082 from "./Migrations/082_HandoffLookupIndex.ts";
+import Migration0083 from "./Migrations/083_MemoryLastReadySpace.ts";
+import Migration0084 from "./Migrations/084_MemoryHubAdministered.ts";
+import Migration0085 from "./Migrations/085_MemoryCheckpointLifecycle.ts";
+import Migration0086 from "./Migrations/086_FleetGoals.ts";
 
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -158,30 +159,31 @@ export const migrationEntries = [
   [61, "PullRequestReviewGuides", Migration0061],
   [62, "ThreadFailureLookupIndex", Migration0062],
   [63, "DropUnusedV1Projections", Migration0063],
+  [64, "CanonicalizeThreadPullRequestLinks", Migration0064],
   // GOAT's own migrations follow upstream's. When an upstream sync claims these ids, move them
   // up and add the names to GOAT_MIGRATION_NAMES; reconcileGoatMigrationIds fixes old ledgers.
-  [64, "ServerActivityIndexes", Migration0064],
-  [65, "RemoteReports", Migration0065],
-  [66, "RemoteDispatches", Migration0066],
-  [67, "ChannelLedger", Migration0067],
-  [68, "RemoteDispatchQuestions", Migration0068],
-  [69, "ThreadRunResults", Migration0069],
-  [70, "RemoteReportRelay", Migration0070],
-  [71, "ProjectionTurnItemRequestIndex", Migration0071],
-  [72, "Memory", Migration0072],
-  [73, "MemoryHubSync", Migration0073],
-  [74, "MemorySearchCounters", Migration0074],
-  [75, "MemoryTaskGrantCeiling", Migration0075],
-  [76, "MemoryImportLineage", Migration0076],
-  [77, "MemoryCheckpointAccounting", Migration0077],
-  [78, "MemoryReportLifecycle", Migration0078],
-  [79, "MemoryUsageCounters", Migration0079],
-  [80, "MemoryRevertResults", Migration0080],
-  [81, "HandoffLookupIndex", Migration0081],
-  [82, "MemoryLastReadySpace", Migration0082],
-  [83, "MemoryHubAdministered", Migration0083],
-  [84, "MemoryCheckpointLifecycle", Migration0084],
-  [85, "FleetGoals", Migration0085],
+  [65, "ServerActivityIndexes", Migration0065],
+  [66, "RemoteReports", Migration0066],
+  [67, "RemoteDispatches", Migration0067],
+  [68, "ChannelLedger", Migration0068],
+  [69, "RemoteDispatchQuestions", Migration0069],
+  [70, "ThreadRunResults", Migration0070],
+  [71, "RemoteReportRelay", Migration0071],
+  [72, "ProjectionTurnItemRequestIndex", Migration0072],
+  [73, "Memory", Migration0073],
+  [74, "MemoryHubSync", Migration0074],
+  [75, "MemorySearchCounters", Migration0075],
+  [76, "MemoryTaskGrantCeiling", Migration0076],
+  [77, "MemoryImportLineage", Migration0077],
+  [78, "MemoryCheckpointAccounting", Migration0078],
+  [79, "MemoryReportLifecycle", Migration0079],
+  [80, "MemoryUsageCounters", Migration0080],
+  [81, "MemoryRevertResults", Migration0081],
+  [82, "HandoffLookupIndex", Migration0082],
+  [83, "MemoryLastReadySpace", Migration0083],
+  [84, "MemoryHubAdministered", Migration0084],
+  [85, "MemoryCheckpointLifecycle", Migration0085],
+  [86, "FleetGoals", Migration0086],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

@@ -10,6 +10,8 @@ import * as SqlitePersistence from "../../persistence/Sqlite.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as FleetDefaults from "../defaults.ts";
 import { Health } from "../health/Health.ts";
+import { Fallback } from "../resources/Fallback.ts";
+import { Placement } from "../resources/Placement.ts";
 import { GoalController, layer as controllerLayer } from "./GoalController.ts";
 import { LAUNCH_GRACE_MS, type PullRequestObservation } from "./goalPlan.ts";
 import { GoalStore, layer as goalStoreLayer, NOT_SENT } from "./GoalStore.ts";
@@ -138,6 +140,37 @@ const runtimeFor = (fake: Fake) =>
       }),
   });
 
+/** This machine only, like the design's first release; SSH hosts are refused. */
+const localPlacement = Layer.succeed(Placement, {
+  place: (request) =>
+    Effect.succeed(
+      (request.hostSelector.hosts ?? [null]).includes(null)
+        ? {
+            _tag: "Placed" as const,
+            host: null,
+            modelSelection: request.modelSelection,
+            reason: undefined,
+          }
+        : {
+            _tag: "Refused" as const,
+            reasons: (request.hostSelector.hosts ?? []).map((host) => ({
+              host,
+              reason: { code: "placement_unavailable" as const, message: "placement_unavailable" },
+            })),
+          },
+    ),
+  status: Effect.die("unused"),
+  statusOf: () => Effect.die("unused"),
+});
+
+const noFallback = Layer.succeed(Fallback, {
+  next: () => Effect.succeed({ _tag: "Exhausted" as const, reason: "No chain." }),
+  reportFailure: () => Effect.void,
+  cooldowns: Effect.succeed([]),
+  coversThreads: Effect.succeed(false),
+  continueThread: () => Effect.succeed(false),
+});
+
 const healthy = Layer.succeed(Health, {
   hostCondition: (host) => Effect.succeed({ host, conditions: [], observedAt: "" }),
   threadHealth: () => Effect.succeed({ _tag: "healthy" as const }),
@@ -157,12 +190,7 @@ const layerFor = (
     Layer.provideMerge(persistence(options.path)),
     Layer.provide(runtimeFor(fake)),
     Layer.provide(
-      Layer.mergeAll(
-        FleetDefaults.layerPlacement,
-        FleetDefaults.layerRescheduler,
-        FleetDefaults.layerFallback,
-        healthy,
-      ),
+      Layer.mergeAll(localPlacement, FleetDefaults.layerRescheduler, noFallback, healthy),
     ),
     Layer.provide(
       ServerSettings.ServerSettingsService.layerTest({

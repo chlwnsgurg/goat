@@ -22,7 +22,7 @@ import { connectCommand } from "./cli/connect.ts";
 import { pairCommand } from "./cli/pair.ts";
 import { imessageCommand } from "./cli/imessage.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
-import { keepOutboundFetchOnHttp1 } from "./outboundHttp.ts";
+import { extendConnectionAttemptTimeout, keepOutboundFetchOnHttp1 } from "./outboundHttp.ts";
 import { sharedServerCommandFlags } from "./cli/config.ts";
 import { projectCommand } from "./cli/project.ts";
 import { providerCommand } from "./cli/provider.ts";
@@ -127,6 +127,7 @@ export const runCliWithArgs = (args: ReadonlyArray<string>, command = cli) =>
   );
 
 export function runCli() {
+  extendConnectionAttemptTimeout();
   keepOutboundFetchOnHttp1();
   Stdio.Stdio.use(({ args }) => Effect.flatMap(args, runCliWithArgs)).pipe(
     Effect.scoped,
