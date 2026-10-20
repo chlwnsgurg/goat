@@ -47,6 +47,12 @@ export const fallbackActionId = (
   runId: string,
   hop: number,
 ) => "goal:" + goal.id + ":s" + slot + ":a" + attempt + ":" + runId + ":fallback:" + hop;
+export const resumeActionId = (
+  goal: Pick<FleetGoal, "id">,
+  slot: number,
+  attempt: number,
+  runId: string,
+) => "goal:" + goal.id + ":s" + slot + ":a" + attempt + ":" + runId + ":resume";
 export const interruptActionId = (goal: Pick<FleetGoal, "id">, slot: number, attempt: number) =>
   "goal:" + goal.id + ":s" + slot + ":a" + attempt + ":interrupt";
 
@@ -155,6 +161,8 @@ export type SlotObservation =
       readonly runId: RunId | null;
       readonly runStatus: string | null;
       readonly lastActivityAt: string | null;
+      /** When a usage limit on the latest run resets; null when unknown or not limited. */
+      readonly usageLimitResetAt?: string | null;
       readonly result: {
         readonly reported: boolean;
         readonly pullRequest: number | null;
@@ -225,6 +233,14 @@ export type GoalAction =
       readonly attempt: number;
       readonly actionId: string;
     }
+  | {
+      /** Continue a run that stopped at a usage limit, once the limit has reset. */
+      readonly type: "resume";
+      readonly slot: number;
+      readonly attempt: number;
+      readonly runId: RunId;
+      readonly actionId: string;
+    }
   | { readonly type: "delete_row" };
 
 export interface GoalPlan {
@@ -273,6 +289,7 @@ export const newWorker = (
   followUps: 0,
   followedUpRunId: null,
   steeredRunId: null,
+  resumedRunId: null,
   lastRunId: null,
   note: null,
 });
@@ -426,7 +443,32 @@ export function planGoal(
       // Someone stopped it on purpose; acting would fight them.
       return { ...worker, state: "needs_human", note: "A person stopped the run." };
     if (seen.runStatus === "failed") {
-      recover("failed", seen.health._tag === "failed" ? seen.health.failureClass : "unknown");
+      const failureClass = seen.health._tag === "failed" ? seen.health.failureClass : "unknown";
+      // A usage-limited run the fallback could not move waits for its reset, then the goal
+      // continues it itself: goal threads are left out of the ordinary recovery sweep.
+      if (failureClass === "usage_limit" && !fresh && seen.runId !== null) {
+        if (worker.resumedRunId === seen.runId) return { ...worker, state: "running" };
+        const resetAt = seen.usageLimitResetAt ?? null;
+        if (resetAt !== null && observation.now >= Date.parse(resetAt)) {
+          actions.push({
+            type: "resume",
+            slot: worker.slot,
+            attempt: worker.attempt,
+            runId: seen.runId,
+            actionId: resumeActionId(goal, worker.slot, worker.attempt, seen.runId),
+          });
+          return { ...worker, state: "running", note: "Its usage limit has reset." };
+        }
+        return {
+          ...worker,
+          state: "running",
+          note:
+            resetAt === null
+              ? "Waits for its usage limit to reset."
+              : "Waits for its usage limit to reset at " + resetAt + ".",
+        };
+      }
+      recover("failed", failureClass);
       return { ...worker, state: "running", note: "The run failed." };
     }
     const prNumber = worker.pullRequest?.number ?? seen.result?.pullRequest ?? null;
@@ -688,7 +730,10 @@ export function planGoal(
     : spec.paused || !owner.available
       ? []
       : done
-        ? actions.filter((action) => action.type === "interrupt")
+        ? // Done stops new work, but threads it may have started are still found and stopped.
+          actions.filter(
+            (action) => action.type === "interrupt" || action.type === "resolve_launch",
+          )
         : budgetSpent
           ? actions.filter(
               (action) => action.type === "interrupt" || action.type === "resolve_launch",

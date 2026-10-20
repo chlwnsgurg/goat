@@ -21,7 +21,6 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
-import * as Schema from "effect/Schema";
 
 import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import * as HostThreadsMcpService from "../../mcp/HostThreadsMcpService.ts";
@@ -34,7 +33,6 @@ import * as ThreadLaunchMcpService from "../../mcp/ThreadLaunchMcpService.ts";
 import { DispatchModeLimit } from "../../orchestration-v2/DispatchModeLimit.ts";
 import * as ThreadManagementService from "../../orchestration-v2/ThreadManagementService.ts";
 import * as PullRequestService from "../../pullRequest/PullRequestService.ts";
-import * as RemoteDispatchCoordinator from "../../remoteReports/RemoteDispatchCoordinator.ts";
 import type { PullRequestObservation } from "./goalPlan.ts";
 import type { WorkerRecord } from "./GoalStore.ts";
 
@@ -74,6 +72,8 @@ export type WorkerReading =
       readonly runStatus: string | null;
       readonly lastActivityAt: string | null;
       readonly result: { readonly reported: boolean; readonly pullRequest: number | null } | null;
+      /** When a usage limit on the latest run resets; null when unknown or not limited. */
+      readonly usageLimitResetAt?: string | null;
     };
 
 export class GoalWorkerRuntime extends Context.Service<
@@ -166,7 +166,14 @@ export const pullRequestNumber = (
   return pullRequest.number ?? (match === null ? null : Number(match[2]));
 };
 
-const isMcpFailure = Schema.is(OrchestratorMcpFailure);
+/** Why a goal will not act on another machine for now. */
+export const REMOTE_WORKERS_DISABLED =
+  "Goal workers run on this machine only for now; workers on other machines are not supported yet.";
+
+const remoteDisabled = () =>
+  Effect.fail(
+    new OrchestratorMcpFailure({ code: "capability_denied", message: REMOTE_WORKERS_DISABLED }),
+  );
 
 const notSendable = (message: string) =>
   new OrchestratorMcpFailure({ code: "thread_not_sendable", message });
@@ -176,7 +183,6 @@ export const make = Effect.gen(function* () {
   const hostThreads = yield* HostThreadsMcpService.HostThreadsMcpService;
   const launches = yield* ThreadLaunchMcpService.ThreadLaunchMcpService;
   const watches = yield* LaunchWatchService.LaunchWatchService;
-  const coordinator = yield* RemoteDispatchCoordinator.RemoteDispatchCoordinator;
   const pullRequests = yield* PullRequestService.PullRequestService;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -297,6 +303,13 @@ export const make = Effect.gen(function* () {
             result = { reported: reported.reportedAt !== null, pullRequest: numbers[0] ?? null };
           }
         }
+        // A usage-limited local run says when its limit resets; the goal resumes it then.
+        const usageLimitResetAt =
+          worker.host === null && seen.run?.status === "failed"
+            ? ((yield* threads
+                .getThreadShell(worker.threadId)
+                .pipe(Effect.orElseSucceed(() => null)))?.usageLimitResetAt ?? null)
+            : null;
         return {
           kind: "seen",
           terminal: seen.terminal,
@@ -304,6 +317,7 @@ export const make = Effect.gen(function* () {
           runStatus: seen.run?.status ?? null,
           lastActivityAt: seen.lastActivityAt,
           result,
+          usageLimitResetAt,
         } as const;
       }),
     observePullRequest: (goal, number) =>
@@ -450,106 +464,15 @@ export const make = Effect.gen(function* () {
           );
           return { host: null, threadId: launched.threadId, runId: launched.runId };
         }
-        // Reached only when a placement layer places remotely; the default places locally.
-        if (!access.canReachHosts)
-          return yield* new OrchestratorMcpFailure({
-            code: "capability_denied",
-            message: "Launching on another machine needs the goal's owner to run full-access.",
-          });
-        const cwd = goal.spec.project.cwd;
-        if (cwd === null)
-          return yield* new OrchestratorMcpFailure({
-            code: "invalid_request",
-            message: "Set spec.project.cwd to launch workers on another machine.",
-          });
-        const ownerThreadId = access.scope.thread!.threadId;
-        const recheck = owner(goal).pipe(
-          Effect.flatMap((current) =>
-            "unavailable" in current || !current.canReachHosts
-              ? Effect.fail(
-                  new OrchestratorMcpFailure({
-                    code: "capability_denied",
-                    message: "The goal's owner can no longer launch on other machines.",
-                  }),
-                )
-              : Effect.void,
-          ),
-        );
-        const launched = yield* coordinator
-          .launch(
-            {
-              kind: "thread",
-              originThreadId: ownerThreadId,
-              delivery: "wake",
-              launch: {
-                host: request.host,
-                cwd,
-                workspace: {
-                  type: "worktree",
-                  branch: request.branch,
-                  baseRef: workspace.baseRef,
-                  startFromOrigin: workspace.startFromOrigin,
-                },
-                title: request.title + " [" + request.actionId + "]",
-                message: request.message,
-                modelSelection: request.modelSelection,
-                runtimeMode,
-                callerRuntimeMode: runtimeMode,
-                interactionMode: "default",
-              },
-            },
-            recheck,
-          )
-          .pipe(
-            Effect.mapError((error) =>
-              isMcpFailure(error)
-                ? error
-                : new OrchestratorMcpFailure({
-                    code: "orchestration_error",
-                    message: Array.from(String(error.message)).slice(0, 2000).join(""),
-                  }),
-            ),
-          );
-        const threadId = ThreadId.make(launched.launch.threadId);
-        const runId = launched.launch.runId === null ? null : RunId.make(launched.launch.runId);
-        yield* watches
-          .register({
-            launcherThreadId: ownerThreadId,
-            host: launched.launch.host,
-            threadId,
-            projectId: null,
-            title: request.title + " [" + request.actionId + "]",
-            runId,
-          })
-          .pipe(Effect.ignore);
-        return { host: launched.launch.host, threadId, runId };
+        // Goal workers run on this machine only until remote authority is carried end to end:
+        // a remote session re-reads the owner's current mode instead of the goal's ceiling, and a
+        // remote launch has no durable action→thread record yet.
+        return yield* remoteDisabled();
       }),
     followUp: (access, goal, worker, message, actionId, modelSelection) => {
       if (worker.threadId === null) return Effect.void;
       const runtimeMode = effectiveRuntimeMode(access, goal);
-      if (worker.host !== null) {
-        // Another machine checks the target against the owner's ceiling, which may be above the
-        // goal's worker mode; such a send could steer a thread the goal may not.
-        if (runtimeMode !== access.runtimeMode)
-          return Effect.fail(
-            new OrchestratorMcpFailure({
-              code: "runtime_mode_escalation_denied",
-              message:
-                "A follow-up to another machine would carry the owner's mode, above the goal's worker mode.",
-            }),
-          );
-        // Another machine checks for a live caller; this works while the owner's run is active (#494).
-        return asOwner(
-          access,
-          hostThreads.sendToThread(access.scope, {
-            threadId: worker.threadId,
-            host: worker.host,
-            message,
-            mode: "queue",
-            clientRequestId: actionId,
-          }),
-        ).pipe(Effect.asVoid);
-      }
+      if (worker.host !== null) return remoteDisabled();
       // The goal acts after its owner's turn ends, when goat_thread_send would refuse an idle
       // caller. The action id is the command id, so a repeated pass delivers once.
       return localTarget(access, worker, runtimeMode).pipe(

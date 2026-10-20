@@ -433,4 +433,76 @@ describe("planGoal", () => {
       },
     ]);
   });
+  it("still looks up an unclear launch once the goal is done, so its thread can be stopped (P2-3)", () => {
+    const goal = testGoal("goal_o", {
+      spec: testSpec({
+        workers: { ...testSpec().workers, count: 0 },
+        targets: [{ type: "pull_request", number: 7 }],
+        doneWhen: [{ type: "pull_requests_merged" }],
+      }),
+    });
+    const unclear = { ...newWorker(goal, 0, null), state: "launch_unknown" as const };
+    const plan = planGoal(
+      goal,
+      [unclear],
+      observe({
+        launchClaims: new Map([
+          [unclear.launchClientRequestId, { claimedAt: NOW - 1000, settled: false }],
+        ]),
+        pullRequests: new Map([[7, { kind: "seen", state: "merged", checks: "passing" }]]),
+      }),
+    );
+    expect(plan.status.phase).toBe("succeeded");
+    expect(plan.actions).toEqual([
+      {
+        type: "resolve_launch",
+        slot: 0,
+        attempt: 1,
+        actionId: "goal:goal_o:s0:a1:launch",
+        expired: false,
+      },
+    ]);
+  });
+
+  it("resumes a usage-limited run once its limit resets, and only once (P2-4)", () => {
+    const goal = testGoal("goal_p");
+    // The fallback already handled this run (none configured), so followedUpRunId is set.
+    const handled = running(goal, 0, { followedUpRunId: RunId.make("run:1") });
+    const limited = (resetAt: string) =>
+      seen({
+        runStatus: "failed",
+        health: { _tag: "failed", failureClass: "usage_limit", runId: RunId.make("run:1") },
+        usageLimitResetAt: resetAt,
+        result: null,
+      });
+    const before = planGoal(
+      goal,
+      [handled],
+      observe({ workers: new Map([[0, limited("2026-10-20T02:00:00.000Z")]]) }),
+    );
+    expect(before.actions).toEqual([]);
+    expect(before.workers[0]!.note).toContain("Waits for its usage limit to reset");
+    const after = planGoal(
+      goal,
+      [handled],
+      observe({ workers: new Map([[0, limited("2026-10-20T00:30:00.000Z")]]) }),
+    );
+    expect(after.actions).toEqual([
+      {
+        type: "resume",
+        slot: 0,
+        attempt: 1,
+        runId: RunId.make("run:1"),
+        actionId: "goal:goal_p:s0:a1:run:1:resume",
+      },
+    ]);
+    const resumed = { ...handled, resumedRunId: RunId.make("run:1") };
+    expect(
+      planGoal(
+        goal,
+        [resumed],
+        observe({ workers: new Map([[0, limited("2026-10-20T00:30:00.000Z")]]) }),
+      ).actions,
+    ).toEqual([]);
+  });
 });

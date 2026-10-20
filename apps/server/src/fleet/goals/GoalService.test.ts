@@ -145,7 +145,19 @@ describe("GoalService", () => {
             ),
           ),
         ),
-      ).toBe("capability_denied");
+      ).toBe("invalid_request");
+      // Workers on other machines are refused for everyone until remote authority lands.
+      expect(
+        yield* codeOf(
+          apply(
+            "thread:owner",
+            input(
+              {},
+              { workers: { ...testSpec().workers, hostSelector: { hosts: [null, "mac-studio"] } } },
+            ),
+          ),
+        ),
+      ).toBe("invalid_request");
       const careful = yield* apply("thread:careful", input());
       expect(careful.goal.owner.runtimeModeCeiling).toBe("auto-accept-edits");
       // Another thread may not rewrite the spec, even with full access.
