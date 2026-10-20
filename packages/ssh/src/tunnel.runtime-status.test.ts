@@ -522,15 +522,32 @@ describe("SSH runtime status", () => {
       state: "failed",
       reason: "missing_tools",
     },
-  ])("classifies an observed failure: $state/$reason", ({ stderr, state, reason }) => {
+    {
+      stderr:
+        "GOAT 1.2.3 on this host cannot open its data because a newer GOAT build already upgraded it. Update this app or the GOAT runtime on this host, then reconnect.",
+      state: "failed",
+      reason: "operation_failed",
+      detail:
+        "GOAT 1.2.3 on this host cannot open its data because a newer GOAT build already upgraded it. Update this app or the GOAT runtime on this host, then reconnect.",
+      instruction: "Update this app or the GOAT runtime on devbox, then reconnect.",
+    },
+  ])("classifies an observed failure: $state/$reason", (input) => {
+    const { stderr, state, reason } = input;
     const f = fixture(stopped);
     f.failProbe(stderr);
     return Effect.gen(function* () {
       const manager = yield* SshTunnel.SshEnvironmentManager;
       const result = yield* manager.status(uploadTarget);
       yield* decodeSshHostResult(result);
-      assert.equal(successfulStatus(result).state, state);
-      assert.equal(successfulStatus(result).failure?.reason, reason);
+      const status = successfulStatus(result);
+      assert.equal(status.state, state);
+      assert.equal(status.failure?.reason, reason);
+      if ("detail" in input && typeof input.detail === "string")
+        assert.include(status.detail ?? "", input.detail);
+      if ("instruction" in input && typeof input.instruction === "string") {
+        assert.equal(status.failure?.fix?.actor, "human");
+        assert.equal(status.failure?.fix?.instruction, input.instruction);
+      }
       assert.equal(f.calls.prompts, 0);
       assert.equal(f.calls.launches, 0);
     }).pipe(Effect.provide(f.layer), Effect.scoped);

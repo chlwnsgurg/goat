@@ -25,6 +25,7 @@ import {
   ORCHESTRATION_PROTOCOL_VERSION,
   RUNTIME_DRAIN_DEFAULT_GRACE_SECONDS,
   RUNTIME_DRAIN_MAX_GRACE_SECONDS,
+  SERVER_EXIT_CODE_DATABASE_AHEAD,
   buildSshKeyAuthInstructions,
 } from "@goat/contracts";
 import {
@@ -2267,11 +2268,15 @@ if [ "$NEEDS_OWNED_UPGRADE" = 1 ]; then
       REFRESH_DECISION=replaced ;;
     rolled-back)
       if [ "$LIVE_COMPATIBLE" != 1 ]; then
+        # The restored server is a new instance, so the fence for the drained one is done.
+        rm -f "$STATE_DIR/draining"
         printf 'GOAT %s did not start on the remote host; GOAT %s was restored and is running, but this app cannot attach to it. See %s.\n' "$TARGET_VERSION" "$supervise_version" "$LOG_FILE" >&2; exit 1
       fi
       printf 'GOAT %s did not start on the remote host; GOAT %s was restored.\n' "$TARGET_VERSION" "$supervise_version" >&2
       REMOTE_PID="$supervise_pid"; REMOTE_PORT="$UPGRADE_PORT"; REMOTE_MANAGED=managed
       SELECTED_VERSION="$supervise_version" ;;
+    old-alive)
+      printf 'The drained GOAT %s server on the remote host did not exit, so it was left running and not replaced. Reconnect after it stops; see %s.\\n' "$UPGRADE_VERSION" "$LOG_FILE" >&2; exit 1 ;;
     *)
       printf 'Remote runtime replacement failed; see %s.\n' "$LOG_FILE" >&2; exit 1 ;;
   esac
@@ -2296,6 +2301,18 @@ else
   fi
   publish_selected_runner
 fi
+# A runtime older than this host's database exits before ready on every start. The marker
+# names that runtime, so later launches report it without starting it again, until another
+# runtime is selected or a newer server writes the database.
+DATABASE_AHEAD_FILE="$STATE_DIR/database-ahead"
+database_ahead_exit() {
+  printf 'GOAT %s on this host cannot open its data because a newer GOAT build already upgraded it. Update this app or the GOAT runtime on this host, then reconnect.\\n' "$SELECTED_VERSION" >&2
+  exit 1
+}
+database_ahead_marked() {
+  [ -f "$DATABASE_AHEAD_FILE" ] && [ "$(cat "$DATABASE_AHEAD_FILE" 2>/dev/null || true)" = "$SELECTED_VERSION" ] || return 1
+  [ -z "$(find "$DEFAULT_SERVER_HOME/userdata" -maxdepth 1 -name 'statev2.sqlite*' -newer "$DATABASE_AHEAD_FILE" 2>/dev/null || true)" ]
+}
 LAUNCH_ATTEMPTS=0
 while [ -z "$REMOTE_PORT" ]; do
   if [ "$GOAT_HOST_WINDOWS" = 0 ] && [ ! -d /proc/self/fd ] && ! command -v lsof >/dev/null 2>&1; then
@@ -2315,6 +2332,7 @@ while [ -z "$REMOTE_PORT" ]; do
   if [ "$LIVE_STATUS" != none ]; then
     printf 'A server appeared before launch; reconnect without replacing it.\\n' >&2; exit 1
   fi
+  if database_ahead_marked; then database_ahead_exit; fi
   if [ "$GOAT_ARCHIVE_MODE" = 1 ]; then
     GOAT_RUNTIME_DIR="$HOME/.goat/runtime/goat/versions/$SELECTED_VERSION"
     SPAWN_IDENTITY="$GOAT_RUNTIME_DIR/goat"
@@ -2356,6 +2374,17 @@ while [ -z "$REMOTE_PORT" ]; do
         continue
       fi
     fi
+    database_ahead=0
+    if ! server_alive "$REMOTE_PID"; then
+      launch_exit=0
+      if [ "$GOAT_HOST_WINDOWS" = 0 ]; then wait "$REMOTE_PID" 2>/dev/null || launch_exit=$?; fi
+      # Windows launches and runtimes that predate the exit code only leave these errors in the log.
+      if [ "$launch_exit" = ${SERVER_EXIT_CODE_DATABASE_AHEAD} ] ||
+         tail -c "+$((LAUNCH_LOG_OFFSET + 1))" "$LOG_FILE" 2>/dev/null |
+           grep -q -e 'upgraded by a newer GOAT build' -e 'Cannot move GOAT migrations onto ids another migration recorded' -e 'would skip required schema migrations'; then
+        database_ahead=1
+      fi
+    fi
     printf 'Remote GOAT server did not become ready with its own listener on 127.0.0.1:%s.\\n' "$REMOTE_PORT" >&2
     if [ -s "$LOG_FILE" ]; then
       tail -n 80 "$LOG_FILE" >&2 2>/dev/null || true
@@ -2365,8 +2394,14 @@ while [ -z "$REMOTE_PORT" ]; do
     if server_alive "$REMOTE_PID"; then server_kill "$REMOTE_PID" || true; fi
     wait_for_pid_exit "$REMOTE_PID"
     rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$STATE_DIR/identity"
+    if [ "$database_ahead" = 1 ]; then
+      printf '%s\\n' "$SELECTED_VERSION" >"$DATABASE_AHEAD_FILE.next.$$"
+      mv "$DATABASE_AHEAD_FILE.next.$$" "$DATABASE_AHEAD_FILE"
+      database_ahead_exit
+    fi
     exit 1
   fi
+  rm -f "$DATABASE_AHEAD_FILE"
   # A held published fallback becomes an ordinary runtime only once its own server is ready
   # and owns the port, so it serves this host's data.
   if [ "@@GOAT_REQUIRE_FRESH_HOST@@" = 1 ]; then rm -f "$HOME/.goat/runtime/goat/held/$SELECTED_VERSION"; fi
@@ -5231,6 +5266,23 @@ function runtimeFailureResult(
     if (error.reason === "runtime-newer") {
       return { kind: "ok", status: { ...base, state: "update_blocked", detail: diagnostic } };
     }
+  }
+  if (/cannot open its data because a newer GOAT build already upgraded it/iu.test(diagnostic)) {
+    return {
+      kind: "ok",
+      status: {
+        ...base,
+        state: "failed",
+        detail: diagnostic,
+        failure: {
+          reason: "operation_failed",
+          fix: {
+            actor: "human",
+            instruction: `Update this app or the GOAT runtime on ${host}, then reconnect.`,
+          },
+        },
+      },
+    };
   }
   const source = `${error.message}\n${evidence}`;
   const proxy = sshLocalProxyFailure(source);

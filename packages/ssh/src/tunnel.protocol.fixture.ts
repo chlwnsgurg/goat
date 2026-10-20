@@ -185,6 +185,16 @@ res.resume(); res.on("end", () => process.exit(res.statusCode === 200 ? 0 : 1));
 } else if (args[0] === "serve") {
   ${exitWithTestParent('args.includes("--test-seed") || process.env.T3_TEST_SEED === "1"')}
   if (fs.existsSync(path.join(test, "fail-start-" + version))) { event("failed-start"); process.exit(3); }
+  const serveExitFile = path.join(test, "serve-exit-" + version);
+  if (fs.existsSync(serveExitFile)) {
+    const spec = fs.readFileSync(serveExitFile, "utf8");
+    const breakAt = spec.indexOf("\\n");
+    const code = Number((breakAt < 0 ? spec : spec.slice(0, breakAt)).trim());
+    const message = breakAt < 0 ? "" : spec.slice(breakAt + 1);
+    event("serve-exit", { code });
+    if (message !== "") console.error(message.replace(/\\n$/, ""));
+    process.exit(Number.isInteger(code) && code >= 0 && code < 256 ? code : 1);
+  }
   const at = args.indexOf("--port"); const requested = at < 0 ? 0 : Number(args[at+1]);
   const instanceId = drainCapable ? require("node:crypto").randomUUID() : undefined;
   const descriptor = {environmentId: "fixture", label: "Fixture", platform: {os: "linux", arch: "x64"},
