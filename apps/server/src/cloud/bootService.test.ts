@@ -1,15 +1,19 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as HostProcess from "@goat/shared/HostProcess";
+import * as NetService from "@goat/shared/Net";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import { Command } from "effect/cli";
 import { HttpClient } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import { vi } from "vite-plus/test";
 
+import { updateCommand } from "../cli/update.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as BootService from "./bootService.ts";
 import { pinnedRuntimePaths } from "./pinnedRuntime.ts";
@@ -270,6 +274,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
     timeouts,
     control,
     runtime,
+    runner,
   };
 });
 
@@ -1024,6 +1029,55 @@ it.layer(NodeServices.layer)("boot service legacy migration", (it) => {
       ]);
       expect(yield* harness.service.status).toMatchObject({ installed: true, current: true });
     }),
+  );
+
+  it.effect.each(["linux", "darwin"] as const)(
+    "goat update migrates the legacy %s service to the requested runtime",
+    (platform) =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness(platform);
+        const legacy = yield* installLegacy(harness, platform);
+        const targetVersion = "1.2.4";
+        yield* harness.makeService(undefined, targetVersion);
+        const runnerLayer = vi
+          .spyOn(ProcessRunner, "layer", "get")
+          .mockReturnValue(Layer.succeed(ProcessRunner.ProcessRunner, harness.runner));
+        try {
+          yield* Command.runWith(updateCommand, { version: "0.1.0" })([
+            targetVersion,
+            "--base-dir",
+            harness.baseDir,
+            "--yes",
+          ]).pipe(
+            Effect.provide(NetService.layer),
+            Effect.provideService(HostProcess.Platform, platform),
+            Effect.provideService(HostProcess.IsExecutable, false),
+            Effect.provideService(HostProcess.ExecutablePath, "/usr/bin/goat"),
+            Effect.provideService(HostProcess.UserId, 501),
+            Effect.provideService(HostProcess.Environment, {}),
+            Effect.provide(
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({ env: { HOME: harness.home, PATH: "/usr/bin" } }),
+              ),
+            ),
+          );
+          const currentUnitPath =
+            platform === "linux"
+              ? `${harness.home}/.config/systemd/user/goat.service`
+              : `${harness.home}/Library/LaunchAgents/si.goat.service.plist`;
+          expect(yield* harness.fs.exists(legacy.unitPath)).toBe(false);
+          const contents = yield* harness.fs.readFileString(currentUnitPath);
+          expect(BootService.bootServiceBaseDirOf(contents)).toBe(harness.baseDir);
+          expect(contents).toContain(`/versions/${targetVersion}/goat`);
+          expect(harness.commands).toContain(
+            platform === "linux"
+              ? "systemctl --user restart goat.service"
+              : `launchctl bootstrap gui/501 ${currentUnitPath}`,
+          );
+        } finally {
+          runnerLayer.mockRestore();
+        }
+      }),
   );
 
   it.effect("install moves an owned launch agent to si.goat.service", () =>
