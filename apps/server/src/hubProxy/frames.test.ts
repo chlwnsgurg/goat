@@ -399,3 +399,71 @@ it("4b: refuses an attachment without a stored id before forwarding", () => {
     false,
   );
 });
+
+const launchWith = (attachments: ReadonlyArray<unknown>) => ({
+  commandId: "c-launch",
+  threadId: "thread-new",
+  projectId: "p1",
+  title: "Investigate",
+  modelSelection: { instanceId: "codex", model: "m" },
+  runtimeMode: "approval-required",
+  interactionMode: "default",
+  workspaceStrategy: { type: "root" },
+  initialMessage: { text: "Look at this", attachments },
+});
+
+const answerWith = (attachments: ReadonlyArray<unknown>) => ({
+  type: "runtime-request.respond",
+  commandId: "c-answer",
+  threadId: "thread-dest",
+  requestId: "q1",
+  answers: { q1: "See attached" },
+  attachmentsByQuestionId: { q1: attachments },
+});
+
+it("4c: a launch carries only fresh uploads or the new thread's own files", () => {
+  const launch = "orchestration.launchThread";
+  expect(
+    refuseProxiedCall(full, launch, {
+      ...launchWith([
+        imageAttachment(createPendingAttachmentId("png")),
+        imageAttachment(createAttachmentId("thread-new", "png")),
+      ]),
+    }),
+  ).toBeUndefined();
+  expect(
+    refuseProxiedCall(
+      full,
+      launch,
+      launchWith([imageAttachment(createAttachmentId("other", "png"))]),
+    ),
+  ).toMatchObject({ requiredScope: "hub:proxy" });
+  // Without a thread id the node makes a new thread, which owns nothing yet.
+  const { threadId: _omit, ...fresh } = launchWith([
+    imageAttachment(createAttachmentId("thread-new", "png")),
+  ]);
+  expect(refuseProxiedCall(full, launch, fresh)).toMatchObject({ requiredScope: "hub:proxy" });
+});
+
+it("4c: an answer to a question carries only fresh uploads or the thread's own files", () => {
+  expect(
+    refuseProxiedCall(
+      full,
+      write,
+      answerWith([
+        imageAttachment(createPendingAttachmentId("png")),
+        imageAttachment(createAttachmentId("thread-dest", "png")),
+      ]),
+    ),
+  ).toBeUndefined();
+  for (const attachments of [
+    [imageAttachment(createAttachmentId("other", "png"))],
+    [
+      imageAttachment(createPendingAttachmentId("png")),
+      imageAttachment(createAttachmentId("other", "png")),
+    ],
+  ])
+    expect(refuseProxiedCall(full, write, answerWith(attachments))).toMatchObject({
+      requiredScope: "hub:proxy",
+    });
+});

@@ -81,6 +81,11 @@ the plan it implements. The model and plan stay because ordinary follow-ups send
 (scheduled tasks, notifications, delegated completion, usage-limit recovery), a sender other than
 the user, a deferred start that prepares a workspace, and memory grants are refused.
 
+The same attachment rule holds for a launch's first message and for files attached to an answer:
+a node hands any stored attachment id to its provider, whichever thread stored it, so the hub
+admits only pending uploads and the destination thread's own files. A launch without a thread id
+creates a thread that owns nothing yet, so it may carry pending uploads only.
+
 The proxied `/api/auth/session` reports the intersection and `proxiedByHub: true`. Client
 command permissions mirror the method policy for such sessions
 ([commandPermissions.ts](../../packages/client-runtime/src/state/commandPermissions.ts)), and the

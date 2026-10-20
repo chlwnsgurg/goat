@@ -31,19 +31,47 @@ export const hubProxyRefusal = (message: string) =>
 
 /**
  * A node hands any stored attachment it is given to the provider, whichever thread stored it. A
- * proxied follow-up may therefore carry only fresh uploads or the destination thread's own files.
+ * proxied follow-up, launch or answer may therefore carry only fresh uploads or the destination
+ * thread's own files.
  */
-const followUpAttachmentsBelongToThread = (payload: unknown): boolean => {
-  const message = payload as { readonly threadId?: unknown; readonly attachments?: unknown };
-  if (!Array.isArray(message.attachments)) return false;
-  const own =
-    typeof message.threadId === "string" ? toSafeThreadAttachmentSegment(message.threadId) : null;
-  return message.attachments.every((attachment: unknown) => {
+const attachmentsBelongToThread = (threadId: unknown, attachments: ReadonlyArray<unknown>) => {
+  const own = typeof threadId === "string" ? toSafeThreadAttachmentSegment(threadId) : null;
+  return attachments.every((attachment) => {
     const id = (attachment as { readonly id?: unknown } | null)?.id;
     if (typeof id !== "string") return false;
     const segment = parseThreadSegmentFromAttachmentId(id);
     return segment === PENDING_ATTACHMENT_THREAD_SEGMENT || (own !== null && segment === own);
   });
+};
+
+const asArray = (value: unknown): ReadonlyArray<unknown> | undefined =>
+  Array.isArray(value) ? value : undefined;
+
+/** False when a call that can carry attachments carries one the destination thread does not own. */
+const attachmentsAreOwned = (method: string, payload: unknown): boolean => {
+  const call = payload as Record<string, unknown>;
+  if (method === "orchestration.launchThread") {
+    const initial = call["initialMessage"] as { readonly attachments?: unknown } | undefined;
+    if (initial === undefined) return true;
+    const attachments = asArray(initial?.attachments);
+    return attachments !== undefined && attachmentsBelongToThread(call["threadId"], attachments);
+  }
+  if (method !== "orchestration.dispatchCommand") return true;
+  if (call["type"] === "message.dispatch") {
+    const attachments = asArray(call["attachments"]);
+    return attachments !== undefined && attachmentsBelongToThread(call["threadId"], attachments);
+  }
+  if (call["type"] === "runtime-request.respond") {
+    const byQuestion = call["attachmentsByQuestionId"];
+    if (byQuestion === undefined) return true;
+    if (typeof byQuestion !== "object" || byQuestion === null) return false;
+    const lists = Object.values(byQuestion).map(asArray);
+    return lists.every(
+      (attachments) =>
+        attachments !== undefined && attachmentsBelongToThread(call["threadId"], attachments),
+    );
+  }
+  return true;
 };
 
 /** Why the hub will not forward this call, or undefined when it will. */
@@ -63,11 +91,7 @@ export const refuseProxiedCall = (
   if (missing !== undefined) return rpcAuthorizationError(missing);
   if (!hubProxyAdmitsMethod(method, payload, required))
     return hubProxyRefusal(`${method} is not available through the hub.`);
-  if (
-    method === "orchestration.dispatchCommand" &&
-    (payload as { readonly type?: unknown }).type === "message.dispatch" &&
-    !followUpAttachmentsBelongToThread(payload)
-  )
+  if (!attachmentsAreOwned(method, payload))
     return hubProxyRefusal("Attachments from another thread cannot be sent through the hub.");
   return undefined;
 };
