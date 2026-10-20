@@ -7141,6 +7141,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       archiveDirectory: runner?.archiveDirectory ?? null,
       bundledArchiveDirectory: runner?.bundledArchiveDirectory ?? null,
       hostDownload: runner?.hostDownload === true,
+      publishedFallback: runner?.publishedFallback === true,
       ghCommand: runner?.ghCommand ?? null,
       cleanupTimeoutMs: runner?.cleanupTimeoutMs ?? null,
       keepExistingRunner: runner?.keepExistingRunner === true,

@@ -123,6 +123,12 @@ export const makeEnsureFlightFixture = Effect.gen(function* () {
       return archive.fs.readFile(path);
     },
   };
+  const runner = {
+    ...ARCHIVE,
+    archiveDirectory: archive.directory,
+    refreshOwnedRuntimeOnFirstConnection: true,
+    publishedFallback: false,
+  };
   const layer = Layer.mergeAll(
     NodeServices.layer,
     ConfigProvider.layer(ConfigProvider.fromUnknown({ HOME: archive.root })),
@@ -132,16 +138,13 @@ export const makeEnsureFlightFixture = Effect.gen(function* () {
     Layer.succeed(HttpClient.HttpClient, testHttpClient),
     SshAuth.SshPasswordPrompt.disabledLayer,
     SshEnvironmentManager.layer({
-      resolveCliRunner: Effect.succeed({
-        ...ARCHIVE,
-        archiveDirectory: archive.directory,
-        refreshOwnedRuntimeOnFirstConnection: true,
-      }),
+      resolveCliRunner: Effect.sync(() => ({ ...runner })),
       leaveRemoteServerRunning: true,
     }),
   );
   return {
     layer,
+    runner,
     count,
     state,
     uploadEntered,

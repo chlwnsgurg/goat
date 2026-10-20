@@ -91,6 +91,46 @@ describe("real manager preparation sharing", () => {
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
+  it.effect.each([false, true])(
+    "published fallback policy changes require a separate preparation: %s",
+    (changed) =>
+      Effect.gen(function* () {
+        const f = yield* makeEnsureFlightFixture;
+        yield* Effect.gen(function* () {
+          const manager = yield* SshEnvironmentManager;
+          const admissions = yield* Queue.unbounded<PreparationAdmission>();
+          const observed = yield* Deferred.make<void>();
+          const options = {
+            onPreparationAdmission: (admission: PreparationAdmission) => {
+              Queue.offerUnsafe(admissions, admission);
+            },
+          };
+          const first = yield* manager
+            .ensureEnvironment(uploadTarget, options)
+            .pipe(Effect.forkChild);
+          const original = yield* Queue.take(admissions);
+          yield* Deferred.await(f.uploadEntered);
+          f.runner.publishedFallback = changed;
+          const second = yield* manager
+            .ensureEnvironment(uploadTarget, {
+              ...options,
+              onPreparationProgress: () => {
+                Deferred.doneUnsafe(observed, Effect.void);
+              },
+            })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(observed);
+          yield* Deferred.succeed(f.releaseUpload, undefined);
+          yield* Fiber.join(first);
+          yield* Fiber.join(second);
+          const next = yield* Queue.take(admissions);
+          assert.equal(next.disposition, changed ? "leader" : "join");
+          assert.equal(next.operationId === original.operationId, !changed);
+          assert.equal(f.count.uploads, 1);
+        }).pipe(Effect.provide(f.layer), Effect.scoped);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it.effect("a failed per-caller pairing cannot fail the prepared runtime or another caller", () =>
     Effect.gen(function* () {
       const f = yield* makeEnsureFlightFixture;
