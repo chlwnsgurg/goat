@@ -25,6 +25,7 @@ import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  relativizeWorkLabelPaths,
   workEntryRowLabel,
   isContextHandoffActivityGroup,
   buildThreadFeed,
@@ -78,6 +79,25 @@ it("shows every changed path beside the aggregate edit counts", () => {
   expect(activity?.workEntry.changedFiles).toEqual(["src/a.ts", "src/b.ts"]);
   expect(workEntryRowLabel(activity!.workEntry)).toBe("src/a.ts +1 more");
   expect(summarizeToolGroup([activity!.workEntry]).summary).toContain("2 files");
+});
+
+it("names an expanded edit by its workspace-relative path", () => {
+  const root = "/private/tmp/b4-qa-repo";
+  const path = `${root}/한글.ts`;
+  const item: OrchestrationV2TurnItem = {
+    ...base("korean-edit", "2026-06-20T00:00:03.000Z", 2),
+    type: "file_change",
+    fileName: path,
+    changes: [{ operation: "update", path }],
+  };
+  const [activity] = buildThreadFeed([projected(item, 0)]).flatMap((entry) =>
+    entry.type === "activity-group" ? entry.activities : [],
+  );
+  expect(workEntryRowLabel(activity!.workEntry, true, root)).toBe("한글.ts");
+  expect(workEntryRowLabel(activity!.workEntry, true)).toBe(path);
+  expect(relativizeWorkLabelPaths(activity!.summary, activity!.workEntry.changedFiles, root)).toBe(
+    "Changed 한글.ts",
+  );
 });
 
 it("keeps historical plan detail accessible from its paged turn item", () => {

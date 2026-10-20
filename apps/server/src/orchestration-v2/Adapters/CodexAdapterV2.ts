@@ -3929,7 +3929,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const status = codexItemStatus(item.status);
             const completedAt = status.completed ? updatedAt : null;
             const lineCounts = codexFileChangeLineCounts(item.changes);
-            const patch = codexFileChangePatch(item.changes);
+            const patch = codexFileChangePatch(item.changes, context.input.runtimePolicy.cwd);
             const nodeId = idAllocator.derive.nodeFromProviderItem({
               driver: CODEX_PROVIDER,
               nativeItemId: item.id,
