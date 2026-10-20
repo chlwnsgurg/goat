@@ -687,6 +687,7 @@ effectIt.effect(
       };
       (window as { desktopBridge?: unknown }).desktopBridge = {
         resolveSshHost: async () => target,
+        getLocalEnvironmentBootstraps,
       };
       state.sshHosts = [target];
       const dialog = yield* Effect.promise(openAddDialog);
@@ -696,7 +697,8 @@ effectIt.effect(
         )!;
         await act(async () => sshMode.click());
         type(document.querySelector<HTMLInputElement>("#saved-backend-ssh-host")!, target.alias);
-        await act(async () => button("Add device", dialog).click());
+        await act(async () => button("Check", dialog).click());
+        await act(async () => button("Connect", dialog).click());
       });
       const input = yield* Deferred.await(gate.entered);
       const report = input.onPreparationProgress!;
@@ -956,7 +958,10 @@ effectIt.effect("ignores local Add reports and a failed completion after unmount
       username: null,
       port: null,
     };
-    (window as { desktopBridge?: unknown }).desktopBridge = { resolveSshHost: async () => target };
+    (window as { desktopBridge?: unknown }).desktopBridge = {
+      resolveSshHost: async () => target,
+      getLocalEnvironmentBootstraps,
+    };
     state.sshHosts = [target];
     const dialog = yield* Effect.promise(openAddDialog);
     yield* Effect.promise(async () => {
@@ -965,7 +970,8 @@ effectIt.effect("ignores local Add reports and a failed completion after unmount
       )!;
       await act(async () => sshMode.click());
       type(document.querySelector<HTMLInputElement>("#saved-backend-ssh-host")!, target.alias);
-      await act(async () => button("Add device", dialog).click());
+      await act(async () => button("Check", dialog).click());
+      await act(async () => button("Connect", dialog).click());
     });
     const input = yield* Deferred.await(gate.entered);
     yield* Effect.promise(() => act(async () => root.render(<div />)));

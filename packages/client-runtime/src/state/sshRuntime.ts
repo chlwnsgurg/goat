@@ -85,12 +85,12 @@ export function sshRuntimeStatusText(status: SshHostStatus): string {
     case "preparing": {
       switch (status.phase) {
         case "connecting":
-          return "Connecting";
+          return sshRuntimePhaseText("connecting");
         case "checking":
           return "Checking GOAT runtime";
         case "uploading": {
           const upload = status.upload;
-          if (upload === undefined) return "Installing GOAT runtime (about 90 MB)";
+          if (upload === undefined) return sshRuntimePhaseText("uploading");
           if (upload.sentBytes === upload.totalBytes) return "Installing GOAT runtime";
           const sent = Math.floor(upload.sentBytes / (1024 * 1024));
           const total = Math.ceil(upload.totalBytes / (1024 * 1024));
