@@ -321,7 +321,7 @@ differences a maintainer would otherwise trip on:
 
 - Code: contract in `packages/contracts/src/fleetGoal.ts`; `plan()` is `planGoal` in
   `apps/server/src/fleet/goals/goalPlan.ts`; claims, CAS and the four tables are in
-  `GoalStore.ts` (migration 085); `GoalController.ts` is the Scheduler source; every touch on a
+  `GoalStore.ts` (migration 086); `GoalController.ts` is the Scheduler source; every touch on a
   thread goes through `GoalWorkerRuntime.ts`. The four tags live where the interface section says,
   with the local-only defaults in `apps/server/src/fleet/defaults.ts`.
 - Workers are observed by reading thread status on each pass. The `controller` watch kind and
@@ -333,12 +333,17 @@ differences a maintainer would otherwise trip on:
 - Local follow-ups, model switches and interrupts dispatch `message.dispatch` / `run.interrupt`
   directly with the action id as `commandId`, after checking the worker's modes against the
   goal's authority and under `DispatchModeLimit`, because `goat_thread_send` refuses an owner
-  whose turn has ended. Remote follow-ups still go through `goat_thread_send` and need a live
-  owner (#494).
+  whose turn has ended.
+- Goal workers are local-only for now. Apply refuses a spec that names a remote host, the
+  controller refuses a remote placement before claiming, and the runtime refuses remote launches
+  and follow-ups. The remote paths re-read the owner's current mode instead of the goal's stored
+  ceiling, find a remote thread only by its title marker, and gate project creation on the worker's
+  mode. Each needs a fix before remote workers come back.
 - PR state comes from `PullRequestService.checks` for the goal's repo, not thread PR links.
-- Goal-owned threads are not yet excluded from `UsageLimitRecoveryWorker` auto-resume; that filter
-  is the resources work's 3b slice. Until then, with `autoResumeLimitedThreads` on, a limited goal
-  worker resumes after its reset even if the goal is paused or out of budget.
+- Goal-owned threads are excluded from `UsageLimitRecoveryWorker` through `GoalThreadOwnership`, so
+  the controller resumes them itself: once a run failed with `usage_limit` and its reset time has
+  passed, it sends one continue message under `goal:<id>:s<slot>:a<attempt>:<runId>:resume`. A
+  paused goal does not resume.
 - An attempt replaced after `LAUNCH_GRACE_MS` is not kept as its own record, so a late thread from
   it is not found or interrupted by the goal. Fencing of stale attempts arrives with self-healing.
 - Owner authority is re-read right before each action, but not inside the claim transaction, so a

@@ -19,12 +19,12 @@ import * as ThreadLaunchMcpService from "../../mcp/ThreadLaunchMcpService.ts";
 import { DispatchModeLimit } from "../../orchestration-v2/DispatchModeLimit.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import * as PullRequestService from "../../pullRequest/PullRequestService.ts";
-import * as RemoteDispatchCoordinator from "../../remoteReports/RemoteDispatchCoordinator.ts";
 import { launchActionId, newWorker } from "./goalPlan.ts";
 import { testGoal, testSpec } from "./goalTestkit.ts";
 import {
   effectiveRuntimeMode,
   GoalWorkerRuntime,
+  REMOTE_WORKERS_DISABLED,
   layer as runtimeLayer,
   type OwnerAccess,
   workerThreadId,
@@ -94,7 +94,6 @@ const layerFor = (seen: Seen) =>
         }),
         Layer.mock(HostThreadsMcpService.HostThreadsMcpService)({}),
         Layer.mock(LaunchWatchService.LaunchWatchService)({}),
-        Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({}),
         Layer.mock(PullRequestService.PullRequestService)({}),
         Layer.mock(ServerEnvironment.ServerEnvironment)({}),
         Layer.mock(ChildProcessSpawner.ChildProcessSpawner)({}),
@@ -206,6 +205,40 @@ describe("GoalWorkerRuntime", () => {
       expect((yield* runtime.findLaunched(access, careful, id, null).pipe(Effect.flip)).code).toBe(
         "orchestration_error",
       );
+    }).pipe(Effect.provide(layerFor(seen)));
+  });
+  it.effect("refuses to launch or steer workers on another machine (P1-1, P1-2, P2-5)", () => {
+    const seen = makeSeen();
+    return Effect.gen(function* () {
+      const runtime = yield* GoalWorkerRuntime;
+      const launch = yield* runtime
+        .launch(ownerAccess("full-access"), {
+          goal: careful,
+          slot: 0,
+          actionId: launchActionId(careful, 0, 1),
+          host: "mac-studio",
+          title: "t",
+          message: "m",
+          branch: "goal/test/s0-a1",
+          modelSelection: careful.spec.workers.modelSelection,
+        })
+        .pipe(Effect.flip);
+      expect(launch).toMatchObject({ code: "capability_denied", message: REMOTE_WORKERS_DISABLED });
+      const followUp = yield* runtime
+        .followUp(
+          ownerAccess("full-access"),
+          careful,
+          { ...worker, host: "mac-studio" },
+          "go",
+          "id",
+        )
+        .pipe(Effect.flip);
+      expect(followUp).toMatchObject({
+        code: "capability_denied",
+        message: REMOTE_WORKERS_DISABLED,
+      });
+      expect(seen.launches).toEqual([]);
+      expect(seen.dispatched).toEqual([]);
     }).pipe(Effect.provide(layerFor(seen)));
   });
 });

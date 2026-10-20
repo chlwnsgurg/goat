@@ -31,6 +31,7 @@ import { assertFullAccess, type Caller, loadCaller } from "../../mcp/threadAcces
 import * as ThreadManagementService from "../../orchestration-v2/ThreadManagementService.ts";
 import { initialStatus } from "./goalPlan.ts";
 import { GoalStore, type GoalStoreError } from "./GoalStore.ts";
+import { REMOTE_WORKERS_DISABLED } from "./GoalWorkerRuntime.ts";
 
 export class GoalService extends Context.Service<
   GoalService,
@@ -159,10 +160,12 @@ export const make = Effect.gen(function* () {
         spec.project.host !== null ||
         (spec.workers.hostSelector.hosts ?? []).some((host) => host !== null);
       if (remote)
-        yield* assertFullAccess(
-          caller,
-          "Workers on other machines need a live full-access/default calling thread, as goat_ssh_thread_launch does.",
-        );
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message:
+            REMOTE_WORKERS_DISABLED +
+            " Leave spec.project.host null and name only this machine (null) in workers.hostSelector.hosts.",
+        });
     });
 
   return GoalService.of({

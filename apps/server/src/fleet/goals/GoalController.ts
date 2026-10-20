@@ -45,7 +45,12 @@ import {
   publicWorker,
   type WorkerRecord,
 } from "./GoalStore.ts";
-import { effectiveRuntimeMode, GoalWorkerRuntime, workerTitle } from "./GoalWorkerRuntime.ts";
+import {
+  effectiveRuntimeMode,
+  GoalWorkerRuntime,
+  REMOTE_WORKERS_DISABLED,
+  workerTitle,
+} from "./GoalWorkerRuntime.ts";
 
 const SOON_MS = 5_000;
 const PULL_REQUESTS_PER_PASS = 60;
@@ -391,6 +396,16 @@ export const make = Effect.gen(function* () {
                 });
                 return;
               }
+              if (placed.host !== null) {
+                // Remote goal workers are off until remote authority is carried end to end.
+                failed = true;
+                issues.push({
+                  condition: "Blocked",
+                  reason: "RemoteWorkersDisabled",
+                  message: placed.host + ": " + REMOTE_WORKERS_DISABLED,
+                });
+                return;
+              }
               if ((yield* claim(action.actionId, "launch", worker, placed.host)) !== null) return;
               // The owner's authority as it is now, after placement and the claim, is what the
               // launch runs with.
@@ -530,6 +545,45 @@ export const make = Effect.gen(function* () {
                 "Normal",
                 "FollowUpSent",
                 "Slot " + worker.slot + ": " + action.message,
+                worker,
+                action.actionId,
+              );
+              return;
+            }
+            case "resume": {
+              if ((yield* claim(action.actionId, "followup", worker, worker.host)) !== null) return;
+              const current = yield* authorityAfterClaim(action.actionId);
+              if (current === null) return;
+              const sent = yield* runtime
+                .followUp(
+                  current,
+                  goal,
+                  worker,
+                  "Your usage limit has reset. Continue where you left off.",
+                  action.actionId,
+                )
+                .pipe(Effect.result);
+              yield* store.settle(
+                action.actionId,
+                sent._tag === "Success" ? "sent" : "failed",
+                nowIso,
+              );
+              if (sent._tag === "Failure") {
+                failed = true;
+                note(
+                  "Warning",
+                  "ResumeFailed",
+                  "Slot " + worker.slot + ": " + sent.failure.message,
+                  worker,
+                  action.actionId,
+                );
+                return;
+              }
+              workers.set(worker.slot, { ...worker, resumedRunId: action.runId });
+              note(
+                "Normal",
+                "WorkerResumed",
+                "Slot " + worker.slot + " continued after its usage limit reset.",
                 worker,
                 action.actionId,
               );
