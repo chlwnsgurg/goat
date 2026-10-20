@@ -2026,7 +2026,13 @@ export const resolveSshCliRunner = (baseDir: string) =>
       Config.withDefault(""),
       Effect.map((value) => value.trim() || undefined),
     );
+    const nodeScriptPath = yield* Config.String("GOAT_DEV_REMOTE_SERVER_ENTRY_PATH").pipe(
+      Config.withDefault(""),
+    );
     return {
+      ...(nodeScriptPath.trim()
+        ? { nodeScriptPath: nodeScriptPath.trim(), nodeEngineRange: packageJson.engines.node }
+        : {}),
       archiveVersion: packageJson.version,
       ...(BUILD_COMMIT_TIME === undefined ? {} : { archiveCommitTime: BUILD_COMMIT_TIME }),
       archiveDirectory,

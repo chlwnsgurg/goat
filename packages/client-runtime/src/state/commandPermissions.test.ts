@@ -13,6 +13,7 @@ import { vi } from "vite-plus/test";
 import {
   AuthOrchestrationOperateScope,
   AuthSettingsWriteScope,
+  SSH_PREFLIGHT_STEP_ORDER,
   AuthSourceControlWriteScope,
   ThreadId,
   EnvironmentId,
@@ -29,6 +30,7 @@ import { Atom, AtomRegistry, AsyncResult } from "effect/reactivity";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { createCommandPermissions } from "./commandPermissions.ts";
 import { createEnvironmentRpcCommand } from "./runtime.ts";
+import { createServerEnvironmentAtoms } from "./server.ts";
 
 vi.mock("./session.ts", () => ({
   createEnvironmentSessionAtoms: () => ({ sessionStateAtom: sessions }),
@@ -578,4 +580,80 @@ it.effect("memory commands check the destination's live grant for all 16 install
       }
     }),
   ),
+);
+
+it.effect("SSH preflight uses the destination settings grant at availability and dispatch", () =>
+  Effect.gen(function* () {
+    let calls = 0;
+    const session = {
+      client: {
+        [WS_METHODS.sshHostPreflight]: () =>
+          Effect.sync(() => {
+            calls++;
+            return {
+              host: "box",
+              destination: { alias: "box", hostname: "box.local", user: "dev", port: 22 },
+              steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({
+                id,
+                state: "passed",
+                summary: "Passed",
+              })),
+              ready: true,
+            };
+          }),
+      },
+    } as unknown as RpcSession;
+    const supervisor = {
+      target: { environmentId: env, label: "target" },
+      session: yield* SubscriptionRef.make(Option.some(session)),
+    } as unknown as EnvironmentSupervisor["Service"];
+    const commandRuntime = Atom.runtime(
+      Layer.mergeAll(
+        Layer.succeed(EnvironmentRegistry, {
+          run: (_id: EnvironmentId, effect: Effect.Effect<unknown>) =>
+            effect.pipe(Effect.provideService(EnvironmentSupervisor, supervisor)),
+        } as unknown as EnvironmentRegistry["Service"]),
+        Layer.mock(Persistence.EnvironmentCacheStore)({}),
+      ),
+    );
+    const command = createServerEnvironmentAtoms(commandRuntime, {
+      initialConfigValueAtom: () => Atom.make(null),
+    }).preflightSshHost;
+    const registry = AtomRegistry.make();
+    registry.mount(sessions(env));
+    registry.mount(sessions(other));
+    yield* Effect.promise(async () => {
+      try {
+        const input = { environmentId: env, input: { host: "box" } };
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        registry.set(
+          sessions(other),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthSettingsWriteScope],
+            permissions: [AuthSettingsWriteScope],
+          }),
+        );
+        expect(registry.get(command.permissionAtom(env))).toBe(false);
+        expect((await command.run(registry, input))._tag).toBe("Failure");
+        expect(calls).toBe(0);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthSettingsWriteScope],
+            permissions: [AuthSettingsWriteScope],
+          }),
+        );
+        expect(registry.get(command.permissionAtom(env))).toBe(true);
+        expect((await command.run(registry, input))._tag).toBe("Success");
+        expect(calls).toBe(1);
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        expect((await command.run(registry, input))._tag).toBe("Failure");
+        expect(calls).toBe(1);
+      } finally {
+        registry.dispose();
+      }
+    });
+  }),
 );

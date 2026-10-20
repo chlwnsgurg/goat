@@ -1,3 +1,7 @@
+import * as SshDeviceAdd from "../../../sshRemote/SshDeviceAdd.ts";
+import * as Setup from "../../../sshRemote/SshHostSetup.ts";
+import * as Sessions from "../../../auth/SessionStore.ts";
+import { SSH_PREFLIGHT_STEP_ORDER, type SshPreflightReport } from "@goat/contracts";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ProviderInstanceId, type SavedConnection, ThreadId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
@@ -25,10 +29,13 @@ const outsideCaller = (
   client: { sessionId: "client:connections", label: "Test agent", access },
   capabilities: new Set(["orchestration"]),
   issuedAt: 0,
+  grantedScopes: ["orchestration:read", "orchestration:operate"],
+  reauthorize: () => Effect.void,
 });
 const threadCaller: McpInvocationContext.McpInvocationScope = {
   ...outsideCaller("full-access"),
   client: undefined,
+  grantedScopes: ["settings:write", "environment:maintain"],
   thread: {
     threadId,
     providerSessionId: "provider:connections",
@@ -36,6 +43,29 @@ const threadCaller: McpInvocationContext.McpInvocationScope = {
   },
 };
 
+const preflight: SshPreflightReport = {
+  host: "build-host",
+  destination: { alias: "build-host", hostname: "build.example", user: "deploy", port: 22 },
+  ready: true,
+  steps: SSH_PREFLIGHT_STEP_ORDER.map((id) => ({
+    id,
+    state: "passed",
+    summary: `${id} passed.`,
+    ...(id === "host_key" ? { fingerprint: "SHA256:human-only" } : {}),
+  })),
+};
+const deviceLayer = SshDeviceAdd.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      Layer.mock(Sessions.SessionStore)({ cookieName: "test", legacyCookieName: undefined }),
+      liveThreadsLayer,
+      Layer.mock(Setup.SshHostSetup)({
+        resolveDestination: (input) => Effect.succeed({ input, host: input.address }),
+        preflight: () => Effect.succeed(preflight),
+      }),
+    ),
+  ),
+);
 const testLayer = (
   caller: McpInvocationContext.McpInvocationScope,
   invoke: Broker.ConnectionCatalogBroker["Service"]["invoke"],
@@ -43,6 +73,7 @@ const testLayer = (
   McpToolAccess.HandlersLayer.layer(Handlers.layer).pipe(
     Layer.provideMerge(Layer.succeed(McpInvocationContext.McpInvocationContext, caller)),
     Layer.provideMerge(liveThreadsLayer),
+    Layer.provideMerge(deviceLayer),
     Layer.provideMerge(Layer.mock(Broker.ConnectionCatalogBroker)({ invoke })),
   );
 
@@ -64,26 +95,32 @@ it.effect("read-only clients can list saved connections", () =>
   ),
 );
 
-it.effect(
-  "refuses read-only and approval-required clients on add and remove before broker invocation",
-  () =>
-    Effect.forEach(["read-only", "approval-required"] as const, (access) =>
-      Effect.gen(function* () {
-        const toolkit = yield* ConnectionToolkit;
-        const add = yield* toolkit
-          .handle("goat_connection_add_ssh", { host: "build-host" })
-          .pipe(Stream.unwrap, Stream.runCollect);
-        const remove = yield* toolkit
-          .handle("goat_connection_remove", { environmentId })
-          .pipe(Stream.unwrap, Stream.runCollect);
-        expect(add.at(-1)?.result).toMatchObject({ code: "capability_denied" });
-        expect(remove.at(-1)?.result).toMatchObject({ code: "capability_denied" });
-      }).pipe(
-        Effect.provide(
-          testLayer(outsideCaller(access), () => Effect.die("Denied caller reached broker")),
-        ),
+it.effect("refuses read-only and approval-required clients on remove, and read-only on add", () =>
+  Effect.forEach(["read-only", "approval-required"] as const, (access) =>
+    Effect.gen(function* () {
+      const toolkit = yield* ConnectionToolkit;
+      const add = yield* toolkit
+        .handle("goat_connection_add_ssh", { host: "build-host" })
+        .pipe(Stream.unwrap, Stream.runCollect);
+      const remove = yield* toolkit
+        .handle("goat_connection_remove", { environmentId })
+        .pipe(Stream.unwrap, Stream.runCollect);
+      expect(add.at(-1)?.result).toMatchObject(
+        access === "read-only"
+          ? { code: "capability_denied" }
+          : {
+              outcome: "capability_denied",
+              saved: false,
+              reason: expect.stringContaining("settings:write"),
+            },
+      );
+      expect(remove.at(-1)?.result).toMatchObject({ code: "capability_denied" });
+    }).pipe(
+      Effect.provide(
+        testLayer(outsideCaller(access), () => Effect.die("Denied caller reached broker")),
       ),
     ),
+  ),
 );
 
 it.effect("attributes a thread add and supplies the ten minute SSH timeout", () =>
@@ -92,7 +129,13 @@ it.effect("attributes a thread add and supplies the ten minute SSH timeout", () 
     const result = yield* toolkit
       .handle("goat_connection_add_ssh", { host: "build-host", label: "Build" })
       .pipe(Stream.unwrap, Stream.runCollect);
-    expect(result.at(-1)?.result).toEqual({ created: true, connection: saved });
+    expect(result.at(-1)?.result).toMatchObject({
+      outcome: "connected",
+      created: true,
+      connection: saved,
+    });
+    expect(JSON.stringify(result)).not.toContain("fingerprint");
+    expect(JSON.stringify(result)).not.toContain("SHA256:human-only");
   }).pipe(
     Effect.provide(
       testLayer(threadCaller, (operation, timeoutMs) => {
@@ -113,13 +156,19 @@ it.effect("attributes a thread add and supplies the ten minute SSH timeout", () 
   ),
 );
 
-it.effect("attributes a full-access outside add and returns idempotent created:false", () =>
+it.effect("saves a trusted alias for a full-access outside caller", () =>
   Effect.gen(function* () {
     const toolkit = yield* ConnectionToolkit;
     const result = yield* toolkit
       .handle("goat_connection_add_ssh", { host: "build-host" })
       .pipe(Stream.unwrap, Stream.runCollect);
-    expect(result.at(-1)?.result).toEqual({ created: false, connection: saved });
+    expect(result.at(-1)?.result).toMatchObject({
+      outcome: "connected",
+      created: false,
+      connection: saved,
+    });
+    expect(JSON.stringify(result)).not.toContain("fingerprint");
+    expect(JSON.stringify(result)).not.toContain("SHA256:human-only");
   }).pipe(
     Effect.provide(
       testLayer(outsideCaller("full-access"), (operation) => {
@@ -246,6 +295,7 @@ it.effect("production registration refuses undeclared arguments before invoking 
       McpHttpServer.layerConnectionToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provideMerge(liveThreadsLayer),
+        Layer.provide(Layer.mock(SshDeviceAdd.SshDeviceAdd)({})),
         Layer.provide(
           Layer.mock(Broker.ConnectionCatalogBroker)({
             invoke: () => Effect.die("Unknown arguments reached broker"),

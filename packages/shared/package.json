@@ -7,6 +7,10 @@
       "types": "./src/sshFailure.ts",
       "import": "./src/sshFailure.ts"
     },
+    "./sshDestination": {
+      "types": "./src/sshDestination.ts",
+      "import": "./src/sshDestination.ts"
+    },
     "./githubMarkdownLinks": {
       "types": "./src/githubMarkdownLinks.ts",
       "import": "./src/githubMarkdownLinks.ts"

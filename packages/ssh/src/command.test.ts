@@ -160,6 +160,65 @@ describe("ssh command", () => {
       Effect.andThen(Effect.sync(() => assert.deepEqual(captured, [0, 128, 255]))),
     );
   });
+  it.live.each([false, true])(
+    "reports consumed binary stdin chunks with a real child (observer throws: %s)",
+    (observerThrows) =>
+      Effect.gen(function* () {
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const bytes = new Uint8Array(2 * 1024 * 1024 + 17).fill(251);
+        const progress: number[] = [];
+        const ready = yield* Deferred.make<ChildProcessSpawner.ChildProcessHandle>();
+        const transport = ChildProcessSpawner.make((command) => {
+          assert.isTrue(ChildProcess.isStandardCommand(command));
+          if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
+          return Effect.gen(function* () {
+            const child = yield* spawner.spawn(
+              ChildProcess.make(
+                process.execPath,
+                [
+                  "-e",
+                  `let received = 0;
+let valid = true;
+require('node:fs').createReadStream('', { fd: 3 }).once('data', () => {
+  process.stdin.on('data', (chunk) => {
+    received += chunk.length;
+    valid &&= chunk.every((byte) => byte === 251);
+  });
+  process.stdin.on('end', () => process.stdout.write(JSON.stringify({ received, valid })));
+});
+process.stderr.write('reader waiting');`,
+                ],
+                { ...command.options, additionalFds: { fd3: { type: "input" } } },
+              ),
+            );
+            return {
+              ...child,
+              stderr: child.stderr.pipe(Stream.tap(() => Deferred.succeed(ready, child))),
+            };
+          });
+        });
+        const upload = yield* runSshCommand(
+          { alias: "fixture", hostname: "fixture", username: null, port: null },
+          {
+            stdin: bytes,
+            onStdinProgress: (sentBytes) => {
+              progress.push(sentBytes);
+              if (observerThrows) throw new Error("view disposed");
+            },
+          },
+        ).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, transport),
+          Effect.forkChild,
+        );
+        const child = yield* Deferred.await(ready);
+        assert.deepEqual(progress, []);
+        yield* Stream.make(encoder.encode("read")).pipe(Stream.run(child.getInputFd(3)));
+        const result = yield* Fiber.join(upload);
+        assert.deepEqual(JSON.parse(result.stdout), { received: bytes.byteLength, valid: true });
+        assert.deepEqual(progress, [1024 * 1024, 2 * 1024 * 1024, bytes.byteLength]);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it.effect("parses resolved ssh config output into a target", () =>
     Effect.sync(() => {
       assert.deepEqual(
