@@ -42,6 +42,8 @@ The main checkout defaults to `~/.goat/dev` (`~/.t3/dev` while only that exists)
 Never run a development server against the live `~/.goat/userdata` or `~/.t3/userdata`.
 See [test data](../../AGENTS.md#test-data) for copying a consistent database snapshot.
 
+When an unsigned `vp run dev:desktop` instance launched from a terminal or agent has no OS keyring access (`safeStorage` encryption unavailable) and cannot save connections, set `GOAT_DEV_INSECURE_SECRET_STORAGE=1` alongside an isolated home (such as a worktree default or `--home-dir <path>` outside `~/.goat` and `~/.t3`). Packaged builds and default homes ignore this flag and refuse to read its development-plaintext blobs.
+
 Read ports from the `[dev-runner]` output. Worktrees derive stable preferences from their paths,
 but occupied ports can shift them. `GOAT_PORT_OFFSET` or `GOAT_DEV_INSTANCE` can select a
 different preference when needed.
