@@ -7,6 +7,7 @@ import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import type * as Scope from "effect/Scope";
 import * as HostProcess from "@goat/shared/HostProcess";
+import { GOAT_CONNECT_COMING_SOON } from "@goat/shared/goatConnect";
 import {
   archiveMemberProblems,
   assembleRelease,
@@ -135,8 +136,11 @@ describe("release payload helpers", () => {
       "C:\\a\\goat",
       "$GITHUB_WORKSPACE",
       "https://github.com/goat-si/goat/issues",
+      "https://github.com/goat-si/goat/blob/dev/docs/user/remote-access.md#tailscale-https",
     ])
       expect(exposureProblems("main.js", content).length).toBeGreaterThan(0);
+    // Clients and the CLI ship this link; a source-repository URL here blocks every nightly.
+    expect(exposureProblems("main.js", GOAT_CONNECT_COMING_SOON.guideUrl)).toEqual([]);
     expect(exposureProblems("node_modules/pkg/types.d.ts")).toEqual([]);
     expect(
       exposureProblems(

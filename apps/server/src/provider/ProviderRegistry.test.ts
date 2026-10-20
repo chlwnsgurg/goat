@@ -213,9 +213,12 @@ function layerMockSpawner(
 ) {
   return Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
+    // `ChildProcessSpawner.make` calls `spawn` while building `exitCode` and
+    // `string` effects, and drivers build commands they may never run (Claude's
+    // logout). Handle a command only when its effect runs, as the Node spawner does.
     ChildProcessSpawner.make((command) => {
       const cmd = command as unknown as { args: ReadonlyArray<string> };
-      return Effect.succeed(mockHandle(handler(cmd.args)));
+      return Effect.sync(() => mockHandle(handler(cmd.args)));
     }),
   );
 }
@@ -240,8 +243,10 @@ function recordingMockSpawnerLayer(
           readonly env?: NodeJS.ProcessEnv;
         };
       };
-      commands.push({ args: cmd.args, env: cmd.options?.env });
-      return Effect.succeed(mockHandle(handler(cmd.args)));
+      return Effect.sync(() => {
+        commands.push({ args: cmd.args, env: cmd.options?.env });
+        return mockHandle(handler(cmd.args));
+      });
     }),
   );
   return { layer, commands };
@@ -260,7 +265,7 @@ function layerMockCommandSpawner(
         command: string;
         args: ReadonlyArray<string>;
       };
-      return Effect.succeed(mockHandle(handler(cmd.command, cmd.args)));
+      return Effect.sync(() => mockHandle(handler(cmd.command, cmd.args)));
     }),
   );
 }
@@ -3363,14 +3368,16 @@ it.layer(
           Layer.updateService(ChildProcessSpawner.ChildProcessSpawner, (spawner) =>
             ChildProcessSpawner.make((command) => {
               if (command._tag !== "StandardCommand") return spawner.spawn(command);
-              spawnedCommands.push(command.command);
-              const beforeSpawn =
-                command.command === secondMissing
-                  ? Deferred.succeed(secondProbeStarted, undefined).pipe(
-                      Effect.andThen(Deferred.await(releaseSecondProbe)),
-                    )
-                  : Effect.void;
-              return beforeSpawn.pipe(Effect.andThen(spawner.spawn(command)));
+              return Effect.suspend(() => {
+                spawnedCommands.push(command.command);
+                const beforeSpawn =
+                  command.command === secondMissing
+                    ? Deferred.succeed(secondProbeStarted, undefined).pipe(
+                        Effect.andThen(Deferred.await(releaseSecondProbe)),
+                      )
+                    : Effect.void;
+                return beforeSpawn.pipe(Effect.andThen(spawner.spawn(command)));
+              });
             }),
           ),
           Layer.provideMerge(NodeServices.layer),
