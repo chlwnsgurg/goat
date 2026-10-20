@@ -112,20 +112,24 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           if (input.expectedInstanceId !== instanceId)
             return { status: "instance-changed" as const, instanceId, forced: false };
-          if (active !== undefined) {
-            const drain = active;
-            if (drain.status === "draining" && input.force === true && !drain.forced) {
-              drain.forced = true;
-              yield* publish(drain, "draining");
-            }
-            return yield* restore(Deferred.await(drain.result));
-          }
-          // Arbitration only decides whether to start a drain; a retry joins an active one above.
-          // A dropped refresh never closes admission; the client keeps its attachment and retries.
-          if (Option.isSome(arbiter) && !(yield* arbiter.value.admit(input)))
-            return { status: "cancelled" as const, instanceId, forced: false };
+          const join = (drain: ActiveDrain) =>
+            Effect.gen(function* () {
+              if (drain.status === "draining" && input.force === true && !drain.forced) {
+                drain.forced = true;
+                yield* publish(drain, "draining");
+              }
+              return yield* restore(Deferred.await(drain.result));
+            });
+          if (active !== undefined) return yield* join(active);
+          // Arbitration only decides whether to start a drain; a retry joins an active one.
+          const admitted = Option.isNone(arbiter) || (yield* arbiter.value.admit(input));
           const now = yield* Clock.currentTimeMillis;
           const result = yield* Deferred.make<RuntimeDrainResult>();
+          // Arbitration can wait on I/O, so another request may have started a drain meanwhile.
+          // From this check to claiming the slot nothing yields.
+          if (active !== undefined) return yield* join(active);
+          // A dropped refresh never closes admission; the client keeps its attachment and retries.
+          if (!admitted) return { status: "cancelled" as const, instanceId, forced: false };
           const drain: ActiveDrain = {
             status: "draining",
             result,

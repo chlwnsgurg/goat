@@ -1,4 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics globalTimers:off
+// @effect-diagnostics globalDateInEffect:off
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -38,6 +40,9 @@ import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 
 const INSTALL_TIMEOUT_MS = 15 * 60_000;
 const PREFLIGHT_TIMEOUT_MS = 30_000;
+// Far beyond the longest drain window plus readiness; only a script stuck before the drain is
+// still running when this expires.
+const DETACHED_TIMEOUT_MS = 30 * 60_000;
 
 export interface SshRuntimeProcessResult {
   readonly code: number | null;
@@ -67,6 +72,9 @@ export class SshRuntimeHost extends Context.Service<
     }) => Effect.Effect<SshRuntimeProcessResult>;
     readonly sha256: (file: string) => Effect.Effect<string | undefined>;
     readonly readText: (file: string) => Effect.Effect<string | undefined>;
+    /** Renames a directory out of the way and returns where it went. */
+    readonly moveAside: (dir: string) => Effect.Effect<string | undefined>;
+    readonly remove: (dir: string) => Effect.Effect<void>;
   }
 >()("goat/cloud/sshRuntimeAutoUpdate/SshRuntimeHost") {}
 
@@ -88,7 +96,7 @@ const collect = (child: NodeChildProcess.ChildProcess) =>
 
 export const layerHost = Layer.succeed(SshRuntimeHost, {
   run: (input) =>
-    Effect.promise(() => {
+    Effect.callback<SshRuntimeProcessResult>((resume) => {
       const child = NodeChildProcess.spawn(input.command, [...input.args], {
         env: input.env,
         stdio: ["pipe", "pipe", "pipe"],
@@ -96,7 +104,11 @@ export const layerHost = Layer.succeed(SshRuntimeHost, {
       });
       child.stdin?.on("error", () => undefined);
       child.stdin?.end(input.stdin ?? "");
-      return collect(child);
+      void collect(child).then((result) => resume(Effect.succeed(result)));
+      // An interrupted install or preflight must not keep running, or holding install locks.
+      return Effect.sync(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      });
     }),
   runDetached: (input) =>
     Effect.promise(async () => {
@@ -124,6 +136,19 @@ export const layerHost = Layer.succeed(SshRuntimeHost, {
       const code = await new Promise<number | null>((resolve) => {
         child.once("error", () => resolve(null));
         child.once("close", resolve);
+        // Still alive here means the script never drained this server: it is stuck before the
+        // swap, so stopping it (its trap releases the replacement lock) cannot strand the host.
+        const bound = setTimeout(() => {
+          if (child.pid !== undefined) {
+            try {
+              process.kill(-child.pid, "SIGTERM");
+            } catch {
+              // Already gone.
+            }
+          }
+        }, DETACHED_TIMEOUT_MS);
+        bound.unref();
+        child.once("close", () => clearTimeout(bound));
       });
       const read = (file: string) => NodeFS.promises.readFile(file, "utf8").catch(() => "");
       const result = { code, stdout: await read(stdoutFile), stderr: await read(stderrFile) };
@@ -139,6 +164,18 @@ export const layerHost = Layer.succeed(SshRuntimeHost, {
     ),
   readText: (file) =>
     Effect.promise(() => NodeFS.promises.readFile(file, "utf8").catch(() => undefined)),
+  moveAside: (dir) =>
+    Effect.promise(async () => {
+      const aside = NodePath.join(
+        NodePath.dirname(dir),
+        `.trash-unverified-${NodePath.basename(dir)}-${process.pid}-${Date.now()}`,
+      );
+      return NodeFS.promises.rename(dir, aside).then(
+        () => aside,
+        () => undefined,
+      );
+    }),
+  remove: (dir) => Effect.promise(() => NodeFS.promises.rm(dir, { recursive: true, force: true })),
 });
 
 export class SshRuntimeAutoUpdate extends Context.Service<
@@ -259,6 +296,18 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
 
   const prepare = (targetVersion: string) =>
     Effect.gen(function* () {
+      // The host download trusts a completion marker, so an install whose executable no longer
+      // matches a verified record is moved aside and downloaded again.
+      const dir = NodePath.join(versionsDir, targetVersion);
+      const unverified =
+        (yield* host.readText(NodePath.join(dir, ".install-complete"))) !== undefined &&
+        (yield* verifiedExecutableSha256(targetVersion).pipe(
+          Effect.as(false),
+          Effect.orElseSucceed(() => true),
+        ));
+      const aside = unverified ? yield* host.moveAside(dir) : undefined;
+      if (unverified && aside === undefined)
+        return yield* fail(`Could not replace the unverified install of goat@${targetVersion}.`);
       // Verified against the release's SHA256SUMS exactly as a host download for a client is.
       const install = yield* host.run({
         command: "/bin/sh",
@@ -270,6 +319,7 @@ export const make = Effect.fn("server.ssh_runtime_auto_update.make")(function* (
       if (install.code !== 0 || lastLine(install.stdout) !== `goat v${targetVersion}`)
         return yield* fail(`Could not install goat@${targetVersion}.`);
       yield* verifiedExecutableSha256(targetVersion);
+      if (aside !== undefined) yield* host.remove(aside);
       const preflight = yield* host.run({
         command: NodePath.join(versionsDir, targetVersion, "goat"),
         args: [

@@ -46,6 +46,7 @@ const makeHarness = Effect.fn("test.ssh_runtime_auto_update.harness")(function* 
     preflight: undefined as Record<string, unknown> | undefined,
     launchOutput: '{"status":"ready","remotePort":3773}\n',
     installs: [] as string[],
+    movedAside: [] as string[],
     preflights: [] as ReadonlyArray<string>[],
     launches: [] as {
       readonly script: string;
@@ -99,6 +100,21 @@ const makeHarness = Effect.fn("test.ssh_runtime_auto_update.harness")(function* 
             : undefined,
       ),
     readText: (file) => Effect.sync(() => files.get(file)),
+    moveAside: (dir) =>
+      Effect.sync(() => {
+        const aside = dir + ".aside";
+        for (const [file, text] of [...files]) {
+          if (!file.startsWith(dir + "/")) continue;
+          files.delete(file);
+          files.set(aside + file.slice(dir.length), text);
+        }
+        state.movedAside.push(dir);
+        return aside;
+      }),
+    remove: (dir) =>
+      Effect.sync(() => {
+        for (const file of [...files.keys()]) if (file.startsWith(dir + "/")) files.delete(file);
+      }),
   });
   const config = yield* ServerConfig.ServerConfig.pipe(
     Effect.provide(
@@ -186,6 +202,19 @@ it.layer(NodeServices.layer)("SSH runtime auto-update", (it) => {
       expect(h.state.installs).toHaveLength(1);
       expect(h.state.installs[0]).toContain("SHA256SUMS");
       expect(h.state.preflights[0]).toContain("__service-preflight");
+    }),
+  );
+
+  it.effect("downloads again over an install whose record does not match its executable", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      const dir = NodePath.join(h.home, ".goat", "runtime", "goat", "versions", target);
+      h.files.set(NodePath.join(dir, ".install-complete"), target + "\n");
+      h.files.set(NodePath.join(dir, ".install-record"), target + " archive-sha other-sha https\n");
+      yield* h.runtime.prepare(target);
+      expect(h.state.movedAside).toEqual([dir]);
+      expect(h.state.installs).toHaveLength(1);
+      expect([...h.files.keys()].some((file) => file.startsWith(dir + ".aside"))).toBe(false);
     }),
   );
 

@@ -6212,8 +6212,12 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         previousIntent.requestedRunner.archiveVersion === input.runner.archiveVersion;
       const intent = {
         target: input.resolvedTarget,
+        // A person's request stays manual on every retry, so the runtime never arbitrates it.
         requestedRunner: sameIntent
-          ? previousIntent.requestedRunner
+          ? {
+              ...previousIntent.requestedRunner,
+              ...(input.runner.manualRefresh === true ? { manualRefresh: true } : {}),
+            }
           : { ...input.runner, confirmReplacement: false },
         generation,
         ...(managedPin === undefined ? {} : { managedPin }),
