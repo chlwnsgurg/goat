@@ -909,22 +909,42 @@ it.effect("queues a plain send behind the stopped queue and releases its hold", 
         });
         // The provider has not stopped yet, so a plain send still resolves to a steer.
         yield* send("sent", "auto");
-        yield* worker.drain();
 
+        // Read the queue before the worker delivers Stop: once the provider stops,
+        // the released queue starts its next run.
         const projection = yield* orchestrator.getThreadProjection(threadId);
         assert.deepEqual(steered, []);
         assert.equal(started.length, 1);
         const queued = projection.runs
           .filter((run) => run.status === "queued")
           .sort((left, right) => (left.queuePosition ?? 0) - (right.queuePosition ?? 0));
-        assert.deepEqual(
-          queued.map(
-            (run) => projection.messages.find((message) => message.id === run.userMessageId)?.text,
-          ),
-          ["queued", "sent"],
-        );
+        const textOf = (run: (typeof projection.runs)[number]) =>
+          projection.messages.find((message) => message.id === run.userMessageId)?.text;
+        assert.deepEqual(queued.map(textOf), ["queued", "sent"]);
         // The user sent it, so the queue they stopped runs again once the provider stops.
         assert.isFalse(queued.some((run) => run.queueHeld === true));
+
+        // The run-update reactor starts the next queued run on its own fiber, and
+        // that commit carries the start effect, so drain again once it lands.
+        const resumed = yield* orchestrator.streamDomainEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "run.updated" &&
+              event.runId === queued[0]!.id &&
+              event.payload.status !== "queued",
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+        yield* worker.drain();
+        yield* Fiber.join(resumed);
+        yield* worker.drain();
+        assert.deepEqual(steered, []);
+        assert.deepEqual(
+          started.map((turn) => turn.runId),
+          [started[0]!.runId, queued[0]!.id],
+        );
       }).pipe(Effect.provide(layer));
     }),
   ),

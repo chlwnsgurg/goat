@@ -37,3 +37,36 @@
   - A rolled-back build sees data as of the migration, not what the new build wrote afterwards.
   - A desktop from this change needs servers that accept the `goat://app` origin, and a Clerk
     instance that allows the `goat://app/` redirect.
+
+## Frozen legacy identities
+
+Decided 2026-10-20 in #110, #111 and #112. The names below keep their T3 spelling through the
+first stable release. Renaming one is a migration of installed state. It is revisited only together
+with a migration that has been verified on real installs, and the rename tooling keeps each one
+(`scripts/lib/goat-rename/rules.ts`).
+
+- **Linux desktop entry `t3code.desktop`, `StartupWMClass` `t3code`, and the deb package
+  `t3code`.** Docks match windows to pinned launchers, URL handlers and file associations through
+  the entry name and WM class, so a rename orphans what users set up. A renamed deb package installs
+  next to the old one instead of upgrading it. Nothing users see gets better.
+- **Preview browser partitions (`persist:t3code-preview-*`).** Each partition holds the cookies
+  and logins of a preview tab. Electron has no supported way to copy a partition, so a rename signs
+  every user out of every previewed site.
+- **GNOME capture extension uuid `snap-shot@t3.codes`, its D-Bus names
+  (`com.t3tools.T3Code.SnapShot`, `/com/t3tools/SnapShot`), and the KDE helper
+  `com.t3tools.T3Code.KdeCapture`.** On Wayland, GNOME Shell loads a newly installed extension
+  only after the user signs out and back in, so a renamed extension switches capture off for every
+  existing user until then. A later rename must keep the old extension working until the new one
+  is active.
+- **Mobile native names**: the `t3-*` Expo modules in `apps/mobile/modules/`, the `T3*` native
+  views and classes, the Android notification tags, and the `t3-agent-notifications`
+  SharedPreferences store. None is visible to users. Renaming a module changes the native
+  fingerprint and needs a new store build. Renaming the tags or the store orphans notifications
+  that are already posted and loses saved preferences. The upstream modules, such as
+  `t3-source-text`, would also make every upstream sync conflict. The notification channel ids
+  are already `agent-alerts` and `agent-activity`, so per-channel settings are not affected.
+  Revisit these only when a native rebuild happens for another reason. That rebuild must migrate
+  the tags and the store, match notifications still posted under the legacy tags, and be checked
+  on Android and iOS devices.
+- **SSH runner `run-t3.sh`.** Clients of every version find and reuse the runner on a remote host
+  by this name, so an older client would no longer see the runner a newer one installed.

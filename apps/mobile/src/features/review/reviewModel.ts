@@ -143,7 +143,7 @@ function splitTruncationMarker(diff: string): {
 } {
   const trimmed = diff.trimEnd();
   if (!trimmed.endsWith("[truncated]")) {
-    return { text: trimmed, truncated: false };
+    return { text: diff, truncated: false };
   }
 
   return {
@@ -473,7 +473,8 @@ export function buildReviewParsedDiff(
   diff: string | null | undefined,
   cacheScope: string,
 ): ReviewParsedDiff {
-  const normalized = diff?.trim();
+  // Only line breaks: a hunk can end in a blank context line, which is a single space.
+  const normalized = diff?.replace(/^\s+/, "").replace(/[\r\n]+$/, "");
   if (!normalized) {
     return { kind: "empty" };
   }
