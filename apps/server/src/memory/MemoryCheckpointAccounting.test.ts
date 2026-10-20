@@ -786,8 +786,10 @@ it.effect.each([50, 500])(
       );
       assert.lengthOf(measured, 1);
       let selected = 0;
-      for (const [query, params] of queries.filter(([query]) =>
-        query.startsWith("SELECT r.*,p.body_json FROM memory_revisions"),
+      for (const [query, params] of queries.filter(
+        ([query]) =>
+          query.startsWith("SELECT r.space,r.revision_id") &&
+          query.includes("FROM memory_revisions r"),
       ))
         selected += (yield* sql.unsafe(query, params)).length;
       assert.strictEqual(selected, 1);

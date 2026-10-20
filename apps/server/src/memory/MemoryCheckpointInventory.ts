@@ -120,7 +120,7 @@ export const measureCheckpointRevisionHistory = Effect.fnUntraced(function* (
 ) {
   const sql = yield* SqlClient.SqlClient;
   const unmeasured =
-    yield* sql<RevisionRow>`SELECT * FROM memory_revisions WHERE space=${space} AND memory_id=${id} AND checkpoint_bytes IS NULL`;
+    yield* sql<RevisionRow>`SELECT revision_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at FROM memory_revisions WHERE space=${space} AND memory_id=${id} AND checkpoint_bytes IS NULL`;
   for (const r of unmeasured) {
     const record = yield* revisionRecord(space, id, r, null);
     yield* validateCheckpointInventory(space, {
@@ -254,10 +254,12 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
       : selected.length
         ? sql`r.revision_id IN ${sql.in(selected)}`
         : sql`0=1`;
-  // A shared payload is deliberately joined once per selected revision.
+  // A shared payload is deliberately joined once per selected revision. Columns
+  // are named: a statement cached before migration 090 added checkpoint_bytes
+  // would map `r.*` onto stale column names and read body_json as NULL.
   const revisions = yield* sql<
     RevisionRow & { body_json: string | null }
-  >`SELECT r.*,p.body_json FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${space} AND r.memory_id=${id} AND ${selection} ORDER BY r.revision_id`;
+  >`SELECT r.space,r.revision_id,r.memory_id,r.operation_id,r.parents_json,r.scope_json,r.assertion_kind,r.provenance_json,r.payload_ref,r.created_at,p.body_json FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${space} AND r.memory_id=${id} AND ${selection} ORDER BY r.revision_id`;
   for (const r of revisions)
     all.revisions.push(
       yield* revisionRecord(
