@@ -58,6 +58,7 @@ const runOnServer = (
       return yield* new TextGenerationError({
         operation: input.operation,
         detail: "OpenCode model selection must use the 'provider/model' format.",
+        ...(memory ? { cause: new MemoryGenerationRunnerError({ code: "unavailable" }) } : {}),
       });
     }
     const location = { directory: AbsolutePath.make(cwd) };
@@ -162,6 +163,8 @@ const runOnServer = (
             return Deferred.succeed(outcome, {
               _tag: "failed",
               detail: "OpenCode used a different memory model.",
+              // The server substitutes the same model on every try.
+              cause: new MemoryGenerationRunnerError({ code: "identity_mismatch" }),
             });
           }
           effectiveModel = `${model.providerID}/${model.id}`;
@@ -275,6 +278,8 @@ const runOnServer = (
         detail: rejected
           ? "OpenCode attempted a tool or permission request during memory generation."
           : "OpenCode did not confirm its effective memory model.",
+        // A server that omits the effective model omits it every time.
+        ...(rejected ? {} : { cause: new MemoryGenerationRunnerError({ code: "unavailable" }) }),
       });
     if (result.text.length === 0) {
       return yield* new TextGenerationError({

@@ -33,6 +33,7 @@ import {
 import { codexModelFamily, getModelSelectionStringOptionValue } from "@goat/shared/model";
 import { getCodexServiceTierOptionValue } from "../codexModelOptions.ts";
 import * as HostProcess from "@goat/shared/HostProcess";
+import { MemoryGenerationRunnerError } from "@goat/provider-core/server/memoryGenerationRunner";
 
 const CODEX_TIMEOUT_MS = 180_000;
 /**
@@ -154,6 +155,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         return yield* new TextGenerationError({
           operation,
           detail: "Codex memory generation could not isolate its authentication home.",
+          // Typed so memory pauses this model: this host cannot link the auth file.
+          cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
         });
       return userHome;
     }

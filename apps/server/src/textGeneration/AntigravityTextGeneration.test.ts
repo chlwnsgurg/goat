@@ -819,6 +819,20 @@ it.layer(NodeServices.layer)("AntigravityTextGeneration", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("pauses memory on a model the account cannot select", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture({ memoryRunnerContext: memoryContext });
+      const error = yield* fixture.textGeneration.generateMemorySummary!({
+        ...memorySummary,
+        modelSelection: { ...memorySelection, model: "not-in-the-account" },
+      }).pipe(Effect.flip);
+      expect(error.detail).toContain("select the Antigravity model");
+      expect(error.cause).toEqual(new MemoryGenerationRunnerError({ code: "unavailable" }));
+      expect(fixture.state.prompts).toEqual([]);
+      yield* fixture.assertCleaned;
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("uses the native default without sending T3's default selection as a model ID", () =>
     Effect.gen(function* () {
       const fixture = yield* makeFixture();

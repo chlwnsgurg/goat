@@ -801,6 +801,8 @@ describe("CursorTextGeneration", () => {
         }),
       );
       expect(failure.detail).toContain("custom ~/.cursor/sandbox.json");
+      // Typed so memory pauses the model instead of retrying a policy that refuses every time.
+      expect(failure.cause).toEqual(new MemoryGenerationRunnerError({ code: "unavailable" }));
       expect(cursorSdkMock.prompt).not.toHaveBeenCalled();
     }).pipe(Effect.provide(layerTest)),
   );

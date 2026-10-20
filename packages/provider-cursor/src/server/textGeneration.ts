@@ -100,6 +100,8 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
           operation,
           detail:
             "Cursor text generation cannot enforce workspace isolation with a custom ~/.cursor/sandbox.json. Use another text-generation provider.",
+          // Typed so memory pauses this model: the policy refuses every request.
+          cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
         });
       }
       const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "goat-cursor-text-" });

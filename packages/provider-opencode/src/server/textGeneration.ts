@@ -199,6 +199,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
         return yield* new TextGenerationError({
           operation: input.operation,
           detail: "OpenCode model selection must use the 'provider/model' format.",
+          ...(memory ? { cause: new MemoryGenerationRunnerError({ code: "unavailable" }) } : {}),
         });
       }
 
@@ -407,7 +408,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
               result.data?.info?.providerID !== parsedModel.providerID ||
               result.data?.info?.variant !== selectedVariant)
           )
-            return yield* failure("OpenCode did not confirm the selected memory model.");
+            return yield* failure("OpenCode did not confirm the selected memory model.", true);
           const responseParts = result.data?.parts ?? [];
           const rawText = getOpenCodeTextResponse(responseParts);
           if (rawText.length === 0) {

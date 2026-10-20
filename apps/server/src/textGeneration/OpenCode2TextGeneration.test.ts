@@ -524,6 +524,9 @@ it.layer(layer)("OpenCode v2 memory generation", (it) => {
         assert.isFalse(yield* fs.exists(state.directory));
       }
       if (scenario === "permission") assert.deepEqual(state.denied, ["permission-1"]);
+      // A substituted model pauses memory for that model; a tool attempt is the model's own act.
+      if (scenario === "model") assert.propertyVal(failure.cause, "code", "identity_mismatch");
+      if (scenario === "tool" || scenario === "permission") assert.isUndefined(failure.cause);
     }).pipe(Effect.scoped),
   );
   it.effect.each(operations)("%s times out, interrupts and removes its helper", (operation) =>

@@ -116,6 +116,8 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
             operation,
             detail:
               "Antigravity text generation is unavailable for profiles with global hooks or MCP configuration. Select another system model.",
+            // Typed so memory pauses this model: the profile refuses every request.
+            cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
           });
         }
 
@@ -224,7 +226,10 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
                 new TextGenerationError({
                   operation,
                   detail: "Could not select the Antigravity model for text generation.",
-                  cause,
+                  // Memory treats a model it cannot select as unavailable until settings change.
+                  cause: TextGenerationOperations.isMemoryOperation(operation)
+                    ? new MemoryGenerationRunnerError({ code: "unavailable" })
+                    : cause,
                 }),
             });
 

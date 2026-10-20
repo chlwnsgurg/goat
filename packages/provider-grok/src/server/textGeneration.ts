@@ -177,7 +177,8 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
             new TextGenerationError({
               operation,
               detail: "Failed to set Grok ACP base model for text generation.",
-              cause,
+              // Memory treats a model it cannot select as unavailable until settings change.
+              cause: memory ? new MemoryGenerationRunnerError({ code: "unavailable" }) : cause,
             }),
         });
         promptStarted = true;
