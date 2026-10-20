@@ -61,6 +61,7 @@ export type EnvironmentRpcTag = keyof EnvironmentProtocolClient & string;
 type RpcMethod<TTag extends EnvironmentRpcTag> = EnvironmentProtocolClient[TTag];
 
 export type EnvironmentSubscriptionRpcTag =
+  | typeof WS_METHODS.notesSubscribe
   | typeof WS_METHODS.memoryChanges
   | typeof WS_METHODS.connectionCatalogServe
   | typeof WS_METHODS.codexAuthCallbackSubscribe

@@ -26,6 +26,8 @@ not explicit. The derived paths include:
 | `server-runtime.json`          | Runtime identity for an already-running server         |
 | `server-owner.lock`            | One server's ownership of this directory               |
 
+Notes are not under the state directory. `notesDir` is `<baseDir>/notes` beside `userdata`, so a person can find and edit the files, except for dev state, which keeps them in `<baseDir>/dev/notes`. That folder is its own git repository; [`notes.md`](notes.md) owns its rules.
+
 A server holds `server-owner.lock` (`apps/server/src/serverOwnerLock.ts`) from before its database
 opens until it exits, so one state directory has one server. The lock file also logs every owner,
 which the service launcher reads before it restores a database backup; see

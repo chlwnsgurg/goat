@@ -128,6 +128,26 @@ import {
 } from "./slackChannel.ts";
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
 import {
+  NoteConflictError,
+  NoteDocument,
+  NoteError,
+  NotesDeleteInput,
+  NotesDeleteResult,
+  NotesEvent,
+  NotesListInput,
+  NotesListResult,
+  NotesMoveInput,
+  NotesReadInput,
+  NotesStartWorkInput,
+  NotesStartWorkResult,
+  NotesSubscribeInput,
+  NotesWorkTargetProjectsInput,
+  NotesWorkTargetProjectsResult,
+  NotesWorkTargetsInput,
+  NotesWorkTargetsResult,
+  NotesWriteInput,
+} from "./notes.ts";
+import {
   AuthAccessStreamError,
   AuthAccessStreamEvent,
   EnvironmentAuthorizationError,
@@ -662,6 +682,17 @@ export const WS_METHODS = {
   handoffsRespond: "handoffs.respond",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
+
+  // Markdown notes on this environment
+  notesList: "notes.list",
+  notesRead: "notes.read",
+  notesWrite: "notes.write",
+  notesMove: "notes.move",
+  notesDelete: "notes.delete",
+  notesSubscribe: "notes.subscribe",
+  notesStartWork: "notes.startWork",
+  notesWorkTargets: "notes.workTargets",
+  notesWorkTargetProjects: "notes.workTargetProjects",
 
   // Threads this environment launched or watches on other machines
   remoteLaunchesList: "remoteLaunches.list",
@@ -2586,7 +2617,69 @@ export const WsChannelRpcGroup = RpcGroup.make(
   SlackChannelSubscribeStatusRpc,
 ).middleware(RpcScopeAuthorization);
 
-export const WsRpcGroup = WsCoreRpcGroup.merge(WsChannelRpcGroup);
+const NoteRpcErrors = Schema.Union([NoteError, NoteConflictError, EnvironmentAuthorizationError]);
+
+const WsNotesListRpc = Rpc.make(WS_METHODS.notesList, {
+  payload: NotesListInput,
+  success: NotesListResult,
+  error: NoteRpcErrors,
+});
+const WsNotesReadRpc = Rpc.make(WS_METHODS.notesRead, {
+  payload: NotesReadInput,
+  success: NoteDocument,
+  error: NoteRpcErrors,
+});
+const WsNotesWriteRpc = Rpc.make(WS_METHODS.notesWrite, {
+  payload: NotesWriteInput,
+  success: NoteDocument,
+  error: NoteRpcErrors,
+});
+const WsNotesMoveRpc = Rpc.make(WS_METHODS.notesMove, {
+  payload: NotesMoveInput,
+  success: NoteDocument,
+  error: NoteRpcErrors,
+});
+const WsNotesDeleteRpc = Rpc.make(WS_METHODS.notesDelete, {
+  payload: NotesDeleteInput,
+  success: NotesDeleteResult,
+  error: NoteRpcErrors,
+});
+const WsNotesSubscribeRpc = Rpc.make(WS_METHODS.notesSubscribe, {
+  payload: NotesSubscribeInput,
+  success: NotesEvent,
+  error: NoteRpcErrors,
+  stream: true,
+});
+const WsNotesStartWorkRpc = Rpc.make(WS_METHODS.notesStartWork, {
+  payload: NotesStartWorkInput,
+  success: NotesStartWorkResult,
+  error: NoteRpcErrors,
+});
+const WsNotesWorkTargetsRpc = Rpc.make(WS_METHODS.notesWorkTargets, {
+  payload: NotesWorkTargetsInput,
+  success: NotesWorkTargetsResult,
+  error: NoteRpcErrors,
+});
+const WsNotesWorkTargetProjectsRpc = Rpc.make(WS_METHODS.notesWorkTargetProjects, {
+  payload: NotesWorkTargetProjectsInput,
+  success: NotesWorkTargetProjectsResult,
+  error: NoteRpcErrors,
+});
+
+/** Notes RPCs, registered by the server in a handler layer of their own like the channel group. */
+export const WsNotesRpcGroup = RpcGroup.make(
+  WsNotesListRpc,
+  WsNotesReadRpc,
+  WsNotesWriteRpc,
+  WsNotesMoveRpc,
+  WsNotesDeleteRpc,
+  WsNotesSubscribeRpc,
+  WsNotesStartWorkRpc,
+  WsNotesWorkTargetsRpc,
+  WsNotesWorkTargetProjectsRpc,
+).middleware(RpcScopeAuthorization);
+
+export const WsRpcGroup = WsCoreRpcGroup.merge(WsChannelRpcGroup).merge(WsNotesRpcGroup);
 
 const MemoryRpcErrors = Schema.Union([Memory.MemoryRpcError, EnvironmentAuthorizationError]);
 const MemoryImportRpcErrors = Schema.Union([

@@ -1,6 +1,7 @@
 import * as SshDeviceAdd from "./sshRemote/SshDeviceAdd.ts";
 import { isGoatConnectEnabled } from "@goat/shared/goatConnect";
 import { desiredLinkReconcileStartup } from "./cloud/DesiredLinkReconcile.ts";
+import * as NotesLayers from "./notes/NotesLayers.ts";
 import * as HomeRoute from "./provider/OpenCodexRoute.ts";
 import * as CodexRoutes from "./provider/CodexRouteService.ts";
 import * as HomeRequests from "./provider/CodexHomeRequests.ts";
@@ -1246,6 +1247,21 @@ const layerSshWorkspace = SshWorkspaceSync.layer.pipe(
   Layer.provide(RuntimeLayer.layerProjectService),
 );
 
+const layerNotes = NotesLayers.layer.pipe(
+  Layer.provide(RuntimeLayer.layerEventSink),
+  Layer.provide(
+    HostThreadsMcpService.layer.pipe(
+      Layer.provide(
+        OrchestratorMcpService.layer.pipe(
+          Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+        ),
+      ),
+      Layer.provide(ThreadResultService.layer),
+    ),
+  ),
+  Layer.provide(ThreadResultService.layer),
+);
+
 const layerMakeRoutes = Layer.mergeAll(
   Layer.effectDiscard(
     Effect.gen(function* () {
@@ -1291,7 +1307,7 @@ const layerMakeRoutes = Layer.mergeAll(
   // One instance for the goat_host_status tool and the server.getHostStatus RPC; fleet
   // placement reads the same one.
   Layer.provide(
-    Layer.mergeAll(FleetPlacement.layer, FleetFallback.layerChains).pipe(
+    Layer.mergeAll(layerNotes, FleetPlacement.layer, FleetFallback.layerChains).pipe(
       Layer.provideMerge(
         McpHttpServer.layerHostStatusService.pipe(
           Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),

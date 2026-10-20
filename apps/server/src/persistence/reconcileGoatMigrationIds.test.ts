@@ -102,7 +102,8 @@ describe("GOAT migration ids", () => {
         [86, "FleetGoals"],
         [87, "FleetHealth"],
         [88, "ThreadRunObservedChecks"],
-        [89, "HubNodes"],
+        [89, "RemoteDispatchObservation"],
+        [90, "HubNodes"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -139,7 +140,8 @@ describe("GOAT migration ids", () => {
         [86, "FleetGoals"],
         [87, "FleetHealth"],
         [88, "ThreadRunObservedChecks"],
-        [89, "HubNodes"],
+        [89, "RemoteDispatchObservation"],
+        [90, "HubNodes"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -183,7 +185,8 @@ describe("GOAT migration ids", () => {
           [86, "FleetGoals"],
           [87, "FleetHealth"],
           [88, "ThreadRunObservedChecks"],
-          [89, "HubNodes"],
+          [89, "RemoteDispatchObservation"],
+          [90, "HubNodes"],
         ]);
         assert.deepStrictEqual(yield* history, migrationManifest);
         assert.deepStrictEqual(yield* runMigrations(), []);

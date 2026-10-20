@@ -4,6 +4,10 @@ import "vite-plus/test/config";
 const reactTests = [
   "src/features/home/home-route-visibility.test.tsx",
   "src/features/settings/SettingsHubNodesRouteScreen.test.tsx",
+  "src/features/notes/NoteConflictRouteScreen.test.tsx",
+  "src/features/notes/NoteLinkedThread.test.tsx",
+  "src/features/notes/NoteRouteScreen.test.tsx",
+  "src/features/notes/NoteStartWorkRouteScreen.test.tsx",
   "src/features/settings/SettingsServerControlsRouteScreen.test.tsx",
   "src/features/settings/components/BranchNamingSettings.test.tsx",
   "src/features/threads/use-visible-second-clock.test.tsx",

@@ -542,6 +542,14 @@
     "./rpc/session": {
       "types": "./src/rpc/session.ts",
       "default": "./src/rpc/session.ts"
+    },
+    "./notes": {
+      "types": "./src/notes/index.ts",
+      "default": "./src/notes/index.ts"
+    },
+    "./notes/rpc": {
+      "types": "./src/notes/rpc/index.ts",
+      "default": "./src/notes/rpc/index.ts"
     }
   },
   "scripts": {
