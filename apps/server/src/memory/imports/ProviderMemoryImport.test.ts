@@ -681,6 +681,91 @@ describe("ProviderMemoryImport closed coordinator", () => {
       }),
     ),
   );
+  it.effect("preview flags an importable item that cannot fit turn start only when requested", () =>
+    fixtureTest(
+      (h, snapshot) =>
+        Effect.gen(function* () {
+          const small = "s".repeat(100);
+          const large = "L".repeat(7_000);
+          const handbook = [
+            "# Task Group: Small guidance",
+            "scope: synthetic fixture task",
+            "",
+            "## Task 1: Stable guidance",
+            "",
+            "### learnings",
+            small,
+            "",
+            "# Task Group: Large guidance",
+            "scope: synthetic fixture task",
+            "",
+            "## Task 1: Stable guidance",
+            "",
+            "### learnings",
+            large,
+          ].join("\n");
+          h.source(
+            snapshotMemoryImportFiles(snapshot, [
+              {
+                selector: "MEMORY.md",
+                text: handbook,
+                byteCount: new TextEncoder().encode(handbook).length,
+              },
+            ]),
+          );
+          const runtime = h.make();
+          const discovered = yield* runtime.run(
+            { action: "discover", memorySpaceId: space, format: "codex" },
+            Effect.void,
+          );
+          assert.equal(discovered.action, "discover");
+          if (discovered.action !== "discover") return;
+          const sourceId = discovered.sources[0]!.sourceId;
+          const runPreview = (includeTurnStartFit?: true) =>
+            runtime.run(
+              {
+                action: "preview",
+                memorySpaceId: space,
+                sourceId,
+                ...(includeTurnStartFit ? { includeTurnStartFit } : {}),
+              },
+              Effect.void,
+            );
+          const plain = yield* runPreview();
+          const fitted = yield* runPreview(true);
+          assert.equal(plain.action, "preview");
+          assert.equal(fitted.action, "preview");
+          if (plain.action !== "preview" || fitted.action !== "preview") return;
+          const row = (items: typeof plain.items, title: string) =>
+            items.find((item) => item.sourceItemKey === `MEMORY.md#task-group:${title}`);
+          assert.equal(plain.items.length, 2);
+          assert.equal(fitted.items.length, 2);
+          for (const item of plain.items)
+            assert.equal(Object.hasOwn(item, "tooLargeForTurnStart"), false);
+          const smallPlain = row(plain.items, "Small guidance");
+          const largePlain = row(plain.items, "Large guidance");
+          const smallFitted = row(fitted.items, "Small guidance");
+          const largeFitted = row(fitted.items, "Large guidance");
+          assert.ok(smallPlain && largePlain && smallFitted && largeFitted);
+          if (!smallPlain || !largePlain || !smallFitted || !largeFitted) return;
+          assert.ok(smallPlain.byteCount < M.MEMORY_CONTEXT_MAX_CHARS);
+          assert.ok(largePlain.byteCount > M.MEMORY_CONTEXT_MAX_CHARS);
+          assert.ok(largePlain.byteCount <= M.MEMORY_BODY_MAX_UTF8_BYTES);
+          assert.equal(Object.hasOwn(largePlain, "issue"), false);
+          assert.equal(Object.hasOwn(largeFitted, "issue"), false);
+          assert.ok(largeFitted.sourceFingerprint);
+          assert.equal(Object.hasOwn(smallFitted, "tooLargeForTurnStart"), false);
+          assert.equal(largeFitted.tooLargeForTurnStart, true);
+          assert.deepEqual(
+            fitted.items.flatMap((item) =>
+              Object.hasOwn(item, "tooLargeForTurnStart") ? [item.sourceItemKey] : [],
+            ),
+            ["MEMORY.md#task-group:Large guidance"],
+          );
+        }),
+      "codex-handbook-v1",
+    ),
+  );
   it.effect("same source cannot change stored scope and accepted parent", () =>
     fixtureTest((h) =>
       Effect.gen(function* () {
