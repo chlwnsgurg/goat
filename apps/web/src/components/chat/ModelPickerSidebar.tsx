@@ -1,7 +1,7 @@
 import { Toolbar } from "@base-ui/react/toolbar";
 import { type ProviderInstanceId } from "@goat/contracts";
 import { memo, useLayoutEffect, useRef, useState } from "react";
-import { SparklesIcon, StarIcon } from "~/components/solar";
+import { PlusIcon, SparklesIcon, StarIcon } from "~/components/solar";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
@@ -44,6 +44,9 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
   selectableUnavailableInstanceIds?: ReadonlySet<ProviderInstanceId>;
   getDisabledInstanceTooltip?: (entry: ProviderInstanceEntry) => string;
   newBadgeInstanceIds?: ReadonlySet<ProviderInstanceId>;
+  /** Shows an "Add provider" button at the bottom of the rail. */
+  onAddProvider?: () => void;
+  addProviderDisabledReason?: string | null;
 }) {
   const handleSelect = (instanceId: ProviderInstanceId | "favorites") => {
     props.onSelectInstance(instanceId);
@@ -230,8 +233,53 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
               </div>
             );
           })}
+          {props.onAddProvider ? (
+            <AddProviderRailButton
+              onAddProvider={props.onAddProvider}
+              disabledReason={props.addProviderDisabledReason ?? null}
+            />
+          ) : null}
         </div>
       </div>
     </Toolbar.Root>
   );
 });
+
+function AddProviderRailButton(props: {
+  onAddProvider: () => void;
+  disabledReason: string | null;
+}) {
+  const disabled = props.disabledReason !== null;
+  return (
+    <div className="mt-auto w-full pt-1" data-model-picker-add-provider="true">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Toolbar.Button
+              className={cn(
+                "relative isolate flex w-full cursor-pointer aspect-square items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground focus-visible:bg-foreground/10 focus-visible:text-foreground focus-visible:outline-none",
+                disabled && "opacity-50 cursor-not-allowed hover:bg-transparent",
+              )}
+              type="button"
+              disabled={disabled}
+              focusableWhenDisabled
+              aria-label={props.disabledReason ?? "Add provider"}
+              onClick={() => {
+                if (!disabled) props.onAddProvider();
+              }}
+            >
+              <PlusIcon className="size-5 shrink-0" aria-hidden />
+            </Toolbar.Button>
+          }
+        />
+        <TooltipPopup
+          side={PICKER_TOOLTIP_SIDE}
+          sideOffset={PICKER_TOOLTIP_SIDE_OFFSET}
+          align="center"
+        >
+          {props.disabledReason ?? "Add provider"}
+        </TooltipPopup>
+      </Tooltip>
+    </div>
+  );
+}

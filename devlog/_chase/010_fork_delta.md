@@ -42,7 +42,7 @@ G13 `goat-copy`, G14 `launch-watch`.
 
 - 커밋: `bfce4301d` `cc5003979` `095115376`
 - 경로: `.github/workflows/goat-ci.yml`, `.vite-hooks/`, `packages/ssh/src/tunnel.*.test.ts`, `.github/scripts/pr-screenshot-gate.*`, `.github/pull_request_template.md`
-- 정책: GOAT CI는 EPYC의 goat-ci 하나이고 upstream workflow는 goat-si/goat에서 모두 비활성이다. GOAT에 쓸모없는 새 upstream workflow는 머지에서 빼고 사이클 카드에 적는다 (`mobile-android-apk.yml`, 사이클 261013). `tunnel.test.ts`는 여러 파일로 나뉘었다. PR 템플릿의 Screenshots 섹션은 goat-ci의 `screenshot-gate` 태스크와 짝이므로, upstream 템플릿 변경을 받을 때 그 섹션을 다시 얹는다.
+- 정책: GOAT CI는 EPYC의 goat-ci 하나이고 upstream workflow는 goat-si/goat에서 모두 비활성이다. GOAT에 쓸모없는 새 upstream workflow는 머지에서 빼고 사이클 카드에 적는다 (`mobile-android-apk.yml`, 사이클 261013). `tunnel.test.ts`는 여러 파일로 나뉘었다. PR 템플릿의 Screenshots 섹션은 goat-ci의 `screenshot-gate` 태스크와 짝이므로, upstream 템플릿 변경을 받을 때 그 섹션을 다시 얹는다. 사이클 261020: upstream `goat/no-dom-test-environment`(#21937)가 per-file jsdom pragma를 거부한다. GOAT 자체 jsdom 테스트는 루트 `vite.config.ts`의 `DOM_TEST_ENVIRONMENT_ALLOWLIST`에 두고 하나씩 browser 테스트나 Vitest project로 옮긴다 (#514). 새 GOAT 테스트는 목록에 더하지 않는다.
 
 ### `cli-home` CLI `goat`와 `~/.goat`
 
@@ -60,7 +60,7 @@ G13 `goat-copy`, G14 `launch-watch`.
 
 - 커밋: #33
 - 경로: `apps/web/src/components/{Sidebar.tsx,Sidebar.logic.ts,Sidebar.drag.ts,promoteThread.ts,CommandPalette.tsx,threadActionMenu.logic.ts}`, `apps/web/src/components/sidebar/{SidebarOpenSubagent.tsx,subagentIndex.ts}`, `apps/web/src/components/chat/{ChatHeader.tsx,ThreadRelationshipsControl.tsx,threadLauncher.logic.ts}`, `apps/server/src/orchestration-v2/{Orchestrator.ts,ThreadManagementService.ts,ThreadLaunchService.ts,ThreadForkService.ts,ProjectionStore.ts}`, `apps/server/src/mcp/{OrchestratorMcpService.ts,AcpMcpStdioBridge.ts,toolkits/{project,ssh,orchestrator}}`, `apps/server/src/sshRemote/SshRemoteDispatch.ts`, `packages/contracts/src/{orchestrationV2.ts,environment.ts}`, `packages/client-runtime/src/{operations/commands.ts,state/threadCommands.ts,state/threadRelationships.ts}`, `packages/provider-core/src/server/subagentProjection.ts`
-- 정책: GOAT 전용 계약 필드(`launchedBy`, subagent `promotedAt`, `thread.stop.stopCascadeFrom`), 명령 `thread.promote`, capability `threadPromotion`. 마이그레이션 없음(`payload_json`). upstream이 같은 이름이나 계보 변경 명령을 들이면 카드로 결정한다. upstream의 사이드바, Orchestrator, fork/subagent builder 변경은 받고 이 동작을 다시 얹는다. 머지 때 확인할 것: Orchestrator의 "계보는 분리만 일어난다" 가정(`appOwnedSubagentParentThreadId`), 연쇄 Stop의 조상 확인, fork·subagent builder의 `launchedBy` 제거.
+- 정책: GOAT 전용 계약 필드(`launchedBy`, subagent `promotedAt`, `thread.stop.stopCascadeFrom`), 명령 `thread.promote`, capability `threadPromotion`. 마이그레이션 없음(`payload_json`). upstream이 같은 이름이나 계보 변경 명령을 들이면 카드로 결정한다. upstream의 사이드바, Orchestrator, fork/subagent builder 변경은 받고 이 동작을 다시 얹는다. 머지 때 확인할 것: Orchestrator의 "계보는 분리만 일어난다" 가정(`appOwnedSubagentParentThreadId`), 연쇄 Stop의 조상 확인, fork·subagent builder의 `launchedBy` 제거. 다른 스레드 agent의 send는 요청 mode와 상관없이 `steer_when_ready`다(`threadSendMode`). upstream 테스트가 agent의 `mode: "queue"` send로 대기 turn을 만들면 GOAT에서는 steer가 되므로 그 테스트는 다른 경로로 옮긴다 (사이클 261020, #555).
 
 ### `desktop-identity` 데스크톱 정체성
 
@@ -102,13 +102,19 @@ G13 `goat-copy`, G14 `launch-watch`.
 
 - 커밋: `e893682a4` `7a7a16584` `4dee8b21c`
 - 경로: `apps/server/src/mcp/toolkits/*/tools.ts`, `orchestration-v2`, `packages/provider-*/src/server`, `t3McpToolPresentation.ts`
-- 정책: upstream 로직을 받고 도구 이름은 `goat_*`, 서버 이름은 GOAT로 다시 쓴다. 새 `t3_*` 도구는 이름을 바꾸고 표시용 legacy alias를 둔다.
+- 정책: upstream 로직을 받고 도구 이름은 `goat_*`, 서버 이름은 GOAT로 다시 쓴다. 새 `t3_*` 도구는 이름을 바꾸고 표시용 legacy alias를 둔다. 텔레메트리(`telemetry/ProviderDimensions.ts`, `McpHttpServer`의 HANDOFF_TOOLS)도 `goat_*` 이름으로 세고, 들어온 `t3_*`는 `goat_*`로 정규화한다 (사이클 261020).
 
 ### `no-t3-import` T3 불러오기 제거
 
 - 커밋: `59d7fe1a6`
 - 경로: `ProjectScriptsControl.tsx`, `settings/ProjectActionsSettings.tsx`, `chat/ThreadDetailsPanel.tsx`, `hooks/useT3ProjectFileScripts.ts`
 - 정책: t3.json 액션 가져오기 메뉴("Import scripts", "From t3.json")는 다시 들이지 않는다. 같은 파일의 다른 upstream 변경은 받는다. upstream이 `ThreadDetailsPanel.test.tsx`를 고치면 삭제를 유지한다. t3.json 기본값, iconPath, 깨진 파일 경고, V1→V2 스레드 마이그레이션은 upstream 그대로다.
+
+### `pdf-viewer` PDF.js 파일 뷰어
+
+- 커밋: `3a13908a0`
+- 경로: `apps/web/src/components/files/pdf`, `apps/web/src/components/files/BrowserDocumentFrame.tsx`, `third-party-licenses.config.json`의 PDF.js·Synara 항목
+- 정책: 파일 미리보기의 PDF는 GOAT PDF.js 뷰어(페이지 이동, 확대, 검색)로 보인다. upstream이 브라우저 미리보기 PDF를 native `<embed>`로 보내는 변경(#21095)은 라우팅만 받고 `BrowserDocumentFrame`은 GOAT 뷰어를 유지한다. 어느 쪽으로 갈지는 #515에서 정한다.
 
 ### `remote-reports` 원격 보고와 원격 위임
 
@@ -126,7 +132,7 @@ G13 `goat-copy`, G14 `launch-watch`.
 
 - 커밋: `aa2eaf2ff` `480ed90da` `b32fe81d1` `b6a829960` `716f27dac`
 - 경로: `packages/ssh/src/tunnel.ts`, `apps/server/src/sshRemote`, `apps/server/src/mcp/toolkits/ssh`, `apps/desktop/src/ssh`
-- 정책: GOAT가 `tunnel.ts`를 크게 다시 썼다. upstream ssh 변경은 의도를 GOAT 코드에 손으로 옮긴다. 충돌 위험이 가장 높다.
+- 정책: GOAT가 `tunnel.ts`를 크게 다시 썼다. upstream ssh 변경은 의도를 GOAT 코드에 손으로 옮긴다. 충돌 위험이 가장 높다. upstream의 설치 lock 수정(#20059, uutils mkdir)은 GOAT lock이 rename으로 게시해 해당 없으므로 받지 않았다 (사이클 261020).
 
 ## 깨끗하게 머지되고도 깨지는 것
 

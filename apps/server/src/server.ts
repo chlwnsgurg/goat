@@ -3,6 +3,7 @@ import { desiredLinkReconcileStartup } from "./cloud/DesiredLinkReconcile.ts";
 import * as HomeRoute from "./provider/OpenCodexRoute.ts";
 import * as CodexRoutes from "./provider/CodexRouteService.ts";
 import * as HomeRequests from "./provider/CodexHomeRequests.ts";
+import * as ProviderOnboarding from "./provider/ProviderOnboarding.ts";
 import { resolveCommandPath } from "@goat/shared/shell";
 import * as HostProcess from "@goat/shared/HostProcess";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- the closed import factory requires a synchronous UUID callback.
@@ -54,6 +55,10 @@ import * as HostThreadsMcpService from "./mcp/HostThreadsMcpService.ts";
 import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as ThreadResultService from "./threadResults/ThreadResultService.ts";
 import * as ProviderDiagnosisRouting from "./provider/ProviderDiagnosisRouting.ts";
+import * as ProviderHostSync from "./provider/ProviderHostSync.ts";
+import * as CloudAgentService from "./cloudAgents/CloudAgentService.ts";
+import * as ThreadLaunchMcpService from "./mcp/ThreadLaunchMcpService.ts";
+import * as RemoteReportService from "./remoteReports/RemoteReportService.ts";
 import * as SshHostSetup from "./sshRemote/SshHostSetup.ts";
 import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
 import * as BoatClient from "./cloudMachines/BoatClient.ts";
@@ -74,6 +79,7 @@ import * as StorageCleanup from "./storageCleanup.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
+// Effect wraps this raw Node HTTP server after its startup and write-error guards attach.
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
 
@@ -102,7 +108,10 @@ import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
 import { withUntracedRequests } from "./http.ts";
 import * as ServerHttp from "./http.ts";
-import { guardHttpResponseWriteErrors } from "./httpResponseErrorGuard.ts";
+import {
+  guardHttpResponseWriteErrors,
+  rejectRequestsUntilServing,
+} from "./httpResponseErrorGuard.ts";
 import { fixPath } from "./os-jank.ts";
 import * as Ws from "./ws.ts";
 import * as AgentScopeLive from "./process/agentScope.ts";
@@ -117,6 +126,7 @@ import * as PullRequestReviewGuides from "./persistence/PullRequestReviewGuides.
 import * as PullRequestReviewGuideService from "./pullRequest/PullRequestReviewGuideService.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
+import * as DelegatedTaskAnalytics from "./telemetry/DelegatedTaskAnalytics.ts";
 import * as ProviderEventIngestor from "./orchestration-v2/ProviderEventIngestor.ts";
 import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as ResetCreditCoordinator from "./provider/resetCreditCoordinator.ts";
@@ -136,6 +146,8 @@ import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceR
 import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
+import * as FleetFallback from "./fleet/resources/Fallback.ts";
+import * as FleetPlacement from "./fleet/resources/Placement.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
@@ -216,6 +228,7 @@ import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts"
 import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
 import * as MaintenanceAudit from "./maintenance/MaintenanceAudit.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
+import * as ServerAutoUpdate from "./cloud/autoUpdate.ts";
 import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
@@ -360,16 +373,19 @@ const layerRelayClient = Layer.unwrap(
 const layerHttpServer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
-    return NodeHttpServer.layer(() => guardHttpResponseWriteErrors(NodeHttp.createServer()), {
-      host: config.host ?? "127.0.0.1",
-      port: config.port,
-      gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
-      // Context takeover stays enabled (ws default) so the compression
-      // window is shared across frames — that also makes small frames cheap
-      // to compress, so no size threshold is set (ws only honors
-      // `threshold` when context takeover is disabled).
-      websocket: { perMessageDeflate: true },
-    });
+    return NodeHttpServer.layer(
+      () => rejectRequestsUntilServing(guardHttpResponseWriteErrors(NodeHttp.createServer())),
+      {
+        host: config.host ?? "127.0.0.1",
+        port: config.port,
+        gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
+        // Context takeover stays enabled (ws default) so the compression
+        // window is shared across frames — that also makes small frames cheap
+        // to compress, so no size threshold is set (ws only honors
+        // `threshold` when context takeover is disabled).
+        websocket: { perMessageDeflate: true },
+      },
+    );
   }),
 );
 
@@ -1049,6 +1065,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     ),
   ),
   layerThreadPullRequestWorker,
+  DelegatedTaskAnalytics.layer,
   Layer.effectDiscard(
     Effect.gen(function* () {
       const service = yield* PullRequestSyncReactor.PullRequestSyncReactor;
@@ -1216,6 +1233,12 @@ const layerSshWorkspace = SshWorkspaceSync.layer.pipe(
 );
 
 const layerMakeRoutes = Layer.mergeAll(
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const autoUpdate = yield* ServerAutoUpdate.ServerAutoUpdate;
+      yield* ServerActivation.forkParked(autoUpdate.run);
+    }).pipe(Effect.provide(ServerAutoUpdate.layer)),
+  ),
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
       Layer.provide(AuthHttp.layer),
@@ -1247,10 +1270,15 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
 ).pipe(
-  // One instance for the goat_host_status tool and the server.getHostStatus RPC.
+  // One instance for the goat_host_status tool and the server.getHostStatus RPC; fleet
+  // placement reads the same one.
   Layer.provide(
-    McpHttpServer.layerHostStatusService.pipe(
-      Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+    Layer.mergeAll(FleetPlacement.layer, FleetFallback.layerChains).pipe(
+      Layer.provideMerge(
+        McpHttpServer.layerHostStatusService.pipe(
+          Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+        ),
+      ),
     ),
   ),
   Layer.provide(CloudTaskSource.layer.pipe(Layer.provide(GitVcsDriver.layer))),
@@ -1259,10 +1287,33 @@ const layerMakeRoutes = Layer.mergeAll(
   // status, and the remote-launch catalog: they all follow runs and wake launchers.
   // The coordinator re-arms watches after a relayed send, so the store comes after it.
   Layer.provide(layerSshWorkspace),
-  Layer.provide(SshHostSetup.layer.pipe(Layer.provide(MaintenanceAudit.layer))),
-  Layer.provide(HomeRequests.layer.pipe(Layer.provideMerge(CodexRoutes.layer))),
+  // SshHostSetup routes approvals of agent-requested provider syncs to ProviderHostSync.
   Layer.provide(
-    ProviderDiagnosisRouting.layer.pipe(
+    SshHostSetup.layer.pipe(
+      Layer.provide(MaintenanceAudit.layer),
+      Layer.provideMerge(ProviderHostSync.layer),
+    ),
+  ),
+  Layer.provide(
+    Layer.mergeAll(
+      HomeRequests.layer.pipe(Layer.provideMerge(CodexRoutes.layer)),
+      ProviderOnboarding.layer,
+    ),
+  ),
+  Layer.provide(
+    Layer.mergeAll(
+      ProviderDiagnosisRouting.layer,
+      // Cloud launches route to a credential holder with the same diagnosis and host reads.
+      CloudAgentService.layer.pipe(
+        Layer.provide(
+          ThreadLaunchMcpService.layer.pipe(
+            Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+            Layer.provide(CloudTaskSource.layer.pipe(Layer.provide(GitVcsDriver.layer))),
+            Layer.provide(RemoteReportService.layer),
+          ),
+        ),
+      ),
+    ).pipe(
       Layer.provide(ProviderDiagnosisService.layer.pipe(Layer.provide(ProviderHostLive.layer))),
       Layer.provide(
         HostThreadsMcpService.layer.pipe(
@@ -1313,7 +1364,30 @@ const layerMakeServer = Layer.unwrap(
     const tailscaleParked = yield* Deferred.make<void>();
     const cloudLinkParked = yield* Deferred.make<void>();
     const routesReady = yield* Deferred.make<void>();
-    const layerLauncher = ServiceLauncherClient.layer;
+    const layerLauncher = ServiceLauncherClient.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.effect(
+            ServiceLauncherClient.ServiceLauncherPort,
+            Effect.map(HttpServer.HttpServer, (server) =>
+              typeof server.address === "string" || !("port" in server.address)
+                ? undefined
+                : server.address.port,
+            ),
+          ),
+          Layer.effect(
+            ServiceLauncherClient.ServiceLauncherHost,
+            Effect.map(HttpServer.HttpServer, (server) =>
+              typeof server.address !== "string" &&
+              "hostname" in server.address &&
+              typeof server.address.hostname === "string"
+                ? server.address.hostname
+                : undefined,
+            ),
+          ),
+        ),
+      ),
+    );
 
     yield* fixPath({ shellEnvironmentPrepared: config.shellEnvironmentPrepared });
 

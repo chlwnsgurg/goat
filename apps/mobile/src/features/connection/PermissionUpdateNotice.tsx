@@ -5,6 +5,7 @@ import { Atom } from "effect/reactivity";
 import { secureStore } from "../../persistence/namespaced-secure-store";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { whenProtectedDataAvailable } from "../../lib/protectedData";
 import { useEnvironments } from "../../state/environments";
 import { environmentSession } from "../../state/session";
 
@@ -35,8 +36,8 @@ export function PermissionUpdateNotice() {
 
   useEffect(() => {
     let active = true;
-    void secureStore
-      .getItem(storageKey)
+    void whenProtectedDataAvailable()
+      .then(() => secureStore.getItem(storageKey))
       .then((raw) => {
         const value: unknown = raw === null ? [] : JSON.parse(raw);
         if (active)

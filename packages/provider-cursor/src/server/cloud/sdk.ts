@@ -46,6 +46,11 @@ export class CursorCloudSdk extends Context.Service<
     readonly resume: (id: string, options: Partial<AgentOptions>) => Promise<CloudAgent>;
     readonly getRun: (id: string, options: CloudRunOptions) => Promise<CloudRun>;
     readonly cancelRun: (id: string, options: CloudRunOptions) => Promise<void>;
+    /** Newest first. Optional so test doubles that never attach registered agents can omit it. */
+    readonly listRuns?: (
+      agentId: string,
+      options: CloudRunOptions,
+    ) => Promise<{ readonly items: ReadonlyArray<CloudRun> }>;
     readonly checkAccess: (apiKey: string) => Effect.Effect<void, CursorCloudSdkError>;
     readonly readModels: (apiKey: string) => Effect.Effect<SDKModel[], CursorCloudSdkError>;
   }
@@ -60,6 +65,8 @@ export const layer = Layer.effect(
       resume: (id, options) => Agent.resume(id, options),
       getRun: (id, options) => Agent.getRun(id, options),
       cancelRun: (id, options) => Agent.cancelRun(id, options),
+      listRuns: (agentId, options) =>
+        Agent.listRuns(agentId, { runtime: "cloud", apiKey: options.apiKey, limit: 1 }),
       checkAccess: (apiKey) =>
         request("list", () => Agent.list({ runtime: "cloud", apiKey, limit: 1 })).pipe(
           Effect.asVoid,

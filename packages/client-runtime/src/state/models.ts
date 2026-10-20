@@ -41,6 +41,11 @@ export interface ThreadRunSummary {
   readonly startedAt: string | null;
   readonly completedAt: string | null;
   readonly assistantMessageId: MessageId | null;
+  /**
+   * The run is still open, but its provider turn already ended, so nothing is
+   * generating while the server settles it.
+   */
+  readonly turnEnded?: boolean;
   readonly sourcePlanRef?: {
     readonly threadId: ThreadId;
     readonly planId: PlanId;
@@ -229,6 +234,12 @@ export function presentThreadShell(
               : nullableIso(thread.latestRunCompletedAt),
           assistantMessageId: null,
         } satisfies ThreadRunSummary);
+  const runtime = shellRuntime(thread);
+  // Waiting runs have ended their provider turn and are only draining effects.
+  const runtimeIsWorking =
+    runtime?.status === "preparing" ||
+    runtime?.status === "starting" ||
+    runtime?.status === "running";
   return {
     environmentId,
     id: thread.id,
@@ -251,7 +262,7 @@ export function presentThreadShell(
     ...(thread.sideChatOf == null ? {} : { sideChatOf: thread.sideChatOf }),
     activeProviderThreadId: thread.activeProviderThreadId,
     latestRun,
-    runtime: shellRuntime(thread),
+    runtime,
     latestUserMessageAt: nullableIso(thread.latestUserMessageAt),
     ...(thread.latestUserAuthoredMessageAt === undefined
       ? {}
@@ -260,7 +271,9 @@ export function presentThreadShell(
       thread.pendingRuntimeRequest !== null &&
       thread.pendingRuntimeRequest.kind !== "user_input" &&
       thread.pendingRuntimeRequest.kind !== "auth_refresh",
-    hasPendingUserInput: thread.pendingRuntimeRequest?.kind === "user_input",
+    hasPendingUserInput:
+      thread.pendingRuntimeRequest?.kind === "user_input" &&
+      (thread.pendingRuntimeRequest.blocking !== false || !runtimeIsWorking),
     pendingSubagentRequest,
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     pendingBackgroundTasks: thread.pendingBackgroundTasks ?? [],

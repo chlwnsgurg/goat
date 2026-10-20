@@ -1442,6 +1442,7 @@ function CloudLinkRow({
 // Sections folded under "Advanced settings"; a search jump to one opens the group.
 const ADVANCED_CONNECTION_SETTING_IDS = [
   "hosts",
+  "provider-host-matrix",
   "cloud-machines",
   "remote-launches",
   "load-balancing",
@@ -1468,7 +1469,7 @@ export function ConnectionsSettings() {
   const loadBalancingEnvironments = [
     ...(primaryEnvironment ? [primaryEnvironment] : []),
     ...savedEnvironments.filter((environment) => environment.entry.enabled),
-  ];
+  ].filter((environment) => environment.connection.phase !== "unsupported");
   const [desktopServerExposureMutationError, setDesktopServerExposureMutationError] = useState<
     string | null
   >(null);

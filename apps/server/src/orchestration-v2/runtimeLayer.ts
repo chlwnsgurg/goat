@@ -2,6 +2,7 @@ import * as Handoffs from "../handoffs/Handoffs.ts";
 import * as AdapterInfrastructure from "../provider/ProviderOrchestrationAdapterInfrastructure.ts";
 import * as RemoteReportInbox from "../remoteReports/RemoteReportInbox.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
+import * as Fallback from "../fleet/resources/Fallback.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
@@ -302,6 +303,7 @@ const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
     Layer.mergeAll(
       layerThreadLaunchProvided,
       layerThreadManagementProvided,
+      layerManagedProjectFoldersProvided,
       layerSecretRequestsProvided,
     ),
   ),
@@ -394,6 +396,8 @@ export const layerProduction = Layer.mergeAll(
   layerSecretRequestsProvided,
   layerHandoffsProvided,
   UsageLimitRecoveryWorker.layer.pipe(
+    // The same layer value the MCP routes reach through Placement, so one instance holds the cooldowns.
+    Layer.provide(Fallback.layer),
     Layer.provide(Layer.mergeAll(ProjectionStore.layer, layerThreadManagementProvided)),
   ),
   layerProviderContinuationWorkerProvided,

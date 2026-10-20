@@ -459,6 +459,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   lineage: OrchestrationV2AppThreadLineage,
   /** Who started this thread; absent for user-created threads and older servers. */
   launchedBy: Schema.optional(OrchestrationV2ThreadLauncher),
+  /** Who started this thread's cloud run outside GOAT, such as "Grok Bot"; descriptive only. */
+  externalLauncher: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
   sideChatOf: SideChatOf,
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -1047,6 +1049,11 @@ export const OrchestrationV2CloudTask = Schema.Struct({
   localChangesIncluded: Schema.optional(Schema.Boolean),
   error: Schema.optional(Schema.String),
   updatedAt: IsoDateTime,
+  /**
+   * "registered": launched outside GOAT and registered afterwards. The first run attaches to
+   * the task and never submits a prompt.
+   */
+  attach: Schema.optional(Schema.Literal("registered")),
 });
 export type OrchestrationV2CloudTask = typeof OrchestrationV2CloudTask.Type;
 
@@ -2032,6 +2039,8 @@ export const OrchestrationV2PendingRuntimeRequestSummary = Schema.Struct({
   id: RuntimeRequestId,
   kind: OrchestrationV2RuntimeRequest.fields.kind,
   createdAt: Schema.DateTimeUtc,
+  /** False for async questions the run keeps working past. Absent from older servers. */
+  blocking: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationV2PendingRuntimeRequestSummary =
   typeof OrchestrationV2PendingRuntimeRequestSummary.Type;
@@ -2062,6 +2071,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   lineage: OrchestrationV2AppThreadLineage,
   /** Who started this thread; absent for user-created threads and older servers. */
   launchedBy: Schema.optional(OrchestrationV2ThreadLauncher),
+  /** Who started this thread's cloud run outside GOAT, such as "Grok Bot"; descriptive only. */
+  externalLauncher: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
   sideChatOf: SideChatOf,
   forkedFrom: Schema.NullOr(OrchestrationV2AppThread.fields.forkedFrom),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
@@ -2835,10 +2846,14 @@ export const OrchestrationV2Command = Schema.Union([
           strength: Schema.Literal("strong"),
         }),
         metadata: Schema.optional(OrchestrationV2ProviderThreadNativeMetadata),
+        /** A cloud task started outside GOAT; the thread follows it from its first run. */
+        cloudTask: Schema.optional(OrchestrationV2CloudTask),
       }),
     ),
     /** Agent thread or user action that started this thread; descriptive only. */
     launchedBy: Schema.optional(OrchestrationV2ThreadLauncher),
+    /** Who started this thread's cloud run outside GOAT, such as "Grok Bot"; descriptive only. */
+    externalLauncher: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
     /** Makes the new thread a side chat of this thread. */
     sideChatOf: Schema.optional(ThreadId),
   }),

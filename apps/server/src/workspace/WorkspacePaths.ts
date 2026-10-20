@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 
 import { expandHomePath } from "@goat/provider-core/server/pathExpansion";
 import * as HostProcess from "@goat/shared/HostProcess";
+import { msysDrivePathToWindows } from "@goat/shared/path";
 
 export class WorkspaceRootNotExistsError extends Schema.TaggedError<WorkspaceRootNotExistsError>()(
   "WorkspaceRootNotExistsError",
@@ -107,6 +108,14 @@ function toPosixRelativePath(input: string): string {
   return input.replaceAll("\\", "/");
 }
 
+/**
+ * A Windows GOAT driven over SSH from Git Bash or Cygwin can be sent the shell's `/c/…` or
+ * `/cygdrive/c/…` form, which Node would resolve against the current drive as `C:\c\…`.
+ */
+export function nativeWorkspacePath(platform: NodeJS.Platform, value: string): string {
+  return platform === "win32" ? (msysDrivePathToWindows(value) ?? value) : value;
+}
+
 export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -138,7 +147,10 @@ export const make = Effect.gen(function* () {
     "WorkspacePaths.normalizeWorkspaceRoot",
   )(function* (workspaceRoot, options) {
     const normalizedWorkspaceRoot = path.resolve(
-      expandHomePath(workspaceRoot.trim(), yield* HostProcess.HomeDirectory),
+      expandHomePath(
+        nativeWorkspacePath(yield* HostProcess.Platform, workspaceRoot.trim()),
+        yield* HostProcess.HomeDirectory,
+      ),
     );
     let workspaceStat = yield* statWorkspaceRoot(
       workspaceRoot,

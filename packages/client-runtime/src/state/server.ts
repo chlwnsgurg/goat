@@ -967,6 +967,12 @@ export function createServerEnvironmentAtoms<R, E>(
     scheduler: configScheduler,
     concurrency: configConcurrency,
   });
+  /** Cloud agent runs this environment follows or links; Fleet reads them while open. */
+  const cloudAgentRuns = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:server:cloud-agent-runs",
+    tag: WS_METHODS.cloudAgentsListRuns,
+    staleTimeMs: 5_000,
+  });
   /** Boat machines this environment manages. Reading it never wakes a machine. */
   const cloudMachines = createEnvironmentRpcQueryAtomFamily(runtime, {
     label: "environment-data:server:cloud-machines",
@@ -1010,6 +1016,7 @@ export function createServerEnvironmentAtoms<R, E>(
 
   return {
     cloudMachines,
+    cloudAgentRuns,
     configureCloudMachines: cloudMachineCommand(WS_METHODS.cloudMachinesConfigure),
     disconnectCloudMachines: cloudMachineCommand(WS_METHODS.cloudMachinesDisconnect),
     createCloudMachine: cloudMachineCommand(WS_METHODS.cloudMachinesCreate),

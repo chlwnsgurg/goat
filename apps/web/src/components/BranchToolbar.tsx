@@ -53,6 +53,7 @@ import {
   Menu,
   MenuGroup,
   MenuGroupLabel,
+  MenuItem,
   MenuPopup,
   MenuRadioGroup,
   MenuRadioItem,
@@ -74,6 +75,7 @@ export interface BranchToolbarHandle {
 }
 
 const EMPTY_SSH_OPTIONS: ReadonlyArray<SavedSshWorktreeOption> = [];
+const EMPTY_ENVIRONMENTS: readonly EnvironmentOption[] = [];
 
 interface BranchToolbarProps {
   sshDestination?: DraftSshDestination | null | undefined;
@@ -101,6 +103,8 @@ interface BranchToolbarProps {
   onCheckoutPullRequestRequest?: (reference: string) => void;
   onComposerFocusRequest?: () => void;
   availableEnvironments?: readonly EnvironmentOption[];
+  /** Connected machines without this project, listed disabled under Run on. */
+  environmentsWithoutProject?: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
   composerControlsHostRef?: (element: HTMLDivElement | null) => void;
   contextStripVisible?: boolean;
@@ -156,6 +160,7 @@ interface RunContextSelectorProps {
   envModeLocked: boolean;
   environmentId: EnvironmentId;
   availableEnvironments: readonly EnvironmentOption[] | undefined;
+  environmentsWithoutProject: readonly EnvironmentOption[];
   showEnvironmentPicker: boolean;
   showEnvironmentIndicator: boolean;
   onEnvironmentChange: ((environmentId: EnvironmentId) => void) | undefined;
@@ -174,6 +179,7 @@ const RunContextSelector = memo(function RunContextSelector({
   envModeLocked,
   environmentId,
   availableEnvironments,
+  environmentsWithoutProject,
   showEnvironmentPicker,
   showEnvironmentIndicator,
   onEnvironmentChange,
@@ -358,6 +364,17 @@ const RunContextSelector = memo(function RunContextSelector({
                   </MenuRadioItem>
                 ))}
               </MenuRadioGroup>
+              {environmentsWithoutProject.map((env) => (
+                <MenuItem key={env.environmentId} disabled>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <EnvironmentMachineIcon kind={env.machine} className="size-3" />
+                    <span className="flex min-w-0 flex-col">
+                      <span className="truncate">{env.label}</span>
+                      <span className="text-muted-foreground text-xs">Project not added here</span>
+                    </span>
+                  </span>
+                </MenuItem>
+              ))}
             </MenuGroup>
             <MenuSeparator />
           </>
@@ -407,8 +424,13 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
     const current = element;
     const compact = overflows;
     if (!current) return;
-    const available = current.clientWidth;
-    if (available === 0) return;
+    const stripWidth = current.clientWidth;
+    if (stripWidth === 0) return;
+    const stripStyle = getComputedStyle(current);
+    const available =
+      stripWidth -
+      (Number.parseFloat(stripStyle.paddingInlineStart) || 0) -
+      (Number.parseFloat(stripStyle.paddingInlineEnd) || 0);
     const contentWidth = (parent: Element): number => {
       const gap = Number.parseFloat(getComputedStyle(parent).columnGap) || 0;
       let width = 0;
@@ -427,7 +449,7 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
       }
       return width + gap * Math.max(0, counted - 1);
     };
-    const stripGap = Number.parseFloat(getComputedStyle(current).columnGap) || 0;
+    const stripGap = Number.parseFloat(stripStyle.columnGap) || 0;
     let needed = 0;
     let groups = 0;
     for (const child of current.children) {
@@ -562,6 +584,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   onCheckoutPullRequestRequest,
   onComposerFocusRequest,
   availableEnvironments,
+  environmentsWithoutProject = EMPTY_ENVIRONMENTS,
   onEnvironmentChange,
   composerControlsHostRef,
   contextStripVisible = true,
@@ -591,14 +614,20 @@ export const BranchToolbar = memo(function BranchToolbar({
     [],
   );
 
+  const hasMultipleEnvironments =
+    (availableEnvironments?.length ?? 0) > 1 || environmentsWithoutProject.length > 0;
   const showEnvironmentPicker = Boolean(
-    availableEnvironments && availableEnvironments.length > 1 && onEnvironmentChange,
+    availableEnvironments &&
+    (availableEnvironments.length > 1 || environmentsWithoutProject.length > 0) &&
+    onEnvironmentChange,
   );
   const activeEnvironmentOption =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
+  // Started threads get no handler but still show which machine they run on,
+  // matching the strip visibility ChatView computes from the same inputs.
   const showEnvironmentIndicator = shouldShowEnvironmentIndicator({
     activeEnvironment: activeEnvironmentOption,
-    canPickEnvironment: showEnvironmentPicker,
+    canPickEnvironment: hasMultipleEnvironments,
   });
   const [stripElement, setStripElement] = useState<HTMLDivElement | null>(null);
   const labelsOverflow = useLabelsOverflow(stripElement);
@@ -619,6 +648,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             envModeLocked={envModeLocked}
             environmentId={environmentId}
             availableEnvironments={availableEnvironments}
+            environmentsWithoutProject={environmentsWithoutProject}
             showEnvironmentPicker={showEnvironmentPicker}
             showEnvironmentIndicator={activeEnvironmentOption !== null}
             onEnvironmentChange={onEnvironmentChange}
@@ -674,6 +704,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             envModeLocked={envModeLocked}
             environmentId={environmentId}
             availableEnvironments={availableEnvironments}
+            environmentsWithoutProject={environmentsWithoutProject}
             showEnvironmentPicker={showEnvironmentPicker}
             showEnvironmentIndicator={showEnvironmentIndicator}
             onEnvironmentChange={onEnvironmentChange}
@@ -703,6 +734,7 @@ export const BranchToolbar = memo(function BranchToolbar({
                 envLocked={envLocked}
                 environmentId={environmentId}
                 availableEnvironments={availableEnvironments}
+                environmentsWithoutProject={environmentsWithoutProject}
                 {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
               />
               {showGitControls ? (

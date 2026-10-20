@@ -10,7 +10,7 @@ import { useThreadShell } from "../../state/entities";
 import { useSavedRemoteConnection } from "../../state/use-remote-environment-registry";
 import { PendingApprovalCard } from "../threads/PendingApprovalCard";
 import { PendingUserInputBody } from "../threads/PendingUserInputBody";
-import { RequestActionButton } from "../threads/RequestActionButton";
+import { Button } from "../../components/ui/Button";
 import { useDecisionInbox, useDecisionInboxSessionState } from "./useDecisionInbox";
 
 export function DecisionsRouteScreen() {
@@ -87,14 +87,14 @@ function FocusedDecisionsContent(props: {
               {state.errors.map(({ ref, message }) => (
                 <View key={JSON.stringify([ref.environmentId, ref.threadId])} className="gap-2">
                   <Text className="text-sm text-foreground-muted">{message}</Text>
-                  <RequestActionButton
+                  <Button
                     label="Go to thread"
                     tone="secondary"
                     onPress={() => navigation.navigate("Thread", ref)}
                   />
                 </View>
               ))}
-              <RequestActionButton label="Retry" tone="secondary" onPress={retry} />
+              <Button label="Retry" tone="secondary" onPress={retry} />
             </View>
           ) : null}
           {state.items.length === 0 && !partial ? (
@@ -152,9 +152,9 @@ function FocusedDecisionsContent(props: {
                       />
                     )}
                   />
-                  <RequestActionButton
+                  <Button
                     label={responding ? "Waiting for thread update…" : "Submit answers"}
-                    size="large"
+                    fullWidth
                     tone={answers ? "primary" : "secondary"}
                     disabled={
                       !canOperateThread ||
@@ -178,13 +178,13 @@ function FocusedDecisionsContent(props: {
                 </Text>
               ) : null}
               <View className="flex-row flex-wrap gap-3">
-                <RequestActionButton
+                <Button
                   label="Skip"
                   tone="secondary"
                   disabled={responding || paused}
                   onPress={skip}
                 />
-                <RequestActionButton
+                <Button
                   label="Go to thread"
                   tone="secondary"
                   onPress={() => navigation.navigate("Thread", current.ref)}

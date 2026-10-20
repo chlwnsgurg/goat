@@ -788,6 +788,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               <TooltipPopup side="top">{thread.title}</TooltipPopup>
             </Tooltip>
           )}
+          {thread.source.externalLauncher ? (
+            <span className="max-w-20 shrink-0 truncate text-xs text-muted-foreground">
+              via {thread.source.externalLauncher}
+            </span>
+          ) : null}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
           {canOperatePreview && discoveredPorts.length > 0 && (

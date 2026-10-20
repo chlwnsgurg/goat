@@ -1,5 +1,8 @@
+import * as Onboarding from "../provider/ProviderOnboarding.ts";
 import * as HomeRequests from "../provider/CodexHomeRequests.ts";
 import * as ProviderDiagnosisRouting from "../provider/ProviderDiagnosisRouting.ts";
+import * as ProviderHostSync from "../provider/ProviderHostSync.ts";
+import * as CloudAgentService from "../cloudAgents/CloudAgentService.ts";
 import { ProviderToolkit } from "./toolkits/provider/tools.ts";
 import * as WorktreeInventoryService from "./WorktreeInventoryService.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
@@ -11,6 +14,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as ChannelGateway from "../channels/ChannelGateway.ts";
 import * as ChannelLedger from "../channels/ChannelLedger.ts";
 import * as ChannelTaskExport from "../channels/ChannelTaskExport.ts";
+import * as ChannelBotHome from "../channels/ChannelBotHome.ts";
 import * as ChannelRemoteWorkers from "../channels/ChannelRemoteWorkers.ts";
 import * as ChannelRuntime from "../channels/ChannelRuntime.ts";
 import * as ChannelWorkerReports from "../channels/ChannelWorkerReports.ts";
@@ -22,6 +26,8 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as Settings from "../serverSettings.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as HostStatusMcpService from "./HostStatusMcpService.ts";
+import * as FleetFallback from "../fleet/resources/Fallback.ts";
+import * as FleetPlacement from "../fleet/resources/Placement.ts";
 import * as HtmlRender from "../htmlRender/HtmlRender.ts";
 import * as MemoryService from "../memory/MemoryService.ts";
 import * as MemorySyncService from "../memory/MemorySyncService.ts";
@@ -60,6 +66,7 @@ import { ChannelToolkit } from "./toolkits/channel/tools.ts";
 import { ConnectionToolkit } from "./toolkits/connection/tools.ts";
 import { DeviceToolkit } from "./toolkits/device/tools.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
+import { FleetResourcesToolkit } from "./toolkits/fleet/resources/tools.ts";
 import { HostStatusToolkit } from "./toolkits/hostStatus/tools.ts";
 import { HtmlToolkit } from "./toolkits/html/tools.ts";
 import { MemoryToolkit } from "./toolkits/memory/tools.ts";
@@ -80,6 +87,7 @@ const toolkits = {
   connection: ConnectionToolkit,
   device: DeviceToolkit,
   environment: EnvironmentToolkit,
+  fleetResources: FleetResourcesToolkit,
   hostStatus: HostStatusToolkit,
   html: HtmlToolkit,
   memory: MemoryToolkit,
@@ -118,6 +126,7 @@ const dependencies = Layer.mergeAll(
   Layer.mock(ChannelTaskExport.ChannelTaskExport)({}),
   Layer.mock(ChannelWorkerReports.ChannelWorkerReports)({}),
   Layer.mock(ChannelRemoteWorkers.ChannelRemoteWorkers)({}),
+  Layer.mock(ChannelBotHome.ChannelBotHome)({}),
   Layer.mock(ChannelRuntime.ChannelRuntime)({ ownerToken: "test-owner" }),
   Layer.mock(ConnectionCatalogBroker.ConnectionCatalogBroker)({}),
   Layer.mock(HubNodes.HubNodes)({}),
@@ -127,6 +136,8 @@ const dependencies = Layer.mergeAll(
   Layer.mock(Settings.ServerSettingsService)({}),
   Layer.mock(ThreadCommandExecutor.ThreadCommandExecutor)({}),
   Layer.mock(HostStatusMcpService.HostStatusMcpService)({}),
+  Layer.mock(FleetFallback.FallbackChains)({}),
+  Layer.mock(FleetPlacement.Placement)({}),
   Layer.mock(HtmlRender.HtmlRender)({}),
   Layer.mock(MemoryService.MemoryService)({
     importPorts: {
@@ -149,7 +160,10 @@ const dependencies = Layer.mergeAll(
   Layer.mock(PreviewManager.PreviewManager)({}),
   Layer.mock(ProjectService.ProjectService)({}),
   Layer.mock(ProviderDiagnosisRouting.ProviderDiagnosisRouting)({}),
+  Layer.mock(CloudAgentService.CloudAgentService)({}),
   Layer.mock(HomeRequests.CodexHomeRequests)({}),
+  Layer.mock(ProviderHostSync.ProviderHostSync)({}),
+  Layer.mock(Onboarding.ProviderOnboarding)({}),
   Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
     namedProjectsRoot: "/tmp/agent-surface-catalog",
   }),
@@ -189,7 +203,7 @@ const client = McpSchema.McpServerClient.of({
 });
 
 it("gives every entry a unique path, legacy name and resolvable schema reference", () => {
-  expect(entries).toHaveLength(141); // Includes current memory, browser, provider and SSH runtime tools.
+  expect(entries).toHaveLength(160); // Includes current memory, browser, provider, SSH runtime, GOAT Bot home and fleet resource tools.
   expect(new Set(entries.map((entry) => entry.name)).size).toBe(entries.length);
   for (const [path, entry] of Object.entries(agentSurfaceRegistry)) {
     expect(path).toBe(entry.path);

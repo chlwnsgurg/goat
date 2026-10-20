@@ -23,6 +23,8 @@ import {
   OrchestratorMcpFailure,
   PreviewAutomationError,
   type PreviewAutomationSnapshot,
+  type RunId,
+  ThreadId,
 } from "@goat/contracts";
 
 import packageJson from "../../package.json" with { type: "json" };
@@ -31,6 +33,15 @@ import * as DeviceService from "../device/DeviceService.ts";
 import * as HtmlRender from "../htmlRender/HtmlRender.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
+import {
+  type AgentThread,
+  agentToolProperties,
+  handoffSettings,
+  MAX_REPORTED_DEPTH,
+  toolOutcome,
+} from "../telemetry/ProviderDimensions.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
@@ -40,6 +51,8 @@ import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { HostStatusToolkit } from "./toolkits/hostStatus/tools.ts";
 import * as HostStatusHandlers from "./toolkits/hostStatus/handlers.ts";
+import { FleetResourcesToolkit } from "./toolkits/fleet/resources/tools.ts";
+import * as FleetResourcesHandlers from "./toolkits/fleet/resources/handlers.ts";
 import { ProviderToolkit } from "./toolkits/provider/tools.ts";
 import * as ProviderHandlers from "./toolkits/provider/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
@@ -973,10 +986,194 @@ const applyToolContracts = <A, E, R>(register: Effect.Effect<A, E, R>) =>
   });
 
 /**
- * `McpServer.toolkit` for handlers that declared their access (see
- * `McpToolAccess`). Every toolkit on `/mcp` registers through this, and each
- * tool refuses arguments it does not declare.
- *
+ * Tools that hand work to another thread's agent: they create it, message it,
+ * steer it, or move context into it. Their events name the receiving agent too.
+ */
+const HANDOFF_TOOLS: ReadonlySet<string> = new Set([
+  "delegate_task",
+  "create_threads",
+  "goat_thread_launch",
+  "goat_thread_send",
+  "goat_thread_send_attachments",
+  "goat_thread_fork",
+  "goat_thread_merge_back",
+  "goat_queue_edit",
+  "goat_queue_promote_to_steer",
+  "goat_pending_request_respond",
+  "schedule_task",
+  "run_scheduled_task_now",
+]);
+
+/** Handoff tools whose result is only `{ sequence }`; their input names the receiving thread. */
+const INPUT_TARGET_TOOLS: ReadonlySet<string> = new Set([
+  "goat_queue_edit",
+  "goat_queue_promote_to_steer",
+  "goat_pending_request_respond",
+]);
+
+const resultThreadKeys = ["childThreadId", "targetThreadId", "boundThreadId", "threadId"] as const;
+
+/** Thread ids a handoff tool result names: the thread that received the work. */
+const resultThreadIds = (content: unknown): ReadonlyArray<string> => {
+  if (typeof content !== "object" || content === null) return [];
+  const record = content as Readonly<Record<string, unknown>>;
+  if (Array.isArray(record.threads)) return record.threads.flatMap(resultThreadIds);
+  const key = resultThreadKeys.find((candidate) => typeof record[candidate] === "string");
+  return key === undefined ? [] : [record[key] as string];
+};
+
+/**
+ * Thread ids that received a handoff. The input's `threadId` is used only after
+ * the call succeeded, so it is one the handler already resolved and authorized.
+ */
+const handoffTargetIds = (
+  tool: string,
+  args: unknown,
+  result: McpSchema.CallToolResult | undefined,
+): ReadonlyArray<string> => {
+  if (!INPUT_TARGET_TOOLS.has(tool)) return resultThreadIds(result?.structuredContent);
+  if (result === undefined || toolOutcome(result).outcome !== "ok") return [];
+  const threadId = (args as { readonly threadId?: unknown } | null | undefined)?.threadId;
+  return typeof threadId === "string" ? [threadId] : [];
+};
+
+/**
+ * Runs a tool registration against a server that records one anonymous
+ * `mcp.tool.invoked` event per call: the tool, the calling agent's provider,
+ * the outcome with its failure code, and the duration. A handoff tool also
+ * reports the caller's model, origin, and delegation depth, the settings the
+ * agent chose, and the provider, model, and modes of each thread that received
+ * the work. Ids, prompts, and free text are never recorded.
+ */
+const withToolAnalytics = <A, E, R>(registration: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const analytics = yield* Effect.serviceOption(AnalyticsService.AnalyticsService);
+    if (Option.isNone(analytics)) return yield* registration;
+    const registry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
+    const threads = yield* Effect.serviceOption(ThreadManagementService.ThreadManagementService);
+    const shellOf = (threadId: string) =>
+      Option.isNone(threads)
+        ? Effect.succeed(null)
+        : threads.value
+            .getThreadShell(ThreadId.make(threadId))
+            .pipe(Effect.orElseSucceed(() => null));
+    // Delegation depth: parents walked from the caller, capped.
+    const depthOf = (thread: AgentThread) =>
+      Effect.gen(function* () {
+        let depth = 0;
+        let parentId =
+          thread.lineage.relationshipToParent === "subagent" ? thread.lineage.parentThreadId : null;
+        while (parentId !== null && depth < MAX_REPORTED_DEPTH) {
+          depth += 1;
+          const parent = yield* shellOf(parentId);
+          parentId =
+            parent?.lineage.relationshipToParent === "subagent"
+              ? parent.lineage.parentThreadId
+              : null;
+        }
+        return depth;
+      });
+    // Whether the caller's active run was started by a scheduled task.
+    const scheduledRunOf = (threadId: string, runId: RunId | null) =>
+      Option.isNone(threads) || runId === null
+        ? Effect.succeed(false)
+        : threads.value
+            .getThreadRecords(ThreadId.make(threadId), ["runs", "messages"], {
+              runIds: [runId],
+              messageRoles: ["user"],
+            })
+            .pipe(
+              Effect.map((records) => {
+                const run = records.runs.find((candidate) => candidate.id === runId);
+                return records.messages.some(
+                  (message) =>
+                    message.id === run?.userMessageId && message.scheduledTaskId !== undefined,
+                );
+              }),
+              Effect.orElseSucceed(() => false),
+            );
+    const record = (
+      tool: string,
+      args: unknown,
+      result: McpSchema.CallToolResult | undefined,
+      durationMs: number,
+    ) =>
+      Effect.gen(function* () {
+        const toolName = tool.replace(/^t3_/, "goat_");
+        // Client credentials (no calling thread) report an unknown caller.
+        const invocation = Option.getOrUndefined(
+          yield* Effect.serviceOption(McpInvocationContext.McpInvocationContext),
+        )?.thread;
+        const providers = Option.isSome(registry) ? yield* registry.value.getProviders : [];
+        // Only handoff tools pay for thread lookups; the rest report the
+        // caller's provider from the credential.
+        const handoff = HANDOFF_TOOLS.has(toolName);
+        const caller =
+          handoff && invocation !== undefined
+            ? ((yield* shellOf(invocation.threadId)) ?? undefined)
+            : undefined;
+        const targetIds = handoff
+          ? [...new Set(handoffTargetIds(toolName, args, result))].filter(
+              (threadId) => threadId !== invocation?.threadId,
+            )
+          : [];
+        const targets = yield* Effect.forEach(targetIds, shellOf);
+        for (const properties of agentToolProperties({
+          tool: toolName,
+          providers,
+          caller,
+          ...(invocation === undefined
+            ? {}
+            : { callerProviderInstanceId: invocation.providerInstanceId }),
+          ...(caller === undefined || invocation === undefined
+            ? {}
+            : {
+                callerDepth: yield* depthOf(caller),
+                callerScheduledRun: yield* scheduledRunOf(invocation.threadId, caller.activeRunId),
+              }),
+          targets: targets.filter((thread) => thread !== null),
+          outcome: toolOutcome(result),
+          ...(handoff
+            ? {
+                settings: handoffSettings(toolName, args, result?.structuredContent),
+              }
+            : {}),
+          durationMs,
+        })) {
+          yield* analytics.value.record("mcp.tool.invoked", properties);
+        }
+      }).pipe(Effect.ignoreCause);
+    const recordingServer = McpServer.McpServer.of({
+      ...server,
+      addTool: (options) =>
+        server.addTool({
+          ...options,
+          handle: (payload) =>
+            Effect.gen(function* () {
+              const startedAt = yield* Clock.currentTimeMillis;
+              return yield* options.handle(payload).pipe(
+                Effect.onExit((exit) => {
+                  const result = exit._tag === "Success" ? exit.value : undefined;
+                  // A call that asks for input is retried with it, and that call is the one counted.
+                  if (result instanceof McpSchema.InputRequired) return Effect.void;
+                  // Handoff tools look up threads to record; the response must not wait on them.
+                  return Clock.currentTimeMillis.pipe(
+                    Effect.flatMap((endedAt) =>
+                      record(options.tool.name, payload, result, endedAt - startedAt),
+                    ),
+                    Effect.forkDetach,
+                    Effect.asVoid,
+                  );
+                }),
+              );
+            }),
+        }),
+    });
+    return yield* registration.pipe(Effect.provideService(McpServer.McpServer, recordingServer));
+  });
+
+/**
  * `McpServer.toolkit` asks for every service its tools declare when it
  * registers them, but the auth middleware provides `McpInvocationContext` to
  * each request instead. Registration must not get one: the services it
@@ -987,7 +1184,7 @@ export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, 
   handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
 ) => {
   const registration = Layer.effectDiscard(
-    applyToolContracts(McpServer.registerToolkit(decodeAsAdvertised(toolkit))),
+    withToolAnalytics(applyToolContracts(McpServer.registerToolkit(decodeAsAdvertised(toolkit)))),
   ).pipe(Layer.provide(McpServer.McpServer.layer));
   // @effect-diagnostics-next-line unsafeEffectTypeAssertion:off - the auth middleware provides it per request.
   const registered = registration as Layer.Layer<
@@ -1002,7 +1199,7 @@ const imageToolRegistration = <Tools extends Record<string, Tool.Any>, A, E, R, 
   register: Effect.Effect<A, E, R>,
   handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
 ) =>
-  Layer.effectDiscard(applyToolContracts(register)).pipe(
+  Layer.effectDiscard(withToolAnalytics(applyToolContracts(register))).pipe(
     Layer.provide(McpToolAccess.HandlersLayer.layer(handlers)),
   );
 
@@ -1019,6 +1216,7 @@ export const catalogRegistrations = {
   previewControls: toolkitRegistration(PreviewControlsToolkit, PreviewControlsHandlers.layer),
   environment: toolkitRegistration(EnvironmentToolkit, EnvironmentHandlers.layer),
   hostStatus: toolkitRegistration(HostStatusToolkit, HostStatusHandlers.layer),
+  fleetResources: toolkitRegistration(FleetResourcesToolkit, FleetResourcesHandlers.layer),
   provider: toolkitRegistration(ProviderToolkit, ProviderHandlers.layer),
   project: toolkitRegistration(ProjectToolkit, ProjectHandlers.layer),
   connection: toolkitRegistration(ConnectionToolkit, ConnectionHandlers.layer),
@@ -1095,6 +1293,9 @@ export const layerHostStatusService = HostStatusMcpService.layer.pipe(
 /** Reads HostStatusMcpService from the server's context; see `layerHostStatusService`. */
 export const layerHostStatusToolkit = catalogRegistrations.hostStatus;
 
+/** Reads Placement and FallbackChains from the server's context, like host status. */
+export const layerFleetResourcesToolkit = catalogRegistrations.fleetResources;
+
 /**
  * goat_provider_diagnose. Composed beside `layer` by the server, which provides
  * ProviderDiagnosisService and CodexHomeRequests are shared application services.
@@ -1146,6 +1347,7 @@ export const layer = Layer.mergeAll(
   layerProjectRegistration,
   layerEnvironmentToolkit,
   layerHostStatusToolkit,
+  layerFleetResourcesToolkit,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,
   layerPullRequestsToolkit,

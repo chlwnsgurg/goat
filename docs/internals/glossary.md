@@ -45,6 +45,17 @@ Terms whose meaning matters across GOAT. Architecture and lifecycle constraints 
 | Checkpoint baseline | The workspace state captured before the work being compared.                                                 |
 | Turn diff           | The workspace changes attributed to one turn.                                                                |
 
+## Fleet (proposed)
+
+These terms come from the [agentic Kubernetes](./agentic-k8s.md) proposal and describe nothing that runs yet.
+
+| Term           | Meaning                                                                                                                     |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Goal           | A durable desired state, such as "these PRs merged with green CI", with workers, limits and a done condition.               |
+| Controller     | The server loop that compares each goal with observed threads, PRs and hosts and takes a few idempotent actions per pass.   |
+| Cordon         | A host marked so that no new goal work is placed on it. Running work stays. Drain also moves goal work off it between runs. |
+| Fallback chain | An ordered list of models or providers a goal's thread may move to when its current one hits a usage limit or fails.        |
+
 ## Pull requests
 
 | Term                 | Meaning                                                                                                                                                                                  |

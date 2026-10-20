@@ -5,7 +5,11 @@ import { settlePromise, squashAtomCommandFailure } from "@goat/client-runtime/st
 import { AsyncResult } from "effect/reactivity";
 import * as Dialog from "../../components/ui/Dialog";
 import { useAtomValue } from "@effect/atom-react";
-import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
+import {
+  useChildThreadInputs,
+  useThreadReportedModelSelection,
+  useThreadShell,
+} from "../../state/entities";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
 import { useNavigation } from "@react-navigation/native";
 import type { WorktreeSetupCardProps } from "./worktree-setup-card";
@@ -82,6 +86,7 @@ import Animated, {
   useAnimatedReaction,
   useAnimatedStyle,
   useDerivedValue,
+  useReducedMotion,
   useSharedValue,
   withTiming,
 } from "react-native-reanimated";
@@ -223,6 +228,8 @@ export interface ThreadDetailScreenProps {
   readonly onNativePasteText: (paste: ComposerTextPaste) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
+  /** Present while the thread's queue is held. */
+  readonly onResumeQueue: (() => Promise<void>) | null;
   readonly onSendMessage: (followUp?: ActiveTurnComposerAction) => Promise<MessageId | null>;
   readonly onReconnectEnvironment: () => void;
   readonly canSwitchThreadProvider: boolean;
@@ -322,6 +329,70 @@ const USER_INPUT_TOGGLE_TIMING = {
   duration: USER_INPUT_TOGGLE_DURATION_MS,
   easing: Easing.out(Easing.cubic),
 };
+
+// The visit watermark follows the shell's updatedAt, which ticks while a run
+// streams. Keeping it in a leaf lets the screen read the quiet shell.
+function ThreadVisitWatermark(props: {
+  readonly environmentId: EnvironmentId;
+  readonly selectedThread: EnvironmentThreadShell;
+  readonly showContent: boolean;
+}) {
+  const liveThread = useThreadShell({
+    environmentId: props.environmentId,
+    threadId: props.selectedThread.id,
+  });
+  const thread = liveThread ?? props.selectedThread;
+  const showContent = props.showContent;
+  const selectedThreadKey = scopedThreadKey(props.environmentId, thread.id);
+  const visitThread = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
+  const lastDispatchedVisitRef = useRef<string | null>(null);
+  const lastVisitDispatchRef = useRef({ threadKey: selectedThreadKey, at: 0 });
+  const selectedThreadId = thread.id;
+  const selectedThreadUpdatedAt = thread.updatedAt;
+  const selectedThreadLastVisitedAt = thread.lastVisitedAt;
+  const selectedThreadCompletedAt = thread.latestRun?.completedAt;
+  useEffect(() => {
+    if (!showContent || selectedThreadLastVisitedAt === undefined) return;
+    const threadUpdatedAtMs = Date.parse(selectedThreadUpdatedAt);
+    if (Number.isNaN(threadUpdatedAtMs)) return;
+    const lastVisitedAtMs = selectedThreadLastVisitedAt
+      ? Date.parse(selectedThreadLastVisitedAt)
+      : NaN;
+    if (!Number.isNaN(lastVisitedAtMs) && lastVisitedAtMs >= threadUpdatedAtMs) return;
+    const dispatchKey = `${selectedThreadKey}:${selectedThreadUpdatedAt}`;
+    if (lastDispatchedVisitRef.current === dispatchKey) return;
+    const dispatch = () => {
+      lastDispatchedVisitRef.current = dispatchKey;
+      lastVisitDispatchRef.current = { threadKey: selectedThreadKey, at: Date.now() };
+      void visitThread({
+        environmentId: props.environmentId,
+        input: { threadId: selectedThreadId, visitedAt: selectedThreadUpdatedAt },
+      });
+    };
+    const completedAtMs = selectedThreadCompletedAt ? Date.parse(selectedThreadCompletedAt) : NaN;
+    const hasUnseenCompletion =
+      !Number.isNaN(completedAtMs) &&
+      (Number.isNaN(lastVisitedAtMs) || completedAtMs > lastVisitedAtMs);
+    const previous = lastVisitDispatchRef.current;
+    const elapsed = Date.now() - previous.at;
+    if (previous.threadKey !== selectedThreadKey || hasUnseenCompletion || elapsed >= 10_000) {
+      dispatch();
+      return;
+    }
+    const timer = setTimeout(dispatch, 10_000 - elapsed);
+    return () => clearTimeout(timer);
+  }, [
+    props.environmentId,
+    selectedThreadId,
+    selectedThreadKey,
+    selectedThreadLastVisitedAt,
+    selectedThreadCompletedAt,
+    selectedThreadUpdatedAt,
+    showContent,
+    visitThread,
+  ]);
+  return null;
+}
 
 export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetailScreenProps) {
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
@@ -630,6 +701,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const userInputCardProgress = useSharedValue(1);
   const userInputInsetProgress = useSharedValue(1);
   const userInputCardCoverage = useSharedValue(0);
+  const composerPopoverHeight = useSharedValue(0);
   const floatingControlCoverage = useSharedValue(
     showFloatingStatus ? FLOATING_WORKING_CONTROL_COVERAGE : 0,
   );
@@ -656,12 +728,22 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     },
     [userInputCoverageApplies],
   );
+  const composerPopoverLift = useDerivedValue(() =>
+    withTiming(
+      !composerSlotHidden && composerPopoverHeight.value > 0 ? composerPopoverHeight.value + 8 : 0,
+      { duration: 180, easing: Easing.out(Easing.cubic), reduceMotion: ReduceMotion.System },
+    ),
+  );
   const floatingControlLift = useDerivedValue(
     () =>
-      userInputCoverageApplies ? userInputCardProgress.value * userInputCardCoverage.value : 0,
+      Math.max(
+        userInputCoverageApplies ? userInputCardProgress.value * userInputCardCoverage.value : 0,
+        composerPopoverLift.value,
+      ),
     [userInputCoverageApplies],
   );
   const { freeze, scrollMessageToEnd } = useKeyboardScrollToEnd({ listRef });
+  const reduceMotion = useReducedMotion();
   // Repin timers fire after the render that scheduled them, so they read follow
   // state from the ref the writers below keep in step with it.
   const endFollowEnabledRef = useRef(true);
@@ -789,54 +871,6 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     setComposerFocused(false);
   }, [selectedThreadKey, showContent]);
 
-  const visitThread = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
-  const lastDispatchedVisitRef = useRef<string | null>(null);
-  const lastVisitDispatchRef = useRef({ threadKey: selectedThreadKey, at: 0 });
-  const selectedThreadId = props.selectedThread.id;
-  const selectedThreadUpdatedAt = props.selectedThread.updatedAt;
-  const selectedThreadLastVisitedAt = props.selectedThread.lastVisitedAt;
-  const selectedThreadCompletedAt = props.selectedThread.latestRun?.completedAt;
-  useEffect(() => {
-    if (!showContent || selectedThreadLastVisitedAt === undefined) return;
-    const threadUpdatedAtMs = Date.parse(selectedThreadUpdatedAt);
-    if (Number.isNaN(threadUpdatedAtMs)) return;
-    const lastVisitedAtMs = selectedThreadLastVisitedAt
-      ? Date.parse(selectedThreadLastVisitedAt)
-      : NaN;
-    if (!Number.isNaN(lastVisitedAtMs) && lastVisitedAtMs >= threadUpdatedAtMs) return;
-    const dispatchKey = `${selectedThreadKey}:${selectedThreadUpdatedAt}`;
-    if (lastDispatchedVisitRef.current === dispatchKey) return;
-    const dispatch = () => {
-      lastDispatchedVisitRef.current = dispatchKey;
-      lastVisitDispatchRef.current = { threadKey: selectedThreadKey, at: Date.now() };
-      void visitThread({
-        environmentId: props.environmentId,
-        input: { threadId: selectedThreadId, visitedAt: selectedThreadUpdatedAt },
-      });
-    };
-    const completedAtMs = selectedThreadCompletedAt ? Date.parse(selectedThreadCompletedAt) : NaN;
-    const hasUnseenCompletion =
-      !Number.isNaN(completedAtMs) &&
-      (Number.isNaN(lastVisitedAtMs) || completedAtMs > lastVisitedAtMs);
-    const previous = lastVisitDispatchRef.current;
-    const elapsed = Date.now() - previous.at;
-    if (previous.threadKey !== selectedThreadKey || hasUnseenCompletion || elapsed >= 10_000) {
-      dispatch();
-      return;
-    }
-    const timer = setTimeout(dispatch, 10_000 - elapsed);
-    return () => clearTimeout(timer);
-  }, [
-    props.environmentId,
-    selectedThreadId,
-    selectedThreadKey,
-    selectedThreadLastVisitedAt,
-    selectedThreadCompletedAt,
-    selectedThreadUpdatedAt,
-    showContent,
-    visitThread,
-  ]);
-
   useEffect(() => {
     setAnchorMessageId(null);
     setSubmittedMessageId(null);
@@ -879,7 +913,10 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
           ) {
             return;
           }
-          return scrollMessageToEnd({ animated: true, closeKeyboard: false });
+          return scrollMessageToEnd({
+            animated: !reduceMotion,
+            closeKeyboard: false,
+          });
         })
         .catch(() => {
           if (
@@ -900,6 +937,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     contentPresentationKind,
     props.queuedMessages,
     selectedThreadFeed,
+    reduceMotion,
     scrollMessageToEnd,
     selectedThreadKey,
   ]);
@@ -966,7 +1004,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
 
   const handleScrollToEnd = () => {
     void Haptics.selectionAsync();
-    void scrollMessageToEnd({ animated: true, closeKeyboard: false }).catch(() => {
+    void scrollMessageToEnd({ animated: !reduceMotion, closeKeyboard: false }).catch(() => {
       freeze.set(false);
     });
   };
@@ -1008,6 +1046,11 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   return (
     <View className="flex-1">
       {!usesNativeWorkspaceColumns ? <NativeLayoutObserver onChange={setScreenMetrics} /> : null}
+      <ThreadVisitWatermark
+        environmentId={props.environmentId}
+        selectedThread={props.selectedThread}
+        showContent={showContent}
+      />
       {showContent ? (
         <View
           style={{ flex: 1 }}
@@ -1101,7 +1144,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
           style={{ position: "absolute", bottom: 0, left: 0, right: 0, top: 0 }}
           offset={{ closed: 0, opened: 0 }}
         >
-          <ComposerPopoverHost hidden={composerSlotHidden}>
+          <ComposerPopoverHost hidden={composerSlotHidden} popoverHeight={composerPopoverHeight}>
             {/* The fixed sticky host gives this bottom-anchored child a stable
               coordinate space. Its top and height can then animate together
               instead of the auto-sized host jumping to Yoga's destination. */}
@@ -1366,6 +1409,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                         onNativePasteText={props.onNativePasteText}
                         onRemoveDraftImage={props.onRemoveDraftImage}
                         onStopThread={props.onStopThread}
+                        onResumeQueue={props.onResumeQueue}
                         onSendMessage={handleSendMessage}
                         onShowUsageLimits={showUsageLimits}
                         canSwitchProvider={props.canSwitchThreadProvider}

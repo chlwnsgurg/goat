@@ -438,6 +438,8 @@ export function applyServerSettingsPatch(
     goatBotHome: goatBotHomePatch,
     // Its targets merge per name below; their `null` removals must not reach deepMerge.
     completionWebhook: completionWebhookPatch,
+    // Per top-level key: deepMerge would keep a fallback chain or host limit the patch removed.
+    fleet: fleetPatch,
     ...patchForMerge
   } = patch;
   const currentBackgroundActivity = normalizeServerBackgroundActivitySettings(current);
@@ -604,6 +606,7 @@ export function applyServerSettingsPatch(
           ),
         }
       : {}),
+    ...(fleetPatch !== undefined ? { fleet: { ...current.fleet, ...fleetPatch } } : {}),
     ...(patch.defaultModelSelection !== undefined
       ? { defaultModelSelection: patch.defaultModelSelection }
       : {}),
@@ -650,6 +653,9 @@ export function applyServerSettingsPatch(
       : {}),
     ...(patch.memoryModelSelection !== undefined
       ? { memoryModelSelection: patch.memoryModelSelection }
+      : {}),
+    ...(patch.goatBotModelSelection !== undefined
+      ? { goatBotModelSelection: patch.goatBotModelSelection }
       : {}),
     ...(goatBotHomePatch !== undefined &&
     goatBotHomeClaimSupersedes(goatBotHomePatch, current.goatBotHome)
@@ -724,4 +730,17 @@ export function modelPreferencesMigrationPatch(
           ...(providerModelPreferences === undefined ? {} : { providerModelPreferences }),
         },
       };
+}
+
+/**
+ * The model GOAT Bot's own turns run on: the chosen one, else the new-thread default, else the
+ * text generation model. The server falls back to the latter two when the chosen model is not
+ * offered on that machine.
+ */
+export function resolveGoatBotModelSelection(settings: ServerSettings): ModelSelection {
+  return (
+    settings.goatBotModelSelection ??
+    settings.defaultModelSelection ??
+    settings.textGenerationModelSelection
+  );
 }

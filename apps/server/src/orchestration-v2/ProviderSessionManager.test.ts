@@ -19,6 +19,7 @@ import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ServerConfig from "../config.ts";
@@ -3059,6 +3060,10 @@ it.effect(
             NodeServices.layer,
             settingsLayer,
             Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+            Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+              namedProjectsRoot: "/projects",
+              isScratchProject: () => Effect.succeed(false),
+            }),
             Layer.mock(ThreadManagement.ThreadManagementService)({}),
             Layer.mock(SecretRequests.SecretRequests)({}),
             Layer.mock(Scheduler.Scheduler)({ register: () => Effect.void }),

@@ -6,10 +6,10 @@ import { cn } from "../../lib/cn";
 
 export interface ButtonProps {
   readonly label: string;
+  readonly accessibilityLabel?: string;
   readonly icon?: AppSymbolName;
   readonly onPress: () => void;
   readonly disabled?: boolean;
-  readonly accessibilityLabel?: string;
   readonly accessibilityHint?: string;
   readonly loading?: boolean;
   readonly tone?: "primary" | "secondary" | "danger" | "text" | "contrast";

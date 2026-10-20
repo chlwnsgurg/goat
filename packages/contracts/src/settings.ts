@@ -37,6 +37,7 @@ import {
   ProviderOptionSelections,
 } from "./model.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { FleetSettings } from "./fleetResources.ts";
 import { ProjectScript, type ProjectMutation } from "./project.ts";
 import { DEFAULT_RUNTIME_MODE, RuntimeMode } from "./providerPolicy.ts";
 import { BrowserProfile, BrowserProfileId, DEFAULT_BROWSER_PROFILE_ID } from "./browserProfile.ts";
@@ -273,6 +274,25 @@ export const DEFAULT_BROWSER_RECORDING_FRAME_RATE: BrowserRecordingFrameRate = 3
 export const BrowserLinkTarget = Schema.Literals(["system", "app"]);
 export type BrowserLinkTarget = typeof BrowserLinkTarget.Type;
 export const DEFAULT_BROWSER_LINK_TARGET: BrowserLinkTarget = "system";
+/**
+ * What the address bar searches with when the input is not an address.
+ * "custom" uses `browserCustomSearchUrl`, a template with `%s` for the query.
+ */
+export const BrowserSearchEngine = Schema.Literals([
+  "duckduckgo",
+  "google",
+  "bing",
+  "brave",
+  "kagi",
+  "ecosia",
+  "custom",
+]);
+export type BrowserSearchEngine = typeof BrowserSearchEngine.Type;
+export const DEFAULT_BROWSER_SEARCH_ENGINE: BrowserSearchEngine = "duckduckgo";
+export const BROWSER_CUSTOM_SEARCH_URL_MAX_LENGTH = 2048;
+export const BrowserCustomSearchUrl = Schema.String.check(
+  Schema.isMaxLength(BROWSER_CUSTOM_SEARCH_URL_MAX_LENGTH),
+);
 
 export const LoadBalancingWeights = Schema.Record(
   TrimmedNonEmptyString,
@@ -341,6 +361,15 @@ export const ClientSettingsSchema = Schema.Struct({
 
   browserLinkTarget: BrowserLinkTarget.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_BROWSER_LINK_TARGET)),
+  ),
+
+  browserSearchEngine: BrowserSearchEngine.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_BROWSER_SEARCH_ENGINE)),
+  ),
+
+  // Kept when the engine is switched away from "custom" so switching back restores it.
+  browserCustomSearchUrl: BrowserCustomSearchUrl.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
   ),
 
   browserAutoShowFloatingPreview: Schema.Boolean.pipe(
@@ -1245,6 +1274,31 @@ export function goatBotHomeClaimSupersedes(
   return current === null || compareGoatBotHomeClaims(next, current) > 0;
 }
 
+/**
+ * A claim that supersedes `observedMax`. Advancing the observed logical clock keeps moving home
+ * working after clock rollback. Clients and the server's own claim share it.
+ */
+export function newGoatBotHomeClaim({
+  environmentId,
+  now,
+  observedMax,
+  randomId,
+}: {
+  environmentId: EnvironmentId;
+  now: number;
+  observedMax: GoatBotHomeClaim | null;
+  randomId: () => string;
+}): GoatBotHomeClaim {
+  return {
+    environmentId,
+    claimedAt: Math.min(
+      Number.MAX_SAFE_INTEGER,
+      Math.max(0, Math.trunc(now), (observedMax?.claimedAt ?? -1) + 1),
+    ),
+    claimId: randomId(),
+  };
+}
+
 export const ServerSettings = Schema.Struct({
   memoryOwnerSourceReadPolicyVersion: NonNegativeInt.pipe(
     Schema.withDecodingDefault(Effect.succeed(0)),
@@ -1260,6 +1314,13 @@ export const ServerSettings = Schema.Struct({
    * never inherit the new-thread default, which can be an expensive or unsupported model.
    */
   memoryModelSelection: Schema.NullOr(ModelSelection).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  /**
+   * The model GOAT Bot's own turns run on. Null follows the new-thread default, then the text
+   * generation model, the way a main thread would.
+   */
+  goatBotModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   memoryHubVersion: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
@@ -1289,6 +1350,7 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
   ),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  automaticServerUpdates: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   continueThreadsAfterServerUpdate: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
@@ -1335,6 +1397,7 @@ export const ServerSettings = Schema.Struct({
   ),
   snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   autoResumeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  fleet: FleetSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
@@ -1695,9 +1758,11 @@ const ServerSettingsPatchFields = Schema.Struct({
   enableAgentMemoryAccess: Schema.optionalKey(Schema.Boolean),
   memoryEnabled: Schema.optionalKey(Schema.Boolean),
   memoryModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  goatBotModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
+  automaticServerUpdates: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),
@@ -1732,6 +1797,8 @@ const ServerSettingsPatchFields = Schema.Struct({
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
+  /** Each top-level key it names replaces the stored one (see FleetSettings). */
+  fleet: Schema.optionalKey(FleetSettings),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
       schemaVersion: Schema.optionalKey(Schema.Literal(1)),
@@ -1906,6 +1973,8 @@ export const ClientSettingsPatch = Schema.Struct({
   browserRecordingShowKeyPresses: Schema.optionalKey(Schema.Boolean),
   browserRecordingShowMousePresses: Schema.optionalKey(Schema.Boolean),
   browserLinkTarget: Schema.optionalKey(BrowserLinkTarget),
+  browserSearchEngine: Schema.optionalKey(BrowserSearchEngine),
+  browserCustomSearchUrl: Schema.optionalKey(BrowserCustomSearchUrl),
   browserAutoShowFloatingPreview: Schema.optionalKey(Schema.Boolean),
   browserProfiles: Schema.optionalKey(Schema.Array(BrowserProfile)),
   browserDefaultProfileId: Schema.optionalKey(BrowserProfileId),

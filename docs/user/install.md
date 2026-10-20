@@ -149,10 +149,24 @@ and enable the provider you want. Installation, login, and configuration belong
 to that environment's machine, even when you connect from a phone or another
 computer.
 
+To add one while you work, open the composer's model picker and select **+** at
+the bottom of the provider list. The window lists every provider with whether it
+is installed, then installs it when GOAT can and signs you in with the provider's
+own flow: a browser page, a device code, an API key, or the provider's login
+command in a terminal inside the window. When a provider can only sign in from
+its own terminal, the window shows the command to run on that machine and
+**Check again** confirms it. The picker adds providers to the environment the
+composer targets, including an SSH-connected machine. The **+** is disabled when
+your device cannot manage that environment's providers.
+
+An agent can ask you to add or sign in to a provider. Its request appears as a
+card in the thread; **Review request** opens the same window, and the agent never
+sees what you enter.
+
 | Provider    | Install and authenticate                                                                                                                                  |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Codex       | [Connect with ChatGPT](./providers-codex.md#connect-with-chatgpt), or install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`. |
-| Claude      | Install [Claude Code](https://claude.com/product/claude-code), then run `claude auth login`.                                                              |
+| Claude      | Install [Claude Code](https://claude.com/product/claude-code), then sign in from GOAT, which runs `claude auth login` in the app.                         |
 | Cursor      | Install [Cursor CLI](https://cursor.com/cli), then run `agent login`.                                                                                     |
 | Grok Build  | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                                                                                        |
 | OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                                                                                  |

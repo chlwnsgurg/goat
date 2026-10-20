@@ -263,20 +263,7 @@ function PrimaryActionButton(props: {
   readonly loading?: boolean;
   readonly onPress: () => void;
 }) {
-  if (Platform.OS === "android") return <Button {...props} tone="primary" fullWidth />;
-  return (
-    <Pressable
-      disabled={props.disabled}
-      onPress={props.onPress}
-      className="h-12 items-center justify-center rounded-full bg-primary active:opacity-70 disabled:opacity-45"
-    >
-      {props.loading ? (
-        <AppActivityIndicator colorClassName={String("accent-primary-foreground")} />
-      ) : (
-        <Text className="text-base font-goat-bold text-primary-foreground">{props.label}</Text>
-      )}
-    </Pressable>
-  );
+  return <Button {...props} tone="primary" fullWidth />;
 }
 
 function ProjectPathInput(props: {
@@ -448,12 +435,13 @@ function EmptyEnvironmentState() {
       <Text className="text-center text-sm leading-normal text-foreground-muted">
         Start or reconnect an environment before adding a project.
       </Text>
-      <Pressable
-        onPress={() => navigation.dispatch(StackActions.replace("ConnectionsNew"))}
-        className="mt-1 rounded-full bg-primary px-4 py-2.5 active:opacity-70"
-      >
-        <Text className="text-sm font-goat-bold text-primary-foreground">{connectHubLabel}</Text>
-      </Pressable>
+      <View className="mt-1">
+        <Button
+          label={connectHubLabel}
+          tone="primary"
+          onPress={() => navigation.dispatch(StackActions.replace("ConnectionsNew"))}
+        />
+      </View>
     </View>
   );
 }
