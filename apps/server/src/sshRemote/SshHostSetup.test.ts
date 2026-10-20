@@ -35,6 +35,8 @@ import { TestClock } from "effect/testing";
 import * as Handoffs from "../handoffs/Handoffs.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
+import { HttpClient } from "effect/http";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
@@ -1454,7 +1456,7 @@ it.effect("preflight normalizes typed destinations and rejects configured alias 
 );
 
 it.effect(
-  "preflight passes the environment label and source runner through the injected runner",
+  "preflight passes the environment label and source runner through the injected runner with crypto and HTTP",
   () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -1491,7 +1493,14 @@ it.effect(
               expect(options.ownerLabel).toBe("Origin");
               expect(options.runner.nodeScriptPath).toBe("/src/server.ts");
               expect(options.runner.nodeEngineRange).toBeTruthy();
-              return Effect.succeed(report);
+              return Effect.gen(function* () {
+                const crypto = yield* Crypto.Crypto;
+                yield* HttpClient.HttpClient;
+                expect(
+                  (yield* crypto.digest("SHA-256", new Uint8Array()).pipe(Effect.orDie)).byteLength,
+                ).toBe(32);
+                return report;
+              });
             },
           }),
         ).pipe(

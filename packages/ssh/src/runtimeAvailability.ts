@@ -9,6 +9,7 @@ import {
 } from "@goat/shared/cliRelease";
 import { HttpClient } from "effect/http";
 import * as Context from "effect/Context";
+import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -16,6 +17,7 @@ import * as Schema from "effect/Schema";
 import type { RemoteGoatRunnerOptions } from "./tunnel.ts";
 import { MAX_RUNTIME_ARCHIVE_BYTES } from "./runtimeArchive.ts";
 import { runPreflightProcess } from "./preflightProcess.ts";
+import { findPublishedRuntime, type PublishedRuntimeSearch } from "./runtimePublished.ts";
 
 type Availability = "present" | "absent" | "unknown";
 export const RuntimeReleaseHead = Context.Reference<
@@ -35,6 +37,17 @@ export const RuntimeReleaseHead = Context.Reference<
       Effect.orElseSucceed(() => "unknown" as const),
     ),
 });
+export const RuntimePublishedSearch = Context.Reference<
+  (input: {
+    readonly platformKey: CliArchivePlatformKey;
+    readonly requestedVersion: string;
+  }) => Effect.Effect<PublishedRuntimeSearch, never, Crypto.Crypto>
+>("ssh/preflight/RuntimePublishedSearch", {
+  defaultValue: () => (input) =>
+    findPublishedRuntime(input).pipe(
+      Effect.orElseSucceed(() => ({ miss: "unreachable" as const, rejected: [] })),
+    ),
+});
 const Assets = Schema.Struct({ assets: Schema.Array(Schema.Struct({ name: Schema.String })) });
 const decodeAssets = Schema.decodeUnknownEffect(Schema.fromJsonString(Assets));
 export const checkRuntimeAvailability = Effect.fn("ssh/preflight.runtime")(function* (input: {
@@ -42,6 +55,8 @@ export const checkRuntimeAvailability = Effect.fn("ssh/preflight.runtime")(funct
   readonly platformKey: CliArchivePlatformKey;
   readonly installedVersions: ReadonlyArray<string>;
   readonly ownerLabel: string;
+  readonly hostHasData: boolean;
+  readonly host?: string;
 }) {
   const { runner, ownerLabel, platformKey, installedVersions } = input;
   // Installed candidates may be reused by provisioning, even when the requested archive exists.
@@ -133,6 +148,30 @@ export const checkRuntimeAvailability = Effect.fn("ssh/preflight.runtime")(funct
       state: "warning",
       summary: `GOAT ${installedVersions[0]} is installed; connect checks whether it is compatible with GOAT ${version}.`,
     });
+  if (runner.publishedFallback === true && !runner.releaseBaseUrl?.trim() && !input.hostHasData) {
+    const search = yield* RuntimePublishedSearch;
+    const published = yield* search({ platformKey, requestedVersion: version });
+    if ("found" in published)
+      return result(
+        {
+          state: "passed",
+          summary: `GOAT ${version} isn't published for ${platformKey}; GOAT installs ${published.found.version}, the newest compatible ${published.found.channel} release.`,
+        },
+        true,
+      );
+    if (published.miss === "unreachable")
+      return result({
+        state: "warning",
+        summary: `Could not check published GOAT runtimes for ${platformKey}.`,
+        detail: "Check that this computer can reach github.com, then check again.",
+      });
+    if (published.miss === "client-too-old")
+      return result({
+        state: "failed",
+        summary: `Every published GOAT runtime for ${platformKey} needs a newer app.`,
+        fix: { actor: "human", instruction: "Update this app, then check again." },
+      });
+  }
   if (inconclusive)
     return result({
       state: "warning",
@@ -141,7 +180,9 @@ export const checkRuntimeAvailability = Effect.fn("ssh/preflight.runtime")(funct
     });
   return result({
     state: "failed",
-    summary: `GOAT ${version} has no runtime for ${platformKey}: it isn't bundled with this build or published.`,
+    summary: input.hostHasData
+      ? `${input.host || "The host"} has GOAT data but no runtime this app can start, and GOAT ${version} isn't published for ${platformKey}.`
+      : `GOAT ${version} has no runtime for ${platformKey}: it isn't bundled with this build or published.`,
     fix: {
       actor: "human",
       instruction: `Install a published GOAT release (stable or nightly) on ${ownerLabel}.`,

@@ -36,6 +36,7 @@ import { probeHostKey } from "@goat/ssh/hostKey";
 import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
 import * as Context from "effect/Context";
+import type * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -211,6 +212,7 @@ export const make = (
     const runner = yield* ProcessRunner.ProcessRunner;
     const serviceScope = yield* Scope.Scope;
     const runtime = yield* Effect.context<
+      | Crypto.Crypto
       | FileSystem.FileSystem
       | Path.Path
       | import("effect/process/ChildProcessSpawner").ChildProcessSpawner

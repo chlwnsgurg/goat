@@ -25,6 +25,9 @@ df -Pk "$HOME" | awk 'END { print "GOAT_FREE_KIB=" $4 }'
 for dir in "$HOME"/.goat/runtime/goat/versions/*; do
   [ -d "$dir" ] && [ -x "$dir/goat" ] && [ "$(cat "$dir/.install-complete" 2>/dev/null)" = "$(basename "$dir")" ] && printf 'GOAT_INSTALLED=%s\n' "$(basename "$dir")"
 done
+for db in "$HOME/.goat/userdata/statev2.sqlite" "$HOME/.goat/userdata/state.sqlite"; do
+  if [ -e "$db" ] || [ -L "$db" ]; then printf 'GOAT_HAS_DATA=1\n'; break; fi
+done
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     command -v cygpath >/dev/null 2>&1 && printf 'GOAT_CYGPATH=yes\n'
@@ -426,6 +429,8 @@ export const runSshPreflight = Effect.fn("ssh/preflight.run")(function* (
     ownerLabel: options.ownerLabel,
     platformKey: key,
     installedVersions,
+    hostHasData: values.get("GOAT_HAS_DATA") === "1",
+    host: input.host,
   });
   steps.push(runtime.step);
   const mayNeedInstallation =

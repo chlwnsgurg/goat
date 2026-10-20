@@ -5,7 +5,12 @@ import * as FileSystem from "effect/FileSystem";
 import { ChildProcessSpawner } from "effect/process";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 import * as Stream from "effect/Stream";
-import { checkRuntimeAvailability, RuntimeReleaseHead } from "./runtimeAvailability.ts";
+import {
+  checkRuntimeAvailability,
+  RuntimeReleaseHead,
+  RuntimePublishedSearch,
+} from "./runtimeAvailability.ts";
+import type { PublishedRuntimeSearch } from "./runtimePublished.ts";
 import { makeSuccessfulProcess } from "./tunnel.fixture.ts";
 import { MAX_RUNTIME_ARCHIVE_BYTES } from "./runtimeArchive.ts";
 import { cliArchiveFileName } from "@goat/shared/cliRelease";
@@ -19,6 +24,11 @@ const fixture = (
     installed?: string[];
     source?: boolean;
     checksum?: "absent" | "unknown";
+    publishedFallback?: boolean;
+    releaseBaseUrl?: string;
+    hostHasData?: boolean;
+    host?: string;
+    published?: PublishedRuntimeSearch;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -35,6 +45,7 @@ const fixture = (
     if (options.local === "both")
       yield* fs.writeFileString(`${directory}/${fileName}.sha256`, "not read or hashed");
     let requests = 0;
+    const searches: Array<{ platformKey: string; requestedVersion: string }> = [];
     const process = ChildProcessSpawner.make(() =>
       Effect.succeed({
         ...makeSuccessfulProcess(
@@ -61,8 +72,14 @@ const fixture = (
       ownerLabel: "Origin",
       platformKey: "linux-arm64",
       installedVersions: options.installed ?? [],
+      hostHasData: options.hostHasData ?? false,
+      ...(options.host === undefined ? {} : { host: options.host }),
       runner: {
         archiveVersion: "0.1.0",
+        ...(options.publishedFallback === undefined
+          ? {}
+          : { publishedFallback: options.publishedFallback }),
+        ...(options.releaseBaseUrl === undefined ? {} : { releaseBaseUrl: options.releaseBaseUrl }),
         ...(options.cache
           ? { archiveDirectory: directory }
           : { bundledArchiveDirectory: directory }),
@@ -71,6 +88,10 @@ const fixture = (
           : {}),
       },
     }).pipe(
+      Effect.provideService(RuntimePublishedSearch, (input) => {
+        searches.push(input);
+        return Effect.succeed(options.published ?? { miss: "none", rejected: [] });
+      }),
       Effect.provideService(RuntimeReleaseHead, (url) => {
         requests++;
         return Effect.succeed(
@@ -82,7 +103,7 @@ const fixture = (
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, process),
       Effect.provide(FetchHttpClient.layer),
     );
-    return { ...result, requests };
+    return { ...result, requests, searches };
   });
 it.effect("source runners warn without looking for archives", () =>
   Effect.gen(function* () {
@@ -206,4 +227,136 @@ it.effect.each(["bundle", "cache", "release", "authenticated"] as const)(
       expect(result.step.state).toBe("passed");
       expect(result.needsTransfer).toBe(false);
     }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["nightly", "stable"] as const)(
+  "offers the newest compatible published %s runtime on a fresh host",
+  (channel) =>
+    Effect.gen(function* () {
+      const version = channel === "nightly" ? "0.2.0-nightly.1" : "0.2.0";
+      const result = yield* fixture({
+        publishedFallback: true,
+        published: { found: { version, channel }, rejected: [] },
+      });
+      expect(result.step).toEqual({
+        id: "runtime",
+        state: "passed",
+        summary: `GOAT 0.1.0 isn't published for linux-arm64; GOAT installs ${version}, the newest compatible ${channel} release.`,
+      });
+      expect(result.needsTransfer).toBe(true);
+      expect(result.searches).toEqual([{ platformKey: "linux-arm64", requestedVersion: "0.1.0" }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["unreachable", "client-too-old", "none"] as const)(
+  "explains a published runtime search miss: %s",
+  (miss) =>
+    Effect.gen(function* () {
+      const result = yield* fixture({ publishedFallback: true, published: { miss, rejected: [] } });
+      expect(result.searches).toHaveLength(1);
+      expect(result.needsTransfer).toBe(false);
+      if (miss === "unreachable") {
+        expect(result.step).toEqual({
+          id: "runtime",
+          state: "warning",
+          summary: "Could not check published GOAT runtimes for linux-arm64.",
+          detail: "Check that this computer can reach github.com, then check again.",
+        });
+      } else if (miss === "client-too-old") {
+        expect(result.step).toEqual({
+          id: "runtime",
+          state: "failed",
+          summary: "Every published GOAT runtime for linux-arm64 needs a newer app.",
+          fix: { actor: "human", instruction: "Update this app, then check again." },
+        });
+      } else {
+        expect(result.step.state).toBe("failed");
+        expect(result.step.summary).toBe(
+          "GOAT 0.1.0 has no runtime for linux-arm64: it isn't bundled with this build or published.",
+        );
+        expect(result.step.fix?.instruction).toContain("on Origin.");
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each([undefined, "build.example"])(
+  "refuses fallback when %s has GOAT data but no installed runtime",
+  (host) =>
+    Effect.gen(function* () {
+      const result = yield* fixture({
+        publishedFallback: true,
+        hostHasData: true,
+        ...(host === undefined ? {} : { host }),
+        published: { found: { version: "0.2.0", channel: "stable" }, rejected: [] },
+      });
+      expect(result.step.state).toBe("failed");
+      expect(result.step.summary).toBe(
+        `${host ?? "The host"} has GOAT data but no runtime this app can start, and GOAT 0.1.0 isn't published for linux-arm64.`,
+      );
+      expect(result.step.fix?.instruction).toContain("on Origin.");
+      expect(result.searches).toEqual([]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["mirror", "disabled", "not opted in", "installed"] as const)(
+  "does not search published fallbacks with %s",
+  (gate) =>
+    Effect.gen(function* () {
+      const result = yield* fixture({
+        ...(gate === "not opted in" ? {} : { publishedFallback: gate !== "disabled" }),
+        ...(gate === "mirror" ? { releaseBaseUrl: " https://mirror.example/releases " } : {}),
+        ...(gate === "installed" ? { installed: ["0.0.9"] } : {}),
+        published: { found: { version: "0.2.0", channel: "stable" }, rejected: [] },
+      });
+      expect(result.searches).toEqual([]);
+      expect(result.step.state).toBe(gate === "installed" ? "warning" : "failed");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["installed", "bundle", "cache", "release", "authenticated"] as const)(
+  "an exact %s runtime takes precedence over published fallback",
+  (source) =>
+    Effect.gen(function* () {
+      const result = yield* fixture({
+        publishedFallback: true,
+        ...(source === "installed"
+          ? { installed: ["0.1.0"] }
+          : source === "bundle"
+            ? { local: "both" as const }
+            : source === "cache"
+              ? { local: "archive" as const, cache: true }
+              : source === "release"
+                ? { head: "present" as const }
+                : { gh: "both" as const }),
+      });
+      expect(result.step.state).toBe("passed");
+      expect(result.step.summary).toContain("0.1.0");
+      expect(result.searches).toEqual([]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect.each(["found", "none"] as const)(
+  "keeps exact-source uncertainty unless published fallback is %s",
+  (outcome) =>
+    Effect.gen(function* () {
+      const result = yield* fixture({
+        publishedFallback: true,
+        releaseBaseUrl: "  ",
+        head: "unknown",
+        gh: "unknown",
+        published:
+          outcome === "found"
+            ? { found: { version: "0.2.0", channel: "stable" }, rejected: [] }
+            : { miss: "none", rejected: [] },
+      });
+      expect(result.searches).toHaveLength(1);
+      expect(result.step.state).toBe(outcome === "found" ? "passed" : "warning");
+      expect(result.step.summary).toContain(
+        outcome === "found" ? "GOAT installs 0.2.0" : "Could not confirm",
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("keeps exact-source uncertainty on a host with existing data", () =>
+  Effect.gen(function* () {
+    const result = yield* fixture({ publishedFallback: true, hostHasData: true, head: "unknown" });
+    expect(result.step.state).toBe("warning");
+    expect(result.step.summary).toContain("Could not confirm");
+    expect(result.searches).toEqual([]);
+  }).pipe(Effect.provide(NodeServices.layer)),
 );

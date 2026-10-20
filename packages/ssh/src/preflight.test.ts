@@ -11,7 +11,7 @@ import * as FileSystem from "effect/FileSystem";
 import { TestClock } from "effect/testing";
 import { FetchHttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
-import { RuntimeReleaseHead } from "./runtimeAvailability.ts";
+import { RuntimePublishedSearch, RuntimeReleaseHead } from "./runtimeAvailability.ts";
 import type { RemoteGoatRunnerOptions } from "./tunnel.ts";
 import { runPreflightProcess } from "./preflightProcess.ts";
 import { runSshPreflight } from "./preflight.ts";
@@ -27,6 +27,8 @@ const fixture = (
     auth?: string;
     authExitCode?: number;
     facts?: string;
+    factsHome?: string;
+    exactReleaseAbsent?: boolean;
     none?: boolean;
     alias?: boolean | string;
     resolvedHost?: string;
@@ -42,10 +44,18 @@ const fixture = (
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const calls: ReadonlyArray<string>[] = [];
+    const nativeSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    let publishedSearches = 0;
     const spawner = ChildProcessSpawner.make((command) =>
       Effect.gen(function* () {
         if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected pipeline");
         calls.push(command.args);
+        if (command.args[0] === "release")
+          return {
+            ...makeSuccessfulProcess(""),
+            exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+            stderr: Stream.make(new TextEncoder().encode("release not found")),
+          };
         if (command.args.includes("-G")) {
           if (command.args.at(-1) === "bastion") return makeSuccessfulProcess("proxyjump none\n");
           return makeSuccessfulProcess(
@@ -73,8 +83,17 @@ const fixture = (
               "build.example",
               input.resolvedHost ?? input.host ?? "build.example",
             ));
+        const remoteFacts =
+          auth && input.factsHome
+            ? yield* runPreflightProcess("env", [
+                `HOME=${input.factsHome}`,
+                "sh",
+                "-c",
+                `sh -c ${command.args.at(-1)}`,
+              ]).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, nativeSpawner))
+            : undefined;
         return {
-          ...makeSuccessfulProcess(auth ? (input.facts ?? facts) : ""),
+          ...makeSuccessfulProcess(auth ? (remoteFacts?.stdout ?? input.facts ?? facts) : ""),
           exitCode: Effect.succeed(
             ChildProcessSpawner.ExitCode(
               auth ? (input.authExitCode ?? (input.auth ? 255 : 0)) : input.none ? 0 : 255,
@@ -96,11 +115,17 @@ const fixture = (
     ).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       Effect.provide(FetchHttpClient.layer),
-      Effect.provideService(RuntimeReleaseHead, () => Effect.succeed("present")),
+      Effect.provideService(RuntimeReleaseHead, () =>
+        Effect.succeed(input.exactReleaseAbsent ? "absent" : "present"),
+      ),
+      Effect.provideService(RuntimePublishedSearch, () => {
+        publishedSearches++;
+        return Effect.succeed({ found: { version: "0.2.0", channel: "stable" }, rejected: [] });
+      }),
     );
     expect(isReport(report)).toBe(true);
     expect(report.steps.map((step) => step.id)).toEqual(SSH_PREFLIGHT_STEP_ORDER);
-    return { report, calls };
+    return { report, calls, publishedSearches };
   });
 it.effect(
   "resolves destination and jump once, disables sharing, uses key-only authentication and reads installed facts",
@@ -550,5 +575,49 @@ it.effect("provides key creation and alias-based installation when no local key 
     expect(report.steps[2]?.fix?.command).toBe(
       "ssh-keygen -t ed25519 && ssh-copy-id -i '/isolated owner/.ssh/id_ed25519.pub' 'build'",
     );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([
+  ["statev2.sqlite", false],
+  ["state.sqlite", false],
+  ["statev2.sqlite", true],
+  ["state.sqlite", true],
+  [undefined, false],
+] as const)("remote facts guard fallback for %s (symlink %s)", ([database, symlink]) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-preflight-data-" });
+    if (database) {
+      yield* fs.makeDirectory(`${home}/.goat/userdata`, { recursive: true });
+      const file = `${home}/.goat/userdata/${database}`;
+      if (symlink) yield* fs.symlink(`${home}/missing-database`, file);
+      else yield* fs.writeFileString(file, "");
+    }
+    const { report, publishedSearches } = yield* fixture({
+      factsHome: home,
+      exactReleaseAbsent: true,
+      runner: { archiveVersion: "0.1.0", publishedFallback: true },
+    });
+    const runtime = report.steps.find((step) => step.id === "runtime");
+    expect(runtime?.state).toBe(database ? "failed" : "passed");
+    expect(runtime?.summary).toContain(
+      database ? "build has GOAT data but no runtime" : "GOAT installs 0.2.0",
+    );
+    expect(publishedSearches).toBe(database ? 0 : 1);
+    expect(report.ready).toBe(!database);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+it.effect("a published fallback still requires space to install", () =>
+  Effect.gen(function* () {
+    const { report, publishedSearches } = yield* fixture({
+      facts: facts.replace("GOAT_INSTALLED=0.1.0", "").replace("1048576", "1024"),
+      exactReleaseAbsent: true,
+      runner: { archiveVersion: "0.1.0", publishedFallback: true },
+    });
+    expect(publishedSearches).toBe(1);
+    expect(report.steps.find((step) => step.id === "runtime")?.state).toBe("passed");
+    expect(report.steps.find((step) => step.id === "disk")?.state).toBe("failed");
+    expect(report.ready).toBe(false);
   }).pipe(Effect.provide(NodeServices.layer)),
 );

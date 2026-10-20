@@ -188,9 +188,10 @@ remote machine.
 Before it installs anything, GOAT checks the host and shows one line per check:
 whether it answers (including Tailscale), its host key, sign-in with your SSH key,
 the operating system, free disk space, and whether a GOAT runtime is available for
-that platform. A check that fails says what to change, often with a command to
-copy, and **Check again** runs them again. **Connect** turns on once nothing is
-left to fix. A host GOAT has not seen before shows its fingerprint for you to
+that platform. On a host that has never run GOAT, the runtime check also considers
+the newest compatible published release, using the same rule as installation.
+A check that fails says what to change, often with a command to copy, and
+**Check again** runs them again. **Connect** turns on once nothing is left to fix. A host GOAT has not seen before shows its fingerprint for you to
 approve first. If you approved a host but its checks still fail, **Forget host** in the
 same dialog removes the SSH entry and pinned key GOAT added. Agents run the same
 checks and get the same results.
